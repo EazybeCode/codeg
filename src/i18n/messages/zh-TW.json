@@ -2703,7 +2703,8 @@
         "mentionGroupAgent": "智能體",
         "mentionGroupSession": "工作階段",
         "mentionGroupCommit": "提交",
-        "mentionGroupSkill": "技能"
+        "mentionGroupSkill": "技能",
+        "startPk": "智慧體 PK"
       },
       "messageQueue": {
         "addToQueue": "加入佇列",
@@ -4952,5 +4953,58 @@
     "emptyAction": "統計我的工作階段",
     "loadFailed": "用量載入失敗",
     "truncatedNotice": "此範圍過大 —— 下面的數字只涵蓋其中最近的一段。"
+  },
+  "PkArena": {
+    "launcher": {
+      "title": "智慧體 PK",
+      "description": "同一任務同時發給多個智慧體,對比結果",
+      "contestantsLabel": "參賽選手(2-4 個)",
+      "noFolderHint": "競技場需要一個 git 儲存庫資料夾——請先開啟一個。",
+      "needMore": "至少選擇 {count} 個智慧體才能開賽。",
+      "taskLabel": "任務",
+      "taskPlaceholder": "所有選手收到的同一任務,例如\"用單一 HTML 檔寫一個貪吃蛇遊戲\"",
+      "selectedCount": "已選 {selected}/{max}(最少 {min})",
+      "cancel": "取消",
+      "start": "開始比賽"
+    },
+    "scoreboard": {
+      "status": {
+        "preparing": "準備中",
+        "connecting": "連線中",
+        "running": "執行中",
+        "done": "完成",
+        "error": "失敗",
+        "canceled": "已取消"
+      },
+      "tokensUnit": "tok",
+      "turnsUnit": "輪"
+    },
+    "arena": {
+      "title": "智慧體 PK 競技場",
+      "description": "一個任務,多個智慧體,同場競技",
+      "roundStatus": {
+        "running": "進行中",
+        "finished": "已結束",
+        "canceled": "已取消",
+        "interrupted": "因重啟中斷"
+      },
+      "roundPicker": "回合",
+      "cancelRound": "取消",
+      "cleanupWorktrees": "清理 worktree",
+      "cleanupHint": "移除選手的 worktree(保留分支)",
+      "share": "分享",
+      "sharing": "匯出中…",
+      "tabs": {
+        "battle": "對戰",
+        "diff": "Diff"
+      },
+      "preparing": "正在準備選手…",
+      "noRound": "未選擇回合",
+      "contestantsUnit": "個智慧體"
+    },
+    "diff": {
+      "loading": "正在載入 diff…",
+      "empty": "該 worktree 沒有變更"
+    }
   }
 }

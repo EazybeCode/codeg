@@ -14,6 +14,7 @@ import {
   Plus,
   Search,
   Sparkles,
+  Swords,
   Upload,
 } from "lucide-react"
 
@@ -31,6 +32,7 @@ import { DropdownRadioItemContent } from "@/components/chat/dropdown-radio-item-
 import { rankByTextMatch } from "@/lib/fuzzy-text-match"
 import { isImeCompositionKey } from "@/lib/ime-composition"
 import { cn } from "@/lib/utils"
+import { usePkArenaStore } from "@/stores/pk-arena-store"
 import type { AvailableCommandInfo } from "@/lib/types"
 
 import { commandInvocationToken } from "@/components/chat/composer/invocation-reference"
@@ -396,6 +398,12 @@ export function ComposerAddMenu({
             </DropdownMenuSub>
           </>
         )}
+        <DropdownMenuItem
+          onClick={() => usePkArenaStore.getState().setLauncherOpen(true)}
+        >
+          <Swords className="size-4" />
+          {t("startPk")}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )

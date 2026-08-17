@@ -2703,7 +2703,8 @@
         "mentionGroupAgent": "الوكلاء",
         "mentionGroupSession": "الجلسات",
         "mentionGroupCommit": "عمليات الإيداع",
-        "mentionGroupSkill": "المهارات"
+        "mentionGroupSkill": "المهارات",
+        "startPk": "منافسة الوكلاء"
       },
       "messageQueue": {
         "addToQueue": "إضافة للقائمة",
@@ -4952,5 +4953,58 @@
     "emptyAction": "احسب جلساتي",
     "loadFailed": "تعذّر تحميل بيانات الاستهلاك",
     "truncatedNotice": "هذا النطاق واسع جدًا — الأرقام تغطي أحدث جزء منه فقط."
+  },
+  "PkArena": {
+    "launcher": {
+      "title": "منافسة الوكلاء الأذكياء",
+      "description": "أرسل مهمة واحدة إلى عدة وكلاء في آنٍ واحد وقارن النتائج",
+      "contestantsLabel": "المتنافسون (2-4)",
+      "noFolderHint": "تحتاج الساحة إلى مجلد فيه مستودع git — افتح واحدًا أولًا.",
+      "needMore": "اختر {count} وكلاء على الأقل لبدء المنافسة.",
+      "taskLabel": "المهمة",
+      "taskPlaceholder": "المهمة نفسها التي يتلقاها كل متنافس، مثال: \"اكتب لعبة الثعبان في ملف HTML واحد\"",
+      "selectedCount": "تم اختيار {selected}/{max} (الحد الأدنى {min})",
+      "cancel": "إلغاء",
+      "start": "ابدأ المنافسة"
+    },
+    "scoreboard": {
+      "status": {
+        "preparing": "قيد التحضير",
+        "connecting": "قيد الاتصال",
+        "running": "قيد التشغيل",
+        "done": "تم",
+        "error": "فشل",
+        "canceled": "ملغى"
+      },
+      "tokensUnit": "توكن",
+      "turnsUnit": "أدوار"
+    },
+    "arena": {
+      "title": "ساحة منافسة الوكلاء",
+      "description": "مهمة واحدة، عدة وكلاء، جنبًا إلى جنب",
+      "roundStatus": {
+        "running": "مباشر",
+        "finished": "انتهت",
+        "canceled": "ملغاة",
+        "interrupted": "قُطعت بإعادة التشغيل"
+      },
+      "roundPicker": "الجولة",
+      "cancelRound": "إلغاء",
+      "cleanupWorktrees": "تنظيف أشجار العمل",
+      "cleanupHint": "إزالة أشجار عمل المتنافسين (تُحفظ الفروع)",
+      "share": "مشاركة",
+      "sharing": "جارٍ التصدير…",
+      "tabs": {
+        "battle": "المنافسة",
+        "diff": "الفروقات"
+      },
+      "preparing": "جارٍ تحضير المتنافس…",
+      "noRound": "لم تُحدد جولة",
+      "contestantsUnit": "وكلاء"
+    },
+    "diff": {
+      "loading": "جارٍ تحميل الفروقات…",
+      "empty": "لا تغييرات في شجرة العمل هذه"
+    }
   }
 }

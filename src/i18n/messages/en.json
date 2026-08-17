@@ -2703,7 +2703,8 @@
         "mentionGroupAgent": "Agents",
         "mentionGroupSession": "Sessions",
         "mentionGroupCommit": "Commits",
-        "mentionGroupSkill": "Skills"
+        "mentionGroupSkill": "Skills",
+        "startPk": "Agent PK"
       },
       "messageQueue": {
         "addToQueue": "Queue message",
@@ -4952,5 +4953,58 @@
     "emptyAction": "Count my sessions",
     "loadFailed": "Could not load usage",
     "truncatedNotice": "This range is very large — the numbers cover only the most recent slice of it."
+  },
+  "PkArena": {
+    "launcher": {
+      "title": "Agent PK",
+      "description": "Send one task to several agents at once and compare the results",
+      "contestantsLabel": "Contestants (2-4)",
+      "noFolderHint": "The arena needs a folder with a git repository — open one first.",
+      "needMore": "Pick at least {count} agents to run a match.",
+      "taskLabel": "Task",
+      "taskPlaceholder": "The task every contestant gets, e.g. \"Write a snake game in a single HTML file\"",
+      "selectedCount": "{selected}/{max} picked (min {min})",
+      "cancel": "Cancel",
+      "start": "Start match"
+    },
+    "scoreboard": {
+      "status": {
+        "preparing": "preparing",
+        "connecting": "connecting",
+        "running": "running",
+        "done": "done",
+        "error": "failed",
+        "canceled": "canceled"
+      },
+      "tokensUnit": "tok",
+      "turnsUnit": "turns"
+    },
+    "arena": {
+      "title": "Agent PK arena",
+      "description": "One task, several agents, side by side",
+      "roundStatus": {
+        "running": "Live",
+        "finished": "Finished",
+        "canceled": "Canceled",
+        "interrupted": "Interrupted by restart"
+      },
+      "roundPicker": "Round",
+      "cancelRound": "Cancel",
+      "cleanupWorktrees": "Clean worktrees",
+      "cleanupHint": "Remove the contestants' worktrees (branches are kept)",
+      "share": "Share",
+      "sharing": "Exporting…",
+      "tabs": {
+        "battle": "Battle",
+        "diff": "Diff"
+      },
+      "preparing": "Preparing contestant…",
+      "noRound": "No round selected",
+      "contestantsUnit": "agents"
+    },
+    "diff": {
+      "loading": "Loading diff…",
+      "empty": "No changes in this worktree"
+    }
   }
 }

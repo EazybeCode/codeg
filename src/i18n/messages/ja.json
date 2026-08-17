@@ -2703,7 +2703,8 @@
         "mentionGroupAgent": "エージェント",
         "mentionGroupSession": "セッション",
         "mentionGroupCommit": "コミット",
-        "mentionGroupSkill": "スキル"
+        "mentionGroupSkill": "スキル",
+        "startPk": "エージェントPK"
       },
       "messageQueue": {
         "addToQueue": "キューに追加",
@@ -4952,5 +4953,58 @@
     "emptyAction": "セッションを集計",
     "loadFailed": "使用量を読み込めませんでした",
     "truncatedNotice": "期間が非常に長いため、表示中の数値は直近の一部のみを対象としています。"
+  },
+  "PkArena": {
+    "launcher": {
+      "title": "エージェントPK",
+      "description": "同じタスクを複数のエージェントに同時に送り、結果を比較します",
+      "contestantsLabel": "出場者(2〜4体)",
+      "noFolderHint": "アリーナには git リポジトリのフォルダが必要です。先に開いてください。",
+      "needMore": "対戦を開始するには最低 {count} 体選択してください。",
+      "taskLabel": "タスク",
+      "taskPlaceholder": "全出場者が受け取る同じタスク。例:「HTML ファイル1つでスネークゲームを作って」",
+      "selectedCount": "{selected}/{max} 選択中(最小 {min})",
+      "cancel": "キャンセル",
+      "start": "対戦開始"
+    },
+    "scoreboard": {
+      "status": {
+        "preparing": "準備中",
+        "connecting": "接続中",
+        "running": "実行中",
+        "done": "完了",
+        "error": "失敗",
+        "canceled": "キャンセル済み"
+      },
+      "tokensUnit": "tok",
+      "turnsUnit": "ターン"
+    },
+    "arena": {
+      "title": "エージェントPKアリーナ",
+      "description": "1つのタスク、複数のエージェント、横並び対決",
+      "roundStatus": {
+        "running": "進行中",
+        "finished": "終了",
+        "canceled": "キャンセル済み",
+        "interrupted": "再起動により中断"
+      },
+      "roundPicker": "ラウンド",
+      "cancelRound": "キャンセル",
+      "cleanupWorktrees": "ワークツリーを削除",
+      "cleanupHint": "出場者のワークツリーを削除します(ブランチは保持)",
+      "share": "共有",
+      "sharing": "書き出し中…",
+      "tabs": {
+        "battle": "対戦",
+        "diff": "Diff"
+      },
+      "preparing": "出場者を準備中…",
+      "noRound": "ラウンド未選択",
+      "contestantsUnit": "体"
+    },
+    "diff": {
+      "loading": "diff を読み込み中…",
+      "empty": "このワークツリーに変更はありません"
+    }
   }
 }

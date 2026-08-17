@@ -2703,7 +2703,8 @@
         "mentionGroupAgent": "Agentes",
         "mentionGroupSession": "Sesiones",
         "mentionGroupCommit": "Commits",
-        "mentionGroupSkill": "Habilidades"
+        "mentionGroupSkill": "Habilidades",
+        "startPk": "PK de agentes"
       },
       "messageQueue": {
         "addToQueue": "Agregar a la cola",
@@ -4952,5 +4953,58 @@
     "emptyAction": "Contabilizar mis sesiones",
     "loadFailed": "No se pudo cargar el uso",
     "truncatedNotice": "Este periodo es muy amplio: las cifras cubren solo su tramo más reciente."
+  },
+  "PkArena": {
+    "launcher": {
+      "title": "PK de agentes",
+      "description": "Envía una tarea a varios agentes a la vez y compara los resultados",
+      "contestantsLabel": "Contendientes (2-4)",
+      "noFolderHint": "La arena necesita una carpeta con un repositorio git: abre una primero.",
+      "needMore": "Elige al menos {count} agentes para iniciar el duelo.",
+      "taskLabel": "Tarea",
+      "taskPlaceholder": "La tarea que recibe cada contendiente, p. ej. \"Escribe un juego de snake en un solo archivo HTML\"",
+      "selectedCount": "{selected}/{max} elegidos (mín. {min})",
+      "cancel": "Cancelar",
+      "start": "Iniciar duelo"
+    },
+    "scoreboard": {
+      "status": {
+        "preparing": "preparando",
+        "connecting": "conectando",
+        "running": "ejecutando",
+        "done": "listo",
+        "error": "falló",
+        "canceled": "cancelado"
+      },
+      "tokensUnit": "tok",
+      "turnsUnit": "turnos"
+    },
+    "arena": {
+      "title": "Arena PK de agentes",
+      "description": "Una tarea, varios agentes, cara a cara",
+      "roundStatus": {
+        "running": "En vivo",
+        "finished": "Terminada",
+        "canceled": "Cancelada",
+        "interrupted": "Interrumpida por reinicio"
+      },
+      "roundPicker": "Ronda",
+      "cancelRound": "Cancelar",
+      "cleanupWorktrees": "Limpiar worktrees",
+      "cleanupHint": "Elimina los worktrees de los contendientes (las ramas se conservan)",
+      "share": "Compartir",
+      "sharing": "Exportando…",
+      "tabs": {
+        "battle": "Duelo",
+        "diff": "Diff"
+      },
+      "preparing": "Preparando contendiente…",
+      "noRound": "Ninguna ronda seleccionada",
+      "contestantsUnit": "agentes"
+    },
+    "diff": {
+      "loading": "Cargando diff…",
+      "empty": "Sin cambios en este worktree"
+    }
   }
 }

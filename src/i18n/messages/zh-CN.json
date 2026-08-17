@@ -2703,7 +2703,8 @@
         "mentionGroupAgent": "智能体",
         "mentionGroupSession": "会话",
         "mentionGroupCommit": "提交",
-        "mentionGroupSkill": "技能"
+        "mentionGroupSkill": "技能",
+        "startPk": "智能体 PK"
       },
       "messageQueue": {
         "addToQueue": "加入队列",
@@ -4952,5 +4953,58 @@
     "emptyAction": "统计我的会话",
     "loadFailed": "用量加载失败",
     "truncatedNotice": "该范围过大 —— 下面的数字只覆盖了其中最近的一段。"
+  },
+  "PkArena": {
+    "launcher": {
+      "title": "智能体 PK",
+      "description": "同一任务同时发给多个智能体,对比结果",
+      "contestantsLabel": "参赛选手(2-4 个)",
+      "noFolderHint": "竞技场需要一个 git 仓库文件夹——请先打开一个。",
+      "needMore": "至少选择 {count} 个智能体才能开赛。",
+      "taskLabel": "任务",
+      "taskPlaceholder": "所有选手收到的同一任务,例如\"用单个 HTML 文件写一个贪吃蛇游戏\"",
+      "selectedCount": "已选 {selected}/{max}(最少 {min})",
+      "cancel": "取消",
+      "start": "开始比赛"
+    },
+    "scoreboard": {
+      "status": {
+        "preparing": "准备中",
+        "connecting": "连接中",
+        "running": "运行中",
+        "done": "完成",
+        "error": "失败",
+        "canceled": "已取消"
+      },
+      "tokensUnit": "tok",
+      "turnsUnit": "轮"
+    },
+    "arena": {
+      "title": "智能体 PK 竞技场",
+      "description": "一个任务,多个智能体,同场竞技",
+      "roundStatus": {
+        "running": "进行中",
+        "finished": "已结束",
+        "canceled": "已取消",
+        "interrupted": "因重启中断"
+      },
+      "roundPicker": "回合",
+      "cancelRound": "取消",
+      "cleanupWorktrees": "清理 worktree",
+      "cleanupHint": "移除选手的 worktree(保留分支)",
+      "share": "分享",
+      "sharing": "导出中…",
+      "tabs": {
+        "battle": "对战",
+        "diff": "Diff"
+      },
+      "preparing": "正在准备选手…",
+      "noRound": "未选择回合",
+      "contestantsUnit": "个智能体"
+    },
+    "diff": {
+      "loading": "正在加载 diff…",
+      "empty": "该 worktree 没有变更"
+    }
   }
 }

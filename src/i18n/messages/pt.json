@@ -2703,7 +2703,8 @@
         "mentionGroupAgent": "Agentes",
         "mentionGroupSession": "Sessões",
         "mentionGroupCommit": "Commits",
-        "mentionGroupSkill": "Habilidades"
+        "mentionGroupSkill": "Habilidades",
+        "startPk": "PK de agentes"
       },
       "messageQueue": {
         "addToQueue": "Adicionar à fila",
@@ -4952,5 +4953,58 @@
     "emptyAction": "Contabilizar minhas sessões",
     "loadFailed": "Não foi possível carregar o uso",
     "truncatedNotice": "Este período é muito amplo — os números cobrem apenas o trecho mais recente."
+  },
+  "PkArena": {
+    "launcher": {
+      "title": "PK de agentes",
+      "description": "Envie uma tarefa para vários agentes de uma vez e compare os resultados",
+      "contestantsLabel": "Competidores (2-4)",
+      "noFolderHint": "A arena precisa de uma pasta com um repositório git — abra uma primeiro.",
+      "needMore": "Escolha pelo menos {count} agentes para iniciar o duelo.",
+      "taskLabel": "Tarefa",
+      "taskPlaceholder": "A tarefa que cada competidor recebe, ex.: \"Escreva um jogo da cobrinha em um único arquivo HTML\"",
+      "selectedCount": "{selected}/{max} escolhidos (mín. {min})",
+      "cancel": "Cancelar",
+      "start": "Iniciar duelo"
+    },
+    "scoreboard": {
+      "status": {
+        "preparing": "preparando",
+        "connecting": "conectando",
+        "running": "executando",
+        "done": "concluído",
+        "error": "falhou",
+        "canceled": "cancelado"
+      },
+      "tokensUnit": "tok",
+      "turnsUnit": "turnos"
+    },
+    "arena": {
+      "title": "Arena PK de agentes",
+      "description": "Uma tarefa, vários agentes, lado a lado",
+      "roundStatus": {
+        "running": "Ao vivo",
+        "finished": "Encerrada",
+        "canceled": "Cancelada",
+        "interrupted": "Interrompida por reinício"
+      },
+      "roundPicker": "Rodada",
+      "cancelRound": "Cancelar",
+      "cleanupWorktrees": "Limpar worktrees",
+      "cleanupHint": "Remove os worktrees dos competidores (as branches são mantidas)",
+      "share": "Compartilhar",
+      "sharing": "Exportando…",
+      "tabs": {
+        "battle": "Duelo",
+        "diff": "Diff"
+      },
+      "preparing": "Preparando competidor…",
+      "noRound": "Nenhuma rodada selecionada",
+      "contestantsUnit": "agentes"
+    },
+    "diff": {
+      "loading": "Carregando diff…",
+      "empty": "Sem alterações neste worktree"
+    }
   }
 }
