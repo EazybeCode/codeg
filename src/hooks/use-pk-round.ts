@@ -79,7 +79,14 @@ export function usePkRound(): {
   cleanupRound: (round: PkRound, keepBranches: boolean) => Promise<void>
   fetchDiff: (round: PkRound, contestant: PkContestant) => Promise<void>
 } {
-  const { connect, sendPrompt, cancel, disconnect } = useAcpActions()
+  const {
+    connect,
+    sendPrompt,
+    cancel,
+    disconnect,
+    attachDelegationChild,
+    detachDelegationChild,
+  } = useAcpActions()
   const connectionStore = useConnectionStore()
   const updateContestant = usePkArenaStore((s) => s.updateContestant)
   const markRound = usePkArenaStore((s) => s.markRound)
@@ -144,7 +151,13 @@ export function usePkRound(): {
   )
 
   useAcpEvent((envelope) => {
-    if (envelope.type !== "status_changed" && envelope.type !== "error") return
+    if (
+      envelope.type !== "status_changed" &&
+      envelope.type !== "error" &&
+      envelope.type !== "turn_complete"
+    ) {
+      return
+    }
     const entry = contestantsByConnection.current.get(envelope.connection_id)
     if (!entry) return
     const round = roundsRef.current.find((r) => r.id === entry.roundId)
@@ -168,7 +181,19 @@ export function usePkRound(): {
       return
     }
 
-    // status_changed: prompting → settled marks the contestant's turn end.
+    // `turn_complete` is the REAL settle signal: the backend flips the turn
+    // status at TurnComplete WITHOUT emitting a status_changed envelope
+    // (session_state.rs: "bypassing StatusChanged entirely"), so waiting for
+    // prompting→settled would leave finished contestants stuck on "running".
+    if (envelope.type === "turn_complete") {
+      if (contestant.status === "running") {
+        void settleContestant(entry.roundId, entry.agentType, "done")
+      }
+      return
+    }
+
+    // status_changed: only the prompting edge matters here — the settle edge
+    // does not exist (see turn_complete above).
     if (envelope.status === "prompting") {
       if (contestant.status === "connecting") {
         updateContestant(entry.roundId, entry.agentType, {
@@ -176,10 +201,6 @@ export function usePkRound(): {
           startedAt: Date.now(),
         })
       }
-      return
-    }
-    if (contestant.status === "running") {
-      void settleContestant(entry.roundId, entry.agentType, "done")
     }
   })
 
@@ -234,6 +255,19 @@ export function usePkRound(): {
               agentType,
             })
             updateContestant(round.id, agentType, { connectionId })
+            // LiveTranscriptView resolves its connection via
+            // useConnectionStateById, which looks the store up BY
+            // connectionId — the entry shape only delegation children have
+            // (attach registers contextKey == connectionId). Attach the
+            // contestant the same way so the battle panes mirror the live
+            // stream; done BEFORE the first prompt so the whole turn flows
+            // through the by-id entry (no mid-turn hydrate needed).
+            attachDelegationChild({
+              connectionId,
+              parentConnectionId: connectionId,
+              parentToolUseId: `pk-arena-${round.id}`,
+              agentType,
+            })
           }
           await sendPrompt(
             contextKey,
@@ -258,7 +292,14 @@ export function usePkRound(): {
         markRound(round.id, "canceled")
       }
     },
-    [connect, connectionStore, markRound, sendPrompt, updateContestant]
+    [
+      connect,
+      connectionStore,
+      markRound,
+      sendPrompt,
+      updateContestant,
+      attachDelegationChild,
+    ]
   )
 
   const cancelRound = useCallback(
@@ -271,6 +312,9 @@ export function usePkRound(): {
           contestant.status === "canceled"
         ) {
           continue
+        }
+        if (contestant.connectionId) {
+          detachDelegationChild(contestant.connectionId)
         }
         if (contestant.contextKey) {
           try {
@@ -286,11 +330,17 @@ export function usePkRound(): {
         })
       }
     },
-    [cancel, disconnect, markRound, updateContestant]
+    [cancel, detachDelegationChild, disconnect, markRound, updateContestant]
   )
 
   const cleanupRound = useCallback(
     async (round: PkRound, keepBranches: boolean) => {
+      // Release the by-id viewer entries before the worktrees go.
+      for (const contestant of round.contestants) {
+        if (contestant.connectionId) {
+          detachDelegationChild(contestant.connectionId)
+        }
+      }
       await Promise.allSettled(
         round.contestants
           .filter((c) => c.worktreePath != null && c.branchName != null)
@@ -310,7 +360,7 @@ export function usePkRound(): {
         })
       }
     },
-    [updateContestant]
+    [detachDelegationChild, updateContestant]
   )
 
   const fetchDiff = useCallback(
