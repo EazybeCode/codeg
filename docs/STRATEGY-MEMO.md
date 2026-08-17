@@ -2,6 +2,7 @@
 
 > 内部决策记录。整理于一次深度代码评审 + 商业化讨论之后。
 > 目的:把散落在对话里的分析、判断、案例、待办沉淀下来,避免重复讨论。
+> 2026-08-16 第二次更新:性能深度扫描 + 上游 issue 需求验证(见二、三、六、九节标注)。
 
 ---
 
@@ -45,12 +46,21 @@
 7. **测试覆盖** — broker 109 测试、companion 53、listener 25,覆盖全边界条件
 8. **trait 解耦** — `ConnectionSpawner` 为 v3 远程 agent 预留扩展点
 
-### 当前短板(v1 限制)
+### 当前短板(v1 限制,2026-08-16 复测)
 
-1. **v1 是 one-shot** — `broker.rs:2527` `disconnect` 写死,子 agent 跑完即杀
-2. **broker.rs 7554 行** — 单文件过大,接近可维护性临界点
+1. **v1 是 one-shot** — `broker.rs:2527` `disconnect` 写死,子 agent 跑完即杀。`continue_with_session`/`close_session` 仍不存在,`acp/delegation/mod.rs:29` 注释还挂着 v2 计划
+2. **巨石文件三座山** — `commands/acp.rs` 17020 行、`acp/connection.rs` 16155 行、`broker.rs` 8481 行(此前记 7554,又长了 ~930;前两个比 broker 更大,之前漏记)。broker 约 4750 行是测试,外移到 `broker_tests.rs` 是零风险减半
 3. **没有远程 agent** — 只能调度本机,v3 未实现
-4. **结果不落库** — 子 agent 输出只在内存缓存(512MB FIFO 淘汰)
+4. **结果不落库(比原记轻)** — 完整文本只在 512MB 内存 FIFO 缓存(`broker.rs:79`);但有界 `text_preview` 已持久化进父会话 tool-call meta(`meta_writer.rs:281`),淘汰后 UI 仍有预览。真缺口是"全文不落库",不是"什么都不落"
+5. **前端两个上帝对象** — `acp-agent-settings.tsx` 11818 行(单个设置页)、`acp-connections-context.tsx` 5606 行(~99 个 switch/case 的事件分发层)
+
+### 性能优化机会(2026-08-16 深度扫描,按收益排序)
+
+1. **侧边栏全量遍历** — `get_sidebar_data`/`list_folders`/`get_stats` 每次都走 `list_conversations_sync`(`commands/conversations.rs:342`),13 个 parser 全目录遍历,但文件夹树只需要 `folder_path`。前端已自己绕开(`skills-settings.tsx:713` 注释承认慢)。改 DB 文件夹索引 = 用户可感知的最大提升
+2. **活跃会话整文件重解析** — 摘要缓存键 `(mtime,size)`(`summary_cache.rs:64`),流式期间每次列表刷新都对整个 JSONL 逐行反序列化(`claude.rs:846`)。`transcript_watermark` 已跟踪字节位置但从未用于增量读(`claude.rs:1866` 注释自认;codex 直接返回 `None`)。基础设施都在,只差接线
+3. **patch 行号解析无缓存** — `resolve_patch_line_numbers` 每个 patch 块全量读目标文件(`parsers/mod.rs:1002`),7 个 parser 共用;同一大文件 N 个 patch = N 次全量读。一次 HashMap memo 即可
+4. **会话文件定位 O(全树)** — Codex 按 id 每次 WalkDir(`codex.rs:336`),Claude 全目录 read_dir(`claude.rs:1060`);id→path 索引变 O(1)
+5. **干净的部分(不用动)** — DB 索引齐全、无 N+1、WAL 配置正确;前端虚拟化(virtua)+ RAF 批处理是真做了的;启动无阻塞扫描,感知慢在首次侧边栏(冷缓存 + 上述第 1 条)
 
 ---
 
@@ -91,6 +101,8 @@
 - 计费
 
 **价值**:从"本地工具"升级为"云平台",商业化的钥匙
+
+**需求验证(2026-08-16)**:上游 issue #461「以持久 Session 为成员的 Team / Chatroom」——社区独立提出了与功能 B/v2 同构的构想。这是 v2 值得做的最直接外部证据。
 
 ### v2 必须先于 v3 的理由
 
@@ -234,6 +246,8 @@
 - V2EX 发帖,标题方向:"周末做了个 AI 编程 PK 场:让 Claude Code、Codex、Gemini 同时写贪吃蛇,看谁快"
 - 每场 PK 都是一次传播机会
 
+**需求验证(2026-08-16)**:上游 issue #428「缺乏派发 subagent 状态的监视」——用户独立要 delegation 可视化监控,与 PK 共用数据层(`use-delegation-card-model.ts`),做完 PK 顺手就有,算免费赠品。
+
 ### 🎯 功能 B:角色化 Agent 团队(PK 之后的第二张牌)
 
 **是什么**:预设 leader/build/review 等角色,一键发起"Claude 当 leader 分任务给 Codex(build)和 Gemini(review)"
@@ -349,6 +363,19 @@
 - [ ] **角色化 Agent 团队**(PK 之后) — 第二个场景
 - [ ] **v2 多轮子会话** — 产品形态质变,1-2 月
 - [ ] **v3 远程 agent** — 商业化钥匙,3-6 月
+
+### 工程待办(2026-08-16 新增,按收益排序)
+
+- [ ] **侧边栏 DB 文件夹索引** — 干掉 13-parser 全量遍历(性能机会 1)
+- [ ] **增量会话解析** — 接通已有但闲置的 `transcript_watermark`(性能机会 2)
+- [ ] **broker.rs 测试外移** — ~4750 行拆到 `broker_tests.rs`,零风险减半
+- [ ] **patch 行号解析加 memo** — 一次 HashMap 的事(性能机会 3)
+
+### 上游影响力机会(刷存在感,非主线)
+
+- [ ] **#391/#387 流式重复文本** — 维护者自己未定位根因(在等用户补 seq 数据);修了就是硬通货
+- [ ] **#396 preferred-config 过滤** — 0xlinn 已给出精确根因:通用路径不按 advertised options 过滤,867 次/23天的重复报错;修法是照抄 grok 路径已有守卫(`connection.rs:1947`)+ `mode` 白名单
+- [x] **#408 接入 qoder cli**(2026-08-17 已完成,待提 PR)— 六层全通:身份/注册表(`qoder-cli`,npx `@qoder-ai/qodercli@1.1.23`,`--acp`)/解析器(Claude 信封格式,`~/.qoder/projects/<encoded-cwd>/<uuid>.jsonl`,state.json 标题加密故走 transcript 明文)/沙箱(`QODER_CONFIG_DIR` RootSlot,实测 `~/.qoder` 可写)/协议(原生 ACP,loadSession+list/resume/fork 全有,MCP 走 settings.json 合并写入+转发跳过)/防御(`qoder-cli` 冲突校验)。规避了既往坑:#396 serde 重命名(测试钉死)、过期 env 误报(important keys 置空)、#468 标题问题(明文派生)。活体验证:server 模式 spawn→握手→prompt→turn_complete→transcript 解析全通。qoder 会话历史与 DSH 等宽(比 DSH 便宜在原生 ACP,贵在 MCP 转发语义相反:qoder 读自己的 settings.json,进跳过名单)
 
 ### 不做清单(防止分心)
 
