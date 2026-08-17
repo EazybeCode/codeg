@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "La tarea que recibe cada contendiente, p. ej. \"Escribe un juego de snake en un solo archivo HTML\"",
       "selectedCount": "{selected}/{max} elegidos (mín. {min})",
       "cancel": "Cancelar",
-      "start": "Iniciar duelo"
+      "start": "Iniciar duelo",
+      "notAGitRepo": "Esta carpeta no es un repositorio git — la arena necesita uno para dar a cada contendiente un worktree aislado.",
+      "initGitRepo": "git init",
+      "initializing": "Inicializando…"
     },
     "scoreboard": {
       "status": {

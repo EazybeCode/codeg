@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "The task every contestant gets, e.g. \"Write a snake game in a single HTML file\"",
       "selectedCount": "{selected}/{max} picked (min {min})",
       "cancel": "Cancel",
-      "start": "Start match"
+      "start": "Start match",
+      "notAGitRepo": "This folder is not a git repository — the arena needs one to give each contestant an isolated worktree.",
+      "initGitRepo": "git init",
+      "initializing": "Initializing…"
     },
     "scoreboard": {
       "status": {

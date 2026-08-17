@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "La tâche reçue par chaque participant, ex. « Écrire un jeu snake dans un seul fichier HTML »",
       "selectedCount": "{selected}/{max} choisis (min. {min})",
       "cancel": "Annuler",
-      "start": "Lancer le duel"
+      "start": "Lancer le duel",
+      "notAGitRepo": "Ce dossier n'est pas un dépôt git — l'arène en nécessite un pour donner à chaque participant un worktree isolé.",
+      "initGitRepo": "git init",
+      "initializing": "Initialisation…"
     },
     "scoreboard": {
       "status": {

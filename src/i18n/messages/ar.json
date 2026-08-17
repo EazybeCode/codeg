@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "المهمة نفسها التي يتلقاها كل متنافس، مثال: \"اكتب لعبة الثعبان في ملف HTML واحد\"",
       "selectedCount": "تم اختيار {selected}/{max} (الحد الأدنى {min})",
       "cancel": "إلغاء",
-      "start": "ابدأ المنافسة"
+      "start": "ابدأ المنافسة",
+      "notAGitRepo": "هذا المجلد ليس مستودع git — تحتاج الساحة إلى مستودع لمنح كل متنافس شجرة عمل معزولة.",
+      "initGitRepo": "git init",
+      "initializing": "جارٍ التهيئة…"
     },
     "scoreboard": {
       "status": {

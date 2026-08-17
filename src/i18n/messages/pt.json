@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "A tarefa que cada competidor recebe, ex.: \"Escreva um jogo da cobrinha em um único arquivo HTML\"",
       "selectedCount": "{selected}/{max} escolhidos (mín. {min})",
       "cancel": "Cancelar",
-      "start": "Iniciar duelo"
+      "start": "Iniciar duelo",
+      "notAGitRepo": "Esta pasta não é um repositório git — a arena precisa de um para dar a cada competidor um worktree isolado.",
+      "initGitRepo": "git init",
+      "initializing": "Inicializando…"
     },
     "scoreboard": {
       "status": {

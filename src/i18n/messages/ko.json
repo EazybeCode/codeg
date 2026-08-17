@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "모든 참가자가 받을 동일한 작업. 예: \"HTML 파일 하나로 스네이크 게임 만들기\"",
       "selectedCount": "{selected}/{max} 선택됨(최소 {min})",
       "cancel": "취소",
-      "start": "대결 시작"
+      "start": "대결 시작",
+      "notAGitRepo": "이 폴더는 git 저장소가 아닙니다. 아레나는 각 참가자에게 격리된 워크트리를 제공하기 위해 저장소가 필요합니다.",
+      "initGitRepo": "git init",
+      "initializing": "초기화 중…"
     },
     "scoreboard": {
       "status": {

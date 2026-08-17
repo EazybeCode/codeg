@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/dialog"
 import { AgentIcon } from "@/components/agent-icon"
 import { useAcpAgents } from "@/hooks/use-acp-agents"
-import { getFolder } from "@/lib/api"
+import { getFolder, getGitBranch, gitInit } from "@/lib/api"
 import type { AgentType } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
@@ -42,6 +42,21 @@ export function PkLauncherDialog() {
   const [task, setTask] = useState("")
   const [workingDir, setWorkingDir] = useState<string | null>(null)
   const [folderId, setFolderId] = useState<number | null>(null)
+  // null = unknown (still checking); false disables Start — worktrees need a
+  // real git repo, and `git worktree add` in a plain folder fails instantly.
+  const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null)
+  const [initializing, setInitializing] = useState(false)
+
+  const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
+    setIsGitRepo(null)
+    getGitBranch(dir)
+      .then((branch) => {
+        if (!cancelledRef.current) setIsGitRepo(branch != null)
+      })
+      .catch(() => {
+        if (!cancelledRef.current) setIsGitRepo(false)
+      })
+  }
 
   useEffect(() => {
     if (!open) return
@@ -49,27 +64,43 @@ export function PkLauncherDialog() {
     setTask("")
     setWorkingDir(null)
     setFolderId(null)
+    setIsGitRepo(null)
     // The active tab decides where the arena runs. Draft tabs may lack a
     // workingDir; fall back to the folder's own path.
     if (activeTab?.folderId == null || activeTab.folderId < 0) return
-    if (activeTab.workingDir) {
-      setFolderId(activeTab.folderId)
-      setWorkingDir(activeTab.workingDir)
-      return
+    const cancelled = { current: false }
+    const resolve = (id: number, dir: string) => {
+      setFolderId(id)
+      setWorkingDir(dir)
+      checkGitRepo(dir, cancelled)
     }
-    let cancelled = false
-    getFolder(activeTab.folderId)
-      .then((folder) => {
-        if (cancelled) return
-        setFolderId(folder.id)
-        setWorkingDir(folder.path)
-      })
-      .catch(() => undefined)
+    if (activeTab.workingDir) {
+      resolve(activeTab.folderId, activeTab.workingDir)
+    } else {
+      getFolder(activeTab.folderId)
+        .then((folder) => {
+          if (!cancelled.current) resolve(folder.id, folder.path)
+        })
+        .catch(() => undefined)
+    }
     return () => {
-      cancelled = true
+      cancelled.current = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+
+  const handleInitGit = async () => {
+    if (!workingDir || initializing) return
+    setInitializing(true)
+    try {
+      await gitInit(workingDir)
+      setIsGitRepo(true)
+    } catch {
+      setIsGitRepo(false)
+    } finally {
+      setInitializing(false)
+    }
+  }
 
   const agents = useMemo(
     () => rawAgents.filter((a) => a.enabled && a.available),
@@ -81,7 +112,11 @@ export function PkLauncherDialog() {
   const selectionValid =
     selected.length >= MIN_CONTESTANTS && selected.length <= MAX_CONTESTANTS
   const canStart =
-    taskValid && selectionValid && folderId != null && workingDir != null
+    taskValid &&
+    selectionValid &&
+    folderId != null &&
+    workingDir != null &&
+    isGitRepo === true
 
   const toggle = (agentType: AgentType) => {
     setSelected((prev) =>
@@ -123,6 +158,19 @@ export function PkLauncherDialog() {
             {noFolder ? (
               <div className="text-xs text-muted-foreground">
                 {t("noFolderHint")}
+              </div>
+            ) : null}
+            {workingDir != null && isGitRepo === false ? (
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span className="min-w-0 flex-1">{t("notAGitRepo")}</span>
+                <button
+                  type="button"
+                  onClick={() => void handleInitGit()}
+                  disabled={initializing}
+                  className="shrink-0 rounded-md border border-border px-2 py-1 text-xs text-foreground hover:bg-muted disabled:opacity-50"
+                >
+                  {initializing ? t("initializing") : t("initGitRepo")}
+                </button>
               </div>
             ) : null}
             <div className="flex flex-wrap gap-2">

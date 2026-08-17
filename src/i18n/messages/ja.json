@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "全出場者が受け取る同じタスク。例:「HTML ファイル1つでスネークゲームを作って」",
       "selectedCount": "{selected}/{max} 選択中(最小 {min})",
       "cancel": "キャンセル",
-      "start": "対戦開始"
+      "start": "対戦開始",
+      "notAGitRepo": "このフォルダは git リポジトリではありません。アリーナは各出場者に隔離されたワークツリーを与えるためにリポジトリが必要です。",
+      "initGitRepo": "git init",
+      "initializing": "初期化中…"
     },
     "scoreboard": {
       "status": {

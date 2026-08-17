@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "Die Aufgabe, die jeder Teilnehmer erhält, z. B. \"Schreibe ein Snake-Spiel in einer einzigen HTML-Datei\"",
       "selectedCount": "{selected}/{max} gewählt (min. {min})",
       "cancel": "Abbrechen",
-      "start": "Kampf starten"
+      "start": "Kampf starten",
+      "notAGitRepo": "Dieser Ordner ist kein Git-Repository — die Arena braucht eines, um jedem Teilnehmer einen isolierten Worktree zu geben.",
+      "initGitRepo": "git init",
+      "initializing": "Initialisiere…"
     },
     "scoreboard": {
       "status": {

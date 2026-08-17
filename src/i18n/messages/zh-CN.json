@@ -4965,7 +4965,10 @@
       "taskPlaceholder": "所有选手收到的同一任务,例如\"用单个 HTML 文件写一个贪吃蛇游戏\"",
       "selectedCount": "已选 {selected}/{max}(最少 {min})",
       "cancel": "取消",
-      "start": "开始比赛"
+      "start": "开始比赛",
+      "notAGitRepo": "该文件夹不是 git 仓库——竞技场需要仓库来为每位选手创建隔离的 worktree。",
+      "initGitRepo": "git init",
+      "initializing": "初始化中…"
     },
     "scoreboard": {
       "status": {
