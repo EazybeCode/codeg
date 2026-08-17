@@ -56,12 +56,19 @@ function taskPromptBlocks(
 
 /**
  * Apply the round's permission policy via `session/set_mode` once the agent
- * has advertised its modes (they arrive with session/new, shortly after
- * connect resolves — hence the brief poll). The requested mode id is only
- * sent when the agent actually advertises it: forcing an unknown id on an
- * agent that would reject it would fail the whole connect sequence, and an
- * agent without the mode simply keeps asking, exactly as before. "default"
- * needs no call at all.
+ * has advertised its modes. The requested mode id is only sent when the
+ * agent actually advertises it: forcing an unknown id on an agent that would
+ * reject it would fail the whole connect sequence, and an agent without the
+ * mode simply keeps asking, exactly as before. "default" needs no call.
+ *
+ * The modes arrive as a `session_modes` EVENT shortly after session/new —
+ * not in connect()'s resolution. The arena attaches the contestant as a
+ * by-id delegation child right after connect, and the attach RE-ROUTES the
+ * reverseMap to the by-id entry, so the event lands there, never on the
+ * owner (contextKey) entry. Polling only the owner entry therefore times
+ * out and the mode is silently skipped (field report: presets "did not
+ * apply"). Poll both entries: pre-attach events land on the owner, post-
+ * attach on the by-id entry.
  */
 type ModesStore = {
   getConnection(key: string):
@@ -75,10 +82,11 @@ async function applyPermissionMode(
   connectionStore: ModesStore,
   setMode: (contextKey: string, modeId: string) => Promise<void>,
   contextKey: string,
+  connectionId: string | null,
   mode: PkPermissionMode
 ): Promise<void> {
   if (mode === "default") return
-  const modes = await waitForModes(connectionStore, contextKey)
+  const modes = await waitForModes(connectionStore, contextKey, connectionId)
   const advertised = modes?.available_modes?.map((m) => m.id) ?? []
   if (!advertised.includes(mode)) return
   try {
@@ -92,12 +100,18 @@ async function applyPermissionMode(
 function waitForModes(
   connectionStore: ModesStore,
   contextKey: string,
-  timeoutMs = 5000
+  connectionId: string | null,
+  timeoutMs = 8000
 ): Promise<{ available_modes?: Array<{ id: string }> } | null> {
   return new Promise((resolve) => {
     const startedAt = Date.now()
     const poll = () => {
-      const modes = connectionStore.getConnection(contextKey)?.modes ?? null
+      const modes =
+        connectionStore.getConnection(contextKey)?.modes ??
+        (connectionId != null
+          ? connectionStore.getConnection(connectionId)?.modes
+          : null) ??
+        null
       if (modes != null) {
         resolve(modes)
         return
@@ -333,6 +347,7 @@ export function usePkRound(): {
             connectionStore,
             setMode,
             contextKey,
+            connectionId,
             round.permissionMode
           )
           await sendPrompt(
