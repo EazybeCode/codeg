@@ -4968,7 +4968,19 @@
       "start": "Kampf starten",
       "notAGitRepo": "Dieser Ordner ist kein Git-Repository — die Arena braucht eines, um jedem Teilnehmer einen isolierten Worktree zu geben.",
       "initGitRepo": "git init",
-      "initializing": "Initialisiere…"
+      "initializing": "Initialisiere…",
+      "permissionLabel": "Berechtigungen",
+      "permissionOptions": {
+        "default": "Jedes Mal fragen",
+        "acceptEdits": "Bearbeitungen automatisch",
+        "bypassPermissions": "Vollautomatik"
+      },
+      "permissionHints": {
+        "default": "jede Freigabe unterbricht den Teilnehmer",
+        "acceptEdits": "Dateibearbeitungen ohne Nachfrage",
+        "bypassPermissions": "gar keine Freigaben"
+      },
+      "permissionNote": "Wird beim Start auf jeden Teilnehmer angewendet; Agenten ohne Unterstützung fragen weiter."
     },
     "scoreboard": {
       "status": {

@@ -20,6 +20,7 @@ import {
   usePkArenaStore,
   type PkContestant,
   type PkContestantUsage,
+  type PkPermissionMode,
   type PkRound,
 } from "@/stores/pk-arena-store"
 
@@ -53,6 +54,64 @@ function taskPromptBlocks(
   ]
 }
 
+/**
+ * Apply the round's permission policy via `session/set_mode` once the agent
+ * has advertised its modes (they arrive with session/new, shortly after
+ * connect resolves — hence the brief poll). The requested mode id is only
+ * sent when the agent actually advertises it: forcing an unknown id on an
+ * agent that would reject it would fail the whole connect sequence, and an
+ * agent without the mode simply keeps asking, exactly as before. "default"
+ * needs no call at all.
+ */
+type ModesStore = {
+  getConnection(key: string):
+    | {
+        modes?: { available_modes?: Array<{ id: string }> } | null
+      }
+    | undefined
+}
+
+async function applyPermissionMode(
+  connectionStore: ModesStore,
+  setMode: (contextKey: string, modeId: string) => Promise<void>,
+  contextKey: string,
+  mode: PkPermissionMode
+): Promise<void> {
+  if (mode === "default") return
+  const modes = await waitForModes(connectionStore, contextKey)
+  const advertised = modes?.available_modes?.map((m) => m.id) ?? []
+  if (!advertised.includes(mode)) return
+  try {
+    await setMode(contextKey, mode)
+  } catch {
+    // A rejected mode switch must not kill the round — the contestant just
+    // runs with its default permission flow.
+  }
+}
+
+function waitForModes(
+  connectionStore: ModesStore,
+  contextKey: string,
+  timeoutMs = 5000
+): Promise<{ available_modes?: Array<{ id: string }> } | null> {
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    const poll = () => {
+      const modes = connectionStore.getConnection(contextKey)?.modes ?? null
+      if (modes != null) {
+        resolve(modes)
+        return
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        resolve(null)
+        return
+      }
+      setTimeout(poll, 200)
+    }
+    poll()
+  })
+}
+
 async function fetchUsage(
   conversationId: number
 ): Promise<PkContestantUsage | null> {
@@ -84,6 +143,7 @@ export function usePkRound(): {
     sendPrompt,
     cancel,
     disconnect,
+    setMode,
     attachDelegationChild,
     detachDelegationChild,
   } = useAcpActions()
@@ -269,6 +329,12 @@ export function usePkRound(): {
               agentType,
             })
           }
+          await applyPermissionMode(
+            connectionStore,
+            setMode,
+            contextKey,
+            round.permissionMode
+          )
           await sendPrompt(
             contextKey,
             taskPromptBlocks(round.task, worktreePath),
@@ -297,6 +363,7 @@ export function usePkRound(): {
       connectionStore,
       markRound,
       sendPrompt,
+      setMode,
       updateContestant,
       attachDelegationChild,
     ]

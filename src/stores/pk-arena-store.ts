@@ -52,6 +52,14 @@ export interface PkContestant {
 
 export type PkRoundStatus = "running" | "finished" | "canceled" | "interrupted"
 
+/**
+ * Round-level permission policy, applied to every contestant right after
+ * connect via `setMode` — the ACP-standard mode ids (Claude Code, Codex and
+ * Qoder all advertise these exact spellings). Agents that don't advertise a
+ * matching mode keep their default and simply ask, as before.
+ */
+export type PkPermissionMode = "default" | "acceptEdits" | "bypassPermissions"
+
 export interface PkRound {
   id: string
   task: string
@@ -59,6 +67,7 @@ export interface PkRound {
   workingDir: string
   createdAt: number
   status: PkRoundStatus
+  permissionMode: PkPermissionMode
   contestants: PkContestant[]
 }
 
@@ -75,6 +84,7 @@ interface PkArenaActions {
     folderId: number
     workingDir: string
     agents: AgentType[]
+    permissionMode?: PkPermissionMode
   }): PkRound
   updateContestant(
     roundId: string,
@@ -117,6 +127,7 @@ interface PersistedRound {
   workingDir: string
   createdAt: number
   status: PkRoundStatus
+  permissionMode?: PkPermissionMode
   contestants: Array<Omit<PkContestant, "diff">>
 }
 
@@ -128,6 +139,7 @@ function toPersisted(round: PkRound): PersistedRound {
     workingDir: round.workingDir,
     createdAt: round.createdAt,
     status: round.status,
+    permissionMode: round.permissionMode,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- diff is live-only and deliberately dropped here
     contestants: round.contestants.map(({ diff: _diff, ...rest }) => rest),
   }
@@ -138,6 +150,7 @@ function revive(persisted: PersistedRound): PkRound {
   const wasLive = persisted.status === "running"
   return {
     ...persisted,
+    permissionMode: persisted.permissionMode ?? "default",
     status: wasLive ? "interrupted" : persisted.status,
     contestants: persisted.contestants.map((c) => {
       if (!wasLive) return { ...c, diff: null }
@@ -185,7 +198,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
     launcherOpen: false,
     arenaOpen: false,
 
-    createRound: ({ task, folderId, workingDir, agents }) => {
+    createRound: ({ task, folderId, workingDir, agents, permissionMode }) => {
       const round: PkRound = {
         id: newRoundId(),
         task,
@@ -193,6 +206,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
         workingDir,
         createdAt: Date.now(),
         status: "running",
+        permissionMode: permissionMode ?? "default",
         contestants: agents.map((agentType) => ({
           agentType,
           contextKey: null,

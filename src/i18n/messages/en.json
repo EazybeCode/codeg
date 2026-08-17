@@ -4968,7 +4968,19 @@
       "start": "Start match",
       "notAGitRepo": "This folder is not a git repository — the arena needs one to give each contestant an isolated worktree.",
       "initGitRepo": "git init",
-      "initializing": "Initializing…"
+      "initializing": "Initializing…",
+      "permissionLabel": "Permissions",
+      "permissionOptions": {
+        "default": "Ask every time",
+        "acceptEdits": "Auto-accept edits",
+        "bypassPermissions": "Full auto"
+      },
+      "permissionHints": {
+        "default": "each approval interrupts the contestant",
+        "acceptEdits": "file edits run without asking",
+        "bypassPermissions": "no approval prompts at all"
+      },
+      "permissionNote": "Applied per contestant when the round starts; agents that don't support a mode keep asking."
     },
     "scoreboard": {
       "status": {

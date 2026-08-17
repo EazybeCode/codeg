@@ -4968,7 +4968,19 @@
       "start": "대결 시작",
       "notAGitRepo": "이 폴더는 git 저장소가 아닙니다. 아레나는 각 참가자에게 격리된 워크트리를 제공하기 위해 저장소가 필요합니다.",
       "initGitRepo": "git init",
-      "initializing": "초기화 중…"
+      "initializing": "초기화 중…",
+      "permissionLabel": "권한",
+      "permissionOptions": {
+        "default": "매번 확인",
+        "acceptEdits": "편집 자동 허용",
+        "bypassPermissions": "완전 자동"
+      },
+      "permissionHints": {
+        "default": "승인마다 참가자가 중단됨",
+        "acceptEdits": "파일 편집 확인 없음",
+        "bypassPermissions": "승인 없음"
+      },
+      "permissionNote": "라운드 시작 시 각 참가자에 적용됩니다. 미지원 에이전트는 계속 확인합니다."
     },
     "scoreboard": {
       "status": {

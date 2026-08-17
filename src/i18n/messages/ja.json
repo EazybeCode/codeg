@@ -4968,7 +4968,19 @@
       "start": "対戦開始",
       "notAGitRepo": "このフォルダは git リポジトリではありません。アリーナは各出場者に隔離されたワークツリーを与えるためにリポジトリが必要です。",
       "initGitRepo": "git init",
-      "initializing": "初期化中…"
+      "initializing": "初期化中…",
+      "permissionLabel": "権限",
+      "permissionOptions": {
+        "default": "毎回確認",
+        "acceptEdits": "編集を自動許可",
+        "bypassPermissions": "完全自動"
+      },
+      "permissionHints": {
+        "default": "承認のたびに出場者が停止",
+        "acceptEdits": "ファイル編集は確認なし",
+        "bypassPermissions": "承認ダイアログなし"
+      },
+      "permissionNote": "ラウンド開始時に各出場者へ適用。未対応のエージェントは引き続き確認します。"
     },
     "scoreboard": {
       "status": {

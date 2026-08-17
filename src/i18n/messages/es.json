@@ -4968,7 +4968,19 @@
       "start": "Iniciar duelo",
       "notAGitRepo": "Esta carpeta no es un repositorio git — la arena necesita uno para dar a cada contendiente un worktree aislado.",
       "initGitRepo": "git init",
-      "initializing": "Inicializando…"
+      "initializing": "Inicializando…",
+      "permissionLabel": "Permisos",
+      "permissionOptions": {
+        "default": "Preguntar siempre",
+        "acceptEdits": "Aceptar ediciones",
+        "bypassPermissions": "Todo automático"
+      },
+      "permissionHints": {
+        "default": "cada aprobación interrumpe al contendiente",
+        "acceptEdits": "ediciones de archivos sin preguntar",
+        "bypassPermissions": "sin aprobaciones"
+      },
+      "permissionNote": "Se aplica a cada contendiente al iniciar; los agentes sin soporte siguen preguntando."
     },
     "scoreboard": {
       "status": {

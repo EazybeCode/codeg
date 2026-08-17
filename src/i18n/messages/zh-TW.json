@@ -4968,7 +4968,19 @@
       "start": "開始比賽",
       "notAGitRepo": "該資料夾不是 git 儲存庫——競技場需要儲存庫來為每位選手建立隔離的 worktree。",
       "initGitRepo": "git init",
-      "initializing": "初始化中…"
+      "initializing": "初始化中…",
+      "permissionLabel": "權限",
+      "permissionOptions": {
+        "default": "每步詢問",
+        "acceptEdits": "自動接受編輯",
+        "bypassPermissions": "全自動"
+      },
+      "permissionHints": {
+        "default": "每次審批都會打斷選手",
+        "acceptEdits": "檔案編輯不再詢問",
+        "bypassPermissions": "完全不彈審批"
+      },
+      "permissionNote": "開賽時對每位選手生效;不支援的智慧體仍會詢問。"
     },
     "scoreboard": {
       "status": {

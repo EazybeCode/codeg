@@ -13,7 +13,7 @@ import { useAcpAgents } from "@/hooks/use-acp-agents"
 import { getFolder, getGitBranch, gitInit } from "@/lib/api"
 import type { AgentType } from "@/lib/types"
 import { cn } from "@/lib/utils"
-import { usePkArenaStore } from "@/stores/pk-arena-store"
+import { usePkArenaStore, type PkPermissionMode } from "@/stores/pk-arena-store"
 import { useTabStore } from "@/stores/tab-store"
 
 /**
@@ -46,6 +46,8 @@ export function PkLauncherDialog() {
   // real git repo, and `git worktree add` in a plain folder fails instantly.
   const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null)
   const [initializing, setInitializing] = useState(false)
+  const [permissionMode, setPermissionMode] =
+    useState<PkPermissionMode>("default")
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
     setIsGitRepo(null)
@@ -65,6 +67,7 @@ export function PkLauncherDialog() {
     setWorkingDir(null)
     setFolderId(null)
     setIsGitRepo(null)
+    setPermissionMode("default")
     // The active tab decides where the arena runs. Draft tabs may lack a
     // workingDir; fall back to the folder's own path.
     if (activeTab?.folderId == null || activeTab.folderId < 0) return
@@ -135,6 +138,7 @@ export function PkLauncherDialog() {
       folderId,
       workingDir,
       agents: selected,
+      permissionMode,
     })
     setLauncherOpen(false)
     setArenaOpen(true)
@@ -219,6 +223,38 @@ export function PkLauncherDialog() {
               rows={5}
               className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
             />
+          </div>
+          <div>
+            <div className="mb-2 text-sm font-medium text-foreground">
+              {t("permissionLabel")}
+            </div>
+            <div className="flex flex-col gap-1.5">
+              {(["default", "acceptEdits", "bypassPermissions"] as const).map(
+                (mode) => (
+                  <label
+                    key={mode}
+                    className="flex cursor-pointer items-center gap-2 text-sm text-foreground"
+                  >
+                    <input
+                      type="radio"
+                      name="pk-permission"
+                      checked={permissionMode === mode}
+                      onChange={() => setPermissionMode(mode)}
+                      className="accent-foreground"
+                    />
+                    <span className="font-medium">
+                      {t(`permissionOptions.${mode}`)}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {t(`permissionHints.${mode}`)}
+                    </span>
+                  </label>
+                )
+              )}
+            </div>
+            <div className="mt-1.5 text-xs text-muted-foreground">
+              {t("permissionNote")}
+            </div>
           </div>
         </div>
         <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-3">

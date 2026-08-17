@@ -4968,7 +4968,19 @@
       "start": "ابدأ المنافسة",
       "notAGitRepo": "هذا المجلد ليس مستودع git — تحتاج الساحة إلى مستودع لمنح كل متنافس شجرة عمل معزولة.",
       "initGitRepo": "git init",
-      "initializing": "جارٍ التهيئة…"
+      "initializing": "جارٍ التهيئة…",
+      "permissionLabel": "الأذونات",
+      "permissionOptions": {
+        "default": "اسأل في كل مرة",
+        "acceptEdits": "اقبل التعديلات تلقائيًا",
+        "bypassPermissions": "تشغيل كامل"
+      },
+      "permissionHints": {
+        "default": "كل موافقة توقف المتنافس",
+        "acceptEdits": "تعديلات الملفات دون سؤال",
+        "bypassPermissions": "لا موافقات إطلاقًا"
+      },
+      "permissionNote": "تُطبق على كل متنافس عند بدء الجولة; الوكلاء غير الداعمة يستمرون في السؤال."
     },
     "scoreboard": {
       "status": {

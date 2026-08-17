@@ -4968,7 +4968,19 @@
       "start": "Iniciar duelo",
       "notAGitRepo": "Esta pasta não é um repositório git — a arena precisa de um para dar a cada competidor um worktree isolado.",
       "initGitRepo": "git init",
-      "initializing": "Inicializando…"
+      "initializing": "Inicializando…",
+      "permissionLabel": "Permissões",
+      "permissionOptions": {
+        "default": "Perguntar sempre",
+        "acceptEdits": "Aceitar edições",
+        "bypassPermissions": "Tudo automático"
+      },
+      "permissionHints": {
+        "default": "cada aprovação interrompe o competidor",
+        "acceptEdits": "edições sem perguntar",
+        "bypassPermissions": "sem aprovações"
+      },
+      "permissionNote": "Aplicado a cada competidor no início; agentes sem suporte continuam perguntando."
     },
     "scoreboard": {
       "status": {

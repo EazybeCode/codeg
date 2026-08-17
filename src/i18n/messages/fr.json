@@ -4968,7 +4968,19 @@
       "start": "Lancer le duel",
       "notAGitRepo": "Ce dossier n'est pas un dépôt git — l'arène en nécessite un pour donner à chaque participant un worktree isolé.",
       "initGitRepo": "git init",
-      "initializing": "Initialisation…"
+      "initializing": "Initialisation…",
+      "permissionLabel": "Autorisations",
+      "permissionOptions": {
+        "default": "Demander à chaque fois",
+        "acceptEdits": "Accepter les modifications",
+        "bypassPermissions": "Tout automatique"
+      },
+      "permissionHints": {
+        "default": "chaque validation interrompt le participant",
+        "acceptEdits": "modifications sans demander",
+        "bypassPermissions": "aucune validation"
+      },
+      "permissionNote": "Appliqué à chaque participant au départ ; les agents non compatibles continuent de demander."
     },
     "scoreboard": {
       "status": {
