@@ -5015,7 +5015,8 @@
       },
       "preparing": "Preparando contendiente…",
       "noRound": "Ninguna ronda seleccionada",
-      "contestantsUnit": "agentes"
+      "contestantsUnit": "agentes",
+      "newRound": "Nueva ronda"
     },
     "diff": {
       "loading": "Cargando diff…",

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { memo, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import {
   Dialog,
@@ -12,6 +12,7 @@ import { LiveTranscriptView } from "@/components/message/live-transcript-view"
 import { PkDiffView } from "@/components/pk/pk-diff-view"
 import { PkScoreboard } from "@/components/pk/pk-scoreboard"
 import { usePkRound } from "@/hooks/use-pk-round"
+import type { PkContestant } from "@/stores/pk-arena-store"
 import { cn } from "@/lib/utils"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
 
@@ -39,7 +40,6 @@ export function PkArenaDialog() {
 
   const { cancelRound, cleanupRound, fetchDiff } = usePkRound()
   const [tab, setTab] = useState<"battle" | "diff">("battle")
-  const [now, setNow] = useState(() => Date.now())
   const [sharing, setSharing] = useState(false)
   const [diffLoading, setDiffLoading] = useState(false)
   const scoreboardRef = useRef<HTMLDivElement>(null)
@@ -58,19 +58,6 @@ export function PkArenaDialog() {
     () => ({ battle: t("tabs.battle"), diff: t("tabs.diff") }) as const,
     [t]
   )
-
-  const live = round != null && round.status === "running"
-
-  // 1s scoreboard clock while any contestant is live.
-  useEffect(() => {
-    if (!open || !live) return
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [open, live])
-
-  useEffect(() => {
-    if (open) setNow(Date.now())
-  }, [open])
 
   // Diff tab: fetch each contestant's worktree diff once per visit.
   useEffect(() => {
@@ -173,6 +160,13 @@ export function PkArenaDialog() {
               ) : null}
               <button
                 type="button"
+                onClick={() => usePkArenaStore.getState().setLauncherOpen(true)}
+                className="rounded-md border border-border px-3 py-1 text-xs text-foreground hover:bg-muted"
+              >
+                {t("newRound")}
+              </button>
+              <button
+                type="button"
                 onClick={() => void handleShare()}
                 disabled={sharing}
                 className="rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
@@ -181,11 +175,7 @@ export function PkArenaDialog() {
               </button>
             </div>
 
-            <PkScoreboard
-              ref={scoreboardRef}
-              contestants={round.contestants}
-              now={now}
-            />
+            <PkScoreboard ref={scoreboardRef} contestants={round.contestants} />
 
             <div className="flex items-center gap-1 border-b border-border px-4">
               {(["battle", "diff"] as const).map((key) => (
@@ -213,23 +203,15 @@ export function PkArenaDialog() {
             >
               {tab === "battle"
                 ? round.contestants.map((contestant) => (
-                    <div
+                    <PkBattlePane
                       key={contestant.agentType}
-                      className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border"
-                    >
-                      {contestant.conversationId != null ? (
-                        <LiveTranscriptView
-                          conversationId={contestant.conversationId}
-                          connectionId={contestant.connectionId}
-                          agentType={contestant.agentType}
-                          kickoffText={round.task}
-                        />
-                      ) : (
-                        <div className="flex flex-1 items-center justify-center px-3 text-xs text-muted-foreground">
-                          {contestant.statusDetail ?? t("preparing")}
-                        </div>
-                      )}
-                    </div>
+                      conversationId={contestant.conversationId}
+                      connectionId={contestant.connectionId}
+                      agentType={contestant.agentType}
+                      task={round.task}
+                      statusDetail={contestant.statusDetail}
+                      preparingLabel={t("preparing")}
+                    />
                   ))
                 : round.contestants.map((contestant) => (
                     <PkDiffView
@@ -250,3 +232,42 @@ export function PkArenaDialog() {
     </Dialog>
   )
 }
+
+/**
+ * One battle column. Memoized on stable props: the dialog re-renders on
+ * every contestant store update (status/usage/diff of ANY contestant), and
+ * an unmemoized pane re-rendered four streaming markdown transcripts each
+ * time — the field-reported arena lag.
+ */
+const PkBattlePane = memo(function PkBattlePane({
+  conversationId,
+  connectionId,
+  agentType,
+  task,
+  statusDetail,
+  preparingLabel,
+}: {
+  conversationId: number | null
+  connectionId: string | null
+  agentType: PkContestant["agentType"]
+  task: string
+  statusDetail: string | null
+  preparingLabel: string
+}) {
+  return (
+    <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
+      {conversationId != null ? (
+        <LiveTranscriptView
+          conversationId={conversationId}
+          connectionId={connectionId}
+          agentType={agentType}
+          kickoffText={task}
+        />
+      ) : (
+        <div className="flex flex-1 items-center justify-center px-3 text-xs text-muted-foreground">
+          {statusDetail ?? preparingLabel}
+        </div>
+      )}
+    </div>
+  )
+})

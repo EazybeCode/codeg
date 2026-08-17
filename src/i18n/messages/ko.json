@@ -5015,7 +5015,8 @@
       },
       "preparing": "참가자 준비 중…",
       "noRound": "라운드 미선택",
-      "contestantsUnit": "개"
+      "contestantsUnit": "개",
+      "newRound": "새 라운드"
     },
     "diff": {
       "loading": "diff 불러오는 중…",

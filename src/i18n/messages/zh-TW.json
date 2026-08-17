@@ -5015,7 +5015,8 @@
       },
       "preparing": "正在準備選手…",
       "noRound": "未選擇回合",
-      "contestantsUnit": "個智慧體"
+      "contestantsUnit": "個智慧體",
+      "newRound": "新一局"
     },
     "diff": {
       "loading": "正在載入 diff…",

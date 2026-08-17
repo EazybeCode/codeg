@@ -399,7 +399,17 @@ export function ComposerAddMenu({
           </>
         )}
         <DropdownMenuItem
-          onClick={() => usePkArenaStore.getState().setLauncherOpen(true)}
+          onClick={() => {
+            const state = usePkArenaStore.getState()
+            // With history to revisit, the menu reopens the ARENA directly
+            // (the dialog otherwise has no way back after it closes);
+            // "新一局" inside the arena opens the launcher.
+            if (state.rounds.length > 0 && state.activeRoundId) {
+              state.setArenaOpen(true)
+            } else {
+              state.setLauncherOpen(true)
+            }
+          }}
         >
           <Swords className="size-4" />
           {t("startPk")}

@@ -5015,7 +5015,8 @@
       },
       "preparing": "出場者を準備中…",
       "noRound": "ラウンド未選択",
-      "contestantsUnit": "体"
+      "contestantsUnit": "体",
+      "newRound": "新しいラウンド"
     },
     "diff": {
       "loading": "diff を読み込み中…",

@@ -5015,7 +5015,8 @@
       },
       "preparing": "Preparando competidor…",
       "noRound": "Nenhuma rodada selecionada",
-      "contestantsUnit": "agentes"
+      "contestantsUnit": "agentes",
+      "newRound": "Nova rodada"
     },
     "diff": {
       "loading": "Carregando diff…",

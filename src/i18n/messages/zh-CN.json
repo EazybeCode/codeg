@@ -5015,7 +5015,8 @@
       },
       "preparing": "正在准备选手…",
       "noRound": "未选择回合",
-      "contestantsUnit": "个智能体"
+      "contestantsUnit": "个智能体",
+      "newRound": "新一局"
     },
     "diff": {
       "loading": "正在加载 diff…",

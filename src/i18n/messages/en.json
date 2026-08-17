@@ -5015,7 +5015,8 @@
       },
       "preparing": "Preparing contestant…",
       "noRound": "No round selected",
-      "contestantsUnit": "agents"
+      "contestantsUnit": "agents",
+      "newRound": "New round"
     },
     "diff": {
       "loading": "Loading diff…",

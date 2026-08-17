@@ -1,6 +1,6 @@
 "use client"
 
-import { forwardRef } from "react"
+import { forwardRef, useEffect, useState } from "react"
 import { useTranslations } from "next-intl"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
@@ -51,10 +51,24 @@ function useContestantStatusLabel() {
 
 export const PkScoreboard = forwardRef<
   HTMLDivElement,
-  { contestants: PkContestant[]; now: number }
->(function PkScoreboard({ contestants, now }, ref) {
+  { contestants: PkContestant[] }
+>(function PkScoreboard({ contestants }, ref) {
   const t = useTranslations("PkArena.scoreboard")
   const statusLabel = useContestantStatusLabel()
+
+  // The ticking clock lives HERE, not in the dialog: a dialog-level `now`
+  // re-rendered four streaming transcript panes once a second and made the
+  // arena crawl (field report: "非常卡"). Scoped to the scoreboard, only
+  // these small cards re-render.
+  const anyLive = contestants.some(
+    (c) => c.status === "running" || c.status === "connecting"
+  )
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!anyLive) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [anyLive])
 
   return (
     <div

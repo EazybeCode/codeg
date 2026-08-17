@@ -5015,7 +5015,8 @@
       },
       "preparing": "Teilnehmer wird vorbereitet…",
       "noRound": "Keine Runde ausgewählt",
-      "contestantsUnit": "Agenten"
+      "contestantsUnit": "Agenten",
+      "newRound": "Neue Runde"
     },
     "diff": {
       "loading": "Diff wird geladen…",

@@ -5015,7 +5015,8 @@
       },
       "preparing": "جارٍ تحضير المتنافس…",
       "noRound": "لم تُحدد جولة",
-      "contestantsUnit": "وكلاء"
+      "contestantsUnit": "وكلاء",
+      "newRound": "جولة جديدة"
     },
     "diff": {
       "loading": "جارٍ تحميل الفروقات…",

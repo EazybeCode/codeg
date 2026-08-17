@@ -5015,7 +5015,8 @@
       },
       "preparing": "Préparation du participant…",
       "noRound": "Aucune manche sélectionnée",
-      "contestantsUnit": "agents"
+      "contestantsUnit": "agents",
+      "newRound": "Nouvelle manche"
     },
     "diff": {
       "loading": "Chargement du diff…",
