@@ -4980,7 +4980,9 @@
         "acceptEdits": "檔案編輯不再詢問",
         "bypassPermissions": "完全不彈審批"
       },
-      "permissionNote": "開賽時對每位選手生效;不支援的智慧體仍會詢問。"
+      "permissionNote": "開賽時對每位選手生效;不支援的智慧體仍會詢問。",
+      "bareModeLabel": "裸機模式(禁用技能)",
+      "bareModeHint": "選手被明確要求只使用基礎能力,不載入任何全域或專案技能。"
     },
     "scoreboard": {
       "status": {

@@ -68,6 +68,8 @@ export interface PkRound {
   createdAt: number
   status: PkRoundStatus
   permissionMode: PkPermissionMode
+  /** Bare mode: contestants are instructed to use no skills at all. */
+  bareMode: boolean
   contestants: PkContestant[]
 }
 
@@ -85,6 +87,7 @@ interface PkArenaActions {
     workingDir: string
     agents: AgentType[]
     permissionMode?: PkPermissionMode
+    bareMode?: boolean
   }): PkRound
   updateContestant(
     roundId: string,
@@ -128,6 +131,7 @@ interface PersistedRound {
   createdAt: number
   status: PkRoundStatus
   permissionMode?: PkPermissionMode
+  bareMode?: boolean
   contestants: Array<Omit<PkContestant, "diff">>
 }
 
@@ -140,6 +144,7 @@ function toPersisted(round: PkRound): PersistedRound {
     createdAt: round.createdAt,
     status: round.status,
     permissionMode: round.permissionMode,
+    bareMode: round.bareMode,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- diff is live-only and deliberately dropped here
     contestants: round.contestants.map(({ diff: _diff, ...rest }) => rest),
   }
@@ -151,6 +156,7 @@ function revive(persisted: PersistedRound): PkRound {
   return {
     ...persisted,
     permissionMode: persisted.permissionMode ?? "default",
+    bareMode: persisted.bareMode ?? false,
     status: wasLive ? "interrupted" : persisted.status,
     contestants: persisted.contestants.map((c) => {
       if (!wasLive) return { ...c, diff: null }
@@ -198,7 +204,14 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
     launcherOpen: false,
     arenaOpen: false,
 
-    createRound: ({ task, folderId, workingDir, agents, permissionMode }) => {
+    createRound: ({
+      task,
+      folderId,
+      workingDir,
+      agents,
+      permissionMode,
+      bareMode,
+    }) => {
       const round: PkRound = {
         id: newRoundId(),
         task,
@@ -207,6 +220,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
         createdAt: Date.now(),
         status: "running",
         permissionMode: permissionMode ?? "default",
+        bareMode: bareMode ?? false,
         contestants: agents.map((agentType) => ({
           agentType,
           contextKey: null,

@@ -37,9 +37,22 @@ import {
  * are summed from the persisted conversation afterwards.
  */
 
+/** 公平竞技规则块。裸机模式下追加到任务提示词——软约束(模型仍会看到
+ * 全局技能目录的内容),但统一施加于所有选手,对比保持 apples-to-apples。 */
+const BARE_MODE_RULES = [
+  "FAIR-PLAY RULES (mandatory):",
+  "This is a fair competition. Do NOT use any skills, slash commands, plugins,",
+  "custom agents, or custom instructions — including anything from",
+  "~/.claude/skills, ~/.codex/skills, ~/.agents/skills, or any other global",
+  "skill store, and any .claude/skills / .agents/skills / .codex/skills",
+  "directories in the repository. Use only your built-in capabilities",
+  "(file read/write, running commands, web access).",
+].join("\n")
+
 function taskPromptBlocks(
   task: string,
-  worktreePath: string
+  worktreePath: string,
+  bareMode: boolean
 ): PromptInputBlock[] {
   return [
     {
@@ -49,6 +62,7 @@ function taskPromptBlocks(
         "",
         `Work inside this directory: ${worktreePath}`,
         "It is a fresh git worktree created for you — this is your isolated arena, no other agent writes here. Commit your work when done.",
+        ...(bareMode ? ["", BARE_MODE_RULES] : []),
       ].join("\n"),
     },
   ]
@@ -352,7 +366,7 @@ export function usePkRound(): {
           )
           await sendPrompt(
             contextKey,
-            taskPromptBlocks(round.task, worktreePath),
+            taskPromptBlocks(round.task, worktreePath, round.bareMode),
             {
               folderId: round.folderId,
               conversationId,

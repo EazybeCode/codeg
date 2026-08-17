@@ -4980,7 +4980,9 @@
         "acceptEdits": "파일 편집 확인 없음",
         "bypassPermissions": "승인 없음"
       },
-      "permissionNote": "라운드 시작 시 각 참가자에 적용됩니다. 미지원 에이전트는 계속 확인합니다."
+      "permissionNote": "라운드 시작 시 각 참가자에 적용됩니다. 미지원 에이전트는 계속 확인합니다.",
+      "bareModeLabel": "베어 모드(스킬 비활성화)",
+      "bareModeHint": "참가자는 기본 기능만 사용하며 전역·프로젝트 스킬을 사용할 수 없습니다."
     },
     "scoreboard": {
       "status": {

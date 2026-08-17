@@ -4980,7 +4980,9 @@
         "acceptEdits": "Dateibearbeitungen ohne Nachfrage",
         "bypassPermissions": "gar keine Freigaben"
       },
-      "permissionNote": "Wird beim Start auf jeden Teilnehmer angewendet; Agenten ohne Unterstützung fragen weiter."
+      "permissionNote": "Wird beim Start auf jeden Teilnehmer angewendet; Agenten ohne Unterstützung fragen weiter.",
+      "bareModeLabel": "Bare-Modus (keine Skills)",
+      "bareModeHint": "Teilnehmer dürfen nur ihre Grundfunktionen nutzen — keine globalen oder Projekt-Skills."
     },
     "scoreboard": {
       "status": {

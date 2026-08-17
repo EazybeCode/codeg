@@ -4980,7 +4980,9 @@
         "acceptEdits": "ediciones de archivos sin preguntar",
         "bypassPermissions": "sin aprobaciones"
       },
-      "permissionNote": "Se aplica a cada contendiente al iniciar; los agentes sin soporte siguen preguntando."
+      "permissionNote": "Se aplica a cada contendiente al iniciar; los agentes sin soporte siguen preguntando.",
+      "bareModeLabel": "Modo básico (sin habilidades)",
+      "bareModeHint": "Se pide a los contendientes usar solo sus capacidades básicas, sin habilidades globales ni del proyecto."
     },
     "scoreboard": {
       "status": {

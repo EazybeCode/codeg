@@ -4980,7 +4980,9 @@
         "acceptEdits": "file edits run without asking",
         "bypassPermissions": "no approval prompts at all"
       },
-      "permissionNote": "Applied per contestant when the round starts; agents that don't support a mode keep asking."
+      "permissionNote": "Applied per contestant when the round starts; agents that don't support a mode keep asking.",
+      "bareModeLabel": "Bare mode (no skills)",
+      "bareModeHint": "Contestants are instructed to use only their built-in capabilities — no global or project skills."
     },
     "scoreboard": {
       "status": {

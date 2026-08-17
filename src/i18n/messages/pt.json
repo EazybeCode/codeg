@@ -4980,7 +4980,9 @@
         "acceptEdits": "edições sem perguntar",
         "bypassPermissions": "sem aprovações"
       },
-      "permissionNote": "Aplicado a cada competidor no início; agentes sem suporte continuam perguntando."
+      "permissionNote": "Aplicado a cada competidor no início; agentes sem suporte continuam perguntando.",
+      "bareModeLabel": "Modo básico (sem habilidades)",
+      "bareModeHint": "Os competidores usam apenas capacidades básicas, sem habilidades globais ou do projeto."
     },
     "scoreboard": {
       "status": {

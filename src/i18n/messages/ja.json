@@ -4980,7 +4980,9 @@
         "acceptEdits": "ファイル編集は確認なし",
         "bypassPermissions": "承認ダイアログなし"
       },
-      "permissionNote": "ラウンド開始時に各出場者へ適用。未対応のエージェントは引き続き確認します。"
+      "permissionNote": "ラウンド開始時に各出場者へ適用。未対応のエージェントは引き続き確認します。",
+      "bareModeLabel": "ベアモード(スキル無効)",
+      "bareModeHint": "出場者は基本機能のみ使用。グローバル・プロジェクトのスキルは使用禁止。"
     },
     "scoreboard": {
       "status": {

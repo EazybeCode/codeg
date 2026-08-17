@@ -4980,7 +4980,9 @@
         "acceptEdits": "modifications sans demander",
         "bypassPermissions": "aucune validation"
       },
-      "permissionNote": "Appliqué à chaque participant au départ ; les agents non compatibles continuent de demander."
+      "permissionNote": "Appliqué à chaque participant au départ ; les agents non compatibles continuent de demander.",
+      "bareModeLabel": "Mode nu (sans compétences)",
+      "bareModeHint": "Les participants n'utilisent que leurs capacités de base, sans compétences globales ni de projet."
     },
     "scoreboard": {
       "status": {

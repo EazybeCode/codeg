@@ -48,6 +48,7 @@ export function PkLauncherDialog() {
   const [initializing, setInitializing] = useState(false)
   const [permissionMode, setPermissionMode] =
     useState<PkPermissionMode>("default")
+  const [bareMode, setBareMode] = useState(false)
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
     setIsGitRepo(null)
@@ -68,6 +69,7 @@ export function PkLauncherDialog() {
     setFolderId(null)
     setIsGitRepo(null)
     setPermissionMode("default")
+    setBareMode(false)
     // The active tab decides where the arena runs. Draft tabs may lack a
     // workingDir; fall back to the folder's own path.
     if (activeTab?.folderId == null || activeTab.folderId < 0) return
@@ -139,6 +141,7 @@ export function PkLauncherDialog() {
       workingDir,
       agents: selected,
       permissionMode,
+      bareMode,
     })
     setLauncherOpen(false)
     setArenaOpen(true)
@@ -256,6 +259,22 @@ export function PkLauncherDialog() {
               {t("permissionNote")}
             </div>
           </div>
+          <label className="flex cursor-pointer items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={bareMode}
+              onChange={(event) => setBareMode(event.target.checked)}
+              className="mt-0.5 accent-foreground"
+            />
+            <span>
+              <span className="font-medium text-foreground">
+                {t("bareModeLabel")}
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                {t("bareModeHint")}
+              </span>
+            </span>
+          </label>
         </div>
         <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-3">
           <span className="text-xs text-muted-foreground">
