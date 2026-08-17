@@ -12,7 +12,9 @@ import { LiveTranscriptView } from "@/components/message/live-transcript-view"
 import { PkDiffView } from "@/components/pk/pk-diff-view"
 import { PkScoreboard } from "@/components/pk/pk-scoreboard"
 import { usePkRound } from "@/hooks/use-pk-round"
-import type { PkContestant } from "@/stores/pk-arena-store"
+import { AgentIcon } from "@/components/agent-icon"
+import { getAgentLabel } from "@/lib/custom-agents"
+import type { PkContestant, PkRound } from "@/stores/pk-arena-store"
 import { cn } from "@/lib/utils"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
 
@@ -38,7 +40,13 @@ export function PkArenaDialog() {
     [rounds, activeRoundId]
   )
 
-  const { cancelRound, cleanupRound, fetchDiff } = usePkRound()
+  const {
+    cancelRound,
+    cleanupRound,
+    fetchDiff,
+    startPrompt,
+    applyContestantSelection,
+  } = usePkRound()
   const [tab, setTab] = useState<"battle" | "diff">("battle")
   const [sharing, setSharing] = useState(false)
   const [diffLoading, setDiffLoading] = useState(false)
@@ -47,6 +55,7 @@ export function PkArenaDialog() {
   // Literal keys — next-intl's typed messages reject dynamic concatenation.
   const roundStatusLabel = useMemo(
     () => ({
+      ready: t("roundStatus.ready"),
       running: t("roundStatus.running"),
       finished: t("roundStatus.finished"),
       canceled: t("roundStatus.canceled"),
@@ -175,6 +184,23 @@ export function PkArenaDialog() {
               </button>
             </div>
 
+            {round.status === "ready" ? (
+              <div className="flex items-center gap-3 border-b border-border bg-amber-500/5 px-4 py-2">
+                <span className="min-w-0 flex-1 text-xs text-muted-foreground">
+                  {t("readyNote")}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void startPrompt(round)}
+                  disabled={
+                    !round.contestants.some((c) => c.status === "ready")
+                  }
+                  className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  {t("startMatch")}
+                </button>
+              </div>
+            ) : null}
             <PkScoreboard ref={scoreboardRef} contestants={round.contestants} />
 
             <div className="flex items-center gap-1 border-b border-border px-4">
@@ -202,17 +228,26 @@ export function PkArenaDialog() {
               }}
             >
               {tab === "battle"
-                ? round.contestants.map((contestant) => (
-                    <PkBattlePane
-                      key={contestant.agentType}
-                      conversationId={contestant.conversationId}
-                      connectionId={contestant.connectionId}
-                      agentType={contestant.agentType}
-                      task={round.task}
-                      statusDetail={contestant.statusDetail}
-                      preparingLabel={t("preparing")}
-                    />
-                  ))
+                ? round.contestants.map((contestant) =>
+                    round.status === "ready" ? (
+                      <PkReadyPane
+                        key={contestant.agentType}
+                        round={round}
+                        contestant={contestant}
+                        onSelect={applyContestantSelection}
+                      />
+                    ) : (
+                      <PkBattlePane
+                        key={contestant.agentType}
+                        conversationId={contestant.conversationId}
+                        connectionId={contestant.connectionId}
+                        agentType={contestant.agentType}
+                        task={round.task}
+                        statusDetail={contestant.statusDetail}
+                        preparingLabel={t("preparing")}
+                      />
+                    )
+                  )
                 : round.contestants.map((contestant) => (
                     <PkDiffView
                       key={contestant.agentType}
@@ -268,6 +303,83 @@ const PkBattlePane = memo(function PkBattlePane({
           {statusDetail ?? preparingLabel}
         </div>
       )}
+    </div>
+  )
+})
+
+/**
+ * 准备阶段的面板:模型 + 思考等级选择器(选项来自握手通告的 configOptions)。
+ * 只读竞技场 store 的选项表,变更经 onSelect 直接下发给后端连接。
+ */
+const PkReadyPane = memo(function PkReadyPane({
+  round,
+  contestant,
+  onSelect,
+}: {
+  round: PkRound
+  contestant: PkContestant
+  onSelect: (
+    round: PkRound,
+    contestant: PkContestant,
+    configId: string,
+    value: string
+  ) => Promise<void>
+}) {
+  const t = useTranslations("PkArena.arena")
+  return (
+    <div className="flex min-h-0 flex-col gap-2 overflow-hidden rounded-lg border border-border p-3">
+      <div className="flex items-center gap-2">
+        <AgentIcon agentType={contestant.agentType} className="size-4" />
+        <span className="text-sm font-medium text-foreground">
+          {getAgentLabel(contestant.agentType)}
+        </span>
+      </div>
+      {contestant.modelOptions.length > 0 ? (
+        <label className="block">
+          <span className="mb-1 block text-xs text-muted-foreground">
+            {t("modelLabel")}
+          </span>
+          <select
+            value={contestant.selectedModel ?? ""}
+            onChange={(event) =>
+              void onSelect(round, contestant, "model", event.target.value)
+            }
+            className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+          >
+            {contestant.modelOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {contestant.effortOptions.length > 0 ? (
+        <label className="block">
+          <span className="mb-1 block text-xs text-muted-foreground">
+            {t("effortLabel")}
+          </span>
+          <select
+            value={contestant.selectedEffort ?? ""}
+            onChange={(event) =>
+              void onSelect(round, contestant, "effort", event.target.value)
+            }
+            className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+          >
+            {contestant.effortOptions.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {contestant.modelOptions.length === 0 &&
+      contestant.effortOptions.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+          {contestant.statusDetail ?? t("preparing")}
+        </div>
+      ) : null}
     </div>
   )
 })

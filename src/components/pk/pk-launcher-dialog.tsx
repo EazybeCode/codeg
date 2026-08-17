@@ -13,7 +13,11 @@ import { useAcpAgents } from "@/hooks/use-acp-agents"
 import { getFolder, getGitBranch, gitInit } from "@/lib/api"
 import type { AgentType } from "@/lib/types"
 import { cn } from "@/lib/utils"
-import { usePkArenaStore, type PkPermissionMode } from "@/stores/pk-arena-store"
+import {
+  usePkArenaStore,
+  type PkEffortLevel,
+  type PkPermissionMode,
+} from "@/stores/pk-arena-store"
 import { useTabStore } from "@/stores/tab-store"
 
 /**
@@ -49,6 +53,7 @@ export function PkLauncherDialog() {
   const [permissionMode, setPermissionMode] =
     useState<PkPermissionMode>("default")
   const [bareMode, setBareMode] = useState(false)
+  const [effort, setEffort] = useState<PkEffortLevel>("default")
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
     setIsGitRepo(null)
@@ -70,6 +75,7 @@ export function PkLauncherDialog() {
     setIsGitRepo(null)
     setPermissionMode("default")
     setBareMode(false)
+    setEffort("default")
     // The active tab decides where the arena runs. Draft tabs may lack a
     // workingDir; fall back to the folder's own path.
     if (activeTab?.folderId == null || activeTab.folderId < 0) return
@@ -142,6 +148,7 @@ export function PkLauncherDialog() {
       agents: selected,
       permissionMode,
       bareMode,
+      effort,
     })
     setLauncherOpen(false)
     setArenaOpen(true)
@@ -257,6 +264,34 @@ export function PkLauncherDialog() {
             </div>
             <div className="mt-1.5 text-xs text-muted-foreground">
               {t("permissionNote")}
+            </div>
+          </div>
+          <div>
+            <div className="mb-2 text-sm font-medium text-foreground">
+              {t("effortLabel")}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {(["default", "low", "medium", "high", "max"] as const).map(
+                (level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    onClick={() => setEffort(level)}
+                    aria-pressed={effort === level}
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-xs transition-colors",
+                      effort === level
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border text-muted-foreground hover:bg-muted"
+                    )}
+                  >
+                    {t(`effortOptions.${level}`)}
+                  </button>
+                )
+              )}
+            </div>
+            <div className="mt-1.5 text-xs text-muted-foreground">
+              {t("effortNote")}
             </div>
           </div>
           <label className="flex cursor-pointer items-start gap-2 text-sm">

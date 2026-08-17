@@ -29,6 +29,7 @@ function formatTokens(n: number): string {
 const STATUS_DOT: Record<PkContestant["status"], string> = {
   preparing: "bg-muted-foreground/50",
   connecting: "bg-sky-500 animate-pulse",
+  ready: "bg-amber-400",
   running: "bg-emerald-500 animate-pulse",
   done: "bg-emerald-600",
   error: "bg-red-500",
@@ -41,6 +42,7 @@ function useContestantStatusLabel() {
   const labels = {
     preparing: t("status.preparing"),
     connecting: t("status.connecting"),
+    ready: t("status.ready"),
     running: t("status.running"),
     done: t("status.done"),
     error: t("status.error"),

@@ -4982,7 +4982,16 @@
       },
       "permissionNote": "Applied per contestant when the round starts; agents that don't support a mode keep asking.",
       "bareModeLabel": "Bare mode (no skills)",
-      "bareModeHint": "Contestants are instructed to use only their built-in capabilities — no global or project skills."
+      "bareModeHint": "Contestants are instructed to use only their built-in capabilities — no global or project skills.",
+      "effortLabel": "Reasoning effort (all contestants)",
+      "effortOptions": {
+        "default": "Default",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "max": "Max"
+      },
+      "effortNote": "Applied as the nearest advertised level per agent; agents without the option keep their default."
     },
     "scoreboard": {
       "status": {
@@ -4991,7 +5000,8 @@
         "running": "running",
         "done": "done",
         "error": "failed",
-        "canceled": "canceled"
+        "canceled": "canceled",
+        "ready": "ready"
       },
       "tokensUnit": "tok",
       "turnsUnit": "turns"
@@ -5003,7 +5013,8 @@
         "running": "Live",
         "finished": "Finished",
         "canceled": "Canceled",
-        "interrupted": "Interrupted by restart"
+        "interrupted": "Interrupted by restart",
+        "ready": "Ready"
       },
       "roundPicker": "Round",
       "cancelRound": "Cancel",
@@ -5018,7 +5029,11 @@
       "preparing": "Preparing contestant…",
       "noRound": "No round selected",
       "contestantsUnit": "agents",
-      "newRound": "New round"
+      "newRound": "New round",
+      "startMatch": "Start match",
+      "readyNote": "Pick each contestant's model and reasoning effort, then start the match.",
+      "modelLabel": "Model",
+      "effortLabel": "Reasoning effort"
     },
     "diff": {
       "loading": "Loading diff…",

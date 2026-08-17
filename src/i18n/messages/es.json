@@ -4982,7 +4982,16 @@
       },
       "permissionNote": "Se aplica a cada contendiente al iniciar; los agentes sin soporte siguen preguntando.",
       "bareModeLabel": "Modo básico (sin habilidades)",
-      "bareModeHint": "Se pide a los contendientes usar solo sus capacidades básicas, sin habilidades globales ni del proyecto."
+      "bareModeHint": "Se pide a los contendientes usar solo sus capacidades básicas, sin habilidades globales ni del proyecto.",
+      "effortLabel": "Esfuerzo de razonamiento (uniforme)",
+      "effortOptions": {
+        "default": "Predeterminado",
+        "low": "Bajo",
+        "medium": "Medio",
+        "high": "Alto",
+        "max": "Máximo"
+      },
+      "effortNote": "Se aplica el nivel más cercano anunciado por cada agente; sin soporte, mantiene el suyo."
     },
     "scoreboard": {
       "status": {
@@ -4991,7 +5000,8 @@
         "running": "ejecutando",
         "done": "listo",
         "error": "falló",
-        "canceled": "cancelado"
+        "canceled": "cancelado",
+        "ready": "listo"
       },
       "tokensUnit": "tok",
       "turnsUnit": "turnos"
@@ -5003,7 +5013,8 @@
         "running": "En vivo",
         "finished": "Terminada",
         "canceled": "Cancelada",
-        "interrupted": "Interrumpida por reinicio"
+        "interrupted": "Interrumpida por reinicio",
+        "ready": "Lista"
       },
       "roundPicker": "Ronda",
       "cancelRound": "Cancelar",
@@ -5018,7 +5029,11 @@
       "preparing": "Preparando contendiente…",
       "noRound": "Ninguna ronda seleccionada",
       "contestantsUnit": "agentes",
-      "newRound": "Nueva ronda"
+      "newRound": "Nueva ronda",
+      "startMatch": "Iniciar duelo",
+      "readyNote": "Elige modelo y esfuerzo de cada contendiente y luego inicia.",
+      "modelLabel": "Modelo",
+      "effortLabel": "Esfuerzo"
     },
     "diff": {
       "loading": "Cargando diff…",

@@ -4982,7 +4982,16 @@
       },
       "permissionNote": "開賽時對每位選手生效;不支援的智慧體仍會詢問。",
       "bareModeLabel": "裸機模式(禁用技能)",
-      "bareModeHint": "選手被明確要求只使用基礎能力,不載入任何全域或專案技能。"
+      "bareModeHint": "選手被明確要求只使用基礎能力,不載入任何全域或專案技能。",
+      "effortLabel": "思考等級(所有選手統一)",
+      "effortOptions": {
+        "default": "預設",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "max": "最高"
+      },
+      "effortNote": "按各選手通告的最近檔位套用;不支援的選手保持預設。"
     },
     "scoreboard": {
       "status": {
@@ -4991,7 +5000,8 @@
         "running": "執行中",
         "done": "完成",
         "error": "失敗",
-        "canceled": "已取消"
+        "canceled": "已取消",
+        "ready": "就緒"
       },
       "tokensUnit": "tok",
       "turnsUnit": "輪"
@@ -5003,7 +5013,8 @@
         "running": "進行中",
         "finished": "已結束",
         "canceled": "已取消",
-        "interrupted": "因重啟中斷"
+        "interrupted": "因重啟中斷",
+        "ready": "就緒"
       },
       "roundPicker": "回合",
       "cancelRound": "取消",
@@ -5018,7 +5029,11 @@
       "preparing": "正在準備選手…",
       "noRound": "未選擇回合",
       "contestantsUnit": "個智慧體",
-      "newRound": "新一局"
+      "newRound": "新一局",
+      "startMatch": "開始比賽",
+      "readyNote": "選擇每位選手的模型與思考等級,然後開始比賽。",
+      "modelLabel": "模型",
+      "effortLabel": "思考等級"
     },
     "diff": {
       "loading": "正在載入 diff…",

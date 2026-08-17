@@ -4982,7 +4982,16 @@
       },
       "permissionNote": "Wird beim Start auf jeden Teilnehmer angewendet; Agenten ohne Unterstützung fragen weiter.",
       "bareModeLabel": "Bare-Modus (keine Skills)",
-      "bareModeHint": "Teilnehmer dürfen nur ihre Grundfunktionen nutzen — keine globalen oder Projekt-Skills."
+      "bareModeHint": "Teilnehmer dürfen nur ihre Grundfunktionen nutzen — keine globalen oder Projekt-Skills.",
+      "effortLabel": "Denkaufwand (einheitlich)",
+      "effortOptions": {
+        "default": "Standard",
+        "low": "Niedrig",
+        "medium": "Mittel",
+        "high": "Hoch",
+        "max": "Max"
+      },
+      "effortNote": "Wird als nächste verfügbare Stufe je Agent angewendet; ohne Unterstützung bleibt der Standard."
     },
     "scoreboard": {
       "status": {
@@ -4991,7 +5000,8 @@
         "running": "Läuft",
         "done": "Fertig",
         "error": "Fehlgeschlagen",
-        "canceled": "Abgebrochen"
+        "canceled": "Abgebrochen",
+        "ready": "Bereit"
       },
       "tokensUnit": "Tok",
       "turnsUnit": "Runden"
@@ -5003,7 +5013,8 @@
         "running": "Live",
         "finished": "Beendet",
         "canceled": "Abgebrochen",
-        "interrupted": "Durch Neustart unterbrochen"
+        "interrupted": "Durch Neustart unterbrochen",
+        "ready": "Bereit"
       },
       "roundPicker": "Runde",
       "cancelRound": "Abbrechen",
@@ -5018,7 +5029,11 @@
       "preparing": "Teilnehmer wird vorbereitet…",
       "noRound": "Keine Runde ausgewählt",
       "contestantsUnit": "Agenten",
-      "newRound": "Neue Runde"
+      "newRound": "Neue Runde",
+      "startMatch": "Kampf starten",
+      "readyNote": "Modell und Denkaufwand je Teilnehmer wählen, dann starten.",
+      "modelLabel": "Modell",
+      "effortLabel": "Denkaufwand"
     },
     "diff": {
       "loading": "Diff wird geladen…",

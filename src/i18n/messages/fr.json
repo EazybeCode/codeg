@@ -4982,7 +4982,16 @@
       },
       "permissionNote": "Appliqué à chaque participant au départ ; les agents non compatibles continuent de demander.",
       "bareModeLabel": "Mode nu (sans compétences)",
-      "bareModeHint": "Les participants n'utilisent que leurs capacités de base, sans compétences globales ni de projet."
+      "bareModeHint": "Les participants n'utilisent que leurs capacités de base, sans compétences globales ni de projet.",
+      "effortLabel": "Effort de raisonnement (uniforme)",
+      "effortOptions": {
+        "default": "Défaut",
+        "low": "Faible",
+        "medium": "Moyen",
+        "high": "Élevé",
+        "max": "Max"
+      },
+      "effortNote": "Applique le niveau annoncé le plus proche par agent ; sans support, garde le défaut."
     },
     "scoreboard": {
       "status": {
@@ -4991,7 +5000,8 @@
         "running": "en cours",
         "done": "terminé",
         "error": "échec",
-        "canceled": "annulé"
+        "canceled": "annulé",
+        "ready": "prêt"
       },
       "tokensUnit": "tok",
       "turnsUnit": "tours"
@@ -5003,7 +5013,8 @@
         "running": "En direct",
         "finished": "Terminée",
         "canceled": "Annulée",
-        "interrupted": "Interrompue par un redémarrage"
+        "interrupted": "Interrompue par un redémarrage",
+        "ready": "Prête"
       },
       "roundPicker": "Manche",
       "cancelRound": "Annuler",
@@ -5018,7 +5029,11 @@
       "preparing": "Préparation du participant…",
       "noRound": "Aucune manche sélectionnée",
       "contestantsUnit": "agents",
-      "newRound": "Nouvelle manche"
+      "newRound": "Nouvelle manche",
+      "startMatch": "Lancer le duel",
+      "readyNote": "Choisissez modèle et effort de chaque participant, puis lancez.",
+      "modelLabel": "Modèle",
+      "effortLabel": "Effort"
     },
     "diff": {
       "loading": "Chargement du diff…",

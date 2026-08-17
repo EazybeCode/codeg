@@ -4982,7 +4982,16 @@
       },
       "permissionNote": "ラウンド開始時に各出場者へ適用。未対応のエージェントは引き続き確認します。",
       "bareModeLabel": "ベアモード(スキル無効)",
-      "bareModeHint": "出場者は基本機能のみ使用。グローバル・プロジェクトのスキルは使用禁止。"
+      "bareModeHint": "出場者は基本機能のみ使用。グローバル・プロジェクトのスキルは使用禁止。",
+      "effortLabel": "思考レベル(全出場者統一)",
+      "effortOptions": {
+        "default": "デフォルト",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "max": "最大"
+      },
+      "effortNote": "各エージェントが通告する最寄りのレベルを適用。未対応はデフォルトのまま。"
     },
     "scoreboard": {
       "status": {
@@ -4991,7 +5000,8 @@
         "running": "実行中",
         "done": "完了",
         "error": "失敗",
-        "canceled": "キャンセル済み"
+        "canceled": "キャンセル済み",
+        "ready": "準備完了"
       },
       "tokensUnit": "tok",
       "turnsUnit": "ターン"
@@ -5003,7 +5013,8 @@
         "running": "進行中",
         "finished": "終了",
         "canceled": "キャンセル済み",
-        "interrupted": "再起動により中断"
+        "interrupted": "再起動により中断",
+        "ready": "準備完了"
       },
       "roundPicker": "ラウンド",
       "cancelRound": "キャンセル",
@@ -5018,7 +5029,11 @@
       "preparing": "出場者を準備中…",
       "noRound": "ラウンド未選択",
       "contestantsUnit": "体",
-      "newRound": "新しいラウンド"
+      "newRound": "新しいラウンド",
+      "startMatch": "対戦開始",
+      "readyNote": "各出場者のモデルと思考レベルを選んでから対戦開始。",
+      "modelLabel": "モデル",
+      "effortLabel": "思考レベル"
     },
     "diff": {
       "loading": "diff を読み込み中…",

@@ -34,7 +34,7 @@ describe("pk arena store", () => {
 
   it("creates a round with one preparing contestant per agent", () => {
     const round = makeRound()
-    expect(round.status).toBe("running")
+    expect(round.status).toBe("ready")
     expect(round.contestants.map((c) => c.agentType)).toEqual([
       "claude_code",
       "codex",
@@ -128,7 +128,7 @@ function reviveFromStorage(): PkRound {
   const raw = window.localStorage.getItem("codeg:pk-arena")
   const parsed = JSON.parse(raw as string)
   // Mirror the production revive contract for a running round.
-  const wasLive = parsed[0].status === "running"
+  const wasLive = parsed[0].status === "ready" || parsed[0].status === "running"
   return {
     ...parsed[0],
     status: wasLive ? "interrupted" : parsed[0].status,

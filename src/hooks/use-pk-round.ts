@@ -8,7 +8,7 @@ import {
   gitRemoveWorktree,
   gitWorktreeAdd,
 } from "@/lib/api"
-import type { PromptInputBlock } from "@/lib/types"
+import type { PromptInputBlock, SessionConfigOptionInfo } from "@/lib/types"
 import {
   useAcpActions,
   useAcpEvent,
@@ -20,6 +20,7 @@ import {
   usePkArenaStore,
   type PkContestant,
   type PkContestantUsage,
+  type PkEffortLevel,
   type PkPermissionMode,
   type PkRound,
 } from "@/stores/pk-arena-store"
@@ -88,46 +89,94 @@ type ModesStore = {
   getConnection(key: string):
     | {
         modes?: { available_modes?: Array<{ id: string }> } | null
+        configOptions?: SessionConfigOptionInfo[] | null
       }
     | undefined
 }
 
-async function applyPermissionMode(
-  connectionStore: ModesStore,
-  setMode: (contextKey: string, modeId: string) => Promise<void>,
-  contextKey: string,
-  connectionId: string | null,
-  mode: PkPermissionMode
-): Promise<void> {
-  if (mode === "default") return
-  const modes = await waitForModes(connectionStore, contextKey, connectionId)
-  const advertised = modes?.available_modes?.map((m) => m.id) ?? []
-  if (!advertised.includes(mode)) return
-  try {
-    await setMode(contextKey, mode)
-  } catch {
-    // A rejected mode switch must not kill the round — the contestant just
-    // runs with its default permission flow.
-  }
+/** 统一的思考等级 → 各 agent 通告值的最近匹配。词表各不相同
+ * (claude: low/medium/high; codex: minimal/low/medium/high/max;
+ * deepseek: off/low/medium/high),按规范序取最近邻,平局取更高档
+ * (公平竞技下宁高勿低)。 */
+const EFFORT_RANK: Record<string, number> = {
+  off: 0,
+  minimal: 1,
+  low: 2,
+  medium: 3,
+  high: 4,
+  max: 5,
 }
 
-function waitForModes(
+function nearestEffort(requested: string, advertised: string[]): string | null {
+  if (advertised.length === 0) return null
+  const exact = advertised.find((v) => v === requested)
+  if (exact) return exact
+  const target = EFFORT_RANK[requested] ?? 3
+  let best: string | null = null
+  let bestDist = Number.POSITIVE_INFINITY
+  for (const value of advertised) {
+    const rank = EFFORT_RANK[value]
+    if (rank === undefined) continue
+    const dist = Math.abs(rank - target)
+    if (
+      dist < bestDist ||
+      (dist === bestDist && best !== null && rank > (EFFORT_RANK[best] ?? 0))
+    ) {
+      best = value
+      bestDist = dist
+    }
+  }
+  return best
+}
+
+/** 把通告的 configOptions 折成竞技场需要的两份选项表。 */
+function selectOptions(configOptions: SessionConfigOptionInfo[] | null): {
+  modelOptions: Array<{ value: string; name: string }>
+  effortOptions: string[]
+} {
+  const modelOptions: Array<{ value: string; name: string }> = []
+  const effortOptions: string[] = []
+  for (const option of configOptions ?? []) {
+    if (option.kind?.type !== "select") continue
+    if (option.id === "model" || option.id === "model_id") {
+      for (const item of option.kind.options) {
+        modelOptions.push({ value: item.value, name: item.name ?? item.value })
+      }
+    } else if (/effort|reasoning/i.test(option.id)) {
+      for (const item of option.kind.options) {
+        if (EFFORT_RANK[item.value] !== undefined)
+          effortOptions.push(item.value)
+      }
+    }
+  }
+  return { modelOptions, effortOptions }
+}
+
+/** 双条目轮询:modes/configOptions 都走 attach 后的 by-id 路由
+ * (见 applyPermissionMode 的注释)。 */
+function waitForOptions(
   connectionStore: ModesStore,
   contextKey: string,
   connectionId: string | null,
   timeoutMs = 8000
-): Promise<{ available_modes?: Array<{ id: string }> } | null> {
+): Promise<{
+  modes?: { available_modes?: Array<{ id: string }> } | null
+  configOptions?: SessionConfigOptionInfo[] | null
+} | null> {
   return new Promise((resolve) => {
     const startedAt = Date.now()
     const poll = () => {
-      const modes =
-        connectionStore.getConnection(contextKey)?.modes ??
-        (connectionId != null
-          ? connectionStore.getConnection(connectionId)?.modes
-          : null) ??
-        null
-      if (modes != null) {
-        resolve(modes)
+      const owner = connectionStore.getConnection(contextKey)
+      const byId =
+        connectionId != null
+          ? connectionStore.getConnection(connectionId)
+          : undefined
+      const entry = owner ?? byId
+      if (
+        entry != null &&
+        (entry.modes != null || entry.configOptions != null)
+      ) {
+        resolve(entry)
         return
       }
       if (Date.now() - startedAt >= timeoutMs) {
@@ -138,6 +187,96 @@ function waitForModes(
     }
     poll()
   })
+}
+
+/**
+ * Apply the round's permission policy via `session/set_mode` once the agent
+ * has advertised its modes. The requested mode id is only sent when the
+ * agent actually advertises it: forcing an unknown id on an agent that would
+ * reject it would fail the whole connect sequence, and an agent without the
+ * mode simply keeps asking, exactly as before. "default" needs no call.
+ *
+ * The modes arrive as a `session_modes` EVENT shortly after session/new —
+ * not in connect()'s resolution. The arena attaches the contestant as a
+ * by-id delegation child right after connect, and the attach RE-ROUTES the
+ * reverseMap to the by-id entry, so the event lands there, never on the
+ * owner (contextKey) entry. Polling only the owner entry therefore times
+ * out and the mode is silently skipped (field report: presets "did not
+ * apply"). `waitForOptions` reads whichever entry the event landed on.
+ */
+async function applyPermissionMode(
+  connectionStore: ModesStore,
+  setMode: (contextKey: string, modeId: string) => Promise<void>,
+  contextKey: string,
+  connectionId: string | null,
+  mode: PkPermissionMode
+): Promise<void> {
+  if (mode === "default") return
+  const entry = await waitForOptions(connectionStore, contextKey, connectionId)
+  const advertised = entry?.modes?.available_modes?.map((m) => m.id) ?? []
+  if (!advertised.includes(mode)) return
+  try {
+    await setMode(contextKey, mode)
+  } catch {
+    // A rejected mode switch must not kill the round — the contestant just
+    // runs with its default permission flow.
+  }
+}
+
+async function applyPreparedOptions(
+  connectionStore: ModesStore,
+  setConfigOption: (
+    contextKey: string,
+    configId: string,
+    valueId: string
+  ) => Promise<void>,
+  contextKey: string,
+  connectionId: string | null,
+  effort: PkEffortLevel
+): Promise<{
+  modelOptions: Array<{ value: string; name: string }>
+  effortOptions: string[]
+  selectedModel: string | null
+  selectedEffort: string | null
+}> {
+  const entry = await waitForOptions(connectionStore, contextKey, connectionId)
+  const options = entry?.configOptions ?? null
+  const { modelOptions, effortOptions } = selectOptions(options)
+  let selectedModel: string | null = null
+  let selectedEffort: string | null = null
+  const effortConfigId =
+    (options ?? []).find(
+      (o) => o.kind?.type === "select" && /effort|reasoning/i.test(o.id)
+    )?.id ?? null
+  if (effortConfigId) {
+    const option = (options ?? []).find((o) => o.id === effortConfigId)
+    const current =
+      option?.kind?.type === "select" ? option.kind.current_value : null
+    selectedEffort = current ?? null
+  }
+  const modelConfigId =
+    (options ?? []).find(
+      (o) =>
+        o.kind?.type === "select" && (o.id === "model" || o.id === "model_id")
+    )?.id ?? null
+  if (modelConfigId) {
+    const option = (options ?? []).find((o) => o.id === modelConfigId)
+    const current =
+      option?.kind?.type === "select" ? option.kind.current_value : null
+    selectedModel = current ?? null
+  }
+  if (effort !== "default" && effortConfigId) {
+    const target = nearestEffort(effort, effortOptions)
+    if (target) {
+      try {
+        await setConfigOption(contextKey, effortConfigId, target)
+        selectedEffort = target
+      } catch {
+        // 拒绝不致命——选手保持当前档位。
+      }
+    }
+  }
+  return { modelOptions, effortOptions, selectedModel, selectedEffort }
 }
 
 async function fetchUsage(
@@ -162,6 +301,13 @@ async function fetchUsage(
 
 export function usePkRound(): {
   startRound: (round: PkRound) => Promise<void>
+  startPrompt: (round: PkRound) => Promise<void>
+  applyContestantSelection: (
+    round: PkRound,
+    contestant: PkContestant,
+    configId: string,
+    value: string
+  ) => Promise<void>
   cancelRound: (round: PkRound) => Promise<void>
   cleanupRound: (round: PkRound, keepBranches: boolean) => Promise<void>
   fetchDiff: (round: PkRound, contestant: PkContestant) => Promise<void>
@@ -172,6 +318,7 @@ export function usePkRound(): {
     cancel,
     disconnect,
     setMode,
+    setConfigOption,
     attachDelegationChild,
     detachDelegationChild,
   } = useAcpActions()
@@ -364,14 +511,20 @@ export function usePkRound(): {
             connectionId,
             round.permissionMode
           )
-          await sendPrompt(
+          const prepared = await applyPreparedOptions(
+            connectionStore,
+            setConfigOption,
             contextKey,
-            taskPromptBlocks(round.task, worktreePath, round.bareMode),
-            {
-              folderId: round.folderId,
-              conversationId,
-            }
+            connectionId,
+            round.effort
           )
+          updateContestant(round.id, agentType, {
+            status: "ready",
+            modelOptions: prepared.modelOptions,
+            effortOptions: prepared.effortOptions,
+            selectedModel: prepared.selectedModel,
+            selectedEffort: prepared.selectedEffort,
+          })
         } catch (error) {
           updateContestant(round.id, agentType, {
             status: "error",
@@ -391,8 +544,8 @@ export function usePkRound(): {
       connect,
       connectionStore,
       markRound,
-      sendPrompt,
       setMode,
+      setConfigOption,
       updateContestant,
       attachDelegationChild,
     ]
@@ -474,5 +627,77 @@ export function usePkRound(): {
     [updateContestant]
   )
 
-  return { startRound, cancelRound, cleanupRound, fetchDiff }
+  const startPrompt = useCallback(
+    async (round: PkRound) => {
+      markRound(round.id, "running")
+      await Promise.allSettled(
+        round.contestants
+          .filter((c) => c.status === "ready" && c.contextKey != null)
+          .map(async (contestant) => {
+            const contextKey = contestant.contextKey as string
+            try {
+              await sendPrompt(
+                contextKey,
+                taskPromptBlocks(
+                  round.task,
+                  contestant.worktreePath ?? round.workingDir,
+                  round.bareMode
+                ),
+                {
+                  folderId: round.folderId,
+                  conversationId: contestant.conversationId,
+                }
+              )
+            } catch (error) {
+              updateContestant(round.id, contestant.agentType, {
+                status: "error",
+                statusDetail: `prompt: ${String(error)}`,
+              })
+            }
+          })
+      )
+      const fresh = usePkArenaStore
+        .getState()
+        .rounds.find((r) => r.id === round.id)
+      if (fresh && fresh.contestants.every((c) => c.status === "error")) {
+        markRound(round.id, "canceled")
+      }
+    },
+    [markRound, sendPrompt, updateContestant]
+  )
+
+  const applyContestantSelection = useCallback(
+    async (
+      round: PkRound,
+      contestant: PkContestant,
+      configId: string,
+      value: string
+    ) => {
+      if (!contestant.contextKey) return
+      try {
+        await setConfigOption(contestant.contextKey, configId, value)
+        if (configId === "model" || configId === "model_id") {
+          updateContestant(round.id, contestant.agentType, {
+            selectedModel: value,
+          })
+        } else {
+          updateContestant(round.id, contestant.agentType, {
+            selectedEffort: value,
+          })
+        }
+      } catch {
+        // 选择被拒(模型临时下架等)不致命。
+      }
+    },
+    [setConfigOption, updateContestant]
+  )
+
+  return {
+    startRound,
+    startPrompt,
+    applyContestantSelection,
+    cancelRound,
+    cleanupRound,
+    fetchDiff,
+  }
 }

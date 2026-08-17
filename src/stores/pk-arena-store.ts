@@ -20,6 +20,7 @@ import type { AgentType } from "@/lib/types"
 export type PkContestantStatus =
   | "preparing"
   | "connecting"
+  | "ready"
   | "running"
   | "done"
   | "error"
@@ -31,9 +32,18 @@ export interface PkContestantUsage {
   turnCount: number
 }
 
+/** 统一的思考等级请求——「默认」表示各选手用自己的默认档。 */
+export type PkEffortLevel = "default" | "low" | "medium" | "high" | "max"
+
 export interface PkContestant {
   /** Wire name — unique within a round (one slot per agent). */
   agentType: AgentType
+  /** Advertised model options (handshake `configOptions`), for the arena pickers. */
+  modelOptions: Array<{ value: string; name: string }>
+  /** Advertised effort option values, for the arena picker. */
+  effortOptions: string[]
+  selectedModel: string | null
+  selectedEffort: string | null
   /** Connections-context key; null until the orchestrator connects. */
   contextKey: string | null
   connectionId: string | null
@@ -50,7 +60,12 @@ export interface PkContestant {
   diff: string | null
 }
 
-export type PkRoundStatus = "running" | "finished" | "canceled" | "interrupted"
+export type PkRoundStatus =
+  | "ready"
+  | "running"
+  | "finished"
+  | "canceled"
+  | "interrupted"
 
 /**
  * Round-level permission policy, applied to every contestant right after
@@ -70,6 +85,8 @@ export interface PkRound {
   permissionMode: PkPermissionMode
   /** Bare mode: contestants are instructed to use no skills at all. */
   bareMode: boolean
+  /** Uniform reasoning-effort request, applied to every contestant. */
+  effort: PkEffortLevel
   contestants: PkContestant[]
 }
 
@@ -88,6 +105,7 @@ interface PkArenaActions {
     agents: AgentType[]
     permissionMode?: PkPermissionMode
     bareMode?: boolean
+    effort?: PkEffortLevel
   }): PkRound
   updateContestant(
     roundId: string,
@@ -132,6 +150,7 @@ interface PersistedRound {
   status: PkRoundStatus
   permissionMode?: PkPermissionMode
   bareMode?: boolean
+  effort?: PkEffortLevel
   contestants: Array<Omit<PkContestant, "diff">>
 }
 
@@ -145,6 +164,7 @@ function toPersisted(round: PkRound): PersistedRound {
     status: round.status,
     permissionMode: round.permissionMode,
     bareMode: round.bareMode,
+    effort: round.effort,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- diff is live-only and deliberately dropped here
     contestants: round.contestants.map(({ diff: _diff, ...rest }) => rest),
   }
@@ -152,11 +172,13 @@ function toPersisted(round: PkRound): PersistedRound {
 
 /** A round that was mid-flight at shutdown: keep the record, drop the liveness. */
 function revive(persisted: PersistedRound): PkRound {
-  const wasLive = persisted.status === "running"
+  const wasLive =
+    persisted.status === "ready" || persisted.status === "running"
   return {
     ...persisted,
     permissionMode: persisted.permissionMode ?? "default",
     bareMode: persisted.bareMode ?? false,
+    effort: persisted.effort ?? "default",
     status: wasLive ? "interrupted" : persisted.status,
     contestants: persisted.contestants.map((c) => {
       if (!wasLive) return { ...c, diff: null }
@@ -211,6 +233,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
       agents,
       permissionMode,
       bareMode,
+      effort,
     }) => {
       const round: PkRound = {
         id: newRoundId(),
@@ -218,11 +241,16 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
         folderId,
         workingDir,
         createdAt: Date.now(),
-        status: "running",
+        status: "ready",
         permissionMode: permissionMode ?? "default",
         bareMode: bareMode ?? false,
+        effort: effort ?? "default",
         contestants: agents.map((agentType) => ({
           agentType,
+          modelOptions: [],
+          effortOptions: [],
+          selectedModel: null,
+          selectedEffort: null,
           contextKey: null,
           connectionId: null,
           conversationId: null,
