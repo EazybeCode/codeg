@@ -174,9 +174,15 @@ function waitForField(
         connectionId != null
           ? connectionStore.getConnection(connectionId)
           : undefined
-      const entry = owner ?? byId
-      if (entry != null && entry[field] != null) {
-        resolve(entry)
+      // 字段优先,不是条目优先:`owner ?? byId` 会在 owner 存在但缺该字段时
+      // 永远选 owner,把带字段的 byId 晾在一边——实测 owner=none byId=N,
+      // 选择器与权限预设全部静默丢失(同一个根).两个条目都查字段,谁有谁算。
+      if (owner != null && owner[field] != null) {
+        resolve(owner)
+        return
+      }
+      if (byId != null && byId[field] != null) {
+        resolve(byId)
         return
       }
       if (Date.now() - startedAt >= timeoutMs) {
@@ -243,6 +249,7 @@ async function applyPreparedOptions(
   effortOptions: string[]
   selectedModel: string | null
   selectedEffort: string | null
+  diagnostic: string
 }> {
   const entry = await waitForField(
     connectionStore,
@@ -286,7 +293,16 @@ async function applyPreparedOptions(
       }
     }
   }
-  return { modelOptions, effortOptions, selectedModel, selectedEffort }
+  return {
+    modelOptions,
+    effortOptions,
+    selectedModel,
+    selectedEffort,
+    diagnostic:
+      options === null
+        ? "no configOptions advertised"
+        : `arrived (${options.length} options)`,
+  }
 }
 
 async function fetchUsage(
@@ -534,6 +550,12 @@ export function usePkRound(): {
             effortOptions: prepared.effortOptions,
             selectedModel: prepared.selectedModel,
             selectedEffort: prepared.selectedEffort,
+            // 诊断:无选择器时把原因写进面板可见的 statusDetail。
+            statusDetail:
+              prepared.modelOptions.length === 0 &&
+              prepared.effortOptions.length === 0
+                ? `no selectors (configOptions ${prepared.diagnostic})`
+                : null,
           })
         } catch (error) {
           updateContestant(round.id, agentType, {
