@@ -4992,7 +4992,9 @@
         "high": "높음",
         "max": "최대"
       },
-      "effortNote": "각 에이전트가 공지한 가장 가까운 수준을 적용합니다. 미지원 시 기본 유지."
+      "effortNote": "각 에이전트가 공지한 가장 가까운 수준을 적용합니다. 미지원 시 기본 유지.",
+      "agentNotReady": "{agent}이 준비되지 않았습니다(설정에서 설치하세요).",
+      "agentCheckFailed": "{agent} 확인 실패."
     },
     "scoreboard": {
       "status": {
@@ -5037,7 +5039,8 @@
       "effortLabel": "추론 수준",
       "minimize": "최소화",
       "exportReport": "보고서 내보내기",
-      "exporting": "생성 중…"
+      "exporting": "생성 중…",
+      "readyTag": "준비됨"
     },
     "diff": {
       "loading": "diff 불러오는 중…",

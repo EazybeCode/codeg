@@ -4992,7 +4992,9 @@
         "high": "高",
         "max": "最高"
       },
-      "effortNote": "按各選手通告的最近檔位套用;不支援的選手保持預設。"
+      "effortNote": "按各選手通告的最近檔位套用;不支援的選手保持預設。",
+      "agentNotReady": "{agent} 未就緒(請先在智慧體設定中安裝)。",
+      "agentCheckFailed": "無法校驗 {agent} 的安裝狀態。"
     },
     "scoreboard": {
       "status": {
@@ -5037,7 +5039,8 @@
       "effortLabel": "思考等級",
       "minimize": "縮小",
       "exportReport": "匯出報告",
-      "exporting": "產生中…"
+      "exporting": "產生中…",
+      "readyTag": "就緒"
     },
     "diff": {
       "loading": "正在載入 diff…",

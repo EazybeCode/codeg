@@ -4992,7 +4992,9 @@
         "high": "High",
         "max": "Max"
       },
-      "effortNote": "Applied as the nearest advertised level per agent; agents without the option keep their default."
+      "effortNote": "Applied as the nearest advertised level per agent; agents without the option keep their default.",
+      "agentNotReady": "{agent} is not ready (install it from Agent Settings first).",
+      "agentCheckFailed": "Could not verify {agent}; check its installation."
     },
     "scoreboard": {
       "status": {
@@ -5037,7 +5039,8 @@
       "effortLabel": "Reasoning effort",
       "minimize": "Minimize",
       "exportReport": "Export report",
-      "exporting": "Building…"
+      "exporting": "Building…",
+      "readyTag": "Ready"
     },
     "diff": {
       "loading": "Loading diff…",

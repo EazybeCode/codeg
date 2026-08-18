@@ -4992,7 +4992,9 @@
         "high": "Hoch",
         "max": "Max"
       },
-      "effortNote": "Wird als nächste verfügbare Stufe je Agent angewendet; ohne Unterstützung bleibt der Standard."
+      "effortNote": "Wird als nächste verfügbare Stufe je Agent angewendet; ohne Unterstützung bleibt der Standard.",
+      "agentNotReady": "{agent} nicht bereit (zuerst in den Agent-Einstellungen installieren).",
+      "agentCheckFailed": "{agent} konnte nicht geprüft werden."
     },
     "scoreboard": {
       "status": {
@@ -5037,7 +5039,8 @@
       "effortLabel": "Denkaufwand",
       "minimize": "Minimieren",
       "exportReport": "Bericht exportieren",
-      "exporting": "Erstelle…"
+      "exporting": "Erstelle…",
+      "readyTag": "Bereit"
     },
     "diff": {
       "loading": "Diff wird geladen…",

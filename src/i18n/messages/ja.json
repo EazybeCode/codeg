@@ -4992,7 +4992,9 @@
         "high": "高",
         "max": "最大"
       },
-      "effortNote": "各エージェントが通告する最寄りのレベルを適用。未対応はデフォルトのまま。"
+      "effortNote": "各エージェントが通告する最寄りのレベルを適用。未対応はデフォルトのまま。",
+      "agentNotReady": "{agent} が未準備です(先に設定でインストール)。",
+      "agentCheckFailed": "{agent} を確認できませんでした。"
     },
     "scoreboard": {
       "status": {
@@ -5037,7 +5039,8 @@
       "effortLabel": "思考レベル",
       "minimize": "最小化",
       "exportReport": "レポートをエクスポート",
-      "exporting": "生成中…"
+      "exporting": "生成中…",
+      "readyTag": "準備完了"
     },
     "diff": {
       "loading": "diff を読み込み中…",

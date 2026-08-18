@@ -179,8 +179,18 @@ export function PkArenaDialog() {
 
   const roundLive = round != null && round.status === "running"
 
+  const handleOpenChange = (next: boolean) => {
+    if (!next) {
+      // 准备态关闭 = 放弃本轮:清理会话连接,防止侧边栏残留空转。
+      if (round && round.status === "ready") {
+        void cancelRound(round)
+      }
+    }
+    setArenaOpen(next)
+  }
+
   return (
-    <Dialog open={open} onOpenChange={setArenaOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         showCloseButton={false}
         className="flex h-[92vh] w-full max-w-none flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-none"
@@ -419,60 +429,72 @@ const PkReadyPane = memo(function PkReadyPane({
   ) => Promise<void>
 }) {
   const t = useTranslations("PkArena.arena")
+  const showPickers =
+    contestant.modelOptions.length > 0 || contestant.effortOptions.length > 0
   return (
-    <div className="flex min-h-0 flex-col gap-2 overflow-hidden rounded-lg border border-border p-3">
-      <div className="flex items-center gap-2">
-        <AgentIcon agentType={contestant.agentType} className="size-4" />
-        <span className="text-sm font-medium text-foreground">
-          {getAgentLabel(contestant.agentType)}
+    <div className="flex h-full w-80 shrink-0 flex-col overflow-hidden rounded-lg border border-border">
+      <div className="flex items-center gap-2.5 border-b border-border bg-muted/30 px-4 py-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background">
+          <AgentIcon agentType={contestant.agentType} className="size-5" />
         </span>
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-foreground">
+            {getAgentLabel(contestant.agentType)}
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="size-1.5 rounded-full bg-amber-400" aria-hidden />
+            {t("readyTag")}
+          </div>
+        </div>
       </div>
-      {contestant.modelOptions.length > 0 ? (
-        <label className="block">
-          <span className="mb-1 block text-xs text-muted-foreground">
-            {t("modelLabel")}
-          </span>
-          <select
-            value={contestant.selectedModel ?? ""}
-            onChange={(event) =>
-              void onSelect(round, contestant, "model", event.target.value)
-            }
-            className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
-          >
-            {contestant.modelOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : null}
-      {contestant.effortOptions.length > 0 ? (
-        <label className="block">
-          <span className="mb-1 block text-xs text-muted-foreground">
-            {t("effortLabel")}
-          </span>
-          <select
-            value={contestant.selectedEffort ?? ""}
-            onChange={(event) =>
-              void onSelect(round, contestant, "effort", event.target.value)
-            }
-            className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
-          >
-            {contestant.effortOptions.map((value) => (
-              <option key={value} value={value}>
-                {value}
-              </option>
-            ))}
-          </select>
-        </label>
-      ) : null}
-      {contestant.modelOptions.length === 0 &&
-      contestant.effortOptions.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
+      {showPickers ? (
+        <div className="flex flex-col gap-4 overflow-auto px-4 py-4">
+          {contestant.modelOptions.length > 0 ? (
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                {t("modelLabel")}
+              </span>
+              <select
+                value={contestant.selectedModel ?? ""}
+                onChange={(event) =>
+                  void onSelect(round, contestant, "model", event.target.value)
+                }
+                className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+              >
+                {contestant.modelOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {contestant.effortOptions.length > 0 ? (
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                {t("effortLabel")}
+              </span>
+              <select
+                value={contestant.selectedEffort ?? ""}
+                onChange={(event) =>
+                  void onSelect(round, contestant, "effort", event.target.value)
+                }
+                className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+              >
+                {contestant.effortOptions.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+        </div>
+      ) : (
+        <div className="flex flex-1 items-center justify-center px-4 text-xs text-muted-foreground">
           {contestant.statusDetail ?? t("preparing")}
         </div>
-      ) : null}
+      )}
     </div>
   )
 })

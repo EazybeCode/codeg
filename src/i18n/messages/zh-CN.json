@@ -4992,7 +4992,9 @@
         "high": "高",
         "max": "最高"
       },
-      "effortNote": "按各选手通告的最近档位应用;不支持的选手保持默认。"
+      "effortNote": "按各选手通告的最近档位应用;不支持的选手保持默认。",
+      "agentNotReady": "{agent} 未就绪(请先在智能体设置里安装)。",
+      "agentCheckFailed": "无法校验 {agent} 的安装状态。"
     },
     "scoreboard": {
       "status": {
@@ -5037,7 +5039,8 @@
       "effortLabel": "思考等级",
       "minimize": "缩小",
       "exportReport": "导出报告",
-      "exporting": "生成中…"
+      "exporting": "生成中…",
+      "readyTag": "就绪"
     },
     "diff": {
       "loading": "正在加载 diff…",

@@ -10,7 +10,8 @@ import {
 } from "@/components/ui/dialog"
 import { AgentIcon } from "@/components/agent-icon"
 import { useAcpAgents } from "@/hooks/use-acp-agents"
-import { getFolder, getGitBranch, gitInit } from "@/lib/api"
+import { acpGetAgentStatus, getFolder, getGitBranch, gitInit } from "@/lib/api"
+import { getAgentLabel } from "@/lib/custom-agents"
 import type { AgentType } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
@@ -54,6 +55,7 @@ export function PkLauncherDialog() {
     useState<PkPermissionMode>("default")
   const [bareMode, setBareMode] = useState(false)
   const [effort, setEffort] = useState<PkEffortLevel>("default")
+  const [startError, setStartError] = useState<string | null>(null)
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
     setIsGitRepo(null)
@@ -76,6 +78,7 @@ export function PkLauncherDialog() {
     setPermissionMode("default")
     setBareMode(false)
     setEffort("default")
+    setStartError(null)
     // The active tab decides where the arena runs. Draft tabs may lack a
     // workingDir; fall back to the folder's own path.
     if (activeTab?.folderId == null || activeTab.folderId < 0) return
@@ -113,8 +116,14 @@ export function PkLauncherDialog() {
     }
   }
 
+  // 只列真正能跑的:安装到位(installed_version) + 未禁用 + 可用。
+  // 未安装的 agent 在 connect 的 preflight 会被拦,但那时回合/会话已创建,
+  // 留下的宿主会话会一直空转——所以 PK 干脆只收已就绪的选手。
   const agents = useMemo(
-    () => rawAgents.filter((a) => a.enabled && a.available),
+    () =>
+      rawAgents.filter(
+        (a) => a.enabled && a.available && a.installed_version != null
+      ),
     [rawAgents]
   )
 
@@ -139,8 +148,24 @@ export function PkLauncherDialog() {
     )
   }
 
-  const handleStart = () => {
+  const handleStart = async () => {
     if (!canStart || folderId == null || workingDir == null) return
+    // 开赛前预检:任何选手不可用就中止,不建回合、不留残留会话。
+    for (const agentType of selected) {
+      try {
+        const status = await acpGetAgentStatus(agentType)
+        if (!status.enabled || !status.available || !status.installed_version) {
+          setStartError(t("agentNotReady", { agent: getAgentLabel(agentType) }))
+          return
+        }
+      } catch {
+        setStartError(
+          t("agentCheckFailed", { agent: getAgentLabel(agentType) })
+        )
+        return
+      }
+    }
+    setStartError(null)
     createRound({
       task: task.trim(),
       folderId,
@@ -311,6 +336,11 @@ export function PkLauncherDialog() {
             </span>
           </label>
         </div>
+        {startError != null ? (
+          <div className="border-t border-border px-5 py-2 text-xs text-red-600 dark:text-red-400">
+            {startError}
+          </div>
+        ) : null}
         <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-3">
           <span className="text-xs text-muted-foreground">
             {t("selectedCount", {
@@ -330,7 +360,7 @@ export function PkLauncherDialog() {
             <button
               type="button"
               disabled={!canStart}
-              onClick={handleStart}
+              onClick={() => void handleStart()}
               className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
             >
               {t("start")}

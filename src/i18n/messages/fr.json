@@ -4992,7 +4992,9 @@
         "high": "Élevé",
         "max": "Max"
       },
-      "effortNote": "Applique le niveau annoncé le plus proche par agent ; sans support, garde le défaut."
+      "effortNote": "Applique le niveau annoncé le plus proche par agent ; sans support, garde le défaut.",
+      "agentNotReady": "{agent} n'est pas prêt (installez-le dans les paramètres).",
+      "agentCheckFailed": "Impossible de vérifier {agent}."
     },
     "scoreboard": {
       "status": {
@@ -5037,7 +5039,8 @@
       "effortLabel": "Effort",
       "minimize": "Réduire",
       "exportReport": "Exporter le rapport",
-      "exporting": "Génération…"
+      "exporting": "Génération…",
+      "readyTag": "Prêt"
     },
     "diff": {
       "loading": "Chargement du diff…",
