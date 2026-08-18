@@ -31,6 +31,7 @@ export function PkArenaDialog() {
   const t = useTranslations("PkArena.arena")
   const open = usePkArenaStore((s) => s.arenaOpen)
   const setArenaOpen = usePkArenaStore((s) => s.setArenaOpen)
+  const setPillDismissed = usePkArenaStore((s) => s.setPillDismissed)
   const rounds = usePkArenaStore((s) => s.rounds)
   const activeRoundId = usePkArenaStore((s) => s.activeRoundId)
   const setActiveRound = usePkArenaStore((s) => s.setActiveRound)
@@ -206,6 +207,18 @@ export function PkArenaDialog() {
               >
                 {t("newRound")}
               </button>
+              {roundLive ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPillDismissed(false)
+                    setArenaOpen(false)
+                  }}
+                  className="rounded-md border border-border px-3 py-1 text-xs text-foreground hover:bg-muted"
+                >
+                  {t("minimize")}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => void handleShare()}
@@ -253,41 +266,38 @@ export function PkArenaDialog() {
               ))}
             </div>
 
-            <div
-              className="grid min-h-0 flex-1 gap-2 p-2"
-              style={{
-                gridTemplateColumns: `repeat(${round.contestants.length}, minmax(0, 1fr))`,
-              }}
-            >
-              {tab === "battle"
-                ? round.contestants.map((contestant) =>
-                    round.status === "ready" ? (
-                      <PkReadyPane
-                        key={contestant.agentType}
-                        round={round}
-                        contestant={contestant}
-                        onSelect={applyContestantSelection}
-                      />
-                    ) : (
-                      <PkBattlePane
-                        key={contestant.agentType}
-                        conversationId={contestant.conversationId}
-                        connectionId={contestant.connectionId}
-                        agentType={contestant.agentType}
-                        task={round.task}
-                        statusDetail={contestant.statusDetail}
-                        preparingLabel={t("preparing")}
-                      />
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <div className="flex h-full gap-2 overflow-x-auto p-2">
+                {tab === "battle"
+                  ? round.contestants.map((contestant) =>
+                      round.status === "ready" ? (
+                        <PkReadyPane
+                          key={contestant.agentType}
+                          round={round}
+                          contestant={contestant}
+                          onSelect={applyContestantSelection}
+                        />
+                      ) : (
+                        <PkBattlePane
+                          key={contestant.agentType}
+                          conversationId={contestant.conversationId}
+                          connectionId={contestant.connectionId}
+                          agentType={contestant.agentType}
+                          task={round.task}
+                          statusDetail={contestant.statusDetail}
+                          preparingLabel={t("preparing")}
+                        />
+                      )
                     )
-                  )
-                : round.contestants.map((contestant) => (
-                    <PkDiffView
-                      key={contestant.agentType}
-                      agentType={contestant.agentType}
-                      diff={contestant.diff}
-                      loading={diffLoading && contestant.diff == null}
-                    />
-                  ))}
+                  : round.contestants.map((contestant) => (
+                      <PkDiffView
+                        key={contestant.agentType}
+                        agentType={contestant.agentType}
+                        diff={contestant.diff}
+                        loading={diffLoading && contestant.diff == null}
+                      />
+                    ))}
+              </div>
             </div>
           </div>
         ) : (
@@ -322,7 +332,7 @@ const PkBattlePane = memo(function PkBattlePane({
   preparingLabel: string
 }) {
   return (
-    <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border">
+    <div className="flex h-full w-80 shrink-0 flex-col overflow-hidden rounded-lg border border-border">
       {conversationId != null ? (
         <LiveTranscriptView
           conversationId={conversationId}

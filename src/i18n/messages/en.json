@@ -5034,11 +5034,17 @@
       "startMatch": "Start match",
       "readyNote": "Pick each contestant's model and reasoning effort, then start the match.",
       "modelLabel": "Model",
-      "effortLabel": "Reasoning effort"
+      "effortLabel": "Reasoning effort",
+      "minimize": "Minimize"
     },
     "diff": {
       "loading": "Loading diff…",
       "empty": "No changes in this worktree"
+    },
+    "minimized": {
+      "restore": "Back to the arena",
+      "live": "PK in progress",
+      "dismiss": "Hide pill"
     }
   }
 }

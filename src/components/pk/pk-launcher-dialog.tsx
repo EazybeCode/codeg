@@ -27,7 +27,7 @@ import { useTabStore } from "@/stores/tab-store"
  */
 
 const MIN_CONTESTANTS = 2
-const MAX_CONTESTANTS = 4
+const MAX_CONTESTANTS = 8
 
 export function PkLauncherDialog() {
   const t = useTranslations("PkArena.launcher")

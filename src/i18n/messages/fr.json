@@ -5034,11 +5034,17 @@
       "startMatch": "Lancer le duel",
       "readyNote": "Choisissez modèle et effort de chaque participant, puis lancez.",
       "modelLabel": "Modèle",
-      "effortLabel": "Effort"
+      "effortLabel": "Effort",
+      "minimize": "Réduire"
     },
     "diff": {
       "loading": "Chargement du diff…",
       "empty": "Aucune modification dans ce worktree"
+    },
+    "minimized": {
+      "restore": "Retour à l'arène",
+      "live": "PK en cours",
+      "dismiss": "Masquer"
     }
   }
 }

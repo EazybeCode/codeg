@@ -5034,11 +5034,17 @@
       "startMatch": "Iniciar duelo",
       "readyNote": "Elige modelo y esfuerzo de cada contendiente y luego inicia.",
       "modelLabel": "Modelo",
-      "effortLabel": "Esfuerzo"
+      "effortLabel": "Esfuerzo",
+      "minimize": "Minimizar"
     },
     "diff": {
       "loading": "Cargando diff…",
       "empty": "Sin cambios en este worktree"
+    },
+    "minimized": {
+      "restore": "Volver a la arena",
+      "live": "PK en curso",
+      "dismiss": "Ocultar"
     }
   }
 }

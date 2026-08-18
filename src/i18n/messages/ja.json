@@ -5034,11 +5034,17 @@
       "startMatch": "対戦開始",
       "readyNote": "各出場者のモデルと思考レベルを選んでから対戦開始。",
       "modelLabel": "モデル",
-      "effortLabel": "思考レベル"
+      "effortLabel": "思考レベル",
+      "minimize": "最小化"
     },
     "diff": {
       "loading": "diff を読み込み中…",
       "empty": "このワークツリーに変更はありません"
+    },
+    "minimized": {
+      "restore": "アリーナに戻る",
+      "live": "PK 実行中",
+      "dismiss": "非表示"
     }
   }
 }

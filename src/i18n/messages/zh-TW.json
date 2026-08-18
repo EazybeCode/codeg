@@ -5034,11 +5034,17 @@
       "startMatch": "開始比賽",
       "readyNote": "選擇每位選手的模型與思考等級,然後開始比賽。",
       "modelLabel": "模型",
-      "effortLabel": "思考等級"
+      "effortLabel": "思考等級",
+      "minimize": "縮小"
     },
     "diff": {
       "loading": "正在載入 diff…",
       "empty": "該 worktree 沒有變更"
+    },
+    "minimized": {
+      "restore": "回到競技場",
+      "live": "PK 進行中",
+      "dismiss": "隱藏"
     }
   }
 }

@@ -75,10 +75,7 @@ export const PkScoreboard = forwardRef<
   return (
     <div
       ref={ref}
-      className="grid gap-2 bg-background px-3 py-2"
-      style={{
-        gridTemplateColumns: `repeat(${contestants.length}, minmax(0, 1fr))`,
-      }}
+      className="flex gap-2 overflow-x-auto bg-background px-3 py-2"
       data-testid="pk-scoreboard"
     >
       {contestants.map((contestant) => {
@@ -90,7 +87,7 @@ export const PkScoreboard = forwardRef<
         return (
           <div
             key={contestant.agentType}
-            className="flex min-w-0 items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2"
+            className="flex w-56 shrink-0 items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2"
           >
             <span
               className={cn(

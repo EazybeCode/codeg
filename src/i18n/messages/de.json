@@ -5034,11 +5034,17 @@
       "startMatch": "Kampf starten",
       "readyNote": "Modell und Denkaufwand je Teilnehmer wählen, dann starten.",
       "modelLabel": "Modell",
-      "effortLabel": "Denkaufwand"
+      "effortLabel": "Denkaufwand",
+      "minimize": "Minimieren"
     },
     "diff": {
       "loading": "Diff wird geladen…",
       "empty": "Keine Änderungen in diesem Worktree"
+    },
+    "minimized": {
+      "restore": "Zurück zur Arena",
+      "live": "PK läuft",
+      "dismiss": "Ausblenden"
     }
   }
 }

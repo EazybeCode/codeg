@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react"
 import { PkArenaDialog } from "@/components/pk/pk-arena-dialog"
 import { PkLauncherDialog } from "@/components/pk/pk-launcher-dialog"
+import { PkMinimizedPill } from "@/components/pk/pk-minimized-pill"
 import { usePkRound } from "@/hooks/use-pk-round"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
 
@@ -37,6 +38,7 @@ export function PkArenaHost() {
     <>
       <PkLauncherDialog />
       <PkArenaDialog />
+      <PkMinimizedPill />
     </>
   )
 }

@@ -95,6 +95,8 @@ interface PkArenaState {
   activeRoundId: string | null
   launcherOpen: boolean
   arenaOpen: boolean
+  /** 悬浮球被用户手动关掉过——新回合/重新打开时复位。 */
+  pillDismissed: boolean
 }
 
 interface PkArenaActions {
@@ -117,6 +119,7 @@ interface PkArenaActions {
   setActiveRound(roundId: string | null): void
   setLauncherOpen(open: boolean): void
   setArenaOpen(open: boolean): void
+  setPillDismissed(dismissed: boolean): void
 }
 
 const STORAGE_KEY = "codeg:pk-arena"
@@ -172,8 +175,7 @@ function toPersisted(round: PkRound): PersistedRound {
 
 /** A round that was mid-flight at shutdown: keep the record, drop the liveness. */
 function revive(persisted: PersistedRound): PkRound {
-  const wasLive =
-    persisted.status === "ready" || persisted.status === "running"
+  const wasLive = persisted.status === "ready" || persisted.status === "running"
   return {
     ...persisted,
     permissionMode: persisted.permissionMode ?? "default",
@@ -225,6 +227,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
     activeRoundId: null,
     launcherOpen: false,
     arenaOpen: false,
+    pillDismissed: false,
 
     createRound: ({
       task,
@@ -310,5 +313,6 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
     setActiveRound: (roundId) => set({ activeRoundId: roundId }),
     setLauncherOpen: (open) => set({ launcherOpen: open }),
     setArenaOpen: (open) => set({ arenaOpen: open }),
+    setPillDismissed: (dismissed) => set({ pillDismissed: dismissed }),
   })
 )
