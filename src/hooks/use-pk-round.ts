@@ -348,6 +348,7 @@ export function usePkRound(): {
     disconnect,
     setMode,
     setConfigOption,
+    touchActivity,
     attachDelegationChild,
     detachDelegationChild,
   } = useAcpActions()
@@ -438,6 +439,24 @@ export function usePkRound(): {
     [disconnectFinished, markRound, updateContestant]
   )
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      for (const round of usePkArenaStore.getState().rounds) {
+        if (round.status !== "ready" && round.status !== "running") continue
+        for (const contestant of round.contestants) {
+          if (contestant.contextKey) {
+            try {
+              touchActivity(contestant.contextKey)
+            } catch {
+              // 保活是尽力而为;失败不影响回合。
+            }
+          }
+        }
+      }
+    }, 20000)
+    return () => window.clearInterval(timer)
+  }, [touchActivity])
+
   useAcpEvent((envelope) => {
     if (
       envelope.type !== "status_changed" &&
@@ -480,8 +499,24 @@ export function usePkRound(): {
       return
     }
 
-    // status_changed: only the prompting edge matters here — the settle edge
-    // does not exist (see turn_complete above).
+    // status_changed: only the prompting edge matters for the running flip;
+    // the settle edge does not exist (see turn_complete above). A disconnect
+    // mid-turn means the backend reaped the connection (idle sweep) or the
+    // agent died — that is a failure, not a stuck running state.
+    if (envelope.status === "disconnected") {
+      if (
+        contestant.status === "running" ||
+        contestant.status === "connecting"
+      ) {
+        void settleContestant(
+          entry.roundId,
+          entry.agentType,
+          "error",
+          "连接中断(空闲回收或进程退出)"
+        )
+      }
+      return
+    }
     if (envelope.status === "prompting") {
       if (contestant.status === "connecting") {
         updateContestant(entry.roundId, entry.agentType, {
