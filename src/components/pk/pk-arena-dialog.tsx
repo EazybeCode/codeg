@@ -53,6 +53,7 @@ export function PkArenaDialog() {
     applyContestantSelection,
   } = usePkRound()
   const markRound = usePkArenaStore((s) => s.markRound)
+  const removeRound = usePkArenaStore((s) => s.removeRound)
   const [tab, setTab] = useState<"battle" | "diff">("battle")
   const [sharing, setSharing] = useState(false)
   const [reportExporting, setReportExporting] = useState(false)
@@ -279,6 +280,24 @@ export function PkArenaDialog() {
                 className="rounded-md border border-border px-3 py-1 text-xs text-foreground hover:bg-muted disabled:opacity-50"
               >
                 {reportExporting ? t("exporting") : t("exportReport")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm(t("deleteConfirm"))) {
+                    const nextRounds = rounds.filter((r) => r.id !== round.id)
+                    removeRound(round.id)
+                    if (nextRounds.length > 0) {
+                      setActiveRound(nextRounds[0].id)
+                    } else {
+                      setArenaOpen(false)
+                    }
+                  }
+                }}
+                className="rounded-md px-3 py-1 text-xs text-muted-foreground hover:bg-red-500/10 hover:text-red-600"
+                title={t("deleteRound")}
+              >
+                {t("deleteRound")}
               </button>
               <button
                 type="button"

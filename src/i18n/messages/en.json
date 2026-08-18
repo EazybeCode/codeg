@@ -5040,7 +5040,9 @@
       "minimize": "Minimize",
       "exportReport": "Export report",
       "exporting": "Building…",
-      "readyTag": "Ready"
+      "readyTag": "Ready",
+      "deleteRound": "Delete",
+      "deleteConfirm": "Delete this round? (worktrees stay on disk — use Clean worktrees to remove them)"
     },
     "diff": {
       "loading": "Loading diff…",

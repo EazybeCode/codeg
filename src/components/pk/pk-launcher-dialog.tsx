@@ -15,6 +15,8 @@ import { getAgentLabel } from "@/lib/custom-agents"
 import type { AgentType } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
+  loadLastLauncherConfig,
+  saveLastLauncherConfig,
   usePkArenaStore,
   type PkEffortLevel,
   type PkPermissionMode,
@@ -79,6 +81,15 @@ export function PkLauncherDialog() {
     setBareMode(false)
     setEffort("default")
     setStartError(null)
+    // 复赛预填:上次配置的选手若仍可参与则沿用。
+    const last = loadLastLauncherConfig()
+    if (last && last.agents.length > 0) {
+      setSelected((prev) => (prev.length > 0 ? prev : last.agents))
+      setTask(last.task ?? "")
+      setPermissionMode(last.permissionMode)
+      setBareMode(last.bareMode)
+      setEffort(last.effort)
+    }
     // The active tab decides where the arena runs. Draft tabs may lack a
     // workingDir; fall back to the folder's own path.
     if (activeTab?.folderId == null || activeTab.folderId < 0) return
@@ -166,6 +177,13 @@ export function PkLauncherDialog() {
       }
     }
     setStartError(null)
+    saveLastLauncherConfig({
+      agents: selected,
+      permissionMode,
+      bareMode,
+      effort,
+      task: task.trim(),
+    })
     createRound({
       task: task.trim(),
       folderId,

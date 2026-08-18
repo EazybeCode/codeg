@@ -5040,7 +5040,9 @@
       "minimize": "Minimizar",
       "exportReport": "Exportar relatório",
       "exporting": "Gerando…",
-      "readyTag": "Pronto"
+      "readyTag": "Pronto",
+      "deleteRound": "Excluir",
+      "deleteConfirm": "Excluir esta rodada? Os worktrees permanecem — use Limpar worktrees."
     },
     "diff": {
       "loading": "Carregando diff…",

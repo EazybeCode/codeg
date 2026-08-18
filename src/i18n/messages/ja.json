@@ -5040,7 +5040,9 @@
       "minimize": "最小化",
       "exportReport": "レポートをエクスポート",
       "exporting": "生成中…",
-      "readyTag": "準備完了"
+      "readyTag": "準備完了",
+      "deleteRound": "削除",
+      "deleteConfirm": "このラウンドを削除?ワークツリーは残ります(「ワークツリーを削除」で除去)"
     },
     "diff": {
       "loading": "diff を読み込み中…",

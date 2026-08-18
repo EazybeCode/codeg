@@ -5040,7 +5040,9 @@
       "minimize": "縮小",
       "exportReport": "匯出報告",
       "exporting": "產生中…",
-      "readyTag": "就緒"
+      "readyTag": "就緒",
+      "deleteRound": "刪除",
+      "deleteConfirm": "刪除這個回合?worktree 會留在磁碟上,可用「清理 worktree」移除。"
     },
     "diff": {
       "loading": "正在載入 diff…",

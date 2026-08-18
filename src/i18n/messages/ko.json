@@ -5040,7 +5040,9 @@
       "minimize": "최소화",
       "exportReport": "보고서 내보내기",
       "exporting": "생성 중…",
-      "readyTag": "준비됨"
+      "readyTag": "준비됨",
+      "deleteRound": "삭제",
+      "deleteConfirm": "이 라운드를 삭제? 워크트리는 남아 있습니다(정리로 제거)"
     },
     "diff": {
       "loading": "diff 불러오는 중…",

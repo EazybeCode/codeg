@@ -5040,7 +5040,9 @@
       "minimize": "Minimieren",
       "exportReport": "Bericht exportieren",
       "exporting": "Erstelle…",
-      "readyTag": "Bereit"
+      "readyTag": "Bereit",
+      "deleteRound": "Löschen",
+      "deleteConfirm": "Diese Runde löschen? Worktrees bleiben auf der Platte — über 'Worktrees bereinigen' entfernen."
     },
     "diff": {
       "loading": "Diff wird geladen…",

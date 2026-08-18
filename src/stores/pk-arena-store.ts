@@ -123,7 +123,36 @@ interface PkArenaActions {
 }
 
 const STORAGE_KEY = "codeg:pk-arena"
+const LAUNCHER_LAST_KEY = "codeg:pk-launcher-last"
 const MAX_PERSISTED_ROUNDS = 20
+
+/** 上次开赛的配置,复赛时一键预填。 */
+export interface PkLauncherLastConfig {
+  agents: AgentType[]
+  permissionMode: PkPermissionMode
+  bareMode: boolean
+  effort: PkEffortLevel
+  task: string
+}
+
+export function loadLastLauncherConfig(): PkLauncherLastConfig | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = window.localStorage.getItem(LAUNCHER_LAST_KEY)
+    return raw ? (JSON.parse(raw) as PkLauncherLastConfig) : null
+  } catch {
+    return null
+  }
+}
+
+export function saveLastLauncherConfig(config: PkLauncherLastConfig): void {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(LAUNCHER_LAST_KEY, JSON.stringify(config))
+  } catch {
+    // 记住配置失败不影响开赛。
+  }
+}
 
 function newRoundId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
