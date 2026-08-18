@@ -5035,7 +5035,9 @@
       "readyNote": "각 참가자의 모델과 추론 수준을 선택한 후 시작하세요.",
       "modelLabel": "모델",
       "effortLabel": "추론 수준",
-      "minimize": "최소화"
+      "minimize": "최소화",
+      "exportReport": "보고서 내보내기",
+      "exporting": "생성 중…"
     },
     "diff": {
       "loading": "diff 불러오는 중…",

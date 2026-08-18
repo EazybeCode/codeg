@@ -5035,7 +5035,9 @@
       "readyNote": "Pick each contestant's model and reasoning effort, then start the match.",
       "modelLabel": "Model",
       "effortLabel": "Reasoning effort",
-      "minimize": "Minimize"
+      "minimize": "Minimize",
+      "exportReport": "Export report",
+      "exporting": "Building…"
     },
     "diff": {
       "loading": "Loading diff…",

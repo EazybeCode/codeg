@@ -5035,7 +5035,9 @@
       "readyNote": "Escolha modelo e esforço de cada competidor e inicie.",
       "modelLabel": "Modelo",
       "effortLabel": "Esforço",
-      "minimize": "Minimizar"
+      "minimize": "Minimizar",
+      "exportReport": "Exportar relatório",
+      "exporting": "Gerando…"
     },
     "diff": {
       "loading": "Carregando diff…",

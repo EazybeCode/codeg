@@ -14,6 +14,9 @@ import { PkScoreboard } from "@/components/pk/pk-scoreboard"
 import { usePkRound } from "@/hooks/use-pk-round"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
+import { getFileTree } from "@/lib/api"
+import { buildPkReportHtml } from "@/lib/pk-report"
+import type { FileTreeNode } from "@/lib/types"
 import type { PkContestant, PkRound } from "@/stores/pk-arena-store"
 import { cn } from "@/lib/utils"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
@@ -52,6 +55,7 @@ export function PkArenaDialog() {
   const markRound = usePkArenaStore((s) => s.markRound)
   const [tab, setTab] = useState<"battle" | "diff">("battle")
   const [sharing, setSharing] = useState(false)
+  const [reportExporting, setReportExporting] = useState(false)
   const [diffLoading, setDiffLoading] = useState(false)
   const scoreboardRef = useRef<HTMLDivElement>(null)
 
@@ -113,6 +117,45 @@ export function PkArenaDialog() {
       }
     }
   }, [round, markRound, disconnectFinished])
+
+  const handleExportReport = async () => {
+    if (!round || reportExporting) return
+    setReportExporting(true)
+    try {
+      // 确保 diff 已抓取(报告需要),并抓每个选手 worktree 的文件树。
+      const pendingDiff = round.contestants.filter(
+        (c) => c.diff == null && c.worktreePath
+      )
+      await Promise.allSettled(pendingDiff.map((c) => fetchDiff(round, c)))
+
+      const fresh = usePkArenaStore
+        .getState()
+        .rounds.find((r) => r.id === round.id)
+      const filesByAgent: Record<string, string[]> = {}
+      for (const contestant of fresh?.contestants ?? []) {
+        if (!contestant.worktreePath) {
+          filesByAgent[contestant.agentType] = []
+          continue
+        }
+        try {
+          const tree = await getFileTree(contestant.worktreePath, 6)
+          filesByAgent[contestant.agentType] = flattenTreeList(tree)
+        } catch {
+          filesByAgent[contestant.agentType] = []
+        }
+      }
+      const html = buildPkReportHtml(fresh ?? round, filesByAgent)
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = `codeg-pk-${round.id}.html`
+      link.click()
+      URL.revokeObjectURL(url)
+    } finally {
+      setReportExporting(false)
+    }
+  }
 
   const handleShare = async () => {
     if (!scoreboardRef.current || sharing) return
@@ -219,6 +262,14 @@ export function PkArenaDialog() {
                   {t("minimize")}
                 </button>
               ) : null}
+              <button
+                type="button"
+                onClick={() => void handleExportReport()}
+                disabled={reportExporting}
+                className="rounded-md border border-border px-3 py-1 text-xs text-foreground hover:bg-muted disabled:opacity-50"
+              >
+                {reportExporting ? t("exporting") : t("exportReport")}
+              </button>
               <button
                 type="button"
                 onClick={() => void handleShare()}
@@ -425,3 +476,17 @@ const PkReadyPane = memo(function PkReadyPane({
     </div>
   )
 })
+
+/** 把文件树拍平成相对路径清单(跳过目录,只留文件)。 */
+function flattenTreeList(nodes: FileTreeNode[], prefix = ""): string[] {
+  const files: string[] = []
+  for (const node of nodes) {
+    const rel = prefix ? `${prefix}/${node.name}` : node.name
+    if (node.kind === "file") {
+      files.push(rel)
+    } else {
+      files.push(...flattenTreeList(node.children, rel))
+    }
+  }
+  return files
+}

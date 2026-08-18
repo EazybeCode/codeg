@@ -5035,7 +5035,9 @@
       "readyNote": "Choisissez modèle et effort de chaque participant, puis lancez.",
       "modelLabel": "Modèle",
       "effortLabel": "Effort",
-      "minimize": "Réduire"
+      "minimize": "Réduire",
+      "exportReport": "Exporter le rapport",
+      "exporting": "Génération…"
     },
     "diff": {
       "loading": "Chargement du diff…",

@@ -5035,7 +5035,9 @@
       "readyNote": "اختر نموذج ومستوى تفكير كل متنافس ثم ابدأ.",
       "modelLabel": "النموذج",
       "effortLabel": "مستوى التفكير",
-      "minimize": "تصغير"
+      "minimize": "تصغير",
+      "exportReport": "تصدير التقرير",
+      "exporting": "جارٍ الإنشاء…"
     },
     "diff": {
       "loading": "جارٍ تحميل الفروقات…",

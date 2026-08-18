@@ -5035,7 +5035,9 @@
       "readyNote": "Elige modelo y esfuerzo de cada contendiente y luego inicia.",
       "modelLabel": "Modelo",
       "effortLabel": "Esfuerzo",
-      "minimize": "Minimizar"
+      "minimize": "Minimizar",
+      "exportReport": "Exportar informe",
+      "exporting": "Generando…"
     },
     "diff": {
       "loading": "Cargando diff…",

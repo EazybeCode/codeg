@@ -5035,7 +5035,9 @@
       "readyNote": "Modell und Denkaufwand je Teilnehmer wählen, dann starten.",
       "modelLabel": "Modell",
       "effortLabel": "Denkaufwand",
-      "minimize": "Minimieren"
+      "minimize": "Minimieren",
+      "exportReport": "Bericht exportieren",
+      "exporting": "Erstelle…"
     },
     "diff": {
       "loading": "Diff wird geladen…",
