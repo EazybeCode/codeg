@@ -44,9 +44,11 @@ export function PkArenaDialog() {
     cancelRound,
     cleanupRound,
     fetchDiff,
+    disconnectFinished,
     startPrompt,
     applyContestantSelection,
   } = usePkRound()
+  const markRound = usePkArenaStore((s) => s.markRound)
   const [tab, setTab] = useState<"battle" | "diff">("battle")
   const [sharing, setSharing] = useState(false)
   const [diffLoading, setDiffLoading] = useState(false)
@@ -92,6 +94,24 @@ export function PkArenaDialog() {
       cancelled = true
     }
   }, [open, tab, round, fetchDiff])
+
+  // 状态自愈:任何原因导致回合停在 ready/running 而选手已全部结算
+  // (settle 事件漏一帧、重启后回放等),打开竞技场时立即收敛到 finished
+  // 并断开残留连接——否则顶部状态永远停在"就绪"。
+  useEffect(() => {
+    if (!round) return
+    const settled = (s: PkContestant["status"]) =>
+      s === "done" || s === "error" || s === "canceled"
+    if (round.status === "ready" || round.status === "running") {
+      if (
+        round.contestants.length > 0 &&
+        round.contestants.every((c) => settled(c.status))
+      ) {
+        markRound(round.id, "finished")
+        void disconnectFinished(round)
+      }
+    }
+  }, [round, markRound, disconnectFinished])
 
   const handleShare = async () => {
     if (!scoreboardRef.current || sharing) return

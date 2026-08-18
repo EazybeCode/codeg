@@ -1779,7 +1779,8 @@
       "search": "検索",
       "openSettings": "設定を開く",
       "backToConversations": "会話に戻る",
-      "withShortcut": "{label}（{shortcut}）"
+      "withShortcut": "{label}（{shortcut}）",
+      "pkArena": "エージェントPKアリーナ"
     },
     "statusBar": {
       "connection": {

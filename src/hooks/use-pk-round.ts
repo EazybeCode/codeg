@@ -4,7 +4,9 @@ import { useCallback, useEffect, useRef } from "react"
 import {
   createConversation,
   getFolderConversation,
+  getGitBranch,
   gitDiff,
+  gitDiffWithBranch,
   gitRemoveWorktree,
   gitWorktreeAdd,
 } from "@/lib/api"
@@ -673,8 +675,19 @@ export function usePkRound(): {
     async (round: PkRound, contestant: PkContestant) => {
       if (!contestant.worktreePath) return
       try {
-        const diff = await gitDiff(contestant.worktreePath)
-        updateContestant(round.id, contestant.agentType, { diff })
+        // 对比基准分支而不是选手自身分支:worktree 里 `git diff <自身分支>`
+        // 在选手提交后为空,而 diff 的意义是"比起跑点改了什么"。先取回合
+        // 仓库当前分支(main 等),再在 worktree 里对它 diff——既含已提交
+        // 也含未提交的工作区改动。
+        const base = (await getGitBranch(round.workingDir)) ?? null
+        const diff =
+          base == null
+            ? // 取不到基准分支名时退回工作区 diff(仅未提交改动)。
+              await gitDiff(contestant.worktreePath)
+            : await gitDiffWithBranch(contestant.worktreePath, base)
+        updateContestant(round.id, contestant.agentType, {
+          diff: diff.trim() === "" ? "（无可比较内容:选手未改动工作区）" : diff,
+        })
       } catch (error) {
         updateContestant(round.id, contestant.agentType, {
           diff: `diff unavailable: ${String(error)}`,

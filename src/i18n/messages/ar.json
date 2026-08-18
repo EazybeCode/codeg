@@ -1779,7 +1779,8 @@
       "search": "بحث",
       "openSettings": "فتح الإعدادات",
       "backToConversations": "العودة إلى المحادثات",
-      "withShortcut": "{label} (اختصار: {shortcut})"
+      "withShortcut": "{label} (اختصار: {shortcut})",
+      "pkArena": "ساحة منافسة الوكلاء"
     },
     "statusBar": {
       "connection": {

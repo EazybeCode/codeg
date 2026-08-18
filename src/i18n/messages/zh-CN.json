@@ -1779,7 +1779,8 @@
       "search": "搜索",
       "openSettings": "打开设置",
       "backToConversations": "返回会话",
-      "withShortcut": "{label}（{shortcut}）"
+      "withShortcut": "{label}（{shortcut}）",
+      "pkArena": "智能体 PK 竞技场"
     },
     "statusBar": {
       "connection": {

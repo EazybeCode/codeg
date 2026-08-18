@@ -1779,7 +1779,8 @@
       "search": "검색",
       "openSettings": "설정 열기",
       "backToConversations": "대화로 돌아가기",
-      "withShortcut": "{label} ({shortcut} 단축키)"
+      "withShortcut": "{label} ({shortcut} 단축키)",
+      "pkArena": "에이전트 PK 아레나"
     },
     "statusBar": {
       "connection": {

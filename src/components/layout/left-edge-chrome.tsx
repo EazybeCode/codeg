@@ -11,6 +11,8 @@ import { useShortcutSettings } from "@/hooks/use-shortcut-settings"
 import { useZoomLevel } from "@/hooks/use-appearance"
 import { formatShortcutLabel } from "@/lib/keyboard-shortcuts"
 import { MAC_TRAFFIC_LIGHT_INSET, leftChromeReserve } from "@/lib/window-chrome"
+import { Swords } from "lucide-react"
+import { usePkArenaStore } from "@/stores/pk-arena-store"
 import { RemoteWorkspaceDropdown } from "./remote-workspace-dropdown"
 
 /**
@@ -68,6 +70,22 @@ export function LeftEdgeChrome() {
           <PanelLeft className="h-3.5 w-3.5" />
         </Button>
         <RemoteWorkspaceDropdown triggerClassName="h-6 w-6 hover:bg-foreground/10 hover:text-foreground/80 dark:hover:bg-foreground/10" />
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-6 w-6 hover:bg-foreground/10 hover:text-foreground/80 dark:hover:bg-foreground/10"
+          onClick={() => {
+            const state = usePkArenaStore.getState()
+            if (state.rounds.length > 0 && state.activeRoundId) {
+              state.setArenaOpen(true)
+            } else {
+              state.setLauncherOpen(true)
+            }
+          }}
+          title={tTitleBar("pkArena")}
+        >
+          <Swords className="h-3.5 w-3.5" />
+        </Button>
       </div>
       {/* Empty tail is a window-drag region. */}
       <div data-tauri-drag-region className="h-full min-w-0 flex-1" />

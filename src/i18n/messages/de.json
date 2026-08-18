@@ -1779,7 +1779,8 @@
       "search": "Suchen",
       "openSettings": "Einstellungen öffnen",
       "backToConversations": "Zurück zu Konversationen",
-      "withShortcut": "{label} (Tastenkürzel: {shortcut})"
+      "withShortcut": "{label} (Tastenkürzel: {shortcut})",
+      "pkArena": "Agenten-PK-Arena"
     },
     "statusBar": {
       "connection": {
