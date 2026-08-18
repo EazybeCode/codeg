@@ -52,6 +52,12 @@ export function PkArenaDialog() {
   const [diffLoading, setDiffLoading] = useState(false)
   const scoreboardRef = useRef<HTMLDivElement>(null)
 
+  // 进行中(ready/running)的回合禁止 ESC / 点遮罩关闭——一个误触就把
+  // 活着的比赛和它的实时流一起关了。只有 X 按钮能显式关闭。
+  const liveRef = useRef(false)
+  liveRef.current =
+    round != null && (round.status === "ready" || round.status === "running")
+
   // Literal keys — next-intl's typed messages reject dynamic concatenation.
   const roundStatusLabel = useMemo(
     () => ({
@@ -114,6 +120,12 @@ export function PkArenaDialog() {
       <DialogContent
         closeButtonClassName="top-2 right-2"
         className="flex h-[92vh] w-full max-w-none flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-none"
+        onEscapeKeyDown={(event) => {
+          if (liveRef.current) event.preventDefault()
+        }}
+        onPointerDownOutside={(event) => {
+          if (liveRef.current) event.preventDefault()
+        }}
       >
         <DialogTitle className="sr-only">{t("title")}</DialogTitle>
         <DialogDescription className="sr-only">

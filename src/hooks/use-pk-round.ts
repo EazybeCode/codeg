@@ -335,6 +335,7 @@ export function usePkRound(): {
     value: string
   ) => Promise<void>
   cancelRound: (round: PkRound) => Promise<void>
+  disconnectFinished: (round: PkRound) => Promise<void>
   cleanupRound: (round: PkRound, keepBranches: boolean) => Promise<void>
   fetchDiff: (round: PkRound, contestant: PkContestant) => Promise<void>
 } {
@@ -363,6 +364,25 @@ export function usePkRound(): {
   // resolve envelopes without re-subscribing as rounds change.
   const contestantsByConnection = useRef(
     new Map<string, { roundId: string; agentType: PkContestant["agentType"] }>()
+  )
+
+  const disconnectFinished = useCallback(
+    async (round: PkRound | null | undefined) => {
+      if (!round) return
+      await Promise.allSettled(
+        round.contestants
+          .filter((c) => c.connectionId != null)
+          .map(async (contestant) => {
+            if (contestant.connectionId) {
+              detachDelegationChild(contestant.connectionId)
+            }
+            if (contestant.contextKey) {
+              await disconnect(contestant.contextKey).catch(() => undefined)
+            }
+          })
+      )
+    },
+    [detachDelegationChild, disconnect]
   )
 
   const settleContestant = useCallback(
@@ -406,9 +426,14 @@ export function usePkRound(): {
         )
       ) {
         markRound(roundId, "finished")
+        // 结算即断开:侧边栏的选手会话立刻停止转圈,结果走向持久化
+        // transcript。想继续追一条会话,把它当普通会话打开重连即可。
+        void disconnectFinished(
+          usePkArenaStore.getState().rounds.find((r) => r.id === roundId)
+        )
       }
     },
-    [markRound, updateContestant]
+    [disconnectFinished, markRound, updateContestant]
   )
 
   useAcpEvent((envelope) => {
@@ -729,6 +754,7 @@ export function usePkRound(): {
     startPrompt,
     applyContestantSelection,
     cancelRound,
+    disconnectFinished,
     cleanupRound,
     fetchDiff,
   }
