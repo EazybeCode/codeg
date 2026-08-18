@@ -153,12 +153,15 @@ function selectOptions(configOptions: SessionConfigOptionInfo[] | null): {
 }
 
 /** 双条目轮询:modes/configOptions 都走 attach 后的 by-id 路由
- * (见 applyPermissionMode 的注释)。 */
-function waitForOptions(
+ * (见 applyPermissionMode 的注释)。按需等**特定字段**——统一等「任一字段」
+ * 会在 modes 先到时立即返回,此时 configOptions 往往还没到,消费方拿到
+ * null 就静默放弃(实测:模型/思考等级选择器永远不出现)。 */
+function waitForField(
   connectionStore: ModesStore,
   contextKey: string,
   connectionId: string | null,
-  timeoutMs = 8000
+  field: "modes" | "configOptions",
+  timeoutMs = 10000
 ): Promise<{
   modes?: { available_modes?: Array<{ id: string }> } | null
   configOptions?: SessionConfigOptionInfo[] | null
@@ -172,10 +175,7 @@ function waitForOptions(
           ? connectionStore.getConnection(connectionId)
           : undefined
       const entry = owner ?? byId
-      if (
-        entry != null &&
-        (entry.modes != null || entry.configOptions != null)
-      ) {
+      if (entry != null && entry[field] != null) {
         resolve(entry)
         return
       }
@@ -212,7 +212,12 @@ async function applyPermissionMode(
   mode: PkPermissionMode
 ): Promise<void> {
   if (mode === "default") return
-  const entry = await waitForOptions(connectionStore, contextKey, connectionId)
+  const entry = await waitForField(
+    connectionStore,
+    contextKey,
+    connectionId,
+    "modes"
+  )
   const advertised = entry?.modes?.available_modes?.map((m) => m.id) ?? []
   if (!advertised.includes(mode)) return
   try {
@@ -239,7 +244,12 @@ async function applyPreparedOptions(
   selectedModel: string | null
   selectedEffort: string | null
 }> {
-  const entry = await waitForOptions(connectionStore, contextKey, connectionId)
+  const entry = await waitForField(
+    connectionStore,
+    contextKey,
+    connectionId,
+    "configOptions"
+  )
   const options = entry?.configOptions ?? null
   const { modelOptions, effortOptions } = selectOptions(options)
   let selectedModel: string | null = null
