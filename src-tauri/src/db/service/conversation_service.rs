@@ -97,7 +97,7 @@ pub async fn create_pk(
         id: NotSet,
         folder_id: Set(folder_id),
         title: Set(title),
-        title_locked: Set(false),
+        title_locked: Set(true),
         agent_type: Set(at_str),
         status: Set(conversation::ConversationStatus::InProgress),
         kind: Set(ConversationKind::Pk),
