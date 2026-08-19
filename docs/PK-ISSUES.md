@@ -287,6 +287,35 @@
 
 ---
 
+## 问题 15：battle/diff 列固定 w-80，不按 agent 数量自适应分配空间
+
+**严重程度**：中
+
+**场景**：3 个选手时右侧大片留白，5 个选手时需要横向滚动。
+
+**现状**：
+
+- `PkBattlePane`（`pk-arena-dialog.tsx:425`）：`w-80 shrink-0` — 固定 320px，不可收缩
+- `PkReadyPane`（`:464`）：同 `w-80 shrink-0`
+- `PkDiffView`（`pk-diff-view.tsx:79`）：`flex h-full min-h-0 flex-col` — 没有 shrink-0，但父容器 `flex h-full gap-2 overflow-x-auto`（`:360`）不限制子元素宽度，diff 列实际也不自适应
+- 容器（`:360`）：`flex h-full gap-2 overflow-x-auto p-2` — 水平滚动布局，子元素不会被压缩到容器宽度内
+- 没有根据 `round.contestants.length` 计算 `flex-basis` 或 grid 列数的逻辑
+
+**影响**：
+
+- 3 个 agent：3 × 320px = 960px，对话框通常 1400px+，右侧约 440px 留白
+- 5 个 agent：5 × 320px = 1600px，需要横向滚动
+- 8 个 agent（最大支持）：8 × 320px = 2560px，大量滚动
+
+**修复方向**：
+
+- 容器改 `grid` 布局，列数 = `min(contestants.length, 上限如6)`，`grid-template-columns: repeat(N, minmax(0, 1fr))`
+- 或改 `flex-1 min-w-0`，让每列等分剩余空间
+- 列数超过上限时再回退到固定宽度 + 横向滚动
+- 需要同时改 PkBattlePane / PkReadyPane / PkDiffView 三个组件的根 div
+
+---
+
 ## 优先级排序
 
 | 优先级 | 问题 | 理由 |
@@ -299,6 +328,7 @@
 | P1 | #12 server 模式无法打开文件夹 | 影响 server 模式体验 |
 | P1 | #13 arena 对话框无法关闭 | 影响 server 模式体验 |
 | P1 | #14b PK 标题被 agent 覆盖 | 一行修复，信息丢失 |
+| P1 | #15 battle/diff 列不自适应宽度 | 视觉体验差 |
 | P2 | #14a 回合切换下拉框信息不足 | 体验差 |
 | P2 | #14c PK 会话侧边栏不可见 | 体验差 |
 | P2 | #6 控制变量 UI 未完成 | 功能不完整 |
