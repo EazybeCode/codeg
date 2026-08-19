@@ -175,14 +175,39 @@
 
 ---
 
+## 问题 12：server 模式下点击文件无法打开/定位到文件夹
+
+**严重程度**：中
+
+**场景**：server 模式（浏览器访问），用户在消息/文件引用里点击文件想打开所在文件夹——桌面模式可以（调系统 Finder），server 模式无反应。
+
+**现状**：
+
+- `revealItemInDir`（`platform.ts:99-104`）和 `openPath`（`platform.ts:87-93`）在 web/server 模式下是 **no-op**——条件 `isDesktop() && getActiveRemoteConnectionId() === null` 为 false 时直接 return
+- `file-reference-actions.tsx:128-130`：右键菜单的"在系统文件管理器中打开"选项在 server 模式下通过 `isLocalDesktop()` 守卫隐藏，用户看不到入口
+- `reply-artifacts.tsx:111`：AI 生成文件的"打开"按钮调 `revealItemInDir`，server 模式下静默失败
+- 后端有 `open_worktree_folder` HTTP 端点（`handlers/folders.rs:69`），但它的作用是把 worktree 注册到侧边栏文件夹列表，不是打开系统文件管理器
+- server 模式下浏览器没有权限直接操作本地文件系统，需要后端代理
+
+**修复方向**：
+
+1. 后端加 `reveal_item` / `open_path` HTTP 端点，server 模式下调 `opener` crate 在服务器主机上打开 Finder/Explorer
+2. 前端 `revealItemInDir` / `openPath` 在 server 模式下调 HTTP 端点而非 Tauri 插件
+3. `file-reference-actions.tsx` 的 `isLocalDesktop()` 守卫改为"桌面本地 OR server 模式"都显示入口
+4. 注意：server 部署在远程时，打开的是**服务器主机**的文件管理器，不是客户端的——这个限制需要在 UI 上提示用户
+
+---
+
 ## 优先级排序
 
 | 优先级 | 问题 | 理由 |
 |--------|------|------|
+| P0 | #0 server 模式选手状态卡 ready，裁判不触发 | 阻断核心流程 |
 | P0 | #4 裁判评分不持久化 | 核心数据丢失，影响所有用户 |
 | P0 | #1 取消不触发裁判 | 阻断核心场景 |
 | P1 | #2 报告不含裁判评分 | 导出产物不完整 |
 | P1 | #3 截图不含裁判评分 | 分享素材不完整 |
+| P1 | #12 server 模式无法打开文件夹 | 影响 server 模式体验 |
 | P2 | #6 控制变量 UI 未完成 | 功能不完整 |
 | P2 | #8 裁判无法重跑 | 容错差 |
 | P3 | #10 评分维度不可配 | 增强需求 |
