@@ -76,7 +76,7 @@ export function PkDiffView({
   const empty = diff != null && diff.trim() === ""
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border">
+    <div className="flex h-full min-h-0 min-w-80 flex-1 flex-col overflow-hidden rounded-lg border border-border">
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2">
         <AgentIcon agentType={agentType} className="size-4" />
         <span className="text-sm font-medium text-foreground">

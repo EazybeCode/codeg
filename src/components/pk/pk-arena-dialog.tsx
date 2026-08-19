@@ -424,7 +424,7 @@ const PkBattlePane = memo(function PkBattlePane({
   preparingLabel: string
 }) {
   return (
-    <div className="flex h-full w-80 shrink-0 flex-col overflow-hidden rounded-lg border border-border">
+    <div className="flex h-full min-w-80 flex-1 flex-col overflow-hidden rounded-lg border border-border">
       {conversationId != null ? (
         <LiveTranscriptView
           conversationId={conversationId}
@@ -463,7 +463,7 @@ const PkReadyPane = memo(function PkReadyPane({
   const showPickers =
     contestant.modelOptions.length > 0 || contestant.effortOptions.length > 0
   return (
-    <div className="flex h-full w-80 shrink-0 flex-col overflow-hidden rounded-lg border border-border">
+    <div className="flex h-full min-w-80 flex-1 flex-col overflow-hidden rounded-lg border border-border">
       <div className="flex items-center gap-2.5 border-b border-border bg-muted/30 px-4 py-3">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-background">
           <AgentIcon agentType={contestant.agentType} className="size-5" />
