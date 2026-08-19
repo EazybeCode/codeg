@@ -2,6 +2,43 @@
 
 > 整理于 2026-08-19，基于 `feat/agent-pk-arena` 分支当前代码确认。
 > 每条都经过源码验证，标注了具体文件和行号。
+> 问题 0 在实跑 round 7（server 模式，5 选手）时发现。
+
+---
+
+## 问题 0：server 模式下选手完成后状态卡在就绪，裁判不触发（P0 根因）
+
+**严重程度**：极高（阻断核心流程）
+
+**实跑证据**（round 7，2026-08-19，server 模式 / 浏览器）：
+- 5 个选手（claude_code, codex, open_code, deepseek, qoder）全部完成 git commit
+- 后端日志全部有 `turn_complete stop_reason=end_turn`
+- 但 DB pk_round status 仍然是 `running`，不是 `finished`
+- 日志中 `judge` 出现 0 次，没有裁判 conversation 被创建
+- 选手状态全部停在 `ready`，UI 显示 0/5
+
+**根因分析**：
+
+选手状态流转链：`connecting → ready → (status_changed "prompting") → running → (turn_complete) → done`
+
+- `use-pk-round.ts:922-924`：turn_complete 到达时检查 `contestant.status === "running"`
+- `use-pk-round.ts:947-950`：选手从 ready → running 依赖收到 `status_changed` 事件的 `status === "prompting"`
+- 如果 `status_changed(prompting)` 事件未到达前端，选手永远停在 `ready`
+- 后续 `turn_complete` 到达时 `contestant.status === "running"` 为 false，直接忽略（return）
+- round 永远停在 running，settleContestant 不被调用，裁判不触发
+
+**事件投递链路**（server 模式）：
+- `acp-connections-context.tsx:4388-4398`：web/server 模式跳过全局 `acp://event` 监听
+- 事件只通过 per-connection attach stream 投递（`setupAttachSubscription`）
+- PK 在 `use-pk-round.ts:1041` 调 `attachDelegationChild` → `:5912` 调 `setupAttachSubscription`
+- attach stream onEvent → `applyMappedEnvelope`（:4177）→ reducer dispatch → fan out 到 useAcpEvent subscribers（:4184-4186）
+- 链路代码看起来完整，但实际运行时 status_changed(prompting) 事件未到达 PK handler
+
+**待查**：是否 attach subscription 建立时机与 status_changed(prompting) 发出时机存在竞态，导致事件在 attach 完成前发出且未被 snapshot/replay 捕获。
+
+**修复方向**：
+1. 短期：startPrompt 发 prompt 后主动把选手设为 running（不依赖 status_changed 事件）
+2. 长期：排查 server 模式 attach stream 是否丢失早期事件
 
 ---
 
