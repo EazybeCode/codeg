@@ -1,11 +1,43 @@
 use serde::{Deserialize, Serialize};
 
+/// One contestant entry in the round config. Supports both a plain string
+/// (backward compat with old rounds: `"claude_code"`) and a labeled object
+/// (new format: `{"agent":"claude_code","label":"Sonnet"}`). The label
+/// disambiguates same-agent slots in control-variable PK
+/// (e.g. "Claude · Sonnet" vs "Claude · Opus").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PkContestantEntry {
+    Simple(String),
+    Labeled {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+}
+
+impl PkContestantEntry {
+    pub fn agent(&self) -> &str {
+        match self {
+            PkContestantEntry::Simple(a) => a,
+            PkContestantEntry::Labeled { agent, .. } => agent,
+        }
+    }
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            PkContestantEntry::Simple(_) => None,
+            PkContestantEntry::Labeled { label, .. } => label.as_deref(),
+        }
+    }
+}
+
 /// Config stored as JSON in `pk_round.config`. Mirrors the launcher's options
 /// so a round is fully reproducible from the DB row alone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PkRoundConfig {
-    /// The agent types selected as contestants, in pick order.
-    pub agents: Vec<String>,
+    /// The agent types selected as contestants, in pick order. Each entry
+    /// is either a plain string (old format) or a labeled object (new format).
+    pub agents: Vec<PkContestantEntry>,
     /// Round-level permission policy applied to every contestant.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,

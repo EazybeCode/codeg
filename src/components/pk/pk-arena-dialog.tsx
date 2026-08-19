@@ -136,14 +136,14 @@ export function PkArenaDialog() {
       const filesByAgent: Record<string, string[]> = {}
       for (const contestant of fresh?.contestants ?? []) {
         if (!contestant.worktreePath) {
-          filesByAgent[contestant.agentType] = []
+          filesByAgent[contestant.slot] = []
           continue
         }
         try {
           const tree = await getFileTree(contestant.worktreePath, 6)
-          filesByAgent[contestant.agentType] = flattenTreeList(tree)
+          filesByAgent[contestant.slot] = flattenTreeList(tree)
         } catch {
-          filesByAgent[contestant.agentType] = []
+          filesByAgent[contestant.slot] = []
         }
       }
       const html = buildPkReportHtml(fresh ?? round, filesByAgent)
@@ -362,14 +362,14 @@ export function PkArenaDialog() {
                   ? round.contestants.map((contestant) =>
                       round.status === "ready" ? (
                         <PkReadyPane
-                          key={contestant.agentType}
+                          key={contestant.slot}
                           round={round}
                           contestant={contestant}
                           onSelect={applyContestantSelection}
                         />
                       ) : (
                         <PkBattlePane
-                          key={contestant.agentType}
+                          key={contestant.slot}
                           conversationId={contestant.conversationId}
                           connectionId={contestant.connectionId}
                           agentType={contestant.agentType}
@@ -381,7 +381,7 @@ export function PkArenaDialog() {
                     )
                   : round.contestants.map((contestant) => (
                       <PkDiffView
-                        key={contestant.agentType}
+                        key={contestant.slot}
                         agentType={contestant.agentType}
                         diff={contestant.diff}
                         loading={diffLoading && contestant.diff == null}

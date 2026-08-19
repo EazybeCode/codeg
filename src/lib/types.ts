@@ -670,11 +670,18 @@ export type PkRoundStatus =
   | "canceled"
   | "interrupted"
 
+/** Mirrors Rust `PkContestantEntry` (src-tauri/src/models/pk_round.rs).
+ * Either a plain string (old format) or a labeled object (new format). */
+export type PkContestantEntry =
+  | string
+  | { agent: string; label?: string }
+
 /** Mirrors Rust `PkRoundConfig` (src-tauri/src/models/pk_round.rs). Stored as
  *  JSON in `pk_round.config`. */
 export interface PkRoundConfig {
-  /** The agent types selected as contestants, in pick order. */
-  agents: string[]
+  /** The agent types selected as contestants, in pick order. Each entry
+   *  is either a plain string (old format) or a labeled object (new format). */
+  agents: PkContestantEntry[]
   /** Round-level permission policy applied to every contestant. */
   permission_mode: string
   /** Bare mode: contestants are instructed to use no skills at all. */

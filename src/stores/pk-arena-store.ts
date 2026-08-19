@@ -36,7 +36,12 @@ export interface PkContestantUsage {
 export type PkEffortLevel = "default" | "low" | "medium" | "high" | "max"
 
 export interface PkContestant {
-  /** Wire name — unique within a round (one slot per agent). */
+  /** Slot index — unique within a round. Same agent can occupy multiple
+   * slots (control-variable PK: e.g. slot 0 = Claude·Sonnet, slot 1 =
+   * Claude·Opus). The key for all lookups is (roundId, slot), NOT agentType. */
+  slot: number
+  /** Wire name — NOT unique within a round when the same agent is picked
+   * twice (control-variable PK). Use `slot` for identity. */
   agentType: AgentType
   /** Advertised model options (handshake `configOptions`), for the arena pickers. */
   modelOptions: Array<{ value: string; name: string }>
@@ -131,7 +136,7 @@ interface PkArenaActions {
     task: string
     folderId: number
     workingDir: string
-    agents: AgentType[]
+    agents: Array<{ agentType: AgentType; label?: string }>
     permissionMode?: PkPermissionMode
     bareMode?: boolean
     effort?: PkEffortLevel
@@ -140,7 +145,7 @@ interface PkArenaActions {
   hydrateFromDb(rounds: PkRoundInfo[]): void
   updateContestant(
     roundId: string,
-    agentType: AgentType,
+    slot: number,
     patch: Partial<PkContestant>
   ): void
   markRound(roundId: string, status: PkRoundStatus): void
@@ -159,7 +164,7 @@ const LAUNCHER_LAST_KEY = "codeg:pk-launcher-last"
 
 /** Last launcher config, for one-click prefill on rematch. */
 export interface PkLauncherLastConfig {
-  agents: AgentType[]
+  agents: Array<{ agentType: AgentType; label?: string }>
   permissionMode: PkPermissionMode
   bareMode: boolean
   effort: PkEffortLevel
@@ -186,19 +191,15 @@ export function saveLastLauncherConfig(config: PkLauncherLastConfig): void {
   }
 }
 
-/** Branch names ride `codeg-pk/<round>/<agent>` — slug-safe and greppable. */
-export function contestantBranchName(
-  roundId: string,
-  agentType: AgentType
-): string {
-  return `codeg-pk/${roundId}/${agentType}`
+/** Branch names ride `codeg-pk/<round>/<slot>` — slug-safe and greppable.
+ * Uses slot index (not agentType) so the same agent in two slots gets two
+ * distinct branches. */
+export function contestantBranchName(roundId: string, slot: number): string {
+  return `codeg-pk/${roundId}/${slot}`
 }
 
-export function contestantContextKey(
-  roundId: string,
-  agentType: AgentType
-): string {
-  return `pk:${roundId}:${agentType}`
+export function contestantContextKey(roundId: string, slot: number): string {
+  return `pk:${roundId}:${slot}`
 }
 
 /** Convert a DB PkRoundInfo row to a PkRound for the store, reviving
@@ -223,25 +224,29 @@ export function dbRoundToStoreRound(
     judgeAgent: info.config.judge_agent ?? null,
     judgeResult: null,
     judgeStatus: "idle",
-    contestants: info.config.agents.map((agentType) => ({
-      agentType: agentType as AgentType,
-      modelOptions: [],
-      effortOptions: [],
-      selectedModel: null,
-      selectedEffort: null,
-      contextKey: null,
-      connectionId: null,
-      conversationId: null,
-      worktreePath: null,
-      branchName: null,
-      status: wasLive ? "canceled" : "done",
-      statusDetail: wasLive ? "interrupted" : null,
-      startedAt: null,
-      endedAt: null,
-      durationMs: null,
-      usage: null,
-      diff: null,
-    })),
+    contestants: info.config.agents.map((entry, slot) => {
+      const agentType = typeof entry === "string" ? entry : entry.agent
+      return {
+        slot,
+        agentType: agentType as AgentType,
+        modelOptions: [],
+        effortOptions: [],
+        selectedModel: null,
+        selectedEffort: null,
+        contextKey: null,
+        connectionId: null,
+        conversationId: null,
+        worktreePath: null,
+        branchName: null,
+        status: wasLive ? "canceled" : "done",
+        statusDetail: wasLive ? "interrupted" : null,
+        startedAt: null,
+        endedAt: null,
+        durationMs: null,
+        usage: null,
+        diff: null,
+      }
+    }),
   }
 }
 
@@ -268,7 +273,9 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
     judgeAgent,
   }) => {
     const config: PkRoundConfig = {
-      agents: agents as string[],
+      agents: agents.map((a) =>
+        a.label ? { agent: a.agentType, label: a.label } : a.agentType
+      ),
       permission_mode: permissionMode ?? "default",
       bare_mode: bareMode ?? false,
       effort: effort ?? "default",
@@ -288,8 +295,9 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       judgeAgent: judgeAgent ?? null,
       judgeResult: null,
       judgeStatus: "idle",
-      contestants: agents.map((agentType) => ({
-        agentType,
+      contestants: agents.map((a, slot) => ({
+        slot,
+        agentType: a.agentType,
         modelOptions: [],
         effortOptions: [],
         selectedModel: null,
@@ -315,7 +323,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
     return round
   },
 
-  updateContestant: (roundId, agentType, patch) => {
+  updateContestant: (roundId, slot, patch) => {
     set((state) => ({
       rounds: state.rounds.map((round) =>
         round.id !== roundId
@@ -323,7 +331,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
           : {
               ...round,
               contestants: round.contestants.map((c) =>
-                c.agentType !== agentType ? c : { ...c, ...patch }
+                c.slot !== slot ? c : { ...c, ...patch }
               ),
             }
       ),

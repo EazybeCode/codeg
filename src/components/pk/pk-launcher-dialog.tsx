@@ -87,7 +87,9 @@ export function PkLauncherDialog() {
     // 复赛预填:上次配置的选手若仍可参与则沿用。
     const last = loadLastLauncherConfig()
     if (last && last.agents.length > 0) {
-      setSelected((prev) => (prev.length > 0 ? prev : last.agents))
+      setSelected((prev) =>
+        prev.length > 0 ? prev : last.agents.map((a) => a.agentType)
+      )
       setTask(last.task ?? "")
       setPermissionMode(last.permissionMode)
       setBareMode(last.bareMode)
@@ -182,7 +184,7 @@ export function PkLauncherDialog() {
     }
     setStartError(null)
     saveLastLauncherConfig({
-      agents: selected,
+      agents: selected.map((agentType) => ({ agentType })),
       permissionMode,
       bareMode,
       effort,
@@ -193,7 +195,7 @@ export function PkLauncherDialog() {
       task: task.trim(),
       folderId,
       workingDir,
-      agents: selected,
+      agents: selected.map((agentType) => ({ agentType })),
       permissionMode,
       bareMode,
       effort,

@@ -86,7 +86,7 @@ export const PkScoreboard = forwardRef<
           contestant.status === "running" || contestant.status === "connecting"
         return (
           <div
-            key={contestant.agentType}
+            key={contestant.slot}
             className="flex w-56 shrink-0 items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2"
           >
             <span

@@ -443,7 +443,7 @@ export function usePkRound(): {
     return unsub
   }, [])
 
-  // Map connectionId → {roundId, agentType} so the event subscription can
+  // Map connectionId → {roundId, slot} so the event subscription can
   // resolve envelopes without re-subscribing as rounds change.
   // `isJudge: true` marks the judge agent connection — it uses the same
   // event pipeline but settles into judgeResult instead of contestant state.
@@ -452,7 +452,7 @@ export function usePkRound(): {
       string,
       {
         roundId: string
-        agentType: PkContestant["agentType"]
+        slot: number
         isJudge?: boolean
       }
     >()
@@ -567,10 +567,11 @@ export function usePkRound(): {
               .getState()
               .rounds.find((r) => r.id === roundId)
             const fresh = freshRound?.contestants.find(
-              (c) => c.agentType === contestant.agentType
+              (c) => c.slot === contestant.slot
             )
             return {
               agentType: contestant.agentType,
+              slot: contestant.slot,
               diff: fresh?.diff ?? "(no diff available)",
             }
           })
@@ -596,7 +597,7 @@ export function usePkRound(): {
         if (connectionId) {
           contestantsByConnection.current.set(connectionId, {
             roundId,
-            agentType: round.judgeAgent as PkContestant["agentType"],
+            slot: -1,
             isJudge: true,
           })
         }
@@ -644,19 +645,17 @@ export function usePkRound(): {
   const settleContestant = useCallback(
     async (
       roundId: string,
-      agentType: PkContestant["agentType"],
+      slot: number,
       outcome: "done" | "error",
       detail?: string
     ) => {
       const endedAt = Date.now()
       const round = roundsRef.current.find((r) => r.id === roundId)
-      const contestant = round?.contestants.find(
-        (c) => c.agentType === agentType
-      )
+      const contestant = round?.contestants.find((c) => c.slot === slot)
       if (!round || !contestant) return
 
       const startedAt = contestant.startedAt ?? endedAt
-      updateContestant(roundId, agentType, {
+      updateContestant(roundId, slot, {
         status: outcome,
         statusDetail: detail ?? null,
         endedAt,
@@ -665,7 +664,7 @@ export function usePkRound(): {
       if (contestant.conversationId != null) {
         const usage = await fetchUsage(contestant.conversationId)
         if (usage) {
-          updateContestant(roundId, agentType, { usage })
+          updateContestant(roundId, slot, { usage })
         }
       }
 
@@ -742,9 +741,7 @@ export function usePkRound(): {
     }
 
     const round = roundsRef.current.find((r) => r.id === entry.roundId)
-    const contestant = round?.contestants.find(
-      (c) => c.agentType === entry.agentType
-    )
+    const contestant = round?.contestants.find((c) => c.slot === entry.slot)
     if (!round || !contestant) return
 
     if (envelope.type === "error") {
@@ -754,7 +751,7 @@ export function usePkRound(): {
       ) {
         void settleContestant(
           entry.roundId,
-          entry.agentType,
+          entry.slot,
           "error",
           envelope.message
         )
@@ -768,7 +765,7 @@ export function usePkRound(): {
     // prompting→settled would leave finished contestants stuck on "running".
     if (envelope.type === "turn_complete") {
       if (contestant.status === "running") {
-        void settleContestant(entry.roundId, entry.agentType, "done")
+        void settleContestant(entry.roundId, entry.slot, "done")
       }
       return
     }
@@ -784,7 +781,7 @@ export function usePkRound(): {
       ) {
         void settleContestant(
           entry.roundId,
-          entry.agentType,
+          entry.slot,
           "error",
           "连接中断(空闲回收或进程退出)"
         )
@@ -793,7 +790,7 @@ export function usePkRound(): {
     }
     if (envelope.status === "prompting") {
       if (contestant.status === "connecting") {
-        updateContestant(entry.roundId, entry.agentType, {
+        updateContestant(entry.roundId, entry.slot, {
           status: "running",
           startedAt: Date.now(),
         })
@@ -803,20 +800,21 @@ export function usePkRound(): {
 
   const startRound = useCallback(
     async (round: PkRound) => {
-      for (const agentType of round.contestants.map((c) => c.agentType)) {
-        const contextKey = contestantContextKey(round.id, agentType)
-        const branchName = contestantBranchName(round.id, agentType)
-        const worktreePath = `${round.workingDir}/.codeg-pk/${round.id}/${agentType}`
+      for (const contestant of round.contestants) {
+        const { slot, agentType } = contestant
+        const contextKey = contestantContextKey(round.id, slot)
+        const branchName = contestantBranchName(round.id, slot)
+        const worktreePath = `${round.workingDir}/.codeg-pk/${round.id}/${slot}`
         try {
           await gitWorktreeAdd(round.workingDir, branchName, worktreePath)
         } catch (error) {
-          updateContestant(round.id, agentType, {
+          updateContestant(round.id, slot, {
             status: "error",
             statusDetail: `worktree: ${String(error)}`,
           })
           continue
         }
-        updateContestant(round.id, agentType, {
+        updateContestant(round.id, slot, {
           branchName,
           worktreePath,
         })
@@ -831,13 +829,13 @@ export function usePkRound(): {
             `PK · ${taskPreview}${round.task.length > 60 ? "…" : ""}`
           )
         } catch (error) {
-          updateContestant(round.id, agentType, {
+          updateContestant(round.id, slot, {
             status: "error",
             statusDetail: `conversation: ${String(error)}`,
           })
           continue
         }
-        updateContestant(round.id, agentType, {
+        updateContestant(round.id, slot, {
           conversationId,
           contextKey,
           status: "connecting",
@@ -850,9 +848,9 @@ export function usePkRound(): {
           if (connectionId) {
             contestantsByConnection.current.set(connectionId, {
               roundId: round.id,
-              agentType,
+              slot,
             })
-            updateContestant(round.id, agentType, { connectionId })
+            updateContestant(round.id, slot, { connectionId })
             // LiveTranscriptView resolves its connection via
             // useConnectionStateById, which looks the store up BY
             // connectionId — the entry shape only delegation children have
@@ -881,7 +879,7 @@ export function usePkRound(): {
             connectionId,
             round.effort
           )
-          updateContestant(round.id, agentType, {
+          updateContestant(round.id, slot, {
             status: "ready",
             modelOptions: prepared.modelOptions,
             effortOptions: prepared.effortOptions,
@@ -895,7 +893,7 @@ export function usePkRound(): {
                 : null,
           })
         } catch (error) {
-          updateContestant(round.id, agentType, {
+          updateContestant(round.id, slot, {
             status: "error",
             statusDetail: `connect/prompt: ${String(error)}`,
           })
@@ -942,7 +940,7 @@ export function usePkRound(): {
           }
           void disconnect(contestant.contextKey).catch(() => undefined)
         }
-        updateContestant(round.id, contestant.agentType, {
+        updateContestant(round.id, contestant.slot, {
           status: "canceled",
           endedAt: Date.now(),
         })
@@ -973,7 +971,7 @@ export function usePkRound(): {
           )
       )
       for (const contestant of round.contestants) {
-        updateContestant(round.id, contestant.agentType, {
+        updateContestant(round.id, contestant.slot, {
           worktreePath: null,
         })
       }
@@ -995,11 +993,11 @@ export function usePkRound(): {
             ? // 取不到基准分支名时退回工作区 diff(仅未提交改动)。
               await gitDiff(contestant.worktreePath)
             : await gitDiffWithBranch(contestant.worktreePath, base)
-        updateContestant(round.id, contestant.agentType, {
+        updateContestant(round.id, contestant.slot, {
           diff: diff.trim() === "" ? "（无可比较内容:选手未改动工作区）" : diff,
         })
       } catch (error) {
-        updateContestant(round.id, contestant.agentType, {
+        updateContestant(round.id, contestant.slot, {
           diff: `diff unavailable: ${String(error)}`,
         })
       }
@@ -1029,7 +1027,7 @@ export function usePkRound(): {
                 }
               )
             } catch (error) {
-              updateContestant(round.id, contestant.agentType, {
+              updateContestant(round.id, contestant.slot, {
                 status: "error",
                 statusDetail: `prompt: ${String(error)}`,
               })
@@ -1057,11 +1055,11 @@ export function usePkRound(): {
       try {
         await setConfigOption(contestant.contextKey, configId, value)
         if (configId === "model" || configId === "model_id") {
-          updateContestant(round.id, contestant.agentType, {
+          updateContestant(round.id, contestant.slot, {
             selectedModel: value,
           })
         } else {
-          updateContestant(round.id, contestant.agentType, {
+          updateContestant(round.id, contestant.slot, {
             selectedEffort: value,
           })
         }
