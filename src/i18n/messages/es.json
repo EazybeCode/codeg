@@ -5079,7 +5079,8 @@
     "judge": {
       "title": "Veredicto del juez",
       "running": "Evaluando…",
-      "error": "El juez falló"
+      "error": "El juez falló",
+      "rerun": "Reevaluar"
     },
     "minimized": {
       "restore": "Volver a la arena",

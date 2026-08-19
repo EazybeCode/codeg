@@ -5079,7 +5079,8 @@
     "judge": {
       "title": "Schiedsrichterurteil",
       "running": "Auswertung…",
-      "error": "Schiedsrichter fehlgeschlagen"
+      "error": "Schiedsrichter fehlgeschlagen",
+      "rerun": "Neu bewerten"
     },
     "minimized": {
       "restore": "Zurück zur Arena",

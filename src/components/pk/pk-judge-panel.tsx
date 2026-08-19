@@ -31,10 +31,12 @@ export function PkJudgePanel({
   judgeStatus,
   judgeResult,
   judgeAgent,
+  onRerun,
 }: {
   judgeStatus: PkJudgeStatus
   judgeResult: PkJudgeResult | null
   judgeAgent: string
+  onRerun?: () => void
 }) {
   const t = useTranslations("PkArena.judge")
 
@@ -60,6 +62,15 @@ export function PkJudgePanel({
           <span className="text-xs text-red-600 dark:text-red-400">
             {t("error")}
           </span>
+        ) : null}
+        {onRerun ? (
+          <button
+            type="button"
+            onClick={onRerun}
+            className="ml-auto inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            {t("rerun")}
+          </button>
         ) : null}
       </div>
 

@@ -5079,7 +5079,8 @@
     "judge": {
       "title": "裁判裁决",
       "running": "评审中…",
-      "error": "裁判失败"
+      "error": "裁判失败",
+      "rerun": "重新评分"
     },
     "minimized": {
       "restore": "回到竞技场",

@@ -5079,7 +5079,8 @@
     "judge": {
       "title": "審査員の評決",
       "running": "評価中…",
-      "error": "審査員が失敗しました"
+      "error": "審査員が失敗しました",
+      "rerun": "再評価"
     },
     "minimized": {
       "restore": "アリーナに戻る",

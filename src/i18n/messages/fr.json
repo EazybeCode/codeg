@@ -5079,7 +5079,8 @@
     "judge": {
       "title": "Verdict du juge",
       "running": "Évaluation…",
-      "error": "Le juge a échoué"
+      "error": "Le juge a échoué",
+      "rerun": "Réévaluer"
     },
     "minimized": {
       "restore": "Retour à l'arène",

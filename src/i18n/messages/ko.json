@@ -5079,7 +5079,8 @@
     "judge": {
       "title": "심판 평결",
       "running": "평가 중…",
-      "error": "심판 실패"
+      "error": "심판 실패",
+      "rerun": "재평가"
     },
     "minimized": {
       "restore": "아레나로 돌아가기",

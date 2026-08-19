@@ -5079,7 +5079,8 @@
     "judge": {
       "title": "Judge Verdict",
       "running": "Evaluating…",
-      "error": "Judge failed"
+      "error": "Judge failed",
+      "rerun": "Re-evaluate"
     },
     "minimized": {
       "restore": "Back to the arena",

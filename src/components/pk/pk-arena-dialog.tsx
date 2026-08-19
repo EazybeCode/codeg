@@ -52,6 +52,7 @@ export function PkArenaDialog() {
     disconnectFinished,
     startPrompt,
     applyContestantSelection,
+    runJudge,
   } = usePkRound()
   const markRound = usePkArenaStore((s) => s.markRound)
   const removeRound = usePkArenaStore((s) => s.removeRound)
@@ -336,6 +337,11 @@ export function PkArenaDialog() {
                   judgeStatus={round.judgeStatus}
                   judgeResult={round.judgeResult}
                   judgeAgent={round.judgeAgent}
+                  onRerun={
+                    judgeStatus === "done" || judgeStatus === "error"
+                      ? () => void runJudge(round)
+                      : undefined
+                  }
                 />
               ) : null}
             </div>
