@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react"
 import { PkArenaDialog } from "@/components/pk/pk-arena-dialog"
 import { PkLauncherDialog } from "@/components/pk/pk-launcher-dialog"
 import { PkMinimizedPill } from "@/components/pk/pk-minimized-pill"
-import { usePkRound } from "@/hooks/use-pk-round"
+import { usePkRound, fetchUsage } from "@/hooks/use-pk-round"
 import { usePkArenaStore, dbRoundToStoreRound } from "@/stores/pk-arena-store"
 import { pkRoundList } from "@/lib/api"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
@@ -46,6 +46,27 @@ export function PkArenaHost() {
           })
           .filter((r) => r.workingDir !== "")
         hydrateFromDb(storeRounds)
+        // Backfill usage for finished contestants — usage is live-only in
+        // the store (issue #4 / #16), so after a restart it's null. Fetch
+        // it from the conversation turns for any contestant that has a
+        // conversationId and is done/error/canceled.
+        for (const round of storeRounds) {
+          for (const c of round.contestants) {
+            if (
+              c.conversationId != null &&
+              (c.status === "done" ||
+                c.status === "error" ||
+                c.status === "canceled")
+            ) {
+              const usage = await fetchUsage(c.conversationId)
+              if (usage) {
+                usePkArenaStore
+                  .getState()
+                  .updateContestant(round.id, c.slot, { usage })
+              }
+            }
+          }
+        }
       } catch {
         hydrateFromDb([])
       }

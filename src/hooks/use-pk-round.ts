@@ -468,7 +468,7 @@ async function applyPreparedOptions(
   }
 }
 
-async function fetchUsage(
+export async function fetchUsage(
   conversationId: number
 ): Promise<PkContestantUsage | null> {
   try {
