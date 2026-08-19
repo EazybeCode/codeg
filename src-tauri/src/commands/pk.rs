@@ -54,7 +54,8 @@ pub async fn pk_round_delete_core(db: &AppDatabase, id: i32) -> Result<(), DbErr
 
 // -- Tauri command wrappers (desktop mode only) --
 
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
 pub async fn pk_round_list(
     db: tauri::State<'_, AppDatabase>,
     folder_id: Option<i32>,
@@ -62,7 +63,8 @@ pub async fn pk_round_list(
     pk_round_list_core(&db, folder_id).await
 }
 
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
 pub async fn pk_round_get(
     db: tauri::State<'_, AppDatabase>,
     id: i32,
@@ -70,7 +72,8 @@ pub async fn pk_round_get(
     pk_round_get_core(&db, id).await
 }
 
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
 pub async fn pk_round_create(
     db: tauri::State<'_, AppDatabase>,
     folder_id: i32,
@@ -80,7 +83,8 @@ pub async fn pk_round_create(
     pk_round_create_core(&db, folder_id, task, config).await
 }
 
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
 pub async fn pk_round_update_status(
     db: tauri::State<'_, AppDatabase>,
     id: i32,
@@ -89,7 +93,8 @@ pub async fn pk_round_update_status(
     pk_round_update_status_core(&db, id, status).await
 }
 
-#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
 pub async fn pk_round_delete(
     db: tauri::State<'_, AppDatabase>,
     id: i32,
