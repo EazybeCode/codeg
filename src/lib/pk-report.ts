@@ -139,6 +139,32 @@ export function buildPkReportHtml(
       ? "就绪"
       : "进行中"
 
+  const judgeSection =
+    round.judgeResult != null && round.judgeResult.scores.length > 0
+      ? (() => {
+          const scoreRows = round.judgeResult.scores
+            .slice()
+            .sort((a, b) => a.rank - b.rank)
+            .map(
+              (s) => `
+          <tr>
+            <td class=agent>${esc(getAgentLabel(s.agentType))}</td>
+            <td><b>#${s.rank}</b></td>
+            <td>${s.score}</td>
+            <td>${esc(s.comment)}</td>
+          </tr>`
+            )
+            .join("")
+          return `
+  <h2>⚖ 裁判评分</h2>
+  <p class=meta>${esc(round.judgeResult.summary)}</p>
+  <table>
+    <thead><tr><th>选手</th><th>排名</th><th>分数</th><th>点评</th></tr></thead>
+    <tbody>${scoreRows}</tbody>
+  </table>`
+        })()
+      : ""
+
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -189,6 +215,8 @@ export function buildPkReportHtml(
 
   <h2>各选手详情</h2>
   ${sections}
+
+  ${judgeSection}
 
   <p class="meta dim">由 codeg Agent PK 竞技场生成</p>
 </body>
