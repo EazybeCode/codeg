@@ -5019,7 +5019,10 @@
       },
       "judgeLabel": "裁判(可選)",
       "judgeNone": "無裁判",
-      "judgeHint": "所有選手完成後,裁判 agent 會讀取每個選手的 diff,給出結構化評分和排名。"
+      "judgeHint": "所有選手完成後,裁判 agent 會讀取每個選手的 diff,給出結構化評分和排名。",
+      "fromCommit": "📋 從提交拉取",
+      "loadingCommits": "載入提交中…",
+      "noCommits": "未找到提交。"
     },
     "scoreboard": {
       "status": {

@@ -5019,7 +5019,10 @@
       },
       "judgeLabel": "Judge (optional)",
       "judgeNone": "No judge",
-      "judgeHint": "After all contestants finish, this agent reads every diff and produces a structured verdict with scores and rankings."
+      "judgeHint": "After all contestants finish, this agent reads every diff and produces a structured verdict with scores and rankings.",
+      "fromCommit": "📋 From commit",
+      "loadingCommits": "Loading commits…",
+      "noCommits": "No commits found."
     },
     "scoreboard": {
       "status": {

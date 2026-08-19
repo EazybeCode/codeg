@@ -5019,7 +5019,10 @@
       },
       "judgeLabel": "Schiedsrichter (optional)",
       "judgeNone": "Kein Schiedsrichter",
-      "judgeHint": "Nachdem alle Teilnehmer fertig sind, liest dieser Agent jeden Diff und erstellt ein strukturiertes Urteil mit Punktzahlen und Rängen."
+      "judgeHint": "Nachdem alle Teilnehmer fertig sind, liest dieser Agent jeden Diff und erstellt ein strukturiertes Urteil mit Punktzahlen und Rängen.",
+      "fromCommit": "📋 Aus Commit",
+      "loadingCommits": "Commits laden…",
+      "noCommits": "Keine Commits gefunden."
     },
     "scoreboard": {
       "status": {

@@ -5019,7 +5019,10 @@
       },
       "judgeLabel": "Juiz (opcional)",
       "judgeNone": "Sem juiz",
-      "judgeHint": "Após todos os concorrentes terminarem, este agente lê cada diff e produz um veredito estruturado com pontuações e classificações."
+      "judgeHint": "Após todos os concorrentes terminarem, este agente lê cada diff e produz um veredito estruturado com pontuações e classificações.",
+      "fromCommit": "📋 Do commit",
+      "loadingCommits": "Carregando commits…",
+      "noCommits": "Nenhum commit encontrado."
     },
     "scoreboard": {
       "status": {

@@ -10,7 +10,13 @@ import {
 } from "@/components/ui/dialog"
 import { AgentIcon } from "@/components/agent-icon"
 import { useAcpAgents } from "@/hooks/use-acp-agents"
-import { acpGetAgentStatus, getFolder, getGitBranch, gitInit } from "@/lib/api"
+import {
+  acpGetAgentStatus,
+  getFolder,
+  getGitBranch,
+  gitInit,
+  gitLog,
+} from "@/lib/api"
 import { getAgentLabel } from "@/lib/custom-agents"
 import { PK_TEMPLATES } from "@/lib/pk-templates"
 import type { AgentType } from "@/lib/types"
@@ -60,6 +66,11 @@ export function PkLauncherDialog() {
   const [effort, setEffort] = useState<PkEffortLevel>("default")
   const [judgeAgent, setJudgeAgent] = useState<string | null>(null)
   const [startError, setStartError] = useState<string | null>(null)
+  const [commitPickerOpen, setCommitPickerOpen] = useState(false)
+  const [commits, setCommits] = useState<
+    Array<{ hash: string; message: string }>
+  >([])
+  const [commitsLoading, setCommitsLoading] = useState(false)
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
     setIsGitRepo(null)
@@ -277,7 +288,7 @@ export function PkLauncherDialog() {
               {t("taskLabel")}
             </label>
             {/* Quick-start templates — one click fills the task textarea. */}
-            <div className="mb-2 flex flex-wrap gap-1.5">
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
               {PK_TEMPLATES.map((tpl) => (
                 <button
                   key={tpl.id}
@@ -290,7 +301,70 @@ export function PkLauncherDialog() {
                   {t(`templates.${tpl.labelKey}` as "templates.pelican")}
                 </button>
               ))}
+              {/* Pull a task from recent git commits — real-engineering PK. */}
+              {workingDir != null && isGitRepo === true ? (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (commitPickerOpen) {
+                      setCommitPickerOpen(false)
+                      return
+                    }
+                    setCommitsLoading(true)
+                    setCommitPickerOpen(true)
+                    try {
+                      const result = await gitLog(workingDir, 5)
+                      setCommits(
+                        result.entries.map((e) => ({
+                          hash: e.hash,
+                          message: e.message,
+                        }))
+                      )
+                    } catch {
+                      setCommits([])
+                    } finally {
+                      setCommitsLoading(false)
+                    }
+                  }}
+                  className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  {t("fromCommit")}
+                </button>
+              ) : null}
             </div>
+            {commitPickerOpen ? (
+              <div className="mb-2 max-h-32 overflow-auto rounded-lg border border-border bg-background">
+                {commitsLoading ? (
+                  <div className="px-3 py-2 text-xs text-muted-foreground">
+                    {t("loadingCommits")}
+                  </div>
+                ) : commits.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-muted-foreground">
+                    {t("noCommits")}
+                  </div>
+                ) : (
+                  commits.map((commit) => (
+                    <button
+                      key={commit.hash}
+                      type="button"
+                      onClick={() => {
+                        setTask(
+                          `Reproduce the change from commit ${commit.hash}: ${commit.message}`
+                        )
+                        setCommitPickerOpen(false)
+                      }}
+                      className="block w-full truncate px-3 py-1.5 text-left text-xs text-foreground hover:bg-muted"
+                      title={commit.message}
+                    >
+                      <span className="font-mono text-muted-foreground">
+                        {commit.hash.slice(0, 7)}
+                      </span>{" "}
+                      {commit.message.split("\n")[0]}
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
             <textarea
               id="pk-task"
               value={task}
