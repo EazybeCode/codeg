@@ -327,16 +327,18 @@ export function PkArenaDialog() {
                 </button>
               </div>
             ) : null}
-            <PkScoreboard ref={scoreboardRef} contestants={round.contestants} />
+            <div ref={scoreboardRef}>
+              <PkScoreboard contestants={round.contestants} />
 
-            {/* Judge verdict panel — shown when a judge is configured. */}
-            {round.judgeAgent ? (
-              <PkJudgePanel
-                judgeStatus={round.judgeStatus}
-                judgeResult={round.judgeResult}
-                judgeAgent={round.judgeAgent}
-              />
-            ) : null}
+              {/* Judge verdict panel — shown when a judge is configured. */}
+              {round.judgeAgent ? (
+                <PkJudgePanel
+                  judgeStatus={round.judgeStatus}
+                  judgeResult={round.judgeResult}
+                  judgeAgent={round.judgeAgent}
+                />
+              ) : null}
+            </div>
 
             <div className="flex items-center gap-1 border-b border-border px-4">
               {(["battle", "diff"] as const).map((key) => (
