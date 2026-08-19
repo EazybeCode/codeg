@@ -316,6 +316,40 @@
 
 ---
 
+## 问题 16：导出报告里输出 token 和轮次全是 "—"
+
+**严重程度**：中
+
+**现状**：`pk-report.ts:105-106` 里 `c.usage ? c.usage.outputTokens : "—"`——usage 为 null 时显示 "—"。实际跑完的 PK 报告里这两列全是 "—"。
+
+**根因有三层：**
+
+1. **问题 #0 场景**（最常见）：选手卡在 ready，settleContestant（`use-pk-round.ts:779-790`）从不执行，fetchUsage 从不被调用，usage 永远 null。
+
+2. **重启/hydrate 场景**：即使选手曾经正常 done 且 fetchUsage 调过，重启后 hydrate 把 usage 重置为 null：
+   - `dbRoundToStoreRound`（`pk-arena-store.ts:246`）：硬编码 `usage: null`
+   - `createRound`（`:315`）：同 `usage: null`
+   - `pk-arena-host.tsx:40-48`：hydrate 从 DB 加载 rounds 后直接 `hydrateFromDb(storeRounds)`，**没有调 fetchUsage 重新拉取**
+   - store 注释（`:15`）说 "Live-only fields (connectionId, diff, usage) stay in the Zustand store — they are meaningless across restarts"——这个设计假设导致 usage 在重启后永远丢失
+
+3. **即使 fetchUsage 被调用**（`use-pk-round.ts:471-489`）：
+   - 调 `getFolderConversation` 拿 turns，遍历 assistant turns 累加 `turn.usage?.output_tokens`
+   - 如果 parser 没从 agent session 文件提取到 usage（某些 agent 格式不包含 token 信息），turn.usage 为 None
+   - 此时返回 `{ inputTokens: 0, outputTokens: 0, turnCount: N }`——不是 "—" 而是 0
+   - DB 里 `token_usage_turn` 表 0 行，说明 token usage 同步机制也有问题
+
+**实跑证据**（round 7）：
+- `token_usage_turn` 表 0 行
+- 5 个选手 status 全是 ready（问题 #0），settleContestant 从不执行
+- 报告里 token 和轮次全 "—"
+
+**修复方向**：
+1. hydrate 时对已完成的选手调 fetchUsage 回填（usage 不应该被当作 live-only）
+2. 或把 usage 持久化到 DB（pk_round 或 conversation 表）
+3. 修复问题 #0 让选手正常走到 settleContestant
+
+---
+
 ## 优先级排序
 
 | 优先级 | 问题 | 理由 |
@@ -329,6 +363,7 @@
 | P1 | #13 arena 对话框无法关闭 | 影响 server 模式体验 |
 | P1 | #14b PK 标题被 agent 覆盖 | 一行修复，信息丢失 |
 | P1 | #15 battle/diff 列不自适应宽度 | 视觉体验差 |
+| P1 | #16 报告里 token/轮次全 "—" | 导出产物不完整 |
 | P2 | #14a 回合切换下拉框信息不足 | 体验差 |
 | P2 | #14c PK 会话侧边栏不可见 | 体验差 |
 | P2 | #6 控制变量 UI 未完成 | 功能不完整 |
