@@ -698,9 +698,26 @@ export interface PkRoundInfo {
   config: PkRoundConfig
   status: PkRoundStatus
   failure_reason: string | null
+  judge_result?: PkJudgeResultDto | null
+  judge_status: string
   created_at: string
   updated_at: string
   finished_at: string | null
+}
+
+/** Serialized judge verdict shape stored in the DB. */
+export interface PkJudgeResultDto {
+  scores: PkJudgeScoreDto[]
+  summary: string
+  rawText: string
+}
+
+/** One contestant's judge verdict. */
+export interface PkJudgeScoreDto {
+  agentType: string
+  score: number
+  rank: number
+  comment: string
 }
 
 /** Mirrors Rust `FolderKind` (src-tauri/src/db/entities/folder.rs).

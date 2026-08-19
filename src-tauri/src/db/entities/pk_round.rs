@@ -29,6 +29,13 @@ pub struct Model {
     pub config: String,
     pub status: PkRoundStatus,
     pub failure_reason: Option<String>,
+    /// JSON: serialized judge verdict (scores, summary, raw text). Null if
+    /// no judge was configured or the judge hasn't run yet.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub judge_result: Option<String>,
+    /// idle | running | done | error | skipped
+    #[sea_orm(column_type = "Text", nullable)]
+    pub judge_status: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub finished_at: Option<DateTimeUtc>,

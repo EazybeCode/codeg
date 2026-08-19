@@ -36,6 +36,14 @@ pub struct UpdateStatusParams {
     pub status: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJudgeParams {
+    pub id: i32,
+    pub judge_result: Option<String>,
+    pub judge_status: String,
+}
+
 pub async fn pk_round_list(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<ListParams>,
@@ -81,6 +89,16 @@ pub async fn pk_round_delete(
     Json(params): Json<IdParams>,
 ) -> Result<Json<()>, AppCommandError> {
     core::pk_round_delete_core(&state.db, params.id)
+        .await
+        .map_err(AppCommandError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn pk_round_update_judge(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<UpdateJudgeParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::pk_round_update_judge_core(&state.db, params.id, params.judge_result, params.judge_status)
         .await
         .map_err(AppCommandError::from)?;
     Ok(Json(()))

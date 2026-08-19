@@ -2,7 +2,12 @@
 
 import { create } from "zustand"
 import type { AgentType, PkRoundConfig, PkRoundInfo } from "@/lib/types"
-import { pkRoundCreate, pkRoundUpdateStatus, pkRoundDelete } from "@/lib/api"
+import {
+  pkRoundCreate,
+  pkRoundUpdateStatus,
+  pkRoundDelete,
+  pkRoundUpdateJudge,
+} from "@/lib/api"
 
 /**
  * Agent PK arena — one task, N agents, isolated worktrees, a scoreboard.
@@ -222,8 +227,20 @@ export function dbRoundToStoreRound(
     bareMode: info.config.bare_mode ?? false,
     effort: (info.config.effort as PkEffortLevel) ?? "default",
     judgeAgent: info.config.judge_agent ?? null,
-    judgeResult: null,
-    judgeStatus: "idle",
+    judgeResult:
+      info.judge_result != null
+        ? {
+            scores: (info.judge_result.scores ?? []).map((s) => ({
+              agentType: s.agentType,
+              score: s.score,
+              rank: s.rank,
+              comment: s.comment,
+            })),
+            summary: info.judge_result.summary ?? "",
+            rawText: info.judge_result.rawText ?? "",
+          }
+        : null,
+    judgeStatus: (info.judge_status as PkJudgeStatus) ?? "idle",
     contestants: info.config.agents.map((entry, slot) => {
       const agentType = typeof entry === "string" ? entry : entry.agent
       return {
@@ -375,5 +392,19 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
             }
       ),
     }))
+    // Persist judge verdict + status to DB so it survives refresh/restart
+    // (fixes issue #4). Fire-and-forget — the store is the live source of
+    // truth; the DB is for persistence.
+    const round = usePkArenaStore
+      .getState()
+      .rounds.find((r) => r.id === roundId)
+    if (round) {
+      const merged = patch.judgeResult ?? round.judgeResult ?? null
+      void pkRoundUpdateJudge(
+        Number(roundId),
+        merged,
+        patch.judgeStatus ?? round.judgeStatus
+      ).catch(() => undefined)
+    }
   },
 }))

@@ -52,6 +52,15 @@ pub async fn pk_round_delete_core(db: &AppDatabase, id: i32) -> Result<(), DbErr
     pk_round_service::soft_delete(&db.conn, id).await
 }
 
+pub async fn pk_round_update_judge_core(
+    db: &AppDatabase,
+    id: i32,
+    judge_result: Option<String>,
+    judge_status: String,
+) -> Result<(), DbError> {
+    pk_round_service::update_judge(&db.conn, id, judge_result, judge_status).await
+}
+
 // -- Tauri command wrappers (desktop mode only) --
 
 #[cfg(feature = "tauri-runtime")]
@@ -100,4 +109,15 @@ pub async fn pk_round_delete(
     id: i32,
 ) -> Result<(), DbError> {
     pk_round_delete_core(&db, id).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
+pub async fn pk_round_update_judge(
+    db: tauri::State<'_, AppDatabase>,
+    id: i32,
+    judge_result: Option<String>,
+    judge_status: String,
+) -> Result<(), DbError> {
+    pk_round_update_judge_core(&db, id, judge_result, judge_status).await
 }

@@ -73,6 +73,11 @@ pub struct PkRoundInfo {
     pub config: PkRoundConfig,
     pub status: String,
     pub failure_reason: Option<String>,
+    /// JSON-serialized judge verdict, or null if no judge / not yet run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_result: Option<serde_json::Value>,
+    /// idle | running | done | error | skipped
+    pub judge_status: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,

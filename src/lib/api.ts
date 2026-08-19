@@ -147,6 +147,7 @@ import type {
   PkRoundConfig,
   PkRoundInfo,
   PkRoundStatus,
+  PkJudgeResultDto,
 } from "./types"
 
 export async function listConversations(params?: {
@@ -4842,4 +4843,16 @@ export async function pkRoundUpdateStatus(
 
 export async function pkRoundDelete(id: number): Promise<void> {
   return getTransport().call("pk_round_delete", { id })
+}
+
+export async function pkRoundUpdateJudge(
+  id: number,
+  judgeResult: PkJudgeResultDto | null,
+  judgeStatus: string
+): Promise<void> {
+  return getTransport().call("pk_round_update_judge", {
+    id,
+    judgeResult: judgeResult != null ? JSON.stringify(judgeResult) : null,
+    judgeStatus,
+  })
 }

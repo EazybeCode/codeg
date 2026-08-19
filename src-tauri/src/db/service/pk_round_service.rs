@@ -23,6 +23,11 @@ fn to_info(m: pk_round::Model) -> PkRoundInfo {
         .ok()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_else(|| format!("{:?}", m.status));
+    let judge_result = m
+        .judge_result
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let judge_status = m.judge_status.unwrap_or_else(|| "idle".into());
     PkRoundInfo {
         id: m.id,
         folder_id: m.folder_id,
@@ -30,6 +35,8 @@ fn to_info(m: pk_round::Model) -> PkRoundInfo {
         config,
         status,
         failure_reason: m.failure_reason,
+        judge_result,
+        judge_status,
         created_at: m.created_at,
         updated_at: m.updated_at,
         finished_at: m.finished_at,
@@ -51,6 +58,8 @@ pub async fn create(
         config: Set(config_json),
         status: Set(pk_round::PkRoundStatus::Ready),
         failure_reason: Set(None),
+        judge_result: Set(None),
+        judge_status: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
         finished_at: Set(None),
@@ -129,6 +138,27 @@ pub async fn soft_delete(conn: &DatabaseConnection, id: i32) -> Result<(), DbErr
         .ok_or_else(|| DbError::Migration(format!("PK round not found: {id}")))?;
     let mut active: pk_round::ActiveModel = round.into();
     active.deleted_at = Set(Some(Utc::now()));
+    active.update(conn).await?;
+    Ok(())
+}
+
+/// Persist the judge verdict and status. `judge_result` is a pre-serialized
+/// JSON string (the frontend sends the full PkJudgeResult object); passing
+/// None clears it.
+pub async fn update_judge(
+    conn: &DatabaseConnection,
+    id: i32,
+    judge_result: Option<String>,
+    judge_status: String,
+) -> Result<(), DbError> {
+    let round = pk_round::Entity::find_by_id(id)
+        .one(conn)
+        .await?
+        .ok_or_else(|| DbError::Migration(format!("PK round not found: {id}")))?;
+    let mut active: pk_round::ActiveModel = round.into();
+    active.judge_result = Set(judge_result);
+    active.judge_status = Set(Some(judge_status));
+    active.updated_at = Set(Utc::now());
     active.update(conn).await?;
     Ok(())
 }

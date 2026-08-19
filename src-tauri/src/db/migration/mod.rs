@@ -39,6 +39,7 @@ mod m20260807_000001_work_task_scheduled_at;
 mod m20260808_000001_custom_agent_supports_mcp;
 mod m20260817_000001_work_task_conversation_title;
 mod m20260819_000001_pk_round;
+mod m20260819_000002_pk_round_judge;
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -84,6 +85,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260808_000001_custom_agent_supports_mcp::Migration),
             Box::new(m20260817_000001_work_task_conversation_title::Migration),
             Box::new(m20260819_000001_pk_round::Migration),
+            Box::new(m20260819_000002_pk_round_judge::Migration),
         ]
     }
 }

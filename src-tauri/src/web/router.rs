@@ -1390,6 +1390,10 @@ pub fn build_router(
             post(handlers::pk::pk_round_update_status),
         )
         .route("/pk_round_delete", post(handlers::pk::pk_round_delete))
+        .route(
+            "/pk_round_update_judge",
+            post(handlers::pk::pk_round_update_judge),
+        )
         // ─── Workspace background ───
         .route(
             "/background_read",
