@@ -945,10 +945,7 @@ export function usePkRound(): {
       return
     }
     if (envelope.status === "prompting") {
-      if (
-        contestant.status === "connecting" ||
-        contestant.status === "ready"
-      ) {
+      if (contestant.status === "connecting" || contestant.status === "ready") {
         updateContestant(entry.roundId, entry.slot, {
           status: "running",
           startedAt: Date.now(),
@@ -1128,6 +1125,18 @@ export function usePkRound(): {
           status: "canceled",
           endedAt: Date.now(),
         })
+      }
+      // 取消后也触发裁判:已完成的选手(done)仍可参与评分。
+      // 复用 settleContestant 的逻辑——如果配了 judgeAgent 且
+      // judgeStatus === "idle",调 runJudge(修复 issue #1)。
+      const fresh = usePkArenaStore
+        .getState()
+        .rounds.find((r) => r.id === round.id)
+      if (fresh && fresh.judgeAgent && fresh.judgeStatus === "idle") {
+        const hasDone = fresh.contestants.some((c) => c.status === "done")
+        if (hasDone) {
+          void runJudgeRef.current(fresh)
+        }
       }
     },
     [cancel, detachDelegationChild, disconnect, markRound, updateContestant]
