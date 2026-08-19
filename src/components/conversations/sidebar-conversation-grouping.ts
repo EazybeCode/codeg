@@ -297,6 +297,7 @@ export function selectRecentConversationsWithReuse(
   for (const conv of conversations) {
     if (conv.pinned_at != null) continue
     if (!showCompleted && conv.status === "completed") continue
+    if (conv.kind === "pk") continue
     if (conv.kind !== "chat" && !openFolderIds.has(conv.folder_id)) continue
     next.push(conv)
   }

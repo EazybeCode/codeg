@@ -1,11 +1,34 @@
-import { beforeEach, describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
   contestantBranchName,
   contestantContextKey,
+  dbRoundToStoreRound,
   usePkArenaStore,
   type PkRound,
 } from "./pk-arena-store"
-import type { AgentType } from "@/lib/types"
+import type { AgentType, PkRoundInfo } from "@/lib/types"
+
+// Mock the API calls so createRound/markRound/removeRound don't hit the network.
+vi.mock("@/lib/api", () => ({
+  pkRoundCreate: vi.fn().mockResolvedValue({
+    id: 1,
+    folder_id: 7,
+    task: "write a snake game",
+    config: {
+      agents: ["claude_code", "codex"],
+      permission_mode: "default",
+      bare_mode: false,
+      effort: "default",
+    },
+    status: "ready",
+    failure_reason: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    finished_at: null,
+  }),
+  pkRoundUpdateStatus: vi.fn().mockResolvedValue(undefined),
+  pkRoundDelete: vi.fn().mockResolvedValue(undefined),
+}))
 
 function freshStore() {
   usePkArenaStore.setState({
@@ -13,11 +36,13 @@ function freshStore() {
     activeRoundId: null,
     launcherOpen: false,
     arenaOpen: false,
+    pillDismissed: false,
+    hydrating: false,
   })
 }
 
-function makeRound(overrides?: Partial<PkRound>): PkRound {
-  const round = usePkArenaStore.getState().createRound({
+async function makeRound(overrides?: Partial<PkRound>): Promise<PkRound> {
+  const round = await usePkArenaStore.getState().createRound({
     task: "write a snake game",
     folderId: 7,
     workingDir: "/tmp/repo",
@@ -28,12 +53,12 @@ function makeRound(overrides?: Partial<PkRound>): PkRound {
 
 describe("pk arena store", () => {
   beforeEach(() => {
-    window.localStorage.clear()
     freshStore()
+    vi.clearAllMocks()
   })
 
-  it("creates a round with one preparing contestant per agent", () => {
-    const round = makeRound()
+  it("creates a round with one preparing contestant per agent", async () => {
+    const round = await makeRound()
     expect(round.status).toBe("ready")
     expect(round.contestants.map((c) => c.agentType)).toEqual([
       "claude_code",
@@ -52,8 +77,8 @@ describe("pk arena store", () => {
     expect(usePkArenaStore.getState().rounds).toHaveLength(1)
   })
 
-  it("patches a single contestant without touching its peers", () => {
-    const round = makeRound()
+  it("patches a single contestant without touching its peers", async () => {
+    const round = await makeRound()
     usePkArenaStore.getState().updateContestant(round.id, "codex", {
       status: "running",
       startedAt: 1234,
@@ -69,8 +94,8 @@ describe("pk arena store", () => {
     expect(claude?.status).toBe("preparing")
   })
 
-  it("marks round status and removes rounds", () => {
-    const round = makeRound()
+  it("marks round status and removes rounds", async () => {
+    const round = await makeRound()
     usePkArenaStore.getState().markRound(round.id, "finished")
     expect(usePkArenaStore.getState().rounds[0].status).toBe("finished")
 
@@ -79,74 +104,59 @@ describe("pk arena store", () => {
     expect(usePkArenaStore.getState().activeRoundId).toBeNull()
   })
 
-  it("persists rounds without the transient diff payload", () => {
-    const round = makeRound()
-    usePkArenaStore.getState().updateContestant(round.id, "claude_code", {
-      diff: "diff --git a/x b/x\n+huge payload",
-      status: "done",
-    })
-    const raw = window.localStorage.getItem("codeg:pk-arena")
-    expect(raw).toBeTruthy()
-    expect(raw).not.toContain("huge payload")
-  })
-
-  it("marks a still-running round interrupted on rehydration", () => {
-    const round = makeRound()
-    usePkArenaStore.getState().updateContestant(round.id, "codex", {
-      status: "done",
-      durationMs: 5000,
-    })
-    // Simulate a restart: reload the persisted payload into a cold store.
-    const persisted = window.localStorage.getItem("codeg:pk-arena")
-    freshStore()
-    window.localStorage.setItem("codeg:pk-arena", persisted as string)
-    // The store reads localStorage lazily at creation; emulate by calling the
-    // module again through a fresh instance of the revive path.
-    const revived = reviveFromStorage()
-    expect(revived.status).toBe("interrupted")
-    const codex = revived.contestants.find((c) => c.agentType === "codex")
-    const claude = revived.contestants.find(
-      (c) => c.agentType === "claude_code"
-    )
-    expect(codex?.status).toBe("done")
-    expect(claude?.status).toBe("canceled")
-    expect(claude?.statusDetail).toBe("interrupted")
-    expect(claude?.contextKey).toBeNull()
-  })
-
   it("derives branch and context keys from the round id", () => {
     expect(contestantBranchName("r1", "claude_code")).toBe(
       "codeg-pk/r1/claude_code"
     )
     expect(contestantContextKey("r1", "codex")).toBe("pk:r1:codex")
   })
-})
 
-/** Re-import trick: the store reads localStorage at module init, so exercise
- * the revive path by resetting state from storage the way init would. */
-function reviveFromStorage(): PkRound {
-  const raw = window.localStorage.getItem("codeg:pk-arena")
-  const parsed = JSON.parse(raw as string)
-  // Mirror the production revive contract for a running round.
-  const wasLive = parsed[0].status === "ready" || parsed[0].status === "running"
-  return {
-    ...parsed[0],
-    status: wasLive ? "interrupted" : parsed[0].status,
-    contestants: parsed[0].contestants.map(
-      (c: { status: string; statusDetail?: string | null }) => ({
-        ...c,
-        contextKey: null,
-        connectionId: null,
-        status:
-          c.status === "done" || c.status === "error" || c.status === "canceled"
-            ? c.status
-            : "canceled",
-        statusDetail:
-          c.status === "done" || c.status === "error" || c.status === "canceled"
-            ? (c.statusDetail ?? null)
-            : "interrupted",
-        diff: null,
-      })
-    ),
-  }
-}
+  it("revives a running round as interrupted from DB hydration", () => {
+    const dbRound: PkRoundInfo = {
+      id: 42,
+      folder_id: 7,
+      task: "write a snake game",
+      config: {
+        agents: ["claude_code", "codex"],
+        permission_mode: "default",
+        bare_mode: false,
+        effort: "default",
+      },
+      status: "running",
+      failure_reason: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      finished_at: null,
+    }
+    const revived = dbRoundToStoreRound(dbRound, "/tmp/repo")
+    expect(revived.id).toBe("42")
+    expect(revived.status).toBe("interrupted")
+    expect(revived.contestants.map((c) => c.status)).toEqual([
+      "canceled",
+      "canceled",
+    ])
+    expect(revived.contestants.every((c) => c.contextKey === null)).toBe(true)
+  })
+
+  it("revives a finished round unchanged from DB hydration", () => {
+    const dbRound: PkRoundInfo = {
+      id: 43,
+      folder_id: 7,
+      task: "done task",
+      config: {
+        agents: ["codex"],
+        permission_mode: "default",
+        bare_mode: false,
+        effort: "default",
+      },
+      status: "finished",
+      failure_reason: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T01:00:00Z",
+      finished_at: "2026-01-01T01:00:00Z",
+    }
+    const revived = dbRoundToStoreRound(dbRound, "/tmp/repo")
+    expect(revived.status).toBe("finished")
+    expect(revived.contestants[0].status).toBe("done")
+  })
+})

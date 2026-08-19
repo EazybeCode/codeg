@@ -184,7 +184,7 @@ export function PkLauncherDialog() {
       effort,
       task: task.trim(),
     })
-    createRound({
+    void createRound({
       task: task.trim(),
       folderId,
       workingDir,

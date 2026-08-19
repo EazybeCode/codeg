@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef } from "react"
 import {
-  createConversation,
+  createPkConversation,
   getFolderConversation,
   getGitBranch,
   gitDiff,
@@ -550,9 +550,10 @@ export function usePkRound(): {
         let conversationId: number | null = null
         try {
           const taskPreview = round.task.slice(0, 60)
-          conversationId = await createConversation(
+          conversationId = await createPkConversation(
             round.folderId,
             agentType,
+            Number(round.id),
             `PK · ${taskPreview}${round.task.length > 60 ? "…" : ""}`
           )
         } catch (error) {

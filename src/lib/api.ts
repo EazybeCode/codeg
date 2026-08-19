@@ -144,6 +144,9 @@ import type {
   TokenUsageReport,
   TokenUsageSyncResult,
   TokenUsageSyncStatus,
+  PkRoundConfig,
+  PkRoundInfo,
+  PkRoundStatus,
 } from "./types"
 
 export async function listConversations(params?: {
@@ -2777,6 +2780,20 @@ export async function createConversation(
   })
 }
 
+export async function createPkConversation(
+  folderId: number,
+  agentType: AgentType,
+  pkRoundId: number,
+  title?: string
+): Promise<number> {
+  return getTransport().call("create_pk_conversation", {
+    folderId,
+    agentType,
+    title: title ?? null,
+    pkRoundId,
+  })
+}
+
 /**
  * Create a folderless "chat mode" conversation. The backend lazily creates a
  * dated per-conversation scratch dir and a dedicated hidden chat folder
@@ -4794,4 +4811,35 @@ export async function scanExternalConflictsWeb(
     { uploadId, passphrase: passphrase ?? null },
     { timeoutMs: BACKUP_LONG_CALL_TIMEOUT_MS }
   )
+}
+
+// ─── PK Arena Rounds ────────────────────────────────────────────────────────
+
+export async function pkRoundList(
+  folderId?: number | null
+): Promise<PkRoundInfo[]> {
+  return getTransport().call("pk_round_list", { folderId: folderId ?? null })
+}
+
+export async function pkRoundGet(id: number): Promise<PkRoundInfo> {
+  return getTransport().call("pk_round_get", { id })
+}
+
+export async function pkRoundCreate(
+  folderId: number,
+  task: string,
+  config: PkRoundConfig
+): Promise<PkRoundInfo> {
+  return getTransport().call("pk_round_create", { folderId, task, config })
+}
+
+export async function pkRoundUpdateStatus(
+  id: number,
+  status: PkRoundStatus
+): Promise<void> {
+  return getTransport().call("pk_round_update_status", { id, status })
+}
+
+export async function pkRoundDelete(id: number): Promise<void> {
+  return getTransport().call("pk_round_delete", { id })
 }

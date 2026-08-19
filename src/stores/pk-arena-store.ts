@@ -1,7 +1,8 @@
 "use client"
 
 import { create } from "zustand"
-import type { AgentType } from "@/lib/types"
+import type { AgentType, PkRoundConfig, PkRoundInfo } from "@/lib/types"
+import { pkRoundCreate, pkRoundUpdateStatus, pkRoundDelete } from "@/lib/api"
 
 /**
  * Agent PK arena — one task, N agents, isolated worktrees, a scoreboard.
@@ -10,11 +11,10 @@ import type { AgentType } from "@/lib/types"
  * unit-testable. The orchestrator (`hooks/use-pk-round`) drives the state
  * machine; the view components only read it.
  *
- * Persistence: rounds live in localStorage so a finished round's scoreboard
- * and diff remain viewable after a restart. Live-only fields (connectionId)
- * are meaningless across restarts, and a round that was still running at
- * shutdown cannot reattach its agent processes — hydration marks those
- * `interrupted` rather than pretending they are live.
+ * Persistence: round metadata (task, agents, config, status) lives in the DB
+ * (`pk_round` table). Live-only fields (connectionId, diff, usage) stay in
+ * the Zustand store — they are meaningless across restarts. A round that was
+ * still running at shutdown is marked `interrupted` on hydration.
  */
 
 export type PkContestantStatus =
@@ -32,7 +32,7 @@ export interface PkContestantUsage {
   turnCount: number
 }
 
-/** 统一的思考等级请求——「默认」表示各选手用自己的默认档。 */
+/** Unified reasoning-effort request — "default" means each contestant uses its own default. */
 export type PkEffortLevel = "default" | "low" | "medium" | "high" | "max"
 
 export interface PkContestant {
@@ -76,6 +76,7 @@ export type PkRoundStatus =
 export type PkPermissionMode = "default" | "acceptEdits" | "bypassPermissions"
 
 export interface PkRound {
+  /** DB id of the pk_round row, as a string (used in branch names, context keys). */
   id: string
   task: string
   folderId: number
@@ -95,8 +96,10 @@ interface PkArenaState {
   activeRoundId: string | null
   launcherOpen: boolean
   arenaOpen: boolean
-  /** 悬浮球被用户手动关掉过——新回合/重新打开时复位。 */
+  /** The pill was manually dismissed — reset on new round / reopen. */
   pillDismissed: boolean
+  /** True while the store is loading rounds from the DB on startup. */
+  hydrating: boolean
 }
 
 interface PkArenaActions {
@@ -108,7 +111,8 @@ interface PkArenaActions {
     permissionMode?: PkPermissionMode
     bareMode?: boolean
     effort?: PkEffortLevel
-  }): PkRound
+  }): Promise<PkRound>
+  hydrateFromDb(rounds: PkRoundInfo[]): void
   updateContestant(
     roundId: string,
     agentType: AgentType,
@@ -122,11 +126,9 @@ interface PkArenaActions {
   setPillDismissed(dismissed: boolean): void
 }
 
-const STORAGE_KEY = "codeg:pk-arena"
 const LAUNCHER_LAST_KEY = "codeg:pk-launcher-last"
-const MAX_PERSISTED_ROUNDS = 20
 
-/** 上次开赛的配置,复赛时一键预填。 */
+/** Last launcher config, for one-click prefill on rematch. */
 export interface PkLauncherLastConfig {
   agents: AgentType[]
   permissionMode: PkPermissionMode
@@ -150,12 +152,8 @@ export function saveLastLauncherConfig(config: PkLauncherLastConfig): void {
   try {
     window.localStorage.setItem(LAUNCHER_LAST_KEY, JSON.stringify(config))
   } catch {
-    // 记住配置失败不影响开赛。
+    // Failing to remember the config doesn't affect the round.
   }
-}
-
-function newRoundId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 /** Branch names ride `codeg-pk/<round>/<agent>` — slug-safe and greppable. */
@@ -173,175 +171,149 @@ export function contestantContextKey(
   return `pk:${roundId}:${agentType}`
 }
 
-interface PersistedRound {
-  id: string
-  task: string
-  folderId: number
+/** Convert a DB PkRoundInfo row to a PkRound for the store, reviving
+ * interrupted rounds and seeding empty live contestant state. */
+export function dbRoundToStoreRound(
+  info: PkRoundInfo,
   workingDir: string
-  createdAt: number
-  status: PkRoundStatus
-  permissionMode?: PkPermissionMode
-  bareMode?: boolean
-  effort?: PkEffortLevel
-  contestants: Array<Omit<PkContestant, "diff">>
-}
-
-function toPersisted(round: PkRound): PersistedRound {
+): PkRound {
+  const wasLive = info.status === "ready" || info.status === "running"
+  const status: PkRoundStatus = wasLive ? "interrupted" : info.status
   return {
-    id: round.id,
-    task: round.task,
-    folderId: round.folderId,
-    workingDir: round.workingDir,
-    createdAt: round.createdAt,
-    status: round.status,
-    permissionMode: round.permissionMode,
-    bareMode: round.bareMode,
-    effort: round.effort,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- diff is live-only and deliberately dropped here
-    contestants: round.contestants.map(({ diff: _diff, ...rest }) => rest),
+    id: String(info.id),
+    task: info.task,
+    folderId: info.folder_id,
+    workingDir,
+    createdAt: new Date(info.created_at).getTime(),
+    status,
+    permissionMode:
+      (info.config.permission_mode as PkPermissionMode) ?? "default",
+    bareMode: info.config.bare_mode ?? false,
+    effort: (info.config.effort as PkEffortLevel) ?? "default",
+    contestants: info.config.agents.map((agentType) => ({
+      agentType: agentType as AgentType,
+      modelOptions: [],
+      effortOptions: [],
+      selectedModel: null,
+      selectedEffort: null,
+      contextKey: null,
+      connectionId: null,
+      conversationId: null,
+      worktreePath: null,
+      branchName: null,
+      status: wasLive ? "canceled" : "done",
+      statusDetail: wasLive ? "interrupted" : null,
+      startedAt: null,
+      endedAt: null,
+      durationMs: null,
+      usage: null,
+      diff: null,
+    })),
   }
 }
 
-/** A round that was mid-flight at shutdown: keep the record, drop the liveness. */
-function revive(persisted: PersistedRound): PkRound {
-  const wasLive = persisted.status === "ready" || persisted.status === "running"
-  return {
-    ...persisted,
-    permissionMode: persisted.permissionMode ?? "default",
-    bareMode: persisted.bareMode ?? false,
-    effort: persisted.effort ?? "default",
-    status: wasLive ? "interrupted" : persisted.status,
-    contestants: persisted.contestants.map((c) => {
-      if (!wasLive) return { ...c, diff: null }
-      const settled =
-        c.status === "done" || c.status === "error" || c.status === "canceled"
-      return {
-        ...c,
-        contextKey: null,
-        connectionId: null,
-        status: settled ? c.status : "canceled",
-        statusDetail: settled ? c.statusDetail : "interrupted",
-        diff: null,
-      }
-    }),
-  }
-}
+export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
+  rounds: [],
+  activeRoundId: null,
+  launcherOpen: false,
+  arenaOpen: false,
+  pillDismissed: false,
+  hydrating: true,
 
-function loadPersisted(): PkRound[] {
-  if (typeof window === "undefined") return []
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as PersistedRound[]
-    if (!Array.isArray(parsed)) return []
-    return parsed.slice(0, MAX_PERSISTED_ROUNDS).map(revive)
-  } catch {
-    return []
-  }
-}
+  hydrateFromDb: (dbRounds) => {
+    set({ rounds: dbRounds, hydrating: false })
+  },
 
-function persist(rounds: PkRound[]): void {
-  if (typeof window === "undefined") return
-  try {
-    const payload = rounds.slice(0, MAX_PERSISTED_ROUNDS).map(toPersisted)
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
-  } catch {
-    // Quota or serialization failure must never break the live round.
-  }
-}
-
-export const usePkArenaStore = create<PkArenaState & PkArenaActions>(
-  (set, get) => ({
-    rounds: loadPersisted(),
-    activeRoundId: null,
-    launcherOpen: false,
-    arenaOpen: false,
-    pillDismissed: false,
-
-    createRound: ({
+  createRound: async ({
+    task,
+    folderId,
+    workingDir,
+    agents,
+    permissionMode,
+    bareMode,
+    effort,
+  }) => {
+    const config: PkRoundConfig = {
+      agents: agents as string[],
+      permission_mode: permissionMode ?? "default",
+      bare_mode: bareMode ?? false,
+      effort: effort ?? "default",
+    }
+    const info = await pkRoundCreate(folderId, task, config)
+    const round: PkRound = {
+      id: String(info.id),
       task,
       folderId,
       workingDir,
-      agents,
-      permissionMode,
-      bareMode,
-      effort,
-    }) => {
-      const round: PkRound = {
-        id: newRoundId(),
-        task,
-        folderId,
-        workingDir,
-        createdAt: Date.now(),
-        status: "ready",
-        permissionMode: permissionMode ?? "default",
-        bareMode: bareMode ?? false,
-        effort: effort ?? "default",
-        contestants: agents.map((agentType) => ({
-          agentType,
-          modelOptions: [],
-          effortOptions: [],
-          selectedModel: null,
-          selectedEffort: null,
-          contextKey: null,
-          connectionId: null,
-          conversationId: null,
-          worktreePath: null,
-          branchName: null,
-          status: "preparing",
-          statusDetail: null,
-          startedAt: null,
-          endedAt: null,
-          durationMs: null,
-          usage: null,
-          diff: null,
-        })),
-      }
-      set((state) => ({
-        rounds: [round, ...state.rounds],
-        activeRoundId: round.id,
-      }))
-      persist(get().rounds)
-      return round
-    },
+      createdAt: new Date(info.created_at).getTime(),
+      status: "ready",
+      permissionMode: permissionMode ?? "default",
+      bareMode: bareMode ?? false,
+      effort: effort ?? "default",
+      contestants: agents.map((agentType) => ({
+        agentType,
+        modelOptions: [],
+        effortOptions: [],
+        selectedModel: null,
+        selectedEffort: null,
+        contextKey: null,
+        connectionId: null,
+        conversationId: null,
+        worktreePath: null,
+        branchName: null,
+        status: "preparing",
+        statusDetail: null,
+        startedAt: null,
+        endedAt: null,
+        durationMs: null,
+        usage: null,
+        diff: null,
+      })),
+    }
+    set((state) => ({
+      rounds: [round, ...state.rounds],
+      activeRoundId: round.id,
+    }))
+    return round
+  },
 
-    updateContestant: (roundId, agentType, patch) => {
-      set((state) => ({
-        rounds: state.rounds.map((round) =>
-          round.id !== roundId
-            ? round
-            : {
-                ...round,
-                contestants: round.contestants.map((c) =>
-                  c.agentType !== agentType ? c : { ...c, ...patch }
-                ),
-              }
-        ),
-      }))
-      persist(get().rounds)
-    },
+  updateContestant: (roundId, agentType, patch) => {
+    set((state) => ({
+      rounds: state.rounds.map((round) =>
+        round.id !== roundId
+          ? round
+          : {
+              ...round,
+              contestants: round.contestants.map((c) =>
+                c.agentType !== agentType ? c : { ...c, ...patch }
+              ),
+            }
+      ),
+    }))
+  },
 
-    markRound: (roundId, status) => {
-      set((state) => ({
-        rounds: state.rounds.map((round) =>
-          round.id === roundId ? { ...round, status } : round
-        ),
-      }))
-      persist(get().rounds)
-    },
+  markRound: (roundId, status) => {
+    set((state) => ({
+      rounds: state.rounds.map((round) =>
+        round.id === roundId ? { ...round, status } : round
+      ),
+    }))
+    // Sync status to DB (fire-and-forget — the store update is the source of
+    // truth for the live UI; the DB row is for persistence across restarts).
+    void pkRoundUpdateStatus(Number(roundId), status).catch(() => undefined)
+  },
 
-    removeRound: (roundId) => {
-      set((state) => ({
-        rounds: state.rounds.filter((round) => round.id !== roundId),
-        activeRoundId:
-          state.activeRoundId === roundId ? null : state.activeRoundId,
-      }))
-      persist(get().rounds)
-    },
+  removeRound: (roundId) => {
+    set((state) => ({
+      rounds: state.rounds.filter((round) => round.id !== roundId),
+      activeRoundId:
+        state.activeRoundId === roundId ? null : state.activeRoundId,
+    }))
+    void pkRoundDelete(Number(roundId)).catch(() => undefined)
+  },
 
-    setActiveRound: (roundId) => set({ activeRoundId: roundId }),
-    setLauncherOpen: (open) => set({ launcherOpen: open }),
-    setArenaOpen: (open) => set({ arenaOpen: open }),
-    setPillDismissed: (dismissed) => set({ pillDismissed: dismissed }),
-  })
-)
+  setActiveRound: (roundId) => set({ activeRoundId: roundId }),
+  setLauncherOpen: (open) => set({ launcherOpen: open }),
+  setArenaOpen: (open) => set({ arenaOpen: open }),
+  setPillDismissed: (dismissed) => set({ pillDismissed: dismissed }),
+}))

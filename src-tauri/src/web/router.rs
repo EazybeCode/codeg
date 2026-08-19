@@ -140,6 +140,10 @@ pub fn build_router(
             post(handlers::conversations::create_conversation),
         )
         .route(
+            "/create_pk_conversation",
+            post(handlers::conversations::create_pk_conversation),
+        )
+        .route(
             "/create_chat_conversation",
             post(handlers::conversations::create_chat_conversation),
         )
@@ -1377,6 +1381,15 @@ pub fn build_router(
             "/work_task_template_delete",
             post(handlers::work_task::work_task_template_delete),
         )
+        // ─── PK arena rounds ───
+        .route("/pk_round_list", post(handlers::pk::pk_round_list))
+        .route("/pk_round_get", post(handlers::pk::pk_round_get))
+        .route("/pk_round_create", post(handlers::pk::pk_round_create))
+        .route(
+            "/pk_round_update_status",
+            post(handlers::pk::pk_round_update_status),
+        )
+        .route("/pk_round_delete", post(handlers::pk::pk_round_delete))
         // ─── Workspace background ───
         .route(
             "/background_read",

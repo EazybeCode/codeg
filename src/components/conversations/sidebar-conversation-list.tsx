@@ -1056,7 +1056,7 @@ export function SidebarConversationList({
   // section, so exclude both here; then apply the completed filter as before.
   const folderConversations = useMemo(() => {
     const base = conversations.filter(
-      (c) => c.pinned_at == null && c.kind !== "chat"
+      (c) => c.pinned_at == null && c.kind !== "chat" && c.kind !== "pk"
     )
     if (showCompleted) return base
     return base.filter((c) => c.status !== "completed")

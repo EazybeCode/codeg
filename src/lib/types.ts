@@ -417,6 +417,9 @@ export interface DbConversationSummary {
    *  worktree path it originally ran in. Drives the "source worktree removed"
    *  badge. */
   origin_cwd?: string | null
+  /** The PK arena round this contestant session belongs to. Set only when
+   *  `kind === "pk"`; drives the sidebar's per-round grouping. */
+  pk_round_id?: number | null
 }
 
 /** Payload for the global `conversation://changed` side-channel that keeps
@@ -655,8 +658,43 @@ export type ConversationStatus =
 
 /** Mirrors Rust `ConversationKind` (src-tauri/src/db/entities/conversation.rs).
  *  `loop` rows belong to the Loop Engineering workbench and never appear in
- *  the sidebar list; `delegate` rows nest under their parent's tool-call view. */
-export type ConversationKind = "regular" | "chat" | "loop" | "delegate"
+ *  the sidebar list; `delegate` rows nest under their parent's tool-call view;
+ *  `pk` rows are PK-arena contestant sessions grouped under their round. */
+export type ConversationKind = "regular" | "chat" | "loop" | "delegate" | "pk"
+
+/** Mirrors Rust `PkRoundStatus` (src-tauri/src/db/entities/pk_round.rs). */
+export type PkRoundStatus =
+  | "ready"
+  | "running"
+  | "finished"
+  | "canceled"
+  | "interrupted"
+
+/** Mirrors Rust `PkRoundConfig` (src-tauri/src/models/pk_round.rs). Stored as
+ *  JSON in `pk_round.config`. */
+export interface PkRoundConfig {
+  /** The agent types selected as contestants, in pick order. */
+  agents: string[]
+  /** Round-level permission policy applied to every contestant. */
+  permission_mode: string
+  /** Bare mode: contestants are instructed to use no skills at all. */
+  bare_mode: boolean
+  /** Uniform reasoning-effort request applied to every contestant. */
+  effort: string
+}
+
+/** Mirrors Rust `PkRoundInfo` (src-tauri/src/models/pk_round.rs). */
+export interface PkRoundInfo {
+  id: number
+  folder_id: number
+  task: string
+  config: PkRoundConfig
+  status: PkRoundStatus
+  failure_reason: string | null
+  created_at: string
+  updated_at: string
+  finished_at: string | null
+}
 
 /** Mirrors Rust `FolderKind` (src-tauri/src/db/entities/folder.rs).
  *  `loop_worktree` is reserved for M2+ — add it here when the variant lands. */
