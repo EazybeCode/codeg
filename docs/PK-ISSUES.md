@@ -233,6 +233,60 @@
 
 ---
 
+## 问题 14：PK 会话管理 UI 粗糙——下拉框切换 + 标题无信息 + 侧边栏不可见
+
+**严重程度**：中（体验差，但不阻断功能）
+
+**三个子问题：**
+
+### 14a：回合切换只有一个下拉框
+
+**现状**（`pk-arena-dialog.tsx:225-239`）：
+
+```tsx
+<select value={round.id} onChange={...} className="max-w-40 ...">
+  {rounds.map((r) => (
+    <option key={r.id} value={r.id}>
+      {new Date(r.createdAt).toLocaleTimeString()} · {r.contestants.length} 选手
+    </option>
+  ))}
+</select>
+```
+
+- 只显示"时间 + 选手数"，没有任务文本、状态、分数
+- max-w-40 导致长内容被截断
+- 多回合时无法快速区分"哪轮做了什么"
+- 没有搜索/过滤
+- 没有删除单轮的入口（只有删除当前轮）
+
+### 14b：conversation 标题被 agent 自动覆盖，丢失 PK 上下文
+
+**现状**：
+
+- `create_pk`（`conversation_service.rs:99-100`）创建时 `title = "PK · <taskPreview>"`，`title_locked = false`
+- agent 跑完后，`refresh_auto_title`（`:240-262`）因为 `title_locked = false`，用 agent 自己取的标题覆盖了 PK 标题
+- 实跑证据（round 7）：DB 里 5 个选手的 title 分别是 "Interactive jelly blob browser toy"、"Build a tiny browser toy..." 等各不相同的标题，没有一个带 "PK ·" 前缀
+- 裁判会话的标题 `PK Judge · <task>` 也同样会被覆盖
+
+**根因**：PK conversation 应该 `title_locked = true`，防止 agent auto-title 覆盖。
+
+### 14c：PK 会话在侧边栏完全不可见
+
+**现状**：
+
+- `sidebar-conversation-list.tsx:1059`：`c.kind !== "pk"` 过滤掉所有 PK 会话
+- `sidebar-conversation-grouping.ts:300`：`if (conv.kind === "pk") continue` 分组时也跳过
+- types.ts:421 注释说 `kind === "pk"` "drives the sidebar's per-round grouping"，但实际分组逻辑根本没有实现——只有排除，没有 PK 专用分组渲染
+- 用户无法在侧边栏看到/打开 PK 选手的会话记录，只能通过 arena 对话框的 battle tab 看实时流
+
+**修复方向**：
+
+1. **14b（最简单）**：`create_pk` 里设 `title_locked = true`
+2. **14a**：回合切换改为列表/卡片视图，每轮显示：任务摘要、状态徽章、选手头像+分数、创建时间；支持搜索和删除
+3. **14c**：侧边栏加 PK 分组——按 round 分组，每组显示任务摘要 + 选手会话列表，点击打开选手 transcript
+
+---
+
 ## 优先级排序
 
 | 优先级 | 问题 | 理由 |
@@ -244,6 +298,9 @@
 | P1 | #3 截图不含裁判评分 | 分享素材不完整 |
 | P1 | #12 server 模式无法打开文件夹 | 影响 server 模式体验 |
 | P1 | #13 arena 对话框无法关闭 | 影响 server 模式体验 |
+| P1 | #14b PK 标题被 agent 覆盖 | 一行修复，信息丢失 |
+| P2 | #14a 回合切换下拉框信息不足 | 体验差 |
+| P2 | #14c PK 会话侧边栏不可见 | 体验差 |
 | P2 | #6 控制变量 UI 未完成 | 功能不完整 |
 | P2 | #8 裁判无法重跑 | 容错差 |
 | P3 | #10 评分维度不可配 | 增强需求 |
