@@ -198,6 +198,41 @@
 
 ---
 
+## 问题 13：任务完成后 arena 对话框只能最小化无法关闭
+
+**严重程度**：中
+
+**场景**：用户跑完 PK 后想关掉 arena 对话框，但只能最小化，没有关闭按钮。
+
+**现状**：
+
+三层问题叠加：
+
+1. **正常进行中的回合**（`pk-arena-dialog.tsx:64-68`）：
+   - `liveRef = round.status === "ready" || round.status === "running"`
+   - ESC 被阻止（`:199-201` onEscapeKeyDown preventDefault）
+   - 点遮罩被阻止（`:202-204` onPointerDownOutside preventDefault）
+   - 没有关闭按钮（`:197` showCloseButton={false}）
+   - 只有"最小化"按钮（`:265-275` setArenaOpen(false)，不真正关闭/清理）
+   - 注释（`:64-65`）说"只有 X 按钮能显式关闭"，但 X 按钮被 showCloseButton={false} 去掉了——设计意图与实现矛盾
+
+2. **因问题 #0 导致的卡住**（最常见场景）：
+   - 选手完成后 round.status 仍是 running（问题 #0），liveRef 永远 true
+   - 所有关闭路径被永久阻止
+   - 只能最小化
+
+3. **即使正常完成的回合**（status=finished/canceled）：
+   - liveRef 为 false，ESC 和点遮罩能关
+   - 但仍然没有 X 按钮（showCloseButton={false}），用户不知道怎么关
+   - handleOpenChange（`:184-191`）能处理关闭，但入口不明显
+
+**修复方向**：
+1. 始终显示关闭按钮（showCloseButton=true），让用户有明确关闭入口
+2. 进行中的回合点关闭时弹确认（"回合进行中，确定关闭？"），而非永久阻止
+3. 或保持 ESC/遮罩阻止，但给一个明确的关闭按钮 + 确认对话框
+
+---
+
 ## 优先级排序
 
 | 优先级 | 问题 | 理由 |
@@ -208,6 +243,7 @@
 | P1 | #2 报告不含裁判评分 | 导出产物不完整 |
 | P1 | #3 截图不含裁判评分 | 分享素材不完整 |
 | P1 | #12 server 模式无法打开文件夹 | 影响 server 模式体验 |
+| P1 | #13 arena 对话框无法关闭 | 影响 server 模式体验 |
 | P2 | #6 控制变量 UI 未完成 | 功能不完整 |
 | P2 | #8 裁判无法重跑 | 容错差 |
 | P3 | #10 评分维度不可配 | 增强需求 |
