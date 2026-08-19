@@ -5008,7 +5008,18 @@
       },
       "effortNote": "Applique le niveau annoncé le plus proche par agent ; sans support, garde le défaut.",
       "agentNotReady": "{agent} n'est pas prêt (installez-le dans les paramètres).",
-      "agentCheckFailed": "Impossible de vérifier {agent}."
+      "agentCheckFailed": "Impossible de vérifier {agent}.",
+      "templates": {
+        "pelican": "Pélican",
+        "bouncingBall": "Balle",
+        "jellyBlob": "Gelée",
+        "snake": "Snake",
+        "flappyBird": "Flappy Bird",
+        "voiceChat": "Chat vocal"
+      },
+      "judgeLabel": "Juge (optionnel)",
+      "judgeNone": "Pas de juge",
+      "judgeHint": "Une fois tous les concurrents terminés, cet agent lit chaque diff et produit un verdict structuré avec scores et classements."
     },
     "scoreboard": {
       "status": {
@@ -5061,6 +5072,11 @@
     "diff": {
       "loading": "Chargement du diff…",
       "empty": "Aucune modification dans ce worktree"
+    },
+    "judge": {
+      "title": "Verdict du juge",
+      "running": "Évaluation…",
+      "error": "Le juge a échoué"
     },
     "minimized": {
       "restore": "Retour à l'arène",

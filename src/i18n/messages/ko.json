@@ -5008,7 +5008,18 @@
       },
       "effortNote": "각 에이전트가 공지한 가장 가까운 수준을 적용합니다. 미지원 시 기본 유지.",
       "agentNotReady": "{agent}이 준비되지 않았습니다(설정에서 설치하세요).",
-      "agentCheckFailed": "{agent} 확인 실패."
+      "agentCheckFailed": "{agent} 확인 실패.",
+      "templates": {
+        "pelican": "펠리컨",
+        "bouncingBall": "공",
+        "jellyBlob": "젤리",
+        "snake": "스네이크",
+        "flappyBird": "Flappy Bird",
+        "voiceChat": "음성 채팅"
+      },
+      "judgeLabel": "심판(선택)",
+      "judgeNone": "심판 없음",
+      "judgeHint": "모든 참가자가 완료되면 심판 에이전트가 각 참가자의 diff를 읽고 구조화된 평가와 순위를 생성합니다."
     },
     "scoreboard": {
       "status": {
@@ -5061,6 +5072,11 @@
     "diff": {
       "loading": "diff 불러오는 중…",
       "empty": "이 워크트리에는 변경 사항이 없습니다"
+    },
+    "judge": {
+      "title": "심판 평결",
+      "running": "평가 중…",
+      "error": "심판 실패"
     },
     "minimized": {
       "restore": "아레나로 돌아가기",

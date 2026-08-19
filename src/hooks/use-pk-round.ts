@@ -23,6 +23,8 @@ import {
   type PkContestant,
   type PkContestantUsage,
   type PkEffortLevel,
+  type PkJudgeResult,
+  type PkJudgeScore,
   type PkPermissionMode,
   type PkRound,
 } from "@/stores/pk-arena-store"
@@ -51,6 +53,84 @@ const BARE_MODE_RULES = [
   "directories in the repository. Use only your built-in capabilities",
   "(file read/write, running commands, web access).",
 ].join("\n")
+
+/** 裁判提示词——在所有选手完成后发送给裁判 agent。要求结构化 JSON 输出
+ * (每个选手:分数、排名、点评;以及总体总结)。裁判不需要 worktree,
+ * 只读取各选手的 diff 文本。 */
+function buildJudgePrompt(
+  task: string,
+  contestants: Array<{ agentType: string; diff: string }>
+): PromptInputBlock[] {
+  const sections = contestants.map(
+    (c) =>
+      `--- Contestant: ${c.agentType} ---\n${c.diff}\n--- End ${c.agentType} ---`
+  )
+  const text = [
+    `You are the JUDGE of a coding PK arena.`,
+    "",
+    `Task given to all contestants:`,
+    `"${task}"`,
+    "",
+    `Below are the git diffs from each contestant. Evaluate each one on:`,
+    `1. Correctness — does it fulfill the task?`,
+    `2. Code quality — readability, structure, edge cases`,
+    `3. Completeness — how much of the task is done?`,
+    `4. Efficiency — token count and time are NOT factors here; judge code-level efficiency only`,
+    "",
+    "Score each contestant 0-100. Rank them (1 = best).",
+    "",
+    "Respond with ONLY a JSON block (no markdown fences, no prose before or after):",
+    '{"scores":[{"agentType":"<agent>","score":<number>,"rank":<number>,"comment":"<one-line>"}],"summary":"<overall verdict in 1-2 sentences>"}',
+    "",
+    "Here are the diffs:",
+    "",
+    ...sections,
+  ].join("\n")
+  return [{ type: "text", text }]
+}
+
+/** 解析裁判 LLM 的文本输出,提取结构化 JSON 评分。
+ * 容忍 markdown 围栏和前后文本。 */
+function parseJudgeResult(rawText: string): PkJudgeResult | null {
+  // Strip markdown code fences if present.
+  const cleaned = rawText
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim()
+  // Find the first { and last } — the JSON blob.
+  const start = cleaned.indexOf("{")
+  const end = cleaned.lastIndexOf("}")
+  if (start === -1 || end === -1 || end <= start) return null
+  const jsonStr = cleaned.slice(start, end + 1)
+  try {
+    const parsed = JSON.parse(jsonStr) as {
+      scores?: Array<{
+        agentType?: string
+        score?: number
+        rank?: number
+        comment?: string
+      }>
+      summary?: string
+    }
+    if (!parsed.scores || !Array.isArray(parsed.scores)) return null
+    const scores: PkJudgeScore[] = parsed.scores
+      .filter((s) => s.agentType != null)
+      .map((s) => ({
+        agentType: String(s.agentType),
+        score: typeof s.score === "number" ? s.score : 0,
+        rank: typeof s.rank === "number" ? s.rank : 0,
+        comment: s.comment ?? "",
+      }))
+    if (scores.length === 0) return null
+    return {
+      scores,
+      summary: parsed.summary ?? "",
+      rawText,
+    }
+  } catch {
+    return null
+  }
+}
 
 function taskPromptBlocks(
   task: string,
@@ -365,8 +445,17 @@ export function usePkRound(): {
 
   // Map connectionId → {roundId, agentType} so the event subscription can
   // resolve envelopes without re-subscribing as rounds change.
+  // `isJudge: true` marks the judge agent connection — it uses the same
+  // event pipeline but settles into judgeResult instead of contestant state.
   const contestantsByConnection = useRef(
-    new Map<string, { roundId: string; agentType: PkContestant["agentType"] }>()
+    new Map<
+      string,
+      {
+        roundId: string
+        agentType: PkContestant["agentType"]
+        isJudge?: boolean
+      }
+    >()
   )
 
   const disconnectFinished = useCallback(
@@ -387,6 +476,170 @@ export function usePkRound(): {
     },
     [detachDelegationChild, disconnect]
   )
+
+  // 裁判 settled 时的处理:从裁判的 conversation 轮次里提取最后一条
+  // assistant 消息文本,解析 JSON 评分。裁判连接用独立 contextKey,不跟
+  // 选手混在一起。
+  const updateJudge = usePkArenaStore((s) => s.updateJudge)
+
+  const settleJudge = useCallback(
+    async (roundId: string) => {
+      const round = roundsRef.current.find((r) => r.id === roundId)
+      if (!round || !round.judgeAgent) return
+      // 裁判的 conversationId 存在 store 里的 judgeResult 临时字段——但
+      // 我们没地方存 conversationId。改用 contextKey 从 connection store
+      // 拿状态,但文本只能从 conversation 轮次读。这里用 contextKey 去
+      // 读 conversationId——不,contextKey 不映射到 conversationId。
+      //
+      // 方案:裁判的 conversationId 在 runJudge 里创建后存入 ref。
+      const judgeConvId = judgeConvIdRef.current.get(roundId)
+      if (judgeConvId != null) {
+        try {
+          const detail = await getFolderConversation(judgeConvId)
+          const lastAssistant = [...(detail.turns ?? [])]
+            .reverse()
+            .find((turn) => turn.role === "assistant")
+          const rawText = lastAssistant?.text ?? ""
+          const result = parseJudgeResult(rawText)
+          updateJudge(roundId, {
+            judgeStatus: "done",
+            judgeResult: result ?? {
+              scores: [],
+              summary: "Judge response could not be parsed.",
+              rawText,
+            },
+          })
+        } catch {
+          updateJudge(roundId, {
+            judgeStatus: "error",
+            judgeResult: {
+              scores: [],
+              summary: "Failed to read judge response.",
+              rawText: "",
+            },
+          })
+        }
+      } else {
+        updateJudge(roundId, { judgeStatus: "error" })
+      }
+      // 断开裁判连接。
+      const judgeCtxKey = `pk:${roundId}:judge`
+      void disconnect(judgeCtxKey).catch(() => undefined)
+    },
+    [disconnect, updateJudge]
+  )
+
+  const settleJudgeError = useCallback(
+    (roundId: string, message: string) => {
+      updateJudge(roundId, {
+        judgeStatus: "error",
+        judgeResult: {
+          scores: [],
+          summary: message,
+          rawText: "",
+        },
+      })
+      const judgeCtxKey = `pk:${roundId}:judge`
+      void disconnect(judgeCtxKey).catch(() => undefined)
+    },
+    [disconnect, updateJudge]
+  )
+
+  // Store judge conversationId per round — needed by settleJudge to read the
+  // conversation turns after the judge finishes.
+  const judgeConvIdRef = useRef(new Map<string, number>())
+
+  const runJudge = useCallback(
+    async (round: PkRound) => {
+      if (!round.judgeAgent) return
+      const roundId = round.id
+      updateJudge(roundId, { judgeStatus: "running" })
+
+      // 收集所有选手的 diff(未加载的先加载)。
+      const contestantsWithDiffs = await Promise.all(
+        round.contestants
+          .filter((c) => c.status === "done")
+          .map(async (contestant) => {
+            if (contestant.diff == null && contestant.worktreePath) {
+              await fetchDiff(round, contestant)
+            }
+            const freshRound = usePkArenaStore
+              .getState()
+              .rounds.find((r) => r.id === roundId)
+            const fresh = freshRound?.contestants.find(
+              (c) => c.agentType === contestant.agentType
+            )
+            return {
+              agentType: contestant.agentType,
+              diff: fresh?.diff ?? "(no diff available)",
+            }
+          })
+      )
+
+      if (contestantsWithDiffs.length === 0) {
+        updateJudge(roundId, {
+          judgeStatus: "skipped",
+          judgeResult: {
+            scores: [],
+            summary: "No completed contestants to judge.",
+            rawText: "",
+          },
+        })
+        return
+      }
+
+      const contextKey = `pk:${roundId}:judge`
+      try {
+        await connect(contextKey, round.judgeAgent, round.workingDir)
+        const connectionId =
+          connectionStore.getConnection(contextKey)?.connectionId ?? null
+        if (connectionId) {
+          contestantsByConnection.current.set(connectionId, {
+            roundId,
+            agentType: round.judgeAgent as PkContestant["agentType"],
+            isJudge: true,
+          })
+        }
+
+        // Create a conversation for the judge so its transcript persists.
+        let conversationId: number | null = null
+        try {
+          const taskPreview = round.task.slice(0, 60)
+          conversationId = await createPkConversation(
+            round.folderId,
+            round.judgeAgent as PkContestant["agentType"],
+            Number(roundId),
+            `PK Judge · ${taskPreview}${round.task.length > 60 ? "…" : ""}`
+          )
+          judgeConvIdRef.current.set(roundId, conversationId)
+        } catch {
+          // 裁判没有 conversation 也能跑,只是 transcript 不持久化。
+        }
+
+        await sendPrompt(
+          contextKey,
+          buildJudgePrompt(round.task, contestantsWithDiffs),
+          {
+            folderId: round.folderId,
+            conversationId: conversationId ?? undefined,
+          }
+        )
+      } catch (error) {
+        updateJudge(roundId, {
+          judgeStatus: "error",
+          judgeResult: {
+            scores: [],
+            summary: `Judge failed to start: ${String(error)}`,
+            rawText: "",
+          },
+        })
+      }
+    },
+    [connect, connectionStore, sendPrompt, updateJudge, fetchDiff]
+  )
+  // Keep a ref so settleContestant can call it without circular deps.
+  const runJudgeRef = useRef(runJudge)
+  runJudgeRef.current = runJudge
 
   const settleContestant = useCallback(
     async (
@@ -434,6 +687,11 @@ export function usePkRound(): {
         void disconnectFinished(
           usePkArenaStore.getState().rounds.find((r) => r.id === roundId)
         )
+        // 裁判自动触发:所有选手 settled 且配置了 judgeAgent 时启动。
+        // 裁判在选手断开后才连(避免连接数叠加),用独立 contextKey。
+        if (fresh.judgeAgent && fresh.judgeStatus === "idle") {
+          void runJudgeRef.current(fresh)
+        }
       }
     },
     [disconnectFinished, markRound, updateContestant]
@@ -467,6 +725,22 @@ export function usePkRound(): {
     }
     const entry = contestantsByConnection.current.get(envelope.connection_id)
     if (!entry) return
+
+    // Judge connections share the event pipeline but settle differently.
+    if (entry.isJudge) {
+      if (envelope.type === "turn_complete") {
+        void settleJudge(entry.roundId)
+      } else if (envelope.type === "error") {
+        settleJudgeError(entry.roundId, envelope.message)
+      } else if (
+        envelope.type === "status_changed" &&
+        envelope.status === "disconnected"
+      ) {
+        settleJudgeError(entry.roundId, "连接中断(空闲回收或进程退出)")
+      }
+      return
+    }
+
     const round = roundsRef.current.find((r) => r.id === entry.roundId)
     const contestant = round?.contestants.find(
       (c) => c.agentType === entry.agentType
@@ -806,5 +1080,6 @@ export function usePkRound(): {
     disconnectFinished,
     cleanupRound,
     fetchDiff,
+    runJudge,
   }
 }

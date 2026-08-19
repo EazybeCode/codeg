@@ -12,6 +12,7 @@ import { AgentIcon } from "@/components/agent-icon"
 import { useAcpAgents } from "@/hooks/use-acp-agents"
 import { acpGetAgentStatus, getFolder, getGitBranch, gitInit } from "@/lib/api"
 import { getAgentLabel } from "@/lib/custom-agents"
+import { PK_TEMPLATES } from "@/lib/pk-templates"
 import type { AgentType } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
@@ -57,6 +58,7 @@ export function PkLauncherDialog() {
     useState<PkPermissionMode>("default")
   const [bareMode, setBareMode] = useState(false)
   const [effort, setEffort] = useState<PkEffortLevel>("default")
+  const [judgeAgent, setJudgeAgent] = useState<string | null>(null)
   const [startError, setStartError] = useState<string | null>(null)
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
@@ -80,6 +82,7 @@ export function PkLauncherDialog() {
     setPermissionMode("default")
     setBareMode(false)
     setEffort("default")
+    setJudgeAgent(null)
     setStartError(null)
     // 复赛预填:上次配置的选手若仍可参与则沿用。
     const last = loadLastLauncherConfig()
@@ -89,6 +92,7 @@ export function PkLauncherDialog() {
       setPermissionMode(last.permissionMode)
       setBareMode(last.bareMode)
       setEffort(last.effort)
+      setJudgeAgent(last.judgeAgent ?? null)
     }
     // The active tab decides where the arena runs. Draft tabs may lack a
     // workingDir; fall back to the folder's own path.
@@ -183,6 +187,7 @@ export function PkLauncherDialog() {
       bareMode,
       effort,
       task: task.trim(),
+      judgeAgent,
     })
     void createRound({
       task: task.trim(),
@@ -192,6 +197,7 @@ export function PkLauncherDialog() {
       permissionMode,
       bareMode,
       effort,
+      judgeAgent,
     })
     setLauncherOpen(false)
     setArenaOpen(true)
@@ -268,6 +274,21 @@ export function PkLauncherDialog() {
             >
               {t("taskLabel")}
             </label>
+            {/* Quick-start templates — one click fills the task textarea. */}
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {PK_TEMPLATES.map((tpl) => (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  title={tpl.task}
+                  onClick={() => setTask(tpl.task)}
+                  className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  <span>{tpl.emoji}</span>
+                  {t(`templates.${tpl.labelKey}` as "templates.pelican")}
+                </button>
+              ))}
+            </div>
             <textarea
               id="pk-task"
               value={task}
@@ -353,6 +374,61 @@ export function PkLauncherDialog() {
               </span>
             </span>
           </label>
+          <div>
+            <div className="mb-2 text-sm font-medium text-foreground">
+              {t("judgeLabel")}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {/* "No judge" chip */}
+              <button
+                type="button"
+                onClick={() => setJudgeAgent(null)}
+                aria-pressed={judgeAgent === null}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition-colors",
+                  judgeAgent === null
+                    ? "border-primary bg-primary/10 text-foreground"
+                    : "border-border text-muted-foreground hover:bg-muted"
+                )}
+              >
+                {t("judgeNone")}
+              </button>
+              {agents.map((agent) => {
+                const isSelected = judgeAgent === agent.agent_type
+                const isContestant = selected.includes(agent.agent_type)
+                return (
+                  <button
+                    key={agent.agent_type}
+                    type="button"
+                    onClick={() =>
+                      setJudgeAgent(
+                        judgeAgent === agent.agent_type
+                          ? null
+                          : agent.agent_type
+                      )
+                    }
+                    aria-pressed={isSelected}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition-colors",
+                      isSelected
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border text-muted-foreground hover:bg-muted",
+                      isContestant && !isSelected && "opacity-40"
+                    )}
+                  >
+                    <AgentIcon
+                      agentType={agent.agent_type}
+                      className="size-4"
+                    />
+                    {agent.name}
+                  </button>
+                )
+              })}
+            </div>
+            <div className="mt-1.5 text-xs text-muted-foreground">
+              {t("judgeHint")}
+            </div>
+          </div>
         </div>
         {startError != null ? (
           <div className="border-t border-border px-5 py-2 text-xs text-red-600 dark:text-red-400">

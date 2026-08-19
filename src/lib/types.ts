@@ -681,6 +681,8 @@ export interface PkRoundConfig {
   bare_mode: boolean
   /** Uniform reasoning-effort request applied to every contestant. */
   effort: string
+  /** Optional judge agent type — reads all diffs and produces a verdict. */
+  judge_agent?: string
 }
 
 /** Mirrors Rust `PkRoundInfo` (src-tauri/src/models/pk_round.rs). */

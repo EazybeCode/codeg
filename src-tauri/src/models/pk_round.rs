@@ -15,6 +15,11 @@ pub struct PkRoundConfig {
     /// Uniform reasoning-effort request applied to every contestant.
     #[serde(default = "default_effort")]
     pub effort: String,
+    /// Optional judge agent — after all contestants finish, this agent reads
+    /// every diff and produces a structured verdict. Stored in config (not a
+    /// separate column) because it is round-level input, set at creation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_agent: Option<String>,
 }
 
 fn default_permission_mode() -> String {

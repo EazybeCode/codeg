@@ -5008,7 +5008,18 @@
       },
       "effortNote": "Applied as the nearest advertised level per agent; agents without the option keep their default.",
       "agentNotReady": "{agent} is not ready (install it from Agent Settings first).",
-      "agentCheckFailed": "Could not verify {agent}; check its installation."
+      "agentCheckFailed": "Could not verify {agent}; check its installation.",
+      "templates": {
+        "pelican": "Pelican",
+        "bouncingBall": "Bouncing Ball",
+        "jellyBlob": "Jelly Blob",
+        "snake": "Snake",
+        "flappyBird": "Flappy Bird",
+        "voiceChat": "Voice Chat"
+      },
+      "judgeLabel": "Judge (optional)",
+      "judgeNone": "No judge",
+      "judgeHint": "After all contestants finish, this agent reads every diff and produces a structured verdict with scores and rankings."
     },
     "scoreboard": {
       "status": {
@@ -5061,6 +5072,11 @@
     "diff": {
       "loading": "Loading diff…",
       "empty": "No changes in this worktree"
+    },
+    "judge": {
+      "title": "Judge Verdict",
+      "running": "Evaluating…",
+      "error": "Judge failed"
     },
     "minimized": {
       "restore": "Back to the arena",

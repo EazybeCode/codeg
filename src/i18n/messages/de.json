@@ -5008,7 +5008,18 @@
       },
       "effortNote": "Wird als nächste verfügbare Stufe je Agent angewendet; ohne Unterstützung bleibt der Standard.",
       "agentNotReady": "{agent} nicht bereit (zuerst in den Agent-Einstellungen installieren).",
-      "agentCheckFailed": "{agent} konnte nicht geprüft werden."
+      "agentCheckFailed": "{agent} konnte nicht geprüft werden.",
+      "templates": {
+        "pelican": "Pelikan",
+        "bouncingBall": "Ball",
+        "jellyBlob": "Gelee",
+        "snake": "Snake",
+        "flappyBird": "Flappy Bird",
+        "voiceChat": "Sprachchat"
+      },
+      "judgeLabel": "Schiedsrichter (optional)",
+      "judgeNone": "Kein Schiedsrichter",
+      "judgeHint": "Nachdem alle Teilnehmer fertig sind, liest dieser Agent jeden Diff und erstellt ein strukturiertes Urteil mit Punktzahlen und Rängen."
     },
     "scoreboard": {
       "status": {
@@ -5061,6 +5072,11 @@
     "diff": {
       "loading": "Diff wird geladen…",
       "empty": "Keine Änderungen in diesem Worktree"
+    },
+    "judge": {
+      "title": "Schiedsrichterurteil",
+      "running": "Auswertung…",
+      "error": "Schiedsrichter fehlgeschlagen"
     },
     "minimized": {
       "restore": "Zurück zur Arena",

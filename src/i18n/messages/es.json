@@ -5008,7 +5008,18 @@
       },
       "effortNote": "Se aplica el nivel más cercano anunciado por cada agente; sin soporte, mantiene el suyo.",
       "agentNotReady": "{agent} no está listo (instálalo en Configuración de agentes).",
-      "agentCheckFailed": "No se pudo verificar {agent}."
+      "agentCheckFailed": "No se pudo verificar {agent}.",
+      "templates": {
+        "pelican": "Pelícano",
+        "bouncingBall": "Pelota",
+        "jellyBlob": "Gelatina",
+        "snake": "Snake",
+        "flappyBird": "Flappy Bird",
+        "voiceChat": "Chat por voz"
+      },
+      "judgeLabel": "Juez (opcional)",
+      "judgeNone": "Sin juez",
+      "judgeHint": "Cuando todos los concursantes terminen, este agente leerá cada diff y producirá un veredicto estructurado con puntuaciones y clasificaciones."
     },
     "scoreboard": {
       "status": {
@@ -5061,6 +5072,11 @@
     "diff": {
       "loading": "Cargando diff…",
       "empty": "Sin cambios en este worktree"
+    },
+    "judge": {
+      "title": "Veredicto del juez",
+      "running": "Evaluando…",
+      "error": "El juez falló"
     },
     "minimized": {
       "restore": "Volver a la arena",

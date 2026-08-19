@@ -67,6 +67,24 @@ export type PkRoundStatus =
   | "canceled"
   | "interrupted"
 
+/** Judge verdict for one contestant. */
+export interface PkJudgeScore {
+  agentType: string
+  score: number
+  rank: number
+  comment: string
+}
+
+/** Structured verdict from the judge agent. */
+export interface PkJudgeResult {
+  scores: PkJudgeScore[]
+  summary: string
+  /** Raw LLM text (kept for debugging / export). */
+  rawText: string
+}
+
+export type PkJudgeStatus = "idle" | "running" | "done" | "error" | "skipped"
+
 /**
  * Round-level permission policy, applied to every contestant right after
  * connect via `setMode` — the ACP-standard mode ids (Claude Code, Codex and
@@ -88,6 +106,12 @@ export interface PkRound {
   bareMode: boolean
   /** Uniform reasoning-effort request, applied to every contestant. */
   effort: PkEffortLevel
+  /** Optional judge agent type — reads all diffs and produces a verdict. */
+  judgeAgent: string | null
+  /** Judge verdict text (structured LLM output). Live-only — not persisted. */
+  judgeResult: PkJudgeResult | null
+  /** "idle" → "running" → "done" | "error" | "skipped". Live-only. */
+  judgeStatus: PkJudgeStatus
   contestants: PkContestant[]
 }
 
@@ -111,6 +135,7 @@ interface PkArenaActions {
     permissionMode?: PkPermissionMode
     bareMode?: boolean
     effort?: PkEffortLevel
+    judgeAgent?: string | null
   }): Promise<PkRound>
   hydrateFromDb(rounds: PkRoundInfo[]): void
   updateContestant(
@@ -124,6 +149,10 @@ interface PkArenaActions {
   setLauncherOpen(open: boolean): void
   setArenaOpen(open: boolean): void
   setPillDismissed(dismissed: boolean): void
+  updateJudge(
+    roundId: string,
+    patch: { judgeResult?: PkJudgeResult | null; judgeStatus?: PkJudgeStatus }
+  ): void
 }
 
 const LAUNCHER_LAST_KEY = "codeg:pk-launcher-last"
@@ -135,6 +164,7 @@ export interface PkLauncherLastConfig {
   bareMode: boolean
   effort: PkEffortLevel
   task: string
+  judgeAgent?: string | null
 }
 
 export function loadLastLauncherConfig(): PkLauncherLastConfig | null {
@@ -190,6 +220,9 @@ export function dbRoundToStoreRound(
       (info.config.permission_mode as PkPermissionMode) ?? "default",
     bareMode: info.config.bare_mode ?? false,
     effort: (info.config.effort as PkEffortLevel) ?? "default",
+    judgeAgent: info.config.judge_agent ?? null,
+    judgeResult: null,
+    judgeStatus: "idle",
     contestants: info.config.agents.map((agentType) => ({
       agentType: agentType as AgentType,
       modelOptions: [],
@@ -232,12 +265,14 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
     permissionMode,
     bareMode,
     effort,
+    judgeAgent,
   }) => {
     const config: PkRoundConfig = {
       agents: agents as string[],
       permission_mode: permissionMode ?? "default",
       bare_mode: bareMode ?? false,
       effort: effort ?? "default",
+      judge_agent: judgeAgent ?? undefined,
     }
     const info = await pkRoundCreate(folderId, task, config)
     const round: PkRound = {
@@ -250,6 +285,9 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       permissionMode: permissionMode ?? "default",
       bareMode: bareMode ?? false,
       effort: effort ?? "default",
+      judgeAgent: judgeAgent ?? null,
+      judgeResult: null,
+      judgeStatus: "idle",
       contestants: agents.map((agentType) => ({
         agentType,
         modelOptions: [],
@@ -316,4 +354,18 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
   setLauncherOpen: (open) => set({ launcherOpen: open }),
   setArenaOpen: (open) => set({ arenaOpen: open }),
   setPillDismissed: (dismissed) => set({ pillDismissed: dismissed }),
+
+  updateJudge: (roundId, patch) => {
+    set((state) => ({
+      rounds: state.rounds.map((round) =>
+        round.id !== roundId
+          ? round
+          : {
+              ...round,
+              judgeResult: patch.judgeResult ?? round.judgeResult,
+              judgeStatus: patch.judgeStatus ?? round.judgeStatus,
+            }
+      ),
+    }))
+  },
 }))

@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/dialog"
 import { LiveTranscriptView } from "@/components/message/live-transcript-view"
 import { PkDiffView } from "@/components/pk/pk-diff-view"
+import { PkJudgePanel } from "@/components/pk/pk-judge-panel"
 import { PkScoreboard } from "@/components/pk/pk-scoreboard"
 import { usePkRound } from "@/hooks/use-pk-round"
 import { AgentIcon } from "@/components/agent-icon"
@@ -327,6 +328,15 @@ export function PkArenaDialog() {
               </div>
             ) : null}
             <PkScoreboard ref={scoreboardRef} contestants={round.contestants} />
+
+            {/* Judge verdict panel — shown when a judge is configured. */}
+            {round.judgeAgent ? (
+              <PkJudgePanel
+                judgeStatus={round.judgeStatus}
+                judgeResult={round.judgeResult}
+                judgeAgent={round.judgeAgent}
+              />
+            ) : null}
 
             <div className="flex items-center gap-1 border-b border-border px-4">
               {(["battle", "diff"] as const).map((key) => (

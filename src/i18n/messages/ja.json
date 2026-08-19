@@ -5008,7 +5008,18 @@
       },
       "effortNote": "各エージェントが通告する最寄りのレベルを適用。未対応はデフォルトのまま。",
       "agentNotReady": "{agent} が未準備です(先に設定でインストール)。",
-      "agentCheckFailed": "{agent} を確認できませんでした。"
+      "agentCheckFailed": "{agent} を確認できませんでした。",
+      "templates": {
+        "pelican": "ペリカン",
+        "bouncingBall": "ボール",
+        "jellyBlob": "ゼリー",
+        "snake": "スネーク",
+        "flappyBird": "Flappy Bird",
+        "voiceChat": "音声チャット"
+      },
+      "judgeLabel": "審査員(任意)",
+      "judgeNone": "審査員なし",
+      "judgeHint": "全選手の完了後、審査員エージェントが各選手の diff を読み、構造化された評価とランキングを生成します。"
     },
     "scoreboard": {
       "status": {
@@ -5061,6 +5072,11 @@
     "diff": {
       "loading": "diff を読み込み中…",
       "empty": "このワークツリーに変更はありません"
+    },
+    "judge": {
+      "title": "審査員の評決",
+      "running": "評価中…",
+      "error": "審査員が失敗しました"
     },
     "minimized": {
       "restore": "アリーナに戻る",

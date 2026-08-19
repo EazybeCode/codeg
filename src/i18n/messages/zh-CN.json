@@ -5008,7 +5008,18 @@
       },
       "effortNote": "按各选手通告的最近档位应用;不支持的选手保持默认。",
       "agentNotReady": "{agent} 未就绪(请先在智能体设置里安装)。",
-      "agentCheckFailed": "无法校验 {agent} 的安装状态。"
+      "agentCheckFailed": "无法校验 {agent} 的安装状态。",
+      "templates": {
+        "pelican": "鹈鹕骑车",
+        "bouncingBall": "弹球",
+        "jellyBlob": "果冻 Blob",
+        "snake": "贪吃蛇",
+        "flappyBird": "Flappy Bird",
+        "voiceChat": "语音聊天"
+      },
+      "judgeLabel": "裁判(可选)",
+      "judgeNone": "无裁判",
+      "judgeHint": "所有选手完成后,裁判 agent 会读取每个选手的 diff,给出结构化评分和排名。"
     },
     "scoreboard": {
       "status": {
@@ -5061,6 +5072,11 @@
     "diff": {
       "loading": "正在加载 diff…",
       "empty": "该 worktree 没有变更"
+    },
+    "judge": {
+      "title": "裁判裁决",
+      "running": "评审中…",
+      "error": "裁判失败"
     },
     "minimized": {
       "restore": "回到竞技场",

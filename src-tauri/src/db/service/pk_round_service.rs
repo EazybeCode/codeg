@@ -17,6 +17,7 @@ fn to_info(m: pk_round::Model) -> PkRoundInfo {
         permission_mode: "default".into(),
         bare_mode: false,
         effort: "default".into(),
+        judge_agent: None,
     });
     let status = serde_json::to_value(m.status)
         .ok()

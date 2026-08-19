@@ -5008,7 +5008,18 @@
       },
       "effortNote": "يُطبق أقرب مستوى مُعلن لكل وكيل; الوكلاء غير الداعمين يحتفظون بإعداداتهم.",
       "agentNotReady": "{agent} غير جاهز (ثبّته من إعدادات الوكلاء أولاً).",
-      "agentCheckFailed": "تعذّر التحقق من {agent}."
+      "agentCheckFailed": "تعذّر التحقق من {agent}.",
+      "templates": {
+        "pelican": "بجعة",
+        "bouncingBall": "كرة",
+        "jellyBlob": "هلام",
+        "snake": "الثعبان",
+        "flappyBird": "Flappy Bird",
+        "voiceChat": "دردشة صوتية"
+      },
+      "judgeLabel": "حَكَم (اختياري)",
+      "judgeNone": "بدون حَكَم",
+      "judgeHint": "بعد انتهاء جميع المتسابقين، يقرأ هذا الوكيل كل فرق وينتج حكمًا منظماً بالدرجات والترتيب."
     },
     "scoreboard": {
       "status": {
@@ -5061,6 +5072,11 @@
     "diff": {
       "loading": "جارٍ تحميل الفروقات…",
       "empty": "لا تغييرات في شجرة العمل هذه"
+    },
+    "judge": {
+      "title": "حكم الحَكَم",
+      "running": "يقيم…",
+      "error": "فشل الحَكَم"
     },
     "minimized": {
       "restore": "العودة إلى الساحة",
