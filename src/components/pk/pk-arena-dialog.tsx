@@ -194,7 +194,7 @@ export function PkArenaDialog() {
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
-        showCloseButton={false}
+        showCloseButton
         className="flex h-[92vh] w-full max-w-none flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-none"
         onEscapeKeyDown={(event) => {
           if (liveRef.current) event.preventDefault()
