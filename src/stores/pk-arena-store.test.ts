@@ -202,9 +202,9 @@ describe("pk arena store", () => {
     }
     const revived = dbRoundToStoreRound(dbRound, "/tmp/repo")
     expect(revived.contestants).toHaveLength(2)
-    expect(revived.contestants.every((c) => c.agentType === "claude_code")).toBe(
-      true
-    )
+    expect(
+      revived.contestants.every((c) => c.agentType === "claude_code")
+    ).toBe(true)
     expect(revived.contestants.map((c) => c.slot)).toEqual([0, 1])
   })
 })

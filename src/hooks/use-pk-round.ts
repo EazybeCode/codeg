@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef } from "react"
 import {
+  acpRespondPermission,
   createPkConversation,
   getFolderConversation,
   getGitBranch,
@@ -292,9 +293,44 @@ function waitForField(
  * out and the mode is silently skipped (field report: presets "did not
  * apply"). `waitForOptions` reads whichever entry the event landed on.
  */
+function mapPermissionToAgentMode(
+  mode: PkPermissionMode,
+  availableModes: string[]
+): string | null {
+  if (mode === "default") return null
+  if (availableModes.includes(mode)) return mode
+
+  if (mode === "bypassPermissions") {
+    const candidate = [
+      "agent-full-access",
+      "danger-full-access",
+      "full-access",
+      "dontAsk",
+      "auto",
+      "acceptEdits",
+      "agent",
+    ].find((m) => availableModes.includes(m))
+    return candidate ?? null
+  }
+
+  if (mode === "acceptEdits") {
+    const candidate = ["acceptEdits", "agent", "auto"].find((m) =>
+      availableModes.includes(m)
+    )
+    return candidate ?? null
+  }
+
+  return null
+}
+
 async function applyPermissionMode(
   connectionStore: ModesStore,
   setMode: (contextKey: string, modeId: string) => Promise<void>,
+  setConfigOption: (
+    contextKey: string,
+    configId: string,
+    valueId: string
+  ) => Promise<void>,
   contextKey: string,
   connectionId: string | null,
   mode: PkPermissionMode
@@ -307,12 +343,57 @@ async function applyPermissionMode(
     "modes"
   )
   const advertised = entry?.modes?.available_modes?.map((m) => m.id) ?? []
-  if (!advertised.includes(mode)) return
-  try {
-    await setMode(contextKey, mode)
-  } catch {
-    // A rejected mode switch must not kill the round — the contestant just
-    // runs with its default permission flow.
+  const targetMode = mapPermissionToAgentMode(mode, advertised)
+  if (targetMode) {
+    try {
+      await setMode(contextKey, targetMode)
+    } catch {
+      // A rejected mode switch must not kill the round
+    }
+  }
+
+  // Also check if the agent (such as Codex) exposes an approval preset via configOptions
+  const configEntry = await waitForField(
+    connectionStore,
+    contextKey,
+    connectionId,
+    "configOptions"
+  )
+  const modeOption = configEntry?.configOptions?.find(
+    (o) =>
+      o.id === "mode" ||
+      o.id === "permission_mode" ||
+      o.id === "approval_policy"
+  )
+  if (modeOption && modeOption.kind?.type === "select") {
+    const optValues = modeOption.kind.options.map((o) => o.value)
+    if (mode === "bypassPermissions") {
+      const targetVal = [
+        "agent-full-access",
+        "danger-full-access",
+        "never",
+        "dontAsk",
+        "auto",
+      ].find((v) => optValues.includes(v))
+      if (targetVal) {
+        try {
+          await setConfigOption(contextKey, modeOption.id, targetVal)
+        } catch {
+          // ignore
+        }
+      }
+    } else if (mode === "acceptEdits") {
+      const targetVal = ["agent", "acceptEdits", "auto"].find((v) =>
+        optValues.includes(v)
+      )
+      if (targetVal) {
+        try {
+          await setConfigOption(contextKey, modeOption.id, targetVal)
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 }
 
@@ -420,6 +501,7 @@ export function usePkRound(): {
   disconnectFinished: (round: PkRound) => Promise<void>
   cleanupRound: (round: PkRound, keepBranches: boolean) => Promise<void>
   fetchDiff: (round: PkRound, contestant: PkContestant) => Promise<void>
+  runJudge: (round: PkRound) => Promise<void>
 } {
   const {
     connect,
@@ -429,6 +511,7 @@ export function usePkRound(): {
     setMode,
     setConfigOption,
     touchActivity,
+    respondPermission,
     attachDelegationChild,
     detachDelegationChild,
   } = useAcpActions()
@@ -499,7 +582,13 @@ export function usePkRound(): {
           const lastAssistant = [...(detail.turns ?? [])]
             .reverse()
             .find((turn) => turn.role === "assistant")
-          const rawText = lastAssistant?.text ?? ""
+          const rawText =
+            lastAssistant?.blocks
+              ?.filter(
+                (b): b is { type: "text"; text: string } => b.type === "text"
+              )
+              .map((b) => b.text)
+              .join("\n") ?? ""
           const result = parseJudgeResult(rawText)
           updateJudge(roundId, {
             judgeStatus: "done",
@@ -549,6 +638,32 @@ export function usePkRound(): {
   // conversation turns after the judge finishes.
   const judgeConvIdRef = useRef(new Map<string, number>())
 
+  const fetchDiff = useCallback(
+    async (round: PkRound, contestant: PkContestant) => {
+      if (!contestant.worktreePath) return
+      try {
+        // 对比基准分支而不是选手自身分支:worktree 里 `git diff <自身分支>`
+        // 在选手提交后为空,而 diff 的意义是"比起跑点改了什么"。先取回合
+        // 仓库当前分支(main 等),再在 worktree 里对它 diff——既含已提交
+        // 也含未提交的工作区改动。
+        const base = (await getGitBranch(round.workingDir)) ?? null
+        const diff =
+          base == null
+            ? // 取不到基准分支名时退回工作区 diff(仅未提交改动)。
+              await gitDiff(contestant.worktreePath)
+            : await gitDiffWithBranch(contestant.worktreePath, base)
+        updateContestant(round.id, contestant.slot, {
+          diff: diff.trim() === "" ? "（无可比较内容:选手未改动工作区）" : diff,
+        })
+      } catch (error) {
+        updateContestant(round.id, contestant.slot, {
+          diff: `diff unavailable: ${String(error)}`,
+        })
+      }
+    },
+    [updateContestant]
+  )
+
   const runJudge = useCallback(
     async (round: PkRound) => {
       if (!round.judgeAgent) return
@@ -591,9 +706,15 @@ export function usePkRound(): {
 
       const contextKey = `pk:${roundId}:judge`
       try {
-        await connect(contextKey, round.judgeAgent, round.workingDir)
+        const connectResult = await connect(
+          contextKey,
+          round.judgeAgent,
+          round.workingDir
+        )
         const connectionId =
-          connectionStore.getConnection(contextKey)?.connectionId ?? null
+          connectResult ??
+          connectionStore.getConnection(contextKey)?.connectionId ??
+          null
         if (connectionId) {
           contestantsByConnection.current.set(connectionId, {
             roundId,
@@ -718,7 +839,8 @@ export function usePkRound(): {
     if (
       envelope.type !== "status_changed" &&
       envelope.type !== "error" &&
-      envelope.type !== "turn_complete"
+      envelope.type !== "turn_complete" &&
+      envelope.type !== "permission_request"
     ) {
       return
     }
@@ -743,6 +865,40 @@ export function usePkRound(): {
     const round = roundsRef.current.find((r) => r.id === entry.roundId)
     const contestant = round?.contestants.find((c) => c.slot === entry.slot)
     if (!round || !contestant) return
+
+    if (envelope.type === "permission_request") {
+      if (
+        round.permissionMode === "bypassPermissions" ||
+        round.permissionMode === "acceptEdits"
+      ) {
+        const opts =
+          (
+            envelope as {
+              options?: Array<{ option_id: string; name?: string }>
+            }
+          ).options ?? []
+        const allowOpt =
+          opts.find(
+            (o) =>
+              /allow|always|proceed|yes|approve|continue/i.test(o.option_id) ||
+              /allow|always|proceed|yes|approve|continue/i.test(o.name ?? "")
+          ) ?? opts[0]
+        if (allowOpt) {
+          const reqId = (envelope as { request_id: string }).request_id
+          const targetKey = contestant.contextKey ?? envelope.connection_id
+          void respondPermission(targetKey, reqId, allowOpt.option_id).catch(
+            () => {
+              void acpRespondPermission(
+                envelope.connection_id,
+                reqId,
+                allowOpt.option_id
+              ).catch(() => {})
+            }
+          )
+        }
+      }
+      return
+    }
 
     if (envelope.type === "error") {
       if (
@@ -841,10 +997,34 @@ export function usePkRound(): {
           status: "connecting",
         })
 
+        let initialModeId: string | null = null
+        let initialConfigValues: Record<string, string> | null = null
+        if (agentType === "claude_code") {
+          initialModeId = round.permissionMode
+        } else if (agentType === "codex") {
+          if (round.permissionMode === "bypassPermissions") {
+            initialModeId = "agent-full-access"
+            initialConfigValues = { mode: "agent-full-access" }
+          } else if (round.permissionMode === "acceptEdits") {
+            initialModeId = "agent"
+            initialConfigValues = { mode: "agent" }
+          }
+        }
+
         try {
-          await connect(contextKey, agentType, worktreePath)
+          const connectResult = await connect(
+            contextKey,
+            agentType,
+            worktreePath,
+            undefined,
+            undefined,
+            initialModeId,
+            initialConfigValues
+          )
           const connectionId =
-            connectionStore.getConnection(contextKey)?.connectionId ?? null
+            connectResult ??
+            connectionStore.getConnection(contextKey)?.connectionId ??
+            null
           if (connectionId) {
             contestantsByConnection.current.set(connectionId, {
               roundId: round.id,
@@ -868,6 +1048,7 @@ export function usePkRound(): {
           await applyPermissionMode(
             connectionStore,
             setMode,
+            setConfigOption,
             contextKey,
             connectionId,
             round.permissionMode
@@ -977,32 +1158,6 @@ export function usePkRound(): {
       }
     },
     [detachDelegationChild, updateContestant]
-  )
-
-  const fetchDiff = useCallback(
-    async (round: PkRound, contestant: PkContestant) => {
-      if (!contestant.worktreePath) return
-      try {
-        // 对比基准分支而不是选手自身分支:worktree 里 `git diff <自身分支>`
-        // 在选手提交后为空,而 diff 的意义是"比起跑点改了什么"。先取回合
-        // 仓库当前分支(main 等),再在 worktree 里对它 diff——既含已提交
-        // 也含未提交的工作区改动。
-        const base = (await getGitBranch(round.workingDir)) ?? null
-        const diff =
-          base == null
-            ? // 取不到基准分支名时退回工作区 diff(仅未提交改动)。
-              await gitDiff(contestant.worktreePath)
-            : await gitDiffWithBranch(contestant.worktreePath, base)
-        updateContestant(round.id, contestant.slot, {
-          diff: diff.trim() === "" ? "（无可比较内容:选手未改动工作区）" : diff,
-        })
-      } catch (error) {
-        updateContestant(round.id, contestant.slot, {
-          diff: `diff unavailable: ${String(error)}`,
-        })
-      }
-    },
-    [updateContestant]
   )
 
   const startPrompt = useCallback(

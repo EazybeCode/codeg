@@ -672,9 +672,7 @@ export type PkRoundStatus =
 
 /** Mirrors Rust `PkContestantEntry` (src-tauri/src/models/pk_round.rs).
  * Either a plain string (old format) or a labeled object (new format). */
-export type PkContestantEntry =
-  | string
-  | { agent: string; label?: string }
+export type PkContestantEntry = string | { agent: string; label?: string }
 
 /** Mirrors Rust `PkRoundConfig` (src-tauri/src/models/pk_round.rs). Stored as
  *  JSON in `pk_round.config`. */

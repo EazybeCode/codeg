@@ -142,7 +142,7 @@ interface PkArenaActions {
     effort?: PkEffortLevel
     judgeAgent?: string | null
   }): Promise<PkRound>
-  hydrateFromDb(rounds: PkRoundInfo[]): void
+  hydrateFromDb(rounds: PkRound[]): void
   updateContestant(
     roundId: string,
     slot: number,
