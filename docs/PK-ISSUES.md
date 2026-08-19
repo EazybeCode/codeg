@@ -1,0 +1,154 @@
+# PK Arena 已知问题清单
+
+> 整理于 2026-08-19，基于 `feat/agent-pk-arena` 分支当前代码确认。
+> 每条都经过源码验证，标注了具体文件和行号。
+
+---
+
+## 问题 1：取消回合不触发裁判
+
+**严重程度**：中（影响核心使用场景）
+
+**场景**：用户启动 PK，某个 agent 耗时过长，用户想提前结束并导出报告时触发裁判打分。
+
+**现状**：做不到。
+
+- `cancelRound`（`use-pk-round.ts:1102-1131`）只做：markRound("canceled") + 断开未完成选手连接 + 标选手为 canceled
+- 裁判的唯一触发点在 `settleContestant`（`:795-814`），条件是所有选手 settled（done/error/canceled）后 markRound("finished") + 检查 judgeAgent
+- cancelRound 直接 markRound("canceled")，不走 settleContestant 分支，裁判永远不会被触发
+
+**修复方向**：cancelRound 末尾加：如果配了 judgeAgent 且 judgeStatus === "idle"，调用 runJudge（复用 settleContestant 里的逻辑）。
+
+---
+
+## 问题 2：裁判评分不在导出报告里
+
+**严重程度**：中
+
+**现状**：`buildPkReportHtml`（`pk-report.ts:83-196`）完全没有引用 `round.judgeResult`。报告只包含：任务文本、元信息、计分板表格（选手/状态/用时/token/轮次/diff增删/文件数）、各选手 diff 详情。没有裁判评分板块。
+
+**修复方向**：buildPkReportHtml 加上裁判评分渲染——渲染 `round.judgeResult.scores` 的排名、分数、点评、summary。
+
+---
+
+## 问题 3：裁判评分不在分享截图里
+
+**严重程度**：低
+
+**现状**：`handleShare`（`pk-arena-dialog.tsx:162-180`）只截 `scoreboardRef.current`，即 PkScoreboard 组件。PkJudgePanel 在 scoreboard 的外面（`:330-339`），截图不包含裁判面板。
+
+**修复方向**：把截图范围扩大到包含 PkJudgePanel，或给裁判面板单独加 ref。
+
+---
+
+## 问题 4：裁判评分不持久化
+
+**严重程度**：高
+
+**现状**：`judgeResult` 只存在前端 store（`pk-arena-store.ts`）的内存里。`pk_round` 表没有 judge_result 字段（见 migration `m20260819_000001_pk_round.rs`）。刷新页面或重启 server 后，裁判结果丢失。只有裁判的 conversation transcript 还在 DB 里（kind=Pk 的 conversation）。
+
+**影响**：用户跑完 PK、关掉 arena、再打开，裁判评分就没了。只能从裁判的 conversation 记录里人肉找 JSON。
+
+**修复方向**：pk_round 表加 judge_result JSON 列，store hydrate 时读回。
+
+---
+
+## 问题 5：导出报告不含裁判评分，且取消时无法触发裁判
+
+**严重程度**：高（两个问题叠加）
+
+这是问题 1 和问题 2 的叠加效应。用户想"提前结束 + 导出报告 + 看裁判打分"这个完整流程，当前完全做不到：
+- cancel 不触发裁判（问题 1）
+- 即使裁判跑过，报告也不含评分（问题 2）
+- 截图也不含评分（问题 3）
+
+---
+
+## 问题 6：控制变量 PK 的 UI 未完成
+
+**严重程度**：中
+
+**现状**：数据层已完成——`PkRoundConfig.agents` 支持 `Array<{agent, label}>` 新格式，兼容旧 `string[]` 格式（store hydrate 时归一化）。但 launcher UI（`pk-launcher-dialog.tsx`）不支持在选手选择区重复添加同一 agent。每个 agent 只显示一个按钮，选中/取消是 toggle，无法添加第二次。
+
+**影响**：用户无法在 UI 上做"Claude Code Sonnet vs Claude Code Opus"这种控制变量实验。只能通过 API 直接创建。
+
+**修复方向**：launcher 选手选择改为"添加槽位"模式，每个槽位独立选 agent + label。
+
+---
+
+## 问题 7：真实工程 PK 的任务来源仅做了 commit 拉取
+
+**严重程度**：低
+
+**现状**：launcher 有 "From commit" 按钮拉取最近 5 条 commit 作为任务（`pk-launcher-dialog.tsx:305-333`）。但路线图里提到的其他任务来源没做：
+- 从 git diff 拉取任务 ❌
+- 从 TODO 注释拉取 ❌
+- 从 GitHub issue 拉取 ❌
+- 在文件树里点选问题来 PK ❌
+
+---
+
+## 问题 8：裁判无法手动重跑
+
+**严重程度**：低
+
+**现状**：裁判是 one-shot 自动触发，judgeStatus 从 idle→running→done/error，没有重跑按钮。如果裁判 JSON 解析失败（judgeStatus="error"），用户无法手动重新触发裁判。
+
+**修复方向**：arena 里加"重新评分"按钮，重置 judgeStatus 为 idle 后调用 runJudge。
+
+---
+
+## 问题 9：进行中的回合可以无限制新开回合
+
+**严重程度**：低（可能是预期行为）
+
+**现状**：arena 的 "New round" 按钮（`pk-arena-dialog.tsx:258-264`）始终可点击，不检查当前回合是否在运行。点击后打开 launcher，可以创建新回合，旧回合继续在后台跑。
+
+**影响**：用户可以同时跑多个回合，没有互斥。可能导致资源占用过高（每个回合的选手都开独立 worktree + agent 连接）。
+
+**评估**：这可能是有意设计（多回合并行），不是 bug。但如果需要限制，应在 launcher 的 start 校验里加检查。
+
+---
+
+## 问题 10：裁判评分维度固定，不可配置
+
+**严重程度**：低
+
+**现状**：裁判 prompt（`use-pk-round.ts:69-90`）硬编码 4 个评分维度：
+1. Correctness — 是否完成任务
+2. Code quality — 可读性、结构、边界处理
+3. Completeness — 完成了多少
+4. Efficiency — 代码层面效率（明确排除 token 数和耗时）
+
+用户无法自定义评分维度或权重。
+
+**修复方向**：launcher 加评分维度配置，传入 buildJudgePrompt。
+
+---
+
+## 问题 11：裁判只看 diff，不看运行结果
+
+**严重程度**：低（设计限制）
+
+**现状**：裁判 prompt 只传 `contestantsWithDiffs`（`use-pk-round.ts:673-693`），即每个选手的 git diff 文本。裁判不跑代码、不看截图、不看运行日志。纯静态 diff 审查。
+
+**影响**：对于"代码能跑但 diff 看起来差"或"代码差但能跑"的情况，裁判评分可能不准。
+
+**评估**：这是当前架构限制，要支持运行结果需要重大改造（沙箱执行 + 截图捕获）。暂时记录，不做。
+
+---
+
+## 优先级排序
+
+| 优先级 | 问题 | 理由 |
+|--------|------|------|
+| P0 | #4 裁判评分不持久化 | 核心数据丢失，影响所有用户 |
+| P0 | #1 取消不触发裁判 | 阻断核心场景 |
+| P1 | #2 报告不含裁判评分 | 导出产物不完整 |
+| P1 | #3 截图不含裁判评分 | 分享素材不完整 |
+| P2 | #6 控制变量 UI 未完成 | 功能不完整 |
+| P2 | #8 裁判无法重跑 | 容错差 |
+| P3 | #10 评分维度不可配 | 增强需求 |
+| P3 | #7 任务来源不足 | 增强需求 |
+| P4 | #9 无限新开回合 | 可能是预期行为 |
+| P4 | #11 裁判只看 diff | 架构限制 |
