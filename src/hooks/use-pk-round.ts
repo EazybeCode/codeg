@@ -945,7 +945,10 @@ export function usePkRound(): {
       return
     }
     if (envelope.status === "prompting") {
-      if (contestant.status === "connecting") {
+      if (
+        contestant.status === "connecting" ||
+        contestant.status === "ready"
+      ) {
         updateContestant(entry.roundId, entry.slot, {
           status: "running",
           startedAt: Date.now(),
@@ -1181,6 +1184,15 @@ export function usePkRound(): {
                   conversationId: contestant.conversationId,
                 }
               )
+              // sendPrompt 已下发,主动把选手推进到 running。
+              // 不依赖 status_changed(prompting) 事件——server 模式下该事件
+              // 可能因 attach stream 竞态丢失,导致选手永远停在 ready,
+              // 后续 turn_complete 因 status !== "running" 被忽略,round
+              // 卡死、裁判不触发(问题 #0)。
+              updateContestant(round.id, contestant.slot, {
+                status: "running",
+                startedAt: Date.now(),
+              })
             } catch (error) {
               updateContestant(round.id, contestant.slot, {
                 status: "error",
