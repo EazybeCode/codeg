@@ -5015,7 +5015,8 @@
         "jellyBlob": "Jelly Blob",
         "snake": "Snake",
         "flappyBird": "Flappy Bird",
-        "voiceChat": "Voice Chat"
+        "voiceChat": "Voice Chat",
+        "blackHole": "Black Hole"
       },
       "judgeLabel": "Judge (optional)",
       "judgeNone": "No judge",

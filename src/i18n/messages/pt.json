@@ -5015,7 +5015,8 @@
         "jellyBlob": "Geleia",
         "snake": "Snake",
         "flappyBird": "Flappy Bird",
-        "voiceChat": "Chat por voz"
+        "voiceChat": "Chat por voz",
+        "blackHole": "Buraco Negro"
       },
       "judgeLabel": "Juiz (opcional)",
       "judgeNone": "Sem juiz",

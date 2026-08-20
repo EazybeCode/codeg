@@ -5015,7 +5015,8 @@
         "jellyBlob": "젤리",
         "snake": "스네이크",
         "flappyBird": "Flappy Bird",
-        "voiceChat": "음성 채팅"
+        "voiceChat": "음성 채팅",
+        "blackHole": "블랙홀"
       },
       "judgeLabel": "심판(선택)",
       "judgeNone": "심판 없음",

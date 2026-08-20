@@ -5015,7 +5015,8 @@
         "jellyBlob": "果凍 Blob",
         "snake": "貪吃蛇",
         "flappyBird": "Flappy Bird",
-        "voiceChat": "語音聊天"
+        "voiceChat": "語音聊天",
+        "blackHole": "黑洞"
       },
       "judgeLabel": "裁判(可選)",
       "judgeNone": "無裁判",

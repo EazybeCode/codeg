@@ -5015,7 +5015,8 @@
         "jellyBlob": "ゼリー",
         "snake": "スネーク",
         "flappyBird": "Flappy Bird",
-        "voiceChat": "音声チャット"
+        "voiceChat": "音声チャット",
+        "blackHole": "ブラックホール"
       },
       "judgeLabel": "審査員(任意)",
       "judgeNone": "審査員なし",

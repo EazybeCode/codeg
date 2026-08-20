@@ -5015,7 +5015,8 @@
         "jellyBlob": "هلام",
         "snake": "الثعبان",
         "flappyBird": "Flappy Bird",
-        "voiceChat": "دردشة صوتية"
+        "voiceChat": "دردشة صوتية",
+        "blackHole": "ثقب أسود"
       },
       "judgeLabel": "حَكَم (اختياري)",
       "judgeNone": "بدون حَكَم",

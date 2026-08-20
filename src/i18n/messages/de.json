@@ -5015,7 +5015,8 @@
         "jellyBlob": "Gelee",
         "snake": "Snake",
         "flappyBird": "Flappy Bird",
-        "voiceChat": "Sprachchat"
+        "voiceChat": "Sprachchat",
+        "blackHole": "Schwarzes Loch"
       },
       "judgeLabel": "Schiedsrichter (optional)",
       "judgeNone": "Kein Schiedsrichter",
