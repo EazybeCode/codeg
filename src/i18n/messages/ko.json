@@ -5021,7 +5021,9 @@
       "judgeLabel": "심판(선택)",
       "judgeNone": "심판 없음",
       "judgeHint": "모든 참가자가 완료되면 심판 에이전트가 각 참가자의 diff를 읽고 구조화된 평가와 순위를 생성합니다.",
-      "fromCommit": "📋 커밋에서",
+      "startPoint": "📍 시작점",
+      "fromHead": "현재 HEAD에서",
+      "startPointHint": "선수들은 이 커밋 이전부터 시작하여 이 커밋의 변경사항을 보지 못하고, 메시지만 과제로 받아 독립적으로 다시 수행합니다.",
       "loadingCommits": "커밋 로딩 중…",
       "noCommits": "커밋이 없습니다.",
       "creativeTemplates": "크리에이티브 템플릿",
@@ -5032,10 +5034,7 @@
       "judgeDimensionsHint": "한 줄에 하나씩. 비워두면 기본값 사용.",
       "addContestant": "{agent}을(를) 참가자로 추가",
       "slotLabelPlaceholder": "라벨(예: Sonnet, Opus)",
-      "removeSlot": "이 참가자 슬롯 제거",
-      "fromDiff": "📝 작업 변경사항에서",
-      "loadingDiff": "변경사항 로딩 중…",
-      "noChanges": "커밋되지 않은 변경사항이 없습니다."
+      "removeSlot": "이 참가자 슬롯 제거"
     },
     "scoreboard": {
       "status": {
@@ -5083,7 +5082,9 @@
       "exporting": "생성 중…",
       "readyTag": "준비됨",
       "deleteRound": "삭제",
-      "deleteConfirm": "이 라운드를 삭제? 워크트리는 남아 있습니다(정리로 제거)"
+      "deleteConfirm": "이 라운드를 삭제? 워크트리는 남아 있습니다(정리로 제거)",
+      "followUp": "추가",
+      "followUpPlaceholder": "이 선수에게만 추가 메시지 전송 (⌘↩ 전송)"
     },
     "diff": {
       "loading": "diff 불러오는 중…",

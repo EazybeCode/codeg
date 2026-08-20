@@ -5021,7 +5021,9 @@
       "judgeLabel": "Juge (optionnel)",
       "judgeNone": "Pas de juge",
       "judgeHint": "Une fois tous les concurrents terminés, cet agent lit chaque diff et produit un verdict structuré avec scores et classements.",
-      "fromCommit": "📋 Depuis commit",
+      "startPoint": "📍 Point de départ",
+      "fromHead": "depuis le HEAD actuel",
+      "startPointHint": "Les candidats partent un commit avant celui-ci — ils ne voient pas ses changements, seulement son message comme tâche. Ils refont le même objectif indépendamment.",
       "loadingCommits": "Chargement des commits…",
       "noCommits": "Aucun commit trouvé.",
       "creativeTemplates": "Modèles créatifs",
@@ -5032,10 +5034,7 @@
       "judgeDimensionsHint": "Une dimension par ligne. Laisser vide pour les valeurs par défaut.",
       "addContestant": "Ajouter {agent} comme concurrent",
       "slotLabelPlaceholder": "Étiquette (ex. Sonnet, Opus)",
-      "removeSlot": "Retirer ce créneau de concurrent",
-      "fromDiff": "📝 Des modifications locales",
-      "loadingDiff": "Chargement des modifications…",
-      "noChanges": "Aucune modification non commitée."
+      "removeSlot": "Retirer ce créneau de concurrent"
     },
     "scoreboard": {
       "status": {
@@ -5083,7 +5082,9 @@
       "exporting": "Génération…",
       "readyTag": "Prêt",
       "deleteRound": "Supprimer",
-      "deleteConfirm": "Supprimer cette manche ? Les worktrees restent — utilisez Nettoyer les worktrees."
+      "deleteConfirm": "Supprimer cette manche ? Les worktrees restent — utilisez Nettoyer les worktrees.",
+      "followUp": "Relancer",
+      "followUpPlaceholder": "Envoyer uniquement à ce candidat (⌘↩ pour envoyer)"
     },
     "diff": {
       "loading": "Chargement du diff…",

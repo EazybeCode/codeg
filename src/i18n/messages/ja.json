@@ -5021,7 +5021,9 @@
       "judgeLabel": "審査員(任意)",
       "judgeNone": "審査員なし",
       "judgeHint": "全選手の完了後、審査員エージェントが各選手の diff を読み、構造化された評価とランキングを生成します。",
-      "fromCommit": "📋 コミットから",
+      "startPoint": "📍 開始点",
+      "fromHead": "現在の HEAD から",
+      "startPointHint": "選手はこのコミットの前から開始し、このコミットの変更を見ず、メッセージをタスクとして独立して再現します。",
       "loadingCommits": "コミットを読み込み中…",
       "noCommits": "コミットが見つかりません。",
       "creativeTemplates": "クリエイティブテンプレート",
@@ -5032,10 +5034,7 @@
       "judgeDimensionsHint": "1 行 1 dimension。空欄でデフォルト使用。",
       "addContestant": "{agent} を選手として追加",
       "slotLabelPlaceholder": "ラベル(例: Sonnet、Opus)",
-      "removeSlot": "この選手スロットを削除",
-      "fromDiff": "📝 作業中の変更から",
-      "loadingDiff": "変更を読み込み中…",
-      "noChanges": "未コミットの変更はありません。"
+      "removeSlot": "この選手スロットを削除"
     },
     "scoreboard": {
       "status": {
@@ -5083,7 +5082,9 @@
       "exporting": "生成中…",
       "readyTag": "準備完了",
       "deleteRound": "削除",
-      "deleteConfirm": "このラウンドを削除?ワークツリーは残ります(「ワークツリーを削除」で除去)"
+      "deleteConfirm": "このラウンドを削除?ワークツリーは残ります(「ワークツリーを削除」で除去)",
+      "followUp": "追加",
+      "followUpPlaceholder": "この選手にのみ追加メッセージを送信(⌘↩ で送信)"
     },
     "diff": {
       "loading": "diff を読み込み中…",

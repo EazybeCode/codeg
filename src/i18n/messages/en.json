@@ -5027,10 +5027,9 @@
       "judgeDimensionsLabel": "Scoring dimensions (optional)",
       "judgeDimensionsPlaceholder": "Correctness — does it fulfill the task?\nCode quality — readability, structure, edge cases\nCompleteness — how much of the task is done?\nEfficiency — code-level efficiency (ignore token/time)",
       "judgeDimensionsHint": "One dimension per line. Leave blank to use the defaults. Each becomes a numbered criterion in the judge prompt.",
-      "fromCommit": "📋 From commit",
-      "fromDiff": "📝 From working changes",
-      "loadingDiff": "Loading changes…",
-      "noChanges": "No uncommitted changes.",
+      "startPoint": "📍 Start point",
+      "fromHead": "from current HEAD",
+      "startPointHint": "Contestants branch from one commit BEFORE this — they never see its changes, only its message as the task. So they redo the same goal independently.",
       "loadingCommits": "Loading commits…",
       "noCommits": "No commits found.",
       "creativeTemplates": "Creative templates",
@@ -5083,7 +5082,9 @@
       "exporting": "Building…",
       "readyTag": "Ready",
       "deleteRound": "Delete",
-      "deleteConfirm": "Delete this round? (worktrees stay on disk — use Clean worktrees to remove them)"
+      "deleteConfirm": "Delete this round? (worktrees stay on disk — use Clean worktrees to remove them)",
+      "followUp": "Follow-up",
+      "followUpPlaceholder": "Send a follow-up message to this contestant only (⌘↩ to send)"
     },
     "diff": {
       "loading": "Loading diff…",

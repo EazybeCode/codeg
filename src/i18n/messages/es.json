@@ -5021,7 +5021,9 @@
       "judgeLabel": "Juez (opcional)",
       "judgeNone": "Sin juez",
       "judgeHint": "Cuando todos los concursantes terminen, este agente leerá cada diff y producirá un veredicto estructurado con puntuaciones y clasificaciones.",
-      "fromCommit": "📋 Desde commit",
+      "startPoint": "📍 Punto de partida",
+      "fromHead": "desde el HEAD actual",
+      "startPointHint": "Los concursantes parten un commit antes de este — no ven sus cambios, solo su mensaje como tarea. Repiten el mismo objetivo de forma independiente.",
       "loadingCommits": "Cargando commits…",
       "noCommits": "No se encontraron commits.",
       "creativeTemplates": "Plantillas creativas",
@@ -5032,10 +5034,7 @@
       "judgeDimensionsHint": "Una dimensión por línea. Déjalo vacío para usar los valores predeterminados.",
       "addContestant": "Añadir {agent} como concursante",
       "slotLabelPlaceholder": "Etiqueta (p. ej. Sonnet, Opus)",
-      "removeSlot": "Quitar este puesto de concursante",
-      "fromDiff": "📝 De cambios locales",
-      "loadingDiff": "Cargando cambios…",
-      "noChanges": "No hay cambios sin confirmar."
+      "removeSlot": "Quitar este puesto de concursante"
     },
     "scoreboard": {
       "status": {
@@ -5083,7 +5082,9 @@
       "exporting": "Generando…",
       "readyTag": "Listo",
       "deleteRound": "Eliminar",
-      "deleteConfirm": "¿Eliminar esta ronda? Los worktrees permanecen — use Limpiar worktrees."
+      "deleteConfirm": "¿Eliminar esta ronda? Los worktrees permanecen — use Limpiar worktrees.",
+      "followUp": "Continuar",
+      "followUpPlaceholder": "Enviar solo a este concursante (⌘↩ para enviar)"
     },
     "diff": {
       "loading": "Cargando diff…",

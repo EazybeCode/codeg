@@ -15,14 +15,12 @@ import {
   acpGetAgentStatus,
   getFolder,
   getGitBranch,
-  gitDiff,
   gitInit,
   gitLog,
-  gitStatus,
 } from "@/lib/api"
 import { getAgentLabel } from "@/lib/custom-agents"
 import { PK_TEMPLATES } from "@/lib/pk-templates"
-import type { AgentType, GitLogEntry, GitStatusEntry } from "@/lib/types"
+import type { AgentType, GitLogEntry } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
   loadLastLauncherConfig,
@@ -77,9 +75,11 @@ export function PkLauncherDialog() {
   const [commitsLoading, setCommitsLoading] = useState(false)
   const [commitSkip, setCommitSkip] = useState(0)
   const [commitsExhausted, setCommitsExhausted] = useState(false)
-  const [diffPickerOpen, setDiffPickerOpen] = useState(false)
-  const [statusEntries, setStatusEntries] = useState<GitStatusEntry[]>([])
-  const [diffLoading, setDiffLoading] = useState(false)
+  /** The commit chosen as the task source. null = start from current HEAD.
+   * When set, the worktree branches from `<hash>^` (one commit before), so
+   * contestants never see this commit's changes — only its message as the
+   * task. */
+  const [selectedCommit, setSelectedCommit] = useState<GitLogEntry | null>(null)
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
     setIsGitRepo(null)
@@ -106,9 +106,7 @@ export function PkLauncherDialog() {
     setJudgeDimensions("")
     setStartError(null)
     setCommitPickerOpen(false)
-    setDiffPickerOpen(false)
-    setStatusEntries([])
-    setDiffLoading(false)
+    setSelectedCommit(null)
     // 复赛预填:上次配置的选手若仍可参与则沿用。
     const last = loadLastLauncherConfig()
     if (last && last.agents.length > 0) {
@@ -240,6 +238,9 @@ export function PkLauncherDialog() {
       judgeAgent,
       judgeDimensions: parsedDimensions.length > 0 ? parsedDimensions : null,
     })
+    // Selected a commit → worktree branches from its PARENT, so contestants
+    // start before that commit and never see its changes. null = current HEAD.
+    const baseCommit = selectedCommit ? `${selectedCommit.hash}^` : null
     void createRound({
       task: task.trim(),
       folderId,
@@ -250,6 +251,7 @@ export function PkLauncherDialog() {
       effort,
       judgeAgent,
       judgeDimensions: parsedDimensions.length > 0 ? parsedDimensions : null,
+      baseCommit,
     })
     setLauncherOpen(false)
     setArenaOpen(true)
@@ -385,13 +387,13 @@ export function PkLauncherDialog() {
               ))}
             </div>
 
-            {/* ── 真实工程 PK:从提交拉取 ── */}
+            {/* ── 真实工程 PK:起点选择 ── */}
             {workingDir != null && isGitRepo === true ? (
               <>
                 <div className="mb-1 text-xs font-medium text-muted-foreground">
                   {t("realEngineering")}
                 </div>
-                <div className="mb-2 flex flex-wrap gap-1.5">
+                <div className="mb-2 flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
                     onClick={async () => {
@@ -399,7 +401,6 @@ export function PkLauncherDialog() {
                         setCommitPickerOpen(false)
                         return
                       }
-                      setDiffPickerOpen(false)
                       setCommitSkip(0)
                       setCommitsExhausted(false)
                       setCommitsLoading(true)
@@ -416,41 +417,35 @@ export function PkLauncherDialog() {
                     }}
                     className={cn(
                       "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors",
-                      commitPickerOpen
+                      commitPickerOpen || selectedCommit
                         ? "border-primary bg-primary/10 text-foreground"
                         : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
                     )}
                   >
-                    {t("fromCommit")}
+                    {t("startPoint")}
                   </button>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      if (diffPickerOpen) {
-                        setDiffPickerOpen(false)
-                        return
-                      }
-                      setCommitPickerOpen(false)
-                      setDiffLoading(true)
-                      setDiffPickerOpen(true)
-                      try {
-                        const entries = await gitStatus(workingDir)
-                        setStatusEntries(entries)
-                      } catch {
-                        setStatusEntries([])
-                      } finally {
-                        setDiffLoading(false)
-                      }
-                    }}
-                    className={cn(
-                      "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors",
-                      diffPickerOpen
-                        ? "border-primary bg-primary/10 text-foreground"
-                        : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-                    )}
-                  >
-                    {t("fromDiff")}
-                  </button>
+                  {selectedCommit ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedCommit(null)
+                        setCommitPickerOpen(false)
+                      }}
+                      className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
+                    >
+                      <span className="font-mono">
+                        {selectedCommit.hash.slice(0, 7)}
+                      </span>
+                      <span className="max-w-[180px] truncate">
+                        {selectedCommit.message.split("\n")[0]}
+                      </span>
+                      <X className="size-3 shrink-0" />
+                    </button>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      {t("fromHead")}
+                    </span>
+                  )}
                 </div>
                 {commitPickerOpen ? (
                   <div className="mb-2 max-h-48 overflow-auto rounded-lg border border-border bg-background">
@@ -469,9 +464,12 @@ export function PkLauncherDialog() {
                             key={commit.hash}
                             type="button"
                             onClick={() => {
-                              setTask(
-                                `复现提交 ${commit.hash.slice(0, 7)} 的改动: ${commit.message.split("\n")[0]}`
-                              )
+                              // Use the commit message as the task so the
+                              // contestant gets a clear goal. The worktree will
+                              // branch from <hash>^ — one commit BEFORE this —
+                              // so the contestant never sees these changes.
+                              setTask(commit.message.split("\n")[0])
+                              setSelectedCommit(commit)
                               setCommitPickerOpen(false)
                             }}
                             className="block w-full px-3 py-2 text-left hover:bg-muted"
@@ -532,58 +530,10 @@ export function PkLauncherDialog() {
                     )}
                   </div>
                 ) : null}
-                {diffPickerOpen ? (
-                  <div className="mb-2 max-h-48 overflow-auto rounded-lg border border-border bg-background">
-                    {diffLoading ? (
-                      <div className="px-3 py-2 text-xs text-muted-foreground">
-                        {t("loadingDiff")}
-                      </div>
-                    ) : statusEntries.length === 0 ? (
-                      <div className="px-3 py-2 text-xs text-muted-foreground">
-                        {t("noChanges")}
-                      </div>
-                    ) : (
-                      <>
-                        {statusEntries.map((entry) => (
-                          <button
-                            key={entry.file}
-                            type="button"
-                            onClick={async () => {
-                              try {
-                                const diff = await gitDiff(
-                                  workingDir,
-                                  entry.file
-                                )
-                                const preview =
-                                  diff.length > 200
-                                    ? `${diff.slice(0, 200)}…`
-                                    : diff
-                                setTask(
-                                  `基于工作区对 \`${entry.file}\` 的改动完成该任务:\n\n\`\`\`diff\n${preview}\n\`\`\``
-                                )
-                              } catch {
-                                setTask(
-                                  `基于工作区对 \`${entry.file}\` 的改动完成任务`
-                                )
-                              }
-                              setDiffPickerOpen(false)
-                            }}
-                            className="block w-full px-3 py-2 text-left hover:bg-muted"
-                            title={entry.file}
-                          >
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-xs text-muted-foreground">
-                                {entry.status}
-                              </span>
-                              <span className="truncate text-xs text-foreground">
-                                {entry.file}
-                              </span>
-                            </div>
-                          </button>
-                        ))}
-                      </>
-                    )}
-                  </div>
+                {selectedCommit ? (
+                  <p className="mb-2 text-[11px] leading-relaxed text-muted-foreground">
+                    {t("startPointHint")}
+                  </p>
                 ) : null}
               </>
             ) : null}

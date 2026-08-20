@@ -121,6 +121,10 @@ export interface PkRound {
   /** Custom judge evaluation dimensions (null = use defaults). Live copy of
    *  PkRoundConfig.judge_dimensions. */
   judgeDimensions: string[] | null
+  /** Git ref each contestant worktree branches from. null = current HEAD.
+   *  Set to `X^` when the round sources its task from commit X, so
+   *  contestants start before X — they never see X's changes. */
+  baseCommit: string | null
   /** Judge verdict text (structured LLM output). Live-only — not persisted. */
   judgeResult: PkJudgeResult | null
   /** "idle" → "running" → "done" | "error" | "skipped". Live-only. */
@@ -150,6 +154,7 @@ interface PkArenaActions {
     effort?: PkEffortLevel
     judgeAgent?: string | null
     judgeDimensions?: string[] | null
+    baseCommit?: string | null
   }): Promise<PkRound>
   hydrateFromDb(rounds: PkRound[]): void
   updateContestant(
@@ -235,6 +240,7 @@ export function dbRoundToStoreRound(
     judgeDimensions: info.config.judge_dimensions?.length
       ? info.config.judge_dimensions
       : null,
+    baseCommit: info.config.base_commit ?? null,
     judgeResult:
       info.judge_result != null
         ? {
@@ -297,6 +303,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
     effort,
     judgeAgent,
     judgeDimensions,
+    baseCommit,
   }) => {
     const config: PkRoundConfig = {
       agents: agents.map((a) =>
@@ -307,6 +314,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       effort: effort ?? "default",
       judge_agent: judgeAgent ?? undefined,
       judge_dimensions: judgeDimensions?.filter((d) => d.trim()) ?? [],
+      base_commit: baseCommit ?? undefined,
     }
     const info = await pkRoundCreate(folderId, task, config)
     const round: PkRound = {
@@ -321,6 +329,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       effort: effort ?? "default",
       judgeAgent: judgeAgent ?? null,
       judgeDimensions: judgeDimensions?.filter((d) => d.trim()) ?? null,
+      baseCommit: baseCommit ?? null,
       judgeResult: null,
       judgeStatus: "idle",
       contestants: agents.map((a, slot) => ({

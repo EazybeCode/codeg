@@ -57,6 +57,14 @@ pub struct PkRoundConfig {
     /// Completeness / Efficiency). Empty or absent = use the defaults.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub judge_dimensions: Vec<String>,
+    /// The git ref each contestant worktree is branched from. Absent or null
+    /// = current HEAD (the default, "from now"). When the launcher picks a
+    /// commit X as the task source, this is set to `X^` so the worktree starts
+    /// one commit BEFORE X — contestants never see X's changes, only its
+    /// message as the task description. Physical isolation, not a prompt
+    /// instruction the agent can ignore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
 }
 
 fn default_permission_mode() -> String {

@@ -5021,7 +5021,9 @@
       "judgeLabel": "裁判(可選)",
       "judgeNone": "無裁判",
       "judgeHint": "所有選手完成後,裁判 agent 會讀取每個選手的 diff,給出結構化評分和排名。",
-      "fromCommit": "📋 從提交拉取",
+      "startPoint": "📍 起點",
+      "fromHead": "從目前 HEAD 開始",
+      "startPointHint": "選手從此提交的前一次提交開始,看不到這次提交的改動,只把它的提交訊息當任務——等於獨立重做同一個目標。",
       "loadingCommits": "載入提交中…",
       "noCommits": "未找到提交。",
       "creativeTemplates": "創意 PK",
@@ -5032,10 +5034,7 @@
       "judgeDimensionsHint": "每行一個維度。留空使用預設。每個維度會成為裁判提示詞中的編號評分標準。",
       "addContestant": "加入 {agent} 為選手",
       "slotLabelPlaceholder": "標籤(如 Sonnet、Opus)",
-      "removeSlot": "移除該選手位置",
-      "fromDiff": "📝 從改動拉取",
-      "loadingDiff": "載入改動中…",
-      "noChanges": "沒有未提交的改動。"
+      "removeSlot": "移除該選手位置"
     },
     "scoreboard": {
       "status": {
@@ -5083,7 +5082,9 @@
       "exporting": "產生中…",
       "readyTag": "就緒",
       "deleteRound": "刪除",
-      "deleteConfirm": "刪除這個回合?worktree 會留在磁碟上,可用「清理 worktree」移除。"
+      "deleteConfirm": "刪除這個回合?worktree 會留在磁碟上,可用「清理 worktree」移除。",
+      "followUp": "追加",
+      "followUpPlaceholder": "只對這名選手發追加訊息(⌘↩ 傳送)"
     },
     "diff": {
       "loading": "正在載入 diff…",

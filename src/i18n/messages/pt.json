@@ -5021,7 +5021,9 @@
       "judgeLabel": "Juiz (opcional)",
       "judgeNone": "Sem juiz",
       "judgeHint": "Após todos os concorrentes terminarem, este agente lê cada diff e produz um veredito estruturado com pontuações e classificações.",
-      "fromCommit": "📋 Do commit",
+      "startPoint": "📍 Ponto de partida",
+      "fromHead": "do HEAD atual",
+      "startPointHint": "Os competidores começam um commit antes deste — sem ver suas mudanças, apenas sua mensagem como tarefa. Refazem o mesmo objetivo de forma independente.",
       "loadingCommits": "Carregando commits…",
       "noCommits": "Nenhum commit encontrado.",
       "creativeTemplates": "Modelos criativos",
@@ -5032,10 +5034,7 @@
       "judgeDimensionsHint": "Uma dimensão por linha. Deixe vazio para usar os padrões.",
       "addContestant": "Adicionar {agent} como concorrente",
       "slotLabelPlaceholder": "Rótulo (ex. Sonnet, Opus)",
-      "removeSlot": "Remover este slot de concorrente",
-      "fromDiff": "📝 Das mudanças locais",
-      "loadingDiff": "Carregando mudanças…",
-      "noChanges": "Nenhuma mudança não commitada."
+      "removeSlot": "Remover este slot de concorrente"
     },
     "scoreboard": {
       "status": {
@@ -5083,7 +5082,9 @@
       "exporting": "Gerando…",
       "readyTag": "Pronto",
       "deleteRound": "Excluir",
-      "deleteConfirm": "Excluir esta rodada? Os worktrees permanecem — use Limpar worktrees."
+      "deleteConfirm": "Excluir esta rodada? Os worktrees permanecem — use Limpar worktrees.",
+      "followUp": "Continuar",
+      "followUpPlaceholder": "Enviar apenas a este concorrente (⌘↩ para enviar)"
     },
     "diff": {
       "loading": "Carregando diff…",

@@ -2048,12 +2048,14 @@ export async function gitNewBranch(
 export async function gitWorktreeAdd(
   path: string,
   branchName: string,
-  worktreePath: string
+  worktreePath: string,
+  base?: string | null
 ): Promise<void> {
   return getTransport().call("git_worktree_add", {
     path,
     branchName,
     worktreePath,
+    base: base ?? undefined,
   })
 }
 

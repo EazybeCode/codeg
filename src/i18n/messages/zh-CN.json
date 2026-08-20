@@ -5027,10 +5027,9 @@
       "judgeDimensionsLabel": "评分维度(可选)",
       "judgeDimensionsPlaceholder": "正确性 — 是否完成任务?\n代码质量 — 可读性、结构、边界处理\n完整度 — 完成了多少?\n效率 — 代码层面效率(忽略 token 数和耗时)",
       "judgeDimensionsHint": "每行一个维度。留空使用默认。每个维度会成为裁判提示词中的编号评分标准。",
-      "fromCommit": "📋 从提交拉取",
-      "fromDiff": "📝 从改动拉取",
-      "loadingDiff": "加载改动中…",
-      "noChanges": "没有未提交的改动。",
+      "startPoint": "📍 起点",
+      "fromHead": "从当前 HEAD 开始",
+      "startPointHint": "选手从此提交的上一次提交开始,看不到这次提交的改动,只把它的提交信息当任务——等于独立重做同一个目标。",
       "loadingCommits": "加载提交中…",
       "noCommits": "未找到提交。",
       "creativeTemplates": "创意 PK",
@@ -5083,7 +5082,9 @@
       "exporting": "生成中…",
       "readyTag": "就绪",
       "deleteRound": "删除",
-      "deleteConfirm": "删除这个回合?worktree 会留在磁盘上,可用「清理 worktree」移除。"
+      "deleteConfirm": "删除这个回合?worktree 会留在磁盘上,可用「清理 worktree」移除。",
+      "followUp": "追加",
+      "followUpPlaceholder": "只对这名选手发追加消息(⌘↩ 发送)"
     },
     "diff": {
       "loading": "正在加载 diff…",

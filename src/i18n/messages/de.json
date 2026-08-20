@@ -5021,7 +5021,9 @@
       "judgeLabel": "Schiedsrichter (optional)",
       "judgeNone": "Kein Schiedsrichter",
       "judgeHint": "Nachdem alle Teilnehmer fertig sind, liest dieser Agent jeden Diff und erstellt ein strukturiertes Urteil mit Punktzahlen und Rängen.",
-      "fromCommit": "📋 Aus Commit",
+      "startPoint": "📍 Startpunkt",
+      "fromHead": "ab aktuellem HEAD",
+      "startPointHint": "Teilnehmer beginnen einen Commit davor — sie sehen diese Änderungen nicht, nur die Commit-Nachricht als Aufgabe. Sie machen dasselbe Ziel unabhängig.",
       "loadingCommits": "Commits laden…",
       "noCommits": "Keine Commits gefunden.",
       "creativeTemplates": "Kreative Vorlagen",
@@ -5032,10 +5034,7 @@
       "judgeDimensionsHint": "Eine Dimension pro Zeile. Leer lassen für Standardwerte.",
       "addContestant": "{agent} als Teilnehmer hinzufügen",
       "slotLabelPlaceholder": "Label (z.B. Sonnet, Opus)",
-      "removeSlot": "Diesen Teilnehmer-Slot entfernen",
-      "fromDiff": "📝 Aus Arbeitsänderungen",
-      "loadingDiff": "Änderungen laden…",
-      "noChanges": "Keine uncommitteten Änderungen."
+      "removeSlot": "Diesen Teilnehmer-Slot entfernen"
     },
     "scoreboard": {
       "status": {
@@ -5083,7 +5082,9 @@
       "exporting": "Erstelle…",
       "readyTag": "Bereit",
       "deleteRound": "Löschen",
-      "deleteConfirm": "Diese Runde löschen? Worktrees bleiben auf der Platte — über 'Worktrees bereinigen' entfernen."
+      "deleteConfirm": "Diese Runde löschen? Worktrees bleiben auf der Platte — über 'Worktrees bereinigen' entfernen.",
+      "followUp": "Nachfassen",
+      "followUpPlaceholder": "Nur an diesen Teilnehmer senden (⌘↩ zum Senden)"
     },
     "diff": {
       "loading": "Diff wird geladen…",

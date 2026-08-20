@@ -692,6 +692,10 @@ export interface PkRoundConfig {
    *  line replacing the default 4 (Correctness / Code quality / Completeness /
    *  Efficiency). Empty or absent = use the defaults. */
   judge_dimensions?: string[]
+  /** Git ref each contestant worktree is branched from. Absent = current HEAD.
+   *  When the launcher picks commit X as the task source, this is `X^` so the
+   *  worktree starts before X — physical isolation, not a prompt rule. */
+  base_commit?: string
 }
 
 /** Mirrors Rust `PkRoundInfo` (src-tauri/src/models/pk_round.rs). */
