@@ -3,8 +3,13 @@
 import { useTranslations } from "next-intl"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
+import { assignJudgeScoreSlots, contestantForJudgeScore } from "@/lib/pk-judge"
 import { cn } from "@/lib/utils"
-import type { PkJudgeResult, PkJudgeStatus } from "@/stores/pk-arena-store"
+import type {
+  PkContestant,
+  PkJudgeResult,
+  PkJudgeStatus,
+} from "@/stores/pk-arena-store"
 import type { AgentType } from "@/lib/types"
 
 /**
@@ -31,14 +36,23 @@ export function PkJudgePanel({
   judgeStatus,
   judgeResult,
   judgeAgent,
+  contestants,
   onRerun,
 }: {
   judgeStatus: PkJudgeStatus
   judgeResult: PkJudgeResult | null
   judgeAgent: string
+  contestants: readonly PkContestant[]
   onRerun?: () => void
 }) {
   const t = useTranslations("PkArena.judge")
+  const completedContestants = contestants.filter(
+    (contestant) => contestant.status === "done"
+  )
+  const scores = assignJudgeScoreSlots(
+    judgeResult?.scores ?? [],
+    completedContestants
+  )
 
   if (judgeStatus === "idle" || judgeStatus === "skipped") return null
 
@@ -76,39 +90,50 @@ export function PkJudgePanel({
 
       {judgeResult ? (
         <div className="space-y-2">
-          {judgeResult.scores.length > 0 ? (
+          {scores.length > 0 ? (
             <div className="flex flex-wrap gap-2">
-              {judgeResult.scores
+              {scores
                 .slice()
                 .sort((a, b) => a.rank - b.rank)
-                .map((score) => (
-                  <div
-                    key={score.agentType}
-                    className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-1.5"
-                  >
-                    <span className="text-sm">{rankBadge(score.rank)}</span>
-                    <AgentIcon
-                      agentType={score.agentType as AgentType}
-                      className="size-4"
-                    />
-                    <span className="text-sm font-medium text-foreground">
-                      {getAgentLabel(score.agentType as AgentType)}
-                    </span>
-                    <span
-                      className={cn(
-                        "text-lg font-bold tabular-nums",
-                        scoreColor(score.score)
-                      )}
+                .map((score, index) => {
+                  const contestant = contestantForJudgeScore(score, contestants)
+                  return (
+                    <div
+                      key={
+                        score.slot ??
+                        `${score.agentType}-${score.rank}-${index}`
+                      }
+                      className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-1.5"
                     >
-                      {score.score}
-                    </span>
-                    {score.comment ? (
-                      <span className="max-w-xs truncate text-xs text-muted-foreground">
-                        {score.comment}
+                      <span className="text-sm">{rankBadge(score.rank)}</span>
+                      <AgentIcon
+                        agentType={score.agentType as AgentType}
+                        className="size-4"
+                      />
+                      <span className="text-sm font-medium text-foreground">
+                        {getAgentLabel(score.agentType as AgentType)}
                       </span>
-                    ) : null}
-                  </div>
-                ))}
+                      {contestant?.label ? (
+                        <span className="max-w-40 truncate text-xs text-muted-foreground">
+                          {contestant.label}
+                        </span>
+                      ) : null}
+                      <span
+                        className={cn(
+                          "text-lg font-bold tabular-nums",
+                          scoreColor(score.score)
+                        )}
+                      >
+                        {score.score}
+                      </span>
+                      {score.comment ? (
+                        <span className="max-w-xs truncate text-xs text-muted-foreground">
+                          {score.comment}
+                        </span>
+                      ) : null}
+                    </div>
+                  )
+                })}
             </div>
           ) : null}
           {judgeResult.summary ? (

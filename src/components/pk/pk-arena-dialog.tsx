@@ -17,8 +17,8 @@ import { PkHistoryPicker } from "@/components/pk/pk-history-picker"
 import { usePkRound } from "@/hooks/use-pk-round"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
-import { getFileTree } from "@/lib/api"
-import { buildPkReportHtml } from "@/lib/pk-report"
+import { getFileTree, readWorkspaceFileBase64 } from "@/lib/api"
+import { buildPkReportHtml, type PkReportArtifact } from "@/lib/pk-report"
 import { savePkReportHtml } from "@/lib/pk-report-export"
 import type { FileTreeNode } from "@/lib/types"
 import type { PkContestant, PkRound } from "@/stores/pk-arena-store"
@@ -126,7 +126,7 @@ export function PkArenaDialog() {
     if (!round || reportExporting) return
     setReportExporting(true)
     try {
-      // 确保 diff 已抓取(报告需要),并抓每个选手 worktree 的文件树。
+      // 非单文件产物仍使用 Diff；同时抓取文件树来识别可运行 HTML。
       const pendingDiff = round.contestants.filter(
         (c) => c.diff == null && c.worktreePath
       )
@@ -135,20 +135,41 @@ export function PkArenaDialog() {
       const fresh = usePkArenaStore
         .getState()
         .rounds.find((r) => r.id === round.id)
-      const filesByAgent: Record<string, string[]> = {}
+      const artifactsBySlot: Record<string, PkReportArtifact[]> = {}
       for (const contestant of fresh?.contestants ?? []) {
-        if (!contestant.worktreePath) {
-          filesByAgent[contestant.slot] = []
-          continue
-        }
+        // worktreePath is live-only state. Historical rounds can still read
+        // their preserved artifact directory through its deterministic path.
+        const artifactRoot =
+          contestant.worktreePath ??
+          `${round.workingDir}/.codeg-pk/${round.id}/${contestant.slot}`
         try {
-          const tree = await getFileTree(contestant.worktreePath, 6)
-          filesByAgent[contestant.slot] = flattenTreeList(tree)
+          const tree = await getFileTree(artifactRoot, 6)
+          const paths = flattenTreeList(tree)
+          const runnableHtmlPath = pickRunnableHtmlPath(paths)
+          let runnableHtmlBase64: string | undefined
+          if (runnableHtmlPath) {
+            try {
+              runnableHtmlBase64 = await readWorkspaceFileBase64(
+                artifactRoot,
+                runnableHtmlPath,
+                2_000_000
+              )
+            } catch {
+              // A large/unreadable HTML file remains listed in the report and
+              // falls back to Diff instead of failing the entire export.
+            }
+          }
+          artifactsBySlot[contestant.slot] = paths.map((path) => ({
+            path,
+            ...(path === runnableHtmlPath && runnableHtmlBase64
+              ? { contentBase64: runnableHtmlBase64 }
+              : {}),
+          }))
         } catch {
-          filesByAgent[contestant.slot] = []
+          artifactsBySlot[contestant.slot] = []
         }
       }
-      const html = buildPkReportHtml(fresh ?? round, filesByAgent, locale)
+      const html = buildPkReportHtml(fresh ?? round, artifactsBySlot, locale)
       const result = await savePkReportHtml(html, round.id)
       if (result === "saved") toast.success(t("reportSaved"))
     } catch (error) {
@@ -279,6 +300,7 @@ export function PkArenaDialog() {
                   judgeStatus={round.judgeStatus}
                   judgeResult={round.judgeResult}
                   judgeAgent={round.judgeAgent}
+                  contestants={round.contestants}
                   onRerun={
                     round.judgeStatus === "done" ||
                     round.judgeStatus === "error"
@@ -568,4 +590,12 @@ function flattenTreeList(nodes: FileTreeNode[], prefix = ""): string[] {
     }
   }
   return files
+}
+
+/** Only a genuinely standalone HTML artifact can survive inside a one-file
+ * report. Multi-file sites keep the file/Diff view because relative assets
+ * would be missing after the report is shared. */
+function pickRunnableHtmlPath(paths: readonly string[]): string | null {
+  if (paths.length !== 1) return null
+  return /\.html?$/i.test(paths[0]) ? paths[0] : null
 }

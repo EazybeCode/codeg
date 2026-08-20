@@ -197,6 +197,7 @@ describe("pk arena store", () => {
         pk_round_id: 42,
         title: "PK · history",
         model: "qoder-model",
+        status: "cancelled",
         created_at: "2026-08-20T08:02:00Z",
       },
       {
@@ -204,6 +205,7 @@ describe("pk arena store", () => {
         pk_round_id: 42,
         title: "PK · history",
         model: "claude-model",
+        status: "pending_review",
         created_at: "2026-08-20T08:01:00Z",
       },
     ] as DbConversationSummary[]
@@ -214,6 +216,10 @@ describe("pk arena store", () => {
     expect(hydrated.contestants.map((c) => c.selectedModel)).toEqual([
       "claude-model",
       "qoder-model",
+    ])
+    expect(hydrated.contestants.map((c) => c.status)).toEqual([
+      "done",
+      "canceled",
     ])
   })
 
@@ -302,6 +308,10 @@ describe("pk arena store", () => {
     expect(revived.contestants.map((c) => c.slot)).toEqual([0, 1])
     expect(revived.contestants.map((c) => c.label)).toEqual(["Sonnet", "Opus"])
     expect(revived.contestants.map((c) => c.configValues.model)).toEqual([
+      "sonnet",
+      "opus",
+    ])
+    expect(revived.contestants.map((c) => c.selectedModel)).toEqual([
       "sonnet",
       "opus",
     ])

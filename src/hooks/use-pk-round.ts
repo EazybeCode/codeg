@@ -14,6 +14,7 @@ import {
   updateConversationStatus,
 } from "@/lib/api"
 import type { PromptInputBlock, SessionConfigOptionInfo } from "@/lib/types"
+import { assignJudgeScoreSlots } from "@/lib/pk-judge"
 import {
   useAcpActions,
   useAcpEvent,
@@ -71,13 +72,18 @@ const DEFAULT_JUDGE_DIMENSIONS = [
 
 export function buildJudgePrompt(
   task: string,
-  contestants: Array<{ agentType: string; diff: string }>,
+  contestants: Array<{
+    slot: number
+    agentType: string
+    label?: string | null
+    diff: string
+  }>,
   dimensions?: string[] | null,
   outputLocale = "en"
 ): PromptInputBlock[] {
   const sections = contestants.map(
     (c) =>
-      `--- Contestant: ${c.agentType} ---\n${c.diff}\n--- End ${c.agentType} ---`
+      `--- Contestant slot ${c.slot}: ${c.agentType}${c.label ? ` · ${c.label}` : ""} ---\n${c.diff}\n--- End slot ${c.slot} ---`
   )
   const dims =
     dimensions && dimensions.length > 0 ? dimensions : DEFAULT_JUDGE_DIMENSIONS
@@ -95,7 +101,8 @@ export function buildJudgePrompt(
     `Write every human-readable comment and summary in the language identified by locale ${outputLocale}. Keep JSON property names unchanged.`,
     "",
     "Respond with ONLY a JSON block (no markdown fences, no prose before or after):",
-    '{"scores":[{"agentType":"<agent>","score":<number>,"rank":<number>,"comment":"<one-line>"}],"summary":"<overall verdict in 1-2 sentences>"}',
+    "Return exactly one score row for every contestant slot listed below. Preserve each numeric slot exactly.",
+    '{"scores":[{"slot":<number>,"agentType":"<agent>","score":<number>,"rank":<number>,"comment":"<one-line>"}],"summary":"<overall verdict in 1-2 sentences>"}',
     "",
     "Here are the diffs:",
     "",
@@ -106,7 +113,10 @@ export function buildJudgePrompt(
 
 /** 解析裁判 LLM 的文本输出,提取结构化 JSON 评分。
  * 容忍 markdown 围栏和前后文本。 */
-function parseJudgeResult(rawText: string): PkJudgeResult | null {
+function parseJudgeResult(
+  rawText: string,
+  contestants: readonly PkContestant[]
+): PkJudgeResult | null {
   // Strip markdown code fences if present.
   const cleaned = rawText
     .replace(/^```(?:json)?\s*/i, "")
@@ -120,6 +130,7 @@ function parseJudgeResult(rawText: string): PkJudgeResult | null {
   try {
     const parsed = JSON.parse(jsonStr) as {
       scores?: Array<{
+        slot?: number
         agentType?: string
         score?: number
         rank?: number
@@ -131,6 +142,7 @@ function parseJudgeResult(rawText: string): PkJudgeResult | null {
     const scores: PkJudgeScore[] = parsed.scores
       .filter((s) => s.agentType != null)
       .map((s) => ({
+        slot: typeof s.slot === "number" ? s.slot : undefined,
         agentType: String(s.agentType),
         score: typeof s.score === "number" ? s.score : 0,
         rank: typeof s.rank === "number" ? s.rank : 0,
@@ -138,7 +150,7 @@ function parseJudgeResult(rawText: string): PkJudgeResult | null {
       }))
     if (scores.length === 0) return null
     return {
-      scores,
+      scores: assignJudgeScoreSlots(scores, contestants),
       summary: parsed.summary ?? "",
       rawText,
     }
@@ -618,7 +630,12 @@ export function usePkRound(): {
               )
               .map((b) => b.text)
               .join("\n") ?? ""
-          const result = parseJudgeResult(rawText)
+          const result = parseJudgeResult(
+            rawText,
+            round.contestants.filter(
+              (contestant) => contestant.status === "done"
+            )
+          )
           updateJudge(roundId, {
             judgeStatus: "done",
             judgeResult: result ?? {
@@ -739,6 +756,7 @@ export function usePkRound(): {
             return {
               agentType: contestant.agentType,
               slot: contestant.slot,
+              label: contestant.label,
               diff: fresh?.diff ?? "(no diff available)",
             }
           })

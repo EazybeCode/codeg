@@ -10,6 +10,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { cn } from "@/lib/utils"
+import { assignJudgeScoreSlots, contestantForJudgeScore } from "@/lib/pk-judge"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useTabActions } from "@/contexts/tab-context"
 import { usePkArenaStore, type PkRound } from "@/stores/pk-arena-store"
@@ -120,7 +121,15 @@ export function PkHistoryPicker({ activeRound }: { activeRound: PkRound }) {
             </div>
           ) : (
             filtered.map((round) => {
-              const winner = round.judgeResult?.scores.find((s) => s.rank === 1)
+              const winner = assignJudgeScoreSlots(
+                round.judgeResult?.scores ?? [],
+                round.contestants.filter(
+                  (contestant) => contestant.status === "done"
+                )
+              ).find((score) => score.rank === 1)
+              const winnerContestant = winner
+                ? contestantForJudgeScore(winner, round.contestants)
+                : undefined
               const active = round.id === activeRound.id
               return (
                 <div
@@ -159,6 +168,9 @@ export function PkHistoryPicker({ activeRound }: { activeRound: PkRound }) {
                         {winner ? (
                           <span className="inline-flex items-center gap-1">
                             <Trophy className="size-3" /> {winner.agentType}
+                            {winnerContestant?.label
+                              ? ` · ${winnerContestant.label}`
+                              : ""}
                           </span>
                         ) : null}
                       </span>

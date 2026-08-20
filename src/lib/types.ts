@@ -727,6 +727,7 @@ export interface PkJudgeResultDto {
 
 /** One contestant's judge verdict. */
 export interface PkJudgeScoreDto {
+  slot?: number
   agentType: string
   score: number
   rank: number

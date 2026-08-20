@@ -18,7 +18,7 @@ describe("buildJudgePrompt", () => {
   it("requires judge prose to follow the current interface locale", () => {
     const [block] = buildJudgePrompt(
       "实现一个页面",
-      [{ agentType: "qoder", diff: "+hello" }],
+      [{ slot: 2, agentType: "qoder", label: "Qwen3.8-Max", diff: "+hello" }],
       null,
       "zh-CN"
     )
@@ -27,6 +27,8 @@ describe("buildJudgePrompt", () => {
     if (block.type === "text") {
       expect(block.text).toContain("locale zh-CN")
       expect(block.text).toContain("Keep JSON property names unchanged")
+      expect(block.text).toContain("Contestant slot 2: qoder · Qwen3.8-Max")
+      expect(block.text).toContain('"slot":<number>')
     }
   })
 })

@@ -93,6 +93,9 @@ export type PkRoundStatus =
 
 /** Judge verdict for one contestant. */
 export interface PkJudgeScore {
+  /** Unique contestant slot. Optional only for verdicts saved before slot
+   * identity was added; consumers deterministically backfill legacy rows. */
+  slot?: number
   agentType: string
   score: number
   rank: number
@@ -297,6 +300,7 @@ export function dbRoundToStoreRound(
       info.judge_result != null
         ? {
             scores: (info.judge_result.scores ?? []).map((s) => ({
+              slot: s.slot,
               agentType: s.agentType,
               score: s.score,
               rank: s.rank,
@@ -313,6 +317,12 @@ export function dbRoundToStoreRound(
       const label = typeof entry === "string" ? null : (entry.label ?? null)
       const configValues =
         typeof entry === "string" ? {} : (entry.config_values ?? {})
+      const persistedStatus = linked?.status
+      const contestantStatus: PkContestantStatus = wasLive
+        ? "canceled"
+        : persistedStatus === "cancelled" || persistedStatus === "in_progress"
+          ? "canceled"
+          : "done"
       return {
         slot,
         agentType: agentType as AgentType,
@@ -322,15 +332,20 @@ export function dbRoundToStoreRound(
         modelConfigId: null,
         effortOptions: [],
         effortConfigId: null,
-        selectedModel: linked?.model ?? null,
+        selectedModel: linked?.model ?? configValues.model ?? null,
         selectedEffort: null,
         contextKey: null,
         connectionId: null,
         conversationId: linked?.id ?? null,
         worktreePath: null,
         branchName: null,
-        status: wasLive ? "canceled" : "done",
-        statusDetail: wasLive ? "interrupted" : null,
+        status: contestantStatus,
+        statusDetail:
+          wasLive || persistedStatus === "in_progress"
+            ? "interrupted"
+            : persistedStatus === "cancelled"
+              ? "conversation cancelled"
+              : null,
         startedAt: null,
         endedAt: null,
         durationMs: null,
