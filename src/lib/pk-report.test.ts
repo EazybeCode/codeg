@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { buildPkReportHtml } from "@/lib/pk-report"
+import { JSDOM } from "jsdom"
+import {
+  buildPkReportHtml,
+  pickRunnableHtmlPath,
+  reportableArtifactPaths,
+} from "@/lib/pk-report"
 import type { PkRound } from "@/stores/pk-arena-store"
 
 const round = {
@@ -39,6 +44,13 @@ const round = {
 } as PkRound
 
 describe("buildPkReportHtml", () => {
+  it("ignores the worktree .git control file when selecting a runnable HTML artifact", () => {
+    expect(pickRunnableHtmlPath([".git", "index.html"])).toBe("index.html")
+    expect(reportableArtifactPaths([".git", "index.html"])).toEqual([
+      "index.html",
+    ])
+  })
+
   it("builds a self-contained localized battle report without inventing tokens", () => {
     const html = buildPkReportHtml(
       round,
@@ -63,9 +75,12 @@ describe("buildPkReportHtml", () => {
     )
 
     expect(html).toContain(`data-artifact-html="${contentBase64}"`)
+    expect(html).toContain("data-showcase")
+    expect(html).toContain("data-artifact-trigger")
     expect(html).toContain('sandbox="allow-scripts allow-pointer-lock"')
     expect(html).toContain("data-open-artifact")
     expect(html).toContain("Open and run")
+    expect(html.indexOf("data-showcase")).toBeLessThan(html.indexOf("Results"))
     expect(html).not.toContain("+const snake = true")
     expect(html).not.toContain("<h1>Playable</h1>")
   })
@@ -107,5 +122,49 @@ describe("buildPkReportHtml", () => {
     expect(html).toMatch(
       /Model B<\/small><\/td>\s*<td><strong class="score">42/
     )
+  })
+
+  it("runs the first embedded entry immediately and switches entries on click", () => {
+    const twoEntries = {
+      ...round,
+      contestants: [
+        { ...round.contestants[0], slot: 0, label: "First" },
+        { ...round.contestants[0], slot: 1, label: "Second" },
+      ],
+    } as PkRound
+    const html = buildPkReportHtml(
+      twoEntries,
+      {
+        "0": [
+          {
+            path: "index.html",
+            contentBase64: btoa("<h1>First entry</h1>"),
+          },
+        ],
+        "1": [
+          {
+            path: "game.html",
+            contentBase64: btoa("<h1>Second entry</h1>"),
+          },
+        ],
+      },
+      "en"
+    )
+    const dom = new JSDOM(html, {
+      runScripts: "dangerously",
+      beforeParse(window) {
+        Object.defineProperty(window, "TextDecoder", { value: TextDecoder })
+      },
+    })
+    const frame = dom.window.document.querySelector("iframe")
+    const triggers = dom.window.document.querySelectorAll<HTMLElement>(
+      "[data-artifact-trigger]"
+    )
+
+    expect(frame?.srcdoc).toContain("First entry")
+    triggers[1].click()
+    expect(frame?.srcdoc).toContain("Second entry")
+    expect(triggers[0].getAttribute("aria-pressed")).toBe("false")
+    expect(triggers[1].getAttribute("aria-pressed")).toBe("true")
   })
 })

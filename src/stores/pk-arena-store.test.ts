@@ -110,6 +110,47 @@ describe("pk arena store", () => {
     expect(usePkArenaStore.getState().activeRoundId).toBeNull()
   })
 
+  it("selects an available round when the arena opens without an active round", async () => {
+    const round = await makeRound()
+    usePkArenaStore.setState({ activeRoundId: null, arenaOpen: false })
+
+    usePkArenaStore.getState().setArenaOpen(true)
+
+    expect(usePkArenaStore.getState().activeRoundId).toBe(round.id)
+    expect(usePkArenaStore.getState().arenaOpen).toBe(true)
+  })
+
+  it("selects the restored round when history hydrates after the arena opens", async () => {
+    const round = await makeRound()
+    usePkArenaStore.setState({
+      rounds: [],
+      activeRoundId: null,
+      arenaOpen: true,
+      hydrating: true,
+    })
+
+    usePkArenaStore.getState().hydrateFromDb([round])
+
+    expect(usePkArenaStore.getState().activeRoundId).toBe(round.id)
+    expect(usePkArenaStore.getState().hydrating).toBe(false)
+  })
+
+  it("preserves a sidebar-selected round while its history is still hydrating", async () => {
+    const clickedRound = await makeRound({ id: "3" })
+    const newerRound = { ...clickedRound, id: "4", task: "newer round" }
+    usePkArenaStore.setState({
+      rounds: [],
+      activeRoundId: "3",
+      arenaOpen: false,
+      hydrating: true,
+    })
+
+    usePkArenaStore.getState().setArenaOpen(true)
+    usePkArenaStore.getState().hydrateFromDb([newerRound, clickedRound])
+
+    expect(usePkArenaStore.getState().activeRoundId).toBe("3")
+  })
+
   it("derives branch and context keys from the round id and slot", () => {
     expect(contestantBranchName("r1", 0)).toBe("codeg-pk/r1/0")
     expect(contestantContextKey("r1", 1)).toBe("pk:r1:1")

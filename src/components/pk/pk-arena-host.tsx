@@ -5,7 +5,11 @@ import { PkArenaDialog } from "@/components/pk/pk-arena-dialog"
 import { PkLauncherDialog } from "@/components/pk/pk-launcher-dialog"
 import { PkMinimizedPill } from "@/components/pk/pk-minimized-pill"
 import { usePkRound, fetchUsage } from "@/hooks/use-pk-round"
-import { usePkArenaStore, dbRoundToStoreRound } from "@/stores/pk-arena-store"
+import {
+  usePkArenaStore,
+  dbRoundToStoreRound,
+  type PkRound,
+} from "@/stores/pk-arena-store"
 import { pkRoundList, updateConversationStatus } from "@/lib/api"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 
@@ -67,13 +71,21 @@ export function PkArenaHost() {
     }
   }, [conversations, rounds])
 
-  // Hydrate from DB on mount (once).
-  const hydratedRef = useRef(false)
+  // Hydrate each store instance once. Fast Refresh can replace the Zustand
+  // store while preserving this host's React refs; keying the guard by the
+  // store's rounds array lets the replacement hydrate again without issuing
+  // duplicate requests during React Strict Mode's repeated effects.
+  const hydrationSourceRef = useRef<readonly PkRound[] | null>(null)
   useEffect(() => {
-    if (hydratedRef.current || folders.length === 0 || conversationsLoading) {
+    if (
+      !hydrating ||
+      hydrationSourceRef.current === rounds ||
+      folders.length === 0 ||
+      conversationsLoading
+    ) {
       return
     }
-    hydratedRef.current = true
+    hydrationSourceRef.current = rounds
     void (async () => {
       try {
         const dbRounds = await pkRoundList()
@@ -110,7 +122,14 @@ export function PkArenaHost() {
         hydrateFromDb([])
       }
     })()
-  }, [conversations, conversationsLoading, folders, hydrateFromDb])
+  }, [
+    conversations,
+    conversationsLoading,
+    folders,
+    hydrateFromDb,
+    hydrating,
+    rounds,
+  ])
 
   // Drive any round that still has contestants in "preparing" — exactly the
   // state the launcher leaves behind. Restarted (interrupted) rounds come

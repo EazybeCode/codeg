@@ -365,7 +365,20 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
   hydrating: true,
 
   hydrateFromDb: (dbRounds) => {
-    set({ rounds: dbRounds, hydrating: false })
+    set((state) => {
+      const activeRoundStillExists = dbRounds.some(
+        (round) => round.id === state.activeRoundId
+      )
+      return {
+        rounds: dbRounds,
+        hydrating: false,
+        activeRoundId: activeRoundStillExists
+          ? state.activeRoundId
+          : state.arenaOpen
+            ? (dbRounds[0]?.id ?? null)
+            : null,
+      }
+    })
   },
 
   createRound: async ({
@@ -486,7 +499,22 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
 
   setActiveRound: (roundId) => set({ activeRoundId: roundId }),
   setLauncherOpen: (open) => set({ launcherOpen: open }),
-  setArenaOpen: (open) => set({ arenaOpen: open }),
+  setArenaOpen: (open) => {
+    set((state) => {
+      if (!open) return { arenaOpen: false }
+      const activeRoundStillExists = state.rounds.some(
+        (round) => round.id === state.activeRoundId
+      )
+      return {
+        arenaOpen: true,
+        activeRoundId: activeRoundStillExists
+          ? state.activeRoundId
+          : state.rounds.length === 0
+            ? state.activeRoundId
+            : state.rounds[0].id,
+      }
+    })
+  },
   setPillDismissed: (dismissed) => set({ pillDismissed: dismissed }),
 
   updateJudge: (roundId, patch) => {

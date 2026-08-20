@@ -18,7 +18,12 @@ import { usePkRound } from "@/hooks/use-pk-round"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
 import { getFileTree, readWorkspaceFileBase64 } from "@/lib/api"
-import { buildPkReportHtml, type PkReportArtifact } from "@/lib/pk-report"
+import {
+  buildPkReportHtml,
+  pickRunnableHtmlPath,
+  reportableArtifactPaths,
+  type PkReportArtifact,
+} from "@/lib/pk-report"
 import { savePkReportHtml } from "@/lib/pk-report-export"
 import type { FileTreeNode } from "@/lib/types"
 import type { PkContestant, PkRound } from "@/stores/pk-arena-store"
@@ -146,6 +151,7 @@ export function PkArenaDialog() {
           const tree = await getFileTree(artifactRoot, 6)
           const paths = flattenTreeList(tree)
           const runnableHtmlPath = pickRunnableHtmlPath(paths)
+          const reportablePaths = reportableArtifactPaths(paths)
           let runnableHtmlBase64: string | undefined
           if (runnableHtmlPath) {
             try {
@@ -159,7 +165,7 @@ export function PkArenaDialog() {
               // falls back to Diff instead of failing the entire export.
             }
           }
-          artifactsBySlot[contestant.slot] = paths.map((path) => ({
+          artifactsBySlot[contestant.slot] = reportablePaths.map((path) => ({
             path,
             ...(path === runnableHtmlPath && runnableHtmlBase64
               ? { contentBase64: runnableHtmlBase64 }
@@ -590,12 +596,4 @@ function flattenTreeList(nodes: FileTreeNode[], prefix = ""): string[] {
     }
   }
   return files
-}
-
-/** Only a genuinely standalone HTML artifact can survive inside a one-file
- * report. Multi-file sites keep the file/Diff view because relative assets
- * would be missing after the report is shared. */
-function pickRunnableHtmlPath(paths: readonly string[]): string | null {
-  if (paths.length !== 1) return null
-  return /\.html?$/i.test(paths[0]) ? paths[0] : null
 }
