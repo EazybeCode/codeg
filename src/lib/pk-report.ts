@@ -1,6 +1,11 @@
 /** Build a self-contained, shareable PK battle report. */
 import { getAgentLabel } from "@/lib/custom-agents"
 import { assignJudgeScoreSlots, contestantForJudgeScore } from "@/lib/pk-judge"
+import {
+  decodePkReportArtifact,
+  encodePkReportArtifact,
+  preparePkReportArtifactHtml,
+} from "@/lib/pk-report-artifact"
 import type { PkRound } from "@/stores/pk-arena-store"
 
 export interface PkReportArtifact {
@@ -184,7 +189,14 @@ export function buildPkReportHtml(
       return [
         {
           contestant,
-          artifact,
+          artifact: {
+            ...artifact,
+            contentBase64: encodePkReportArtifact(
+              preparePkReportArtifactHtml(
+                decodePkReportArtifact(artifact.contentBase64)
+              )
+            ),
+          },
           score,
           agentLabel: `${getAgentLabel(contestant.agentType)}${
             contestant.label ? ` · ${contestant.label}` : ""

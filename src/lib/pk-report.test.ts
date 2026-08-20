@@ -5,6 +5,11 @@ import {
   pickRunnableHtmlPath,
   reportableArtifactPaths,
 } from "@/lib/pk-report"
+import {
+  decodePkReportArtifact,
+  encodePkReportArtifact,
+  preparePkReportArtifactHtml,
+} from "@/lib/pk-report-artifact"
 import type { PkRound } from "@/stores/pk-arena-store"
 
 const round = {
@@ -77,7 +82,6 @@ describe("buildPkReportHtml", () => {
       "en"
     )
 
-    expect(html).toContain(`data-artifact-html="${contentBase64}"`)
     expect(html).toContain("data-showcase")
     expect(html).toContain("data-artifact-trigger")
     expect(html).toContain('sandbox="allow-scripts allow-pointer-lock"')
@@ -86,6 +90,31 @@ describe("buildPkReportHtml", () => {
     expect(html.indexOf("data-showcase")).toBeLessThan(html.indexOf("Results"))
     expect(html).not.toContain("+const snake = true")
     expect(html).not.toContain("<h1>Playable</h1>")
+
+    const dom = new JSDOM(html)
+    const embedded = dom.window.document
+      .querySelector<HTMLElement>("[data-artifact-html]")
+      ?.getAttribute("data-artifact-html")
+    expect(decodePkReportArtifact(embedded ?? "")).toContain(
+      "data-codeg-storage-compat"
+    )
+  })
+
+  it("injects compatibility after the doctype and only once", () => {
+    const artifact = "<!doctype html><script>game()</script>"
+    const prepared = preparePkReportArtifactHtml(artifact)
+
+    expect(prepared).toMatch(
+      /^<!doctype html><script data-codeg-storage-compat>/
+    )
+    expect(preparePkReportArtifactHtml(prepared)).toBe(prepared)
+  })
+
+  it("round-trips UTF-8 artifact content through report base64", () => {
+    const artifact = "<!doctype html><title>中文作品 🐍</title>"
+    expect(decodePkReportArtifact(encodePkReportArtifact(artifact))).toBe(
+      artifact
+    )
   })
 
   it("keeps scores attached to repeated-agent contestant slots", () => {
@@ -169,5 +198,37 @@ describe("buildPkReportHtml", () => {
     expect(frame?.srcdoc).toContain("Second entry")
     expect(triggers[0].getAttribute("aria-pressed")).toBe("false")
     expect(triggers[1].getAttribute("aria-pressed")).toBe("true")
+  })
+
+  it("keeps Web Storage-dependent entries runnable inside the opaque-origin sandbox", () => {
+    const artifact = `<!doctype html><html><body><p id="status">booting</p><script>
+      localStorage.setItem("high-score", "7")
+      document.querySelector("#status").textContent = localStorage.getItem("high-score")
+    </script></body></html>`
+    const report = buildPkReportHtml(
+      round,
+      {
+        "0": [
+          {
+            path: "index.html",
+            contentBase64: btoa(artifact),
+          },
+        ],
+      },
+      "en"
+    )
+    const reportDom = new JSDOM(report, {
+      runScripts: "dangerously",
+      beforeParse(window) {
+        Object.defineProperty(window, "TextDecoder", { value: TextDecoder })
+      },
+    })
+    const srcdoc = reportDom.window.document.querySelector("iframe")?.srcdoc
+
+    expect(srcdoc).toBeTruthy()
+    const artifactDom = new JSDOM(srcdoc, { runScripts: "dangerously" })
+    expect(
+      artifactDom.window.document.querySelector("#status")?.textContent
+    ).toBe("7")
   })
 })
