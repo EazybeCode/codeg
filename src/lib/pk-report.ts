@@ -14,7 +14,7 @@ export interface PkReportArtifact {
 /** Select a genuinely standalone HTML artifact from a contestant worktree. */
 export function reportableArtifactPaths(paths: readonly string[]): string[] {
   return paths.filter((path) => {
-    const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "")
+    const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "")
     return normalized !== ".git" && !normalized.startsWith(".git/")
   })
 }

@@ -46,6 +46,9 @@ const round = {
 describe("buildPkReportHtml", () => {
   it("ignores the worktree .git control file when selecting a runnable HTML artifact", () => {
     expect(pickRunnableHtmlPath([".git", "index.html"])).toBe("index.html")
+    expect(pickRunnableHtmlPath([".git\\config", "index.html"])).toBe(
+      "index.html"
+    )
     expect(reportableArtifactPaths([".git", "index.html"])).toEqual([
       "index.html",
     ])
