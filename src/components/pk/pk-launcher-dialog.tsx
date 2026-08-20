@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { AgentIcon } from "@/components/agent-icon"
+import { X } from "lucide-react"
 import { useAcpAgents } from "@/hooks/use-acp-agents"
 import {
   acpGetAgentStatus,
@@ -52,7 +53,9 @@ export function PkLauncherDialog() {
       : null
   )
 
-  const [selected, setSelected] = useState<AgentType[]>([])
+  const [slots, setSlots] = useState<
+    Array<{ agentType: AgentType; label: string }>
+  >([])
   const [task, setTask] = useState("")
   const [workingDir, setWorkingDir] = useState<string | null>(null)
   const [folderId, setFolderId] = useState<number | null>(null)
@@ -86,7 +89,7 @@ export function PkLauncherDialog() {
 
   useEffect(() => {
     if (!open) return
-    setSelected([])
+    setSlots([])
     setTask("")
     setWorkingDir(null)
     setFolderId(null)
@@ -100,8 +103,13 @@ export function PkLauncherDialog() {
     // 复赛预填:上次配置的选手若仍可参与则沿用。
     const last = loadLastLauncherConfig()
     if (last && last.agents.length > 0) {
-      setSelected((prev) =>
-        prev.length > 0 ? prev : last.agents.map((a) => a.agentType)
+      setSlots((prev) =>
+        prev.length > 0
+          ? prev
+          : last.agents.map((a) => ({
+              agentType: a.agentType,
+              label: a.label ?? "",
+            }))
       )
       setTask(last.task ?? "")
       setPermissionMode(last.permissionMode)
@@ -161,7 +169,7 @@ export function PkLauncherDialog() {
   const noFolder = open && folderId == null && activeTab != null
   const taskValid = task.trim().length > 0
   const selectionValid =
-    selected.length >= MIN_CONTESTANTS && selected.length <= MAX_CONTESTANTS
+    slots.length >= MIN_CONTESTANTS && slots.length <= MAX_CONTESTANTS
   const canStart =
     taskValid &&
     selectionValid &&
@@ -169,20 +177,28 @@ export function PkLauncherDialog() {
     workingDir != null &&
     isGitRepo === true
 
-  const toggle = (agentType: AgentType) => {
-    setSelected((prev) =>
-      prev.includes(agentType)
-        ? prev.filter((a) => a !== agentType)
-        : prev.length >= MAX_CONTESTANTS
-          ? prev
-          : [...prev, agentType]
+  const addSlot = (agentType: AgentType) => {
+    setSlots((prev) =>
+      prev.length >= MAX_CONTESTANTS
+        ? prev
+        : [...prev, { agentType, label: "" }]
     )
+  }
+
+  const removeSlot = (index: number) => {
+    setSlots((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const updateSlotLabel = (index: number, label: string) => {
+    setSlots((prev) => prev.map((s, i) => (i === index ? { ...s, label } : s)))
   }
 
   const handleStart = async () => {
     if (!canStart || folderId == null || workingDir == null) return
     // 开赛前预检:任何选手不可用就中止,不建回合、不留残留会话。
-    for (const agentType of selected) {
+    // Deduplicate agent types — the same agent in two slots only needs one check.
+    const uniqueAgents = Array.from(new Set(slots.map((s) => s.agentType)))
+    for (const agentType of uniqueAgents) {
       try {
         const status = await acpGetAgentStatus(agentType)
         if (!status.enabled || !status.available || !status.installed_version) {
@@ -201,8 +217,13 @@ export function PkLauncherDialog() {
       .split("\n")
       .map((d) => d.trim())
       .filter(Boolean)
+    const agentsPayload = slots.map((s) =>
+      s.label.trim()
+        ? { agentType: s.agentType, label: s.label.trim() }
+        : { agentType: s.agentType }
+    )
     saveLastLauncherConfig({
-      agents: selected.map((agentType) => ({ agentType })),
+      agents: agentsPayload,
       permissionMode,
       bareMode,
       effort,
@@ -214,7 +235,7 @@ export function PkLauncherDialog() {
       task: task.trim(),
       folderId,
       workingDir,
-      agents: selected.map((agentType) => ({ agentType })),
+      agents: agentsPayload,
       permissionMode,
       bareMode,
       effort,
@@ -260,18 +281,18 @@ export function PkLauncherDialog() {
             ) : null}
             <div className="flex flex-wrap gap-2">
               {agents.map((agent) => {
-                const isSelected = selected.includes(agent.agent_type)
+                const slotsFull = slots.length >= MAX_CONTESTANTS
                 return (
                   <button
                     key={agent.agent_type}
                     type="button"
-                    onClick={() => toggle(agent.agent_type)}
-                    aria-pressed={isSelected}
+                    onClick={() => addSlot(agent.agent_type)}
+                    disabled={slotsFull}
+                    aria-label={t("addContestant", { agent: agent.name })}
                     className={cn(
                       "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition-colors",
-                      isSelected
-                        ? "border-primary bg-primary/10 text-foreground"
-                        : "border-border text-muted-foreground hover:bg-muted"
+                      "border-border text-muted-foreground hover:bg-muted",
+                      "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
                     )}
                   >
                     <AgentIcon
@@ -279,11 +300,51 @@ export function PkLauncherDialog() {
                       className="size-4"
                     />
                     {agent.name}
+                    <span className="text-xs text-muted-foreground">+</span>
                   </button>
                 )
               })}
             </div>
-            {selected.length > 0 && selected.length < MIN_CONTESTANTS ? (
+            {slots.length > 0 ? (
+              <div className="mt-3 flex flex-col gap-1.5">
+                {slots.map((slot, index) => {
+                  const agentName =
+                    agents.find((a) => a.agent_type === slot.agentType)?.name ??
+                    slot.agentType
+                  return (
+                    <div
+                      key={index}
+                      className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1.5"
+                    >
+                      <AgentIcon
+                        agentType={slot.agentType}
+                        className="size-4 shrink-0"
+                      />
+                      <span className="shrink-0 text-xs font-medium text-foreground">
+                        {agentName}
+                      </span>
+                      <input
+                        type="text"
+                        value={slot.label}
+                        onChange={(e) => updateSlotLabel(index, e.target.value)}
+                        placeholder={t("slotLabelPlaceholder")}
+                        maxLength={40}
+                        className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-0.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeSlot(index)}
+                        aria-label={t("removeSlot")}
+                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : null}
+            {slots.length > 0 && slots.length < MIN_CONTESTANTS ? (
               <div className="mt-2 text-xs text-muted-foreground">
                 {t("needMore", { count: MIN_CONTESTANTS })}
               </div>
@@ -536,7 +597,9 @@ export function PkLauncherDialog() {
               </button>
               {agents.map((agent) => {
                 const isSelected = judgeAgent === agent.agent_type
-                const isContestant = selected.includes(agent.agent_type)
+                const isContestant = slots.some(
+                  (s) => s.agentType === agent.agent_type
+                )
                 return (
                   <button
                     key={agent.agent_type}
@@ -596,7 +659,7 @@ export function PkLauncherDialog() {
         <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-3">
           <span className="text-xs text-muted-foreground">
             {t("selectedCount", {
-              selected: selected.length,
+              selected: slots.length,
               min: MIN_CONTESTANTS,
               max: MAX_CONTESTANTS,
             })}

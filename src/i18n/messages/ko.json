@@ -5029,7 +5029,10 @@
       "loadMore": "더 로드",
       "judgeDimensionsLabel": "평가 차원 (선택)",
       "judgeDimensionsPlaceholder": "정확성 — 작업을 충족하는가?\n코드 품질 — 가독성, 구조, 엣지 케이스\n완성도 — 얼마나 완료했는가?\n효율성 — 코드 수준 효율 (token/시간 제외)",
-      "judgeDimensionsHint": "한 줄에 하나씩. 비워두면 기본값 사용."
+      "judgeDimensionsHint": "한 줄에 하나씩. 비워두면 기본값 사용.",
+      "addContestant": "{agent}을(를) 참가자로 추가",
+      "slotLabelPlaceholder": "라벨(예: Sonnet, Opus)",
+      "removeSlot": "이 참가자 슬롯 제거"
     },
     "scoreboard": {
       "status": {

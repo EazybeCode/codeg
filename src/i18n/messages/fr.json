@@ -5029,7 +5029,10 @@
       "loadMore": "Charger plus",
       "judgeDimensionsLabel": "Dimensions d'évaluation (optionnel)",
       "judgeDimensionsPlaceholder": "Correctness — la tâche est-elle remplie ?\nCode quality — lisibilité, structure, cas limites\nCompleteness — quelle proportion est faite ?\nEfficiency — efficacité du code (ignorer token/temps)",
-      "judgeDimensionsHint": "Une dimension par ligne. Laisser vide pour les valeurs par défaut."
+      "judgeDimensionsHint": "Une dimension par ligne. Laisser vide pour les valeurs par défaut.",
+      "addContestant": "Ajouter {agent} comme concurrent",
+      "slotLabelPlaceholder": "Étiquette (ex. Sonnet, Opus)",
+      "removeSlot": "Retirer ce créneau de concurrent"
     },
     "scoreboard": {
       "status": {

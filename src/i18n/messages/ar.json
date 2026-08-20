@@ -5029,7 +5029,10 @@
       "loadMore": "تحميل المزيد",
       "judgeDimensionsLabel": "أبعاد التقييم (اختياري)",
       "judgeDimensionsPlaceholder": "Correctness — does it fulfill the task?\nCode quality — readability, structure, edge cases\nCompleteness — how much of the task is done?\nEfficiency — code-level efficiency (ignore token/time)",
-      "judgeDimensionsHint": "بُعد واحد لكل سطر. اتركه فارغًا لاستخدام الافتراضي."
+      "judgeDimensionsHint": "بُعد واحد لكل سطر. اتركه فارغًا لاستخدام الافتراضي.",
+      "addContestant": "إضافة {agent} كمتسابق",
+      "slotLabelPlaceholder": "تسمية (مثل Sonnet، Opus)",
+      "removeSlot": "إزالة هذا المتسابق"
     },
     "scoreboard": {
       "status": {

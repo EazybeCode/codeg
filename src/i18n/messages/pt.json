@@ -5029,7 +5029,10 @@
       "loadMore": "Carregar mais",
       "judgeDimensionsLabel": "Dimensões de avaliação (opcional)",
       "judgeDimensionsPlaceholder": "Correctness — cumpre a tarefa?\nCode quality — legibilidade, estrutura, casos-limite\nCompleteness — quanto está feito?\nEfficiency — eficiência do código (ignorar token/tempo)",
-      "judgeDimensionsHint": "Uma dimensão por linha. Deixe vazio para usar os padrões."
+      "judgeDimensionsHint": "Uma dimensão por linha. Deixe vazio para usar os padrões.",
+      "addContestant": "Adicionar {agent} como concorrente",
+      "slotLabelPlaceholder": "Rótulo (ex. Sonnet, Opus)",
+      "removeSlot": "Remover este slot de concorrente"
     },
     "scoreboard": {
       "status": {
