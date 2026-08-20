@@ -227,15 +227,26 @@ export function PkArenaDialog() {
                 <select
                   value={round.id}
                   onChange={(event) => setActiveRound(event.target.value)}
-                  className="max-w-40 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+                  className="max-w-72 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
                   aria-label={t("roundPicker")}
                 >
-                  {rounds.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {new Date(r.createdAt).toLocaleTimeString()} ·{" "}
-                      {r.contestants.length} {t("contestantsUnit")}
-                    </option>
-                  ))}
+                  {rounds.map((r) => {
+                    const taskPreview =
+                      r.task.length > 30 ? `${r.task.slice(0, 30)}…` : r.task
+                    const topScore = r.judgeResult?.scores?.find(
+                      (s) => s.rank === 1
+                    )
+                    const scoreInfo = topScore
+                      ? ` · 🏆${topScore.agentType}`
+                      : ""
+                    return (
+                      <option key={r.id} value={r.id}>
+                        {roundStatusLabel[r.status]} · {taskPreview} ·{" "}
+                        {r.contestants.length} {t("contestantsUnit")}
+                        {scoreInfo}
+                      </option>
+                    )
+                  })}
                 </select>
               ) : null}
               {roundLive ? (
