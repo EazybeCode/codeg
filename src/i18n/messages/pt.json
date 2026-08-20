@@ -5095,7 +5095,7 @@
         "ready": "Pronta"
       },
       "roundPicker": "Rodada",
-      "cancelRound": "Cancelar",
+      "cancelRound": "Cancelar rodada",
       "cleanupWorktrees": "Limpar worktrees",
       "cleanupHint": "Remove os worktrees dos competidores (as branches são mantidas)",
       "share": "Compartilhar",
@@ -5112,6 +5112,15 @@
       "readyNote": "Escolha modelo e esforço de cada competidor e inicie.",
       "modelLabel": "Modelo",
       "effortLabel": "Esforço",
+      "effortUnsupported": "Este agente não oferece níveis de raciocínio; o padrão dele será usado",
+      "effortOptions": {
+        "off": "Desativado",
+        "minimal": "Mínimo",
+        "low": "Baixo",
+        "medium": "Médio",
+        "high": "Alto",
+        "max": "Máximo"
+      },
       "minimize": "Minimizar",
       "exportReport": "Exportar relatório",
       "exporting": "Gerando…",

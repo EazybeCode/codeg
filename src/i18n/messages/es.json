@@ -5095,7 +5095,7 @@
         "ready": "Lista"
       },
       "roundPicker": "Ronda",
-      "cancelRound": "Cancelar",
+      "cancelRound": "Cancelar ronda",
       "cleanupWorktrees": "Limpiar worktrees",
       "cleanupHint": "Elimina los worktrees de los contendientes (las ramas se conservan)",
       "share": "Compartir",
@@ -5112,6 +5112,15 @@
       "readyNote": "Elige modelo y esfuerzo de cada contendiente y luego inicia.",
       "modelLabel": "Modelo",
       "effortLabel": "Esfuerzo",
+      "effortUnsupported": "Este agente no permite configurar niveles de razonamiento; se usará su valor predeterminado",
+      "effortOptions": {
+        "off": "Desactivado",
+        "minimal": "Mínimo",
+        "low": "Bajo",
+        "medium": "Medio",
+        "high": "Alto",
+        "max": "Máximo"
+      },
       "minimize": "Minimizar",
       "exportReport": "Exportar informe",
       "exporting": "Generando…",

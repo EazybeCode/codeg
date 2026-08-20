@@ -5095,7 +5095,7 @@
         "ready": "準備完了"
       },
       "roundPicker": "ラウンド",
-      "cancelRound": "キャンセル",
+      "cancelRound": "ラウンドをキャンセル",
       "cleanupWorktrees": "ワークツリーを削除",
       "cleanupHint": "出場者のワークツリーを削除します(ブランチは保持)",
       "share": "共有",
@@ -5112,6 +5112,15 @@
       "readyNote": "各出場者のモデルと思考レベルを選んでから対戦開始。",
       "modelLabel": "モデル",
       "effortLabel": "思考レベル",
+      "effortUnsupported": "このエージェントは思考レベル設定に対応していないため、既定値を使用します",
+      "effortOptions": {
+        "off": "オフ",
+        "minimal": "最小",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "max": "最大"
+      },
       "minimize": "最小化",
       "exportReport": "レポートをエクスポート",
       "exporting": "生成中…",

@@ -5095,7 +5095,7 @@
         "ready": "就绪"
       },
       "roundPicker": "回合",
-      "cancelRound": "取消",
+      "cancelRound": "取消本轮",
       "cleanupWorktrees": "清理 worktree",
       "cleanupHint": "移除选手的 worktree(保留分支)",
       "share": "分享",
@@ -5109,9 +5109,18 @@
       "contestantsUnit": "个智能体",
       "newRound": "新一局",
       "startMatch": "开始比赛",
-      "readyNote": "选择每位选手的模型与思考等级,然后开始比赛。",
+      "readyNote": "按每位选手实际支持的模型与思考等级确认配置,然后开始比赛。",
       "modelLabel": "模型",
       "effortLabel": "思考等级",
+      "effortUnsupported": "该智能体不支持思考等级配置,将使用自身默认值",
+      "effortOptions": {
+        "off": "关闭",
+        "minimal": "最低",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "max": "最高"
+      },
       "minimize": "缩小",
       "exportReport": "导出报告",
       "exporting": "生成中…",

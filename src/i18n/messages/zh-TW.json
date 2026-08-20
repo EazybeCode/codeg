@@ -5095,7 +5095,7 @@
         "ready": "就緒"
       },
       "roundPicker": "回合",
-      "cancelRound": "取消",
+      "cancelRound": "取消本輪",
       "cleanupWorktrees": "清理 worktree",
       "cleanupHint": "移除選手的 worktree(保留分支)",
       "share": "分享",
@@ -5112,6 +5112,15 @@
       "readyNote": "選擇每位選手的模型與思考等級,然後開始比賽。",
       "modelLabel": "模型",
       "effortLabel": "思考等級",
+      "effortUnsupported": "此智能體不支援思考等級設定,將使用自身預設值",
+      "effortOptions": {
+        "off": "關閉",
+        "minimal": "最低",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "max": "最高"
+      },
       "minimize": "縮小",
       "exportReport": "匯出報告",
       "exporting": "產生中…",

@@ -5095,7 +5095,7 @@
         "ready": "Prête"
       },
       "roundPicker": "Manche",
-      "cancelRound": "Annuler",
+      "cancelRound": "Annuler la manche",
       "cleanupWorktrees": "Nettoyer les worktrees",
       "cleanupHint": "Supprime les worktrees des participants (les branches sont conservées)",
       "share": "Partager",
@@ -5112,6 +5112,15 @@
       "readyNote": "Choisissez modèle et effort de chaque participant, puis lancez.",
       "modelLabel": "Modèle",
       "effortLabel": "Effort",
+      "effortUnsupported": "Cet agent n'expose pas de niveaux de raisonnement; sa valeur par défaut sera utilisée",
+      "effortOptions": {
+        "off": "Désactivé",
+        "minimal": "Minimal",
+        "low": "Faible",
+        "medium": "Moyen",
+        "high": "Élevé",
+        "max": "Maximum"
+      },
       "minimize": "Réduire",
       "exportReport": "Exporter le rapport",
       "exporting": "Génération…",

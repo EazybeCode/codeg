@@ -5095,7 +5095,7 @@
         "ready": "Ready"
       },
       "roundPicker": "Round",
-      "cancelRound": "Cancel",
+      "cancelRound": "Cancel round",
       "cleanupWorktrees": "Clean worktrees",
       "cleanupHint": "Remove the contestants' worktrees (branches are kept)",
       "share": "Share",
@@ -5109,9 +5109,18 @@
       "contestantsUnit": "agents",
       "newRound": "New round",
       "startMatch": "Start match",
-      "readyNote": "Pick each contestant's model and reasoning effort, then start the match.",
+      "readyNote": "Confirm the model and reasoning levels each contestant actually supports, then start the match.",
       "modelLabel": "Model",
       "effortLabel": "Reasoning effort",
+      "effortUnsupported": "This agent does not expose reasoning levels; its default will be used",
+      "effortOptions": {
+        "off": "Off",
+        "minimal": "Minimal",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "max": "Max"
+      },
       "minimize": "Minimize",
       "exportReport": "Export report",
       "exporting": "Building…",

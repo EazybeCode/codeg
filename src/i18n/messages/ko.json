@@ -5095,7 +5095,7 @@
         "ready": "준비됨"
       },
       "roundPicker": "라운드",
-      "cancelRound": "취소",
+      "cancelRound": "라운드 취소",
       "cleanupWorktrees": "워크트리 정리",
       "cleanupHint": "참가자의 워크트리를 제거합니다(브랜치는 유지)",
       "share": "공유",
@@ -5112,6 +5112,15 @@
       "readyNote": "각 참가자의 모델과 추론 수준을 선택한 후 시작하세요.",
       "modelLabel": "모델",
       "effortLabel": "추론 수준",
+      "effortUnsupported": "이 에이전트는 추론 수준 설정을 지원하지 않아 기본값을 사용합니다",
+      "effortOptions": {
+        "off": "끄기",
+        "minimal": "최소",
+        "low": "낮음",
+        "medium": "중간",
+        "high": "높음",
+        "max": "최대"
+      },
       "minimize": "최소화",
       "exportReport": "보고서 내보내기",
       "exporting": "생성 중…",

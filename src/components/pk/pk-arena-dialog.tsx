@@ -14,6 +14,10 @@ import { PkDiffView } from "@/components/pk/pk-diff-view"
 import { PkJudgePanel } from "@/components/pk/pk-judge-panel"
 import { PkScoreboard } from "@/components/pk/pk-scoreboard"
 import { PkHistoryPicker } from "@/components/pk/pk-history-picker"
+import {
+  getArenaCloseAction,
+  getEffortControl,
+} from "@/components/pk/pk-arena-policy"
 import { usePkRound } from "@/hooks/use-pk-round"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
@@ -188,11 +192,8 @@ export function PkArenaDialog() {
   const roundLive = round != null && round.status === "running"
 
   const handleOpenChange = (next: boolean) => {
-    if (!next) {
-      // 准备态关闭 = 放弃本轮:清理会话连接,防止侧边栏残留空转。
-      if (round && round.status === "ready") {
-        void cancelRound(round)
-      }
+    if (!next && round && getArenaCloseAction(round.status) === "minimize") {
+      setPillDismissed(false)
     }
     setArenaOpen(next)
   }
@@ -233,7 +234,7 @@ export function PkArenaDialog() {
                 </div>
               </div>
               <PkHistoryPicker activeRound={round} />
-              {roundLive ? (
+              {round.status === "ready" || roundLive ? (
                 <button
                   type="button"
                   onClick={() => void cancelRound(round)}
@@ -503,8 +504,18 @@ const PkReadyPane = memo(function PkReadyPane({
   ) => Promise<void>
 }) {
   const t = useTranslations("PkArena.arena")
-  const showPickers =
-    contestant.modelOptions.length > 0 || contestant.effortOptions.length > 0
+  const effortControl = getEffortControl(
+    contestant.effortOptions,
+    contestant.effortConfigId
+  )
+  const effortOptionLabels = {
+    off: t("effortOptions.off"),
+    minimal: t("effortOptions.minimal"),
+    low: t("effortOptions.low"),
+    medium: t("effortOptions.medium"),
+    high: t("effortOptions.high"),
+    max: t("effortOptions.max"),
+  } as const
   return (
     <div className="flex h-full min-w-80 flex-1 flex-col overflow-hidden rounded-lg border border-border">
       <div className="flex items-center gap-2.5 border-b border-border bg-muted/30 px-4 py-3">
@@ -522,64 +533,69 @@ const PkReadyPane = memo(function PkReadyPane({
           </div>
         </div>
       </div>
-      {showPickers ? (
-        <div className="flex flex-col gap-4 overflow-auto px-4 py-4">
-          {contestant.modelOptions.length > 0 && contestant.modelConfigId ? (
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                {t("modelLabel")}
-              </span>
-              <select
-                value={contestant.selectedModel ?? ""}
-                onChange={(event) =>
-                  void onSelect(
-                    round,
-                    contestant,
-                    contestant.modelConfigId as string,
-                    event.target.value
-                  )
-                }
-                className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
-              >
-                {contestant.modelOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-          {contestant.effortOptions.length > 0 && contestant.effortConfigId ? (
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
-                {t("effortLabel")}
-              </span>
-              <select
-                value={contestant.selectedEffort ?? ""}
-                onChange={(event) =>
-                  void onSelect(
-                    round,
-                    contestant,
-                    contestant.effortConfigId as string,
-                    event.target.value
-                  )
-                }
-                className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
-              >
-                {contestant.effortOptions.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-        </div>
-      ) : (
-        <div className="flex flex-1 items-center justify-center px-4 text-xs text-muted-foreground">
-          {contestant.statusDetail ?? t("preparing")}
-        </div>
-      )}
+      <div className="flex flex-col gap-4 overflow-auto px-4 py-4">
+        {contestant.modelOptions.length > 0 && contestant.modelConfigId ? (
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("modelLabel")}
+            </span>
+            <select
+              value={contestant.selectedModel ?? ""}
+              onChange={(event) =>
+                void onSelect(
+                  round,
+                  contestant,
+                  contestant.modelConfigId as string,
+                  event.target.value
+                )
+              }
+              className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+            >
+              {contestant.modelOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        {effortControl.kind === "select" ? (
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("effortLabel")}
+            </span>
+            <select
+              value={contestant.selectedEffort ?? ""}
+              onChange={(event) =>
+                void onSelect(
+                  round,
+                  contestant,
+                  effortControl.configId,
+                  event.target.value
+                )
+              }
+              className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+            >
+              {effortControl.options.map((value) => (
+                <option key={value} value={value}>
+                  {effortOptionLabels[
+                    value as keyof typeof effortOptionLabels
+                  ] ?? value}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <div>
+            <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              {t("effortLabel")}
+            </span>
+            <div className="rounded-md border border-dashed border-border bg-muted/30 px-2 py-1.5 text-xs text-muted-foreground">
+              {t("effortUnsupported")}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 })

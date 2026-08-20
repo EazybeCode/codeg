@@ -5095,7 +5095,7 @@
         "ready": "Bereit"
       },
       "roundPicker": "Runde",
-      "cancelRound": "Abbrechen",
+      "cancelRound": "Runde abbrechen",
       "cleanupWorktrees": "Worktrees bereinigen",
       "cleanupHint": "Worktrees der Teilnehmer entfernen (Branches bleiben)",
       "share": "Teilen",
@@ -5112,6 +5112,15 @@
       "readyNote": "Modell und Denkaufwand je Teilnehmer wählen, dann starten.",
       "modelLabel": "Modell",
       "effortLabel": "Denkaufwand",
+      "effortUnsupported": "Dieser Agent bietet keine Denkstufen an; sein Standardwert wird verwendet",
+      "effortOptions": {
+        "off": "Aus",
+        "minimal": "Minimal",
+        "low": "Niedrig",
+        "medium": "Mittel",
+        "high": "Hoch",
+        "max": "Maximum"
+      },
       "minimize": "Minimieren",
       "exportReport": "Bericht exportieren",
       "exporting": "Erstelle…",
