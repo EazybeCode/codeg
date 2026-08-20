@@ -51,6 +51,7 @@ export function PkArenaDialog() {
     fetchDiff,
     disconnectFinished,
     startPrompt,
+    sendFollowUp,
     applyContestantSelection,
     runJudge,
   } = usePkRound()
@@ -349,7 +350,8 @@ export function PkArenaDialog() {
                   judgeResult={round.judgeResult}
                   judgeAgent={round.judgeAgent}
                   onRerun={
-                    judgeStatus === "done" || judgeStatus === "error"
+                    round.judgeStatus === "done" ||
+                    round.judgeStatus === "error"
                       ? () => void runJudge(round)
                       : undefined
                   }
@@ -389,12 +391,18 @@ export function PkArenaDialog() {
                       ) : (
                         <PkBattlePane
                           key={contestant.slot}
+                          contestant={contestant}
                           conversationId={contestant.conversationId}
                           connectionId={contestant.connectionId}
                           agentType={contestant.agentType}
                           task={round.task}
                           statusDetail={contestant.statusDetail}
                           preparingLabel={t("preparing")}
+                          followUpLabel={t("followUp")}
+                          followUpPlaceholder={t("followUpPlaceholder")}
+                          onFollowUp={(message) =>
+                            void sendFollowUp(round, contestant, message)
+                          }
                         />
                       )
                     )
@@ -426,20 +434,48 @@ export function PkArenaDialog() {
  * time — the field-reported arena lag.
  */
 const PkBattlePane = memo(function PkBattlePane({
+  contestant,
   conversationId,
   connectionId,
   agentType,
   task,
   statusDetail,
   preparingLabel,
+  followUpLabel,
+  followUpPlaceholder,
+  onFollowUp,
 }: {
+  contestant: PkContestant
   conversationId: number | null
   connectionId: string | null
   agentType: PkContestant["agentType"]
   task: string
   statusDetail: string | null
   preparingLabel: string
+  followUpLabel: string
+  followUpPlaceholder: string
+  onFollowUp: (message: string) => void
 }) {
+  // The follow-up box shows when the contestant finished its last turn AND
+  // its connection is still alive (contextKey set). A disconnected contestant
+  // can't receive a new prompt.
+  const canFollowUp =
+    contestant.status === "done" && contestant.contextKey != null
+  const [followUpText, setFollowUpText] = useState("")
+  const [sending, setSending] = useState(false)
+
+  const handleSend = async () => {
+    const trimmed = followUpText.trim()
+    if (!trimmed || sending) return
+    setSending(true)
+    setFollowUpText("")
+    try {
+      await onFollowUp(trimmed)
+    } finally {
+      setSending(false)
+    }
+  }
+
   return (
     <div className="flex h-full min-w-80 flex-1 flex-col overflow-hidden rounded-lg border border-border">
       {conversationId != null ? (
@@ -454,6 +490,38 @@ const PkBattlePane = memo(function PkBattlePane({
           {statusDetail ?? preparingLabel}
         </div>
       )}
+      {canFollowUp ? (
+        <div className="border-t border-border bg-muted/30 p-2">
+          <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+            {followUpLabel}
+          </div>
+          <textarea
+            value={followUpText}
+            onChange={(e) => setFollowUpText(e.target.value)}
+            placeholder={followUpPlaceholder}
+            rows={2}
+            disabled={sending}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault()
+                void handleSend()
+              }
+            }}
+            className="w-full resize-none rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+          />
+          <div className="mt-1 flex items-center justify-between">
+            <span className="text-[10px] text-muted-foreground">⌘↩</span>
+            <button
+              type="button"
+              onClick={() => void handleSend()}
+              disabled={!followUpText.trim() || sending}
+              className="rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
+            >
+              {sending ? "…" : followUpLabel}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 })

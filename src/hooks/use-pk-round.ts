@@ -501,6 +501,11 @@ export async function fetchUsage(
 export function usePkRound(): {
   startRound: (round: PkRound) => Promise<void>
   startPrompt: (round: PkRound) => Promise<void>
+  sendFollowUp: (
+    round: PkRound,
+    contestant: PkContestant,
+    message: string
+  ) => Promise<void>
   applyContestantSelection: (
     round: PkRound,
     contestant: PkContestant,
@@ -976,7 +981,12 @@ export function usePkRound(): {
         const branchName = contestantBranchName(round.id, slot)
         const worktreePath = `${round.workingDir}/.codeg-pk/${round.id}/${slot}`
         try {
-          await gitWorktreeAdd(round.workingDir, branchName, worktreePath)
+          await gitWorktreeAdd(
+            round.workingDir,
+            branchName,
+            worktreePath,
+            round.baseCommit
+          )
         } catch (error) {
           updateContestant(round.id, slot, {
             status: "error",
@@ -1234,6 +1244,47 @@ export function usePkRound(): {
     [markRound, sendPrompt, updateContestant]
   )
 
+  /** Send a follow-up message to ONE contestant — the multi-turn / human-
+   *  intervention path. Only works when the contestant is done (its previous
+   *  turn settled) AND its connection is still alive (contextKey != null).
+   *  Pushes the contestant back to running so the scoreboard reflects the
+   *  new turn; the round stays "finished" if it was — the follow-up is a
+   *  single-contestant side turn, not a new round. */
+  const sendFollowUp = useCallback(
+    async (round: PkRound, contestant: PkContestant, message: string) => {
+      if (!contestant.contextKey || contestant.conversationId == null) return
+      const trimmed = message.trim()
+      if (!trimmed) return
+      const blocks: PromptInputBlock[] = [
+        {
+          type: "text",
+          text: [
+            trimmed,
+            "",
+            `Continue working inside this directory: ${contestant.worktreePath ?? round.workingDir}`,
+          ].join("\n"),
+        },
+      ]
+      try {
+        await sendPrompt(contestant.contextKey, blocks, {
+          folderId: round.folderId,
+          conversationId: contestant.conversationId,
+        })
+        updateContestant(round.id, contestant.slot, {
+          status: "running",
+          endedAt: null,
+          durationMs: null,
+        })
+      } catch (error) {
+        updateContestant(round.id, contestant.slot, {
+          status: "error",
+          statusDetail: `follow-up: ${String(error)}`,
+        })
+      }
+    },
+    [sendPrompt, updateContestant]
+  )
+
   const applyContestantSelection = useCallback(
     async (
       round: PkRound,
@@ -1263,6 +1314,7 @@ export function usePkRound(): {
   return {
     startRound,
     startPrompt,
+    sendFollowUp,
     applyContestantSelection,
     cancelRound,
     disconnectFinished,
