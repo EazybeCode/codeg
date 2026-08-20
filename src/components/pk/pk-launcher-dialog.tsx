@@ -319,6 +319,7 @@ export function PkLauncherDialog() {
             {slots.length > 0 ? (
               <div className="mt-3 flex flex-col gap-1.5">
                 {slots.map((slot, index) => {
+                  if (!slot.agentType) return null
                   const agentName =
                     agents.find((a) => a.agent_type === slot.agentType)?.name ??
                     slot.agentType

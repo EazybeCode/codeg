@@ -191,7 +191,20 @@ export function loadLastLauncherConfig(): PkLauncherLastConfig | null {
   if (typeof window === "undefined") return null
   try {
     const raw = window.localStorage.getItem(LAUNCHER_LAST_KEY)
-    return raw ? (JSON.parse(raw) as PkLauncherLastConfig) : null
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PkLauncherLastConfig
+    // Normalize legacy agents formats. Before the controlled-variable UI (#6),
+    // agents were stored as `string[]` (just agent types); normalize each entry
+    // to `{ agentType, label? }`. Guard against corrupt/missing agentType.
+    if (Array.isArray(parsed.agents)) {
+      parsed.agents = parsed.agents
+        .map((a) => (typeof a === "string" ? { agentType: a as AgentType } : a))
+        .filter(
+          (a): a is { agentType: AgentType; label?: string } =>
+            a != null && typeof a.agentType === "string"
+        )
+    }
+    return parsed
   } catch {
     return null
   }

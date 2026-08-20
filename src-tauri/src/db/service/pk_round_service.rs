@@ -61,7 +61,7 @@ pub async fn create(
         status: Set(pk_round::PkRoundStatus::Ready),
         failure_reason: Set(None),
         judge_result: Set(None),
-        judge_status: Set(None),
+        judge_status: Set(Some("idle".into())),
         created_at: Set(now),
         updated_at: Set(now),
         finished_at: Set(None),
