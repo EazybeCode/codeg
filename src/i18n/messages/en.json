@@ -5023,7 +5023,10 @@
       "judgeHint": "After all contestants finish, this agent reads every diff and produces a structured verdict with scores and rankings.",
       "fromCommit": "📋 From commit",
       "loadingCommits": "Loading commits…",
-      "noCommits": "No commits found."
+      "noCommits": "No commits found.",
+      "creativeTemplates": "Creative templates",
+      "realEngineering": "Real engineering",
+      "loadMore": "Load more"
     },
     "scoreboard": {
       "status": {

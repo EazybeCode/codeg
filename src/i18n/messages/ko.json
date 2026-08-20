@@ -5023,7 +5023,10 @@
       "judgeHint": "모든 참가자가 완료되면 심판 에이전트가 각 참가자의 diff를 읽고 구조화된 평가와 순위를 생성합니다.",
       "fromCommit": "📋 커밋에서",
       "loadingCommits": "커밋 로딩 중…",
-      "noCommits": "커밋이 없습니다."
+      "noCommits": "커밋이 없습니다.",
+      "creativeTemplates": "크리에이티브 템플릿",
+      "realEngineering": "실제 엔지니어링",
+      "loadMore": "더 로드"
     },
     "scoreboard": {
       "status": {

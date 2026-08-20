@@ -5023,7 +5023,10 @@
       "judgeHint": "Une fois tous les concurrents terminés, cet agent lit chaque diff et produit un verdict structuré avec scores et classements.",
       "fromCommit": "📋 Depuis commit",
       "loadingCommits": "Chargement des commits…",
-      "noCommits": "Aucun commit trouvé."
+      "noCommits": "Aucun commit trouvé.",
+      "creativeTemplates": "Modèles créatifs",
+      "realEngineering": "Ingénierie réelle",
+      "loadMore": "Charger plus"
     },
     "scoreboard": {
       "status": {

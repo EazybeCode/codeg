@@ -5023,7 +5023,10 @@
       "judgeHint": "Nachdem alle Teilnehmer fertig sind, liest dieser Agent jeden Diff und erstellt ein strukturiertes Urteil mit Punktzahlen und Rängen.",
       "fromCommit": "📋 Aus Commit",
       "loadingCommits": "Commits laden…",
-      "noCommits": "Keine Commits gefunden."
+      "noCommits": "Keine Commits gefunden.",
+      "creativeTemplates": "Kreative Vorlagen",
+      "realEngineering": "Echte Entwicklung",
+      "loadMore": "Mehr laden"
     },
     "scoreboard": {
       "status": {

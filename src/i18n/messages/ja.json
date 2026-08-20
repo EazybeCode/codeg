@@ -5023,7 +5023,10 @@
       "judgeHint": "全選手の完了後、審査員エージェントが各選手の diff を読み、構造化された評価とランキングを生成します。",
       "fromCommit": "📋 コミットから",
       "loadingCommits": "コミットを読み込み中…",
-      "noCommits": "コミットが見つかりません。"
+      "noCommits": "コミットが見つかりません。",
+      "creativeTemplates": "クリエイティブテンプレート",
+      "realEngineering": "リアルエンジニアリング",
+      "loadMore": "もっと読み込む"
     },
     "scoreboard": {
       "status": {

@@ -5023,7 +5023,10 @@
       "judgeHint": "Cuando todos los concursantes terminen, este agente leerá cada diff y producirá un veredicto estructurado con puntuaciones y clasificaciones.",
       "fromCommit": "📋 Desde commit",
       "loadingCommits": "Cargando commits…",
-      "noCommits": "No se encontraron commits."
+      "noCommits": "No se encontraron commits.",
+      "creativeTemplates": "Plantillas creativas",
+      "realEngineering": "Ingeniería real",
+      "loadMore": "Cargar más"
     },
     "scoreboard": {
       "status": {

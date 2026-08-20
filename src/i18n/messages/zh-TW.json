@@ -5023,7 +5023,10 @@
       "judgeHint": "所有選手完成後,裁判 agent 會讀取每個選手的 diff,給出結構化評分和排名。",
       "fromCommit": "📋 從提交拉取",
       "loadingCommits": "載入提交中…",
-      "noCommits": "未找到提交。"
+      "noCommits": "未找到提交。",
+      "creativeTemplates": "創意 PK",
+      "realEngineering": "真實工程 PK",
+      "loadMore": "加載更多"
     },
     "scoreboard": {
       "status": {

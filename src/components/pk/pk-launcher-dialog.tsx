@@ -19,7 +19,7 @@ import {
 } from "@/lib/api"
 import { getAgentLabel } from "@/lib/custom-agents"
 import { PK_TEMPLATES } from "@/lib/pk-templates"
-import type { AgentType } from "@/lib/types"
+import type { AgentType, GitLogEntry } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
   loadLastLauncherConfig,
@@ -67,10 +67,10 @@ export function PkLauncherDialog() {
   const [judgeAgent, setJudgeAgent] = useState<string | null>(null)
   const [startError, setStartError] = useState<string | null>(null)
   const [commitPickerOpen, setCommitPickerOpen] = useState(false)
-  const [commits, setCommits] = useState<
-    Array<{ hash: string; message: string }>
-  >([])
+  const [commits, setCommits] = useState<GitLogEntry[]>([])
   const [commitsLoading, setCommitsLoading] = useState(false)
+  const [commitSkip, setCommitSkip] = useState(0)
+  const [commitsExhausted, setCommitsExhausted] = useState(false)
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
     setIsGitRepo(null)
@@ -287,8 +287,11 @@ export function PkLauncherDialog() {
             >
               {t("taskLabel")}
             </label>
-            {/* Quick-start templates — one click fills the task textarea. */}
-            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            {/* ── 创意 PK:一键模板 ── */}
+            <div className="mb-1 text-xs font-medium text-muted-foreground">
+              {t("creativeTemplates")}
+            </div>
+            <div className="mb-3 flex flex-wrap items-center gap-1.5">
               {PK_TEMPLATES.map((tpl) => (
                 <button
                   key={tpl.id}
@@ -301,69 +304,122 @@ export function PkLauncherDialog() {
                   {t(`templates.${tpl.labelKey}` as "templates.pelican")}
                 </button>
               ))}
-              {/* Pull a task from recent git commits — real-engineering PK. */}
-              {workingDir != null && isGitRepo === true ? (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    if (commitPickerOpen) {
-                      setCommitPickerOpen(false)
-                      return
-                    }
-                    setCommitsLoading(true)
-                    setCommitPickerOpen(true)
-                    try {
-                      const result = await gitLog(workingDir, 5)
-                      setCommits(
-                        result.entries.map((e) => ({
-                          hash: e.hash,
-                          message: e.message,
-                        }))
-                      )
-                    } catch {
-                      setCommits([])
-                    } finally {
-                      setCommitsLoading(false)
-                    }
-                  }}
-                  className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                >
-                  {t("fromCommit")}
-                </button>
-              ) : null}
             </div>
-            {commitPickerOpen ? (
-              <div className="mb-2 max-h-32 overflow-auto rounded-lg border border-border bg-background">
-                {commitsLoading ? (
-                  <div className="px-3 py-2 text-xs text-muted-foreground">
-                    {t("loadingCommits")}
-                  </div>
-                ) : commits.length === 0 ? (
-                  <div className="px-3 py-2 text-xs text-muted-foreground">
-                    {t("noCommits")}
-                  </div>
-                ) : (
-                  commits.map((commit) => (
-                    <button
-                      key={commit.hash}
-                      type="button"
-                      onClick={() => {
-                        setTask(
-                          `Reproduce the change from commit ${commit.hash}: ${commit.message}`
-                        )
+
+            {/* ── 真实工程 PK:从提交拉取 ── */}
+            {workingDir != null && isGitRepo === true ? (
+              <>
+                <div className="mb-1 text-xs font-medium text-muted-foreground">
+                  {t("realEngineering")}
+                </div>
+                <div className="mb-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (commitPickerOpen) {
                         setCommitPickerOpen(false)
-                      }}
-                      className="block w-full truncate px-3 py-1.5 text-left text-xs text-foreground hover:bg-muted"
-                      title={commit.message}
-                    >
-                      <span className="font-mono text-muted-foreground">
-                        {commit.hash.slice(0, 7)}
-                      </span>{" "}
-                      {commit.message.split("\n")[0]}
-                    </button>
-                  ))
-                )}
-              </div>
+                        return
+                      }
+                      setCommitSkip(0)
+                      setCommitsExhausted(false)
+                      setCommitsLoading(true)
+                      setCommitPickerOpen(true)
+                      try {
+                        const result = await gitLog(workingDir, 10)
+                        setCommits(result.entries)
+                        setCommitsExhausted(result.entries.length < 10)
+                      } catch {
+                        setCommits([])
+                      } finally {
+                        setCommitsLoading(false)
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  >
+                    {t("fromCommit")}
+                  </button>
+                </div>
+                {commitPickerOpen ? (
+                  <div className="mb-2 max-h-48 overflow-auto rounded-lg border border-border bg-background">
+                    {commitsLoading ? (
+                      <div className="px-3 py-2 text-xs text-muted-foreground">
+                        {t("loadingCommits")}
+                      </div>
+                    ) : commits.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-muted-foreground">
+                        {t("noCommits")}
+                      </div>
+                    ) : (
+                      <>
+                        {commits.map((commit) => (
+                          <button
+                            key={commit.hash}
+                            type="button"
+                            onClick={() => {
+                              setTask(
+                                `复现提交 ${commit.hash.slice(0, 7)} 的改动: ${commit.message.split("\n")[0]}`
+                              )
+                              setCommitPickerOpen(false)
+                            }}
+                            className="block w-full px-3 py-2 text-left hover:bg-muted"
+                            title={commit.message}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {commit.hash.slice(0, 7)}
+                              </span>
+                              <span className="truncate text-xs text-foreground">
+                                {commit.message.split("\n")[0]}
+                              </span>
+                            </div>
+                            <div className="mt-0.5 flex items-center gap-3 text-[11px] text-muted-foreground">
+                              <span>{commit.author}</span>
+                              <span>
+                                {new Date(commit.date).toLocaleDateString()}
+                              </span>
+                              {commit.files.length > 0 ? (
+                                <span>📄 {commit.files.length} 文件</span>
+                              ) : null}
+                            </div>
+                          </button>
+                        ))}
+                        {!commitsExhausted ? (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const nextSkip = commitSkip + 10
+                              setCommitsLoading(true)
+                              try {
+                                const result = await gitLog(
+                                  workingDir,
+                                  10,
+                                  undefined,
+                                  undefined,
+                                  nextSkip
+                                )
+                                setCommits((prev) => [
+                                  ...prev,
+                                  ...result.entries,
+                                ])
+                                setCommitSkip(nextSkip)
+                                setCommitsExhausted(result.entries.length < 10)
+                              } catch {
+                                // ignore
+                              } finally {
+                                setCommitsLoading(false)
+                              }
+                            }}
+                            disabled={commitsLoading}
+                            className="block w-full border-t border-border px-3 py-2 text-center text-xs text-muted-foreground hover:bg-muted disabled:opacity-50"
+                          >
+                            {commitsLoading ? "…" : t("loadMore")}
+                          </button>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </>
             ) : null}
             <textarea
               id="pk-task"
