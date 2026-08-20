@@ -1,10 +1,10 @@
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, DatabaseConnection, EntityTrait,
-    QueryFilter, QueryOrder, Set,
+    QueryFilter, QueryOrder, Set, TransactionTrait,
 };
 
-use crate::db::entities::pk_round;
+use crate::db::entities::{conversation, pk_round};
 use crate::db::error::DbError;
 use crate::models::{PkRoundConfig, PkRoundInfo};
 
@@ -134,13 +134,26 @@ pub async fn update_status(
 }
 
 pub async fn soft_delete(conn: &DatabaseConnection, id: i32) -> Result<(), DbError> {
+    use sea_orm::sea_query::Expr;
+
+    let txn = conn.begin().await?;
     let round = pk_round::Entity::find_by_id(id)
-        .one(conn)
+        .filter(pk_round::Column::DeletedAt.is_null())
+        .one(&txn)
         .await?
         .ok_or_else(|| DbError::Migration(format!("PK round not found: {id}")))?;
+    let now = Utc::now();
     let mut active: pk_round::ActiveModel = round.into();
-    active.deleted_at = Set(Some(Utc::now()));
-    active.update(conn).await?;
+    active.deleted_at = Set(Some(now));
+    active.update(&txn).await?;
+    conversation::Entity::update_many()
+        .col_expr(conversation::Column::DeletedAt, Expr::value(Some(now)))
+        .col_expr(conversation::Column::UpdatedAt, Expr::value(now))
+        .filter(conversation::Column::PkRoundId.eq(id))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .exec(&txn)
+        .await?;
+    txn.commit().await?;
     Ok(())
 }
 

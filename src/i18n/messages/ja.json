@@ -1659,6 +1659,13 @@
       "noChats": "チャットがありません",
       "noRecent": "最近の会話はありません",
       "noPk": "PKセッションはありません",
+      "pkOpenArena": "Open this PK arena",
+      "pkArchive": "Archive the PK round",
+      "pkArchiveConfirm": "Archive “{task}”? The round and its agent sessions will be hidden.",
+      "pkArchiveSuccess": "PK round archived",
+      "pkArchiveFailed": "Archive failed: {message}",
+      "pkExpand": "Expand agent sessions",
+      "pkCollapse": "Collapse agent sessions",
       "showMoreRecent": "さらに表示（{count}）",
       "noFolders": "開いているフォルダがありません",
       "newChatAction": "新しいチャット",
@@ -4975,7 +4982,7 @@
     "launcher": {
       "title": "エージェントPK",
       "description": "同じタスクを複数のエージェントに同時に送り、結果を比較します",
-      "contestantsLabel": "出場者(2〜4体)",
+      "contestantsLabel": "出場者（{min}～{max}体）",
       "noFolderHint": "アリーナには git リポジトリのフォルダが必要です。先に開いてください。",
       "needMore": "対戦を開始するには最低 {count} 体選択してください。",
       "taskLabel": "タスク",
@@ -5036,6 +5043,11 @@
       "judgeDimensionsHint": "1 行 1 dimension。空欄でデフォルト使用。",
       "addContestant": "{agent} を選手として追加",
       "slotLabelPlaceholder": "ラベル(例: Sonnet、Opus)",
+      "slotNumber": "出場者 {number}",
+      "modelLoading": "モデルを読み込み中…",
+      "modelUnavailable": "このエージェントはデフォルトモデルを使用します",
+      "modelLoadFailed": "モデルを読み込めませんでした",
+      "retryModelLoad": "モデルを再読み込み",
       "removeSlot": "この選手スロットを削除"
     },
     "scoreboard": {
@@ -5049,7 +5061,28 @@
         "ready": "準備完了"
       },
       "tokensUnit": "tok",
+      "tokensUnavailable": "Token not reported",
+      "tokensUnavailableHint": "This agent did not return token usage; this does not mean zero tokens.",
       "turnsUnit": "ターン"
+    },
+    "history": {
+      "title": "Round history",
+      "hint": "Search, open, and archive complete rounds.",
+      "trigger": "History {count}",
+      "searchPlaceholder": "Search tasks or agents…",
+      "empty": "No matching rounds",
+      "agents": "{count} agents",
+      "archive": "Archive round",
+      "archiveConfirm": "Archive “{task}”? The round and its agent sessions will be hidden.",
+      "archiveSuccess": "PK round archived",
+      "archiveFailed": "Archive failed: {message}",
+      "status": {
+        "ready": "Ready",
+        "running": "Running",
+        "finished": "Finished",
+        "canceled": "Canceled",
+        "interrupted": "Interrupted"
+      }
     },
     "arena": {
       "title": "エージェントPKアリーナ",
@@ -5082,6 +5115,9 @@
       "minimize": "最小化",
       "exportReport": "レポートをエクスポート",
       "exporting": "生成中…",
+      "shareReport": "Save / share report",
+      "reportSaved": "HTML report saved",
+      "reportFailed": "Report export failed: {message}",
       "readyTag": "準備完了",
       "deleteRound": "削除",
       "deleteConfirm": "このラウンドを削除?ワークツリーは残ります(「ワークツリーを削除」で除去)",

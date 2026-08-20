@@ -102,6 +102,7 @@ export const PkScoreboard = forwardRef<
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium text-foreground">
                 {getAgentLabel(contestant.agentType)}
+                {contestant.label ? ` · ${contestant.label}` : ""}
               </div>
               <div className="flex items-baseline gap-2 text-xs text-muted-foreground">
                 <span className="tabular-nums">
@@ -123,9 +124,17 @@ export const PkScoreboard = forwardRef<
                 {contestant.usage ? (
                   <>
                     <span aria-hidden>·</span>
-                    <span className="tabular-nums">
-                      {formatTokens(contestant.usage.outputTokens)}{" "}
-                      {t("tokensUnit")}
+                    <span
+                      className="tabular-nums"
+                      title={
+                        contestant.usage.tokensReported
+                          ? undefined
+                          : t("tokensUnavailableHint")
+                      }
+                    >
+                      {contestant.usage.tokensReported
+                        ? `${formatTokens(contestant.usage.outputTokens)} ${t("tokensUnit")}`
+                        : t("tokensUnavailable")}
                     </span>
                     <span aria-hidden>·</span>
                     <span className="tabular-nums">

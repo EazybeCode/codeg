@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef } from "react"
+import { useLocale } from "next-intl"
 import {
   acpRespondPermission,
   createPkConversation,
@@ -10,6 +11,7 @@ import {
   gitDiffWithBranch,
   gitRemoveWorktree,
   gitWorktreeAdd,
+  updateConversationStatus,
 } from "@/lib/api"
 import type { PromptInputBlock, SessionConfigOptionInfo } from "@/lib/types"
 import {
@@ -67,10 +69,11 @@ const DEFAULT_JUDGE_DIMENSIONS = [
   "Efficiency — token count and time are NOT factors here; judge code-level efficiency only",
 ]
 
-function buildJudgePrompt(
+export function buildJudgePrompt(
   task: string,
   contestants: Array<{ agentType: string; diff: string }>,
-  dimensions?: string[] | null
+  dimensions?: string[] | null,
+  outputLocale = "en"
 ): PromptInputBlock[] {
   const sections = contestants.map(
     (c) =>
@@ -89,6 +92,7 @@ function buildJudgePrompt(
     numbered,
     "",
     "Score each contestant 0-100. Rank them (1 = best).",
+    `Write every human-readable comment and summary in the language identified by locale ${outputLocale}. Keep JSON property names unchanged.`,
     "",
     "Respond with ONLY a JSON block (no markdown fences, no prose before or after):",
     '{"scores":[{"agentType":"<agent>","score":<number>,"rank":<number>,"comment":"<one-line>"}],"summary":"<overall verdict in 1-2 sentences>"}',
@@ -303,7 +307,7 @@ function waitForField(
  * out and the mode is silently skipped (field report: presets "did not
  * apply"). `waitForOptions` reads whichever entry the event landed on.
  */
-function mapPermissionToAgentMode(
+export function mapPermissionToAgentMode(
   mode: PkPermissionMode,
   availableModes: string[]
 ): string | null {
@@ -315,7 +319,6 @@ function mapPermissionToAgentMode(
       "agent-full-access",
       "danger-full-access",
       "full-access",
-      "dontAsk",
       "auto",
       "acceptEdits",
       "agent",
@@ -382,7 +385,6 @@ async function applyPermissionMode(
         "agent-full-access",
         "danger-full-access",
         "never",
-        "dontAsk",
         "auto",
       ].find((v) => optValues.includes(v))
       if (targetVal) {
@@ -419,7 +421,9 @@ async function applyPreparedOptions(
   effort: PkEffortLevel
 ): Promise<{
   modelOptions: Array<{ value: string; name: string }>
+  modelConfigId: string | null
   effortOptions: string[]
+  effortConfigId: string | null
   selectedModel: string | null
   selectedEffort: string | null
   diagnostic: string
@@ -468,7 +472,9 @@ async function applyPreparedOptions(
   }
   return {
     modelOptions,
+    modelConfigId,
     effortOptions,
+    effortConfigId,
     selectedModel,
     selectedEffort,
     diagnostic:
@@ -486,13 +492,20 @@ export async function fetchUsage(
     let inputTokens = 0
     let outputTokens = 0
     let turnCount = 0
+    let tokensReported = false
     for (const turn of detail.turns ?? []) {
       if (turn.role !== "assistant") continue
       turnCount += 1
       inputTokens += turn.usage?.input_tokens ?? 0
       outputTokens += turn.usage?.output_tokens ?? 0
+      if (
+        (turn.usage?.input_tokens ?? 0) > 0 ||
+        (turn.usage?.output_tokens ?? 0) > 0
+      ) {
+        tokensReported = true
+      }
     }
-    return { inputTokens, outputTokens, turnCount }
+    return { inputTokens, outputTokens, turnCount, tokensReported }
   } catch {
     return null
   }
@@ -518,6 +531,7 @@ export function usePkRound(): {
   fetchDiff: (round: PkRound, contestant: PkContestant) => Promise<void>
   runJudge: (round: PkRound) => Promise<void>
 } {
+  const locale = useLocale()
   const {
     connect,
     sendPrompt,
@@ -623,8 +637,20 @@ export function usePkRound(): {
             },
           })
         }
+        // Judge sessions are system-owned terminal work, not user work waiting
+        // for review. Explicitly settle the linked conversation so the sidebar
+        // does not keep rendering an in-progress spinner after the verdict is
+        // already available.
+        await updateConversationStatus(judgeConvId, "completed").catch(
+          () => undefined
+        )
       } else {
         updateJudge(roundId, { judgeStatus: "error" })
+      }
+      for (const [connectionId, entry] of contestantsByConnection.current) {
+        if (entry.isJudge && entry.roundId === roundId) {
+          contestantsByConnection.current.delete(connectionId)
+        }
       }
       // 断开裁判连接。
       const judgeCtxKey = `pk:${roundId}:judge`
@@ -643,6 +669,17 @@ export function usePkRound(): {
           rawText: "",
         },
       })
+      const judgeConvId = judgeConvIdRef.current.get(roundId)
+      if (judgeConvId != null) {
+        void updateConversationStatus(judgeConvId, "cancelled").catch(
+          () => undefined
+        )
+      }
+      for (const [connectionId, entry] of contestantsByConnection.current) {
+        if (entry.isJudge && entry.roundId === roundId) {
+          contestantsByConnection.current.delete(connectionId)
+        }
+      }
       const judgeCtxKey = `pk:${roundId}:judge`
       void disconnect(judgeCtxKey).catch(() => undefined)
     },
@@ -758,7 +795,8 @@ export function usePkRound(): {
           buildJudgePrompt(
             round.task,
             contestantsWithDiffs,
-            round.judgeDimensions
+            round.judgeDimensions,
+            locale
           ),
           {
             folderId: round.folderId,
@@ -776,7 +814,7 @@ export function usePkRound(): {
         })
       }
     },
-    [connect, connectionStore, sendPrompt, updateJudge, fetchDiff]
+    [connect, connectionStore, sendPrompt, updateJudge, fetchDiff, locale]
   )
   // Keep a ref so settleContestant can call it without circular deps.
   const runJudgeRef = useRef(runJudge)
@@ -1022,16 +1060,25 @@ export function usePkRound(): {
         })
 
         let initialModeId: string | null = null
-        let initialConfigValues: Record<string, string> | null = null
+        let initialConfigValues: Record<string, string> | null =
+          Object.keys(contestant.configValues).length > 0
+            ? { ...contestant.configValues }
+            : null
         if (agentType === "claude_code") {
           initialModeId = round.permissionMode
         } else if (agentType === "codex") {
           if (round.permissionMode === "bypassPermissions") {
             initialModeId = "agent-full-access"
-            initialConfigValues = { mode: "agent-full-access" }
+            initialConfigValues = {
+              ...(initialConfigValues ?? {}),
+              mode: "agent-full-access",
+            }
           } else if (round.permissionMode === "acceptEdits") {
             initialModeId = "agent"
-            initialConfigValues = { mode: "agent" }
+            initialConfigValues = {
+              ...(initialConfigValues ?? {}),
+              mode: "agent",
+            }
           }
         }
 
@@ -1087,7 +1134,9 @@ export function usePkRound(): {
           updateContestant(round.id, slot, {
             status: "ready",
             modelOptions: prepared.modelOptions,
+            modelConfigId: prepared.modelConfigId,
             effortOptions: prepared.effortOptions,
+            effortConfigId: prepared.effortConfigId,
             selectedModel: prepared.selectedModel,
             selectedEffort: prepared.selectedEffort,
             // 诊断:无选择器时把原因写进面板可见的 statusDetail。
@@ -1295,9 +1344,13 @@ export function usePkRound(): {
       if (!contestant.contextKey) return
       try {
         await setConfigOption(contestant.contextKey, configId, value)
-        if (configId === "model" || configId === "model_id") {
+        if (configId === contestant.modelConfigId) {
+          const label = contestant.modelOptions.find(
+            (option) => option.value === value
+          )?.name
           updateContestant(round.id, contestant.slot, {
             selectedModel: value,
+            ...(label ? { label } : {}),
           })
         } else {
           updateContestant(round.id, contestant.slot, {

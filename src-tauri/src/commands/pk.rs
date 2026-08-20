@@ -121,3 +121,56 @@ pub async fn pk_round_update_judge(
 ) -> Result<(), DbError> {
     pk_round_update_judge_core(&db, id, judge_result, judge_status).await
 }
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::EntityTrait;
+
+    use super::*;
+    use crate::db::entities::conversation;
+    use crate::db::service::conversation_service;
+    use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
+    use crate::models::AgentType;
+
+    #[tokio::test]
+    async fn archiving_round_also_hides_its_pk_conversations() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/pk-archive").await;
+        let round = pk_round_service::create(
+            &db.conn,
+            folder_id,
+            "test task".into(),
+            PkRoundConfig {
+                agents: Vec::new(),
+                permission_mode: "default".into(),
+                bare_mode: false,
+                effort: "default".into(),
+                judge_agent: None,
+                judge_dimensions: Vec::new(),
+                base_commit: None,
+            },
+        )
+        .await
+        .unwrap();
+        let conversation = conversation_service::create_pk(
+            &db.conn,
+            folder_id,
+            AgentType::Qoder,
+            Some("PK contestant".into()),
+            None,
+            round.id,
+        )
+        .await
+        .unwrap();
+
+        pk_round_delete_core(&db, round.id).await.unwrap();
+
+        assert!(pk_round_service::list(&db.conn, None).await.unwrap().is_empty());
+        let archived = conversation::Entity::find_by_id(conversation.id)
+            .one(&db.conn)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(archived.deleted_at.is_some());
+    }
+}

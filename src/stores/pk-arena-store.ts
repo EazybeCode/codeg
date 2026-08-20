@@ -1,7 +1,12 @@
 "use client"
 
 import { create } from "zustand"
-import type { AgentType, PkRoundConfig, PkRoundInfo } from "@/lib/types"
+import type {
+  AgentType,
+  DbConversationSummary,
+  PkRoundConfig,
+  PkRoundInfo,
+} from "@/lib/types"
 import {
   pkRoundCreate,
   pkRoundUpdateStatus,
@@ -35,6 +40,9 @@ export interface PkContestantUsage {
   inputTokens: number
   outputTokens: number
   turnCount: number
+  /** False when the upstream agent emitted assistant turns but did not report
+   * token accounting (Qoder currently returns zeroes for some models). */
+  tokensReported: boolean
 }
 
 /** Unified reasoning-effort request — "default" means each contestant uses its own default. */
@@ -48,10 +56,16 @@ export interface PkContestant {
   /** Wire name — NOT unique within a round when the same agent is picked
    * twice (control-variable PK). Use `slot` for identity. */
   agentType: AgentType
+  /** Captured display name for the pinned model/config (e.g. "Sonnet"). */
+  label: string | null
+  /** Config values pinned in the launcher and applied before the first prompt. */
+  configValues: Record<string, string>
   /** Advertised model options (handshake `configOptions`), for the arena pickers. */
   modelOptions: Array<{ value: string; name: string }>
+  modelConfigId: string | null
   /** Advertised effort option values, for the arena picker. */
   effortOptions: string[]
+  effortConfigId: string | null
   selectedModel: string | null
   selectedEffort: string | null
   /** Connections-context key; null until the orchestrator connects. */
@@ -148,7 +162,11 @@ interface PkArenaActions {
     task: string
     folderId: number
     workingDir: string
-    agents: Array<{ agentType: AgentType; label?: string }>
+    agents: Array<{
+      agentType: AgentType
+      label?: string
+      configValues?: Record<string, string>
+    }>
     permissionMode?: PkPermissionMode
     bareMode?: boolean
     effort?: PkEffortLevel
@@ -163,7 +181,7 @@ interface PkArenaActions {
     patch: Partial<PkContestant>
   ): void
   markRound(roundId: string, status: PkRoundStatus): void
-  removeRound(roundId: string): void
+  archiveRound(roundId: string): Promise<void>
   setActiveRound(roundId: string | null): void
   setLauncherOpen(open: boolean): void
   setArenaOpen(open: boolean): void
@@ -178,7 +196,11 @@ const LAUNCHER_LAST_KEY = "codeg:pk-launcher-last"
 
 /** Last launcher config, for one-click prefill on rematch. */
 export interface PkLauncherLastConfig {
-  agents: Array<{ agentType: AgentType; label?: string }>
+  agents: Array<{
+    agentType: AgentType
+    label?: string
+    configValues?: Record<string, string>
+  }>
   permissionMode: PkPermissionMode
   bareMode: boolean
   effort: PkEffortLevel
@@ -200,8 +222,13 @@ export function loadLastLauncherConfig(): PkLauncherLastConfig | null {
       parsed.agents = parsed.agents
         .map((a) => (typeof a === "string" ? { agentType: a as AgentType } : a))
         .filter(
-          (a): a is { agentType: AgentType; label?: string } =>
-            a != null && typeof a.agentType === "string"
+          (
+            a
+          ): a is {
+            agentType: AgentType
+            label?: string
+            configValues?: Record<string, string>
+          } => a != null && typeof a.agentType === "string"
         )
     }
     return parsed
@@ -234,10 +261,22 @@ export function contestantContextKey(roundId: string, slot: number): string {
  * interrupted rounds and seeding empty live contestant state. */
 export function dbRoundToStoreRound(
   info: PkRoundInfo,
-  workingDir: string
+  workingDir: string,
+  linkedConversations: readonly DbConversationSummary[] = []
 ): PkRound {
   const wasLive = info.status === "ready" || info.status === "running"
   const status: PkRoundStatus = wasLive ? "interrupted" : info.status
+  const contestantConversations = linkedConversations
+    .filter(
+      (conversation) =>
+        conversation.pk_round_id === info.id &&
+        !conversation.title?.startsWith("PK Judge ·")
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.created_at).getTime() - new Date(b.created_at).getTime() ||
+        a.id - b.id
+    )
   return {
     id: String(info.id),
     task: info.task,
@@ -269,17 +308,25 @@ export function dbRoundToStoreRound(
         : null,
     judgeStatus: (info.judge_status as PkJudgeStatus) ?? "idle",
     contestants: info.config.agents.map((entry, slot) => {
+      const linked = contestantConversations[slot]
       const agentType = typeof entry === "string" ? entry : entry.agent
+      const label = typeof entry === "string" ? null : (entry.label ?? null)
+      const configValues =
+        typeof entry === "string" ? {} : (entry.config_values ?? {})
       return {
         slot,
         agentType: agentType as AgentType,
+        label,
+        configValues,
         modelOptions: [],
+        modelConfigId: null,
         effortOptions: [],
-        selectedModel: null,
+        effortConfigId: null,
+        selectedModel: linked?.model ?? null,
         selectedEffort: null,
         contextKey: null,
         connectionId: null,
-        conversationId: null,
+        conversationId: linked?.id ?? null,
         worktreePath: null,
         branchName: null,
         status: wasLive ? "canceled" : "done",
@@ -319,9 +366,19 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
     baseCommit,
   }) => {
     const config: PkRoundConfig = {
-      agents: agents.map((a) =>
-        a.label ? { agent: a.agentType, label: a.label } : a.agentType
-      ),
+      agents: agents.map((a) => {
+        const configValues = a.configValues ?? {}
+        if (!a.label && Object.keys(configValues).length === 0) {
+          return a.agentType
+        }
+        return {
+          agent: a.agentType,
+          ...(a.label ? { label: a.label } : {}),
+          ...(Object.keys(configValues).length > 0
+            ? { config_values: configValues }
+            : {}),
+        }
+      }),
       permission_mode: permissionMode ?? "default",
       bare_mode: bareMode ?? false,
       effort: effort ?? "default",
@@ -348,8 +405,12 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       contestants: agents.map((a, slot) => ({
         slot,
         agentType: a.agentType,
+        label: a.label ?? null,
+        configValues: a.configValues ?? {},
         modelOptions: [],
+        modelConfigId: null,
         effortOptions: [],
+        effortConfigId: null,
         selectedModel: null,
         selectedEffort: null,
         contextKey: null,
@@ -399,13 +460,13 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
     void pkRoundUpdateStatus(Number(roundId), status).catch(() => undefined)
   },
 
-  removeRound: (roundId) => {
+  archiveRound: async (roundId) => {
+    await pkRoundDelete(Number(roundId))
     set((state) => ({
       rounds: state.rounds.filter((round) => round.id !== roundId),
       activeRoundId:
         state.activeRoundId === roundId ? null : state.activeRoundId,
     }))
-    void pkRoundDelete(Number(roundId)).catch(() => undefined)
   },
 
   setActiveRound: (roundId) => set({ activeRoundId: roundId }),

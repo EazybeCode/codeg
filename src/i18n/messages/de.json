@@ -1659,6 +1659,13 @@
       "noChats": "Keine Chats",
       "noRecent": "Keine kürzlichen Konversationen",
       "noPk": "Keine PK-Sitzungen",
+      "pkOpenArena": "Open this PK arena",
+      "pkArchive": "Archive the PK round",
+      "pkArchiveConfirm": "Archive “{task}”? The round and its agent sessions will be hidden.",
+      "pkArchiveSuccess": "PK round archived",
+      "pkArchiveFailed": "Archive failed: {message}",
+      "pkExpand": "Expand agent sessions",
+      "pkCollapse": "Collapse agent sessions",
       "showMoreRecent": "Mehr anzeigen ({count})",
       "noFolders": "Keine Ordner geöffnet",
       "newChatAction": "Neuer Chat",
@@ -4975,7 +4982,7 @@
     "launcher": {
       "title": "Agenten-PK",
       "description": "Eine Aufgabe gleichzeitig an mehrere Agenten senden und die Ergebnisse vergleichen",
-      "contestantsLabel": "Teilnehmer (2-4)",
+      "contestantsLabel": "Teilnehmer ({min}–{max})",
       "noFolderHint": "Die Arena braucht einen Ordner mit einem Git-Repository — öffne zuerst einen.",
       "needMore": "Wähle mindestens {count} Agenten für ein Duell.",
       "taskLabel": "Aufgabe",
@@ -5036,6 +5043,11 @@
       "judgeDimensionsHint": "Eine Dimension pro Zeile. Leer lassen für Standardwerte.",
       "addContestant": "{agent} als Teilnehmer hinzufügen",
       "slotLabelPlaceholder": "Label (z.B. Sonnet, Opus)",
+      "slotNumber": "Teilnehmer {number}",
+      "modelLoading": "Modelle werden geladen…",
+      "modelUnavailable": "Dieser Agent verwendet sein Standardmodell",
+      "modelLoadFailed": "Modelle konnten nicht geladen werden",
+      "retryModelLoad": "Modelle erneut laden",
       "removeSlot": "Diesen Teilnehmer-Slot entfernen"
     },
     "scoreboard": {
@@ -5049,7 +5061,28 @@
         "ready": "Bereit"
       },
       "tokensUnit": "Tok",
+      "tokensUnavailable": "Token not reported",
+      "tokensUnavailableHint": "This agent did not return token usage; this does not mean zero tokens.",
       "turnsUnit": "Runden"
+    },
+    "history": {
+      "title": "Round history",
+      "hint": "Search, open, and archive complete rounds.",
+      "trigger": "History {count}",
+      "searchPlaceholder": "Search tasks or agents…",
+      "empty": "No matching rounds",
+      "agents": "{count} agents",
+      "archive": "Archive round",
+      "archiveConfirm": "Archive “{task}”? The round and its agent sessions will be hidden.",
+      "archiveSuccess": "PK round archived",
+      "archiveFailed": "Archive failed: {message}",
+      "status": {
+        "ready": "Ready",
+        "running": "Running",
+        "finished": "Finished",
+        "canceled": "Canceled",
+        "interrupted": "Interrupted"
+      }
     },
     "arena": {
       "title": "Agenten-PK-Arena",
@@ -5082,6 +5115,9 @@
       "minimize": "Minimieren",
       "exportReport": "Bericht exportieren",
       "exporting": "Erstelle…",
+      "shareReport": "Save / share report",
+      "reportSaved": "HTML report saved",
+      "reportFailed": "Report export failed: {message}",
       "readyTag": "Bereit",
       "deleteRound": "Löschen",
       "deleteConfirm": "Diese Runde löschen? Worktrees bleiben auf der Platte — über 'Worktrees bereinigen' entfernen.",

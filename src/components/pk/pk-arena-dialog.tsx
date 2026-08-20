@@ -1,7 +1,8 @@
 "use client"
 
 import { memo, useEffect, useMemo, useRef, useState } from "react"
-import { useTranslations } from "next-intl"
+import { useLocale, useTranslations } from "next-intl"
+import { toast } from "sonner"
 import {
   Dialog,
   DialogContent,
@@ -12,11 +13,13 @@ import { LiveTranscriptView } from "@/components/message/live-transcript-view"
 import { PkDiffView } from "@/components/pk/pk-diff-view"
 import { PkJudgePanel } from "@/components/pk/pk-judge-panel"
 import { PkScoreboard } from "@/components/pk/pk-scoreboard"
+import { PkHistoryPicker } from "@/components/pk/pk-history-picker"
 import { usePkRound } from "@/hooks/use-pk-round"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
 import { getFileTree } from "@/lib/api"
 import { buildPkReportHtml } from "@/lib/pk-report"
+import { savePkReportHtml } from "@/lib/pk-report-export"
 import type { FileTreeNode } from "@/lib/types"
 import type { PkContestant, PkRound } from "@/stores/pk-arena-store"
 import { cn } from "@/lib/utils"
@@ -25,7 +28,7 @@ import { usePkArenaStore } from "@/stores/pk-arena-store"
 /**
  * The arena itself: scoreboard on top, one live transcript column per
  * contestant, a diff tab once the round settles, and a share button that
- * exports the scoreboard as a PNG. Round switching comes from the store's
+ * saves a complete self-contained HTML battle report. Round switching comes from the store's
  * `activeRoundId` — the launcher sets it on start, history can revisit any
  * finished round (live streams of an old round are gone; its persisted
  * conversation still renders through the same view).
@@ -33,12 +36,12 @@ import { usePkArenaStore } from "@/stores/pk-arena-store"
 
 export function PkArenaDialog() {
   const t = useTranslations("PkArena.arena")
+  const locale = useLocale()
   const open = usePkArenaStore((s) => s.arenaOpen)
   const setArenaOpen = usePkArenaStore((s) => s.setArenaOpen)
   const setPillDismissed = usePkArenaStore((s) => s.setPillDismissed)
   const rounds = usePkArenaStore((s) => s.rounds)
   const activeRoundId = usePkArenaStore((s) => s.activeRoundId)
-  const setActiveRound = usePkArenaStore((s) => s.setActiveRound)
 
   const round = useMemo(
     () => rounds.find((r) => r.id === activeRoundId) ?? null,
@@ -56,12 +59,9 @@ export function PkArenaDialog() {
     runJudge,
   } = usePkRound()
   const markRound = usePkArenaStore((s) => s.markRound)
-  const removeRound = usePkArenaStore((s) => s.removeRound)
   const [tab, setTab] = useState<"battle" | "diff">("battle")
-  const [sharing, setSharing] = useState(false)
   const [reportExporting, setReportExporting] = useState(false)
   const [diffLoading, setDiffLoading] = useState(false)
-  const scoreboardRef = useRef<HTMLDivElement>(null)
 
   // 进行中(ready/running)的回合禁止 ESC / 点遮罩关闭——一个误触就把
   // 活着的比赛和它的实时流一起关了。只有 X 按钮能显式关闭。
@@ -148,36 +148,13 @@ export function PkArenaDialog() {
           filesByAgent[contestant.slot] = []
         }
       }
-      const html = buildPkReportHtml(fresh ?? round, filesByAgent)
-      const blob = new Blob([html], { type: "text/html;charset=utf-8" })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement("a")
-      link.href = url
-      link.download = `codeg-pk-${round.id}.html`
-      link.click()
-      URL.revokeObjectURL(url)
+      const html = buildPkReportHtml(fresh ?? round, filesByAgent, locale)
+      const result = await savePkReportHtml(html, round.id)
+      if (result === "saved") toast.success(t("reportSaved"))
+    } catch (error) {
+      toast.error(t("reportFailed", { message: String(error) }))
     } finally {
       setReportExporting(false)
-    }
-  }
-
-  const handleShare = async () => {
-    if (!scoreboardRef.current || sharing) return
-    setSharing(true)
-    try {
-      const { toPng } = await import("html-to-image")
-      const dataUrl = await toPng(scoreboardRef.current, {
-        backgroundColor: getComputedStyle(document.body).backgroundColor,
-        pixelRatio: 2,
-      })
-      const link = document.createElement("a")
-      link.download = `codeg-pk-${round?.id ?? "round"}.png`
-      link.href = dataUrl
-      link.click()
-    } catch {
-      // Sharing is best-effort; a failed export must not disturb the round.
-    } finally {
-      setSharing(false)
     }
   }
 
@@ -212,8 +189,12 @@ export function PkArenaDialog() {
         {round ? (
           <div className="flex h-full min-h-0 flex-col">
             <div className="flex items-center gap-3 border-b border-border px-4 py-2 pr-12">
-              <span className="text-base" aria-hidden>
-                ⚔
+              <span
+                className="inline-flex h-5 shrink-0 items-center rounded border border-amber-500/35 bg-amber-500/10 px-1.5 font-mono text-[10px] font-bold tracking-[0.12em] text-amber-700 dark:text-amber-300"
+                title={t("title")}
+                aria-label={t("title")}
+              >
+                PK
               </span>
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-semibold text-foreground">
@@ -224,32 +205,7 @@ export function PkArenaDialog() {
                   {new Date(round.createdAt).toLocaleString()}
                 </div>
               </div>
-              {rounds.length > 1 ? (
-                <select
-                  value={round.id}
-                  onChange={(event) => setActiveRound(event.target.value)}
-                  className="max-w-72 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
-                  aria-label={t("roundPicker")}
-                >
-                  {rounds.map((r) => {
-                    const taskPreview =
-                      r.task.length > 30 ? `${r.task.slice(0, 30)}…` : r.task
-                    const topScore = r.judgeResult?.scores?.find(
-                      (s) => s.rank === 1
-                    )
-                    const scoreInfo = topScore
-                      ? ` · 🏆${topScore.agentType}`
-                      : ""
-                    return (
-                      <option key={r.id} value={r.id}>
-                        {roundStatusLabel[r.status]} · {taskPreview} ·{" "}
-                        {r.contestants.length} {t("contestantsUnit")}
-                        {scoreInfo}
-                      </option>
-                    )
-                  })}
-                </select>
-              ) : null}
+              <PkHistoryPicker activeRound={round} />
               {roundLive ? (
                 <button
                   type="button"
@@ -291,35 +247,9 @@ export function PkArenaDialog() {
                 type="button"
                 onClick={() => void handleExportReport()}
                 disabled={reportExporting}
-                className="rounded-md border border-border px-3 py-1 text-xs text-foreground hover:bg-muted disabled:opacity-50"
-              >
-                {reportExporting ? t("exporting") : t("exportReport")}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (window.confirm(t("deleteConfirm"))) {
-                    const nextRounds = rounds.filter((r) => r.id !== round.id)
-                    removeRound(round.id)
-                    if (nextRounds.length > 0) {
-                      setActiveRound(nextRounds[0].id)
-                    } else {
-                      setArenaOpen(false)
-                    }
-                  }
-                }}
-                className="rounded-md px-3 py-1 text-xs text-muted-foreground hover:bg-red-500/10 hover:text-red-600"
-                title={t("deleteRound")}
-              >
-                {t("deleteRound")}
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleShare()}
-                disabled={sharing}
                 className="rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
               >
-                {sharing ? t("sharing") : t("share")}
+                {reportExporting ? t("exporting") : t("shareReport")}
               </button>
             </div>
 
@@ -340,7 +270,7 @@ export function PkArenaDialog() {
                 </button>
               </div>
             ) : null}
-            <div ref={scoreboardRef}>
+            <div>
               <PkScoreboard contestants={round.contestants} />
 
               {/* Judge verdict panel — shown when a judge is configured. */}
@@ -556,6 +486,7 @@ const PkReadyPane = memo(function PkReadyPane({
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-foreground">
             {getAgentLabel(contestant.agentType)}
+            {contestant.label ? ` · ${contestant.label}` : ""}
           </div>
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <span className="size-1.5 rounded-full bg-amber-400" aria-hidden />
@@ -565,7 +496,7 @@ const PkReadyPane = memo(function PkReadyPane({
       </div>
       {showPickers ? (
         <div className="flex flex-col gap-4 overflow-auto px-4 py-4">
-          {contestant.modelOptions.length > 0 ? (
+          {contestant.modelOptions.length > 0 && contestant.modelConfigId ? (
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
                 {t("modelLabel")}
@@ -573,7 +504,12 @@ const PkReadyPane = memo(function PkReadyPane({
               <select
                 value={contestant.selectedModel ?? ""}
                 onChange={(event) =>
-                  void onSelect(round, contestant, "model", event.target.value)
+                  void onSelect(
+                    round,
+                    contestant,
+                    contestant.modelConfigId as string,
+                    event.target.value
+                  )
                 }
                 className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
               >
@@ -585,7 +521,7 @@ const PkReadyPane = memo(function PkReadyPane({
               </select>
             </label>
           ) : null}
-          {contestant.effortOptions.length > 0 ? (
+          {contestant.effortOptions.length > 0 && contestant.effortConfigId ? (
             <label className="block">
               <span className="mb-1.5 block text-xs font-medium text-muted-foreground">
                 {t("effortLabel")}
@@ -593,7 +529,12 @@ const PkReadyPane = memo(function PkReadyPane({
               <select
                 value={contestant.selectedEffort ?? ""}
                 onChange={(event) =>
-                  void onSelect(round, contestant, "effort", event.target.value)
+                  void onSelect(
+                    round,
+                    contestant,
+                    contestant.effortConfigId as string,
+                    event.target.value
+                  )
                 }
                 className="w-full rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
               >

@@ -1659,6 +1659,13 @@
       "noChats": "沒有聊天",
       "noRecent": "暫無最近對話",
       "noPk": "暫無 PK 對話",
+      "pkOpenArena": "Open this PK arena",
+      "pkArchive": "Archive the PK round",
+      "pkArchiveConfirm": "Archive “{task}”? The round and its agent sessions will be hidden.",
+      "pkArchiveSuccess": "PK round archived",
+      "pkArchiveFailed": "Archive failed: {message}",
+      "pkExpand": "Expand agent sessions",
+      "pkCollapse": "Collapse agent sessions",
       "showMoreRecent": "顯示更多（{count}）",
       "noFolders": "沒有開啟的資料夾",
       "newChatAction": "新增聊天",
@@ -4975,7 +4982,7 @@
     "launcher": {
       "title": "智慧體 PK",
       "description": "同一任務同時發給多個智慧體,對比結果",
-      "contestantsLabel": "參賽選手(2-4 個)",
+      "contestantsLabel": "參賽選手（{min}–{max} 個）",
       "noFolderHint": "競技場需要一個 git 儲存庫資料夾——請先開啟一個。",
       "needMore": "至少選擇 {count} 個智慧體才能開賽。",
       "taskLabel": "任務",
@@ -5036,6 +5043,11 @@
       "judgeDimensionsHint": "每行一個維度。留空使用預設。每個維度會成為裁判提示詞中的編號評分標準。",
       "addContestant": "加入 {agent} 為選手",
       "slotLabelPlaceholder": "標籤(如 Sonnet、Opus)",
+      "slotNumber": "選手 {number}",
+      "modelLoading": "正在讀取模型…",
+      "modelUnavailable": "此智慧體使用預設模型",
+      "modelLoadFailed": "模型清單讀取失敗",
+      "retryModelLoad": "重新讀取模型清單",
       "removeSlot": "移除該選手位置"
     },
     "scoreboard": {
@@ -5049,7 +5061,28 @@
         "ready": "就緒"
       },
       "tokensUnit": "tok",
+      "tokensUnavailable": "Token not reported",
+      "tokensUnavailableHint": "This agent did not return token usage; this does not mean zero tokens.",
       "turnsUnit": "輪"
+    },
+    "history": {
+      "title": "Round history",
+      "hint": "Search, open, and archive complete rounds.",
+      "trigger": "History {count}",
+      "searchPlaceholder": "Search tasks or agents…",
+      "empty": "No matching rounds",
+      "agents": "{count} agents",
+      "archive": "Archive round",
+      "archiveConfirm": "Archive “{task}”? The round and its agent sessions will be hidden.",
+      "archiveSuccess": "PK round archived",
+      "archiveFailed": "Archive failed: {message}",
+      "status": {
+        "ready": "Ready",
+        "running": "Running",
+        "finished": "Finished",
+        "canceled": "Canceled",
+        "interrupted": "Interrupted"
+      }
     },
     "arena": {
       "title": "智慧體 PK 競技場",
@@ -5082,6 +5115,9 @@
       "minimize": "縮小",
       "exportReport": "匯出報告",
       "exporting": "產生中…",
+      "shareReport": "Save / share report",
+      "reportSaved": "HTML report saved",
+      "reportFailed": "Report export failed: {message}",
       "readyTag": "就緒",
       "deleteRound": "刪除",
       "deleteConfirm": "刪除這個回合?worktree 會留在磁碟上,可用「清理 worktree」移除。",

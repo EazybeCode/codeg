@@ -6,7 +6,7 @@ import { PkLauncherDialog } from "@/components/pk/pk-launcher-dialog"
 import { PkMinimizedPill } from "@/components/pk/pk-minimized-pill"
 import { usePkRound, fetchUsage } from "@/hooks/use-pk-round"
 import { usePkArenaStore, dbRoundToStoreRound } from "@/stores/pk-arena-store"
-import { pkRoundList } from "@/lib/api"
+import { pkRoundList, updateConversationStatus } from "@/lib/api"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 
 /**
@@ -29,11 +29,50 @@ export function PkArenaHost() {
   const hydrating = usePkArenaStore((s) => s.hydrating)
   const hydrateFromDb = usePkArenaStore((s) => s.hydrateFromDb)
   const folders = useAppWorkspaceStore((s) => s.allFolders)
+  const conversations = useAppWorkspaceStore((s) => s.conversations)
+  const conversationsLoading = useAppWorkspaceStore(
+    (s) => s.conversationsLoading
+  )
+  const reconciledJudgeIdsRef = useRef(new Set<number>())
+
+  // Repair legacy judge rows created before judge completion explicitly
+  // settled its conversation. The round verdict is authoritative: a finished
+  // verdict cannot have a live spinner, and an errored verdict cannot remain
+  // in progress. The normal conversation event updates the sidebar in place.
+  useEffect(() => {
+    for (const round of rounds) {
+      const target =
+        round.judgeStatus === "done"
+          ? "completed"
+          : round.judgeStatus === "error"
+            ? "cancelled"
+            : null
+      if (!target) continue
+      const judge = conversations.find(
+        (conversation) =>
+          conversation.pk_round_id === Number(round.id) &&
+          conversation.title?.startsWith("PK Judge ·")
+      )
+      if (
+        !judge ||
+        judge.status === target ||
+        reconciledJudgeIdsRef.current.has(judge.id)
+      ) {
+        continue
+      }
+      reconciledJudgeIdsRef.current.add(judge.id)
+      void updateConversationStatus(judge.id, target).catch(() => {
+        reconciledJudgeIdsRef.current.delete(judge.id)
+      })
+    }
+  }, [conversations, rounds])
 
   // Hydrate from DB on mount (once).
   const hydratedRef = useRef(false)
   useEffect(() => {
-    if (hydratedRef.current || folders.length === 0) return
+    if (hydratedRef.current || folders.length === 0 || conversationsLoading) {
+      return
+    }
     hydratedRef.current = true
     void (async () => {
       try {
@@ -42,7 +81,7 @@ export function PkArenaHost() {
           .map((info) => {
             const folder = folders.find((f) => f.id === info.folder_id)
             const workingDir = folder?.path ?? ""
-            return dbRoundToStoreRound(info, workingDir)
+            return dbRoundToStoreRound(info, workingDir, conversations)
           })
           .filter((r) => r.workingDir !== "")
         hydrateFromDb(storeRounds)
@@ -71,7 +110,7 @@ export function PkArenaHost() {
         hydrateFromDb([])
       }
     })()
-  }, [folders, hydrateFromDb])
+  }, [conversations, conversationsLoading, folders, hydrateFromDb])
 
   // Drive any round that still has contestants in "preparing" — exactly the
   // state the launcher leaves behind. Restarted (interrupted) rounds come

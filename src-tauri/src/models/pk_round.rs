@@ -1,10 +1,13 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// One contestant entry in the round config. Supports both a plain string
 /// (backward compat with old rounds: `"claude_code"`) and a labeled object
-/// (new format: `{"agent":"claude_code","label":"Sonnet"}`). The label
-/// disambiguates same-agent slots in control-variable PK
-/// (e.g. "Claude · Sonnet" vs "Claude · Opus").
+/// (new format: `{"agent":"claude_code","label":"Sonnet", ...}`).
+/// `config_values` is applied to
+/// this slot's ACP session before its first prompt; `label` is the captured
+/// human-readable value used to disambiguate same-agent slots.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PkContestantEntry {
@@ -13,6 +16,8 @@ pub enum PkContestantEntry {
         agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        config_values: BTreeMap<String, String>,
     },
 }
 
@@ -94,4 +99,33 @@ pub struct PkRoundInfo {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PkContestantEntry;
+
+    #[test]
+    fn contestant_entry_keeps_legacy_formats_compatible() {
+        let simple: PkContestantEntry = serde_json::from_str(r#""codex""#).unwrap();
+        assert_eq!(simple.agent(), "codex");
+        assert_eq!(simple.label(), None);
+
+        let labeled: PkContestantEntry =
+            serde_json::from_str(r#"{"agent":"claude_code","label":"Sonnet"}"#).unwrap();
+        assert_eq!(labeled.agent(), "claude_code");
+        assert_eq!(labeled.label(), Some("Sonnet"));
+    }
+
+    #[test]
+    fn contestant_entry_round_trips_pinned_config_values() {
+        let entry: PkContestantEntry = serde_json::from_str(
+            r#"{"agent":"claude_code","label":"Opus","config_values":{"model":"opus"}}"#,
+        )
+        .unwrap();
+        let json = serde_json::to_value(entry).unwrap();
+        assert_eq!(json["agent"], "claude_code");
+        assert_eq!(json["label"], "Opus");
+        assert_eq!(json["config_values"]["model"], "opus");
+    }
 }

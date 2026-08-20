@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import {
   Dialog,
@@ -9,7 +9,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { AgentIcon } from "@/components/agent-icon"
-import { X } from "lucide-react"
+import { Loader2, RefreshCw, X } from "lucide-react"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { useAgentOptions } from "@/components/automations/use-agent-options"
 import { useAcpAgents } from "@/hooks/use-acp-agents"
 import {
   acpGetAgentStatus,
@@ -20,7 +30,11 @@ import {
 } from "@/lib/api"
 import { getAgentLabel } from "@/lib/custom-agents"
 import { PK_TEMPLATES } from "@/lib/pk-templates"
-import type { AgentType, GitLogEntry } from "@/lib/types"
+import type {
+  AgentType,
+  GitLogEntry,
+  SessionConfigOptionInfo,
+} from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
   loadLastLauncherConfig,
@@ -32,13 +46,20 @@ import {
 import { useTabStore } from "@/stores/tab-store"
 
 /**
- * Arena launcher: pick 2-4 installed agents, write the task, start the round.
+ * Arena launcher: pick 2-8 installed agents, write the task, start the round.
  * Reads the ACTIVE tab for the target folder (an arena needs a real folder —
  * its git repo provides the per-contestant worktrees; chat mode has none).
  */
 
 const MIN_CONTESTANTS = 2
 const MAX_CONTESTANTS = 8
+
+interface LauncherSlot {
+  id: number
+  agentType: AgentType
+  label: string
+  configValues: Record<string, string>
+}
 
 export function PkLauncherDialog() {
   const t = useTranslations("PkArena.launcher")
@@ -47,15 +68,14 @@ export function PkLauncherDialog() {
   const setArenaOpen = usePkArenaStore((s) => s.setArenaOpen)
   const createRound = usePkArenaStore((s) => s.createRound)
   const { agents: rawAgents } = useAcpAgents()
+  const nextSlotId = useRef(0)
   const activeTab = useTabStore((s) =>
     s.activeTabId
       ? (s.tabs.find((tab) => tab.id === s.activeTabId) ?? null)
       : null
   )
 
-  const [slots, setSlots] = useState<
-    Array<{ agentType: AgentType; label: string }>
-  >([])
+  const [slots, setSlots] = useState<LauncherSlot[]>([])
   const [task, setTask] = useState("")
   const [workingDir, setWorkingDir] = useState<string | null>(null)
   const [folderId, setFolderId] = useState<number | null>(null)
@@ -114,8 +134,10 @@ export function PkLauncherDialog() {
         prev.length > 0
           ? prev
           : last.agents.map((a) => ({
+              id: ++nextSlotId.current,
               agentType: a.agentType,
               label: a.label ?? "",
+              configValues: a.configValues ?? {},
             }))
       )
       setTask(last.task ?? "")
@@ -188,7 +210,15 @@ export function PkLauncherDialog() {
     setSlots((prev) =>
       prev.length >= MAX_CONTESTANTS
         ? prev
-        : [...prev, { agentType, label: "" }]
+        : [
+            ...prev,
+            {
+              id: ++nextSlotId.current,
+              agentType,
+              label: "",
+              configValues: {},
+            },
+          ]
     )
   }
 
@@ -196,8 +226,23 @@ export function PkLauncherDialog() {
     setSlots((prev) => prev.filter((_, i) => i !== index))
   }
 
-  const updateSlotLabel = (index: number, label: string) => {
-    setSlots((prev) => prev.map((s, i) => (i === index ? { ...s, label } : s)))
+  const updateSlotModel = (
+    index: number,
+    configId: string,
+    value: string,
+    label: string
+  ) => {
+    setSlots((prev) =>
+      prev.map((slot, i) =>
+        i === index
+          ? {
+              ...slot,
+              label,
+              configValues: { ...slot.configValues, [configId]: value },
+            }
+          : slot
+      )
+    )
   }
 
   const handleStart = async () => {
@@ -225,8 +270,12 @@ export function PkLauncherDialog() {
       .map((d) => d.trim())
       .filter(Boolean)
     const agentsPayload = slots.map((s) =>
-      s.label.trim()
-        ? { agentType: s.agentType, label: s.label.trim() }
+      s.label.trim() || Object.keys(s.configValues).length > 0
+        ? {
+            agentType: s.agentType,
+            ...(s.label.trim() ? { label: s.label.trim() } : {}),
+            configValues: s.configValues,
+          }
         : { agentType: s.agentType }
     )
     saveLastLauncherConfig({
@@ -260,17 +309,25 @@ export function PkLauncherDialog() {
 
   return (
     <Dialog open={open} onOpenChange={setLauncherOpen}>
-      <DialogContent className="flex max-h-[85vh] w-full max-w-lg flex-col gap-0 overflow-hidden rounded-2xl p-0">
-        <DialogTitle className="border-b border-border px-5 py-3 text-base font-semibold">
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col gap-0 overflow-hidden rounded-2xl p-0">
+        <DialogTitle className="border-b border-border px-6 py-4 text-base font-semibold">
           {t("title")}
         </DialogTitle>
         <DialogDescription className="sr-only">
           {t("description")}
         </DialogDescription>
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-5 py-4">
-          <div>
-            <div className="mb-2 text-sm font-medium text-foreground">
-              {t("contestantsLabel")}
+        <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-6 py-5">
+          <section className="rounded-xl border border-border bg-muted/20 p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="text-sm font-medium text-foreground">
+                {t("contestantsLabel", {
+                  min: MIN_CONTESTANTS,
+                  max: MAX_CONTESTANTS,
+                })}
+              </div>
+              <span className="text-xs tabular-nums text-muted-foreground">
+                {slots.length}/{MAX_CONTESTANTS}
+              </span>
             </div>
             {noFolder ? (
               <div className="text-xs text-muted-foreground">
@@ -317,7 +374,7 @@ export function PkLauncherDialog() {
               })}
             </div>
             {slots.length > 0 ? (
-              <div className="mt-3 flex flex-col gap-1.5">
+              <div className="mt-4 flex flex-col gap-2">
                 {slots.map((slot, index) => {
                   if (!slot.agentType) return null
                   const agentName =
@@ -325,29 +382,40 @@ export function PkLauncherDialog() {
                     slot.agentType
                   return (
                     <div
-                      key={index}
-                      className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1.5"
+                      key={slot.id}
+                      className="flex items-center gap-3 rounded-xl border border-border bg-background px-3 py-2.5 shadow-xs"
                     >
-                      <AgentIcon
-                        agentType={slot.agentType}
-                        className="size-4 shrink-0"
-                      />
-                      <span className="shrink-0 text-xs font-medium text-foreground">
-                        {agentName}
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
+                        <AgentIcon
+                          agentType={slot.agentType}
+                          className="size-4"
+                        />
                       </span>
-                      <input
-                        type="text"
-                        value={slot.label}
-                        onChange={(e) => updateSlotLabel(index, e.target.value)}
-                        placeholder={t("slotLabelPlaceholder")}
-                        maxLength={40}
-                        className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-0.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                      <div className="w-32 min-w-0 shrink-0">
+                        <div className="truncate text-sm font-medium text-foreground">
+                          {agentName}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {t("slotNumber", { number: index + 1 })}
+                        </div>
+                      </div>
+                      <SlotModelSelect
+                        agentType={slot.agentType}
+                        workingDir={workingDir}
+                        configValues={slot.configValues}
+                        onChange={(configId, value, label) =>
+                          updateSlotModel(index, configId, value, label)
+                        }
+                        loadingLabel={t("modelLoading")}
+                        unavailableLabel={t("modelUnavailable")}
+                        failedLabel={t("modelLoadFailed")}
+                        retryLabel={t("retryModelLoad")}
                       />
                       <button
                         type="button"
                         onClick={() => removeSlot(index)}
                         aria-label={t("removeSlot")}
-                        className="shrink-0 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                        className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                       >
                         <X className="size-3.5" />
                       </button>
@@ -361,8 +429,8 @@ export function PkLauncherDialog() {
                 {t("needMore", { count: MIN_CONTESTANTS })}
               </div>
             ) : null}
-          </div>
-          <div className="flex min-h-0 flex-1 flex-col">
+          </section>
+          <section>
             <label
               htmlFor="pk-task"
               className="mb-2 text-sm font-medium text-foreground"
@@ -546,8 +614,8 @@ export function PkLauncherDialog() {
               rows={5}
               className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
             />
-          </div>
-          <div>
+          </section>
+          <section>
             <div className="mb-2 text-sm font-medium text-foreground">
               {t("permissionLabel")}
             </div>
@@ -578,8 +646,8 @@ export function PkLauncherDialog() {
             <div className="mt-1.5 text-xs text-muted-foreground">
               {t("permissionNote")}
             </div>
-          </div>
-          <div>
+          </section>
+          <section>
             <div className="mb-2 text-sm font-medium text-foreground">
               {t("effortLabel")}
             </div>
@@ -606,7 +674,7 @@ export function PkLauncherDialog() {
             <div className="mt-1.5 text-xs text-muted-foreground">
               {t("effortNote")}
             </div>
-          </div>
+          </section>
           <label className="flex cursor-pointer items-start gap-2 text-sm">
             <input
               type="checkbox"
@@ -623,7 +691,7 @@ export function PkLauncherDialog() {
               </span>
             </span>
           </label>
-          <div>
+          <section>
             <div className="mb-2 text-sm font-medium text-foreground">
               {t("judgeLabel")}
             </div>
@@ -696,14 +764,14 @@ export function PkLauncherDialog() {
                 </div>
               </div>
             )}
-          </div>
+          </section>
         </div>
         {startError != null ? (
           <div className="border-t border-border px-5 py-2 text-xs text-red-600 dark:text-red-400">
             {startError}
           </div>
         ) : null}
-        <div className="flex items-center justify-between gap-3 border-t border-border px-5 py-3">
+        <div className="flex items-center justify-between gap-3 border-t border-border bg-background px-6 py-3.5">
           <span className="text-xs text-muted-foreground">
             {t("selectedCount", {
               selected: slots.length,
@@ -731,5 +799,167 @@ export function PkLauncherDialog() {
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function findModelOption(
+  options: SessionConfigOptionInfo[]
+): SessionConfigOptionInfo | null {
+  return (
+    options.find(
+      (option) =>
+        option.kind.type === "select" &&
+        (option.id === "model" ||
+          option.id === "model_id" ||
+          option.category === "model")
+    ) ?? null
+  )
+}
+
+function modelValueLabel(
+  option: SessionConfigOptionInfo,
+  value: string
+): string {
+  if (option.kind.type !== "select") return value
+  for (const group of option.kind.groups) {
+    const match = group.options.find((item) => item.value === value)
+    if (match) return match.name
+  }
+  return option.kind.options.find((item) => item.value === value)?.name ?? value
+}
+
+function hasModelValue(
+  option: SessionConfigOptionInfo,
+  value: string
+): boolean {
+  if (option.kind.type !== "select") return false
+  return (
+    option.kind.options.some((item) => item.value === value) ||
+    option.kind.groups.some((group) =>
+      group.options.some((item) => item.value === value)
+    )
+  )
+}
+
+function SlotModelSelect({
+  agentType,
+  workingDir,
+  configValues,
+  onChange,
+  loadingLabel,
+  unavailableLabel,
+  failedLabel,
+  retryLabel,
+}: {
+  agentType: AgentType
+  workingDir: string | null
+  configValues: Record<string, string>
+  onChange: (configId: string, value: string, label: string) => void
+  loadingLabel: string
+  unavailableLabel: string
+  failedLabel: string
+  retryLabel: string
+}) {
+  const { snapshot, loading, error, reload } = useAgentOptions(
+    agentType,
+    workingDir
+  )
+  const modelOption = useMemo(
+    () => findModelOption(snapshot?.config_options ?? []),
+    [snapshot]
+  )
+  const configuredValue = modelOption ? configValues[modelOption.id] : null
+  const currentValue =
+    modelOption?.kind.type === "select"
+      ? configuredValue && hasModelValue(modelOption, configuredValue)
+        ? configuredValue
+        : modelOption.kind.current_value
+      : null
+
+  useEffect(() => {
+    if (
+      modelOption?.kind.type !== "select" ||
+      !currentValue ||
+      configValues[modelOption.id] === currentValue
+    ) {
+      return
+    }
+    onChange(
+      modelOption.id,
+      currentValue,
+      modelValueLabel(modelOption, currentValue)
+    )
+  }, [configValues, currentValue, modelOption, onChange])
+
+  if (loading) {
+    return (
+      <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+        <span className="truncate">{loadingLabel}</span>
+      </div>
+    )
+  }
+  if (error) {
+    return (
+      <div className="flex min-w-0 flex-1 items-center gap-2 text-xs text-destructive">
+        <span className="min-w-0 flex-1 truncate" title={error}>
+          {failedLabel}
+        </span>
+        <button
+          type="button"
+          onClick={reload}
+          aria-label={retryLabel}
+          title={retryLabel}
+          className="rounded-md p-1.5 hover:bg-muted"
+        >
+          <RefreshCw className="size-3.5" />
+        </button>
+      </div>
+    )
+  }
+  if (!modelOption || modelOption.kind.type !== "select") {
+    return (
+      <div className="min-w-0 flex-1 text-xs text-muted-foreground">
+        {unavailableLabel}
+      </div>
+    )
+  }
+
+  return (
+    <Select
+      value={currentValue ?? undefined}
+      onValueChange={(value) =>
+        onChange(modelOption.id, value, modelValueLabel(modelOption, value))
+      }
+    >
+      <SelectTrigger
+        size="sm"
+        className="min-w-0 flex-1 rounded-lg bg-background"
+        aria-label={modelOption.name}
+      >
+        <SelectValue placeholder={modelOption.name} />
+      </SelectTrigger>
+      <SelectContent position="popper" align="start">
+        {modelOption.kind.groups.length > 0
+          ? modelOption.kind.groups.map((group) => (
+              <SelectGroup key={group.group}>
+                <SelectLabel>{group.name}</SelectLabel>
+                {group.options.map((item) => (
+                  <SelectItem
+                    key={`${group.group}-${item.value}`}
+                    value={item.value}
+                  >
+                    {item.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            ))
+          : modelOption.kind.options.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {item.name}
+              </SelectItem>
+            ))}
+      </SelectContent>
+    </Select>
   )
 }

@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  Archive,
   ExternalLink,
   FolderClosed,
   FolderGit2,
@@ -1111,6 +1112,39 @@ export function SidebarConversationList({
       return next
     })
   }, [])
+  const openPkRound = useCallback((roundId: number) => {
+    const store = usePkArenaStore.getState()
+    store.setActiveRound(String(roundId))
+    store.setArenaOpen(true)
+  }, [])
+  const archivePkRound = useCallback(
+    async (roundId: number) => {
+      const round = usePkArenaStore
+        .getState()
+        .rounds.find((item) => Number(item.id) === roundId)
+      if (
+        !round ||
+        !window.confirm(t("pkArchiveConfirm", { task: round.task }))
+      ) {
+        return
+      }
+      try {
+        await usePkArenaStore.getState().archiveRound(String(roundId))
+        for (const conversation of pkConversations.get(roundId) ?? []) {
+          closeConversationTab(
+            conversation.folder_id,
+            conversation.id,
+            conversation.agent_type
+          )
+        }
+        await refreshConversations()
+        toast.success(t("pkArchiveSuccess"))
+      } catch (error) {
+        toast.error(t("pkArchiveFailed", { message: String(error) }))
+      }
+    },
+    [closeConversationTab, pkConversations, refreshConversations, t]
+  )
 
   // Pinned bucket: the FULL conversation list (ignores "Show completed" — a
   // pinned conversation stays visible regardless), sorted most-recently-pinned
@@ -2412,27 +2446,51 @@ export function SidebarConversationList({
     }
     if (row.kind === "pk-round") {
       const collapsed = pkRoundCollapsed.has(row.roundId)
+      const roundStatus = pkRounds.find(
+        (round) => Number(round.id) === row.roundId
+      )?.status
+      const canArchive = roundStatus !== "running" && roundStatus !== "ready"
       return (
-        <button
-          type="button"
-          onClick={() => togglePkRound(row.roundId)}
-          aria-expanded={!collapsed}
-          className="group flex h-[1.75rem] w-full items-center gap-1 rounded-md px-[0.5rem] text-left hover:bg-sidebar-accent"
-        >
-          <ChevronRight
-            className={cn(
-              "h-3 w-3 shrink-0 text-muted-foreground transition-transform",
-              !collapsed && "rotate-90"
-            )}
-          />
-          <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
-          <span className="truncate text-[0.75rem] font-medium text-sidebar-foreground/80">
-            {row.task}
-          </span>
-          <span className="ml-auto shrink-0 text-[0.6875rem] text-muted-foreground/70">
-            {row.count}
-          </span>
-        </button>
+        <div className="group flex h-[1.75rem] w-full items-center rounded-md px-[0.25rem] hover:bg-sidebar-accent">
+          <button
+            type="button"
+            onClick={() => togglePkRound(row.roundId)}
+            aria-expanded={!collapsed}
+            className="rounded p-1 text-muted-foreground hover:text-sidebar-foreground"
+            title={collapsed ? t("pkExpand") : t("pkCollapse")}
+          >
+            <ChevronRight
+              className={cn(
+                "h-3 w-3 transition-transform",
+                !collapsed && "rotate-90"
+              )}
+            />
+          </button>
+          <button
+            type="button"
+            onClick={() => openPkRound(row.roundId)}
+            className="flex min-w-0 flex-1 items-center gap-1 py-1 text-left"
+            title={t("pkOpenArena")}
+          >
+            <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
+            <span className="truncate text-[0.75rem] font-medium text-sidebar-foreground/80">
+              {row.task}
+            </span>
+            <span className="ml-auto shrink-0 text-[0.6875rem] text-muted-foreground/70">
+              {row.count}
+            </span>
+          </button>
+          {canArchive ? (
+            <button
+              type="button"
+              onClick={() => void archivePkRound(row.roundId)}
+              className="rounded p-1 text-muted-foreground opacity-0 hover:bg-background/70 hover:text-sidebar-foreground focus:opacity-100 group-hover:opacity-100"
+              title={t("pkArchive")}
+            >
+              <Archive className="size-3" />
+            </button>
+          ) : null}
+        </div>
       )
     }
     if (row.kind === "recent-more") {

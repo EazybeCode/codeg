@@ -1659,6 +1659,13 @@
       "noChats": "لا توجد محادثات",
       "noRecent": "لا توجد محادثات حديثة",
       "noPk": "لا توجد جلسات PK",
+      "pkOpenArena": "Open this PK arena",
+      "pkArchive": "Archive the PK round",
+      "pkArchiveConfirm": "Archive “{task}”? The round and its agent sessions will be hidden.",
+      "pkArchiveSuccess": "PK round archived",
+      "pkArchiveFailed": "Archive failed: {message}",
+      "pkExpand": "Expand agent sessions",
+      "pkCollapse": "Collapse agent sessions",
       "showMoreRecent": "عرض المزيد ({count})",
       "noFolders": "لا توجد مجلدات مفتوحة",
       "newChatAction": "محادثة جديدة",
@@ -4975,7 +4982,7 @@
     "launcher": {
       "title": "منافسة الوكلاء الأذكياء",
       "description": "أرسل مهمة واحدة إلى عدة وكلاء في آنٍ واحد وقارن النتائج",
-      "contestantsLabel": "المتنافسون (2-4)",
+      "contestantsLabel": "المتنافسون ({min}–{max})",
       "noFolderHint": "تحتاج الساحة إلى مجلد فيه مستودع git — افتح واحدًا أولًا.",
       "needMore": "اختر {count} وكلاء على الأقل لبدء المنافسة.",
       "taskLabel": "المهمة",
@@ -5036,6 +5043,11 @@
       "judgeDimensionsHint": "بُعد واحد لكل سطر. اتركه فارغًا لاستخدام الافتراضي.",
       "addContestant": "إضافة {agent} كمتسابق",
       "slotLabelPlaceholder": "تسمية (مثل Sonnet، Opus)",
+      "slotNumber": "المتنافس {number}",
+      "modelLoading": "جارٍ تحميل النماذج…",
+      "modelUnavailable": "يستخدم هذا الوكيل نموذجه الافتراضي",
+      "modelLoadFailed": "تعذر تحميل النماذج",
+      "retryModelLoad": "إعادة تحميل النماذج",
       "removeSlot": "إزالة هذا المتسابق"
     },
     "scoreboard": {
@@ -5049,7 +5061,28 @@
         "ready": "جاهز"
       },
       "tokensUnit": "توكن",
+      "tokensUnavailable": "Token not reported",
+      "tokensUnavailableHint": "This agent did not return token usage; this does not mean zero tokens.",
       "turnsUnit": "أدوار"
+    },
+    "history": {
+      "title": "Round history",
+      "hint": "Search, open, and archive complete rounds.",
+      "trigger": "History {count}",
+      "searchPlaceholder": "Search tasks or agents…",
+      "empty": "No matching rounds",
+      "agents": "{count} agents",
+      "archive": "Archive round",
+      "archiveConfirm": "Archive “{task}”? The round and its agent sessions will be hidden.",
+      "archiveSuccess": "PK round archived",
+      "archiveFailed": "Archive failed: {message}",
+      "status": {
+        "ready": "Ready",
+        "running": "Running",
+        "finished": "Finished",
+        "canceled": "Canceled",
+        "interrupted": "Interrupted"
+      }
     },
     "arena": {
       "title": "ساحة منافسة الوكلاء",
@@ -5082,6 +5115,9 @@
       "minimize": "تصغير",
       "exportReport": "تصدير التقرير",
       "exporting": "جارٍ الإنشاء…",
+      "shareReport": "Save / share report",
+      "reportSaved": "HTML report saved",
+      "reportFailed": "Report export failed: {message}",
       "readyTag": "جاهز",
       "deleteRound": "حذف",
       "deleteConfirm": "حذف هذه الجولة? تبقى أشجار العمل على القرص — استخدم تنظيف أشجار العمل.",

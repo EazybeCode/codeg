@@ -6,9 +6,10 @@ import {
   usePkArenaStore,
   type PkRound,
 } from "./pk-arena-store"
-import type { PkRoundInfo } from "@/lib/types"
+import type { DbConversationSummary, PkRoundInfo } from "@/lib/types"
+import { pkRoundCreate } from "@/lib/api"
 
-// Mock the API calls so createRound/markRound/removeRound don't hit the network.
+// Mock the API calls so createRound/markRound/archiveRound don't hit the network.
 vi.mock("@/lib/api", () => ({
   pkRoundCreate: vi.fn().mockResolvedValue({
     id: 1,
@@ -25,6 +26,7 @@ vi.mock("@/lib/api", () => ({
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     finished_at: null,
+    judge_status: "idle",
   }),
   pkRoundUpdateStatus: vi.fn().mockResolvedValue(undefined),
   pkRoundDelete: vi.fn().mockResolvedValue(undefined),
@@ -103,7 +105,7 @@ describe("pk arena store", () => {
     usePkArenaStore.getState().markRound(round.id, "finished")
     expect(usePkArenaStore.getState().rounds[0].status).toBe("finished")
 
-    usePkArenaStore.getState().removeRound(round.id)
+    await usePkArenaStore.getState().archiveRound(round.id)
     expect(usePkArenaStore.getState().rounds).toHaveLength(0)
     expect(usePkArenaStore.getState().activeRoundId).toBeNull()
   })
@@ -125,6 +127,7 @@ describe("pk arena store", () => {
         effort: "default",
       },
       status: "running",
+      judge_status: "idle",
       failure_reason: null,
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T00:00:00Z",
@@ -153,6 +156,7 @@ describe("pk arena store", () => {
         effort: "default",
       },
       status: "finished",
+      judge_status: "idle",
       failure_reason: null,
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T01:00:00Z",
@@ -163,14 +167,72 @@ describe("pk arena store", () => {
     expect(revived.contestants[0].status).toBe("done")
   })
 
+  it("reattaches persisted PK conversations to contestant slots", () => {
+    const dbRound: PkRoundInfo = {
+      id: 42,
+      folder_id: 7,
+      task: "history",
+      config: {
+        agents: ["claude_code", "qoder"],
+        permission_mode: "default",
+        bare_mode: false,
+        effort: "default",
+      },
+      status: "finished",
+      judge_status: "done",
+      failure_reason: null,
+      created_at: "2026-08-20T08:00:00Z",
+      updated_at: "2026-08-20T08:10:00Z",
+      finished_at: "2026-08-20T08:10:00Z",
+    }
+    const conversations = [
+      {
+        id: 81,
+        pk_round_id: 42,
+        title: "PK Judge · history",
+        created_at: "2026-08-20T08:03:00Z",
+      },
+      {
+        id: 80,
+        pk_round_id: 42,
+        title: "PK · history",
+        model: "qoder-model",
+        created_at: "2026-08-20T08:02:00Z",
+      },
+      {
+        id: 79,
+        pk_round_id: 42,
+        title: "PK · history",
+        model: "claude-model",
+        created_at: "2026-08-20T08:01:00Z",
+      },
+    ] as DbConversationSummary[]
+
+    const hydrated = dbRoundToStoreRound(dbRound, "/repo", conversations)
+
+    expect(hydrated.contestants.map((c) => c.conversationId)).toEqual([79, 80])
+    expect(hydrated.contestants.map((c) => c.selectedModel)).toEqual([
+      "claude-model",
+      "qoder-model",
+    ])
+  })
+
   it("supports same agent in multiple slots (control-variable PK)", async () => {
     const round = await usePkArenaStore.getState().createRound({
       task: "write a snake game",
       folderId: 7,
       workingDir: "/tmp/repo",
       agents: [
-        { agentType: "claude_code" as const, label: "Sonnet" },
-        { agentType: "claude_code" as const, label: "Opus" },
+        {
+          agentType: "claude_code" as const,
+          label: "Sonnet",
+          configValues: { model: "sonnet" },
+        },
+        {
+          agentType: "claude_code" as const,
+          label: "Opus",
+          configValues: { model: "opus" },
+        },
       ],
     })
     expect(round.contestants).toHaveLength(2)
@@ -178,6 +240,29 @@ describe("pk arena store", () => {
       true
     )
     expect(round.contestants.map((c) => c.slot)).toEqual([0, 1])
+    expect(round.contestants.map((c) => c.label)).toEqual(["Sonnet", "Opus"])
+    expect(round.contestants.map((c) => c.configValues.model)).toEqual([
+      "sonnet",
+      "opus",
+    ])
+    expect(vi.mocked(pkRoundCreate)).toHaveBeenCalledWith(
+      7,
+      "write a snake game",
+      expect.objectContaining({
+        agents: [
+          {
+            agent: "claude_code",
+            label: "Sonnet",
+            config_values: { model: "sonnet" },
+          },
+          {
+            agent: "claude_code",
+            label: "Opus",
+            config_values: { model: "opus" },
+          },
+        ],
+      })
+    )
   })
 
   it("supports labeled contestant entries in DB hydration", () => {
@@ -187,14 +272,23 @@ describe("pk arena store", () => {
       task: "control variable test",
       config: {
         agents: [
-          { agent: "claude_code", label: "Sonnet" },
-          { agent: "claude_code", label: "Opus" },
+          {
+            agent: "claude_code",
+            label: "Sonnet",
+            config_values: { model: "sonnet" },
+          },
+          {
+            agent: "claude_code",
+            label: "Opus",
+            config_values: { model: "opus" },
+          },
         ],
         permission_mode: "default",
         bare_mode: false,
         effort: "default",
       },
       status: "finished",
+      judge_status: "idle",
       failure_reason: null,
       created_at: "2026-01-01T00:00:00Z",
       updated_at: "2026-01-01T01:00:00Z",
@@ -206,5 +300,10 @@ describe("pk arena store", () => {
       revived.contestants.every((c) => c.agentType === "claude_code")
     ).toBe(true)
     expect(revived.contestants.map((c) => c.slot)).toEqual([0, 1])
+    expect(revived.contestants.map((c) => c.label)).toEqual(["Sonnet", "Opus"])
+    expect(revived.contestants.map((c) => c.configValues.model)).toEqual([
+      "sonnet",
+      "opus",
+    ])
   })
 })

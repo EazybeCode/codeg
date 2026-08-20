@@ -671,14 +671,19 @@ export type PkRoundStatus =
   | "interrupted"
 
 /** Mirrors Rust `PkContestantEntry` (src-tauri/src/models/pk_round.rs).
- * Either a plain string (old format) or a labeled object (new format). */
-export type PkContestantEntry = string | { agent: string; label?: string }
+ * Plain strings are legacy entries; objects can pin per-slot ACP config. */
+export type PkContestantEntry =
+  | string
+  | {
+      agent: string
+      label?: string
+      config_values?: Record<string, string>
+    }
 
 /** Mirrors Rust `PkRoundConfig` (src-tauri/src/models/pk_round.rs). Stored as
  *  JSON in `pk_round.config`. */
 export interface PkRoundConfig {
-  /** The agent types selected as contestants, in pick order. Each entry
-   *  is either a plain string (old format) or a labeled object (new format). */
+  /** Contestants in slot order, optionally carrying per-slot ACP config. */
   agents: PkContestantEntry[]
   /** Round-level permission policy applied to every contestant. */
   permission_mode: string
