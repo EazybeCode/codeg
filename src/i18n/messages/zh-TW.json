@@ -5032,7 +5032,10 @@
       "judgeDimensionsHint": "每行一個維度。留空使用預設。每個維度會成為裁判提示詞中的編號評分標準。",
       "addContestant": "加入 {agent} 為選手",
       "slotLabelPlaceholder": "標籤(如 Sonnet、Opus)",
-      "removeSlot": "移除該選手位置"
+      "removeSlot": "移除該選手位置",
+      "fromDiff": "📝 從改動拉取",
+      "loadingDiff": "載入改動中…",
+      "noChanges": "沒有未提交的改動。"
     },
     "scoreboard": {
       "status": {

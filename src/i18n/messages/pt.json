@@ -5032,7 +5032,10 @@
       "judgeDimensionsHint": "Uma dimensão por linha. Deixe vazio para usar os padrões.",
       "addContestant": "Adicionar {agent} como concorrente",
       "slotLabelPlaceholder": "Rótulo (ex. Sonnet, Opus)",
-      "removeSlot": "Remover este slot de concorrente"
+      "removeSlot": "Remover este slot de concorrente",
+      "fromDiff": "📝 Das mudanças locais",
+      "loadingDiff": "Carregando mudanças…",
+      "noChanges": "Nenhuma mudança não commitada."
     },
     "scoreboard": {
       "status": {

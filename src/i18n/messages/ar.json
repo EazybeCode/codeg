@@ -5032,7 +5032,10 @@
       "judgeDimensionsHint": "بُعد واحد لكل سطر. اتركه فارغًا لاستخدام الافتراضي.",
       "addContestant": "إضافة {agent} كمتسابق",
       "slotLabelPlaceholder": "تسمية (مثل Sonnet، Opus)",
-      "removeSlot": "إزالة هذا المتسابق"
+      "removeSlot": "إزالة هذا المتسابق",
+      "fromDiff": "📝 من التغييرات الحالية",
+      "loadingDiff": "تحميل التغييرات…",
+      "noChanges": "لا توجد تغييرات غير ملتزمة."
     },
     "scoreboard": {
       "status": {

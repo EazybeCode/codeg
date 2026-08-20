@@ -15,12 +15,14 @@ import {
   acpGetAgentStatus,
   getFolder,
   getGitBranch,
+  gitDiff,
   gitInit,
   gitLog,
+  gitStatus,
 } from "@/lib/api"
 import { getAgentLabel } from "@/lib/custom-agents"
 import { PK_TEMPLATES } from "@/lib/pk-templates"
-import type { AgentType, GitLogEntry } from "@/lib/types"
+import type { AgentType, GitLogEntry, GitStatusEntry } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import {
   loadLastLauncherConfig,
@@ -75,6 +77,9 @@ export function PkLauncherDialog() {
   const [commitsLoading, setCommitsLoading] = useState(false)
   const [commitSkip, setCommitSkip] = useState(0)
   const [commitsExhausted, setCommitsExhausted] = useState(false)
+  const [diffPickerOpen, setDiffPickerOpen] = useState(false)
+  const [statusEntries, setStatusEntries] = useState<GitStatusEntry[]>([])
+  const [diffLoading, setDiffLoading] = useState(false)
 
   const checkGitRepo = (dir: string, cancelledRef: { current: boolean }) => {
     setIsGitRepo(null)
@@ -100,6 +105,10 @@ export function PkLauncherDialog() {
     setJudgeAgent(null)
     setJudgeDimensions("")
     setStartError(null)
+    setCommitPickerOpen(false)
+    setDiffPickerOpen(false)
+    setStatusEntries([])
+    setDiffLoading(false)
     // 复赛预填:上次配置的选手若仍可参与则沿用。
     const last = loadLastLauncherConfig()
     if (last && last.agents.length > 0) {
@@ -382,7 +391,7 @@ export function PkLauncherDialog() {
                 <div className="mb-1 text-xs font-medium text-muted-foreground">
                   {t("realEngineering")}
                 </div>
-                <div className="mb-2">
+                <div className="mb-2 flex flex-wrap gap-1.5">
                   <button
                     type="button"
                     onClick={async () => {
@@ -390,6 +399,7 @@ export function PkLauncherDialog() {
                         setCommitPickerOpen(false)
                         return
                       }
+                      setDiffPickerOpen(false)
                       setCommitSkip(0)
                       setCommitsExhausted(false)
                       setCommitsLoading(true)
@@ -404,9 +414,42 @@ export function PkLauncherDialog() {
                         setCommitsLoading(false)
                       }
                     }}
-                    className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors",
+                      commitPickerOpen
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
                   >
                     {t("fromCommit")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (diffPickerOpen) {
+                        setDiffPickerOpen(false)
+                        return
+                      }
+                      setCommitPickerOpen(false)
+                      setDiffLoading(true)
+                      setDiffPickerOpen(true)
+                      try {
+                        const entries = await gitStatus(workingDir)
+                        setStatusEntries(entries)
+                      } catch {
+                        setStatusEntries([])
+                      } finally {
+                        setDiffLoading(false)
+                      }
+                    }}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors",
+                      diffPickerOpen
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                    )}
+                  >
+                    {t("fromDiff")}
                   </button>
                 </div>
                 {commitPickerOpen ? (
@@ -485,6 +528,59 @@ export function PkLauncherDialog() {
                             {commitsLoading ? "…" : t("loadMore")}
                           </button>
                         ) : null}
+                      </>
+                    )}
+                  </div>
+                ) : null}
+                {diffPickerOpen ? (
+                  <div className="mb-2 max-h-48 overflow-auto rounded-lg border border-border bg-background">
+                    {diffLoading ? (
+                      <div className="px-3 py-2 text-xs text-muted-foreground">
+                        {t("loadingDiff")}
+                      </div>
+                    ) : statusEntries.length === 0 ? (
+                      <div className="px-3 py-2 text-xs text-muted-foreground">
+                        {t("noChanges")}
+                      </div>
+                    ) : (
+                      <>
+                        {statusEntries.map((entry) => (
+                          <button
+                            key={entry.file}
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const diff = await gitDiff(
+                                  workingDir,
+                                  entry.file
+                                )
+                                const preview =
+                                  diff.length > 200
+                                    ? `${diff.slice(0, 200)}…`
+                                    : diff
+                                setTask(
+                                  `基于工作区对 \`${entry.file}\` 的改动完成该任务:\n\n\`\`\`diff\n${preview}\n\`\`\``
+                                )
+                              } catch {
+                                setTask(
+                                  `基于工作区对 \`${entry.file}\` 的改动完成任务`
+                                )
+                              }
+                              setDiffPickerOpen(false)
+                            }}
+                            className="block w-full px-3 py-2 text-left hover:bg-muted"
+                            title={entry.file}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-xs text-muted-foreground">
+                                {entry.status}
+                              </span>
+                              <span className="truncate text-xs text-foreground">
+                                {entry.file}
+                              </span>
+                            </div>
+                          </button>
+                        ))}
                       </>
                     )}
                   </div>

@@ -5032,7 +5032,10 @@
       "judgeDimensionsHint": "Eine Dimension pro Zeile. Leer lassen für Standardwerte.",
       "addContestant": "{agent} als Teilnehmer hinzufügen",
       "slotLabelPlaceholder": "Label (z.B. Sonnet, Opus)",
-      "removeSlot": "Diesen Teilnehmer-Slot entfernen"
+      "removeSlot": "Diesen Teilnehmer-Slot entfernen",
+      "fromDiff": "📝 Aus Arbeitsänderungen",
+      "loadingDiff": "Änderungen laden…",
+      "noChanges": "Keine uncommitteten Änderungen."
     },
     "scoreboard": {
       "status": {

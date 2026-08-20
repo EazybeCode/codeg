@@ -5032,7 +5032,10 @@
       "judgeDimensionsHint": "한 줄에 하나씩. 비워두면 기본값 사용.",
       "addContestant": "{agent}을(를) 참가자로 추가",
       "slotLabelPlaceholder": "라벨(예: Sonnet, Opus)",
-      "removeSlot": "이 참가자 슬롯 제거"
+      "removeSlot": "이 참가자 슬롯 제거",
+      "fromDiff": "📝 작업 변경사항에서",
+      "loadingDiff": "변경사항 로딩 중…",
+      "noChanges": "커밋되지 않은 변경사항이 없습니다."
     },
     "scoreboard": {
       "status": {

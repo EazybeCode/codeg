@@ -5032,7 +5032,10 @@
       "judgeDimensionsHint": "1 行 1 dimension。空欄でデフォルト使用。",
       "addContestant": "{agent} を選手として追加",
       "slotLabelPlaceholder": "ラベル(例: Sonnet、Opus)",
-      "removeSlot": "この選手スロットを削除"
+      "removeSlot": "この選手スロットを削除",
+      "fromDiff": "📝 作業中の変更から",
+      "loadingDiff": "変更を読み込み中…",
+      "noChanges": "未コミットの変更はありません。"
     },
     "scoreboard": {
       "status": {

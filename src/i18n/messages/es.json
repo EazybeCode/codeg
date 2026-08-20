@@ -5032,7 +5032,10 @@
       "judgeDimensionsHint": "Una dimensión por línea. Déjalo vacío para usar los valores predeterminados.",
       "addContestant": "Añadir {agent} como concursante",
       "slotLabelPlaceholder": "Etiqueta (p. ej. Sonnet, Opus)",
-      "removeSlot": "Quitar este puesto de concursante"
+      "removeSlot": "Quitar este puesto de concursante",
+      "fromDiff": "📝 De cambios locales",
+      "loadingDiff": "Cargando cambios…",
+      "noChanges": "No hay cambios sin confirmar."
     },
     "scoreboard": {
       "status": {
