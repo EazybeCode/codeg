@@ -39,6 +39,7 @@ import {
 } from "lucide-react"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { usePkArenaStore } from "@/stores/pk-arena-store"
 import { useTabActions, useTabStore } from "@/contexts/tab-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useTerminalContext } from "@/contexts/terminal-context"
@@ -108,6 +109,7 @@ import {
   reuseSet,
   selectChatConversationsWithReuse,
   selectPinnedWithReuse,
+  selectPkConversationsWithReuse,
   selectRecentConversationsWithReuse,
   worktreeChildrenByParent,
   worktreeHeaderAlias,
@@ -856,6 +858,7 @@ export function SidebarConversationList({
   const [sectionCollapsed, setSectionCollapsed] =
     useState<SidebarSectionCollapsed>({})
   const pinnedExpanded = !sectionCollapsed.pinned
+  const pkExpanded = !sectionCollapsed.pk
   const foldersExpanded = !sectionCollapsed.folders
   const chatsExpanded = !sectionCollapsed.chats
   const recentExpanded = !sectionCollapsed.recent
@@ -1076,6 +1079,39 @@ export function SidebarConversationList({
     return next
   }, [conversations, showCompleted])
 
+  // PK-arena conversations grouped by round (hottest round first). Each round
+  // renders as a collapsible sub-group under the "PK" section header. The round
+  // task labels come from the PK arena store; a round not yet hydrated shows a
+  // generic "Round #N" fallback.
+  const pkConvsRef = useRef<Map<number, DbConversationSummary[]>>(new Map())
+  const pkConversations = useMemo(() => {
+    const next = selectPkConversationsWithReuse(
+      conversations,
+      pkConvsRef.current
+    )
+    pkConvsRef.current = next
+    return next
+  }, [conversations])
+  const pkRounds = usePkArenaStore((s) => s.rounds)
+  const [pkRoundCollapsed, setPkRoundCollapsed] = useState<Set<number>>(
+    new Set()
+  )
+  const pkRoundTasks = useMemo(() => {
+    const map = new Map<number, string>()
+    for (const r of pkRounds) {
+      map.set(Number(r.id), r.task)
+    }
+    return map
+  }, [pkRounds])
+  const togglePkRound = useCallback((roundId: number) => {
+    setPkRoundCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(roundId)) next.delete(roundId)
+      else next.add(roundId)
+      return next
+    })
+  }, [])
+
   // Pinned bucket: the FULL conversation list (ignores "Show completed" — a
   // pinned conversation stays visible regardless), sorted most-recently-pinned
   // first, with reference reuse so an unrelated status event doesn't rebuild it.
@@ -1259,6 +1295,10 @@ export function SidebarConversationList({
       buildRows({
         pinned,
         pinnedExpanded,
+        pkConversations,
+        pkExpanded,
+        pkRoundTasks,
+        pkRoundCollapsed,
         // Top-level (reorderable) folders drive the outer order; buildRows nests
         // each container's root sub-group + worktrees via `containerChildren`.
         orderedFolderIds: reorderableFolderIds,
@@ -1282,6 +1322,10 @@ export function SidebarConversationList({
     [
       pinned,
       pinnedExpanded,
+      pkConversations,
+      pkExpanded,
+      pkRoundTasks,
+      pkRoundCollapsed,
       reorderableFolderIds,
       byFolder,
       folderExpanded,
@@ -2359,6 +2403,38 @@ export function SidebarConversationList({
         </div>
       )
     }
+    if (row.kind === "pk-empty") {
+      return (
+        <div className="px-[0.5rem] py-[0.375rem] text-[0.75rem] text-muted-foreground/70">
+          {t("noPk")}
+        </div>
+      )
+    }
+    if (row.kind === "pk-round") {
+      const collapsed = pkRoundCollapsed.has(row.roundId)
+      return (
+        <button
+          type="button"
+          onClick={() => togglePkRound(row.roundId)}
+          aria-expanded={!collapsed}
+          className="group flex h-[1.75rem] w-full items-center gap-1 rounded-md px-[0.5rem] text-left hover:bg-sidebar-accent"
+        >
+          <ChevronRight
+            className={cn(
+              "h-3 w-3 shrink-0 text-muted-foreground transition-transform",
+              !collapsed && "rotate-90"
+            )}
+          />
+          <span className="size-1.5 shrink-0 rounded-full bg-amber-400" />
+          <span className="truncate text-[0.75rem] font-medium text-sidebar-foreground/80">
+            {row.task}
+          </span>
+          <span className="ml-auto shrink-0 text-[0.6875rem] text-muted-foreground/70">
+            {row.count}
+          </span>
+        </button>
+      )
+    }
     if (row.kind === "recent-more") {
       // Footer of the paged Recent section — a row, not a hint: each click
       // reveals another page. Its geometry is the conversation card's, so the
@@ -2464,6 +2540,8 @@ export function SidebarConversationList({
     if (row.kind === "folders-empty") return "folders-empty"
     if (row.kind === "recent-empty") return "recent-empty"
     if (row.kind === "recent-more") return "recent-more"
+    if (row.kind === "pk-empty") return "pk-empty"
+    if (row.kind === "pk-round") return `pk-round-${row.roundId}`
     const prefix = row.recent ? "recent-" : ""
     if (row.kind === "subsession-loading") {
       return `${prefix}subloading-${row.parentId}`
