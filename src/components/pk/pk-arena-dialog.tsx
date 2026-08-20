@@ -192,7 +192,7 @@ export function PkArenaDialog() {
   const roundLive = round != null && round.status === "running"
 
   const handleOpenChange = (next: boolean) => {
-    if (!next && round && getArenaCloseAction(round.status) === "minimize") {
+    if (!next && round && getArenaCloseAction() === "minimize") {
       setPillDismissed(false)
     }
     setArenaOpen(next)
@@ -259,7 +259,7 @@ export function PkArenaDialog() {
               >
                 {t("newRound")}
               </button>
-              {roundLive ? (
+              {getArenaCloseAction() === "minimize" ? (
                 <button
                   type="button"
                   onClick={() => {

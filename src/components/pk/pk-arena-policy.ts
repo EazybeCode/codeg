@@ -1,10 +1,25 @@
-import type { PkRoundStatus } from "@/stores/pk-arena-store"
+import type { PkRound } from "@/stores/pk-arena-store"
 
-export type PkArenaCloseAction = "minimize" | "close"
+export type PkArenaCloseAction = "minimize"
 
-/** Closing the arena is navigation, not a destructive round action. */
-export function getArenaCloseAction(status: PkRoundStatus): PkArenaCloseAction {
-  return status === "ready" || status === "running" ? "minimize" : "close"
+/** Closing the arena is always navigation, independent of round lifecycle. */
+export function getArenaCloseAction(): PkArenaCloseAction {
+  return "minimize"
+}
+
+/** Pick the round represented by the minimized entry without hiding history. */
+export function getArenaPillRound(
+  rounds: readonly PkRound[],
+  activeRoundId: string | null
+): PkRound | null {
+  return (
+    rounds.find((round) => round.id === activeRoundId) ??
+    rounds.find(
+      (round) => round.status === "ready" || round.status === "running"
+    ) ??
+    rounds[0] ??
+    null
+  )
 }
 
 export type PkEffortControl =

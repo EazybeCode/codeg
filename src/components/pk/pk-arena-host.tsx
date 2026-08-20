@@ -11,6 +11,7 @@ import {
   type PkRound,
 } from "@/stores/pk-arena-store"
 import { pkRoundList, updateConversationStatus } from "@/lib/api"
+import { getPkConversationStatusRepairs } from "@/lib/pk-conversation-reconciliation"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 
 /**
@@ -37,37 +38,26 @@ export function PkArenaHost() {
   const conversationsLoading = useAppWorkspaceStore(
     (s) => s.conversationsLoading
   )
-  const reconciledJudgeIdsRef = useRef(new Set<number>())
+  const reconciledConversationIdsRef = useRef(new Set<number>())
 
-  // Repair legacy judge rows created before judge completion explicitly
-  // settled its conversation. The round verdict is authoritative: a finished
-  // verdict cannot have a live spinner, and an errored verdict cannot remain
-  // in progress. The normal conversation event updates the sidebar in place.
+  // Repair persisted PK conversation rows whose lifecycle no longer agrees
+  // with the authoritative round. This covers both legacy judge rows and
+  // contestant rows left live by an older cancellation path. The normal
+  // conversation event updates the sidebar in place.
   useEffect(() => {
-    for (const round of rounds) {
-      const target =
-        round.judgeStatus === "done"
-          ? "completed"
-          : round.judgeStatus === "error"
-            ? "cancelled"
-            : null
-      if (!target) continue
-      const judge = conversations.find(
-        (conversation) =>
-          conversation.pk_round_id === Number(round.id) &&
-          conversation.title?.startsWith("PK Judge ·")
-      )
-      if (
-        !judge ||
-        judge.status === target ||
-        reconciledJudgeIdsRef.current.has(judge.id)
-      ) {
+    for (const repair of getPkConversationStatusRepairs(
+      rounds,
+      conversations
+    )) {
+      if (reconciledConversationIdsRef.current.has(repair.conversationId)) {
         continue
       }
-      reconciledJudgeIdsRef.current.add(judge.id)
-      void updateConversationStatus(judge.id, target).catch(() => {
-        reconciledJudgeIdsRef.current.delete(judge.id)
-      })
+      reconciledConversationIdsRef.current.add(repair.conversationId)
+      void updateConversationStatus(repair.conversationId, repair.status).catch(
+        () => {
+          reconciledConversationIdsRef.current.delete(repair.conversationId)
+        }
+      )
     }
   }, [conversations, rounds])
 

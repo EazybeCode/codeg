@@ -1212,6 +1212,12 @@ export function usePkRound(): {
           }
           void disconnect(contestant.contextKey).catch(() => undefined)
         }
+        if (contestant.conversationId != null) {
+          await updateConversationStatus(
+            contestant.conversationId,
+            "cancelled"
+          ).catch(() => undefined)
+        }
         updateContestant(round.id, contestant.slot, {
           status: "canceled",
           endedAt: Date.now(),

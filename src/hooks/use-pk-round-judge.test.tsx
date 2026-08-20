@@ -35,7 +35,7 @@ vi.mock("@/lib/api", () => ({
   pkRoundCreate: vi.fn(),
   pkRoundDelete: vi.fn(),
   pkRoundUpdateJudge: vi.fn().mockResolvedValue(undefined),
-  pkRoundUpdateStatus: vi.fn(),
+  pkRoundUpdateStatus: vi.fn().mockResolvedValue(undefined),
   updateConversationStatus: mocks.updateConversationStatus,
 }))
 
@@ -124,5 +124,39 @@ describe("PK judge conversation lifecycle", () => {
       81,
       "cancelled"
     )
+  })
+
+  it("settles every live contestant conversation when a round is canceled", async () => {
+    const round = {
+      id: "4",
+      task: "cancel task",
+      folderId: 1,
+      workingDir: "/repo",
+      status: "ready",
+      judgeAgent: null,
+      judgeStatus: "idle",
+      judgeDimensions: null,
+      contestants: [
+        {
+          slot: 0,
+          agentType: "qoder",
+          status: "ready",
+          conversationId: 89,
+        },
+        {
+          slot: 1,
+          agentType: "codex",
+          status: "connecting",
+          conversationId: 90,
+        },
+      ],
+    } as PkRound
+    usePkArenaStore.setState({ rounds: [round] })
+    const { result } = renderHook(() => usePkRound())
+
+    await act(async () => result.current.cancelRound(round))
+
+    expect(mocks.updateConversationStatus).toHaveBeenCalledWith(89, "cancelled")
+    expect(mocks.updateConversationStatus).toHaveBeenCalledWith(90, "cancelled")
   })
 })

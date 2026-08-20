@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { useTranslations } from "next-intl"
 import { Swords, X } from "lucide-react"
+import { getArenaPillRound } from "@/components/pk/pk-arena-policy"
 import { cn } from "@/lib/utils"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
 
@@ -15,33 +16,33 @@ import { usePkArenaStore } from "@/stores/pk-arena-store"
 export function PkMinimizedPill() {
   const t = useTranslations("PkArena.minimized")
   const rounds = usePkArenaStore((s) => s.rounds)
+  const activeRoundId = usePkArenaStore((s) => s.activeRoundId)
   const arenaOpen = usePkArenaStore((s) => s.arenaOpen)
   const pillDismissed = usePkArenaStore((s) => s.pillDismissed)
   const setArenaOpen = usePkArenaStore((s) => s.setArenaOpen)
   const setPillDismissed = usePkArenaStore((s) => s.setPillDismissed)
 
-  const liveRound = rounds.find(
-    (r) => r.status === "ready" || r.status === "running"
-  )
+  const round = getArenaPillRound(rounds, activeRoundId)
+  const roundLive = round?.status === "ready" || round?.status === "running"
+  const tStatus = useTranslations("PkArena.arena.roundStatus")
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    if (!liveRound || arenaOpen) return
+    if (!round || !roundLive || arenaOpen) return
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [liveRound, arenaOpen])
+  }, [round, roundLive, arenaOpen])
 
-  const visible = liveRound != null && !arenaOpen && !pillDismissed
-  if (!visible || !liveRound) {
-    // 兜底:何时该显示但被 dismiss 挡住时,新回合会复位——见创建处。
+  const visible = round != null && !arenaOpen && !pillDismissed
+  if (!visible || !round) {
     return null
   }
 
-  const done = liveRound.contestants.filter(
+  const done = round.contestants.filter(
     (c) =>
       c.status === "done" || c.status === "error" || c.status === "canceled"
   ).length
-  const total = liveRound.contestants.length
-  const elapsed = Math.round((now - liveRound.createdAt) / 1000)
+  const total = round.contestants.length
+  const elapsed = Math.round((now - round.createdAt) / 1000)
 
   return (
     <div
@@ -62,12 +63,17 @@ export function PkMinimizedPill() {
           {done}/{total}
         </span>
         <span className="hidden text-xs text-muted-foreground sm:inline">
-          {t("live")} {elapsed > 0 ? `· ${elapsed}s` : ""}
+          {tStatus(round.status)}
+          {roundLive && elapsed > 0 ? ` · ${elapsed}s` : ""}
         </span>
         <span
           className={cn(
-            "size-2 rounded-full bg-emerald-500",
-            liveRound.status === "running" && "animate-pulse"
+            "size-2 rounded-full",
+            round.status === "ready" && "bg-amber-500",
+            round.status === "running" && "animate-pulse bg-emerald-500",
+            round.status === "finished" && "bg-emerald-500",
+            round.status === "canceled" && "bg-muted-foreground/60",
+            round.status === "interrupted" && "bg-orange-500"
           )}
           aria-hidden
         />
