@@ -5026,7 +5026,10 @@
       "noCommits": "لم يتم العثور على التزامات.",
       "creativeTemplates": "قوالب إبداعية",
       "realEngineering": "هندسة حقيقية",
-      "loadMore": "تحميل المزيد"
+      "loadMore": "تحميل المزيد",
+      "judgeDimensionsLabel": "أبعاد التقييم (اختياري)",
+      "judgeDimensionsPlaceholder": "Correctness — does it fulfill the task?\nCode quality — readability, structure, edge cases\nCompleteness — how much of the task is done?\nEfficiency — code-level efficiency (ignore token/time)",
+      "judgeDimensionsHint": "بُعد واحد لكل سطر. اتركه فارغًا لاستخدام الافتراضي."
     },
     "scoreboard": {
       "status": {

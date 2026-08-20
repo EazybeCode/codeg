@@ -52,6 +52,11 @@ pub struct PkRoundConfig {
     /// separate column) because it is round-level input, set at creation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judge_agent: Option<String>,
+    /// Optional custom judge evaluation dimensions. Each entry is a free-form
+    /// line that replaces the default 4 (Correctness / Code quality /
+    /// Completeness / Efficiency). Empty or absent = use the defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub judge_dimensions: Vec<String>,
 }
 
 fn default_permission_mode() -> String {

@@ -18,6 +18,7 @@ fn to_info(m: pk_round::Model) -> PkRoundInfo {
         bare_mode: false,
         effort: "default".into(),
         judge_agent: None,
+        judge_dimensions: Vec::new(),
     });
     let status = serde_json::to_value(m.status)
         .ok()

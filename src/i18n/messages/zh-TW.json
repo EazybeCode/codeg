@@ -5026,7 +5026,10 @@
       "noCommits": "未找到提交。",
       "creativeTemplates": "創意 PK",
       "realEngineering": "真實工程 PK",
-      "loadMore": "加載更多"
+      "loadMore": "加載更多",
+      "judgeDimensionsLabel": "評分維度（可選）",
+      "judgeDimensionsPlaceholder": "正確性 — 是否完成任務?\n程式碼品質 — 可可讀性、結構、邊界處理\n完整度 — 完成了多少?\n效率 — 程式碼層面效率（忽略 token 數和耗時）",
+      "judgeDimensionsHint": "每行一個維度。留空使用預設。每個維度會成為裁判提示詞中的編號評分標準。"
     },
     "scoreboard": {
       "status": {

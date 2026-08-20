@@ -65,6 +65,7 @@ export function PkLauncherDialog() {
   const [bareMode, setBareMode] = useState(false)
   const [effort, setEffort] = useState<PkEffortLevel>("default")
   const [judgeAgent, setJudgeAgent] = useState<string | null>(null)
+  const [judgeDimensions, setJudgeDimensions] = useState<string>("")
   const [startError, setStartError] = useState<string | null>(null)
   const [commitPickerOpen, setCommitPickerOpen] = useState(false)
   const [commits, setCommits] = useState<GitLogEntry[]>([])
@@ -94,6 +95,7 @@ export function PkLauncherDialog() {
     setBareMode(false)
     setEffort("default")
     setJudgeAgent(null)
+    setJudgeDimensions("")
     setStartError(null)
     // 复赛预填:上次配置的选手若仍可参与则沿用。
     const last = loadLastLauncherConfig()
@@ -106,6 +108,7 @@ export function PkLauncherDialog() {
       setBareMode(last.bareMode)
       setEffort(last.effort)
       setJudgeAgent(last.judgeAgent ?? null)
+      setJudgeDimensions(last.judgeDimensions?.join("\n") ?? "")
     }
     // The active tab decides where the arena runs. Draft tabs may lack a
     // workingDir; fall back to the folder's own path.
@@ -194,6 +197,10 @@ export function PkLauncherDialog() {
       }
     }
     setStartError(null)
+    const parsedDimensions = judgeDimensions
+      .split("\n")
+      .map((d) => d.trim())
+      .filter(Boolean)
     saveLastLauncherConfig({
       agents: selected.map((agentType) => ({ agentType })),
       permissionMode,
@@ -201,6 +208,7 @@ export function PkLauncherDialog() {
       effort,
       task: task.trim(),
       judgeAgent,
+      judgeDimensions: parsedDimensions.length > 0 ? parsedDimensions : null,
     })
     void createRound({
       task: task.trim(),
@@ -211,6 +219,7 @@ export function PkLauncherDialog() {
       bareMode,
       effort,
       judgeAgent,
+      judgeDimensions: parsedDimensions.length > 0 ? parsedDimensions : null,
     })
     setLauncherOpen(false)
     setArenaOpen(true)
@@ -560,6 +569,23 @@ export function PkLauncherDialog() {
             <div className="mt-1.5 text-xs text-muted-foreground">
               {t("judgeHint")}
             </div>
+            {judgeAgent != null && (
+              <div className="mt-2.5">
+                <div className="mb-1.5 text-xs font-medium text-foreground">
+                  {t("judgeDimensionsLabel")}
+                </div>
+                <textarea
+                  value={judgeDimensions}
+                  onChange={(e) => setJudgeDimensions(e.target.value)}
+                  placeholder={t("judgeDimensionsPlaceholder")}
+                  rows={3}
+                  className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                <div className="mt-1 text-xs text-muted-foreground">
+                  {t("judgeDimensionsHint")}
+                </div>
+              </div>
+            )}
           </div>
         </div>
         {startError != null ? (

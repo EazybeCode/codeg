@@ -5026,7 +5026,10 @@
       "noCommits": "커밋이 없습니다.",
       "creativeTemplates": "크리에이티브 템플릿",
       "realEngineering": "실제 엔지니어링",
-      "loadMore": "더 로드"
+      "loadMore": "더 로드",
+      "judgeDimensionsLabel": "평가 차원 (선택)",
+      "judgeDimensionsPlaceholder": "정확성 — 작업을 충족하는가?\n코드 품질 — 가독성, 구조, 엣지 케이스\n완성도 — 얼마나 완료했는가?\n효율성 — 코드 수준 효율 (token/시간 제외)",
+      "judgeDimensionsHint": "한 줄에 하나씩. 비워두면 기본값 사용."
     },
     "scoreboard": {
       "status": {

@@ -5026,7 +5026,10 @@
       "noCommits": "コミットが見つかりません。",
       "creativeTemplates": "クリエイティブテンプレート",
       "realEngineering": "リアルエンジニアリング",
-      "loadMore": "もっと読み込む"
+      "loadMore": "もっと読み込む",
+      "judgeDimensionsLabel": "評価 dimension（任意）",
+      "judgeDimensionsPlaceholder": "正確性 — タスクを満たすか?\nコード品質 — 可読性・構造・エッジケース\n完成度 — どの程度完了したか?\n効率 — コード効率（token/時間は除外）",
+      "judgeDimensionsHint": "1 行 1 dimension。空欄でデフォルト使用。"
     },
     "scoreboard": {
       "status": {

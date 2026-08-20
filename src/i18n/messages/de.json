@@ -5026,7 +5026,10 @@
       "noCommits": "Keine Commits gefunden.",
       "creativeTemplates": "Kreative Vorlagen",
       "realEngineering": "Echte Entwicklung",
-      "loadMore": "Mehr laden"
+      "loadMore": "Mehr laden",
+      "judgeDimensionsLabel": "Bewertungsdimensionen (optional)",
+      "judgeDimensionsPlaceholder": "Correctness — erfüllt es die Aufgabe?\nCode quality — Lesbarkeit, Struktur, Randfälle\nCompleteness — wie viel ist erledigt?\nEfficiency — Code-Effizienz (ohne Token/Zeit)",
+      "judgeDimensionsHint": "Eine Dimension pro Zeile. Leer lassen für Standardwerte."
     },
     "scoreboard": {
       "status": {

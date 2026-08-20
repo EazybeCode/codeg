@@ -688,6 +688,10 @@ export interface PkRoundConfig {
   effort: string
   /** Optional judge agent type — reads all diffs and produces a verdict. */
   judge_agent?: string
+  /** Optional custom judge evaluation dimensions. Each entry is a free-form
+   *  line replacing the default 4 (Correctness / Code quality / Completeness /
+   *  Efficiency). Empty or absent = use the defaults. */
+  judge_dimensions?: string[]
 }
 
 /** Mirrors Rust `PkRoundInfo` (src-tauri/src/models/pk_round.rs). */

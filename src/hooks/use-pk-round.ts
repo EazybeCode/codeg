@@ -58,14 +58,27 @@ const BARE_MODE_RULES = [
 /** 裁判提示词——在所有选手完成后发送给裁判 agent。要求结构化 JSON 输出
  * (每个选手:分数、排名、点评;以及总体总结)。裁判不需要 worktree,
  * 只读取各选手的 diff 文本。 */
+/** Default judge evaluation dimensions, used when the round has no custom
+ * `judge_dimensions` configured. */
+const DEFAULT_JUDGE_DIMENSIONS = [
+  "Correctness — does it fulfill the task?",
+  "Code quality — readability, structure, edge cases",
+  "Completeness — how much of the task is done?",
+  "Efficiency — token count and time are NOT factors here; judge code-level efficiency only",
+]
+
 function buildJudgePrompt(
   task: string,
-  contestants: Array<{ agentType: string; diff: string }>
+  contestants: Array<{ agentType: string; diff: string }>,
+  dimensions?: string[] | null
 ): PromptInputBlock[] {
   const sections = contestants.map(
     (c) =>
       `--- Contestant: ${c.agentType} ---\n${c.diff}\n--- End ${c.agentType} ---`
   )
+  const dims =
+    dimensions && dimensions.length > 0 ? dimensions : DEFAULT_JUDGE_DIMENSIONS
+  const numbered = dims.map((d, i) => `${i + 1}. ${d}`).join("\n")
   const text = [
     `You are the JUDGE of a coding PK arena.`,
     "",
@@ -73,10 +86,7 @@ function buildJudgePrompt(
     `"${task}"`,
     "",
     `Below are the git diffs from each contestant. Evaluate each one on:`,
-    `1. Correctness — does it fulfill the task?`,
-    `2. Code quality — readability, structure, edge cases`,
-    `3. Completeness — how much of the task is done?`,
-    `4. Efficiency — token count and time are NOT factors here; judge code-level efficiency only`,
+    numbered,
     "",
     "Score each contestant 0-100. Rank them (1 = best).",
     "",
@@ -740,7 +750,11 @@ export function usePkRound(): {
 
         await sendPrompt(
           contextKey,
-          buildJudgePrompt(round.task, contestantsWithDiffs),
+          buildJudgePrompt(
+            round.task,
+            contestantsWithDiffs,
+            round.judgeDimensions
+          ),
           {
             folderId: round.folderId,
             conversationId: conversationId ?? undefined,

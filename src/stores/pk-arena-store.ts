@@ -118,6 +118,9 @@ export interface PkRound {
   effort: PkEffortLevel
   /** Optional judge agent type — reads all diffs and produces a verdict. */
   judgeAgent: string | null
+  /** Custom judge evaluation dimensions (null = use defaults). Live copy of
+   *  PkRoundConfig.judge_dimensions. */
+  judgeDimensions: string[] | null
   /** Judge verdict text (structured LLM output). Live-only — not persisted. */
   judgeResult: PkJudgeResult | null
   /** "idle" → "running" → "done" | "error" | "skipped". Live-only. */
@@ -146,6 +149,7 @@ interface PkArenaActions {
     bareMode?: boolean
     effort?: PkEffortLevel
     judgeAgent?: string | null
+    judgeDimensions?: string[] | null
   }): Promise<PkRound>
   hydrateFromDb(rounds: PkRound[]): void
   updateContestant(
@@ -175,6 +179,7 @@ export interface PkLauncherLastConfig {
   effort: PkEffortLevel
   task: string
   judgeAgent?: string | null
+  judgeDimensions?: string[] | null
 }
 
 export function loadLastLauncherConfig(): PkLauncherLastConfig | null {
@@ -227,6 +232,9 @@ export function dbRoundToStoreRound(
     bareMode: info.config.bare_mode ?? false,
     effort: (info.config.effort as PkEffortLevel) ?? "default",
     judgeAgent: info.config.judge_agent ?? null,
+    judgeDimensions: info.config.judge_dimensions?.length
+      ? info.config.judge_dimensions
+      : null,
     judgeResult:
       info.judge_result != null
         ? {
@@ -288,6 +296,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
     bareMode,
     effort,
     judgeAgent,
+    judgeDimensions,
   }) => {
     const config: PkRoundConfig = {
       agents: agents.map((a) =>
@@ -297,6 +306,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       bare_mode: bareMode ?? false,
       effort: effort ?? "default",
       judge_agent: judgeAgent ?? undefined,
+      judge_dimensions: judgeDimensions?.filter((d) => d.trim()) ?? [],
     }
     const info = await pkRoundCreate(folderId, task, config)
     const round: PkRound = {
@@ -310,6 +320,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       bareMode: bareMode ?? false,
       effort: effort ?? "default",
       judgeAgent: judgeAgent ?? null,
+      judgeDimensions: judgeDimensions?.filter((d) => d.trim()) ?? null,
       judgeResult: null,
       judgeStatus: "idle",
       contestants: agents.map((a, slot) => ({
