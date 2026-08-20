@@ -437,7 +437,7 @@ i18n 只翻译了模板**标签**（zh-CN.json:5013-5018 "鹈鹕骑车"/"弹球"
 | P0 | #1 取消不触发裁判 | ✅ | cancelRound 末尾调 runJudge |
 | P1 | #2 报告不含裁判评分 | ✅ | 报告加颁奖台板块 |
 | P1 | #3 截图不含裁判评分 | ✅ | 截图范围含 PkJudgePanel |
-| P1 | #12 server 模式无法打开文件夹 | | 待修 |
+| P1 | #12 server 模式无法打开文件夹 | ✅ | 设计正确,加守卫隐藏 |
 | P1 | #13 arena 对话框无法关闭 | ✅ | showCloseButton=true |
 | P1 | #14b PK 标题被 agent 覆盖 | ✅ | title_locked=true |
 | P1 | #15 battle/diff 列不自适应宽度 | ✅ | flex-1 min-w-80 |
