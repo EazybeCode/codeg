@@ -1,7 +1,6 @@
 "use client"
 
 import { useEffect, useRef } from "react"
-import { PkArenaDialog } from "@/components/pk/pk-arena-dialog"
 import { PkLauncherDialog } from "@/components/pk/pk-launcher-dialog"
 import { PkMinimizedPill } from "@/components/pk/pk-minimized-pill"
 import { usePkRound, fetchUsage } from "@/hooks/use-pk-round"
@@ -15,7 +14,7 @@ import { getPkConversationStatusRepairs } from "@/lib/pk-conversation-reconcilia
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 
 /**
- * Arena mount point — renders the launcher and arena dialogs and drives the
+ * Arena mount point — renders global launch/minimized controls and drives the
  * orchestrator for rounds created by the launcher. Must live inside
  * `AcpConnectionsProvider` (the workspace layout provides it): the
  * orchestrator calls `connect`/`sendPrompt` and subscribes to `acp://event`.
@@ -138,7 +137,6 @@ export function PkArenaHost() {
   return (
     <>
       <PkLauncherDialog />
-      <PkArenaDialog />
       <PkMinimizedPill />
     </>
   )

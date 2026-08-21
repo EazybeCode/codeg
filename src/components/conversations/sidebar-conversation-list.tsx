@@ -42,6 +42,7 @@ import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
 import { useTabActions, useTabStore } from "@/contexts/tab-context"
+import { isConversationWorkspaceTab } from "@/lib/workspace-tab"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useTerminalContext } from "@/contexts/terminal-context"
 import { useThemeColor, useZoomLevel } from "@/hooks/use-appearance"
@@ -780,6 +781,8 @@ export function SidebarConversationList({
   const tabs = useTabStore((s) => s.tabs)
   const {
     openTab,
+    openPkRoundTab,
+    closePkRoundTab,
     closeConversationTab,
     closeTabsByFolder,
     openNewConversationTab,
@@ -820,7 +823,9 @@ export function SidebarConversationList({
   const selectedConversation = useMemo(() => {
     const activeTab = tabs.find((tab) => tab.id === activeTabId)
     const next =
-      !activeTab || activeTab.conversationId == null
+      !activeTab ||
+      !isConversationWorkspaceTab(activeTab) ||
+      activeTab.conversationId == null
         ? null
         : { id: activeTab.conversationId, agentType: activeTab.agentType }
     const reused = reuseSelected(selectedConvRef.current, next)
@@ -832,7 +837,7 @@ export function SidebarConversationList({
   const openTabKeys = useMemo(() => {
     const next = new Set<string>()
     for (const tab of tabs) {
-      if (tab.conversationId != null) {
+      if (isConversationWorkspaceTab(tab) && tab.conversationId != null) {
         next.add(`${tab.agentType}:${tab.conversationId}`)
       }
     }
@@ -1112,11 +1117,16 @@ export function SidebarConversationList({
       return next
     })
   }, [])
-  const openPkRound = useCallback((roundId: number) => {
-    const store = usePkArenaStore.getState()
-    store.setActiveRound(String(roundId))
-    store.setArenaOpen(true)
-  }, [])
+  const openPkRound = useCallback(
+    (roundId: number) => {
+      const store = usePkArenaStore.getState()
+      const round = store.rounds.find((item) => Number(item.id) === roundId)
+      if (!round) return
+      store.setActiveRound(round.id)
+      openPkRoundTab(round.id, round.folderId, round.task)
+    },
+    [openPkRoundTab]
+  )
   const archivePkRound = useCallback(
     async (roundId: number) => {
       const round = usePkArenaStore
@@ -1130,6 +1140,7 @@ export function SidebarConversationList({
       }
       try {
         await usePkArenaStore.getState().archiveRound(String(roundId))
+        closePkRoundTab(String(roundId))
         for (const conversation of pkConversations.get(roundId) ?? []) {
           closeConversationTab(
             conversation.folder_id,
@@ -1143,7 +1154,13 @@ export function SidebarConversationList({
         toast.error(t("pkArchiveFailed", { message: String(error) }))
       }
     },
-    [closeConversationTab, pkConversations, refreshConversations, t]
+    [
+      closeConversationTab,
+      closePkRoundTab,
+      pkConversations,
+      refreshConversations,
+      t,
+    ]
   )
 
   // Pinned bucket: the FULL conversation list (ignores "Show completed" — a

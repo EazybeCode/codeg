@@ -153,7 +153,6 @@ interface PkArenaState {
   rounds: PkRound[]
   activeRoundId: string | null
   launcherOpen: boolean
-  arenaOpen: boolean
   /** The pill was manually dismissed — reset on new round / reopen. */
   pillDismissed: boolean
   /** True while the store is loading rounds from the DB on startup. */
@@ -187,7 +186,6 @@ interface PkArenaActions {
   archiveRound(roundId: string): Promise<void>
   setActiveRound(roundId: string | null): void
   setLauncherOpen(open: boolean): void
-  setArenaOpen(open: boolean): void
   setPillDismissed(dismissed: boolean): void
   updateJudge(
     roundId: string,
@@ -360,7 +358,6 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
   rounds: [],
   activeRoundId: null,
   launcherOpen: false,
-  arenaOpen: false,
   pillDismissed: false,
   hydrating: true,
 
@@ -372,11 +369,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       return {
         rounds: dbRounds,
         hydrating: false,
-        activeRoundId: activeRoundStillExists
-          ? state.activeRoundId
-          : state.arenaOpen
-            ? (dbRounds[0]?.id ?? null)
-            : null,
+        activeRoundId: activeRoundStillExists ? state.activeRoundId : null,
       }
     })
   },
@@ -499,22 +492,6 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
 
   setActiveRound: (roundId) => set({ activeRoundId: roundId }),
   setLauncherOpen: (open) => set({ launcherOpen: open }),
-  setArenaOpen: (open) => {
-    set((state) => {
-      if (!open) return { arenaOpen: false }
-      const activeRoundStillExists = state.rounds.some(
-        (round) => round.id === state.activeRoundId
-      )
-      return {
-        arenaOpen: true,
-        activeRoundId: activeRoundStillExists
-          ? state.activeRoundId
-          : state.rounds.length === 0
-            ? state.activeRoundId
-            : state.rounds[0].id,
-      }
-    })
-  },
   setPillDismissed: (dismissed) => set({ pillDismissed: dismissed }),
 
   updateJudge: (roundId, patch) => {

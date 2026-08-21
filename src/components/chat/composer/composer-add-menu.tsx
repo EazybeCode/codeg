@@ -33,6 +33,7 @@ import { rankByTextMatch } from "@/lib/fuzzy-text-match"
 import { isImeCompositionKey } from "@/lib/ime-composition"
 import { cn } from "@/lib/utils"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
+import { useTabStore } from "@/stores/tab-store"
 import type { AvailableCommandInfo } from "@/lib/types"
 
 import { commandInvocationToken } from "@/components/chat/composer/invocation-reference"
@@ -405,7 +406,14 @@ export function ComposerAddMenu({
             // (the dialog otherwise has no way back after it closes);
             // "新一局" inside the arena opens the launcher.
             if (state.rounds.length > 0 && state.activeRoundId) {
-              state.setArenaOpen(true)
+              const round = state.rounds.find(
+                (item) => item.id === state.activeRoundId
+              )
+              if (round) {
+                useTabStore
+                  .getState()
+                  .openPkRoundTab(round.id, round.folderId, round.task)
+              }
             } else {
               state.setLauncherOpen(true)
             }

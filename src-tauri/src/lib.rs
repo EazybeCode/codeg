@@ -1086,6 +1086,7 @@ mod tauri_app {
                 folders::git_search_authors,
                 folders::git_commit_branches,
                 windows::open_folder_window,
+                windows::open_pk_round_window,
                 windows::open_commit_window,
                 windows::open_settings_window,
                 windows::open_merge_window,

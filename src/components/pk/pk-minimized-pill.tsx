@@ -6,6 +6,7 @@ import { Swords, X } from "lucide-react"
 import { getArenaPillRound } from "@/components/pk/pk-arena-policy"
 import { cn } from "@/lib/utils"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
+import { useTabStore } from "@/stores/tab-store"
 
 /**
  * 竞技场最小化胶囊。大窗关闭后,只要还有进行中(ready/running)的回合,
@@ -17,22 +18,24 @@ export function PkMinimizedPill() {
   const t = useTranslations("PkArena.minimized")
   const rounds = usePkArenaStore((s) => s.rounds)
   const activeRoundId = usePkArenaStore((s) => s.activeRoundId)
-  const arenaOpen = usePkArenaStore((s) => s.arenaOpen)
   const pillDismissed = usePkArenaStore((s) => s.pillDismissed)
-  const setArenaOpen = usePkArenaStore((s) => s.setArenaOpen)
   const setPillDismissed = usePkArenaStore((s) => s.setPillDismissed)
+  const activeTabId = useTabStore((s) => s.activeTabId)
+  const openPkRoundTab = useTabStore((s) => s.openPkRoundTab)
 
   const round = getArenaPillRound(rounds, activeRoundId)
+  const isRoundTabActive =
+    round != null && activeTabId === `pk-round-${round.id}`
   const roundLive = round?.status === "ready" || round?.status === "running"
   const tStatus = useTranslations("PkArena.arena.roundStatus")
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    if (!round || !roundLive || arenaOpen) return
+    if (!round || !roundLive || isRoundTabActive) return
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [round, roundLive, arenaOpen])
+  }, [round, roundLive, isRoundTabActive])
 
-  const visible = round != null && !arenaOpen && !pillDismissed
+  const visible = round != null && !isRoundTabActive && !pillDismissed
   if (!visible || !round) {
     return null
   }
@@ -53,7 +56,7 @@ export function PkMinimizedPill() {
         type="button"
         onClick={() => {
           setPillDismissed(false)
-          setArenaOpen(true)
+          openPkRoundTab(round.id, round.folderId, round.task)
         }}
         className="flex items-center gap-2 text-sm text-foreground hover:opacity-80"
         title={t("restore")}

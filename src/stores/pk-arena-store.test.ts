@@ -37,7 +37,6 @@ function freshStore() {
     rounds: [],
     activeRoundId: null,
     launcherOpen: false,
-    arenaOpen: false,
     pillDismissed: false,
     hydrating: false,
   })
@@ -110,28 +109,17 @@ describe("pk arena store", () => {
     expect(usePkArenaStore.getState().activeRoundId).toBeNull()
   })
 
-  it("selects an available round when the arena opens without an active round", async () => {
-    const round = await makeRound()
-    usePkArenaStore.setState({ activeRoundId: null, arenaOpen: false })
-
-    usePkArenaStore.getState().setArenaOpen(true)
-
-    expect(usePkArenaStore.getState().activeRoundId).toBe(round.id)
-    expect(usePkArenaStore.getState().arenaOpen).toBe(true)
-  })
-
-  it("selects the restored round when history hydrates after the arena opens", async () => {
+  it("does not implicitly select history during hydration", async () => {
     const round = await makeRound()
     usePkArenaStore.setState({
       rounds: [],
       activeRoundId: null,
-      arenaOpen: true,
       hydrating: true,
     })
 
     usePkArenaStore.getState().hydrateFromDb([round])
 
-    expect(usePkArenaStore.getState().activeRoundId).toBe(round.id)
+    expect(usePkArenaStore.getState().activeRoundId).toBeNull()
     expect(usePkArenaStore.getState().hydrating).toBe(false)
   })
 
@@ -141,11 +129,9 @@ describe("pk arena store", () => {
     usePkArenaStore.setState({
       rounds: [],
       activeRoundId: "3",
-      arenaOpen: false,
       hydrating: true,
     })
 
-    usePkArenaStore.getState().setArenaOpen(true)
     usePkArenaStore.getState().hydrateFromDb([newerRound, clickedRound])
 
     expect(usePkArenaStore.getState().activeRoundId).toBe("3")

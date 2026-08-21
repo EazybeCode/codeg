@@ -1,12 +1,5 @@
 import type { PkRound } from "@/stores/pk-arena-store"
 
-export type PkArenaCloseAction = "minimize"
-
-/** Closing the arena is always navigation, independent of round lifecycle. */
-export function getArenaCloseAction(): PkArenaCloseAction {
-  return "minimize"
-}
-
 /** Pick the round represented by the minimized entry without hiding history. */
 export function getArenaPillRound(
   rounds: readonly PkRound[],

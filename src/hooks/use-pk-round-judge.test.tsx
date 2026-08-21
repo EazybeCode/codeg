@@ -75,7 +75,6 @@ describe("PK judge conversation lifecycle", () => {
       rounds: [],
       activeRoundId: null,
       launcherOpen: false,
-      arenaOpen: false,
       pillDismissed: false,
       hydrating: false,
     })

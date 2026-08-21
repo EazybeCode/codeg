@@ -71,10 +71,16 @@ vi.mock("@/stores/tab-store", () => ({
   useTabStore: (selector: (state: unknown) => unknown) =>
     selector({
       activeTabId: "tab-1",
+      openPkRoundTab: vi.fn(),
       tabs: [
         {
           id: "tab-1",
+          kind: "conversation",
           folderId: 7,
+          conversationId: null,
+          agentType: "claude-code",
+          title: "New conversation",
+          isPinned: true,
           workingDir: "/tmp/repo",
         },
       ],
@@ -111,7 +117,6 @@ describe("PkLauncherDialog", () => {
       rounds: [],
       activeRoundId: null,
       launcherOpen: true,
-      arenaOpen: false,
       pillDismissed: false,
       hydrating: false,
     })

@@ -65,8 +65,8 @@ export function PkLauncherDialog() {
   const t = useTranslations("PkArena.launcher")
   const open = usePkArenaStore((s) => s.launcherOpen)
   const setLauncherOpen = usePkArenaStore((s) => s.setLauncherOpen)
-  const setArenaOpen = usePkArenaStore((s) => s.setArenaOpen)
   const createRound = usePkArenaStore((s) => s.createRound)
+  const openPkRoundTab = useTabStore((s) => s.openPkRoundTab)
   const { agents: rawAgents } = useAcpAgents()
   const nextSlotId = useRef(0)
   const activeTab = useTabStore((s) =>
@@ -156,7 +156,7 @@ export function PkLauncherDialog() {
       setWorkingDir(dir)
       checkGitRepo(dir, cancelled)
     }
-    if (activeTab.workingDir) {
+    if (activeTab.kind === "conversation" && activeTab.workingDir) {
       resolve(activeTab.folderId, activeTab.workingDir)
     } else {
       getFolder(activeTab.folderId)
@@ -290,7 +290,7 @@ export function PkLauncherDialog() {
     // Selected a commit → worktree branches from its PARENT, so contestants
     // start before that commit and never see its changes. null = current HEAD.
     const baseCommit = selectedCommit ? `${selectedCommit.hash}^` : null
-    void createRound({
+    const round = await createRound({
       task: task.trim(),
       folderId,
       workingDir,
@@ -303,7 +303,7 @@ export function PkLauncherDialog() {
       baseCommit,
     })
     setLauncherOpen(false)
-    setArenaOpen(true)
+    openPkRoundTab(round.id, round.folderId, round.task)
     // The orchestrator (in PkArenaHost) picks the new round up from the store.
   }
 

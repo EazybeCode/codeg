@@ -2251,6 +2251,25 @@ async function openAppWindow(
   releaseAppWindow(name)
 }
 
+/** Open a PK round in its own workspace window. The target route reuses the
+ * normal workspace shell; `WorkspacePage` turns the query into a local PK tab
+ * once round hydration completes. */
+export async function openPkRoundWindow(
+  roundId: string,
+  title: string
+): Promise<void> {
+  if (isDesktop()) {
+    return getShellTransport().call("open_pk_round_window", {
+      roundId,
+      title,
+      remoteConnectionId: getActiveRemoteConnectionId(),
+    })
+  }
+  return openAppWindow(`pk-round-${roundId}`, async () => ({
+    path: `/workspace?pkRoundId=${encodeURIComponent(roundId)}`,
+  }))
+}
+
 export async function openMergeWindow(
   folderId: number,
   operation: string,

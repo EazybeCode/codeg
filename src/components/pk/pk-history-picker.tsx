@@ -32,7 +32,8 @@ export function PkHistoryPicker({ activeRound }: { activeRound: PkRound }) {
     (s) => s.refreshConversations
   )
   const conversations = useAppWorkspaceStore((s) => s.conversations)
-  const { closeConversationTab } = useTabActions()
+  const { closeConversationTab, closePkRoundTab, openPkRoundTab } =
+    useTabActions()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [archivingId, setArchivingId] = useState<string | null>(null)
@@ -60,6 +61,7 @@ export function PkHistoryPicker({ activeRound }: { activeRound: PkRound }) {
     setArchivingId(round.id)
     try {
       await archiveRound(round.id)
+      closePkRoundTab(round.id)
       for (const conversation of conversations) {
         if (conversation.pk_round_id !== Number(round.id)) continue
         closeConversationTab(
@@ -72,7 +74,6 @@ export function PkHistoryPicker({ activeRound }: { activeRound: PkRound }) {
       const remaining = usePkArenaStore.getState().rounds
       if (round.id === activeRound.id) {
         if (remaining[0]) setActiveRound(remaining[0].id)
-        else usePkArenaStore.getState().setArenaOpen(false)
       }
       toast.success(t("archiveSuccess"))
     } catch (error) {
@@ -143,6 +144,7 @@ export function PkHistoryPicker({ activeRound }: { activeRound: PkRound }) {
                     type="button"
                     onClick={() => {
                       setActiveRound(round.id)
+                      openPkRoundTab(round.id, round.folderId, round.task)
                       setOpen(false)
                     }}
                     className="min-w-0 flex flex-1 items-center gap-2 text-left"
