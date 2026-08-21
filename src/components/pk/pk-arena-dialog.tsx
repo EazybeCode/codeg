@@ -21,15 +21,9 @@ import {
 import { usePkRound } from "@/hooks/use-pk-round"
 import { AgentIcon } from "@/components/agent-icon"
 import { getAgentLabel } from "@/lib/custom-agents"
-import { getFileTree, readWorkspaceFileBase64 } from "@/lib/api"
-import {
-  buildPkReportHtml,
-  pickRunnableHtmlPath,
-  reportableArtifactPaths,
-  type PkReportArtifact,
-} from "@/lib/pk-report"
+import { buildPkReportHtml } from "@/lib/pk-report"
+import { preparePkReportData } from "@/lib/pk-report-data"
 import { savePkReportHtml } from "@/lib/pk-report-export"
-import type { FileTreeNode } from "@/lib/types"
 import type { PkContestant, PkRound } from "@/stores/pk-arena-store"
 import { cn } from "@/lib/utils"
 import { usePkArenaStore } from "@/stores/pk-arena-store"
@@ -135,51 +129,15 @@ export function PkArenaDialog() {
     if (!round || reportExporting) return
     setReportExporting(true)
     try {
-      // 非单文件产物仍使用 Diff；同时抓取文件树来识别可运行 HTML。
-      const pendingDiff = round.contestants.filter(
-        (c) => c.diff == null && c.worktreePath
-      )
-      await Promise.allSettled(pendingDiff.map((c) => fetchDiff(round, c)))
-
       const fresh = usePkArenaStore
         .getState()
         .rounds.find((r) => r.id === round.id)
-      const artifactsBySlot: Record<string, PkReportArtifact[]> = {}
-      for (const contestant of fresh?.contestants ?? []) {
-        // worktreePath is live-only state. Historical rounds can still read
-        // their preserved artifact directory through its deterministic path.
-        const artifactRoot =
-          contestant.worktreePath ??
-          `${round.workingDir}/.codeg-pk/${round.id}/${contestant.slot}`
-        try {
-          const tree = await getFileTree(artifactRoot, 6)
-          const paths = flattenTreeList(tree)
-          const runnableHtmlPath = pickRunnableHtmlPath(paths)
-          const reportablePaths = reportableArtifactPaths(paths)
-          let runnableHtmlBase64: string | undefined
-          if (runnableHtmlPath) {
-            try {
-              runnableHtmlBase64 = await readWorkspaceFileBase64(
-                artifactRoot,
-                runnableHtmlPath,
-                2_000_000
-              )
-            } catch {
-              // A large/unreadable HTML file remains listed in the report and
-              // falls back to Diff instead of failing the entire export.
-            }
-          }
-          artifactsBySlot[contestant.slot] = reportablePaths.map((path) => ({
-            path,
-            ...(path === runnableHtmlPath && runnableHtmlBase64
-              ? { contentBase64: runnableHtmlBase64 }
-              : {}),
-          }))
-        } catch {
-          artifactsBySlot[contestant.slot] = []
-        }
-      }
-      const html = buildPkReportHtml(fresh ?? round, artifactsBySlot, locale)
+      const reportData = await preparePkReportData(fresh ?? round)
+      const html = buildPkReportHtml(
+        reportData.round,
+        reportData.artifactsBySlot,
+        locale
+      )
       const result = await savePkReportHtml(html, round.id)
       if (result === "saved") toast.success(t("reportSaved"))
     } catch (error) {
@@ -245,7 +203,11 @@ export function PkArenaDialog() {
               ) : round.contestants.some((c) => c.worktreePath) ? (
                 <button
                   type="button"
-                  onClick={() => void cleanupRound(round, true)}
+                  onClick={() =>
+                    void cleanupRound(round, true).catch((error) =>
+                      toast.error(t("reportFailed", { message: String(error) }))
+                    )
+                  }
                   className="rounded-md border border-border px-3 py-1 text-xs text-foreground hover:bg-muted"
                   title={t("cleanupHint")}
                 >
@@ -599,17 +561,3 @@ const PkReadyPane = memo(function PkReadyPane({
     </div>
   )
 })
-
-/** 把文件树拍平成相对路径清单(跳过目录,只留文件)。 */
-function flattenTreeList(nodes: FileTreeNode[], prefix = ""): string[] {
-  const files: string[] = []
-  for (const node of nodes) {
-    const rel = prefix ? `${prefix}/${node.name}` : node.name
-    if (node.kind === "file") {
-      files.push(rel)
-    } else {
-      files.push(...flattenTreeList(node.children, rel))
-    }
-  }
-  return files
-}

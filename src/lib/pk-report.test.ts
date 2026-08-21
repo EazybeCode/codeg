@@ -59,6 +59,26 @@ describe("buildPkReportHtml", () => {
     ])
   })
 
+  it("recognizes a conventional HTML entrypoint in a multi-file web project", () => {
+    expect(
+      pickRunnableHtmlPath([
+        ".git",
+        "README.md",
+        "index.html",
+        "assets/game.js",
+        "assets/game.css",
+      ])
+    ).toBe("index.html")
+    expect(
+      pickRunnableHtmlPath([
+        "package.json",
+        "src/main.ts",
+        "dist/index.html",
+        "dist/assets/app.js",
+      ])
+    ).toBe("dist/index.html")
+  })
+
   it("builds a self-contained localized battle report without inventing tokens", () => {
     const html = buildPkReportHtml(
       round,

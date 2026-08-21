@@ -44,6 +44,13 @@ pub struct UpdateJudgeParams {
     pub judge_status: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveReportSnapshotParams {
+    pub id: i32,
+    pub snapshot: String,
+}
+
 pub async fn pk_round_list(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<ListParams>,
@@ -68,9 +75,10 @@ pub async fn pk_round_create(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<CreateParams>,
 ) -> Result<Json<crate::models::PkRoundInfo>, AppCommandError> {
-    let result = core::pk_round_create_core(&state.db, params.folder_id, params.task, params.config)
-        .await
-        .map_err(AppCommandError::from)?;
+    let result =
+        core::pk_round_create_core(&state.db, params.folder_id, params.task, params.config)
+            .await
+            .map_err(AppCommandError::from)?;
     Ok(Json(result))
 }
 
@@ -91,6 +99,7 @@ pub async fn pk_round_delete(
     core::pk_round_delete_core(&state.db, params.id)
         .await
         .map_err(AppCommandError::from)?;
+    core::pk_round_delete_report_snapshot_core(&state.data_dir, params.id).await?;
     Ok(Json(()))
 }
 
@@ -98,8 +107,30 @@ pub async fn pk_round_update_judge(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<UpdateJudgeParams>,
 ) -> Result<Json<()>, AppCommandError> {
-    core::pk_round_update_judge_core(&state.db, params.id, params.judge_result, params.judge_status)
-        .await
-        .map_err(AppCommandError::from)?;
+    core::pk_round_update_judge_core(
+        &state.db,
+        params.id,
+        params.judge_result,
+        params.judge_status,
+    )
+    .await
+    .map_err(AppCommandError::from)?;
     Ok(Json(()))
+}
+
+pub async fn pk_round_save_report_snapshot(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<SaveReportSnapshotParams>,
+) -> Result<Json<()>, AppCommandError> {
+    core::pk_round_save_report_snapshot_core(&state.data_dir, params.id, params.snapshot).await?;
+    Ok(Json(()))
+}
+
+pub async fn pk_round_get_report_snapshot(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<IdParams>,
+) -> Result<Json<Option<String>>, AppCommandError> {
+    Ok(Json(
+        core::pk_round_get_report_snapshot_core(&state.data_dir, params.id).await?,
+    ))
 }

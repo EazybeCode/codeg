@@ -1354,6 +1354,8 @@ mod tauri_app {
                 pk_commands::pk_round_update_status,
                 pk_commands::pk_round_delete,
                 pk_commands::pk_round_update_judge,
+                pk_commands::pk_round_save_report_snapshot,
+                pk_commands::pk_round_get_report_snapshot,
                 terminal_commands::terminal_spawn,
                 terminal_commands::terminal_write,
                 terminal_commands::terminal_resize,

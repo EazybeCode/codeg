@@ -15,6 +15,7 @@ import {
 } from "@/lib/api"
 import type { PromptInputBlock, SessionConfigOptionInfo } from "@/lib/types"
 import { assignJudgeScoreSlots } from "@/lib/pk-judge"
+import { preparePkReportData } from "@/lib/pk-report-data"
 import {
   useAcpActions,
   useAcpEvent,
@@ -877,6 +878,10 @@ export function usePkRound(): {
         )
       ) {
         markRound(roundId, "finished")
+        // Capture the disposable worktrees as soon as the round settles. This
+        // makes report export independent from the arena staying open and is
+        // retried synchronously before an explicit worktree cleanup.
+        void preparePkReportData(fresh).catch(() => undefined)
         // 结算即断开:侧边栏的选手会话立刻停止转圈,结果走向持久化
         // transcript。想继续追一条会话,把它当普通会话打开重连即可。
         void disconnectFinished(
@@ -1235,12 +1240,26 @@ export function usePkRound(): {
           void runJudgeRef.current(fresh)
         }
       }
+      if (fresh) void preparePkReportData(fresh).catch(() => undefined)
     },
     [cancel, detachDelegationChild, disconnect, markRound, updateContestant]
   )
 
   const cleanupRound = useCallback(
     async (round: PkRound, keepBranches: boolean) => {
+      const freshRound =
+        usePkArenaStore
+          .getState()
+          .rounds.find((item) => item.id === round.id) ?? round
+      const reportData = await preparePkReportData(freshRound)
+      if (
+        reportData.source === "empty" &&
+        freshRound.contestants.some((contestant) => contestant.worktreePath)
+      ) {
+        throw new Error(
+          "Could not preserve the PK report; worktrees were not removed"
+        )
+      }
       // Release the by-id viewer entries before the worktrees go.
       for (const contestant of round.contestants) {
         if (contestant.connectionId) {

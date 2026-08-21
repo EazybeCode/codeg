@@ -4858,3 +4858,24 @@ export async function pkRoundUpdateJudge(
     judgeStatus,
   })
 }
+
+export async function pkRoundSaveReportSnapshot(
+  id: number,
+  snapshot: string
+): Promise<void> {
+  return getTransport().call(
+    "pk_round_save_report_snapshot",
+    { id, snapshot },
+    { timeoutMs: 60_000 }
+  )
+}
+
+export async function pkRoundGetReportSnapshot(
+  id: number
+): Promise<string | null> {
+  return getTransport().call(
+    "pk_round_get_report_snapshot",
+    { id },
+    { timeoutMs: 60_000 }
+  )
+}

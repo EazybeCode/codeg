@@ -1394,6 +1394,15 @@ pub fn build_router(
             "/pk_round_update_judge",
             post(handlers::pk::pk_round_update_judge),
         )
+        .route(
+            "/pk_round_save_report_snapshot",
+            post(handlers::pk::pk_round_save_report_snapshot)
+                .layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route(
+            "/pk_round_get_report_snapshot",
+            post(handlers::pk::pk_round_get_report_snapshot),
+        )
         // ─── Workspace background ───
         .route(
             "/background_read",

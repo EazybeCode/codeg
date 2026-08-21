@@ -26,8 +26,19 @@ export function reportableArtifactPaths(paths: readonly string[]): string[] {
 
 export function pickRunnableHtmlPath(paths: readonly string[]): string | null {
   const reportable = reportableArtifactPaths(paths)
-  if (reportable.length !== 1) return null
-  return /\.html?$/i.test(reportable[0]) ? reportable[0] : null
+  const htmlPaths = reportable.filter((path) => /\.html?$/i.test(path))
+  if (htmlPaths.length === 1) return htmlPaths[0]
+
+  // Multi-file web entries are the normal case: index.html plus scripts,
+  // styles and assets. Prefer the shallowest conventional entrypoint, while
+  // refusing to guess between several arbitrarily named HTML documents.
+  const indexPaths = htmlPaths
+    .filter((path) => /(^|\/)index\.html?$/i.test(path))
+    .sort((a, b) => {
+      const depth = (path: string) => path.replace(/\\/g, "/").split("/").length
+      return depth(a) - depth(b) || a.localeCompare(b)
+    })
+  return indexPaths[0] ?? null
 }
 
 function esc(raw: string): string {
