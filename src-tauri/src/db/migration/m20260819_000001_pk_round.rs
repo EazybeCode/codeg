@@ -77,16 +77,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .name(IDX_CONVERSATION_PK_ROUND)
-                    .table(Conversation::Table)
-                    .col(Conversation::PkRoundId)
-                    .to_owned(),
-            )
-            .await?;
-
         // Add pk_round_id column to conversation table.
         manager
             .alter_table(
@@ -95,25 +85,37 @@ impl MigrationTrait for Migration {
                     .add_column(ColumnDef::new(Conversation::PkRoundId).integer().null())
                     .to_owned(),
             )
+            .await?;
+
+        // SQLite cannot create an index for a column that has not been added
+        // yet, so keep this after the ALTER TABLE above.
+        manager
+            .create_index(
+                Index::create()
+                    .name(IDX_CONVERSATION_PK_ROUND)
+                    .table(Conversation::Table)
+                    .col(Conversation::PkRoundId)
+                    .to_owned(),
+            )
             .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .alter_table(
-                Table::alter()
-                    .table(Conversation::Table)
-                    .drop_column(Conversation::PkRoundId)
-                    .to_owned(),
-            )
-            .await?;
-
         manager
             .drop_index(
                 Index::drop()
                     .if_exists()
                     .name(IDX_CONVERSATION_PK_ROUND)
                     .table(Conversation::Table)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Conversation::Table)
+                    .drop_column(Conversation::PkRoundId)
                     .to_owned(),
             )
             .await?;
@@ -153,4 +155,51 @@ enum PkRound {
 enum Conversation {
     Table,
     PkRoundId,
+}
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::Database;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn conversation_round_index_follows_column_lifecycle() {
+        let connection = Database::connect("sqlite::memory:").await.unwrap();
+        let manager = SchemaManager::new(&connection);
+        manager
+            .create_table(
+                Table::create()
+                    .table(Conversation::Table)
+                    .col(
+                        ColumnDef::new(Alias::new("id"))
+                            .integer()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+
+        Migration.up(&manager).await.unwrap();
+        assert!(manager
+            .has_column("conversation", "pk_round_id")
+            .await
+            .unwrap());
+        assert!(manager
+            .has_index("conversation", IDX_CONVERSATION_PK_ROUND)
+            .await
+            .unwrap());
+
+        Migration.down(&manager).await.unwrap();
+        assert!(!manager
+            .has_column("conversation", "pk_round_id")
+            .await
+            .unwrap());
+        assert!(!manager
+            .has_index("conversation", IDX_CONVERSATION_PK_ROUND)
+            .await
+            .unwrap());
+    }
 }
