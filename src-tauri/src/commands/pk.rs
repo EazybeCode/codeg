@@ -128,6 +128,19 @@ pub async fn pk_round_delete_report_snapshot_core(
 // -- Tauri command wrappers (desktop mode only) --
 
 #[cfg(feature = "tauri-runtime")]
+fn resolve_desktop_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, AppCommandError> {
+    use tauri::Manager;
+
+    let fallback = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| {
+            AppCommandError::io_error("Resolve app data dir").with_detail(error.to_string())
+        })?;
+    Ok(crate::paths::resolve_effective_data_dir(&fallback))
+}
+
+#[cfg(feature = "tauri-runtime")]
 #[tauri::command]
 pub async fn pk_round_list(
     db: tauri::State<'_, AppDatabase>,
@@ -170,13 +183,14 @@ pub async fn pk_round_update_status(
 #[tauri::command]
 pub async fn pk_round_delete(
     db: tauri::State<'_, AppDatabase>,
-    state: tauri::State<'_, crate::app_state::AppState>,
+    app: tauri::AppHandle,
     id: i32,
 ) -> Result<(), AppCommandError> {
     pk_round_delete_core(&db, id)
         .await
         .map_err(AppCommandError::from)?;
-    pk_round_delete_report_snapshot_core(&state.data_dir, id).await
+    let data_dir = resolve_desktop_data_dir(&app)?;
+    pk_round_delete_report_snapshot_core(&data_dir, id).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -193,20 +207,22 @@ pub async fn pk_round_update_judge(
 #[cfg(feature = "tauri-runtime")]
 #[tauri::command]
 pub async fn pk_round_save_report_snapshot(
-    state: tauri::State<'_, crate::app_state::AppState>,
+    app: tauri::AppHandle,
     id: i32,
     snapshot: String,
 ) -> Result<(), AppCommandError> {
-    pk_round_save_report_snapshot_core(&state.data_dir, id, snapshot).await
+    let data_dir = resolve_desktop_data_dir(&app)?;
+    pk_round_save_report_snapshot_core(&data_dir, id, snapshot).await
 }
 
 #[cfg(feature = "tauri-runtime")]
 #[tauri::command]
 pub async fn pk_round_get_report_snapshot(
-    state: tauri::State<'_, crate::app_state::AppState>,
+    app: tauri::AppHandle,
     id: i32,
 ) -> Result<Option<String>, AppCommandError> {
-    pk_round_get_report_snapshot_core(&state.data_dir, id).await
+    let data_dir = resolve_desktop_data_dir(&app)?;
+    pk_round_get_report_snapshot_core(&data_dir, id).await
 }
 
 #[cfg(test)]
@@ -218,6 +234,33 @@ mod tests {
     use crate::db::service::conversation_service;
     use crate::db::test_helpers::{fresh_in_memory_db, seed_folder};
     use crate::models::AgentType;
+
+    fn requires_unmanaged_app_state(source: &str) -> bool {
+        let forbidden = [
+            "tauri::State<'_, crate::app_state::",
+            "AppState>",
+        ]
+        .concat();
+        source.contains(&forbidden)
+    }
+
+    #[test]
+    fn detects_the_unmanaged_state_signature_that_breaks_tauri_invocation() {
+        let broken = [
+            "state: tauri::State<'_, crate::app_state::",
+            "AppState>,",
+        ]
+        .concat();
+        assert!(requires_unmanaged_app_state(&broken));
+    }
+
+    #[test]
+    fn desktop_pk_commands_do_not_require_unmanaged_app_state() {
+        assert!(
+            !requires_unmanaged_app_state(include_str!("pk.rs")),
+            "desktop PK commands must use automatically injected AppHandle or a registered state"
+        );
+    }
 
     #[tokio::test]
     async fn archiving_round_also_hides_its_pk_conversations() {
