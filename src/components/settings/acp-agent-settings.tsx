@@ -160,6 +160,7 @@ import {
 } from "./deepseek-config-panel"
 import { KimiCodeConfigPanel } from "./kimi-code-config-panel"
 import { PiConfigPanel } from "./pi-config-panel"
+import { QoderConfigPanel } from "./qoder-config-panel"
 
 interface AgentCheckState {
   result?: PreflightResult
@@ -10424,6 +10425,32 @@ supports_websockets = true`}
                         }
                       )
                     }
+                  />
+                ) : selectedAgent.agent_type === "qoder" ? (
+                  <QoderConfigPanel
+                    agent={selectedAgent}
+                    saving={Boolean(savingEnv[selectedAgent.agent_type])}
+                    onSaveEnv={(env, enabled) =>
+                      persistEnv(
+                        selectedAgent.agent_type,
+                        enabled,
+                        envMapToText(env),
+                        selectedAgent.model_provider_id,
+                        // The one key this panel owns, folded into the raw
+                        // editor's draft. That draft is persisted WHOLESALE by
+                        // the enable switch and the generic env Save button, so
+                        // without this a saved token would be silently deleted
+                        // the moment either one fires. `undefined` (the token
+                        // field was cleared) deletes the line, which is the
+                        // outcome clearing it asks for.
+                        {
+                          QODER_PERSONAL_ACCESS_TOKEN:
+                            env.QODER_PERSONAL_ACCESS_TOKEN,
+                        }
+                      )
+                    }
+                    onSaved={refreshAgents}
+                    onAffectedSessions={reportAffectedSessions}
                   />
                 ) : selectedAgent.agent_type === "grok" ? (
                   <div className="space-y-3 rounded-md border bg-muted/10 p-3">

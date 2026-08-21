@@ -402,7 +402,15 @@ describe("SuggestionPopup", () => {
       within(screen.getByTestId("mention-popup")).getByText("Loading")
     ).toBeInTheDocument()
 
-    act(() => ref.current?.onKeyDown(key("Enter")))
+    // Declined, not swallowed: with nothing to insert the key belongs to the
+    // editor. Android's soft keyboard reaches this path through a synthetic
+    // Enter that ProseMirror fires *after* applying the DOM change, and a
+    // `true` there would make it drop the change (the user's newline).
+    let handled: boolean | undefined
+    act(() => {
+      handled = ref.current?.onKeyDown(key("Enter"))
+    })
+    expect(handled).toBe(false)
     expect(onSelect).not.toHaveBeenCalled()
   })
 
