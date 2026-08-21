@@ -35,7 +35,8 @@ export function PkMinimizedPill() {
     return () => window.clearInterval(timer)
   }, [round, roundLive, isRoundTabActive])
 
-  const visible = round != null && !isRoundTabActive && !pillDismissed
+  const visible =
+    round != null && roundLive && !isRoundTabActive && !pillDismissed
   if (!visible || !round) {
     return null
   }

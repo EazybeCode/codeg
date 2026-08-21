@@ -3,9 +3,18 @@ import type { PkRound } from "@/stores/pk-arena-store"
 import { getArenaPillRound, getEffortControl } from "./pk-arena-policy"
 
 describe("PK arena lifecycle policy", () => {
-  it("keeps a terminal round available in the minimized entry", () => {
+  it.each(["finished", "canceled", "interrupted"] as const)(
+    "does not show a %s round in the minimized entry",
+    (status) => {
+      const terminal = { id: "7", status } as PkRound
+      expect(getArenaPillRound([terminal], "7")).toBeNull()
+    }
+  )
+
+  it("prefers a live round when the active round is terminal", () => {
     const finished = { id: "7", status: "finished" } as PkRound
-    expect(getArenaPillRound([finished], "7")).toBe(finished)
+    const running = { id: "8", status: "running" } as PkRound
+    expect(getArenaPillRound([finished, running], "7")).toBe(running)
   })
 })
 

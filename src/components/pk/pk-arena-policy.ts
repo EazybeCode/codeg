@@ -1,18 +1,16 @@
 import type { PkRound } from "@/stores/pk-arena-store"
 
-/** Pick the round represented by the minimized entry without hiding history. */
+const isLiveRound = (round: PkRound) =>
+  round.status === "ready" || round.status === "running"
+
+/** Pick the live round represented by the minimized entry. */
 export function getArenaPillRound(
   rounds: readonly PkRound[],
   activeRoundId: string | null
 ): PkRound | null {
-  return (
-    rounds.find((round) => round.id === activeRoundId) ??
-    rounds.find(
-      (round) => round.status === "ready" || round.status === "running"
-    ) ??
-    rounds[0] ??
-    null
-  )
+  const activeRound = rounds.find((round) => round.id === activeRoundId)
+  if (activeRound && isLiveRound(activeRound)) return activeRound
+  return rounds.find(isLiveRound) ?? null
 }
 
 export type PkEffortControl =
