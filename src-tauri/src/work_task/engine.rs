@@ -1946,12 +1946,14 @@ impl TaskEngine {
         }
     }
 
-    /// Drop every delegation-child mapping belonging to a retired run. Called
-    /// wherever a run leaves `index`; the run's outstanding-request set is
-    /// cleared wholesale by those same call sites.
-    async fn forget_delegation_children_of(&self, parent_conn_id: &str) {
+    /// Drop every delegation-child mapping belonging to a retired run, and
+    /// return the connection ids that were detached — their outstanding
+    /// requests are now unanswerable, so whoever does not clear the task's set
+    /// wholesale has to retract those keys by hand (see
+    /// [`Self::retire_connection`]).
+    async fn forget_delegation_children_of(&self, parent_conn_id: &str) -> Vec<String> {
         // `parent_conn_id` is a run connection, never a key in this map.
-        self.detach_delegation_subtree(parent_conn_id, false).await;
+        self.detach_delegation_subtree(parent_conn_id, false).await
     }
 
     /// Drop every engine-side trace of a run connection: its `index` entry, the
@@ -1964,6 +1966,17 @@ impl TaskEngine {
     /// arrive calls this; the entry has no other way out (`reconcile_once`
     /// only ever looks at `running` / `awaiting_input` rows).
     async fn retire_connection(&self, conn_id: &str, task_id: i32) {
+        // Unmap this run's delegation children FIRST: the purge below needs
+        // their ids, and a child that is already detached can no longer publish
+        // a fresh key (`track_request` resolves a child through
+        // `delegation_parents`, and an unmapped one resolves to nothing).
+        let orphaned: Vec<String> = self
+            .forget_delegation_children_of(conn_id)
+            .await
+            .iter()
+            .map(|child| format!("{child}#"))
+            .collect();
+
         // The outstanding-request set is keyed by TASK, not by connection, so
         // clearing it while another generation still owns the row would drop
         // ITS pending permissions — resolving one of the survivors then empties
@@ -1975,14 +1988,74 @@ impl TaskEngine {
         // its parent is indexed), so holding it is what keeps the answer true
         // until the set is gone. Lock order is index → awaiting; every other
         // `awaiting` critical section is a leaf, so it cannot invert.
-        {
+        let emptied_for = {
             let mut index = self.index.lock().await;
             index.remove(conn_id);
-            if !index.values().any(|(tid, _)| *tid == task_id) {
-                self.awaiting.lock().await.remove(&task_id);
+            let survivor = index
+                .values()
+                .find(|(tid, _)| *tid == task_id)
+                .map(|(_, run_seq)| *run_seq);
+            let mut awaiting = self.awaiting.lock().await;
+            match survivor {
+                // Last one out, so the whole set goes — orphans included. A set
+                // inherited by the next generation would never flip the row to
+                // `awaiting_input` again.
+                None => {
+                    awaiting.remove(&task_id);
+                    None
+                }
+                // Someone else still owns the row: keep THEIR requests, but
+                // retract this run's children's. Sparing those is the opposite
+                // error and the worse one — the chain that named them is gone,
+                // so neither `track_request` nor `forget_delegation_child` can
+                // resolve them any more, and one key stuck in a shared set pins
+                // the survivor on the wrong side of the `running` ⇄
+                // `awaiting_input` edge until something clears the set
+                // wholesale. Only a LATER retirement that is the last one out
+                // (or a cancel) does that, so it outlasts every generation the
+                // orphan is actually lying about.
+                Some(run_seq) => Self::retract_keys(&mut awaiting, task_id, &orphaned)
+                    .then_some(run_seq),
+            }
+        };
+
+        // Emptied by the retraction alone: the row is parked on requests that
+        // just became unanswerable, so return it to the survivor's `running`
+        // through the same flip `track_request` would have used.
+        if let Some(run_seq) = emptied_for {
+            let flipped = work_task_service::flip_awaiting(&self.db.conn, task_id, run_seq, false)
+                .await
+                .unwrap_or(false);
+            if flipped {
+                self.emit_upsert(task_id);
             }
         }
-        self.forget_delegation_children_of(conn_id).await;
+    }
+
+    /// Drop every key under `prefixes` from the task's outstanding set,
+    /// reporting whether that is what emptied it (and so owes a flip back to
+    /// `running`). An untouched set never reports `true`, however empty.
+    fn retract_keys(
+        awaiting: &mut HashMap<i32, HashSet<String>>,
+        task_id: i32,
+        prefixes: &[String],
+    ) -> bool {
+        if prefixes.is_empty() {
+            return false;
+        }
+        let Some(set) = awaiting.get_mut(&task_id) else {
+            return false;
+        };
+        let before = set.len();
+        set.retain(|k| !prefixes.iter().any(|p| k.starts_with(p.as_str())));
+        if set.len() == before {
+            return false; // nothing of this subtree's was outstanding
+        }
+        if set.is_empty() {
+            awaiting.remove(&task_id);
+            return true;
+        }
+        false
     }
 
     /// Drop a finished delegation child (and anything it delegated in turn) plus
@@ -2004,20 +2077,7 @@ impl TaskEngine {
         let prefixes: Vec<String> = detached.iter().map(|c| format!("{c}#")).collect();
         let emptied = {
             let mut awaiting = self.awaiting.lock().await;
-            let Some(set) = awaiting.get_mut(&task_id) else {
-                return;
-            };
-            let before = set.len();
-            set.retain(|k| !prefixes.iter().any(|p| k.starts_with(p.as_str())));
-            if set.len() == before {
-                return; // nothing of this subtree's was outstanding
-            }
-            if set.is_empty() {
-                awaiting.remove(&task_id);
-                true
-            } else {
-                false
-            }
+            Self::retract_keys(&mut awaiting, task_id, &prefixes)
         };
         if emptied {
             let flipped = work_task_service::flip_awaiting(&self.db.conn, task_id, run_seq, false)
@@ -2036,9 +2096,7 @@ impl TaskEngine {
         };
 
         let summary = self.capture_summary(conn_id).await;
-        self.index.lock().await.remove(conn_id);
-        self.awaiting.lock().await.remove(&task_id);
-        self.forget_delegation_children_of(conn_id).await;
+        self.retire_connection(conn_id, task_id).await;
         let _ = self.manager.disconnect(conn_id).await;
 
         let task = work_task_service::get_model(&self.db.conn, task_id).await.ok();
@@ -7398,6 +7456,131 @@ mod tests {
         // The old connection's cancel finally arrives.
         engine.on_turn_complete(PARENT_CONN, "cancelled").await;
 
+        assert_eq!(status_of(&engine, task_id).await, WorkTaskStatus::Running);
+    }
+
+    /// Walk the row on to a fresh generation running on `conn_id`, WITHOUT
+    /// retiring the previous one's `index` entry — the state a delayed
+    /// `TurnComplete` from the old connection lands in. Returns the new run_seq.
+    async fn relaunch_on(engine: &TaskEngine, task_id: i32, conn_id: &str) -> i32 {
+        let row = work_task_service::get_model(&engine.db.conn, task_id)
+            .await
+            .expect("task row");
+        let conv_id = row.conversation_id.expect("conversation");
+
+        assert!(work_task_service::settle_review(
+            &engine.db.conn,
+            task_id,
+            row.run_seq,
+            None,
+            None,
+        )
+        .await
+        .expect("settle review"));
+        let next_seq = work_task_service::claim_for_run(
+            &engine.db.conn,
+            task_id,
+            WorkTaskStatus::Review,
+            "test",
+        )
+        .await
+        .expect("claim")
+        .expect("claimed");
+        assert!(work_task_service::begin_setup(&engine.db.conn, task_id, next_seq)
+            .await
+            .expect("begin_setup"));
+        assert!(work_task_service::mark_running(
+            &engine.db.conn,
+            task_id,
+            next_seq,
+            conv_id,
+            conn_id,
+        )
+        .await
+        .expect("mark_running"));
+        engine
+            .index
+            .lock()
+            .await
+            .insert(conn_id.into(), (task_id, next_seq));
+        next_seq
+    }
+
+    #[tokio::test]
+    async fn a_previous_generation_cancel_does_not_clear_current_waits() {
+        let (engine, task_id) = running_task().await;
+        relaunch_on(&engine, task_id, "conn-next").await;
+
+        engine
+            .track_request("conn-next", "permission-a".into(), true)
+            .await;
+        engine
+            .track_request("conn-next", "permission-b".into(), true)
+            .await;
+        assert_eq!(
+            status_of(&engine, task_id).await,
+            WorkTaskStatus::AwaitingInput
+        );
+
+        engine.on_turn_complete(PARENT_CONN, "cancelled").await;
+        engine
+            .track_request("conn-next", "permission-a".into(), false)
+            .await;
+
+        assert_eq!(
+            status_of(&engine, task_id).await,
+            WorkTaskStatus::AwaitingInput,
+            "the second request in the current generation is still outstanding"
+        );
+
+        engine
+            .track_request("conn-next", "permission-b".into(), false)
+            .await;
+        assert_eq!(status_of(&engine, task_id).await, WorkTaskStatus::Running);
+    }
+
+    /// The mirror image of the case above, and the half sparing the set opens:
+    /// a retired run's DELEGATION children are namespaced by connection id, so
+    /// keeping the task's set keeps THEIR keys too — with nothing left that
+    /// could ever answer them, because the same retirement just unmapped the
+    /// chain (`track_request` and `forget_delegation_child` both resolve a
+    /// detached child to nothing). One orphan pins the set non-empty until a
+    /// wholesale clear comes along — a later retirement that IS the last one
+    /// out, or a cancel — and until then every generation's first request
+    /// misses the `len() == 1` edge: the board says `running` for a run parked
+    /// on the user, which is bug #447 all over again. Unlike the transient
+    /// over-clear, answering the request is not what gets you out of it.
+    #[tokio::test]
+    async fn retiring_a_run_takes_its_orphaned_delegation_requests_with_it() {
+        let (engine, task_id) = running_task().await;
+        engine
+            .on_event(&delegation_started(PARENT_CONN, CHILD_CONN))
+            .await;
+        engine.on_event(&permission_request(CHILD_CONN, "r1")).await;
+        assert_eq!(
+            status_of(&engine, task_id).await,
+            WorkTaskStatus::AwaitingInput
+        );
+
+        relaunch_on(&engine, task_id, "conn-next").await;
+        engine.on_turn_complete(PARENT_CONN, "cancelled").await;
+
+        assert!(
+            engine.awaiting.lock().await.get(&task_id).is_none(),
+            "a child's key cannot outlive the delegation chain that named it"
+        );
+
+        // ...and the surviving generation's own edge still swings both ways.
+        engine
+            .track_request("conn-next", "p:r9".into(), true)
+            .await;
+        assert_eq!(
+            status_of(&engine, task_id).await,
+            WorkTaskStatus::AwaitingInput
+        );
+        engine
+            .track_request("conn-next", "p:r9".into(), false)
+            .await;
         assert_eq!(status_of(&engine, task_id).await, WorkTaskStatus::Running);
     }
 
