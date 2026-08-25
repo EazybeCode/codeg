@@ -4822,6 +4822,7 @@
     "deliverPrTitleLabel": "プルリクエストのタイトル",
     "deliverPrTitleLabelMr": "マージリクエストのタイトル",
     "deliverPrDraft": "ドラフトとして作成",
+    "deliverPrDeleteWorktree": "デリバリー後に worktree を削除",
     "deliverPrSubmit": "プッシュして作成",
     "deliverPrSubmitting": "プッシュ中…",
     "deliverPrDone": "プルリクエストを作成しました",
@@ -4831,6 +4832,7 @@
     "deliverPrBackTitleMr": "マージリクエストに戻す",
     "deliverPrBackDescription": "このタスクのコミットを {repo}#{number} のヘッドブランチ {branch} に push します。新しく作るものはありません。既にあるレビューにそのまま反映されます。",
     "deliverPrBackDescriptionMr": "このタスクのコミットを {repo}!{number} のソースブランチ {branch} に push します。新しく作るものはありません。既にあるレビューにそのまま反映されます。",
+    "deliverPrBackDeleteWorktree": "プッシュ後に worktree を削除",
     "deliverPrBackSubmit": "push",
     "deliverPrBackDone": "プルリクエストに push しました",
     "deliverPrBackDoneMr": "マージリクエストに push しました"

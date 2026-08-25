@@ -4822,6 +4822,7 @@
     "deliverPrTitleLabel": "PR 標題",
     "deliverPrTitleLabelMr": "合併請求標題",
     "deliverPrDraft": "建立為草稿",
+    "deliverPrDeleteWorktree": "交付後刪除 worktree",
     "deliverPrSubmit": "推送並建立",
     "deliverPrSubmitting": "推送中…",
     "deliverPrDone": "PR 已建立",
@@ -4831,6 +4832,7 @@
     "deliverPrBackTitleMr": "推回該合併請求",
     "deliverPrBackDescription": "把這個任務的提交推到 {repo}#{number} 的頭分支 {branch}。不會新建任何東西——工作直接進入已經存在的那個審查。",
     "deliverPrBackDescriptionMr": "把這個任務的提交推到 {repo}!{number} 的來源分支 {branch}。不會新建任何東西——工作直接進入已經存在的那個審查。",
+    "deliverPrBackDeleteWorktree": "推回後刪除 worktree",
     "deliverPrBackSubmit": "推送",
     "deliverPrBackDone": "已推回 PR",
     "deliverPrBackDoneMr": "已推回合併請求"

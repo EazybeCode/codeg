@@ -4822,6 +4822,7 @@
     "deliverPrTitleLabel": "Titel des Pull Requests",
     "deliverPrTitleLabelMr": "Titel des Merge Requests",
     "deliverPrDraft": "Als Entwurf öffnen",
+    "deliverPrDeleteWorktree": "Worktree nach der Übergabe löschen",
     "deliverPrSubmit": "Pushen und öffnen",
     "deliverPrSubmitting": "Wird gepusht …",
     "deliverPrDone": "Pull Request geöffnet",
@@ -4831,6 +4832,7 @@
     "deliverPrBackTitleMr": "Zurück in den Merge Request liefern",
     "deliverPrBackDescription": "Pusht die Commits dieser Aufgabe auf {branch}, den Head-Branch von {repo}#{number}. Es wird nichts Neues geöffnet — die bereits laufende Review bekommt die Arbeit.",
     "deliverPrBackDescriptionMr": "Pusht die Commits dieser Aufgabe auf {branch}, den Quell-Branch von {repo}!{number}. Es wird nichts Neues geöffnet — die bereits laufende Review bekommt die Arbeit.",
+    "deliverPrBackDeleteWorktree": "Worktree nach dem Push löschen",
     "deliverPrBackSubmit": "Pushen",
     "deliverPrBackDone": "In den Pull Request gepusht",
     "deliverPrBackDoneMr": "In den Merge Request gepusht"

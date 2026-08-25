@@ -4822,6 +4822,7 @@
     "deliverPrTitleLabel": "풀 리퀘스트 제목",
     "deliverPrTitleLabelMr": "병합 요청 제목",
     "deliverPrDraft": "초안으로 만들기",
+    "deliverPrDeleteWorktree": "전달 후 worktree 삭제",
     "deliverPrSubmit": "푸시하고 만들기",
     "deliverPrSubmitting": "푸시 중…",
     "deliverPrDone": "풀 리퀘스트를 만들었습니다",
@@ -4831,6 +4832,7 @@
     "deliverPrBackTitleMr": "병합 요청으로 되돌려 보내기",
     "deliverPrBackDescription": "이 작업의 커밋을 {repo}#{number}의 헤드 브랜치 {branch}에 푸시합니다. 새로 만드는 것은 없고, 이미 열려 있는 리뷰에 그대로 반영됩니다.",
     "deliverPrBackDescriptionMr": "이 작업의 커밋을 {repo}!{number}의 소스 브랜치 {branch}에 푸시합니다. 새로 만드는 것은 없고, 이미 열려 있는 리뷰에 그대로 반영됩니다.",
+    "deliverPrBackDeleteWorktree": "푸시 후 worktree 삭제",
     "deliverPrBackSubmit": "푸시",
     "deliverPrBackDone": "풀 리퀘스트에 푸시했습니다",
     "deliverPrBackDoneMr": "병합 요청에 푸시했습니다"

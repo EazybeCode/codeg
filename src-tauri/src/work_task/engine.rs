@@ -2499,7 +2499,7 @@ impl TaskEngine {
                 self.emit_upsert(task_id);
             } else {
                 // Broadcast omitted: the removal announces its own outcome.
-                self.remove_worktree_locked(task_id).await;
+                self.remove_worktree_locked(task_id, None).await;
             }
         }
         Ok(())
@@ -2566,7 +2566,7 @@ impl TaskEngine {
             }
         }
         if let Err(e) =
-            task_git::remove_worktree_and_branch(&root.path, &wt.path, branch_to_delete).await
+            task_git::remove_worktree_and_branch(&root.path, &wt.path, branch_to_delete, None).await
         {
             let _ = work_task_service::set_cleanup_state(
                 &self.db.conn,
@@ -2892,7 +2892,7 @@ impl TaskEngine {
                     // second settle of the same generation posts nothing.
                     self.spawn_forge_writeback(task_id, WritebackOutcome::Merged(commit));
                     if state.delete_worktree {
-                        self.remove_worktree_locked(task_id).await;
+                        self.remove_worktree_locked(task_id, None).await;
                     }
                 }
             }
@@ -3077,11 +3077,16 @@ impl TaskEngine {
     /// refused delivery leaves the task exactly as it was. After the CAS, any
     /// failure returns the task to review with the reason on the card; every
     /// step is idempotent, so the retry is just another click.
+    ///
+    /// `delete_worktree` is the same offer the other two acceptances make, and
+    /// it rides on the delivery rather than gating it — see
+    /// [`Self::remove_delivered_worktree`].
     pub async fn deliver_pr(
         self: &Arc<Self>,
         task_id: i32,
         pr_title: Option<String>,
         draft: bool,
+        delete_worktree: bool,
     ) -> Result<String, String> {
         let task = work_task_service::get_model(&self.db.conn, task_id)
             .await
@@ -3239,9 +3244,105 @@ impl TaskEngine {
                 &state,
             )
             .await;
+        // Only after the delivery SUCCEEDED: one that bounced back to review
+        // still needs its checkout for the retry. Still inside the claim, so a
+        // second click cannot start a delivery on a task whose worktree is
+        // half removed. `expected_head` is the OID the push published, and the
+        // cleanup is allowed to destroy the branch only while it is still that.
+        if outcome.is_ok() && delete_worktree {
+            self.remove_delivered_worktree(task_id, task.folder_id, &expected_head)
+                .await;
+        }
         self.release_in_flight(task_id, token).await;
         self.emit_upsert(task_id);
         outcome
+    }
+
+    /// Take a delivered task's worktree with it, the way the merge and the
+    /// no-merge acceptances do. Runs AFTER the settle, on a task that is
+    /// already `done`, and deliberately returns nothing: the delivery is what
+    /// the button promised and it has happened — a removal that fails flags
+    /// `cleanup_state` and stays retryable from the card, which must not
+    /// re-read as "the push failed".
+    ///
+    /// TWO probes, because each is blind to exactly what the other sees — the
+    /// pairing `complete_task` documents, aimed at what a DELIVERY publishes
+    /// rather than at what a merge lands:
+    ///
+    /// - `deliver_pr` refused a dirty worktree before the CAS, but that was
+    ///   before the push and the REST calls. `worktree remove --force` drops
+    ///   whatever appeared since without a word, and a file that was never
+    ///   committed is on no forge at all;
+    /// - a COMMIT made in that same window leaves `git status` spotless and is
+    ///   just as unpublished — the delivery pushed `published_head`, not it. So
+    ///   the branch tip is checked against the OID that actually reached the
+    ///   forge, which is the only thing that ever made `branch -D` safe here.
+    ///   `has_landable_changes` cannot serve as that probe: it is true of every
+    ///   delivery by construction.
+    ///
+    /// Either probe keeps the worktree, says why, and leaves the retry on the
+    /// card. The tip then rides along to the removal itself, so the read above
+    /// and the delete cannot straddle a ref that moves in between.
+    ///
+    /// Takes the folder git lock, so no caller may already hold it.
+    async fn remove_delivered_worktree(
+        self: &Arc<Self>,
+        task_id: i32,
+        folder_id: i32,
+        published_head: &str,
+    ) {
+        let lock = self.folder_lock(folder_id).await;
+        let _guard = lock.lock().await;
+        let Ok(task) = work_task_service::get_model(&self.db.conn, task_id).await else {
+            return;
+        };
+        if let Some(reason) = self.delivered_worktree_keep_reason(&task, published_head).await {
+            let _ =
+                work_task_service::set_cleanup_state(&self.db.conn, task_id, true, Some(reason))
+                    .await;
+            self.emit_upsert(task_id);
+            return;
+        }
+        // Broadcast omitted: the removal announces its own outcome.
+        self.remove_worktree_locked(task_id, Some(published_head)).await;
+    }
+
+    /// Why a delivered task's checkout must outlive the cleanup its user asked
+    /// for, or `None` when nothing objects. See
+    /// [`Self::remove_delivered_worktree`] for what the two answers protect.
+    ///
+    /// The tip half FAILS CLOSED: a branch git declines to resolve is not a
+    /// branch anyone may `-D`. The `None`s above it are the opposite case and
+    /// deliberately so — no worktree recorded, no folder row, no work branch
+    /// means there is nothing here for the removal to destroy, and it already
+    /// handles each of those itself.
+    async fn delivered_worktree_keep_reason(
+        &self,
+        task: &crate::db::entities::work_task::Model,
+        published_head: &str,
+    ) -> Option<String> {
+        let wt_id = task.worktree_folder_id?;
+        let wt = get_folder_core(&self.db, wt_id).await.ok()?;
+        if task_git::has_changes(&wt.path).await.unwrap_or(false) {
+            return Some(
+                "the worktree was kept: it still holds uncommitted files. Remove them, then \
+                 retry the cleanup."
+                    .to_string(),
+            );
+        }
+        let branch = task.work_branch.as_deref()?;
+        match task_git::rev_parse(&wt.path, branch).await {
+            Ok(tip) if tip.eq_ignore_ascii_case(published_head) => None,
+            Ok(_) => Some(format!(
+                "the worktree was kept: '{branch}' moved on after the delivery, so it holds \
+                 commits that were never pushed. Deliver again to publish them, or remove the \
+                 worktree by hand once they are safe."
+            )),
+            Err(e) => Some(format!(
+                "the worktree was kept: '{branch}' could not be read, so there is no telling \
+                 whether it still holds only the delivered work ({e})"
+            )),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4312,7 +4413,7 @@ impl TaskEngine {
                     self.emit_upsert(task_id);
                     self.spawn_forge_writeback(task_id, WritebackOutcome::Merged(commit));
                     if state.delete_worktree {
-                        self.remove_worktree_locked(task_id).await;
+                        self.remove_worktree_locked(task_id, None).await;
                     }
                 }
             }
@@ -4355,7 +4456,7 @@ impl TaskEngine {
         // No `emit_upsert` here: the removal owns that broadcast now, and only
         // it can tell a pass that changed the row from one that found nothing
         // to do.
-        self.remove_worktree_locked(task_id).await;
+        self.remove_worktree_locked(task_id, None).await;
         Ok(())
     }
 
@@ -4370,8 +4471,13 @@ impl TaskEngine {
     /// removed" badge (`worktreeWasRemoved`, keyed on `worktree_folder_id`)
     /// never appears until a full refetch. `converge_worktree_removal` owns its
     /// folder / conversation / tab broadcasts for the same reason.
-    async fn remove_worktree_locked(&self, task_id: i32) {
-        if self.remove_worktree_inner(task_id).await {
+    ///
+    /// `expected_tip` is forwarded to [`task_git::remove_worktree_and_branch`]:
+    /// `Some(oid)` deletes the work branch only while it still points there.
+    /// The local-merge paths pass `None` — they settle from git truth about the
+    /// base, not from an OID they published.
+    async fn remove_worktree_locked(&self, task_id: i32, expected_tip: Option<&str>) {
+        if self.remove_worktree_inner(task_id, expected_tip).await {
             self.emit_upsert(task_id);
         }
     }
@@ -4385,8 +4491,9 @@ impl TaskEngine {
     /// project folder (stamping `origin_cwd`), close its tabs, and soft-delete
     /// the folder row. A git failure flags `cleanup_state='failed'` (retryable
     /// from the card) and leaves the DB untouched; a `done` task never leaves
-    /// `done` either way.
-    async fn remove_worktree_inner(&self, task_id: i32) -> bool {
+    /// `done` either way — including a branch that moved out from under an
+    /// `expected_tip`, which lands here as exactly that kind of git failure.
+    async fn remove_worktree_inner(&self, task_id: i32, expected_tip: Option<&str>) -> bool {
         let Ok(task) = work_task_service::get_model(&self.db.conn, task_id).await else {
             return false;
         };
@@ -4461,6 +4568,7 @@ impl TaskEngine {
             &root.path,
             &wt.path,
             task.work_branch.as_deref(),
+            expected_tip,
         )
         .await
         {
@@ -7836,6 +7944,16 @@ mod tests {
         /// a test says "someone closed / retargeted / merged it while codeg
         /// was pushing", which is the whole window the settle check guards.
         after_push: Mutex<Option<ForgePr>>,
+        /// A file dropped into the worktree the moment the push runs. Opens
+        /// the other window of the same kind: the worktree was clean when
+        /// `deliver_pr` checked it and is dirty by the time the post-delivery
+        /// cleanup would run `worktree remove --force` over it.
+        dirty_on_push: Option<String>,
+        /// A file COMMITTED onto the work branch the moment the push runs —
+        /// the half `dirty_on_push` cannot reach. `git status` stays spotless,
+        /// so only a check against the OID the delivery actually published can
+        /// tell that the branch has outrun it.
+        commit_on_push: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -7843,13 +7961,23 @@ mod tests {
         async fn push_branch(
             &self,
             _ctx: &DeliveryCtx<'_>,
-            _worktree_path: &str,
+            worktree_path: &str,
             repo: &str,
             work_branch: &str,
             remote_branch: &str,
         ) -> Result<(), String> {
             if let Some(e) = &self.push_error {
                 return Err(e.clone());
+            }
+            if let Some(name) = &self.dirty_on_push {
+                std::fs::write(std::path::Path::new(worktree_path).join(name), "scratch\n")
+                    .expect("write");
+            }
+            if let Some(name) = &self.commit_on_push {
+                let dir = std::path::Path::new(worktree_path);
+                std::fs::write(dir.join(name), "landed after the push\n").expect("write");
+                git_run(dir, &["add", "-A"]);
+                git_run(dir, &["commit", "-qm", "never published"]);
             }
             self.pushes.lock().await.push((
                 repo.to_string(),
@@ -8097,7 +8225,7 @@ mod tests {
         let f = delivery_fixture(FakeForge::default()).await;
         let url = f
             .engine
-            .deliver_pr(f.task_id, Some("  Fix login  ".into()), false)
+            .deliver_pr(f.task_id, Some("  Fix login  ".into()), false, false)
             .await
             .expect("delivery");
         assert_eq!(url, "https://github.test/acme/app/pull/42");
@@ -8122,11 +8250,96 @@ mod tests {
         let meta: serde_json::Value =
             serde_json::from_str(task.source_meta.as_deref().unwrap()).unwrap();
         assert_eq!(meta["result_pr"], "https://github.test/acme/app/pull/42");
-        // The worktree is deliberately kept: the pull request points at this
-        // branch and another round on it is a normal next step.
+        // The worktree is kept because this caller did not ask for it to go —
+        // the pull request points at this branch and another round on it is a
+        // normal next step.
         assert!(f.worktree.exists());
         // Nothing is left in the in-flight set for the reconcile tick to trip on.
         assert!(f.engine.merging.lock().await.is_empty());
+    }
+
+    /// The delivery's own version of the offer both other acceptances make:
+    /// take the checkout along. Safe here in a way a bare `branch -D` is not —
+    /// by the time this runs the commits it destroys locally are on the forge.
+    #[tokio::test]
+    async fn a_delivery_takes_the_worktree_along_when_asked() {
+        let f = delivery_fixture(FakeForge::default()).await;
+        let url = f.engine.deliver_pr(f.task_id, None, false, true).await.expect("delivery");
+        assert_eq!(url, "https://github.test/acme/app/pull/42");
+
+        let task = row(&f.engine, f.task_id).await;
+        assert_eq!(task.status, WorkTaskStatus::Done);
+        assert_eq!(task.completion_kind.as_deref(), Some("delivered_pr"));
+        assert!(!f.worktree.exists(), "the checkout is gone from disk");
+        assert!(task.worktree_folder_id.is_none(), "and the row's pointer with it");
+        assert!(task.cleanup_state.is_none(), "a removal that worked flags nothing");
+        assert!(
+            task_git::rev_parse(f.root.to_str().unwrap(), "refs/heads/task/7").await.is_err(),
+            "the local branch goes too — the push that just ran is what makes that safe"
+        );
+        assert!(f.engine.merging.lock().await.is_empty());
+    }
+
+    /// The worktree turned dirty between `deliver_pr`'s pre-flight clean check
+    /// and the removal. `worktree remove --force` would drop those files
+    /// without a word and they are on no forge, so the checkout is KEPT and
+    /// flagged for a retry from the card — while the delivery itself, which is
+    /// what the button promised, still reports success.
+    #[tokio::test]
+    async fn a_worktree_that_turned_dirty_is_kept_rather_than_forced_away() {
+        let f = delivery_fixture(FakeForge {
+            dirty_on_push: Some("scratch.txt".into()),
+            ..Default::default()
+        })
+        .await;
+        let url = f.engine.deliver_pr(f.task_id, None, false, true).await.expect("delivery");
+        assert_eq!(url, "https://github.test/acme/app/pull/42");
+
+        let task = row(&f.engine, f.task_id).await;
+        assert_eq!(task.status, WorkTaskStatus::Done, "the delivery still landed");
+        assert_eq!(task.completion_kind.as_deref(), Some("delivered_pr"));
+        assert!(f.worktree.join("scratch.txt").exists(), "the stray file survives");
+        assert!(task.worktree_folder_id.is_some(), "the checkout is still the task's");
+        assert_eq!(
+            task.cleanup_state.as_deref(),
+            Some("failed"),
+            "so the card can offer the cleanup again once the file is dealt with"
+        );
+    }
+
+    /// The blind spot `git status` cannot cover: a COMMIT made in the same
+    /// window leaves the worktree spotless while putting the branch ahead of
+    /// everything the delivery published. `worktree remove --force` plus
+    /// `branch -D` would take that commit with them, and it is on no forge —
+    /// so the tip is checked against the OID that actually went out, and a
+    /// branch that outran it keeps both its checkout and its commit.
+    #[tokio::test]
+    async fn a_branch_that_outran_the_delivery_keeps_its_unpublished_commit() {
+        let f = delivery_fixture(FakeForge {
+            commit_on_push: Some("later.txt".into()),
+            ..Default::default()
+        })
+        .await;
+        let url = f.engine.deliver_pr(f.task_id, None, false, true).await.expect("delivery");
+        assert_eq!(url, "https://github.test/acme/app/pull/42");
+
+        let task = row(&f.engine, f.task_id).await;
+        assert_eq!(task.status, WorkTaskStatus::Done, "the delivery still landed");
+        assert_eq!(task.completion_kind.as_deref(), Some("delivered_pr"));
+        assert!(f.worktree.exists(), "the checkout survives");
+        assert!(task.worktree_folder_id.is_some(), "and stays the task's");
+        assert_eq!(
+            task.cleanup_state.as_deref(),
+            Some("failed"),
+            "retryable once the extra commit is delivered or moved somewhere safe"
+        );
+        // Spotless — which is exactly why the other probe could not have
+        // caught this, and why the tip check has to exist.
+        assert!(!task_git::has_changes(f.worktree.to_str().unwrap()).await.expect("status"));
+        let tip = task_git::rev_parse(f.root.to_str().unwrap(), "refs/heads/task/7")
+            .await
+            .expect("the branch is still there");
+        assert_ne!(tip, f.head, "and it holds the commit nobody pushed");
     }
 
     /// A pull request that already matches all four criteria is ADOPTED. This
@@ -8146,7 +8359,7 @@ mod tests {
             base_ref: "main".into(),
         });
 
-        let url = f.engine.deliver_pr(f.task_id, None, false).await.expect("delivery");
+        let url = f.engine.deliver_pr(f.task_id, None, false, false).await.expect("delivery");
         assert_eq!(url, "https://github.test/acme/app/pull/11");
         assert!(
             f.forge.created.lock().await.is_empty(),
@@ -8172,7 +8385,7 @@ mod tests {
             base_ref: "release/1.x".into(), // ← the only difference
         });
 
-        let url = f.engine.deliver_pr(f.task_id, None, false).await.expect("delivery");
+        let url = f.engine.deliver_pr(f.task_id, None, false, false).await.expect("delivery");
         assert_eq!(url, "https://github.test/acme/app/pull/42", "a new one was opened");
         assert_eq!(f.forge.created.lock().await.len(), 1);
     }
@@ -8200,7 +8413,7 @@ mod tests {
             let f = delivery_fixture(forge).await;
             let err = f
                 .engine
-                .deliver_pr(f.task_id, None, false)
+                .deliver_pr(f.task_id, None, false, false)
                 .await
                 .expect_err("must fail");
             assert!(err.contains(expected), "got {err}");
@@ -8229,7 +8442,7 @@ mod tests {
             head_repo: "acme/app".into(),
             base_ref: "main".into(),
         });
-        let err = f.engine.deliver_pr(f.task_id, None, false).await.expect_err("must stop");
+        let err = f.engine.deliver_pr(f.task_id, None, false, false).await.expect_err("must stop");
         assert!(err.contains("closed without merging"), "got {err}");
         assert!(f.forge.created.lock().await.is_empty());
         assert_eq!(row(&f.engine, f.task_id).await.status, WorkTaskStatus::Review);
@@ -8245,7 +8458,7 @@ mod tests {
         std::fs::write(dirty.worktree.join("scratch.txt"), "junk\n").expect("write");
         let err = dirty
             .engine
-            .deliver_pr(dirty.task_id, None, false)
+            .deliver_pr(dirty.task_id, None, false, false)
             .await
             .expect_err("dirty worktree");
         assert!(err.contains("uncommitted changes"), "got {err}");
@@ -8256,7 +8469,7 @@ mod tests {
         git_run(&empty.worktree, &["reset", "-q", "--hard", "HEAD~1"]);
         let err = empty
             .engine
-            .deliver_pr(empty.task_id, None, false)
+            .deliver_pr(empty.task_id, None, false, false)
             .await
             .expect_err("nothing to deliver");
         assert!(err.contains("nothing to deliver"), "got {err}");
@@ -8293,7 +8506,7 @@ mod tests {
 
             let err = f
                 .engine
-                .deliver_pr(f.task_id, None, false)
+                .deliver_pr(f.task_id, None, false, false)
                 .await
                 .expect_err("must refuse");
             assert!(err.contains(needle), "got {err}");
@@ -8425,7 +8638,7 @@ mod tests {
 
         let err = f
             .engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect_err("must refuse");
         assert!(err.contains("not on the remote yet"), "got {err}");
@@ -8438,7 +8651,7 @@ mod tests {
         *f.forge.remote_base.lock().await = None;
         let err = f
             .engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect_err("an unreadable base must refuse");
         assert!(err.contains("could not read"), "got {err}");
@@ -8492,7 +8705,7 @@ mod tests {
 
         let err = f
             .engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect_err("the second must not run");
         assert!(err.contains("already merging"), "got {err}");
@@ -8553,7 +8766,7 @@ mod tests {
 
         let err = f
             .engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect_err("must bounce");
         assert!(err.contains("different commit"), "got {err}");
@@ -8637,7 +8850,7 @@ mod tests {
         f.forge.existing.lock().await.push(pr);
 
         f.engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect("push back");
 
@@ -8673,7 +8886,7 @@ mod tests {
         active.update(&f.engine.db.conn).await.expect("record the run's result");
 
         f.engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect("delivery");
 
@@ -8704,7 +8917,7 @@ mod tests {
         let f = delivery_fixture(FakeForge::default()).await;
         set_writeback(&f, false).await;
         f.engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect("delivery");
         // The settle emitted; give a spawned write-back the same chance to run
@@ -8729,7 +8942,7 @@ mod tests {
             "the fixture stands in for a pre-choice row"
         );
         f.engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect("delivery");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -8748,7 +8961,7 @@ mod tests {
         .await;
         enable_writeback(&f).await;
         f.engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect("delivery");
 
@@ -9302,7 +9515,7 @@ mod tests {
 
             let err = f
                 .engine
-                .deliver_pr(f.task_id, None, false)
+                .deliver_pr(f.task_id, None, false, false)
                 .await
                 .err()
                 .unwrap_or_else(|| panic!("{label}: must not settle"));
@@ -9335,7 +9548,7 @@ mod tests {
         merged_ours.head_sha = f.head.clone();
         *f.forge.after_push.lock().await = Some(merged_ours);
         f.engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect("merged at our commit is a delivery");
         assert_eq!(row(&f.engine, f.task_id).await.status, WorkTaskStatus::Done);
@@ -9363,7 +9576,7 @@ mod tests {
         merged_on_top.head_sha = descendant;
         *f.forge.after_push.lock().await = Some(merged_on_top);
         f.engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect("a merge that contains our commit is a delivery");
         assert_eq!(row(&f.engine, f.task_id).await.status, WorkTaskStatus::Done);
@@ -9388,7 +9601,7 @@ mod tests {
         *f.forge.after_push.lock().await = Some(merged_theirs);
         let err = f
             .engine
-            .deliver_pr(f.task_id, None, false)
+            .deliver_pr(f.task_id, None, false, false)
             .await
             .expect_err("a merge without our commit is not a delivery");
         assert!(err.contains("does not contain it"), "{err}");
@@ -9429,7 +9642,7 @@ mod tests {
 
         let url = f
             .engine
-            .deliver_pr(f.task_id, Some("ignored".into()), false)
+            .deliver_pr(f.task_id, Some("ignored".into()), false, false)
             .await
             .expect("push back");
         assert_eq!(url, "https://github.test/acme/app/pull/7");
@@ -9467,7 +9680,7 @@ mod tests {
         as_pull_request_task(&f, pr.clone()).await;
         f.forge.existing.lock().await.push(pr);
 
-        f.engine.deliver_pr(f.task_id, None, false).await.expect("fork push back");
+        f.engine.deliver_pr(f.task_id, None, false, false).await.expect("fork push back");
         assert_eq!(
             f.forge.pushes.lock().await.as_slice(),
             [("contributor/app".to_string(), "task/7".to_string(), "feature".to_string())],
@@ -9494,7 +9707,7 @@ mod tests {
         as_pull_request_task(&f, pr.clone()).await;
         f.forge.existing.lock().await.push(pr);
 
-        f.engine.deliver_pr(f.task_id, None, false).await.expect("settled without a push");
+        f.engine.deliver_pr(f.task_id, None, false, false).await.expect("settled without a push");
         assert!(f.forge.pushes.lock().await.is_empty(), "no push may run");
         let task = row(&f.engine, f.task_id).await;
         assert_eq!(task.status, WorkTaskStatus::Done);
@@ -9516,7 +9729,7 @@ mod tests {
             "acme/app",
         ));
 
-        f.engine.deliver_pr(f.task_id, None, false).await.expect("push back");
+        f.engine.deliver_pr(f.task_id, None, false, false).await.expect("push back");
         assert_eq!(
             f.forge.pushes.lock().await.as_slice(),
             [("acme/app".to_string(), "task/7".to_string(), "feature".to_string())]
@@ -9537,7 +9750,7 @@ mod tests {
         closed.forge.existing.lock().await.push(pr);
         let err = closed
             .engine
-            .deliver_pr(closed.task_id, None, false)
+            .deliver_pr(closed.task_id, None, false, false)
             .await
             .expect_err("closed");
         assert!(err.contains("no longer open"), "{err}");
@@ -9550,7 +9763,7 @@ mod tests {
         as_pull_request_task(&fork, open_pull("x", "feature", "project-4711")).await;
         let err = fork
             .engine
-            .deliver_pr(fork.task_id, None, false)
+            .deliver_pr(fork.task_id, None, false, false)
             .await
             .expect_err("unnameable fork");
         assert!(err.contains("cannot see"), "{err}");
@@ -9569,7 +9782,7 @@ mod tests {
             .push(open_pull("x", "someone-elses-branch", "acme/app"));
         let err = moved
             .engine
-            .deliver_pr(moved.task_id, None, false)
+            .deliver_pr(moved.task_id, None, false, false)
             .await
             .expect_err("retargeted");
         assert!(err.contains("now tracks branch"), "{err}");

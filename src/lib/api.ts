@@ -3278,13 +3278,24 @@ export async function workTaskMerge(
  *
  *  Unlike the merge dispatch this awaits the WHOLE operation — no agent runs,
  *  just a push and two REST calls — so a rejection is the real reason and the
- *  task is already back in review by the time it surfaces. */
+ *  task is already back in review by the time it surfaces.
+ *
+ *  `deleteWorktree` takes the checkout along once the delivery lands — the
+ *  same offer the merge and complete acceptances make. It rides on the
+ *  delivery: a removal that fails leaves a retryable cleanup mark on the card
+ *  and this call still resolves with the URL. */
 export async function workTaskDeliverPr(
   id: number,
   prTitle: string | null,
-  draft: boolean
+  draft: boolean,
+  deleteWorktree: boolean
 ): Promise<string> {
-  return getTransport().call("work_task_deliver_pr", { id, prTitle, draft })
+  return getTransport().call("work_task_deliver_pr", {
+    id,
+    prTitle,
+    draft,
+    deleteWorktree,
+  })
 }
 
 /** Withdraw a merge waiting in the project's queue; the task stays in review. */

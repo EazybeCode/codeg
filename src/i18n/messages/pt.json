@@ -4822,6 +4822,7 @@
     "deliverPrTitleLabel": "Título do pull request",
     "deliverPrTitleLabelMr": "Título do merge request",
     "deliverPrDraft": "Abrir como rascunho",
+    "deliverPrDeleteWorktree": "Excluir o worktree após entregar",
     "deliverPrSubmit": "Enviar e abrir",
     "deliverPrSubmitting": "Enviando…",
     "deliverPrDone": "Pull request aberto",
@@ -4831,6 +4832,7 @@
     "deliverPrBackTitleMr": "Devolver ao merge request",
     "deliverPrBackDescription": "Envia os commits desta tarefa para {branch}, a branch de head de {repo}#{number}. Nada novo é aberto — a revisão que já existe recebe o trabalho.",
     "deliverPrBackDescriptionMr": "Envia os commits desta tarefa para {branch}, a branch de origem de {repo}!{number}. Nada novo é aberto — a revisão que já existe recebe o trabalho.",
+    "deliverPrBackDeleteWorktree": "Excluir o worktree após enviar",
     "deliverPrBackSubmit": "Enviar",
     "deliverPrBackDone": "Enviado ao pull request",
     "deliverPrBackDoneMr": "Enviado ao merge request"

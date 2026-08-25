@@ -4822,6 +4822,7 @@
     "deliverPrTitleLabel": "Pull request title",
     "deliverPrTitleLabelMr": "Merge request title",
     "deliverPrDraft": "Open as a draft",
+    "deliverPrDeleteWorktree": "Delete the worktree after delivering",
     "deliverPrSubmit": "Push and open",
     "deliverPrSubmitting": "Pushing…",
     "deliverPrDone": "Pull request opened",
@@ -4831,6 +4832,7 @@
     "deliverPrBackTitleMr": "Deliver back to the merge request",
     "deliverPrBackDescription": "Pushes this task's commits onto {branch}, the head branch of {repo}#{number}. Nothing new is opened — the review that is already there receives the work.",
     "deliverPrBackDescriptionMr": "Pushes this task's commits onto {branch}, the source branch of {repo}!{number}. Nothing new is opened — the review that is already there receives the work.",
+    "deliverPrBackDeleteWorktree": "Delete the worktree after pushing",
     "deliverPrBackSubmit": "Push",
     "deliverPrBackDone": "Pushed to the pull request",
     "deliverPrBackDoneMr": "Pushed to the merge request"

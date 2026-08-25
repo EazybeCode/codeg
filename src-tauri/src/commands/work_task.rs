@@ -593,13 +593,19 @@ pub async fn work_task_merge_unqueue_core(
 /// REST calls, no agent — so both success and failure land in the caller's
 /// dialog. Every gate is inside the engine, where a direct API call cannot
 /// route around it.
+///
+/// `delete_worktree` takes the checkout along once the delivery lands, the
+/// same offer the merge and complete acceptances make. It never changes the
+/// result: a removal that fails leaves a retryable `cleanup_state` on the card
+/// and the delivered URL still comes back.
 pub async fn work_task_deliver_pr_core(
     id: i32,
     pr_title: Option<String>,
     draft: bool,
+    delete_worktree: bool,
 ) -> Result<String, DbError> {
     engine()?
-        .deliver_pr(id, pr_title, draft)
+        .deliver_pr(id, pr_title, draft, delete_worktree)
         .await
         .map_err(DbError::Validation)
 }
@@ -964,8 +970,9 @@ pub async fn work_task_deliver_pr(
     id: i32,
     pr_title: Option<String>,
     draft: bool,
+    delete_worktree: bool,
 ) -> Result<String, DbError> {
-    work_task_deliver_pr_core(id, pr_title, draft).await
+    work_task_deliver_pr_core(id, pr_title, draft, delete_worktree).await
 }
 
 #[cfg(feature = "tauri-runtime")]

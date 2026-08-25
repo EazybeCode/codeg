@@ -4822,6 +4822,7 @@
     "deliverPrTitleLabel": "PR 标题",
     "deliverPrTitleLabelMr": "合并请求标题",
     "deliverPrDraft": "创建为草稿",
+    "deliverPrDeleteWorktree": "交付后删除 worktree",
     "deliverPrSubmit": "推送并创建",
     "deliverPrSubmitting": "推送中…",
     "deliverPrDone": "PR 已创建",
@@ -4831,6 +4832,7 @@
     "deliverPrBackTitleMr": "推回该合并请求",
     "deliverPrBackDescription": "把这个任务的提交推到 {repo}#{number} 的头分支 {branch}。不会新建任何东西——工作直接进入已经存在的那个评审。",
     "deliverPrBackDescriptionMr": "把这个任务的提交推到 {repo}!{number} 的源分支 {branch}。不会新建任何东西——工作直接进入已经存在的那个评审。",
+    "deliverPrBackDeleteWorktree": "推回后删除 worktree",
     "deliverPrBackSubmit": "推送",
     "deliverPrBackDone": "已推回 PR",
     "deliverPrBackDoneMr": "已推回合并请求"
