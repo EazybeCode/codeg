@@ -7,7 +7,11 @@ import {
   type PkRound,
 } from "./pk-arena-store"
 import type { DbConversationSummary, PkRoundInfo } from "@/lib/types"
-import { pkRoundCreate } from "@/lib/api"
+import {
+  pkRoundCreate,
+  pkRoundUpdateJudge,
+  pkRoundUpdateStatus,
+} from "@/lib/api"
 
 // Mock the API calls so createRound/markRound/archiveRound don't hit the network.
 vi.mock("@/lib/api", () => ({
@@ -30,6 +34,7 @@ vi.mock("@/lib/api", () => ({
   }),
   pkRoundUpdateStatus: vi.fn().mockResolvedValue(undefined),
   pkRoundDelete: vi.fn().mockResolvedValue(undefined),
+  pkRoundUpdateJudge: vi.fn().mockResolvedValue(undefined),
 }))
 
 function freshStore() {
@@ -107,6 +112,82 @@ describe("pk arena store", () => {
     await usePkArenaStore.getState().archiveRound(round.id)
     expect(usePkArenaStore.getState().rounds).toHaveLength(0)
     expect(usePkArenaStore.getState().activeRoundId).toBeNull()
+  })
+
+  it("surfaces persistence failures until the same field saves successfully", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    const round = await makeRound()
+    vi.mocked(pkRoundUpdateStatus).mockRejectedValueOnce(
+      new Error("database unavailable")
+    )
+
+    usePkArenaStore.getState().markRound(round.id, "running")
+
+    await vi.waitFor(() =>
+      expect(
+        usePkArenaStore.getState().rounds[0].persistenceErrors.status
+      ).toBe("database unavailable")
+    )
+
+    usePkArenaStore.getState().retryPersistence(round.id)
+
+    await vi.waitFor(() =>
+      expect(
+        usePkArenaStore.getState().rounds[0].persistenceErrors.status
+      ).toBeNull()
+    )
+    consoleError.mockRestore()
+  })
+
+  it("serializes writes so an older request cannot overwrite a newer value", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    const round = await makeRound()
+    let rejectOlder!: (error: Error) => void
+    vi.mocked(pkRoundUpdateStatus).mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          rejectOlder = reject
+        })
+    )
+
+    usePkArenaStore.getState().markRound(round.id, "running")
+    usePkArenaStore.getState().markRound(round.id, "finished")
+    await vi.waitFor(() => expect(pkRoundUpdateStatus).toHaveBeenCalledTimes(1))
+    rejectOlder(new Error("stale failure"))
+    await vi.waitFor(() => expect(pkRoundUpdateStatus).toHaveBeenCalledTimes(2))
+    await vi.waitFor(() =>
+      expect(
+        usePkArenaStore.getState().rounds[0].persistenceErrors.status
+      ).toBeNull()
+    )
+
+    expect(vi.mocked(pkRoundUpdateStatus).mock.calls).toEqual([
+      [Number(round.id), "running"],
+      [Number(round.id), "finished"],
+    ])
+    consoleError.mockRestore()
+  })
+
+  it("surfaces judge persistence failures independently", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    const round = await makeRound()
+    vi.mocked(pkRoundUpdateJudge).mockRejectedValueOnce(
+      new Error("judge write failed")
+    )
+
+    usePkArenaStore.getState().updateJudge(round.id, {
+      judgeStatus: "running",
+    })
+
+    await vi.waitFor(() =>
+      expect(usePkArenaStore.getState().rounds[0].persistenceErrors.judge).toBe(
+        "judge write failed"
+      )
+    )
+    expect(
+      usePkArenaStore.getState().rounds[0].persistenceErrors.status
+    ).toBeNull()
+    consoleError.mockRestore()
   })
 
   it("does not implicitly select history during hydration", async () => {

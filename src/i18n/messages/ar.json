@@ -5267,6 +5267,8 @@
       "shareReport": "Save / share report",
       "reportSaved": "HTML report saved",
       "reportFailed": "Report export failed: {message}",
+      "persistenceFailed": "تعذر حفظ بعض تغييرات الجولة. أعد المحاولة قبل إغلاق هذه الصفحة.",
+      "retrySave": "إعادة محاولة الحفظ",
       "readyTag": "جاهز",
       "deleteRound": "حذف",
       "deleteConfirm": "حذف هذه الجولة? تبقى أشجار العمل على القرص — استخدم تنظيف أشجار العمل.",

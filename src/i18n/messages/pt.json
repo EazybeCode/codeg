@@ -5267,6 +5267,8 @@
       "shareReport": "Save / share report",
       "reportSaved": "HTML report saved",
       "reportFailed": "Report export failed: {message}",
+      "persistenceFailed": "Algumas alterações da rodada não puderam ser salvas. Tente novamente antes de fechar esta página.",
+      "retrySave": "Tentar salvar novamente",
       "readyTag": "Pronto",
       "deleteRound": "Excluir",
       "deleteConfirm": "Excluir esta rodada? Os worktrees permanecem — use Limpar worktrees.",

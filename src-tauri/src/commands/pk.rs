@@ -125,6 +125,23 @@ pub async fn pk_round_delete_report_snapshot_core(
     }
 }
 
+/// Archive is a database operation; deleting its derived report cache is
+/// best-effort. A cache cleanup failure must not turn an already committed
+/// archive into a user-visible failure.
+pub async fn pk_round_archive_core(
+    db: &AppDatabase,
+    data_dir: &Path,
+    id: i32,
+) -> Result<(), DbError> {
+    pk_round_delete_core(db, id).await?;
+    if let Err(error) = pk_round_delete_report_snapshot_core(data_dir, id).await {
+        tracing::warn!(
+            "[PK] round {id} archived, but its report snapshot could not be removed: {error}"
+        );
+    }
+    Ok(())
+}
+
 // -- Tauri command wrappers (desktop mode only) --
 
 #[cfg(feature = "tauri-runtime")]
@@ -186,11 +203,12 @@ pub async fn pk_round_delete(
     app: tauri::AppHandle,
     id: i32,
 ) -> Result<(), AppCommandError> {
-    pk_round_delete_core(&db, id)
+    // Resolve fallible runtime state before committing the archive.
+    let data_dir = resolve_desktop_data_dir(&app)?;
+    pk_round_archive_core(&db, &data_dir, id)
         .await
         .map_err(AppCommandError::from)?;
-    let data_dir = resolve_desktop_data_dir(&app)?;
-    pk_round_delete_report_snapshot_core(&data_dir, id).await
+    Ok(())
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -305,6 +323,41 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(archived.deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn snapshot_cleanup_failure_does_not_turn_archive_into_failure() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/pk-archive-cache").await;
+        let round = pk_round_service::create(
+            &db.conn,
+            folder_id,
+            "test task".into(),
+            PkRoundConfig {
+                agents: Vec::new(),
+                permission_mode: "default".into(),
+                bare_mode: false,
+                effort: "default".into(),
+                judge_agent: None,
+                judge_dimensions: Vec::new(),
+                base_commit: None,
+            },
+        )
+        .await
+        .unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let snapshot_path = report_snapshot_path(data_dir.path(), round.id);
+        std::fs::create_dir_all(&snapshot_path).unwrap();
+
+        pk_round_archive_core(&db, data_dir.path(), round.id)
+            .await
+            .unwrap();
+
+        assert!(pk_round_service::list(&db.conn, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(snapshot_path.is_dir());
     }
 
     #[tokio::test]

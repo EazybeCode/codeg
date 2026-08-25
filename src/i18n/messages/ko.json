@@ -5267,6 +5267,8 @@
       "shareReport": "Save / share report",
       "reportSaved": "HTML report saved",
       "reportFailed": "Report export failed: {message}",
+      "persistenceFailed": "일부 라운드 상태를 저장하지 못했습니다. 페이지를 닫기 전에 작업을 다시 시도하세요.",
+      "retrySave": "저장 다시 시도",
       "readyTag": "준비됨",
       "deleteRound": "삭제",
       "deleteConfirm": "이 라운드를 삭제? 워크트리는 남아 있습니다(정리로 제거)",

@@ -5267,6 +5267,8 @@
       "shareReport": "Save / share report",
       "reportSaved": "HTML report saved",
       "reportFailed": "Report export failed: {message}",
+      "persistenceFailed": "Certaines modifications de la manche n’ont pas pu être enregistrées. Réessayez avant de fermer cette page.",
+      "retrySave": "Réessayer l’enregistrement",
       "readyTag": "Prêt",
       "deleteRound": "Supprimer",
       "deleteConfirm": "Supprimer cette manche ? Les worktrees restent — utilisez Nettoyer les worktrees.",

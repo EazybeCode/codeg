@@ -60,6 +60,7 @@ export function PkArenaView({
     runJudge,
   } = usePkRound()
   const markRound = usePkArenaStore((s) => s.markRound)
+  const retryPersistence = usePkArenaStore((s) => s.retryPersistence)
   const [tab, setTab] = useState<"battle" | "diff">("battle")
   const [reportExporting, setReportExporting] = useState(false)
   const [diffLoading, setDiffLoading] = useState(false)
@@ -140,6 +141,11 @@ export function PkArenaView({
   }
 
   const roundLive = round != null && round.status === "running"
+  const persistenceError = round
+    ? Object.values(round.persistenceErrors ?? {})
+        .filter(Boolean)
+        .join(" · ")
+    : ""
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-background">
@@ -224,6 +230,23 @@ export function PkArenaView({
               {reportExporting ? t("exporting") : t("shareReport")}
             </button>
           </div>
+
+          {persistenceError ? (
+            <div
+              className="flex items-center gap-3 border-b border-destructive/30 bg-destructive/8 px-4 py-2 text-xs text-destructive"
+              title={persistenceError}
+              role="status"
+            >
+              <span className="min-w-0 flex-1">{t("persistenceFailed")}</span>
+              <button
+                type="button"
+                className="shrink-0 rounded border border-destructive/30 px-2 py-1 font-medium hover:bg-destructive/10"
+                onClick={() => retryPersistence(round.id)}
+              >
+                {t("retrySave")}
+              </button>
+            </div>
+          ) : null}
 
           {round.status === "ready" ? (
             <div className="flex items-center gap-3 border-b border-border bg-amber-500/5 px-4 py-2">

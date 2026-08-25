@@ -94,6 +94,26 @@ describe("buildPkReportHtml", () => {
     expect(html).not.toContain("https://")
   })
 
+  it("localizes reports for every supported UI language", () => {
+    const expectations = [
+      ["zh-TW", "智能體 PK 戰報"],
+      ["ja", "エージェントPK戦報"],
+      ["ko", "에이전트 PK 결과 보고서"],
+      ["es", "Informe de batalla PK de agentes"],
+      ["de", "Agenten-PK-Kampfbericht"],
+      ["fr", "Rapport de bataille PK des agents"],
+      ["pt", "Relatório de batalha PK de agentes"],
+      ["ar", "تقرير منافسة الوكلاء"],
+    ] as const
+
+    for (const [locale, title] of expectations) {
+      expect(buildPkReportHtml(round, {}, locale)).toContain(title)
+    }
+    expect(buildPkReportHtml(round, {}, "ar")).toContain(
+      '<html lang="ar" dir="rtl">'
+    )
+  })
+
   it("embeds a single HTML artifact as a sandboxed runnable preview", () => {
     const contentBase64 = btoa("<h1>Playable</h1><script>game()</script>")
     const html = buildPkReportHtml(

@@ -5267,6 +5267,8 @@
       "shareReport": "Save / share report",
       "reportSaved": "HTML report saved",
       "reportFailed": "Report export failed: {message}",
+      "persistenceFailed": "No se pudieron guardar algunos cambios de la ronda. Reintenta la acción antes de cerrar esta página.",
+      "retrySave": "Reintentar guardado",
       "readyTag": "Listo",
       "deleteRound": "Eliminar",
       "deleteConfirm": "¿Eliminar esta ronda? Los worktrees permanecen — use Limpiar worktrees.",

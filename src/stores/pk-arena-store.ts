@@ -112,6 +112,10 @@ export interface PkJudgeResult {
 
 export type PkJudgeStatus = "idle" | "running" | "done" | "error" | "skipped"
 
+export type PkPersistenceField = "status" | "judge"
+
+export type PkPersistenceErrors = Record<PkPersistenceField, string | null>
+
 /**
  * Round-level permission policy, applied to every contestant right after
  * connect via `setMode` — the ACP-standard mode ids (Claude Code, Codex and
@@ -142,10 +146,12 @@ export interface PkRound {
    *  Set to `X^` when the round sources its task from commit X, so
    *  contestants start before X — they never see X's changes. */
   baseCommit: string | null
-  /** Judge verdict text (structured LLM output). Live-only — not persisted. */
+  /** Structured judge verdict, persisted with the round for history/report export. */
   judgeResult: PkJudgeResult | null
-  /** "idle" → "running" → "done" | "error" | "skipped". Live-only. */
+  /** "idle" → "running" → "done" | "error" | "skipped". Persisted. */
   judgeStatus: PkJudgeStatus
+  /** Latest persistence failure per independently saved round field. Live-only. */
+  persistenceErrors: PkPersistenceErrors
   contestants: PkContestant[]
 }
 
@@ -184,6 +190,7 @@ interface PkArenaActions {
   ): void
   markRound(roundId: string, status: PkRoundStatus): void
   archiveRound(roundId: string): Promise<void>
+  retryPersistence(roundId: string): void
   setActiveRound(roundId: string | null): void
   setLauncherOpen(open: boolean): void
   setPillDismissed(dismissed: boolean): void
@@ -194,6 +201,75 @@ interface PkArenaActions {
 }
 
 const LAUNCHER_LAST_KEY = "codeg:pk-launcher-last"
+
+const persistenceRevisions = new Map<string, number>()
+const persistenceQueues = new Map<string, Promise<void>>()
+
+function persistenceKey(roundId: string, field: PkPersistenceField): string {
+  return `${roundId}:${field}`
+}
+
+/**
+ * Serialize writes for one round field and surface only its latest result.
+ * Serialization prevents a slower old request from overwriting a newer DB
+ * value; the revision prevents its stale error from replacing newer UI state.
+ */
+function persistLatest(
+  roundId: string,
+  field: PkPersistenceField,
+  operation: () => Promise<void>
+): void {
+  const key = persistenceKey(roundId, field)
+  const revision = (persistenceRevisions.get(key) ?? 0) + 1
+  persistenceRevisions.set(key, revision)
+  const previous = persistenceQueues.get(key) ?? Promise.resolve()
+  const pending = previous.catch(() => undefined).then(operation)
+  persistenceQueues.set(key, pending)
+
+  void pending
+    .then(() => {
+      if (persistenceRevisions.get(key) !== revision) return
+      usePkArenaStore.setState((state) => ({
+        rounds: state.rounds.map((round) =>
+          round.id === roundId
+            ? {
+                ...round,
+                persistenceErrors: {
+                  ...(round.persistenceErrors ?? { status: null, judge: null }),
+                  [field]: null,
+                },
+              }
+            : round
+        ),
+      }))
+    })
+    .finally(() => {
+      if (persistenceQueues.get(key) === pending) {
+        persistenceQueues.delete(key)
+      }
+    })
+    .catch((error: unknown) => {
+      if (persistenceRevisions.get(key) !== revision) return
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(
+        `[PkArena] failed to persist ${field} for round ${roundId}`,
+        error
+      )
+      usePkArenaStore.setState((state) => ({
+        rounds: state.rounds.map((round) =>
+          round.id === roundId
+            ? {
+                ...round,
+                persistenceErrors: {
+                  ...(round.persistenceErrors ?? { status: null, judge: null }),
+                  [field]: message,
+                },
+              }
+            : round
+        ),
+      }))
+    })
+}
 
 /** Last launcher config, for one-click prefill on rematch. */
 export interface PkLauncherLastConfig {
@@ -309,6 +385,7 @@ export function dbRoundToStoreRound(
           }
         : null,
     judgeStatus: (info.judge_status as PkJudgeStatus) ?? "idle",
+    persistenceErrors: { status: null, judge: null },
     contestants: info.config.agents.map((entry, slot) => {
       const linked = contestantConversations[slot]
       const agentType = typeof entry === "string" ? entry : entry.agent
@@ -423,6 +500,7 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
       baseCommit: baseCommit ?? null,
       judgeResult: null,
       judgeStatus: "idle",
+      persistenceErrors: { status: null, judge: null },
       contestants: agents.map((a, slot) => ({
         slot,
         agentType: a.agentType,
@@ -476,18 +554,43 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
         round.id === roundId ? { ...round, status } : round
       ),
     }))
-    // Sync status to DB (fire-and-forget — the store update is the source of
-    // truth for the live UI; the DB row is for persistence across restarts).
-    void pkRoundUpdateStatus(Number(roundId), status).catch(() => undefined)
+    persistLatest(roundId, "status", () =>
+      pkRoundUpdateStatus(Number(roundId), status)
+    )
   },
 
   archiveRound: async (roundId) => {
     await pkRoundDelete(Number(roundId))
+    persistenceRevisions.delete(persistenceKey(roundId, "status"))
+    persistenceRevisions.delete(persistenceKey(roundId, "judge"))
+    persistenceQueues.delete(persistenceKey(roundId, "status"))
+    persistenceQueues.delete(persistenceKey(roundId, "judge"))
     set((state) => ({
       rounds: state.rounds.filter((round) => round.id !== roundId),
       activeRoundId:
         state.activeRoundId === roundId ? null : state.activeRoundId,
     }))
+  },
+
+  retryPersistence: (roundId) => {
+    const round = usePkArenaStore
+      .getState()
+      .rounds.find((candidate) => candidate.id === roundId)
+    if (!round) return
+    if (round.persistenceErrors?.status) {
+      persistLatest(roundId, "status", () =>
+        pkRoundUpdateStatus(Number(roundId), round.status)
+      )
+    }
+    if (round.persistenceErrors?.judge) {
+      persistLatest(roundId, "judge", () =>
+        pkRoundUpdateJudge(
+          Number(roundId),
+          round.judgeResult,
+          round.judgeStatus
+        )
+      )
+    }
   },
 
   setActiveRound: (roundId) => set({ activeRoundId: roundId }),
@@ -506,19 +609,19 @@ export const usePkArenaStore = create<PkArenaState & PkArenaActions>((set) => ({
             }
       ),
     }))
-    // Persist judge verdict + status to DB so it survives refresh/restart
-    // (fixes issue #4). Fire-and-forget — the store is the live source of
-    // truth; the DB is for persistence.
+    // Persist judge verdict + status to DB so it survives refresh/restart.
     const round = usePkArenaStore
       .getState()
       .rounds.find((r) => r.id === roundId)
     if (round) {
       const merged = patch.judgeResult ?? round.judgeResult ?? null
-      void pkRoundUpdateJudge(
-        Number(roundId),
-        merged,
-        patch.judgeStatus ?? round.judgeStatus
-      ).catch(() => undefined)
+      persistLatest(roundId, "judge", () =>
+        pkRoundUpdateJudge(
+          Number(roundId),
+          merged,
+          patch.judgeStatus ?? round.judgeStatus
+        )
+      )
     }
   },
 }))

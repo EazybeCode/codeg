@@ -96,10 +96,9 @@ pub async fn pk_round_delete(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<IdParams>,
 ) -> Result<Json<()>, AppCommandError> {
-    core::pk_round_delete_core(&state.db, params.id)
+    core::pk_round_archive_core(&state.db, &state.data_dir, params.id)
         .await
         .map_err(AppCommandError::from)?;
-    core::pk_round_delete_report_snapshot_core(&state.data_dir, params.id).await?;
     Ok(Json(()))
 }
 

@@ -5267,6 +5267,8 @@
       "shareReport": "Save / share report",
       "reportSaved": "HTML report saved",
       "reportFailed": "Report export failed: {message}",
+      "persistenceFailed": "Einige Änderungen der Runde konnten nicht gespeichert werden. Wiederhole die Aktion, bevor du diese Seite schließt.",
+      "retrySave": "Speichern wiederholen",
       "readyTag": "Bereit",
       "deleteRound": "Löschen",
       "deleteConfirm": "Diese Runde löschen? Worktrees bleiben auf der Platte — über 'Worktrees bereinigen' entfernen.",

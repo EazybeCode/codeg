@@ -5267,6 +5267,8 @@
       "shareReport": "保存 / 分享战报",
       "reportSaved": "HTML 战报已保存",
       "reportFailed": "战报导出失败：{message}",
+      "persistenceFailed": "部分回合状态未能保存，请在关闭页面前重试对应操作。",
+      "retrySave": "重试保存",
       "readyTag": "就绪",
       "deleteRound": "删除",
       "deleteConfirm": "删除这个回合?worktree 会留在磁盘上,可用「清理 worktree」移除。",

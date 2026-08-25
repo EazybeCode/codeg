@@ -5267,6 +5267,8 @@
       "shareReport": "Save / share report",
       "reportSaved": "HTML report saved",
       "reportFailed": "Report export failed: {message}",
+      "persistenceFailed": "一部のラウンド状態を保存できませんでした。ページを閉じる前に操作を再試行してください。",
+      "retrySave": "保存を再試行",
       "readyTag": "準備完了",
       "deleteRound": "削除",
       "deleteConfirm": "このラウンドを削除?ワークツリーは残ります(「ワークツリーを削除」で除去)",
