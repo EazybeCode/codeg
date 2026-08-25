@@ -112,6 +112,13 @@ interface MessageListViewProps {
    * copy alone. MUST be referentially stable.
    */
   onQuoteSelection?: (text: string) => void
+  /**
+   * Ask a question about a text selection made in this transcript: the host
+   * opens a new conversation on the same agent and sends the quoted selection
+   * followed by the question. Enables the "ask" entry on the selection bubble,
+   * on the same terms as `onQuoteSelection`. MUST be referentially stable.
+   */
+  onAskSelection?: (selection: string, question: string) => void
 }
 
 export interface ResolvedMessageGroup {
@@ -648,6 +655,7 @@ export function MessageListView({
   showMessageNav = true,
   userTurnHeader = null,
   onQuoteSelection,
+  onAskSelection,
 }: MessageListViewProps) {
   const t = useTranslations("Folder.chat.messageList")
   const sharedT = useTranslations("Folder.chat.shared")
@@ -1168,6 +1176,7 @@ export function MessageListView({
         <SelectionActionBubble
           containerRef={selectionBoxRef}
           onQuote={onQuoteSelection}
+          onAsk={onAskSelection}
         />
       </div>
     </SessionViewerHost>

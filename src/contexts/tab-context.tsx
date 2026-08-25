@@ -13,6 +13,7 @@ import {
   runCorrectionOnce,
   runRecoveryOnce,
   useTabStore,
+  type OpenedDraftTarget,
   type TabItem,
   type WorkspaceTabItem,
 } from "@/stores/tab-store"
@@ -24,7 +25,7 @@ import {
   type TabsChanged,
 } from "@/lib/types"
 
-export type { TabItem, WorkspaceTabItem }
+export type { OpenedDraftTarget, TabItem, WorkspaceTabItem }
 export { useTabStore, useTabActions } from "@/stores/tab-store"
 
 interface TabProviderProps {
@@ -247,9 +248,13 @@ export interface TabContextValue {
       inheritFromActive?: boolean
       folderDefaultAgent?: AgentType | null
       targetGroup?: string
+      forceAgent?: TabItem["agentType"]
     }
-  ) => void
-  openChatModeTab: (options?: { targetGroup?: string }) => void
+  ) => OpenedDraftTarget
+  openChatModeTab: (options?: {
+    targetGroup?: string
+    forceAgent?: TabItem["agentType"]
+  }) => OpenedDraftTarget
   setChatDraftWorkingDir: (tabId: string, workingDir: string) => void
   confirmDraftAgent: (tabId: string, agentType: AgentType) => void
   setDraftAgentFromFallback: (tabId: string, agentType: AgentType) => void

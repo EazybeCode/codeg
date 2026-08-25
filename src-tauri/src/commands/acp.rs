@@ -3172,6 +3172,27 @@ fn codex_config_projection_from_toml(raw_toml: &str) -> serde_json::Map<String, 
         }
     }
 
+    // `[features].default_mode_request_user_input` — the flag that lets codex
+    // call `request_user_input` outside Plan mode, i.e. whether codeg's
+    // question cards can appear in an ordinary turn at all
+    // (openai/codex#24750). Feature flags are resolved when the thread is
+    // created, so flipping this only reaches a session that starts afterwards;
+    // folding it into the fingerprint is what tells the user their RUNNING
+    // sessions need a restart. Same false-is-default rule as the sandbox keys
+    // below: absent and `false` both stay out, so a config nobody touched keeps
+    // its historical fingerprint.
+    if value
+        .get("features")
+        .and_then(|table| table.get("default_mode_request_user_input"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
+    {
+        merged.insert(
+            "defaultModeRequestUserInput".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+
     // Sandbox / approval keys. codex reads these when a thread is created
     // (`thread/start`), never mid-session, so a panel edit must mark running
     // sessions restart-required — and the fingerprint is the only channel that
@@ -13412,6 +13433,40 @@ mod tests {
         );
         assert!(with_sandbox.contains_key("sandboxWorkspaceWrite"));
         assert_ne!(plain, with_sandbox, "the fingerprint input must change");
+    }
+
+    #[test]
+    fn codex_projection_folds_default_mode_request_user_input() {
+        // Feature flags resolve at thread creation, so turning questions on in
+        // Default mode must mark running sessions restart-required.
+        let base = "model = \"gpt-5\"\n";
+        let plain = codex_config_projection_from_toml(base);
+        assert!(!plain.contains_key("defaultModeRequestUserInput"));
+
+        let on = codex_config_projection_from_toml(
+            "model = \"gpt-5\"\n\n[features]\ndefault_mode_request_user_input = true\n",
+        );
+        assert_eq!(
+            on.get("defaultModeRequestUserInput")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_ne!(plain, on, "the fingerprint input must change");
+
+        // Explicit `false` IS codex's default, so it must hash identically to
+        // an untouched config — otherwise flipping the switch on and back off
+        // would leave every running session falsely marked restart-required.
+        let off = codex_config_projection_from_toml(
+            "model = \"gpt-5\"\n\n[features]\ndefault_mode_request_user_input = false\n",
+        );
+        assert_eq!(plain, off);
+
+        // Other `[features]` keys are not projected, and must not be mistaken
+        // for this one.
+        let other = codex_config_projection_from_toml(
+            "model = \"gpt-5\"\n\n[features]\nskills = true\n",
+        );
+        assert_eq!(plain, other);
     }
 
     #[test]
