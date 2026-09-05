@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
-    Aes256Gcm, Key,
+    Aes256Gcm, Key, Nonce,
 };
 use axum::{
     extract::{Extension, Query},
@@ -62,6 +62,38 @@ fn encrypt(plaintext: &str) -> Option<String> {
     let mut blob = nonce.to_vec();
     blob.extend_from_slice(&ct);
     Some(B64.encode(blob))
+}
+
+/// Reverse of `encrypt`. Returns None on any failure (bad key, tampered blob).
+pub fn decrypt(blob: &str) -> Option<String> {
+    let key = enc_key().ok()?;
+    let raw = B64.decode(blob).ok()?;
+    if raw.len() < 12 {
+        return None;
+    }
+    let (nonce_bytes, ct) = raw.split_at(12);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let pt = cipher.decrypt(Nonce::from_slice(nonce_bytes), ct).ok()?;
+    String::from_utf8(pt).ok()
+}
+
+/// Resolve the logged-in user from the session cookie. The API is still token-
+/// gated (v1 bridge), but the browser also carries the `workos_session` cookie,
+/// so per-user endpoints (GitHub repo ops) can identify who is acting.
+pub async fn current_user(
+    headers: &HeaderMap,
+    db: &sea_orm::DatabaseConnection,
+) -> Option<user::Model> {
+    let sid = cookie_value(headers, SESSION_COOKIE)?;
+    let sess = session::Entity::find_by_id(sid).one(db).await.ok().flatten()?;
+    if sess.expires_at < chrono::Utc::now() {
+        return None;
+    }
+    user::Entity::find_by_id(sess.user_id)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
 }
 
 fn random_id() -> String {
