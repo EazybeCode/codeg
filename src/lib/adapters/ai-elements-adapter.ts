@@ -67,9 +67,12 @@ export type AdaptedToolCallPart = {
   toolStatus?: string | null
   /**
    * ACP extensibility metadata forwarded from `ContentBlock.tool_use.meta`.
-   * Opaque pass-through; the only consumer today is `<DelegatedSubThread>`
-   * which reads `meta["codeg.delegation"]` as a binding fallback when the
-   * live DelegationContext entry is missing (page refresh, late mount).
+   * Opaque pass-through, read by narrow accessors rather than interpreted here:
+   * `<DelegatedSubThread>` takes `meta["codeg.delegation"]` as a binding
+   * fallback when the live DelegationContext entry is missing (page refresh,
+   * late mount), and the command card takes
+   * `meta.jetbrains.air.asyncTasks.backgrounded` (`toolCallMovedToBackground`)
+   * to explain a call that will never settle inside the turn.
    */
   meta?: Record<string, unknown> | null
   /**

@@ -24,8 +24,8 @@ use sacp::schema::{
 use sacp::schema::{HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio};
 use sacp::util::MatchDispatch;
 use sacp::{
-    on_receive_request, Agent, Client, ConnectionTo, Dispatch, JsonRpcRequest, Responder,
-    SessionMessage, UntypedMessage,
+    on_receive_notification, on_receive_request, Agent, Client, ConnectionTo, Dispatch,
+    JsonRpcRequest, Responder, SessionMessage, UntypedMessage,
 };
 use sacp_tokio::AcpAgent;
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -980,17 +980,18 @@ pub enum ConnectionCommand {
         reply: tokio::sync::oneshot::Sender<Result<SteerOutcome, AcpError>>,
     },
     /// Stop one AIR async task (`_session/async_task/stop`; claude-agent-acp
-    /// 0.73+). Handled in BOTH loops on purpose: background work is normally
-    /// launched by — and outlives — a turn, so the user is as likely to reach
-    /// for the stop button mid-turn as between turns.
+    /// 0.73+, codex-acp 1.10+ — identical params and response on both).
+    /// Handled in BOTH loops on purpose: background work is normally launched
+    /// by — and outlives — a turn, so the user is as likely to reach for the
+    /// stop button mid-turn as between turns.
     ///
     /// The reply is the adapter's own `stopped` flag, not "did the request
     /// succeed": it answers `false` for a task it will not stop (unknown,
     /// already terminal, or a stop already in flight). The visible result
-    /// arrives on the normal channel either way — the adapter follows a
-    /// successful stop with an `async_task_state_update` and a transcript line
-    /// — so this is only what the caller needs to avoid claiming it stopped
-    /// something it didn't.
+    /// arrives on the normal channel either way — a successful stop is followed
+    /// by an `async_task_state_update` (and, on codex, by the launching tool
+    /// call finally settling `failed` with exit code -1) — so this is only what
+    /// the caller needs to avoid claiming it stopped something it didn't.
     StopAsyncTask {
         task_id: String,
         reply: tokio::sync::oneshot::Sender<Result<bool, AcpError>>,
@@ -3831,11 +3832,9 @@ fn build_client_capabilities(
     if agent_type == AgentType::ClaudeCode {
         meta.insert("subagent-transcript".to_string(), serde_json::Value::Bool(true));
     }
-    // claude-agent-acp 0.73.0 added "asyncTasks", and it is advertised — to
-    // claude ONLY, because codex-acp 1.8.0 does not implement the channel
-    // (its bundle contains no `asyncTasks` string at all). It publishes the
-    // lifecycle of Claude's NON-AGENT background work (background shells,
-    // workflows, monitors) as `async_task_spawned` / `_progress` /
+    // claude-agent-acp 0.73.0 added "asyncTasks", and codex-acp 1.10.0 joined
+    // it, so BOTH are advertised. It publishes the lifecycle of an agent's
+    // NON-AGENT background work as `async_task_spawned` / `_progress` /
     // `_state_update`, all on the parent session id. Unlike the two capabilities
     // below, this one adds something codeg cannot get anywhere else: the
     // transcript watcher (`background_watch`) can see that a task was launched
@@ -3846,6 +3845,42 @@ fn build_client_capabilities(
     // `_session/async_task/stop` control. Sub-agent tasks stay out of it by the
     // adapter's own filter (`taskType: "local_agent"` is marked ignored), so
     // advertising this does not disturb the sub-agent surfaces.
+    //
+    // For claude those tasks are background shells, workflows and monitors; for
+    // codex they are BACKGROUND TERMINALS — a shell process the model leaves
+    // running past the tool call, which codex core tracks under
+    // `thread/backgroundTerminals/*`. codex-acp only announces a terminal that
+    // its own `thread/backgroundTerminals/list` still reports as alive, so an
+    // ordinary foreground command never appears here.
+    //
+    // The codex half was captured off a live 1.10.0 over stdio, and the control
+    // run (identical prompt, capability withheld) is what settles the trade:
+    //
+    //   WITHOUT the advertisement — one frame, then silence for the rest of the
+    //   connection:
+    //     tool_call        {toolCallId:"exec-…", status:"in_progress",
+    //                       kind:"execute", title:"sleep 400"}
+    //   The turn ends `end_turn` with that call still `in_progress`. There is no
+    //   completion, no terminal edge, and nothing that says why.
+    //
+    //   WITH it, the same run adds:
+    //     tool_call_update {toolCallId:"exec-…",
+    //                       _meta.jetbrains.air.asyncTasks.backgrounded:true}
+    //     async_task_spawned {asyncTaskId:"exec-…", name:"sleep 400",
+    //                         taskType:"shell", showInTranscript:false,
+    //                         canStop:true, toolCallId:"exec-…"}
+    //     …and on `_session/async_task/stop` → {stopped:true}:
+    //     async_task_state_update {asyncTaskId:"exec-…", state:"stopped",
+    //                              toolCallId:"exec-…"}
+    //     tool_call_update {toolCallId:"exec-…", status:"failed", exit_code:-1}
+    //
+    // Three details of the codex shape that the shared reader already absorbs:
+    // `asyncTaskId` EQUALS the `toolCallId` for a root-session task (the adapter
+    // only prefixes `<threadId>:` for a sub-agent thread); there is no
+    // `description`, `usage` or `outputFilePath`, so the strip row is name-only;
+    // and the `backgrounded` marker rides a `_meta` block with NO `version` key,
+    // unlike its `sessionFailure` sibling — the frontend's
+    // `toolCallMovedToBackground` must not gate on one.
     //
     // The remaining two AIR capabilities are deliberately still out.
     // claude-agent-acp 0.69.0 and codex-acp 1.4.0 added
@@ -3903,14 +3938,13 @@ fn build_client_capabilities(
     // to rebuild the capsule — a parent tool-use id, or the child tool calls
     // arriving with one codeg has seen.
     if matches!(agent_type, AgentType::ClaudeCode | AgentType::Codex) {
-        let mut capabilities = vec!["sessionFailure"];
-        if agent_type == AgentType::ClaudeCode {
-            capabilities.push("asyncTasks");
-        }
         meta.insert(
             "jetbrains".to_string(),
             serde_json::json!({
-                "air": { "version": 1, "capabilities": capabilities }
+                "air": {
+                    "version": 1,
+                    "capabilities": ["sessionFailure", "asyncTasks"],
+                }
             }),
         );
     }
@@ -5026,6 +5060,13 @@ async fn run_connection(
                 }
             },
             on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |notif: AuthStatusUpdateNotification, _cx: ConnectionTo<Agent>| {
+                handle_auth_status_update(agent_type, notif);
+                Ok(())
+            },
+            on_receive_notification!(),
         )
         .connect_with(agent, async move |cx| -> Result<(), sacp::Error> {
             let state = state_outer;
@@ -12204,6 +12245,80 @@ fn grok_ext_notification_is_alert(dispatch: &Dispatch, agent_type: AgentType) ->
     }
 }
 
+/// codex-acp 1.9.0's `_auth/status_update` — the agent reporting which identity
+/// IT is logged in with.
+///
+/// Connection-level: unlike every other agent push codeg reads, the params carry
+/// NO `sessionId`, which is exactly why it needs a handler of its own (see
+/// [`handle_auth_status_update`]). Only `authStatus` is modelled; the payload is
+/// kept as a raw value so a new `kind` or an added field can never turn a
+/// well-formed push into a deserialization failure.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, sacp::JsonRpcNotification)]
+#[notification(method = "_auth/status_update")]
+#[serde(rename_all = "camelCase")]
+struct AuthStatusUpdateNotification {
+    auth_status: serde_json::Value,
+}
+
+/// Claim `_auth/status_update` and drop it, loudly enough to be greppable.
+///
+/// codex-acp pushes this unconditionally — once right after the `initialize`
+/// response, then on every authenticate / logout / session create, and whenever
+/// the app-server reports `account/updated`. It is not gated on anything codeg
+/// advertises; the agent merely ANNOUNCES the channel with
+/// `agentCapabilities._meta.authStatus = {}`.
+///
+/// A handler is registered rather than letting it fall through because falling
+/// through is not free. sacp walks the handler chain, finds no claimant (the
+/// per-session `ActiveSessionHandler` only matches frames carrying its own
+/// `sessionId`, and this one carries none), and then does two things for every
+/// such notification: logs `Rejecting message with error, no handler` at INFO,
+/// and calls `Dispatch::respond_with_error`, which for a NOTIFICATION means
+/// `send_error_notification` — codeg writes a bare JSON-RPC error object back to
+/// an agent that never asked a question. Claiming the frame here is what keeps
+/// the bump from introducing that.
+///
+/// Nothing consumes the payload yet, and that is a deliberate stop: the status
+/// describes the AGENT-owned login only (routing codeg itself configured through
+/// `providers/set` is explicitly excluded upstream), and every failure it could
+/// warn about already arrives as an AIR `sessionFailure` carrying an actionable
+/// `login`. The shape is recorded here so a future consumer does not have to
+/// re-derive it:
+///
+///   {"authStatus": {"kind": "account" | "api_key" | "external" | "gateway"
+///                           | "none",
+///                   "label": "ChatGPT Pro" | "OpenAI API key"
+///                            | "Custom model gateway" | "Not logged in" | …,
+///                   "detail"?: "<gateway provider id>",
+///                   "account"?: {"email"?, "plan"?, "organization"?},
+///                   "vendor"?: {…}}}
+///
+/// Observed against a live 1.10.0 whose `~/.codex/config.toml` selects a custom
+/// provider: `{"kind":"gateway","label":"Custom model gateway","detail":"codeg"}`.
+/// The payload is NOT logged whole: `account.email` and `account.organization`
+/// are the signed-in person's identity, and codeg's log file is user-visible
+/// (and shipped in diagnostics). `kind` and `label` are the two fields that
+/// answer "which identity is this connection using", and neither identifies a
+/// person — `label` is one of a fixed vocabulary ("ChatGPT Pro", "OpenAI API
+/// key", "Custom model gateway", "Not logged in") plus, for a gateway, the
+/// provider id the user configured locally.
+fn handle_auth_status_update(agent_type: AgentType, notif: AuthStatusUpdateNotification) {
+    let field = |key: &str| {
+        notif
+            .auth_status
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    tracing::debug!(
+        agent = %agent_type,
+        kind = %field("kind"),
+        label = %field("label"),
+        "[ACP] agent reported its auth status (no consumer)"
+    );
+}
+
 /// Whether codeg has a mapper for this ext-notification method.
 ///
 /// Used ONLY to keep the unrecognized-method log quiet about methods we do know
@@ -12320,11 +12435,13 @@ fn fix_usage_update_nulls(mut dispatch: Dispatch) -> Dispatch {
 /// would be reported as an agent that said nothing. Same raw-rewrite seam as
 /// [`fix_usage_update_nulls`].
 ///
-/// Deliberately NOT gated on `agent_type`. Only claude-agent-acp is offered the
-/// `asyncTasks` capability today (see `build_client_capabilities`), so nothing
-/// else should send these — but if something does, reading the frame is
-/// strictly better than dropping it, and both adapters implement the same AIR
-/// vocabulary.
+/// Deliberately NOT gated on `agent_type`. claude-agent-acp and codex-acp are
+/// the two adapters offered the `asyncTasks` capability (see
+/// `build_client_capabilities`), so nothing else should send these — but if
+/// something does, reading the frame is strictly better than dropping it, since
+/// every AIR speaker uses the same vocabulary. The two shapes differ only in how
+/// much they fill in: claude names a `description`, `usage` and
+/// `outputFilePath`; codex sends the command as `name` and stops there.
 fn air_async_task_delta(dispatch: &Dispatch) -> Option<AsyncTaskDelta> {
     let Dispatch::Notification(msg) = dispatch else {
         return None;
@@ -14174,10 +14291,10 @@ mod tests {
             // And exactly this much. Adding a capability here is not free — it
             // is what turns the corresponding behavior on.
             //
-            // "asyncTasks" (claude-agent-acp 0.73.0) IS wanted, and only claude
-            // has it: codex-acp 1.8.0 contains no async-task code at all, so
-            // advertising it there would be a promise about a channel that
-            // cannot answer.
+            // "asyncTasks" IS wanted, from BOTH (claude-agent-acp 0.73.0,
+            // codex-acp 1.10.0): it is the only channel that reports whether an
+            // agent's background work is still alive, and the only one that can
+            // stop it.
             //
             // The other two stay out. "agentFileChangeReport"
             // (claude-agent-acp 0.69.0 / codex-acp 1.4.0) buys an extra model
@@ -14188,11 +14305,8 @@ mod tests {
             // rendering around, replacing it with an announcement that carries
             // no parent tool-use id to rebuild it from. See the reasoning at
             // the advertisement site before relaxing this.
-            let expected: Vec<serde_json::Value> = if agent == AgentType::ClaudeCode {
-                vec!["sessionFailure".into(), "asyncTasks".into()]
-            } else {
-                vec!["sessionFailure".into()]
-            };
+            let expected: Vec<serde_json::Value> =
+                vec!["sessionFailure".into(), "asyncTasks".into()];
             assert_eq!(
                 capabilities, &expected,
                 "{agent:?} advertises an unexpected AIR capability set"
@@ -16740,6 +16854,86 @@ mod tests {
         assert!(!state.spawned);
         assert_eq!(state.state.as_deref(), Some("completed"));
         assert_eq!(state.summary.as_deref(), Some("3 files changed"));
+    }
+
+    /// codex-acp 1.10.0's frames, verbatim off a live stdio session (`sleep 400`
+    /// left running in a persistent shell, then stopped). codex fills in far
+    /// less than claude — no `description`, `usage` or `outputFilePath`, and the
+    /// task id EQUALS the tool call id — so the reader has to survive on the
+    /// spawn frame's four fields alone, and `to_record`'s defaults must not
+    /// invent anything the strip would then render.
+    #[test]
+    fn async_task_reader_handles_the_codex_spawn_and_stop_frames() {
+        let spawn = air_async_task_delta(&async_task_notif(serde_json::json!({
+            "sessionUpdate": "async_task_spawned",
+            "asyncTaskId": "exec-74096479-1a0d-4c6d-bbfa-ae10fce94da2",
+            "name": "sleep 400",
+            "taskType": "shell",
+            "showInTranscript": false,
+            "canStop": true,
+            "toolCallId": "exec-74096479-1a0d-4c6d-bbfa-ae10fce94da2",
+        })))
+        .expect("codex spawn frame");
+        assert!(spawn.spawned);
+        assert_eq!(spawn.name.as_deref(), Some("sleep 400"));
+        assert_eq!(spawn.task_type.as_deref(), Some("shell"));
+        assert_eq!(spawn.can_stop, Some(true));
+        // Absent upstream, and they must stay absent rather than become empty
+        // strings the strip would render as a blank meta line.
+        assert!(spawn.description.is_none());
+        assert!(spawn.usage.is_none());
+        assert!(spawn.output_file_path.is_none());
+        assert_eq!(spawn.tool_call_id.as_deref(), Some(spawn.task_id.as_str()));
+
+        let record = spawn.to_record();
+        assert_eq!(record.name, "sleep 400");
+        assert_eq!(record.task_type, "shell");
+        // No `state` on the wire: the row must start LIVE, or the strip would
+        // never show a task that codex only ever revises at its terminal edge.
+        assert_eq!(record.state, "running");
+        assert!(record.can_stop);
+        assert!(!crate::acp::types::async_task_state_is_terminal(
+            &record.state
+        ));
+
+        let stopped = air_async_task_delta(&async_task_notif(serde_json::json!({
+            "sessionUpdate": "async_task_state_update",
+            "asyncTaskId": "exec-74096479-1a0d-4c6d-bbfa-ae10fce94da2",
+            "state": "stopped",
+            "toolCallId": "exec-74096479-1a0d-4c6d-bbfa-ae10fce94da2",
+        })))
+        .expect("codex stop frame");
+        assert!(!stopped.spawned);
+        assert_eq!(stopped.state.as_deref(), Some("stopped"));
+        assert!(crate::acp::types::async_task_state_is_terminal("stopped"));
+    }
+
+    /// The `_auth/status_update` payload codex-acp 1.9+ pushes, unchanged. The
+    /// only contract that matters is that it DESERIALIZES — sacp answers an
+    /// unclaimed notification with a `method_not_found` error notification
+    /// written back to the agent, and a strict struct here would put codeg back
+    /// on that path the first time OpenAI adds a field.
+    #[test]
+    fn auth_status_update_deserializes_every_observed_kind() {
+        for payload in [
+            // Observed live: a `~/.codex/config.toml` selecting a custom provider.
+            serde_json::json!({"authStatus": {
+                "kind": "gateway", "label": "Custom model gateway", "detail": "codeg"
+            }}),
+            serde_json::json!({"authStatus": {
+                "kind": "account", "label": "ChatGPT Pro",
+                "account": {"email": "a@b.c", "plan": "pro"}
+            }}),
+            serde_json::json!({"authStatus": {"kind": "none", "label": "Not logged in"}}),
+            // A future kind, and a future sibling field, must both still parse.
+            serde_json::json!({"authStatus": {"kind": "something_new"}, "extra": 1}),
+        ] {
+            let notif: AuthStatusUpdateNotification =
+                serde_json::from_value(payload.clone()).unwrap_or_else(|e| {
+                    panic!("must not reject {payload}: {e}");
+                });
+            assert!(notif.auth_status.is_object());
+        }
     }
 
     /// The interceptor sits in front of EVERY dispatch, so a false positive

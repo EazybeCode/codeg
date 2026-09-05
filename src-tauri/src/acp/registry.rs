@@ -895,9 +895,60 @@ pub fn get_agent_meta(agent_type: AgentType) -> AcpAgentMeta {
             // three names). Steering still ships no `promptRequired` opt-in
             // (tarball grep: zero hits), and there is still no `engines.node`,
             // so the 20.0.0 floor is retained.
+            //
+            // 1.9.0 + 1.10.0 add exactly five wire methods between them (diff of
+            // the two bundles' method literals: nothing was REMOVED), of which
+            // three are internal app-server calls and two face the client:
+            //
+            // (a) 1.10.0 — AIR **`asyncTasks`**, and this is the bump's reason.
+            // codex's background terminals (a shell the model leaves running,
+            // e.g. via the `unified_exec` tool) now publish the same lifecycle
+            // claude-agent-acp 0.73.0 does, so `build_client_capabilities` now
+            // advertises the capability to Codex as well. It is purely
+            // additive: `CodexBackgroundTerminalTasks` is constructed with
+            // `enabled = clientSupportsAirCapability(…, "asyncTasks")` and every
+            // method short-circuits on `isActive()`, so NOT advertising is
+            // byte-identical to 1.8.0. Verified against a live 1.10.0 over
+            // stdio, WITH and WITHOUT the advertisement — see the wire trace in
+            // `build_client_capabilities`. The control run is the argument for
+            // opting in: without it the launching `execute` tool call sits at
+            // `in_progress` for the rest of the connection and codeg learns
+            // nothing at all about the process behind it.
+            //
+            // (b) 1.9.0 — **`_auth/status_update`**, a connection-level (NO
+            // `sessionId`) notification pushed unconditionally: once just after
+            // the `initialize` response, then on each authenticate / logout /
+            // session create, and on the app-server's `account/updated`. It is
+            // NOT capability-gated in either direction; the agent only
+            // ANNOUNCES it via `agentCapabilities._meta.authStatus = {}`. codeg
+            // claims and drops it in `handle_auth_status_update` — see there for
+            // why a silent drop is not an option.
+            //
+            // (c) 1.9.0 — `account/rateLimits/read` (internal): `/status` now
+            // refreshes the rate limits before printing instead of showing
+            // whatever the last turn happened to report, prints an extra
+            // "individual spend limit" line, and flips the context line from
+            // "N% left" to "N% used". All three are agent TEXT that codeg
+            // renders as markdown — the whole repo has no `/status` parser
+            // (`lib/codex-command-action.ts`, codeg's only codex-text reader,
+            // handles tool-call titles and command-result envelopes, never a
+            // slash-command's reply), so this is display-only.
+            //
+            // (d) 1.9.0 — `sessionState.lastTokenUsage` is reset when a turn
+            // actually STARTS rather than when a prompt is received, so a prompt
+            // that dies before its turn opens no longer blanks the last usage.
+            // codeg reads `usage_update` frames and is unaffected.
+            //
+            // `thread/backgroundTerminals/{list,terminate}` are the app-server
+            // half of (a) and never reach ACP. Steering STILL ships no
+            // `promptRequired` opt-in (tarball grep: zero hits ⇒ the arm below
+            // stays None), `agentFileChangeReport` / native subagent sessions
+            // are still not adopted, and there is still no `engines.node`, so
+            // the 20.0.0 floor is retained. `@openai/codex` moves ^0.152 →
+            // ^0.153.3 (one minor plus patches).
             distribution: AgentDistribution::Npx {
-                version: "1.8.0",
-                package: "@agentclientprotocol/codex-acp@1.8.0",
+                version: "1.10.0",
+                package: "@agentclientprotocol/codex-acp@1.10.0",
                 cmd: "codex-acp",
                 args: &[],
                 env: &[],
@@ -1809,8 +1860,8 @@ mod tests {
         );
         assert_npx_version(
             AgentType::Codex,
-            "1.8.0",
-            "@agentclientprotocol/codex-acp@1.8.0",
+            "1.10.0",
+            "@agentclientprotocol/codex-acp@1.10.0",
             Some("20.0.0"),
         );
         assert_npx_version(AgentType::Pi, "0.0.33", "pi-acp@0.0.33", Some("22.0.0"));

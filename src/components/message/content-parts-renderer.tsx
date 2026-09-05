@@ -11,8 +11,10 @@ import {
   extractClaudeCodeMetaTitle,
   extractClaudeCodeSkillName,
   normalizeToolName,
+  toolCallMovedToBackground,
 } from "@/lib/tool-call-normalization"
 import { parseBackgroundLaunch } from "@/lib/background-task"
+import { isUnsettledToolCall } from "@/lib/tool-call-lifecycle"
 import { normalizePriority, normalizeStatus } from "@/lib/plan-parse"
 import { isDelegateToAgentToolName } from "@/lib/delegation-card"
 import { useTranslations } from "next-intl"
@@ -2298,6 +2300,38 @@ const ToolCallPart = memo(function ToolCallPart({
         : null,
     [isCommandTool, part.output, part.errorText]
   )
+  // The same statement, told a different way. codex-acp doesn't put a launch
+  // notice in the output — it never completes the call at all — and says so on
+  // the ACP `_meta` instead (`toolCallMovedToBackground`). Not gated on
+  // `isCommandTool`: the marker is authoritative about THIS call regardless of
+  // how the tool name resolved, which is what makes it safe to trust over a
+  // parsed string. The live strip above the transcript owns the rest of the
+  // lifecycle (and the stop button); this badge only answers "why is it still
+  // spinning".
+  //
+  // Gated on the call being UNSETTLED, which the claude arm below is not — and
+  // the asymmetry is the wire's, not a style choice. Claude's launch call
+  // completes immediately (its output IS the ack), so its badge has to survive
+  // a settled card; codex's stays open for the process's whole life and settles
+  // only when the process dies or a stop lands. Ungated, the marker would
+  // outlive its own truth: the reducer keeps the stored meta when an update
+  // carries none (`meta: action.meta ?? block.info.meta`), so a settling frame
+  // without `_meta` would leave "Background" pinned to a finished command.
+  // `isUnsettledToolCall` rather than a bare state check, so the badge survives
+  // COMPLETE_TURN promotion — that flips `state` to `output-available` while the
+  // forwarded ACP status is still `in_progress`.
+  //
+  // The gate only fires when the settle lands INSIDE the turn (a short task) or
+  // after a detail reload. A process that outlives its turn settles out-of-turn,
+  // and the reducer routes an out-of-turn `tool_call_update` to
+  // `outOfTurnToolCalls` rather than into the promoted turn — so the card keeps
+  // both its `in_progress` status and this badge until the conversation is
+  // reloaded. That is pre-existing routing, not something the marker changes,
+  // and the strip above the transcript is the surface that does clear on time.
+  const airBackgrounded = useMemo(
+    () => toolCallMovedToBackground(part.meta) && isUnsettledToolCall(part),
+    [part]
+  )
   const title = useMemo(() => {
     // claude-agent-acp ≥0.63 supplies the human-readable description as
     // `_meta.claudeCode.title` (ACP `title` stays the raw command). It wins
@@ -2400,6 +2434,7 @@ const ToolCallPart = memo(function ToolCallPart({
       !hasStats &&
       !wallTime &&
       !backgroundLaunch &&
+      !airBackgrounded &&
       !announcedSessionId &&
       !codexScript?.label
     ) {
@@ -2430,10 +2465,13 @@ const ToolCallPart = memo(function ToolCallPart({
             {t("shellSession", { id: announcedSessionId })}
           </span>
         )}
-        {backgroundLaunch && (
+        {/* One badge, two sources — a parsed launch notice (claude/grok) or the
+            AIR marker (codex). They never coexist on one call, and the claim
+            they make is the same, so the AIR arm reuses the existing copy. */}
+        {(backgroundLaunch || airBackgrounded) && (
           <span
             className="inline-flex items-center gap-1 rounded-full bg-muted px-1.5 py-0.5 text-3xs font-medium text-muted-foreground"
-            title={backgroundLaunch.taskId}
+            title={backgroundLaunch?.taskId ?? part.toolCallId}
           >
             <TerminalIcon className="size-3" />
             {t("backgroundTask.runningInBackground")}
@@ -2462,6 +2500,8 @@ const ToolCallPart = memo(function ToolCallPart({
     lineChangeStats,
     wallTime,
     backgroundLaunch,
+    airBackgrounded,
+    part.toolCallId,
     announcedSessionId,
     codexScript,
     t,
