@@ -16,6 +16,7 @@ pub mod feedback;
 pub mod files;
 pub mod folder_commands;
 pub mod folder_links;
+pub mod github_auth;
 pub mod folders;
 pub mod forge;
 pub mod git;

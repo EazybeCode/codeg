@@ -1714,9 +1714,22 @@ pub fn build_router(
         }
     });
 
+    // Browser-facing auth routes live at the ROOT (not under /api): a person hits
+    // /auth/github/login in a browser and GitHub redirects to /auth/github/callback.
+    let auth_routes = Router::new()
+        .route(
+            "/auth/github/login",
+            get(handlers::github_auth::github_login),
+        )
+        .route(
+            "/auth/github/callback",
+            get(handlers::github_auth::github_callback),
+        );
+
     Router::new()
         .nest("/api", api)
         .merge(ws_route)
+        .merge(auth_routes)
         .fallback_service(fallback)
         .layer(html_rewrite)
         .layer(cors)
