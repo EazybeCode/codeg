@@ -21,8 +21,8 @@ export const viewport: Viewport = {
 }
 
 export const metadata: Metadata = {
-  title: "codeg",
-  description: "AI Coding Agent Conversation Manager",
+  title: "Eazybe WorkOS",
+  description: "Eazybe WorkOS — shared AI coding workspace",
   icons: {
     icon: [
       { url: "/icon-32x32.png", sizes: "32x32", type: "image/png" },
