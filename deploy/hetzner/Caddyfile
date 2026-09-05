@@ -1,0 +1,11 @@
+# Automatic HTTPS in front of WorkOS. Caddy fetches a Let's Encrypt cert for $DOMAIN.
+{$DOMAIN} {
+	reverse_proxy workos:3080
+
+	# OPTIONAL extra gate in front of codeg's own token (defence in depth).
+	# Generate a hash:  docker run --rm caddy:2 caddy hash-password --plaintext 'yourpass'
+	# then set BASIC_USER / BASIC_HASH in .env and uncomment:
+	# basicauth {
+	# 	{$BASIC_USER} {$BASIC_HASH}
+	# }
+}

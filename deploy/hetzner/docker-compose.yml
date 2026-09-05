@@ -1,0 +1,52 @@
+# Eazybe WorkOS — hosted org workspace (Hetzner / any Docker host)
+# One stack = one org. For a second org, copy this dir with a new .env
+# (different ORG_SLUG, DOMAIN, CODEG_TOKEN) or run:  docker compose -p workos-<org> up -d
+name: workos-${ORG_SLUG:-eazybe}
+
+services:
+  workos:
+    build:
+      context: ../..          # builds the fork (frontend + Rust server) from source
+    image: eazybe-workos:${IMAGE_TAG:-latest}
+    container_name: workos-${ORG_SLUG:-eazybe}
+    restart: unless-stopped
+    expose:
+      - "3080"                # not published to the host directly — Caddy fronts it with TLS
+    volumes:
+      - data:/data                                  # persistent: sessions DB, uploads
+      - ${PROJECTS_DIR:-./projects}:/projects       # repos the org's agents work on
+    environment:
+      - CODEG_TOKEN=${CODEG_TOKEN:?set a strong token in .env}
+      - CODEG_PORT=3080
+      - CODEG_HOST=0.0.0.0
+      - CODEG_RUNTIME=docker
+      # Agent credentials so Claude/Codex work server-side (org-owned keys):
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Git identity for pushing the org memory wiki (optional):
+      - CODEG_GIT_USERNAME=${CODEG_GIT_USERNAME:-}
+      - CODEG_GIT_PASSWORD=${CODEG_GIT_PASSWORD:-}
+
+  # TLS reverse proxy — automatic HTTPS via Let's Encrypt.
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      - DOMAIN=${DOMAIN:?set your domain in .env}
+      - BASIC_USER=${BASIC_USER:-}
+      - BASIC_HASH=${BASIC_HASH:-}
+    depends_on:
+      - workos
+
+volumes:
+  data:
+  caddy-data:
+  caddy-config:
