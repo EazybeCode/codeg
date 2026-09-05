@@ -2954,3 +2954,18 @@ div.monaco-diff-editor.side-by-side .editor.modified {
 .canvas-surface[data-canvas-panning] * {
   cursor: grabbing !important;
 }
+
+/* Restore the pointer cursor on interactive elements. Tailwind v4's base reset
+   drops it, which makes the whole app feel un-clickable. This brings back the
+   "hand" everywhere it belongs. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+[role="tab"],
+[role="menuitem"],
+[role="option"],
+a[href],
+summary,
+label[for],
+select:not(:disabled) {
+  cursor: pointer;
+}
