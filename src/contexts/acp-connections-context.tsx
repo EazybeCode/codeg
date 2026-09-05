@@ -54,6 +54,7 @@ import type {
   AvailableCommandInfo,
   ConfigStaleKind,
   ConnectionStatus,
+  ContentBlock,
   ConversationConnectionInfo,
   EventEnvelope,
   PlanEntryInfo,
@@ -85,6 +86,7 @@ import {
   mergeAsyncTasks,
   upsertAsyncTask,
 } from "@/lib/async-tasks"
+import { contentBlocksFromUserMessage } from "@/lib/user-message-blocks"
 import { getAgentLabel } from "@/lib/custom-agents"
 import {
   CONNECTION_IDLE_TIMEOUT_MS,
@@ -220,8 +222,22 @@ export type LiveContentBlock =
    * transcript. That ordering is what lets the runtime store tell the agent's
    * copy of THIS message from the same words sent in an earlier round (see
    * `suppressPersistedSteeredPrompts`), and it is the time the message shows.
+   *
+   * `blocks` is what the user actually sent, present only when the draft
+   * carried more than plain text (image attachments). `text` alone cannot
+   * stand in for it: it is the composer's DISPLAY form, which collapses
+   * attachments into words, so a steered image would render as a sentence
+   * about an image until a reload replaced it with the agent's own copy.
+   * Absent for a text-only steer, where the renderer falls back to `text` and
+   * the historical behaviour is unchanged.
    */
-  | { type: "steering"; id: string; text: string; createdAt: string }
+  | {
+      type: "steering"
+      id: string
+      text: string
+      createdAt: string
+      blocks?: ContentBlock[] | null
+    }
 
 export interface LiveMessage {
   id: string
@@ -650,6 +666,9 @@ type Action =
       text: string
       /** The note's `created_at` (ISO) — see the `steering` block. */
       createdAt: string
+      /** What the user sent, when it was more than plain text — see the
+       *  `steering` block. Absent for a text-only steer. */
+      blocks?: ContentBlock[] | null
     }
   | {
       type: "CLAUDE_API_RETRY"
@@ -2501,6 +2520,7 @@ function connectionsReducer(
               id: action.id,
               text: action.text,
               createdAt: action.createdAt,
+              blocks: action.blocks ?? null,
             },
           ],
         },
@@ -3723,6 +3743,12 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             id: e.item.id,
             text: e.item.text,
             createdAt: e.item.created_at,
+            // Present only when the draft carried attachments. Widened through
+            // the same mapping a `user_message` echo uses, so one message
+            // renders identically whichever of the two routes it arrives by.
+            blocks: e.item.blocks
+              ? contentBlocksFromUserMessage(e.item.blocks)
+              : null,
           })
           break
         }

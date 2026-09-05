@@ -2721,6 +2721,11 @@ impl ConnectionManager {
         // AFTER the admission checks above so a rejected steer never triggers
         // file reads, and BEFORE the shield below so a failure aborts with no
         // side effects.
+        // Whether the caller sent a real draft rather than bare text. Read
+        // BEFORE `blocks` is consumed below, and the sole gate on recording a
+        // block list at all: a text-only steer must keep producing exactly the
+        // note it always produced.
+        let had_blocks = blocks.is_some();
         let wire_blocks = match blocks {
             Some(mut blocks) => {
                 crate::acp::prompt_hydration::hydrate_prompt_blocks(
@@ -2753,6 +2758,31 @@ impl ConnectionManager {
             }
             None => vec![PromptInputBlock::Text { text: text.clone() }],
         };
+        // Project what the user sent for the broadcast, AFTER hydration and
+        // from the same bytes the agent gets — the contract an ordinary prompt
+        // already follows (`user_blocks_from_prompt` at the `UserMessage`
+        // emit). Without it the note reaches the live transcript as `text`
+        // alone, which is the composer's DISPLAY form: a steered image would
+        // render as words about an image until a reload replaced it with the
+        // agent's own copy.
+        //
+        // `None` for a text-only steer, so that path's note is unchanged and
+        // the frontend keeps rendering it from `text`.
+        //
+        // Filtered on the ATTACHMENT bytes rather than on `blocks.is_some()`: a
+        // draft that projects down to text alone says nothing `text` does not
+        // already say, and recording a list for it would put one on a note the
+        // field's contract calls text-only.
+        //
+        // No budget check here on purpose — the per-turn attachment bound lives
+        // at the single authorized writer (`SessionState::apply_event`'s
+        // `FeedbackSubmitted` arm), where the check and the append share one
+        // critical section. Enforcing it here would be a read, an agent
+        // round-trip, then a write: concurrent steers would both read the same
+        // total and both pass it.
+        let record_blocks = had_blocks
+            .then(|| crate::acp::user_blocks_from_prompt(&wire_blocks))
+            .filter(|projected| crate::acp::feedback::attachment_bytes(projected) > 0);
         let conn_id_for_task = conn_id.to_string();
         let handle = tokio::spawn(async move {
             let outcome: Result<FeedbackItem, AcpError> = async {
@@ -2800,8 +2830,12 @@ impl ConnectionManager {
                         state.write().await.native_steering_available = false;
                     }
                 }
-                let item =
-                    FeedbackItem::new_delivered(uuid::Uuid::new_v4().to_string(), text, created_at);
+                let item = FeedbackItem::new_delivered(
+                    uuid::Uuid::new_v4().to_string(),
+                    text,
+                    created_at,
+                    record_blocks,
+                );
                 // Ungated on purpose — see the invariant on this fn's doc.
                 emit_with_state(
                     &state,
@@ -3741,6 +3775,10 @@ impl SessionPlanApprovalAccess for ConnectionManagerPlanApprovalLookup {
 mod tests {
     use super::*;
     use crate::acp::connection::AgentConnection;
+    // Test-only: the budget itself is enforced at the append in
+    // `SessionState::apply_event`, so nothing in this module's production code
+    // names it — only the tests that pin the bound do.
+    use crate::acp::feedback::MAX_FEEDBACK_ATTACHMENT_BYTES_PER_TURN;
     use crate::acp::session_state::SessionState;
     use crate::acp::types::ConnectionStatus;
     use crate::web::event_bridge::{EventEmitter, WebEvent, WebEventBroadcaster};
@@ -7686,6 +7724,31 @@ mod tests {
         })
     }
 
+    /// [`answer_steer`] for a test that submits more than once: answers `n`
+    /// Steer commands with the same outcome. The loop is what makes concurrent
+    /// submits resolvable — each waits on its own reply channel, so a
+    /// single-shot answerer would leave the second one hanging.
+    /// Takes a bare [`SteerOutcome`] (which is `Copy`) rather than the
+    /// `Result` [`answer_steer`] accepts, because `AcpError` is not `Clone` and
+    /// a repeated answerer has to hand out the same value more than once. No
+    /// caller needs a repeated FAILURE.
+    fn answer_steer_n(
+        mut rx: tokio::sync::mpsc::Receiver<ConnectionCommand>,
+        outcome: SteerOutcome,
+        n: usize,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            for _ in 0..n {
+                match rx.recv().await {
+                    Some(ConnectionCommand::Steer { reply, .. }) => {
+                        let _ = reply.send(Ok(outcome));
+                    }
+                    _ => panic!("expected a Steer command"),
+                }
+            }
+        })
+    }
+
     /// The note's instant must precede the injection reaching the agent. The
     /// adapter hands the text to the agent BEFORE it answers `injected`, so the
     /// agent can write its own transcript copy of the message while this call
@@ -7754,6 +7817,11 @@ mod tests {
                 text: "ship it".into()
             }]
         );
+        // ...and so does the NOTE: a text-only steer records no block list, so
+        // every consumer keeps rendering it from `text` alone. This is the
+        // half that keeps the attachment support below from changing the
+        // historical path.
+        assert_eq!(item.blocks, None);
 
         let state = mgr.get_state("c1").await.unwrap();
         {
@@ -7771,8 +7839,12 @@ mod tests {
     #[tokio::test]
     async fn native_submit_with_blocks_carries_the_draft_and_records_the_text() {
         // A draft with an image attachment steers as its full block list (the
-        // wire payload) while the recorded note stays the display text — the
-        // strip/snapshot/broadcast never carry image bytes.
+        // wire payload) while the recorded note's `text` stays the display
+        // form. The note ALSO carries the projected blocks, because `text` is
+        // what the composer collapsed the attachment into: without them the
+        // live transcript renders a sentence about an image where the image
+        // should be, and only a reload (which reads the agent's own copy) puts
+        // it back. Projection matches an ordinary prompt's `user_message`.
         let mgr = ConnectionManager::new();
         let rx = mgr
             .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
@@ -7796,8 +7868,177 @@ mod tests {
             .unwrap();
         assert_eq!(item.status, FeedbackStatus::Delivered);
         assert_eq!(item.text, "make it match this mock");
+        // The note carries the image, so the live transcript can render it at
+        // the point the user sent it rather than waiting for a reload.
+        assert_eq!(
+            item.blocks,
+            Some(vec![
+                crate::acp::types::UserMessageBlock::Text {
+                    text: "make it match this mock".into()
+                },
+                crate::acp::types::UserMessageBlock::Image {
+                    data: "aGk=".into(),
+                    mime_type: "image/png".into(),
+                },
+            ])
+        );
         // The wire carried the caller's blocks verbatim, attachment included.
         assert_eq!(fake_loop.await.unwrap(), draft);
+    }
+
+    #[tokio::test]
+    async fn a_draft_that_projects_to_text_alone_records_no_block_list() {
+        // `blocks` means "this note carried more than its text". A draft whose
+        // projection is text-only says nothing `text` does not, so recording a
+        // list for it would put one on a note the field's contract calls
+        // text-only — and the frontend would key its dedup on that list.
+        let mgr = ConnectionManager::new();
+        let rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        mark_native_steering_ready(&mgr, "c1").await;
+        let fake_loop = answer_steer(rx, Ok(SteerOutcome::Injected));
+
+        let item = mgr
+            .submit_feedback(
+                "c1",
+                "just words".into(),
+                Some(vec![PromptInputBlock::Text {
+                    text: "just words".into(),
+                }]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(item.blocks, None);
+        // The wire still carried what the caller sent — only the RECORD is
+        // trimmed, so the agent's input is untouched.
+        assert_eq!(
+            fake_loop.await.unwrap(),
+            vec![PromptInputBlock::Text {
+                text: "just words".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn steer_attachments_past_the_per_turn_budget_are_not_retained() {
+        // The budget guards what OUTLIVES the event: `SessionState.feedback`,
+        // which every snapshot is rebuilt from. So it is enforced at the append
+        // — the single authorized writer, where the check and the push share
+        // one critical section — not at the submit site, where a read, an agent
+        // round-trip and a write would let two concurrent steers both pass it.
+        //
+        // Past the budget the note still DELIVERS and the event still carries
+        // its blocks to whoever is attached right now; only the retained copy
+        // drops them, so a reconnect renders it from `text` like any text-only
+        // steer.
+        let mgr = ConnectionManager::new();
+        let rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        mark_native_steering_ready(&mgr, "c1").await;
+        let fake_loop = answer_steer(rx, Ok(SteerOutcome::Injected));
+
+        let huge = "A".repeat(MAX_FEEDBACK_ATTACHMENT_BYTES_PER_TURN + 1);
+        let item = mgr
+            .submit_feedback(
+                "c1",
+                "one enormous screenshot".into(),
+                Some(vec![PromptInputBlock::Image {
+                    data: huge,
+                    mime_type: "image/png".into(),
+                    uri: None,
+                }]),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            item.status,
+            FeedbackStatus::Delivered,
+            "over budget is not a rejection — the agent already has the content"
+        );
+
+        // The RETAINED note is the one that had to shed the attachment.
+        let state = mgr.get_state("c1").await.unwrap();
+        {
+            let s = state.read().await;
+            assert_eq!(s.feedback.len(), 1);
+            assert_eq!(
+                s.feedback[0].blocks, None,
+                "an over-budget attachment must not be kept for the turn"
+            );
+            assert_eq!(s.feedback[0].text, "one enormous screenshot");
+        }
+
+        // And the wire was never trimmed: the budget governs what codeg KEEPS,
+        // not what the agent receives.
+        let sent = fake_loop.await.unwrap();
+        assert!(matches!(
+            sent.as_slice(),
+            [PromptInputBlock::Image { data, .. }]
+                if data.len() == MAX_FEEDBACK_ATTACHMENT_BYTES_PER_TURN + 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_over_budget_steers_cannot_both_be_retained() {
+        // The interleaving a submit-site check could not stop: two steers whose
+        // attachments each fit the budget alone but not together. The append is
+        // serialized by the state write lock, so the second one sees the first
+        // already retained and sheds its own blocks.
+        let mgr = ConnectionManager::new();
+        let rx = mgr
+            .insert_test_connection_live("c1", AgentType::ClaudeCode, None, EventEmitter::Noop)
+            .await;
+        mark_native_steering_ready(&mgr, "c1").await;
+        let fake_loop = answer_steer_n(rx, SteerOutcome::Injected, 2);
+
+        // Two thirds of the budget each: either alone is admissible, the pair
+        // is not.
+        let half = "A".repeat((MAX_FEEDBACK_ATTACHMENT_BYTES_PER_TURN / 3) * 2);
+        let shot = |text: &str| {
+            let data = half.clone();
+            let text = text.to_string();
+            let mgr = &mgr;
+            async move {
+                mgr.submit_feedback(
+                    "c1",
+                    text,
+                    Some(vec![PromptInputBlock::Image {
+                        data,
+                        mime_type: "image/png".into(),
+                        uri: None,
+                    }]),
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let (a, b) = tokio::join!(shot("first"), shot("second"));
+        assert_eq!(a.status, FeedbackStatus::Delivered);
+        assert_eq!(b.status, FeedbackStatus::Delivered);
+        fake_loop.await.unwrap();
+
+        let state = mgr.get_state("c1").await.unwrap();
+        let s = state.read().await;
+        assert_eq!(s.feedback.len(), 2, "both notes are still recorded");
+        let retained: usize = s
+            .feedback
+            .iter()
+            .filter_map(|f| f.blocks.as_deref())
+            .map(crate::acp::feedback::attachment_bytes)
+            .sum();
+        assert!(
+            retained <= MAX_FEEDBACK_ATTACHMENT_BYTES_PER_TURN,
+            "the aggregate bound holds across concurrent steers: retained={retained}"
+        );
+        assert_eq!(
+            s.feedback.iter().filter(|f| f.blocks.is_some()).count(),
+            1,
+            "exactly one of the pair keeps its attachment"
+        );
     }
 
     #[test]

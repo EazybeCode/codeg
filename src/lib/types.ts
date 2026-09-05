@@ -2894,6 +2894,15 @@ export interface FeedbackItem {
   created_at: string
   status: FeedbackStatus
   delivered_at?: string | null
+  /** What the user actually sent, when the note carried more than plain text
+   *  (image attachments). Absent for a text-only note — every pull-channel one,
+   *  and the historical native one — where `text` is the whole message.
+   *
+   *  Needed because `text` is the DISPLAY form the composer collapses a draft
+   *  into, so a steered image would otherwise reach the live transcript as
+   *  words about an image. Backend-projected by `user_blocks_from_prompt`
+   *  after hydration, the same shape `user_message` broadcasts. */
+  blocks?: UserMessageBlock[] | null
 }
 
 /** Snapshot of the most recent ACP runtime error. */
