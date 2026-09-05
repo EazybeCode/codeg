@@ -48,10 +48,16 @@ pub async fn init_database(
     crate::commands::backup::restore::cleanup_transient_dirs(app_data_dir);
 
     let db_path = app_data_dir.join(database_file_name());
-    let db_url = format!(
-        "sqlite:{}?mode=rwc",
-        urlencoding::encode(&db_path.to_string_lossy())
-    );
+    // Multi-tenant deployments set DATABASE_URL to Postgres (postgres://…).
+    // Local/desktop dev falls back to the per-data-dir SQLite file.
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(u) if !u.trim().is_empty() => u,
+        _ => format!(
+            "sqlite:{}?mode=rwc",
+            urlencoding::encode(&db_path.to_string_lossy())
+        ),
+    };
+    let is_sqlite = db_url.starts_with("sqlite");
 
     // Apply migrations on a dedicated single connection. The runtime pool below
     // keeps several connections open for read concurrency, but sea-orm spreads a
@@ -68,7 +74,9 @@ pub async fn init_database(
         .connect_timeout(Duration::from_secs(10))
         .sqlx_logging(false);
     let migrate_conn = Database::connect(migrate_opts).await?;
-    apply_sqlite_pragmas(&migrate_conn).await?;
+    if is_sqlite {
+        apply_sqlite_pragmas(&migrate_conn).await?;
+    }
     Migrator::up(&migrate_conn, None)
         .await
         .map_err(|e| DbError::Migration(e.to_string()))?;
@@ -83,7 +91,9 @@ pub async fn init_database(
         .idle_timeout(Duration::from_secs(300))
         .sqlx_logging(false);
     let conn = Database::connect(opts).await?;
-    apply_sqlite_pragmas(&conn).await?;
+    if is_sqlite {
+        apply_sqlite_pragmas(&conn).await?;
+    }
 
     service::app_metadata_service::update_app_version(&conn, app_version).await?;
 

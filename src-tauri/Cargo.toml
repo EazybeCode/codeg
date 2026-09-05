@@ -95,8 +95,8 @@ regex = "1"
 portable-pty = "0.8"
 urlencoding = "2"
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs", version = "0.0.0", optional = true }
-sea-orm = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
-sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "runtime-tokio-rustls"] }
+sea-orm = { version = "1.1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }
 # Synchronous read-only access to agent-native SQLite session stores (the
 # Cursor parser reads ~/.cursor/chats/*/store.db from the sync AgentParser
 # trait, where sqlx's async pool doesn't fit). Pinned to the rusqlite line
