@@ -5,6 +5,7 @@ import {
   FolderGit2,
   FolderOpenDot,
   GamepadDirectional,
+  Github,
   LayoutTemplate,
   ListTodo,
   Map as MapIcon,
@@ -36,6 +37,7 @@ import { openProjectBootWindow } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
 import { openPetWindow } from "@/lib/pet/api"
 import { CloneDialog } from "./clone-dialog"
+import { GithubProjectDialog } from "./github-project-dialog"
 import { RemoteWorkspaceManageDialog } from "./remote-workspace-manage-dialog"
 import { WorkspaceFolderDialog } from "./workspace-folder-dialog"
 
@@ -74,6 +76,7 @@ export function QuickActionsDropdown() {
 
   const [folderDialogOpen, setFolderDialogOpen] = useState(false)
   const [cloneOpen, setCloneOpen] = useState(false)
+  const [ghOpen, setGhOpen] = useState(false)
   const [remoteManageOpen, setRemoteManageOpen] = useState(false)
 
   // Remote connections are only reachable on the desktop runtime (a web client
@@ -135,6 +138,11 @@ export function QuickActionsDropdown() {
           className="w-auto min-w-60"
         >
           <DropdownMenuLabel>{t("groups.workspace")}</DropdownMenuLabel>
+          <DropdownMenuItem onSelect={() => setGhOpen(true)}>
+            <Github className="mr-2 h-4 w-4" />
+            Open GitHub project
+          </DropdownMenuItem>
+
           <DropdownMenuItem onSelect={() => setFolderDialogOpen(true)}>
             <FolderOpenDot />
             {tFolderDropdown("openFolder")}
@@ -252,6 +260,7 @@ export function QuickActionsDropdown() {
         onOpenChange={setFolderDialogOpen}
       />
       <CloneDialog open={cloneOpen} onOpenChange={setCloneOpen} />
+      <GithubProjectDialog open={ghOpen} onOpenChange={setGhOpen} />
       {/* Mounted only where its submenu exists, so web builds don't carry a
           dialog nothing can ever open. */}
       {desktop && (
