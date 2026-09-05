@@ -11,7 +11,10 @@ use axum::{extract::Extension, http::HeaderMap, http::StatusCode, response::Into
 use serde::Serialize;
 
 use crate::app_state::AppState;
+use crate::commands::folders as folder_commands;
+use crate::models::system::GitCredentials;
 use crate::web::handlers::github_auth;
+use serde::Deserialize;
 
 #[derive(Serialize)]
 pub struct RepoItem {
@@ -101,4 +104,68 @@ pub async fn list_github_repos(
         .collect();
 
     Json(repos).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct CloneReq {
+    pub full_name: String,
+    pub clone_url: Option<String>,
+}
+
+/// POST /api/clone_github_repo — clone a repo the user picked into their org's
+/// server-side space, using their (decrypted) GitHub token. Returns the path so
+/// the frontend can openFolder() it. Idempotent: if already cloned, returns the path.
+pub async fn clone_github_repo(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<CloneReq>,
+) -> impl IntoResponse {
+    let user = match github_auth::current_user(&headers, &state.db.conn).await {
+        Some(u) => u,
+        None => {
+            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"not signed in"}))).into_response()
+        }
+    };
+    let token = match user.gh_token_enc.as_deref().and_then(github_auth::decrypt) {
+        Some(t) => t,
+        None => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"no github token"}))).into_response()
+        }
+    };
+    let repo_name = req.full_name.rsplit('/').next().unwrap_or("repo").to_string();
+    let target = state
+        .data_dir
+        .join("orgs")
+        .join(user.org_id.to_string())
+        .join(&repo_name);
+    let target_str = target.to_string_lossy().to_string();
+
+    if !target.exists() {
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let url = req
+            .clone_url
+            .unwrap_or_else(|| format!("https://github.com/{}.git", req.full_name));
+        let creds = GitCredentials {
+            username: user.login.clone(),
+            password: token,
+        };
+        if let Err(e) = folder_commands::clone_repository_core(
+            &url,
+            &target_str,
+            Some(&creds),
+            &state.db,
+            &state.data_dir,
+        )
+        .await
+        {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("clone failed: {e}")})),
+            )
+                .into_response();
+        }
+    }
+    Json(serde_json::json!({"path": target_str, "name": repo_name})).into_response()
 }
