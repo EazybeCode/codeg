@@ -1689,9 +1689,11 @@ pub fn build_router(
             let path = req.uri().path();
             // If path has no extension (not a file) and a .html version exists, rewrite
             if path != "/"
+                && path != "/login"
                 && !path.contains('.')
                 && !path.starts_with("/api")
                 && !path.starts_with("/ws")
+                && !path.starts_with("/auth")
             {
                 let html_path = format!("{}.html", path.trim_end_matches('/'));
                 let html_file = dir.join(html_path.trim_start_matches('/'));
@@ -1717,6 +1719,7 @@ pub fn build_router(
     // Browser-facing auth routes live at the ROOT (not under /api): a person hits
     // /auth/github/login in a browser and GitHub redirects to /auth/github/callback.
     let auth_routes = Router::new()
+        .route("/login", get(handlers::github_auth::login_redirect))
         .route(
             "/auth/github/login",
             get(handlers::github_auth::github_login),

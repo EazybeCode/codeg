@@ -109,8 +109,21 @@ pub async fn github_login() -> Response {
         state
     );
     (
-        AppendHeaders([(header::SET_COOKIE, cookie)]),
+        AppendHeaders([
+            (header::SET_COOKIE, cookie),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ]),
         Redirect::to(&url),
+    )
+        .into_response()
+}
+
+/// The frontend sends unauthenticated users to `/login`. In server / multi-tenant
+/// mode we replace token entry with GitHub login.
+pub async fn login_redirect() -> Response {
+    (
+        AppendHeaders([(header::CACHE_CONTROL, "no-store".to_string())]),
+        Redirect::to("/auth/github/login"),
     )
         .into_response()
 }
@@ -349,18 +362,30 @@ pub async fn github_callback(
         return html_error(&format!("Create session failed: {e}"));
     }
 
-    // 7) set cookie, clear state cookie, land in the app
+    // 7) set the session cookie AND hand the browser the app token, so the
+    // existing frontend (which reads localStorage["codeg_token"]) works with no
+    // token prompt. Then land in the workspace. This token bridge is the v1
+    // shim; Phase 2 switches the API to session-based per-org auth and drops it.
     let session_cookie = format!(
         "{SESSION_COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
         SESSION_DAYS * 86400
     );
     let clear_state = "workos_oauth_state=; Path=/; HttpOnly; Max-Age=0".to_string();
+    let app_token = env("CODEG_TOKEN").unwrap_or_default();
+    let token_js = serde_json::to_string(&app_token).unwrap_or_else(|_| "\"\"".into());
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><title>Signing in…</title>\
+         <body style=\"font:15px -apple-system;padding:40px\">Signing you in…\
+         <script>try{{localStorage.setItem('codeg_token',{token_js});}}catch(e){{}}\
+         location.replace('/workspace');</script></body>"
+    );
     (
         AppendHeaders([
             (header::SET_COOKIE, session_cookie),
             (header::SET_COOKIE, clear_state),
+            (header::CACHE_CONTROL, "no-store".to_string()),
         ]),
-        Redirect::to("/"),
+        Html(body),
     )
         .into_response()
 }
