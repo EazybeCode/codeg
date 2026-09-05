@@ -29,17 +29,19 @@ impl MigrationTrait for Migration {
         // earlier conversation behind with no back-reference, so those rows
         // stay as they are.
         let conn = manager.get_connection();
+        // `true`/`false` (not 1/0) so the boolean comparison is valid on both
+        // Postgres and modern SQLite. substr/trim/EXISTS are portable.
         let sql = "UPDATE conversation \
                SET title = (SELECT substr(trim(wt.title), 1, 80) FROM work_task AS wt \
                              WHERE wt.conversation_id = conversation.id \
                              ORDER BY wt.id DESC LIMIT 1), \
-                   title_locked = 1 \
-             WHERE title_locked = 0 \
+                   title_locked = true \
+             WHERE title_locked = false \
                AND deleted_at IS NULL \
                AND EXISTS (SELECT 1 FROM work_task AS wt \
                             WHERE wt.conversation_id = conversation.id \
                               AND trim(wt.title) <> '')";
-        conn.execute(Statement::from_string(DbBackend::Sqlite, sql.to_string()))
+        conn.execute(Statement::from_string(conn.get_database_backend(), sql.to_string()))
             .await?;
         Ok(())
     }
