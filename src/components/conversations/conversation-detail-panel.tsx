@@ -1606,6 +1606,9 @@ const ConversationTabView = memo(function ConversationTabView({
   const showDraftHeader = !hasPersistedConversation && !hasSentMessage
   const isWelcomeMode = showDraftHeader
 
+  // Skills picker (category tabs + skill cards) hidden for a cleaner empty
+  // state — product decision. Flip to re-enable.
+  const SHOW_SKILL_PICKER = false
   const handleQuickAction = useCallback((payload: ComposerInjectContent) => {
     setComposerInject(payload)
   }, [])
@@ -2147,10 +2150,12 @@ const ConversationTabView = memo(function ConversationTabView({
             <div className="flex-1" />
             <div className="mx-auto flex w-full max-w-3xl shrink-0 flex-col gap-6 px-4 py-4">
               <WelcomeHero />
-              <QuickActions
-                onSelect={handleQuickAction}
-                agentType={selectedAgent}
-              />
+              {SHOW_SKILL_PICKER ? (
+                <QuickActions
+                  onSelect={handleQuickAction}
+                  agentType={selectedAgent}
+                />
+              ) : null}
               <div className="flex justify-center">
                 <AgentSelector
                   // The selector spans the row it is given (it has to measure

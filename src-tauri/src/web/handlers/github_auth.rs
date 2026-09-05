@@ -119,11 +119,44 @@ pub async fn github_login() -> Response {
 }
 
 /// The frontend sends unauthenticated users to `/login`. In server / multi-tenant
-/// mode we replace token entry with GitHub login.
+/// mode we show a branded landing page whose button starts the GitHub flow.
 pub async fn login_redirect() -> Response {
+    let page = r##"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in — Eazybe WorkOS</title>
+<style>
+ :root{--bg:#f7f7f5;--card:#fff;--ink:#1c1c1e;--muted:#8a8a8e;--line:#e6e6e3;--accent:#2383e2}
+ @media(prefers-color-scheme:dark){:root{--bg:#111214;--card:#1b1d20;--ink:#ececed;--muted:#8a8d93;--line:#2a2d31;--accent:#4c9ffe}}
+ *{box-sizing:border-box} html,body{height:100%}
+ body{margin:0;display:flex;align-items:center;justify-content:center;background:
+   radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb,var(--accent) 12%, var(--bg)), var(--bg));
+   color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+ .card{width:360px;max-width:calc(100vw - 32px);background:var(--card);border:1px solid var(--line);
+   border-radius:16px;padding:36px 32px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.08)}
+ .logo{font-size:34px;line-height:1;margin-bottom:14px}
+ h1{font-size:20px;margin:0 0 6px;letter-spacing:-.01em}
+ p{color:var(--muted);margin:0 0 26px;font-size:13.5px}
+ .btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
+   padding:12px 16px;border-radius:10px;border:none;background:var(--ink);color:var(--card);
+   font-size:14.5px;font-weight:600;cursor:pointer;text-decoration:none;transition:transform .05s}
+ .btn:hover{transform:translateY(-1px)} .btn:active{transform:translateY(0)}
+ .btn svg{width:18px;height:18px;fill:currentColor}
+ .foot{margin-top:22px;font-size:11.5px;color:var(--muted)}
+</style></head><body>
+ <div class="card">
+   <div class="logo">🧩</div>
+   <h1>Eazybe WorkOS</h1>
+   <p>Your team's shared AI coding workspace.</p>
+   <a class="btn" href="/auth/github/login">
+     <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+     Sign in with GitHub
+   </a>
+   <div class="foot">You'll join your GitHub organization's workspace.</div>
+ </div>
+</body></html>"##;
     (
         AppendHeaders([(header::CACHE_CONTROL, "no-store".to_string())]),
-        Redirect::to("/auth/github/login"),
+        Html(page),
     )
         .into_response()
 }
