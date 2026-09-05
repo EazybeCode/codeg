@@ -8599,6 +8599,9 @@ fn finish_turn_reason<'a>(
 /// `empty` is a synthesized reason emitted by `run_conversation_loop` when the
 /// agent reports `EndTurn` without producing any agent output; `empty` carries
 /// an `EmptyTurnReport` that refines the code and attaches redacted evidence.
+/// `auth_required` is the other synthesized reason: the agent REJECTED the
+/// prompt with ACP's -32000 instead of ending the turn, which asks the user to
+/// sign in and retry rather than reporting anything wrong with the turn itself.
 fn turn_failure_error_event(
     reason_str: &str,
     agent_type: AgentType,
@@ -8623,6 +8626,11 @@ fn turn_failure_error_event(
         "unknown" => (
             "turn_failed_unknown",
             format!("{agent_type} ended the turn with an unrecognized stop reason."),
+            None,
+        ),
+        "auth_required" => (
+            "turn_failed_auth_required",
+            format!("{agent_type} needs you to sign in again before it can run this turn."),
             None,
         ),
         "empty" => {
@@ -9188,7 +9196,110 @@ async fn run_conversation_loop<'a>(
                             }
                         }
                         prompt_result = &mut prompt_response => {
-                            let response = prompt_result?;
+                            // ACP defines the `authRequired` rejection as the
+                            // signal that the CLIENT should run its auth flow
+                            // and come back — the session survives it, so this
+                            // one error code must not unwind the connection the
+                            // way `?` unwinds every other prompt failure
+                            // (terminal `Error` → `Disconnected`, and the
+                            // lifecycle worker flips the conversation row to
+                            // Cancelled). It is a TURN failure, so it takes the
+                            // turn-failure exit instead and the loop goes back
+                            // to idle with the session intact.
+                            //
+                            // claude-agent-acp 0.74.0 made this reachable in the
+                            // ordinary case: through 0.73.0 a mid-session
+                            // sign-out settled an AIR client's turn with a
+                            // disguised `end_turn` carrying the failure record,
+                            // and 0.74.0 publishes that record on the update
+                            // channel and rejects the prompt as well. The
+                            // adapter deliberately keeps the session addressable
+                            // across the refusal ("the client can sign in and
+                            // retry on the same session"), which is only true if
+                            // the client keeps its end too. Agent-agnostic on
+                            // purpose: every agent that answers -32000 here is
+                            // asking for credentials, not reporting a dead
+                            // process — which is why `session/load` already
+                            // treats "Authentication required" as an expected
+                            // outcome rather than an error to surface.
+                            let response = match prompt_result {
+                                Ok(response) => response,
+                                Err(e)
+                                    if matches!(
+                                        e.code,
+                                        sacp::schema::ErrorCode::AuthRequired
+                                    ) =>
+                                {
+                                    tracing::warn!(
+                                        "[ACP] session/prompt refused with authRequired ({e}); \
+                                         ending the turn and keeping the session"
+                                    );
+                                    if !tracked_terminal_tool_calls.is_empty() {
+                                        poll_tracked_terminal_tool_calls(
+                                            terminal_runtime.as_ref(),
+                                            &sid,
+                                            state,
+                                            emitter,
+                                            &mut tracked_terminal_tool_calls,
+                                        )
+                                        .await;
+                                    }
+                                    // Synthesized like `empty`: no `StopReason`
+                                    // ever arrives for a rejected prompt, so the
+                                    // turn needs a reason of its own. AIR-capable
+                                    // agents ALSO publish an `access` failure
+                                    // record with a `login` action, which the
+                                    // banner renders — the two are complementary
+                                    // (a transient alert plus a persistent strip
+                                    // with the way back in), and this Error is
+                                    // the only surface for agents with no AIR.
+                                    if let Some(err_event) = turn_failure_error_event(
+                                        "auth_required",
+                                        agent_type,
+                                        None,
+                                    ) {
+                                        emit_with_state(state, emitter, err_event).await;
+                                    }
+                                    // Not journaled (that is `end_turn` only),
+                                    // but still recorded: the transcript's turn
+                                    // ended here, and omitting it would leave the
+                                    // history parser reading the next prompt as a
+                                    // continuation of this one.
+                                    record_turn_end(
+                                        agent_type,
+                                        &sid.0,
+                                        "auth_required",
+                                        turn_started_at_ms,
+                                        current_session_model_id(state).await,
+                                    )
+                                    .await;
+                                    // Same wedge guard as the two sibling turn
+                                    // exits — see the `StopReason` branch above
+                                    // for why the drain and the event must share
+                                    // one critical section.
+                                    drain_permissions_then_emit(
+                                        perms,
+                                        state,
+                                        emitter,
+                                        AcpEvent::TurnComplete {
+                                            session_id: sid.0.to_string(),
+                                            stop_reason: "auth_required".into(),
+                                            agent_type: agent_type.to_string(),
+                                        },
+                                    )
+                                    .await;
+                                    // Non-`end_turn`, so cascade-cancel like
+                                    // every other turn-failure exit: the parent
+                                    // will never consume an in-flight delegation
+                                    // result. Turn-scoped — the connection is
+                                    // still alive.
+                                    if let Some(inj) = delegation_injection {
+                                        inj.broker.cancel_by_parent_turn(conn_id).await;
+                                    }
+                                    break;
+                                }
+                                Err(e) => return Err(e),
+                            };
                             // A turn's terminal AIR failure rides on the
                             // response `_meta` (see `response_session_failure`
                             // — the update channel only carries the retry
@@ -14265,6 +14376,51 @@ mod tests {
         assert_eq!(record.actions, vec!["retry".to_string(), "sing".to_string()]);
     }
 
+    /// claude-agent-acp 0.74.0's mid-session sign-out record, verbatim off the
+    /// `session_info_update` channel (`sessionFailureMeta`: id, revision,
+    /// category, severity, title, details, actions — `kind`/`recoveryPolicy`
+    /// stay agent-internal). Two things in it changed with that release and
+    /// are worth pinning:
+    ///
+    /// * the CLI's own "… Please run /login" prose moved OUT of `title` into
+    ///   `details`, leaving the policy's client-neutral fallback as the title —
+    ///   so the strip reads as a heading with the TUI advice behind its
+    ///   expander, not the other way round;
+    /// * the record may carry a `reason` refinement. codeg never produces one
+    ///   (it is `--hide-claude-auth`-only; see the registry entry), and the
+    ///   parser reads fields individually, so an unknown key must simply ride
+    ///   through instead of failing the record.
+    #[test]
+    fn parse_session_failure_record_reads_claude_074_sign_out() {
+        let signed_out = serde_json::json!({
+            "id": "sess-7:session-error:epoch-1:1",
+            "revision": 1,
+            "category": "access",
+            "severity": "error",
+            "title": "Sign in to continue using Claude.",
+            "details": "Invalid API key · Please run /login",
+            "actions": ["login"],
+        });
+        let record = parse_session_failure_record(&signed_out).expect("record");
+        assert_eq!(record.category, "access");
+        assert_eq!(record.severity, "error");
+        assert_eq!(record.title, "Sign in to continue using Claude.");
+        assert_eq!(
+            record.details.as_deref(),
+            Some("Invalid API key · Please run /login")
+        );
+        // The banner renders a Login button off exactly this.
+        assert_eq!(record.actions, vec!["login".to_string()]);
+
+        // Same record plus the release's new refinement: parsed identically.
+        let mut with_reason = signed_out.clone();
+        with_reason["reason"] = serde_json::json!("claude_subscription_not_supported");
+        assert_eq!(
+            parse_session_failure_record(&with_reason).expect("record"),
+            record
+        );
+    }
+
     #[test]
     fn client_capabilities_advertise_air_for_claude_and_codex_only() {
         // Both AIR speakers must send EXACTLY the shape the adapters gate on:
@@ -17426,6 +17582,30 @@ mod tests {
             assert_eq!(code.as_deref(), Some(expected));
             assert!(details.is_none(), "{reason} must not carry details");
         }
+    }
+
+    /// The synthesized reason for an `authRequired` prompt REJECTION
+    /// (claude-agent-acp 0.74.0's mid-session sign-out). It must produce its
+    /// own code — reusing `refusal` would tell the user the agent declined the
+    /// work, when it actually declined the credentials — and it must stay
+    /// non-terminal, because the whole point of that arm in
+    /// `run_conversation_loop` is that the connection outlives the turn.
+    #[test]
+    fn turn_failure_error_event_maps_auth_required_without_killing_the_connection() {
+        let Some(AcpEvent::Error {
+            code,
+            details,
+            terminal,
+            message,
+            ..
+        }) = turn_failure_error_event("auth_required", AgentType::ClaudeCode, None)
+        else {
+            panic!("auth_required should produce an error event");
+        };
+        assert_eq!(code.as_deref(), Some("turn_failed_auth_required"));
+        assert!(details.is_none());
+        assert!(!terminal, "a sign-out never kills the connection");
+        assert!(message.contains("sign in"), "message was {message:?}");
     }
 
     #[test]
