@@ -174,6 +174,15 @@ export class WebTransport implements Transport {
       window.clearTimeout(timeout)
     }
     if (res.status === 401) {
+      const error = await res.json().catch(() => null)
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "error" in error &&
+        (error.error === "unauthorized" || error.error === "reauth_required")
+      ) {
+        throw error
+      }
       // Definitive auth failure. Surface the unified unauthorized dialog
       // rather than an abrupt redirect — a hard `location.href` here would
       // fight a reconnect dialog that may already be on screen. The user

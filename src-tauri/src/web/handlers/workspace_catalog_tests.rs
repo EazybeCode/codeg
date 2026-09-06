@@ -190,6 +190,24 @@ async fn catalog_handlers_require_a_live_user_cookie_even_with_the_shared_bearer
 }
 
 #[tokio::test]
+async fn catalog_session_database_failure_is_not_misreported_as_unauthorized() {
+    let db = fresh_in_memory_db().await;
+    let access = denied_access();
+    let policy = BrowserMutationPolicy::from_app_origin(None);
+    let handler = WorkspaceCatalogHandler::new(&db.conn, &access, &policy);
+    let headers = json_headers(Some("session-on-closed-database"));
+    db.conn.clone().close().await.unwrap();
+
+    assert!(super::github_auth::current_user_result(&headers, &db.conn)
+        .await
+        .is_err());
+    let (status, body) = body_json(handler.list_workspace_nodes(&headers, b"{}").await).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body, serde_json::json!({ "error": "database" }));
+}
+
+#[tokio::test]
 async fn catalog_handler_derives_the_valid_cookie_scope_and_never_lists_another_org() {
     let db = fresh_in_memory_db().await;
     seed_org(&db, 1).await;

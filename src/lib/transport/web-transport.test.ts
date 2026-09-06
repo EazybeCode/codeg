@@ -289,3 +289,41 @@ describe("WebTransport connection state machine", () => {
     expect(localStorage.getItem("codeg_token")).toBe("tok") // token preserved
   })
 })
+
+describe("WebTransport 401 response contract", () => {
+  it.each(["unauthorized", "reauth_required"] as const)(
+    "preserves structured catalog %s errors without invalidating the installation token",
+    async (error) => {
+      const transport = new WebTransport("http://localhost")
+      const responseBody = { error }
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify(responseBody), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        })
+      )
+
+      await expect(transport.call("list_workspace_nodes", {})).rejects.toEqual(
+        responseBody
+      )
+
+      expect(transport.getConnectionSnapshot()).toBe("connected")
+      expect(localStorage.getItem("codeg_token")).toBe("tok")
+    }
+  )
+
+  it("keeps plain-text 401 as a global installation-token failure", async () => {
+    const transport = new WebTransport("http://localhost")
+    fetchMock.mockResolvedValueOnce(
+      new Response("Invalid or missing token", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      })
+    )
+
+    await expect(transport.call("health", {})).rejects.toThrow("Unauthorized")
+
+    expect(transport.getConnectionSnapshot()).toBe("unauthorized")
+    expect(localStorage.getItem("codeg_token")).toBe("tok")
+  })
+})

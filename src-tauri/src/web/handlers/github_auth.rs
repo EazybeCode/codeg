@@ -80,20 +80,29 @@ pub fn decrypt(blob: &str) -> Option<String> {
 /// Resolve the logged-in user from the session cookie. The API is still token-
 /// gated (v1 bridge), but the browser also carries the `workos_session` cookie,
 /// so per-user endpoints (GitHub repo ops) can identify who is acting.
+pub async fn current_user_result(
+    headers: &HeaderMap,
+    db: &sea_orm::DatabaseConnection,
+) -> Result<Option<user::Model>, sea_orm::DbErr> {
+    let Some(sid) = cookie_value(headers, SESSION_COOKIE) else {
+        return Ok(None);
+    };
+    let Some(sess) = session::Entity::find_by_id(sid).one(db).await? else {
+        return Ok(None);
+    };
+    if sess.expires_at < chrono::Utc::now() {
+        return Ok(None);
+    }
+    user::Entity::find_by_id(sess.user_id).one(db).await
+}
+
+/// Compatibility wrapper for legacy callers that treat database failure as no
+/// current user. New authenticated catalog handlers use the fallible helper.
 pub async fn current_user(
     headers: &HeaderMap,
     db: &sea_orm::DatabaseConnection,
 ) -> Option<user::Model> {
-    let sid = cookie_value(headers, SESSION_COOKIE)?;
-    let sess = session::Entity::find_by_id(sid).one(db).await.ok().flatten()?;
-    if sess.expires_at < chrono::Utc::now() {
-        return None;
-    }
-    user::Entity::find_by_id(sess.user_id)
-        .one(db)
-        .await
-        .ok()
-        .flatten()
+    current_user_result(headers, db).await.ok().flatten()
 }
 
 /// Why [`ensure_github_token`] could not hand back a usable token. The handler

@@ -151,8 +151,8 @@ pub async fn scope_from_headers(
     headers: &HeaderMap,
     db: &DatabaseConnection,
 ) -> Result<Scope, CatalogError> {
-    let user = super::github_auth::current_user(headers, db)
-        .await
+    let user = super::github_auth::current_user_result(headers, db)
+        .await?
         .ok_or(CatalogError::Unauthorized)?;
     let organization_exists = org::Entity::find_by_id(user.org_id)
         .one(db)
