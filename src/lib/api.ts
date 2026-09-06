@@ -2116,6 +2116,15 @@ export async function applySidebarLayout(
   return getTransport().call("apply_sidebar_layout", { entries })
 }
 
+/** Reorder a folder's organizational subfolders among themselves. `orderedIds`
+ *  is the new sibling order; the backend assigns each `sort_order = its index`. */
+export async function reorderSubfolders(
+  parentId: number,
+  orderedIds: number[]
+): Promise<void> {
+  return getTransport().call("reorder_subfolders", { parentId, orderedIds })
+}
+
 /** Move one folder into (`groupId`) or out of (`null`) a group, appending it to
  *  the target container. The context-menu path, which has no drop position. */
 export async function setFolderGroup(

@@ -238,6 +238,10 @@ pub fn build_router(
             post(handlers::folders::apply_sidebar_layout),
         )
         .route(
+            "/reorder_subfolders",
+            post(handlers::folders::reorder_subfolders),
+        )
+        .route(
             "/set_folder_group",
             post(handlers::folders::set_folder_group),
         )

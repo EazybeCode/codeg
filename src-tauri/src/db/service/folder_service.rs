@@ -700,7 +700,12 @@ pub(crate) async fn assign_folder_positions(
         .iter()
         .map(|(id, _, group_id)| match group_id {
             Some(g) => format!("WHEN {id} THEN {g}"),
-            None => format!("WHEN {id} THEN NULL"),
+            // CAST(NULL AS INTEGER), not bare NULL: when EVERY branch is NULL
+            // (e.g. reordering subfolders, which all have group_id=NULL),
+            // Postgres types an all-NULL CASE as `text` and rejects assigning it
+            // to the integer `group_id` column. The cast forces integer typing;
+            // it's valid on SQLite too.
+            None => format!("WHEN {id} THEN CAST(NULL AS INTEGER)"),
         })
         .collect::<Vec<_>>()
         .join(" ");

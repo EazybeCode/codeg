@@ -326,6 +326,29 @@ pub async fn apply_sidebar_layout(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReorderSubfoldersParams {
+    pub parent_id: i32,
+    pub ordered_ids: Vec<i32>,
+}
+
+/// Reorder a folder's organizational subfolders among themselves. See
+/// `reorder_subfolders_core`.
+pub async fn reorder_subfolders(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<ReorderSubfoldersParams>,
+) -> Result<Json<()>, AppCommandError> {
+    folder_commands::reorder_subfolders_core(
+        &state.emitter,
+        &state.db,
+        params.parent_id,
+        params.ordered_ids,
+    )
+    .await?;
+    Ok(Json(()))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SetFolderGroupParams {
     pub folder_id: i32,
     #[serde(default)]

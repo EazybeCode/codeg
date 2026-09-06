@@ -2,6 +2,7 @@ import { create } from "zustand"
 import { registerBackendScopedStoreReset } from "@/stores/backend-scoped-store-reset"
 import {
   applySidebarLayout as apiApplySidebarLayout,
+  reorderSubfolders as apiReorderSubfolders,
   createFolderGroup as apiCreateFolderGroup,
   deleteFolderGroup as apiDeleteFolderGroup,
   getFolder as apiGetFolder,
@@ -155,6 +156,9 @@ export interface AppWorkspaceStoreState {
    * and rolled back if the write fails, so the list never snaps back mid-drop.
    */
   applySidebarLayout: (entries: SidebarLayoutEntry[]) => Promise<void>
+  /** Reorder a folder's subfolders among themselves (drag within parent).
+   *  Optimistic like {@link applySidebarLayout}; rolls back on failure. */
+  reorderSubfolders: (parentId: number, orderedIds: number[]) => Promise<void>
   createFolderGroup: (
     name: string,
     color?: FolderThemeColor
@@ -761,6 +765,35 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
           folders: prevFolders,
           allFolders: prevAllFolders,
           folderGroups: prevGroups,
+        })
+        throw err
+      }
+    },
+
+    reorderSubfolders: async (parentId, orderedIds) => {
+      const { folders: prevFolders, allFolders: prevAllFolders } = get()
+      // Optimistically stamp sort_order = index on the named siblings so the
+      // new order sticks the instant the drag's optimistic override clears,
+      // without waiting for the `layout` broadcast. Subfolder sort_order is only
+      // ever compared among siblings of one parent, so absolute values (0..n)
+      // are safe and never touch top-level / group ordering.
+      const rank = new Map(orderedIds.map((id, i) => [id, i]))
+      const patchList = (prev: FolderDetail[]) =>
+        prev.map((f) => {
+          const next = rank.get(f.id)
+          if (next === undefined || f.sort_order === next) return f
+          return { ...f, sort_order: next }
+        })
+      set({
+        folders: patchList(prevFolders),
+        allFolders: patchList(prevAllFolders),
+      })
+      try {
+        await apiReorderSubfolders(parentId, orderedIds)
+      } catch (err) {
+        rollbackAndResync(set, get, {
+          folders: prevFolders,
+          allFolders: prevAllFolders,
         })
         throw err
       }

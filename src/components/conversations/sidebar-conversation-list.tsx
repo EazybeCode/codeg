@@ -108,6 +108,7 @@ import {
 } from "./sidebar-conversation-card"
 import {
   applyLayoutMove,
+  applyReorder,
   buildDragSlots,
   buildOwnerHeaderIndex,
   buildRows,
@@ -1096,6 +1097,9 @@ export function SidebarConversationList({
   )
   const folderGroups = useAppWorkspaceStore((s) => s.folderGroups)
   const applySidebarLayout = useAppWorkspaceStore((s) => s.applySidebarLayout)
+  const reorderSubfoldersAction = useAppWorkspaceStore(
+    (s) => s.reorderSubfolders
+  )
   const createFolderGroup = useAppWorkspaceStore((s) => s.createFolderGroup)
   const updateFolderGroup = useAppWorkspaceStore((s) => s.updateFolderGroup)
   const deleteFolderGroupAction = useAppWorkspaceStore(
@@ -1307,6 +1311,23 @@ export function SidebarConversationList({
   const [dragLayout, setDragLayout] = useState<SidebarLayout | null>(null)
   const pendingLayoutRef = useRef<SidebarLayout | null>(null)
 
+  // ── Subfolder reorder drag (a SEPARATE path from the SidebarLayout drag) ─────
+  // Subfolders live outside `SidebarLayout` (they render via the subfolder tree,
+  // not `top`/`membersByGroup`), so reordering them among their siblings runs its
+  // own tiny gesture: `subfolderDragParent` is the parent whose children are
+  // being reordered (null = this drag is a normal folder/group layout drag), and
+  // `subfolderDragOrder` is the optimistic sibling id order under the pointer.
+  // Both are gated behind a subfolder grip, so the top-level / group drag path is
+  // byte-for-byte unchanged when they are null.
+  const [subfolderDragParent, setSubfolderDragParent] = useState<number | null>(
+    null
+  )
+  const [subfolderDragOrder, setSubfolderDragOrder] = useState<number[]>([])
+  const subfolderDragParentRef = useRef<number | null>(null)
+  const subfolderDragOrderRef = useRef<number[]>([])
+  subfolderDragParentRef.current = subfolderDragParent
+  subfolderDragOrderRef.current = subfolderDragOrder
+
   // Floating sticky folder header. `stickyFolderId` is the ONLY new render
   // state and changes solely when the scroll crosses into a different folder —
   // never on a status event or the per-minute `now` tick — so the card/header
@@ -1331,6 +1352,10 @@ export function SidebarConversationList({
     startY: number
     lastY: number
     started: boolean
+    /** Set when the grip was on a subfolder header: the subfolder's DIRECT
+     *  parent, whose children this drag reorders. Undefined for a normal
+     *  folder/group layout drag. */
+    subfolderParentId?: number
   } | null>(null)
   const dragCleanupRef = useRef<(() => void) | null>(null)
   const autoscrollRef = useRef<number | null>(null)
@@ -1342,6 +1367,14 @@ export function SidebarConversationList({
   const storeLayoutRef = useRef<SidebarLayout>(EMPTY_SIDEBAR_LAYOUT)
   const dragSlotsRef = useRef<DragSlot[]>([])
   const reorderingRef = useRef(false)
+  // Read by the imperative subfolder-drag handlers without re-subscribing them.
+  const folderIndexRef = useRef<typeof folderIndex>(folderIndex)
+  const folderSortModesRef = useRef<Record<number, FolderSortMode>>(
+    folderSortModes
+  )
+  const subfolderChildrenRef = useRef<ReadonlyMap<number, readonly number[]>>(
+    new Map()
+  )
 
   useEffect(() => {
     // Hydrate from localStorage after mount to keep SSR/CSR markup consistent.
@@ -1723,6 +1756,11 @@ export function SidebarConversationList({
     () => subfolderChildrenByParent(folders, folderSortModeFor),
     [folders, folderSortModeFor]
   )
+  // Keep the imperative-gesture refs current (read by the subfolder-drag pointer
+  // handlers, which must not re-subscribe when these change).
+  folderIndexRef.current = folderIndex
+  folderSortModesRef.current = folderSortModes
+  subfolderChildrenRef.current = subfolderChildren
   // childId → parentId for open subfolders, used to compute each subfolder's
   // render depth (and its top-most non-subfolder ancestor for the group indent).
   const subfolderParentById = useMemo(() => {
@@ -1828,10 +1866,18 @@ export function SidebarConversationList({
   // appeared or vanished mid-drag is immediately a valid / invalid target — the
   // slot array and what the user sees can never disagree, because they are the
   // same array.
-  const dragSlots = useMemo<DragSlot[]>(
-    () => (dragging ? buildDragSlots(layout, dragging) : []),
-    [dragging, layout]
-  )
+  const dragSlots = useMemo<DragSlot[]>(() => {
+    if (!dragging) return []
+    // Subfolder drag: one flat slot per sibling, in the optimistic order — the
+    // surface renders exactly these rows, so `pointerYToTargetIndex` maps 1:1.
+    if (subfolderDragParent != null) {
+      return subfolderDragOrder.map((id, index) => ({
+        render: { kind: "folder" as const, id, depth: 0 },
+        target: { groupId: null, index },
+      }))
+    }
+    return buildDragSlots(layout, dragging)
+  }, [dragging, layout, subfolderDragParent, subfolderDragOrder])
   dragSlotsRef.current = dragSlots
 
   // Sticky-overlay lookup tables, rebuilt only when the flat rows change
@@ -2595,8 +2641,35 @@ export function SidebarConversationList({
     setDragLayout(next)
   }, [])
 
+  // Persist a finished subfolder reorder. Cleared state first so the surface
+  // tears down; the store patches sort_order optimistically, so no flash.
+  const persistSubfolderReorder = useCallback(
+    async (parentId: number, order: number[]) => {
+      setReordering(true)
+      try {
+        await reorderSubfoldersAction(parentId, order)
+      } catch (e) {
+        toast.error(t("toasts.applyLayoutFailed", { message: toErrorMessage(e) }))
+      } finally {
+        setReordering(false)
+      }
+    },
+    [reorderSubfoldersAction, t]
+  )
+
   const handleDragEnd = useCallback(async () => {
     setDragging(null)
+    // Subfolder drag path: persist the sibling order and reset its state.
+    if (subfolderDragParentRef.current != null) {
+      const parentId = subfolderDragParentRef.current
+      const order = subfolderDragOrderRef.current
+      subfolderDragParentRef.current = null
+      subfolderDragOrderRef.current = []
+      setSubfolderDragParent(null)
+      setSubfolderDragOrder([])
+      if (order.length > 0) await persistSubfolderReorder(parentId, order)
+      return
+    }
     const next = pendingLayoutRef.current
     pendingLayoutRef.current = null
     if (!next) {
@@ -2620,7 +2693,7 @@ export function SidebarConversationList({
       // layout (or, on failure, once its rollback has restored the old one).
       setDragLayout(null)
     }
-  }, [persistLayout])
+  }, [persistLayout, persistSubfolderReorder])
 
   // ── Custom folder-drag gesture ────────────────────────────────────────────
   // Height of one folder header row (Tailwind `h-[2rem]`); the drag surface
@@ -2681,6 +2754,17 @@ export function SidebarConversationList({
       )
       const slot = slots[slotIndex]
       if (!slot) return
+      // Subfolder drag: reorder the optimistic sibling array (the surface rows
+      // ARE that array), moving the dragged id to the pointer's slot.
+      if (state.subfolderParentId != null) {
+        const order = subfolderDragOrderRef.current
+        const from = order.indexOf(state.entry.id)
+        if (from < 0 || from === slotIndex) return
+        const next = applyReorder(order, from, slotIndex)
+        subfolderDragOrderRef.current = next
+        setSubfolderDragOrder(next)
+        return
+      }
       const current = layoutRef.current
       // Skip the no-op: without this every pointermove would allocate a fresh
       // layout object and re-render the whole surface at pointer frequency.
@@ -2748,6 +2832,10 @@ export function SidebarConversationList({
     pendingLayoutRef.current = null
     setDragging(null)
     setDragLayout(null)
+    subfolderDragParentRef.current = null
+    subfolderDragOrderRef.current = []
+    setSubfolderDragParent(null)
+    setSubfolderDragOrder([])
   }, [teardownDragListeners])
 
   const finishDrag = useCallback(() => {
@@ -2776,9 +2864,19 @@ export function SidebarConversationList({
         if (moved < DRAG_THRESHOLD_PX) return
         state.started = true
         setDragging(state.entry)
-        // Seed the optimistic layout from the current one so the drag surface
-        // has something to render before the first target update lands.
-        setDragLayout(layoutRef.current)
+        if (state.subfolderParentId != null) {
+          // Subfolder drag: seed the optimistic sibling order from the tree.
+          const siblings =
+            subfolderChildrenRef.current.get(state.subfolderParentId) ?? []
+          setSubfolderDragParent(state.subfolderParentId)
+          setSubfolderDragOrder([...siblings])
+          subfolderDragParentRef.current = state.subfolderParentId
+          subfolderDragOrderRef.current = [...siblings]
+        } else {
+          // Normal folder/group drag: seed the optimistic layout so the surface
+          // has something to render before the first target update lands.
+          setDragLayout(layoutRef.current)
+        }
       }
       updateDragTarget(event.clientY)
       maybeAutoscroll(event.clientY)
@@ -2814,7 +2912,11 @@ export function SidebarConversationList({
   )
 
   const beginEntryDrag = useCallback(
-    (entry: SidebarEntry, event: React.PointerEvent) => {
+    (
+      entry: SidebarEntry,
+      event: React.PointerEvent,
+      subfolderParentId?: number
+    ) => {
       if (event.button !== 0) return
       if (reorderingRef.current) return
       if (dragPointerRef.current) return
@@ -2825,6 +2927,7 @@ export function SidebarConversationList({
         startY: event.clientY,
         lastY: event.clientY,
         started: false,
+        subfolderParentId,
       }
       window.addEventListener("pointermove", onDragPointerMove)
       window.addEventListener("pointerup", onDragPointerUp)
@@ -2852,6 +2955,20 @@ export function SidebarConversationList({
   const beginGroupDrag = useCallback(
     (groupId: number, event: React.PointerEvent) => {
       beginEntryDrag({ kind: "group", id: groupId }, event)
+    },
+    [beginEntryDrag]
+  )
+  // Grip on a SUBFOLDER header: reorder among its siblings. Resolves the direct
+  // parent from the (ref'd) folder index and only arms when the parent's
+  // per-folder sort is Manual — dragging is meaningless under Name/Recent, which
+  // impose their own order. Stable identity (reads refs) so header memos hold.
+  const beginSubfolderDrag = useCallback(
+    (folderId: number, event: React.PointerEvent) => {
+      const parentId = folderIndexRef.current.get(folderId)?.parentId
+      if (parentId == null) return
+      const mode = folderSortModesRef.current[parentId] ?? "manual"
+      if (mode !== "manual") return
+      beginEntryDrag({ kind: "folder", id: folderId }, event, parentId)
     },
     [beginEntryDrag]
   )
@@ -3067,7 +3184,17 @@ export function SidebarConversationList({
           isRootGroup || isWorktree ? undefined : handleSetFolderSortMode
         }
         isDragging={opts.dragging}
-        onGripPointerDown={opts.grip ? beginFolderDrag : undefined}
+        // A subfolder header grips into the subfolder-reorder gesture (reorder
+        // among siblings); a normal top-level folder grips into the layout drag.
+        // `beginSubfolderDrag` self-gates on the parent's Manual sort, so under
+        // Name/Recent the grip is present but the drag never arms.
+        onGripPointerDown={
+          !opts.grip
+            ? undefined
+            : isSubfolder
+              ? beginSubfolderDrag
+              : beginFolderDrag
+        }
         suppressed={opts.suppressed ?? false}
         depth={depth}
         variant={variant}

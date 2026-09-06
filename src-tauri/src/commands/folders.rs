@@ -1112,6 +1112,50 @@ pub async fn apply_sidebar_layout_core(
     Ok(())
 }
 
+/// Reorder a folder's organizational subfolders among themselves. `ordered_ids`
+/// is the new sibling order; each is assigned `sort_order = its index` so
+/// `subfolderChildrenByParent` (which sorts a parent's children by `sort_order`
+/// in Manual mode) renders them in that order.
+///
+/// Deliberately validating: only ids that are genuinely a `Subfolder` whose
+/// `parent_id == parent_id` are written. Subfolder `sort_order` is compared ONLY
+/// among siblings of the same parent (never against top-level folders or group
+/// members), so rewriting it here cannot disturb the top-level / group ordering
+/// — but the validation still guards against a stale client naming a top-level
+/// folder id, whose `sort_order` DOES drive the shared top-level order.
+pub async fn reorder_subfolders_core(
+    emitter: &EventEmitter,
+    db: &AppDatabase,
+    parent_id: i32,
+    ordered_ids: Vec<i32>,
+) -> Result<(), AppCommandError> {
+    use crate::db::entities::folder::FolderKind;
+
+    let mut assignments: Vec<(i32, i32, Option<i32>)> = Vec::new();
+    let mut order = 0i32;
+    for id in ordered_ids {
+        let folder = folder_service::get_folder_by_id(&db.conn, id)
+            .await
+            .map_err(AppCommandError::from)?;
+        if let Some(folder) = folder {
+            if folder.kind == FolderKind::Subfolder && folder.parent_id == Some(parent_id) {
+                // group_id stays NULL for subfolders (they follow the tree, not a
+                // sidebar group) — assign_folder_positions writes it as None here.
+                assignments.push((id, order, None));
+                order += 1;
+            }
+        }
+    }
+    if assignments.is_empty() {
+        return Ok(());
+    }
+    folder_service::assign_folder_positions(&db.conn, &assignments)
+        .await
+        .map_err(AppCommandError::from)?;
+    emit_folder_group_change(emitter, crate::web::event_bridge::FolderGroupChange::Layout);
+    Ok(())
+}
+
 /// Move one folder into (or out of) a group — the context-menu path, which has
 /// no drop position to derive an index from, so the folder is appended.
 pub async fn set_folder_group_core(
