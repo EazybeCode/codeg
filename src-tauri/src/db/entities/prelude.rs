@@ -27,3 +27,6 @@ pub use super::work_task::Entity as WorkTask;
 pub use super::work_task_event::Entity as WorkTaskEvent;
 pub use super::work_task_settings::Entity as WorkTaskSettings;
 pub use super::work_task_template::Entity as WorkTaskTemplate;
+pub use super::workspace_chat_draft::Entity as WorkspaceChatDraft;
+pub use super::workspace_node::Entity as WorkspaceNode;
+pub use super::workspace_repository::Entity as WorkspaceRepository;

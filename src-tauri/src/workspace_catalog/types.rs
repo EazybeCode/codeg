@@ -31,6 +31,25 @@ pub struct WorkspaceNode {
     pub revision: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateNodeInput {
+    pub parent_id: Option<i32>,
+    pub kind: WorkspaceNodeKind,
+    pub name: String,
+    pub repository_default: Option<RepositoryDefault>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateNodeInput {
+    pub node_id: i32,
+    pub expected_revision: i64,
+    pub parent_id: Option<i32>,
+    pub name: String,
+    pub repository_default: Option<RepositoryDefault>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CatalogError {
     #[error("unauthorized")]
@@ -51,4 +70,11 @@ pub enum CatalogError {
     UpstreamUnavailable,
     #[error("database error")]
     Database,
+}
+
+impl From<sea_orm::DbErr> for CatalogError {
+    fn from(error: sea_orm::DbErr) -> Self {
+        tracing::error!(error = %error, "workspace catalog database operation failed");
+        Self::Database
+    }
 }

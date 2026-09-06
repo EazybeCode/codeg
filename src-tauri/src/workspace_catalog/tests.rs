@@ -205,6 +205,7 @@ fn workspace_catalog_node_shapes_enforce_hierarchy_roles() {
 fn workspace_catalog_label_validation_uses_trimmed_unicode_length() {
     assert!(validate_label("  valid label  ").is_ok());
     assert!(validate_label(&"界".repeat(200)).is_ok());
+    assert!(validate_label(&format!("  {}  ", "界".repeat(200))).is_ok());
     assert!(matches!(
         validate_label(" \n\t "),
         Err(CatalogError::InvalidInput(_))
@@ -261,5 +262,24 @@ fn workspace_catalog_kind_serializes_as_snake_case() {
     assert_eq!(
         serde_json::to_string(&WorkspaceNodeKind::WorkingDirectory).unwrap(),
         "\"working_directory\""
+    );
+}
+
+#[test]
+fn workspace_catalog_local_child_with_foreign_ancestor_is_not_found() {
+    let mut foreign_parent = node(1, None, WorkspaceNodeKind::Project, None);
+    foreign_parent.org_id = 2;
+    let local_child = node(2, Some(1), WorkspaceNodeKind::Folder, None);
+
+    assert_eq!(
+        resolve_default(
+            &[foreign_parent, local_child],
+            &Scope {
+                org_id: 1,
+                user_id: 1,
+            },
+            2,
+        ),
+        Err(CatalogError::NotFound)
     );
 }
