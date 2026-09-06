@@ -1,9 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{
     body::{Body, Bytes},
-    extract::State,
+    extract::{Extension, State},
     http::{HeaderMap, Response, StatusCode},
     middleware,
     routing::post,
@@ -21,9 +21,10 @@ use uuid::Uuid;
 
 use super::workspace_catalog::{BrowserMutationPolicy, WorkspaceCatalogHandler};
 use crate::{
+    app_state::AppState,
     db::{
         entities::{conversation, folder, org, session, user, workspace_chat_draft},
-        migration::Migrator,
+        migration::Migrator, AppDatabase,
     },
     web::auth,
     workspace_catalog::{CatalogError, RepositoryAccess, Scope, VerifiedRepository},
@@ -31,6 +32,7 @@ use crate::{
 
 const ADMIN_URL: &str = "postgres://air1@localhost:5432/postgres";
 const TEST_TOKEN: &str = "catalog-postgres-test-token";
+const DATABASE_PREFIX: &str = "workos_catalog_test_";
 
 type TestResult<T> = Result<T, String>;
 
@@ -138,7 +140,7 @@ struct TestServer {
 }
 
 impl TestServer {
-    async fn start(db: DatabaseConnection) -> TestResult<Self> {
+    async fn start(db: DatabaseConnection, app_state: Arc<AppState>) -> TestResult<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|error| format!("bind isolated HTTP server: {error}"))?;
@@ -166,7 +168,12 @@ impl TestServer {
             )
             .route("/api/create_workspace_chat_draft", post(create_draft))
             .route("/api/list_workspace_chat_drafts", post(list_drafts))
+            .route(
+                "/api/get_folder_conversation",
+                post(super::conversations::get_folder_conversation),
+            )
             .with_state(state)
+            .layer(Extension(app_state))
             .layer(middleware::from_fn(move |request, next| async move {
                 auth::require_token(request, next, TEST_TOKEN.into()).await
             }));
@@ -242,6 +249,16 @@ fn require_status(response: &ApiResponse, expected: StatusCode, operation: &str)
     )
 }
 
+fn require_unprovisioned(response: &ApiResponse, operation: &str) -> TestResult<()> {
+    require(
+        response.body["execution_state"] == "unprovisioned",
+        format!(
+            "{operation}: expected unprovisioned draft, got {}",
+            response.body
+        ),
+    )
+}
+
 fn json_i32(value: &Value, field: &str) -> TestResult<i32> {
     value[field]
         .as_i64()
@@ -249,13 +266,59 @@ fn json_i32(value: &Value, field: &str) -> TestResult<i32> {
         .ok_or_else(|| format!("missing integer field {field} in {value}"))
 }
 
-fn validate_database_name(name: &str) -> TestResult<()> {
+fn validate_database_target(expected: &str, candidate: &str) -> TestResult<()> {
+    let suffix = candidate.strip_prefix(DATABASE_PREFIX).unwrap_or_default();
     require(
-        name.starts_with("workos_catalog_test_")
-            && name.len() == "workos_catalog_test_".len() + 32
-            && name.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'),
-        format!("refusing unsafe disposable database name: {name}"),
+        candidate == expected
+            && suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')),
+        format!(
+            "refusing database target {candidate}; expected exact generated name {expected}"
+        ),
     )
+}
+
+#[test]
+fn workspace_catalog_database_cleanup_guard_requires_exact_generated_hex_name() {
+    let expected = "workos_catalog_test_0123456789abcdef0123456789abcdef";
+    assert!(validate_database_target(expected, expected).is_ok());
+    for rejected in [
+        "workos_catalog_test_0123456789abcdef0123456789abcdee",
+        "workos_catalog_test_0123456789abcdef0123456789abcdeG",
+        "workos_catalog_test_0123456789abcdef0123456789abcde_",
+        "workos_catalog_test_0123456789abcdef",
+        "workos_local",
+    ] {
+        assert!(
+            validate_database_target(expected, rejected).is_err(),
+            "cleanup guard accepted {rejected}"
+        );
+    }
+}
+
+fn snapshot_data_tree(root: &Path) -> TestResult<Vec<(String, bool, Vec<u8>)>> {
+    let mut snapshot = Vec::new();
+    for entry in walkdir::WalkDir::new(root).min_depth(1) {
+        let entry = entry.map_err(|error| format!("walk fixture data tree: {error}"))?;
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|error| format!("relativize fixture path: {error}"))?
+            .to_string_lossy()
+            .into_owned();
+        let is_dir = entry.file_type().is_dir();
+        let contents = if entry.file_type().is_file() {
+            std::fs::read(entry.path())
+                .map_err(|error| format!("read fixture data file {relative}: {error}"))?
+        } else {
+            Vec::new()
+        };
+        snapshot.push((relative, is_dir, contents));
+    }
+    snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(snapshot)
 }
 
 async fn connect(url: &str, max_connections: u32) -> TestResult<DatabaseConnection> {
@@ -472,6 +535,7 @@ async fn exercise_catalog(db: &DatabaseConnection, api: &ApiClient) -> TestResul
     for response in responses {
         let response = response?;
         require_status(&response, StatusCode::OK, "concurrent inherited retry")?;
+        require_unprovisioned(&response, "concurrent inherited retry")?;
         require(
             response.body["repository_id"] == primary_id,
             format!("inherited draft selected wrong repository: {}", response.body),
@@ -521,6 +585,7 @@ async fn exercise_catalog(db: &DatabaseConnection, api: &ApiClient) -> TestResul
         )
         .await?;
     require_status(&retried, StatusCode::OK, "retry after parent default change")?;
+    require_unprovisioned(&retried, "retry after parent default change")?;
     require(
         json_i32(&retried.body, "id")? == inherited_draft_id
             && retried.body["repository_id"] == primary_id,
@@ -540,6 +605,7 @@ async fn exercise_catalog(db: &DatabaseConnection, api: &ApiClient) -> TestResul
         )
         .await?;
     require_status(&override_draft, StatusCode::OK, "create overridden draft")?;
+    require_unprovisioned(&override_draft, "create overridden draft")?;
     require(
         override_draft.body["repository_id"] == primary_id,
         format!("explicit override was not captured: {}", override_draft.body),
@@ -558,6 +624,7 @@ async fn exercise_catalog(db: &DatabaseConnection, api: &ApiClient) -> TestResul
         )
         .await?;
     require_status(&bob_draft, StatusCode::OK, "create second-member draft")?;
+    require_unprovisioned(&bob_draft, "create second-member draft")?;
     let alice_drafts = api
         .post(
             "list_workspace_chat_drafts",
@@ -571,7 +638,11 @@ async fn exercise_catalog(db: &DatabaseConnection, api: &ApiClient) -> TestResul
         .as_array()
         .ok_or_else(|| format!("draft list was not an array: {}", alice_drafts.body))?;
     require(
-        drafts.len() == 2 && drafts.iter().all(|draft| draft["creator_user_id"] == 7101),
+        drafts.len() == 2
+            && drafts.iter().all(|draft| {
+                draft["creator_user_id"] == 7101
+                    && draft["execution_state"] == "unprovisioned"
+            }),
         format!("draft privacy filter leaked rows: {}", alice_drafts.body),
     )?;
 
@@ -611,27 +682,55 @@ async fn exercise_catalog(db: &DatabaseConnection, api: &ApiClient) -> TestResul
             == 0,
         "catalog operations created a legacy conversation row",
     )?;
+    let legacy_lookup = api
+        .post(
+            "get_folder_conversation",
+            "alice-session",
+            json!({"conversationId": inherited_draft_id}),
+        )
+        .await?;
+    require_status(
+        &legacy_lookup,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "look up draft id through legacy conversation API",
+    )?;
     require(
-        conversation::Entity::find_by_id(inherited_draft_id)
-            .one(db)
-            .await
-            .map_err(|error| format!("look up draft id in legacy conversations: {error}"))?
-            .is_none(),
-        "a catalog draft id resolved to a launchable legacy conversation",
+        legacy_lookup.body["code"] == "database_error",
+        format!(
+            "draft id unexpectedly mapped through legacy conversation API: {}",
+            legacy_lookup.body
+        ),
     )?;
     Ok(())
 }
 
 async fn run_http_scenario(db: &DatabaseConnection) -> TestResult<()> {
     seed_identity_rows(db).await?;
-    let server = TestServer::start(db.clone()).await?;
+    let data_dir = tempfile::tempdir().map_err(|error| format!("create fixture data dir: {error}"))?;
+    let app_state = Arc::new(AppState::new_for_test(
+        AppDatabase { conn: db.clone() },
+        data_dir.path().to_path_buf(),
+    ));
+    let before = snapshot_data_tree(data_dir.path())?;
+    let server = TestServer::start(db.clone(), app_state).await?;
     let api = ApiClient {
         client: reqwest::Client::new(),
         base_url: server.base_url.clone(),
     };
     let result = exercise_catalog(db, &api).await;
     let shutdown_result = server.stop().await;
-    result.and(shutdown_result)
+    let after = snapshot_data_tree(data_dir.path());
+    result
+        .and(shutdown_result)
+        .and_then(|()| after)
+        .and_then(|after| {
+            require(
+                after == before,
+                format!(
+                    "catalog/legacy lookup changed fixture data tree; before={before:?}, after={after:?}"
+                ),
+            )
+        })
 }
 
 /// Explicitly gated because it creates a real local Postgres database. Run with:
@@ -639,24 +738,25 @@ async fn run_http_scenario(db: &DatabaseConnection) -> TestResult<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires local Postgres role air1 with CREATEDB on localhost:5432"]
 async fn workspace_catalog_postgres_http_integration() {
-    let database_name = format!("workos_catalog_test_{}", Uuid::new_v4().simple());
-    validate_database_name(&database_name).expect("generated database name must be safe");
+    let generated_database_name = format!("{DATABASE_PREFIX}{}", Uuid::new_v4().simple());
+    validate_database_target(&generated_database_name, &generated_database_name)
+        .expect("generated database name must be safe");
     let admin = connect(ADMIN_URL, 1)
         .await
         .expect("connect explicit local Postgres admin database");
     admin
         .execute(Statement::from_string(
             DbBackend::Postgres,
-            format!("CREATE DATABASE \"{database_name}\""),
+            format!("CREATE DATABASE \"{generated_database_name}\""),
         ))
         .await
         .expect("create generated catalog test database");
-    let database_url = format!("postgres://air1@localhost:5432/{database_name}");
+    let database_url = format!("postgres://air1@localhost:5432/{generated_database_name}");
     let db = match connect(&database_url, 8).await {
         Ok(db) => db,
         Err(error) => {
             admin.close().await.expect("close admin pool");
-            panic!("{error}; preserved database {database_name}");
+            panic!("{error}; preserved database {generated_database_name}");
         }
     };
     let migration_result = Migrator::up(&db, None)
@@ -666,21 +766,32 @@ async fn workspace_catalog_postgres_http_integration() {
         Ok(()) => run_http_scenario(&db).await,
         Err(error) => Err(error),
     };
-    db.close().await.expect("close disposable database pool");
-
     if let Err(error) = outcome {
+        db.close().await.expect("close disposable database pool");
         admin.close().await.expect("close admin pool after failure");
-        panic!("{error}; preserved database {database_name}");
+        panic!("{error}; preserved database {generated_database_name}");
     }
 
-    validate_database_name(&database_name).expect("cleanup database name must remain exact and safe");
+    let connected_database_name = db
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT current_database() AS database_name",
+        ))
+        .await
+        .expect("read current disposable database identity")
+        .expect("current_database must return one row")
+        .try_get::<String>("", "database_name")
+        .expect("decode current disposable database identity");
+    validate_database_target(&generated_database_name, &connected_database_name)
+        .expect("cleanup target must equal the connected generated database");
+    db.close().await.expect("close disposable database pool");
     admin
         .execute(Statement::from_string(
             DbBackend::Postgres,
-            format!("DROP DATABASE \"{database_name}\""),
+            format!("DROP DATABASE \"{connected_database_name}\""),
         ))
         .await
         .expect("drop successful catalog test database");
     admin.close().await.expect("close admin pool");
-    eprintln!("verified and removed disposable database {database_name}");
+    eprintln!("verified and removed disposable database {connected_database_name}");
 }
