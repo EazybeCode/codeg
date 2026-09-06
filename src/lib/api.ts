@@ -2040,6 +2040,43 @@ export async function openFolderById(folderId: number): Promise<FolderDetail> {
   return getTransport().call("open_folder_by_id", { folderId })
 }
 
+/** Create a nested organizational subfolder (a real directory on disk) under
+ *  `parentId`. Works on Projects and subfolders alike — arbitrary depth. */
+export async function createSubfolder(
+  parentId: number,
+  name: string
+): Promise<FolderDetail> {
+  return getTransport().call("create_subfolder", { parentId, name })
+}
+
+/** Create a subfolder that is a CLONE of a GitHub repo under `parentId`. The
+ *  server clones `owner/repo` into a fresh dir beneath the parent, checks out
+ *  (`createBranch=false`) or creates (`true`) `branch`, and records the
+ *  repo + branch on the folder row. The user's GitHub token is resolved
+ *  server-side from their session. */
+export async function createRepoSubfolder(
+  parentId: number,
+  name: string,
+  fullName: string,
+  branch: string,
+  createBranch: boolean
+): Promise<FolderDetail> {
+  return getTransport().call("create_repo_subfolder", {
+    parentId,
+    name,
+    fullName,
+    branch,
+    createBranch,
+  })
+}
+
+/** The branches of a GitHub repo the signed-in user can reach. */
+export async function listGithubBranches(
+  fullName: string
+): Promise<{ name: string }[]> {
+  return getTransport().call("list_github_branches", { full_name: fullName })
+}
+
 export async function removeFolderFromWorkspace(
   folderId: number
 ): Promise<void> {

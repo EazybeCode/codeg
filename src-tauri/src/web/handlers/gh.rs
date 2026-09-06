@@ -31,6 +31,28 @@ fn s(v: &serde_json::Value, k: &str) -> String {
     v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// Map a [`github_auth::GithubTokenError`] to an HTTP response. Reauth-required
+/// → 401 with the sentinel `error: "github_reauth_required"` so the frontend can
+/// prompt a re-login; a transient GitHub/network failure → 502.
+fn github_token_error_response(err: github_auth::GithubTokenError) -> axum::response::Response {
+    use github_auth::GithubTokenError;
+    match err {
+        GithubTokenError::ReauthRequired(reason) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "github_reauth_required",
+                "detail": reason,
+            })),
+        )
+            .into_response(),
+        GithubTokenError::Network(msg) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("github: {msg}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// GET/POST /api/list_github_repos — the current user's GitHub repos, newest first.
 pub async fn list_github_repos(
     Extension(state): Extension<Arc<AppState>>,
@@ -47,15 +69,9 @@ pub async fn list_github_repos(
                 .into_response()
         }
     };
-    let token = match user.gh_token_enc.as_deref().and_then(github_auth::decrypt) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "no github token on record — sign in again"})),
-            )
-                .into_response()
-        }
+    let token = match github_auth::ensure_github_token(db, &user).await {
+        Ok(t) => t,
+        Err(e) => return github_token_error_response(e),
     };
 
     let http = reqwest::Client::new();
@@ -106,6 +122,80 @@ pub async fn list_github_repos(
     Json(repos).into_response()
 }
 
+#[derive(Serialize)]
+pub struct BranchItem {
+    name: String,
+}
+
+#[derive(Deserialize)]
+pub struct BranchesReq {
+    pub full_name: String,
+}
+
+/// POST /api/list_github_branches — the branches of a repo the user can reach,
+/// for the "clone into a subfolder" picker. Mirrors [`list_github_repos`]:
+/// resolves the signed-in user + decrypts their token, then queries GitHub.
+pub async fn list_github_branches(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(req): axum::Json<BranchesReq>,
+) -> impl IntoResponse {
+    let db = &state.db.conn;
+    let user = match github_auth::current_user(&headers, db).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "not signed in"})),
+            )
+                .into_response()
+        }
+    };
+    let token = match github_auth::ensure_github_token(db, &user).await {
+        Ok(t) => t,
+        Err(e) => return github_token_error_response(e),
+    };
+
+    let full_name = req.full_name.trim();
+    if full_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "full_name is required"})),
+        )
+            .into_response();
+    }
+
+    let http = reqwest::Client::new();
+    let raw: Vec<serde_json::Value> = match http
+        .get(format!(
+            "https://api.github.com/repos/{full_name}/branches?per_page=100"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", "EazyWorkOS")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(r) => r.json().await.unwrap_or_default(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("github: {e}")})),
+            )
+                .into_response()
+        }
+    };
+
+    let branches: Vec<BranchItem> = raw
+        .into_iter()
+        .map(|v| BranchItem { name: s(&v, "name") })
+        .filter(|b| !b.name.is_empty())
+        .collect();
+
+    Json(branches).into_response()
+}
+
 #[derive(Deserialize)]
 pub struct CloneReq {
     pub full_name: String,
@@ -126,11 +216,9 @@ pub async fn clone_github_repo(
             return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"not signed in"}))).into_response()
         }
     };
-    let token = match user.gh_token_enc.as_deref().and_then(github_auth::decrypt) {
-        Some(t) => t,
-        None => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"no github token"}))).into_response()
-        }
+    let token = match github_auth::ensure_github_token(&state.db.conn, &user).await {
+        Ok(t) => t,
+        Err(e) => return github_token_error_response(e),
     };
     let repo_name = req.full_name.rsplit('/').next().unwrap_or("repo").to_string();
     let target = state

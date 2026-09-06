@@ -36,6 +36,10 @@ pub struct FolderDetail {
     /// Display-only grouping — never consulted for cwd, agent or conversation
     /// resolution. Always NULL on worktree children (they follow their repo).
     pub group_id: Option<i32>,
+    /// For a `Subfolder` cloned from GitHub: the `owner/repo` it clones; NULL for
+    /// a plain container subfolder and every other folder. Paired with
+    /// `git_branch` (the clone's branch) to render an `owner/repo @ branch` label.
+    pub repo_full_name: Option<String>,
 }
 
 /// A sidebar folder group. Ordered against ungrouped top-level folders by the

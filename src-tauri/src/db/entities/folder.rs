@@ -14,6 +14,12 @@ pub enum FolderKind {
     Regular,
     #[sea_orm(string_value = "chat")]
     Chat,
+    /// A pure organizational container nested under another folder. Unlike a
+    /// worktree folder (also carries `parent_id`), a subfolder's `parent_id` is
+    /// its DIRECT parent, not the flattened root, and it can nest arbitrarily
+    /// deep. It is a real directory on disk inside its parent.
+    #[sea_orm(string_value = "subfolder")]
+    Subfolder,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
@@ -48,6 +54,10 @@ pub struct Model {
     /// concurrently) is tolerated: the sidebar falls the folder back to top
     /// level. See `super::folder_group`.
     pub group_id: Option<i32>,
+    /// For a `Subfolder` cloned from GitHub: the `owner/repo` it is a clone of;
+    /// NULL for a plain organizational (container) subfolder and for every other
+    /// folder kind. Paired with `git_branch` (the clone's checked-out branch).
+    pub repo_full_name: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

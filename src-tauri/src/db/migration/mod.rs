@@ -45,6 +45,7 @@ mod m20260829_000001_folder_group;
 mod m20260830_000001_canvas_node;
 mod m20260831_000001_canvas_node_group_grid;
 mod m20260905_000001_multitenancy;
+mod m20260906_000001_folder_repo_full_name;
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -96,6 +97,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260830_000001_canvas_node::Migration),
             Box::new(m20260831_000001_canvas_node_group_grid::Migration),
             Box::new(m20260905_000001_multitenancy::Migration),
+            Box::new(m20260906_000001_folder_repo_full_name::Migration),
         ]
     }
 }

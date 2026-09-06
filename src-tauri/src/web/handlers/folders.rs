@@ -147,6 +147,85 @@ pub async fn open_folder_by_id(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSubfolderParams {
+    pub parent_id: i32,
+    pub name: String,
+}
+
+/// Create a nested organizational subfolder under `parent_id`. See
+/// `create_subfolder_core`.
+pub async fn create_subfolder(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<CreateSubfolderParams>,
+) -> Result<Json<FolderDetail>, AppCommandError> {
+    Ok(Json(
+        folder_commands::create_subfolder_core(&state.db, params.parent_id, params.name).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRepoSubfolderParams {
+    pub parent_id: i32,
+    pub name: String,
+    pub full_name: String,
+    pub branch: String,
+    #[serde(default)]
+    pub create_branch: bool,
+}
+
+/// Create a subfolder that is a CLONE of a GitHub repo under `parent_id`. The
+/// caller's GitHub OAuth token is resolved HERE (from the session cookie in
+/// `headers`) — never in the command layer — and passed into the core as
+/// `GitCredentials`. See `create_repo_subfolder_core`.
+///
+/// `HeaderMap` must precede the body `Json` extractor (axum consumes the body
+/// last).
+pub async fn create_repo_subfolder(
+    Extension(state): Extension<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(params): Json<CreateRepoSubfolderParams>,
+) -> Result<Json<FolderDetail>, AppCommandError> {
+    use crate::models::system::GitCredentials;
+    use crate::web::handlers::github_auth;
+
+    let user = github_auth::current_user(&headers, &state.db.conn)
+        .await
+        .ok_or_else(|| AppCommandError::authentication_failed("Not signed in"))?;
+    // Auto-refreshes an expired token; a rejected/absent refresh token surfaces
+    // as `github_reauth_required` so the frontend can prompt a re-login.
+    let token = github_auth::ensure_github_token(&state.db.conn, &user)
+        .await
+        .map_err(|e| match e {
+            github_auth::GithubTokenError::ReauthRequired(_) => {
+                AppCommandError::authentication_failed("github_reauth_required")
+            }
+            github_auth::GithubTokenError::Network(m) => {
+                AppCommandError::external_command("GitHub token refresh failed", m)
+            }
+        })?;
+    let creds = GitCredentials {
+        username: user.login.clone(),
+        password: token,
+    };
+
+    Ok(Json(
+        folder_commands::create_repo_subfolder_core(
+            &state.db,
+            &state.data_dir,
+            params.parent_id,
+            params.name,
+            params.full_name,
+            params.branch,
+            params.create_branch,
+            Some(&creds),
+        )
+        .await?,
+    ))
+}
+
 pub async fn remove_folder_from_workspace(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<FolderIdParams>,

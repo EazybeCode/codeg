@@ -714,6 +714,11 @@ export function MessageInput({
     folderPickerOverride
   )
   const folderBranchPickerAttached = hasFolderBranchPicker
+  // Eazybe WorkOS: folder + branch selection lives in the LEFT pane only (the
+  // Projects tree + its per-branch worktree rows), per Sagar's direction — the
+  // composer stays clean. We keep the status row (context usage + connection)
+  // but hide the in-composer folder/branch picker. Flip to re-enable.
+  const SHOW_FOLDER_BRANCH_PICKER = false
   const imageAttachments = attach.imageAttachments
   const hasAttachments = attachments.length > 0
   const hasSendableContent = !composerEmpty || hasAttachments
@@ -2090,10 +2095,12 @@ export function MessageInput({
           // right-align at the trailing edge.
           <div className="flex items-center justify-between gap-2 rounded-b-xl px-2 pt-1 text-xs text-muted-foreground">
             <div className="flex min-w-0 items-center gap-1">
-              <ConversationFolderBranchPicker
-                tabId={attachmentTabId}
-                override={folderPickerOverride}
-              />
+              {SHOW_FOLDER_BRANCH_PICKER && (
+                <ConversationFolderBranchPicker
+                  tabId={attachmentTabId}
+                  override={folderPickerOverride}
+                />
+              )}
             </div>
             {/* `pr-px` offsets the composer chrome's 1px border: the send button
                 sits INSIDE that border while this status row sits outside it, so

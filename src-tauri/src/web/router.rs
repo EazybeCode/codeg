@@ -34,6 +34,10 @@ pub fn build_router(
     let api = Router::new()
         .route("/health", post(health_check))
         .route("/list_github_repos", post(handlers::gh::list_github_repos))
+        .route(
+            "/list_github_branches",
+            post(handlers::gh::list_github_branches),
+        )
         .route("/clone_github_repo", post(handlers::gh::clone_github_repo))
         // Debug endpoint: operator-facing snapshot of `EventBusMetrics`
         // (emit volume, lag/eviction counts, attach decision counts).
@@ -200,6 +204,14 @@ pub fn build_router(
         .route(
             "/open_folder_by_id",
             post(handlers::folders::open_folder_by_id),
+        )
+        .route(
+            "/create_subfolder",
+            post(handlers::folders::create_subfolder),
+        )
+        .route(
+            "/create_repo_subfolder",
+            post(handlers::folders::create_repo_subfolder),
         )
         .route(
             "/remove_folder_from_workspace",

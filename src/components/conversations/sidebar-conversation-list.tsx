@@ -15,6 +15,7 @@ import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { Virtualizer, type VirtualizerHandle } from "virtua"
 import {
+  ArrowDownUp,
   Bot,
   Check,
   ChevronDown,
@@ -26,7 +27,9 @@ import {
   FolderGit2,
   FolderOpen,
   FolderOpenDot,
+  FolderPlus,
   FolderRoot,
+  Github,
   Layers,
   LayersPlus,
   Link2,
@@ -35,7 +38,6 @@ import {
   MonitorCloud,
   MoreHorizontal,
   Palette,
-  Rocket,
   Settings,
   SquarePen,
   Tag,
@@ -53,7 +55,6 @@ import { OpenInSubContent } from "@/components/layout/open-in-menu"
 import {
   openImportSessionsWindow,
   openInCode,
-  openProjectBootWindow,
   updateConversationTitle,
   updateConversationStatus,
   updateConversationPinned,
@@ -75,6 +76,8 @@ import { getAgentLabel } from "@/lib/custom-agents"
 import {
   loadFolderExpanded,
   saveFolderExpanded,
+  loadFolderSortModes,
+  saveFolderSortModes,
   loadFolderGroupExpanded,
   saveFolderGroupExpanded,
   loadSectionCollapsed,
@@ -83,6 +86,7 @@ import {
   saveConversationExpanded,
   DEFAULT_SECTION_ORDER,
   SIDEBAR_SECTION_KEYS,
+  type FolderSortMode,
   type SidebarSectionCollapsed,
   type SidebarSectionKey,
   type SidebarSortMode,
@@ -128,6 +132,7 @@ import {
   selectChatConversationsWithReuse,
   selectPinnedWithReuse,
   selectRecentConversationsWithReuse,
+  subfolderChildrenByParent,
   worktreeChildrenByParent,
   worktreeHeaderAlias,
   type DragSlot,
@@ -140,7 +145,9 @@ import { useSubsessionSync } from "@/hooks/use-subsession-sync"
 import { SidebarSectionHeader } from "./sidebar-section-header"
 import { SidebarFolderGroupHeader } from "./sidebar-folder-group-header"
 import { ConversationManageDialog } from "./conversation-manage-dialog"
+import { RepoSubfolderDialog } from "./repo-subfolder-dialog"
 import { CloneDialog } from "@/components/layout/clone-dialog"
+import { GithubProjectDialog } from "@/components/layout/github-project-dialog"
 import { RemoteWorkspaceManageDialog } from "@/components/layout/remote-workspace-manage-dialog"
 import { WorkspaceFolderDialog } from "@/components/layout/workspace-folder-dialog"
 import { Button } from "@/components/ui/button"
@@ -210,6 +217,10 @@ const FolderHeader = memo(function FolderHeader({
   onToggle,
   onRemoveFromWorkspace,
   onNewConversation,
+  onNewSubfolder,
+  onNewRepoSubfolder,
+  sortMode: folderSortMode = "manual",
+  onSetSortMode,
   onImport,
   onManageConversations,
   onManageLinks,
@@ -230,6 +241,8 @@ const FolderHeader = memo(function FolderHeader({
   variant = "repo",
   worktreeBranch = null,
   rootBranch = null,
+  repoFullName = null,
+  repoBranch = null,
 }: {
   folderId: number
   folderName: string
@@ -260,6 +273,17 @@ const FolderHeader = memo(function FolderHeader({
   onToggle: (folderId: number) => void
   onRemoveFromWorkspace: (folderId: number) => void
   onNewConversation: (folderId: number) => void
+  /** Create a nested subfolder under this folder. Omitted on sub-group headers
+   *  (worktree / root) that follow their repo and can't own subfolders. */
+  onNewSubfolder?: (folderId: number) => void
+  /** Create a subfolder that clones a GitHub repo under this folder. Omitted on
+   *  the same sub-group headers as {@link onNewSubfolder}. */
+  onNewRepoSubfolder?: (folderId: number) => void
+  /** This folder's per-folder sort choice; "manual" (the default) defers to the
+   *  global sort. */
+  sortMode?: FolderSortMode
+  /** Set this folder's per-folder sort. Omitted on sub-group headers. */
+  onSetSortMode?: (folderId: number, mode: FolderSortMode) => void
   onImport: (folderId: number) => void
   onManageConversations: (folderId: number) => void
   onManageLinks: (folderId: number) => void
@@ -316,8 +340,10 @@ const FolderHeader = memo(function FolderHeader({
    *   and the same `alias [ name ]` label as the two above, with the container's
    *   live branch standing in for the alias and a fixed, non-localized "root"
    *   for the name (see {@link rootBranch}).
+   * - `subfolder`: a nested organizational folder — a plain Folder glyph and the
+   *   `alias [ name ]` label, indented by its {@link depth}.
    */
-  variant?: "repo" | "worktree" | "root"
+  variant?: "repo" | "worktree" | "root" | "subfolder"
   /** The worktree's branch name (its own `git_branch`), used as the alias when
    *  none is set. Leaves the bare folder name when absent. */
   worktreeBranch?: string | null
@@ -327,6 +353,12 @@ const FolderHeader = memo(function FolderHeader({
    * bare "root" this row carried before there was a branch to show.
    */
   rootBranch?: string | null
+  /** For a `subfolder` variant cloned from GitHub: the `owner/repo` it clones,
+   *  shown as a muted secondary label. Null for plain container subfolders. */
+  repoFullName?: string | null
+  /** The branch to show beside {@link repoFullName} — the live HEAD if known,
+   *  else the recorded clone branch. */
+  repoBranch?: string | null
 }) {
   // Own the translations here rather than receiving `t` as a prop: next-intl
   // returns a fresh `t` on every parent render, so passing it down would defeat
@@ -370,6 +402,45 @@ const FolderHeader = memo(function FolderHeader({
     onSetAlias(folderId, trimmed ? trimmed : null)
     setAliasDialogOpen(false)
   }, [aliasValue, folderId, onSetAlias])
+
+  // Inline rename (double-click the name). Notion-style: the field edits the
+  // display name and commits to the folder ALIAS via the same path as the alias
+  // dialog — it never renames the real directory. Only offered on real folders
+  // and subfolders (worktree / root sub-groups show a branch label instead).
+  const canInlineRename = variant === "repo" || variant === "subfolder"
+  const [renaming, setRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState("")
+  // Guards against a double commit when Enter (or Escape) blurs the input, which
+  // then fires onBlur on top of the keydown handler.
+  const renameSettledRef = useRef(false)
+  const beginRename = useCallback(() => {
+    if (!canInlineRename) return
+    // Seed with the current display name (alias if set, else the folder name),
+    // so the user edits what they see.
+    setRenameValue(folderAlias ?? folderName)
+    renameSettledRef.current = false
+    setRenaming(true)
+  }, [canInlineRename, folderAlias, folderName])
+  const commitRename = useCallback(() => {
+    if (renameSettledRef.current) return
+    renameSettledRef.current = true
+    const trimmed = renameValue.trim()
+    // Clear the alias when empty or when it just restents the real folder name,
+    // so a folder never shows a redundant `name [ name ]` label.
+    const next = !trimmed || trimmed === folderName ? null : trimmed
+    onSetAlias(folderId, next)
+    setRenaming(false)
+  }, [renameValue, folderName, folderId, onSetAlias])
+  const cancelRename = useCallback(() => {
+    renameSettledRef.current = true
+    setRenaming(false)
+  }, [])
+  const renameInputRef = useCallback((node: HTMLInputElement | null) => {
+    if (node) {
+      node.focus()
+      node.select()
+    }
+  }, [])
 
   const titleTint = folderTitleTintVars(themeColor)
   // The `[ name ]` half of an aliased label is normally a DEEPER shade than the
@@ -453,6 +524,14 @@ const FolderHeader = memo(function FolderHeader({
                       returns undefined and the default class carries the day. */}
                   <span
                     style={titleTint}
+                    onDoubleClick={
+                      canInlineRename
+                        ? (e) => {
+                            e.stopPropagation()
+                            beginRename()
+                          }
+                        : undefined
+                    }
                     className={cn(
                       "min-w-0 flex-shrink truncate text-left text-[0.875rem] font-normal",
                       titleTint
@@ -481,14 +560,32 @@ const FolderHeader = memo(function FolderHeader({
                         alias={rootBranch ?? null}
                         bracketClassName={bracketClassName}
                       />
+                    ) : folderAlias?.trim() ? (
+                      // A renamed folder shows JUST its alias (the new name) —
+                      // no `[ realname ]` bracket. The worktree / root variants
+                      // above keep their two-part branch label.
+                      folderAlias.trim()
                     ) : (
-                      <FolderAliasLabel
-                        name={folderName}
-                        alias={folderAlias}
-                        bracketClassName={bracketClassName}
-                      />
+                      folderName
                     )}
                   </span>
+                  {/* Repo-folder secondary label: a subfolder cloned from GitHub
+                      reads `owner/repo @ branch` in muted text after its name, so
+                      it is distinguishable from a plain container subfolder. */}
+                  {variant === "subfolder" && repoFullName ? (
+                    <span
+                      className="min-w-0 shrink truncate text-[0.6875rem] text-muted-foreground/70"
+                      title={
+                        repoBranch
+                          ? `${repoFullName} @ ${repoBranch}`
+                          : repoFullName
+                      }
+                    >
+                      {repoBranch
+                        ? `${repoFullName} @ ${repoBranch}`
+                        : repoFullName}
+                    </span>
+                  ) : null}
                   {/* Live-activity badge: the number of RUNNING sessions in this
                       group, and nothing at all when none are. Amber (not the
                       primary tint the old total-count chip used) is the same
@@ -600,6 +697,45 @@ const FolderHeader = memo(function FolderHeader({
                 <SquarePen className="h-[0.875rem] w-[0.875rem]" />
               </button>
             </div>
+            {/* Inline-rename overlay: sits on top of the row, aligned with the
+                label text (same left padding as the toggle), so double-clicking
+                the name turns it into an editable field without nesting an
+                <input> inside the toggle <button>. Enter commits (to the alias),
+                Escape cancels, blur commits. */}
+            {renaming ? (
+              <div
+                className="absolute inset-0 z-10 flex items-center pr-[0.5rem]"
+                style={{
+                  paddingLeft: `calc(var(--conv-rail-axis) + 0.875rem + ${depth} * ${CONV_RAIL_DEPTH_STEP})`,
+                }}
+              >
+                <input
+                  ref={renameInputRef}
+                  {...ime.props}
+                  value={renameValue}
+                  placeholder={folderName}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (ime.isComposing(e)) return
+                    if (e.key === "Enter") {
+                      e.preventDefault()
+                      commitRename()
+                    } else if (e.key === "Escape") {
+                      e.preventDefault()
+                      cancelRename()
+                    }
+                  }}
+                  onBlur={commitRename}
+                  className={cn(
+                    "min-w-0 flex-1 rounded-[0.375rem] px-[0.375rem] py-[0.125rem]",
+                    "text-[0.875rem] font-normal text-sidebar-foreground",
+                    "bg-[var(--sidebar)] outline-none ring-2 ring-ring ring-inset"
+                  )}
+                />
+              </div>
+            ) : null}
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent>
@@ -607,6 +743,52 @@ const FolderHeader = memo(function FolderHeader({
             <SquarePen className="h-4 w-4" />
             {t("newConversation")}
           </ContextMenuItem>
+          {onNewSubfolder ? (
+            <ContextMenuSub>
+              <ContextMenuSubTrigger>
+                <FolderPlus className="h-4 w-4" />
+                {t("subfolder.new")}
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent>
+                <ContextMenuItem onSelect={() => onNewSubfolder(folderId)}>
+                  <FolderPlus className="h-4 w-4" />
+                  {t("subfolder.empty")}
+                </ContextMenuItem>
+                {onNewRepoSubfolder ? (
+                  <ContextMenuItem
+                    onSelect={() => onNewRepoSubfolder(folderId)}
+                  >
+                    <Github className="h-4 w-4" />
+                    {t("subfolder.fromRepo")}
+                  </ContextMenuItem>
+                ) : null}
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+          ) : null}
+          {onSetSortMode ? (
+            <ContextMenuSub>
+              <ContextMenuSubTrigger>
+                <ArrowDownUp className="h-4 w-4" />
+                {t("folderSortBy.label")}
+              </ContextMenuSubTrigger>
+              <ContextMenuSubContent>
+                {(["manual", "name", "recent"] as const).map((mode) => (
+                  <ContextMenuItem
+                    key={mode}
+                    onSelect={() => onSetSortMode(folderId, mode)}
+                  >
+                    <Check
+                      className={cn(
+                        "h-4 w-4",
+                        folderSortMode === mode ? "opacity-100" : "opacity-0"
+                      )}
+                    />
+                    {t(`folderSortBy.${mode}`)}
+                  </ContextMenuItem>
+                ))}
+              </ContextMenuSubContent>
+            </ContextMenuSub>
+          ) : null}
           <ContextMenuItem onSelect={() => onImport(folderId)}>
             <Download className="h-4 w-4" />
             {t("importLocalSessions")}
@@ -920,6 +1102,7 @@ export function SidebarConversationList({
     (s) => s.deleteFolderGroup
   )
   const setFolderGroupAction = useAppWorkspaceStore((s) => s.setFolderGroup)
+  const createSubfolderAction = useAppWorkspaceStore((s) => s.createSubfolder)
   const refreshFolder = useAppWorkspaceStore((s) => s.refreshFolder)
   const refreshing = loading
   const { activeFolder } = useActiveFolder()
@@ -945,6 +1128,9 @@ export function SidebarConversationList({
         color: string
         defaultAgentType: AgentType | null
         gitBranch: string | null
+        kind: FolderDetail["kind"]
+        parentId: number | null
+        repoFullName: string | null
       }
     >()
     for (const f of allFolders)
@@ -955,6 +1141,9 @@ export function SidebarConversationList({
         color: f.color,
         defaultAgentType: f.default_agent_type,
         gitBranch: f.git_branch,
+        kind: f.kind,
+        parentId: f.parent_id,
+        repoFullName: f.repo_full_name,
       })
     return map
   }, [allFolders])
@@ -994,6 +1183,21 @@ export function SidebarConversationList({
   const [folderExpanded, setFolderExpanded] = useState<Record<number, boolean>>(
     {}
   )
+  // Per-folder conversation sort override, keyed by folder id. Absent = "manual"
+  // (fall back to the global `sortMode`). A device-local view preference, like
+  // `folderExpanded`; hydrated from localStorage on mount.
+  const [folderSortModes, setFolderSortModes] = useState<
+    Record<number, FolderSortMode>
+  >({})
+  // Inline subfolder creation. "New Subfolder" opens an inline input row under
+  // the (auto-expanded) parent; committing it creates the folder with the typed
+  // name as the REAL name. `pendingSubfolderParentId` is the parent the input is
+  // currently shown under (null = none); only one at a time. Declared here (not
+  // beside its handlers) because the `buildRows` memo reads it.
+  const [pendingSubfolderParentId, setPendingSubfolderParentId] = useState<
+    number | null
+  >(null)
+  const [newSubfolderName, setNewSubfolderName] = useState("")
   // Collapsed state of each folder GROUP, keyed by group id. Absent key =
   // expanded, mirroring `folderExpanded`. Hydrated from localStorage on mount.
   const [folderGroupExpanded, setFolderGroupExpanded] = useState<
@@ -1080,6 +1284,7 @@ export function SidebarConversationList({
   // dialog itself can then widen to the workspace or point at another folder.
   const [manageFolderId, setManageFolderId] = useState<number | null>(null)
   const [cloneOpen, setCloneOpen] = useState(false)
+  const [ghOpen, setGhOpen] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
   const [remoteManageOpen, setRemoteManageOpen] = useState(false)
   // Backs the list context menu's "Open remote workspace" submenu. Shared with
@@ -1142,10 +1347,32 @@ export function SidebarConversationList({
     // Hydrate from localStorage after mount to keep SSR/CSR markup consistent.
 
     setFolderExpanded(loadFolderExpanded())
+    setFolderSortModes(loadFolderSortModes())
     setFolderGroupExpanded(loadFolderGroupExpanded())
     setSectionCollapsed(loadSectionCollapsed())
     setConversationExpanded(new Set(loadConversationExpanded()))
   }, [])
+
+  // Resolver handed to the grouping helpers so each folder's bucket and its
+  // subfolder children order by that folder's per-folder sort choice.
+  const folderSortModeFor = useCallback(
+    (id: number): FolderSortMode | undefined => folderSortModes[id],
+    [folderSortModes]
+  )
+
+  // Set (or clear, via "manual") a folder's per-folder sort and persist it.
+  const handleSetFolderSortMode = useCallback(
+    (folderId: number, mode: FolderSortMode) => {
+      setFolderSortModes((prev) => {
+        const next = { ...prev }
+        if (mode === "manual") delete next[folderId]
+        else next[folderId] = mode
+        saveFolderSortModes(next)
+        return next
+      })
+    },
+    []
+  )
 
   const toggleSection = useCallback((section: SidebarSectionKey) => {
     setSectionCollapsed((prev) => {
@@ -1360,6 +1587,10 @@ export function SidebarConversationList({
   const childToParent = useMemo(() => {
     const map = new Map<number, number>()
     for (const f of folders) {
+      // Subfolders are organizational containers with their own conversation
+      // bucket and header — they are never merged into their parent (that merge
+      // is a worktree-only concern), so they are excluded here.
+      if (f.kind === "subfolder") continue
       if (f.parent_id != null && openFolderIds.has(f.parent_id)) {
         map.set(f.id, f.parent_id)
       }
@@ -1387,11 +1618,12 @@ export function SidebarConversationList({
       folderConversations,
       sortMode,
       byFolderRef.current,
-      displayChildToParent
+      displayChildToParent,
+      folderSortModeFor
     )
     byFolderRef.current = grouped
     return grouped
-  }, [folderConversations, sortMode, displayChildToParent])
+  }, [folderConversations, sortMode, displayChildToParent, folderSortModeFor])
 
   // Counts the unfiltered-but-non-pinned conversations per display group, so the
   // empty-hint renderer distinguishes a truly empty folder from one whose rows
@@ -1425,11 +1657,15 @@ export function SidebarConversationList({
   }, [conversations, displayChildToParent])
 
   // The REORDERABLE folders: worktree child folders are excluded (they follow
-  // their parent, never reorder on their own). Hidden chat folders never reach
-  // here — the backend already excludes them from the open-folder set
-  // (`folder_service::list_open_folder_details`).
+  // their parent, never reorder on their own), as are organizational subfolders
+  // (they render nested under their parent via `subfolderChildren`, never as a
+  // top-level slot). Hidden chat folders never reach here — the backend excludes
+  // them from the open-folder set (`folder_service::list_open_folder_details`).
   const reorderableFolders = useMemo(
-    () => folders.filter((f) => !childToParent.has(f.id)),
+    () =>
+      folders.filter(
+        (f) => !childToParent.has(f.id) && f.kind !== "subfolder"
+      ),
     [folders, childToParent]
   )
 
@@ -1477,6 +1713,26 @@ export function SidebarConversationList({
     () => new Set(containerChildren.keys()),
     [containerChildren]
   )
+
+  // Organizational subfolder tree: parentId → its open subfolder child ids
+  // (sorted). Independent of the worktree "Show worktrees" toggle — subfolders
+  // are a first-class, always-on nesting. `buildRows` recurses through this for
+  // arbitrary depth. Depends only on `folders`, so status events never rebuild
+  // it.
+  const subfolderChildren = useMemo(
+    () => subfolderChildrenByParent(folders, folderSortModeFor),
+    [folders, folderSortModeFor]
+  )
+  // childId → parentId for open subfolders, used to compute each subfolder's
+  // render depth (and its top-most non-subfolder ancestor for the group indent).
+  const subfolderParentById = useMemo(() => {
+    const map = new Map<number, number>()
+    for (const f of folders) {
+      if (f.kind === "subfolder" && f.parent_id != null)
+        map.set(f.id, f.parent_id)
+    }
+    return map
+  }, [folders])
 
   // Resolve each container's HEAD so its "root" sub-group can be labeled with
   // the branch its main worktree is on. Needed because the app-wide branch poll
@@ -1526,6 +1782,8 @@ export function SidebarConversationList({
         childrenLoading,
         containerChildren,
         rootGroupCollapsed,
+        subfolderChildren,
+        pendingSubfolderParentId,
         layout,
         groupExpanded: folderGroupExpanded,
       }),
@@ -1549,6 +1807,8 @@ export function SidebarConversationList({
       childrenLoading,
       containerChildren,
       rootGroupCollapsed,
+      subfolderChildren,
+      pendingSubfolderParentId,
       layout,
       folderGroupExpanded,
     ]
@@ -2127,6 +2387,62 @@ export function SidebarConversationList({
     [folderIndex]
   )
 
+  // Inline subfolder creation handlers. State lives higher up (near
+  // `folderSortModes`) because the `buildRows` memo reads
+  // `pendingSubfolderParentId`.
+  const subfolderCreateIme = useImeGuard()
+  // Guards against Enter (or Escape) committing, then the input's unmount blur
+  // committing a second time with the same captured name.
+  const subfolderCreateSettledRef = useRef(false)
+  // Stable callback ref (identity fixed) so it fires ONLY on mount/unmount, not
+  // on every keystroke — an inline arrow ref re-ran each render and re-selected
+  // the text, which swallowed typing. Mirrors the inline-rename input's ref.
+  const subfolderCreateInputRef = useCallback((node: HTMLInputElement | null) => {
+    if (node) {
+      node.focus()
+      node.select()
+    }
+  }, [])
+  const handleNewSubfolder = useCallback((parentId: number) => {
+    setFolderExpanded((prev) => ({ ...prev, [parentId]: true }))
+    setNewSubfolderName("")
+    subfolderCreateSettledRef.current = false
+    setPendingSubfolderParentId(parentId)
+  }, [])
+  const cancelNewSubfolder = useCallback(() => {
+    if (subfolderCreateSettledRef.current) return
+    subfolderCreateSettledRef.current = true
+    setPendingSubfolderParentId(null)
+    setNewSubfolderName("")
+  }, [])
+  const commitNewSubfolder = useCallback(
+    (parentId: number) => {
+      if (subfolderCreateSettledRef.current) return
+      subfolderCreateSettledRef.current = true
+      const name = newSubfolderName.trim()
+      // Escape / empty name creates nothing.
+      setPendingSubfolderParentId(null)
+      setNewSubfolderName("")
+      if (name === "") return
+      void createSubfolderAction(parentId, name).catch((err) => {
+        console.error(
+          "[SidebarConversationList] failed to create subfolder:",
+          err
+        )
+      })
+    },
+    [newSubfolderName, createSubfolderAction]
+  )
+
+  // "From GitHub repo" — opens the repo-clone dialog anchored at this parent.
+  const [repoSubfolderParentId, setRepoSubfolderParentId] = useState<
+    number | null
+  >(null)
+  const handleNewRepoSubfolder = useCallback((parentId: number) => {
+    setFolderExpanded((prev) => ({ ...prev, [parentId]: true }))
+    setRepoSubfolderParentId(parentId)
+  }, [])
+
   const handleOpenImportWindow = useCallback(() => {
     void openImportSessionsWindow()
   }, [])
@@ -2555,15 +2871,6 @@ export function SidebarConversationList({
   // header doesn't re-render on every parent render.
   const handleOpenCloneDialog = useCallback(() => setCloneOpen(true), [])
 
-  const handleProjectBoot = useCallback(() => {
-    openProjectBootWindow().catch((err) => {
-      console.error(
-        "[SidebarConversationList] failed to open project boot:",
-        err
-      )
-    })
-  }, [])
-
   const showEmptyWorkspaceActions =
     folders.length === 0 && conversations.length === 0
 
@@ -2595,6 +2902,24 @@ export function SidebarConversationList({
   const groupDepth = (folderId: number): number => {
     const familyRoot = childToParent.get(folderId) ?? folderId
     return groupIdByFolder.has(familyRoot) ? 1 : 0
+  }
+
+  // A subfolder's nesting depth (number of subfolder links up to its first
+  // non-subfolder ancestor) plus that ancestor's id (a Project/repo), so its
+  // render indent can add the ancestor's group indent on top. A non-subfolder
+  // returns depth 0 and itself as the root. Bounded so malformed data can't spin.
+  const subfolderDepthAndRoot = (
+    folderId: number
+  ): { depth: number; rootId: number } => {
+    let depth = 0
+    let cur = folderId
+    while (depth < 64) {
+      const parent = subfolderParentById.get(cur)
+      if (parent == null) break
+      depth++
+      cur = parent
+    }
+    return { depth, rootId: cur }
   }
 
   // Running sessions across a container repo and all its worktrees — the count
@@ -2656,13 +2981,23 @@ export function SidebarConversationList({
     // spanning the whole family. Its own sessions render in the root sub-group.
     const isContainer =
       !isRootGroup && showWorktrees && containerRepoIds.has(folderId)
-    const variant = isRootGroup ? "root" : isWorktree ? "worktree" : "repo"
+    const isSubfolder = !isRootGroup && folderEntry?.kind === "subfolder"
+    const variant = isRootGroup
+      ? "root"
+      : isWorktree
+        ? "worktree"
+        : isSubfolder
+          ? "subfolder"
+          : "repo"
     // Sub-group indent (worktree / root) stacks ON TOP of the group indent, so a
-    // worktree of a grouped repo sits at depth 2. `opts.flat` zeroes both on the
-    // drag surface, whose fixed-height row math needs every row at one indent.
+    // worktree of a grouped repo sits at depth 2. A subfolder adds one level per
+    // ancestor subfolder, on top of its Project's group indent. `opts.flat` zeroes
+    // everything on the drag surface, whose fixed-height row math needs one indent.
+    const { depth: subDepth, rootId: subRootId } =
+      subfolderDepthAndRoot(folderId)
     const depth = opts.flat
       ? 0
-      : (isRootGroup || isWorktree ? 1 : 0) + groupDepth(folderId)
+      : (isRootGroup || isWorktree ? 1 : 0) + subDepth + groupDepth(subRootId)
     const runningCount = isContainer
       ? containerRunningCount(folderId)
       : (folderRunningCounts.get(folderId) ?? 0)
@@ -2702,13 +3037,34 @@ export function SidebarConversationList({
         // sub-group and a container's "root" sub-group follow their repo and
         // can't be grouped on their own, so they get no submenu at all rather
         // than one that silently moves something else.
-        folderGroups={isRootGroup || isWorktree ? undefined : folderGroups}
+        folderGroups={
+          isRootGroup || isWorktree || isSubfolder ? undefined : folderGroups
+        }
         currentGroupId={groupIdByFolder.get(folderId) ?? null}
         onMoveToGroup={
-          isRootGroup || isWorktree ? undefined : handleMoveToGroup
+          isRootGroup || isWorktree || isSubfolder
+            ? undefined
+            : handleMoveToGroup
         }
         onNewGroupWithFolder={
-          isRootGroup || isWorktree ? undefined : handleNewGroupWithFolder
+          isRootGroup || isWorktree || isSubfolder
+            ? undefined
+            : handleNewGroupWithFolder
+        }
+        // "New subfolder" on real folder + subfolder headers (arbitrary depth),
+        // but not on a container's root sub-group or a worktree sub-group, which
+        // follow their repo.
+        onNewSubfolder={
+          isRootGroup || isWorktree ? undefined : handleNewSubfolder
+        }
+        onNewRepoSubfolder={
+          isRootGroup || isWorktree ? undefined : handleNewRepoSubfolder
+        }
+        // Per-folder "Sort by" — offered on real folders and subfolders, not on
+        // worktree / root sub-groups (they follow their repo's order).
+        sortMode={folderSortModes[folderId] ?? "manual"}
+        onSetSortMode={
+          isRootGroup || isWorktree ? undefined : handleSetFolderSortMode
         }
         isDragging={opts.dragging}
         onGripPointerDown={opts.grip ? beginFolderDrag : undefined}
@@ -2721,6 +3077,15 @@ export function SidebarConversationList({
         // `git_branch` column is never written by the folder flow.
         rootBranch={
           isRootGroup
+            ? (branches.get(folderId) ?? folderEntry?.gitBranch ?? null)
+            : null
+        }
+        // Repo-folder label: the cloned repo + its branch. Prefer the live HEAD
+        // from the branch poll, falling back to the recorded clone branch, so a
+        // written `git_branch` never fights the HEAD-poll `branches` map.
+        repoFullName={isSubfolder ? (folderEntry?.repoFullName ?? null) : null}
+        repoBranch={
+          isSubfolder
             ? (branches.get(folderId) ?? folderEntry?.gitBranch ?? null)
             : null
         }
@@ -2843,7 +3208,11 @@ export function SidebarConversationList({
       const nested =
         showWorktrees &&
         (childToParent.has(row.folderId) || containerRepoIds.has(row.folderId))
-      const depth = (nested ? 1 : 0) + groupDepth(row.folderId)
+      // A subfolder's empty hint aligns with its (nested) header depth.
+      const { depth: subDepth, rootId: subRootId } = subfolderDepthAndRoot(
+        row.folderId
+      )
+      const depth = (nested ? 1 : 0) + subDepth + groupDepth(subRootId)
       return (
         // Full row height (h-[2rem], the fixed virtua item size) so the container
         // connector spine stays continuous THROUGH an empty sub-group ("no
@@ -2862,6 +3231,52 @@ export function SidebarConversationList({
               ? t("emptyFolderHint")
               : t("noUnfinishedConversations")}
           </span>
+        </div>
+      )
+    }
+    if (row.kind === "subfolder-create") {
+      // Inline "create subfolder" input row, nested one level under its parent —
+      // depth mirrors where the new child header will land.
+      const { depth: parentSubDepth, rootId: parentRootId } =
+        subfolderDepthAndRoot(row.parentId)
+      const depth = 1 + parentSubDepth + groupDepth(parentRootId)
+      return (
+        <div
+          className="relative flex h-[2rem] items-center pr-[0.5rem]"
+          style={{
+            paddingLeft: `calc(var(--conv-rail-axis) + 0.875rem + ${depth} * ${CONV_RAIL_DEPTH_STEP})`,
+          }}
+        >
+          <SubsessionAncestorRails depth={depth} />
+          <input
+            ref={subfolderCreateInputRef}
+            autoFocus
+            {...subfolderCreateIme.props}
+            value={newSubfolderName}
+            placeholder={t("subfolder.namePrompt")}
+            onChange={(e) => setNewSubfolderName(e.target.value)}
+            // Keep the row's own pointer/click handling (and any parent
+            // focus-stealing) from yanking focus off the field.
+            onPointerDown={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (subfolderCreateIme.isComposing(e)) return
+              if (e.key === "Enter") {
+                e.preventDefault()
+                commitNewSubfolder(row.parentId)
+              } else if (e.key === "Escape") {
+                e.preventDefault()
+                cancelNewSubfolder()
+              }
+            }}
+            onBlur={() => commitNewSubfolder(row.parentId)}
+            className={cn(
+              "relative min-w-0 flex-1 rounded-[0.375rem] px-[0.375rem] py-[0.125rem]",
+              "text-[0.875rem] font-normal text-sidebar-foreground",
+              "bg-[var(--sidebar)] outline-none ring-2 ring-ring ring-inset"
+            )}
+          />
         </div>
       )
     }
@@ -3039,6 +3454,8 @@ export function SidebarConversationList({
     if (row.kind === "folder") return `folder-${row.folderId}`
     if (row.kind === "root-group") return `rootgroup-${row.folderId}`
     if (row.kind === "empty") return `empty-${row.folderId}`
+    if (row.kind === "subfolder-create")
+      return `subfolder-create-${row.parentId}`
     if (row.kind === "chats-empty") return "chats-empty"
     if (row.kind === "folders-empty") return "folders-empty"
     if (row.kind === "recent-empty") return "recent-empty"
@@ -3074,6 +3491,19 @@ export function SidebarConversationList({
         </div>
       ) : showEmptyWorkspaceActions ? (
         <div className="flex-1 flex flex-col items-center justify-center px-3 gap-2">
+          {/* Primary, cloud-native path (Eazybe WorkOS): pick a repo straight
+              from the signed-in GitHub account — no manual clone URL, no local
+              path. This is the default for a general-org workspace. Rendered
+              first and with the solid (default) variant so it reads as THE
+              action; the folder/clone/boot rows below stay secondary. */}
+          <Button
+            size="sm"
+            className="w-full max-w-[14rem] justify-start"
+            onClick={() => setGhOpen(true)}
+          >
+            <Github className="h-3.5 w-3.5 mr-1.5" />
+            Open a GitHub project
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -3091,15 +3521,6 @@ export function SidebarConversationList({
           >
             <FolderGit2 className="h-3.5 w-3.5 mr-1.5" />
             {tFolderDropdown("cloneRepository")}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full max-w-[14rem] justify-start"
-            onClick={handleProjectBoot}
-          >
-            <Rocket className="h-3.5 w-3.5 mr-1.5" />
-            {tFolderDropdown("projectBoot")}
           </Button>
           <Button
             variant="outline"
@@ -3283,10 +3704,6 @@ export function SidebarConversationList({
               <FolderGit2 className="h-4 w-4" />
               {tFolderDropdown("cloneRepository")}
             </ContextMenuItem>
-            <ContextMenuItem onSelect={handleProjectBoot}>
-              <Rocket className="h-4 w-4" />
-              {tFolderDropdown("projectBoot")}
-            </ContextMenuItem>
             {/* The trigger wraps the whole scroll area, so this is also the menu
                 a right-click on the "Folders" heading (or on empty space below
                 the list) opens — the same entry point as the heading's
@@ -3450,6 +3867,13 @@ export function SidebarConversationList({
       )}
 
       <CloneDialog open={cloneOpen} onOpenChange={setCloneOpen} />
+      <GithubProjectDialog open={ghOpen} onOpenChange={setGhOpen} />
+      <RepoSubfolderDialog
+        parentId={repoSubfolderParentId}
+        onOpenChange={(open) => {
+          if (!open) setRepoSubfolderParentId(null)
+        }}
+      />
       <WorkspaceFolderDialog open={browserOpen} onOpenChange={setBrowserOpen} />
       {/* Sibling of the context menu, never a child of it: the menu unmounts
           its content on close, which would take a nested dialog with it. Mounted

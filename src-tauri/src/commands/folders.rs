@@ -819,6 +819,133 @@ pub async fn open_folder_in_workspace_core(
     Ok(detail)
 }
 
+/// Turn a user-supplied subfolder name into a filesystem-safe directory
+/// segment: trim, collapse path separators / control chars to `-`, and drop a
+/// leading dot so it can't create a hidden or traversing directory. Empty
+/// results are rejected by the caller.
+fn slugify_subfolder_name(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    cleaned.trim_matches('.').trim().to_string()
+}
+
+/// Create a nested organizational subfolder under `parent_id`: makes a real
+/// directory `parent.path/<slug(name)>` on disk and records a `kind = Subfolder`
+/// row whose `parent_id` is the DIRECT parent. Arbitrary depth — a subfolder can
+/// itself be a parent. Returns the new [`FolderDetail`].
+pub async fn create_subfolder_core(
+    db: &AppDatabase,
+    parent_id: i32,
+    name: String,
+) -> Result<FolderDetail, AppCommandError> {
+    let display_name = name.trim().to_string();
+    let slug = slugify_subfolder_name(&name);
+    if display_name.is_empty() || slug.is_empty() {
+        return Err(AppCommandError::invalid_input(
+            "Subfolder name cannot be empty",
+        ));
+    }
+
+    let parent = folder_service::get_folder_by_id(&db.conn, parent_id)
+        .await
+        .map_err(AppCommandError::from)?
+        .ok_or_else(|| AppCommandError::not_found(format!("Folder {parent_id} not found")))?;
+
+    let child_path = std::path::Path::new(&parent.path).join(&slug);
+    std::fs::create_dir_all(&child_path).map_err(AppCommandError::io)?;
+    let child_path = child_path.to_string_lossy().to_string();
+
+    folder_service::create_subfolder(&db.conn, parent_id, &child_path, &display_name)
+        .await
+        .map_err(AppCommandError::from)
+}
+
+/// Create a subfolder that is a CLONE of a GitHub repo under `parent_id`. Clones
+/// `https://github.com/{full_name}.git` into a fresh directory beneath the
+/// parent, checks out (or creates) `branch`, then records a `kind = Subfolder`
+/// row carrying `git_branch` + `repo_full_name`. `credentials` is the caller's
+/// GitHub OAuth token, resolved in the handler layer (never here).
+///
+/// Two risks the flow avoids deliberately: (1) it does NOT pre-create the clone
+/// directory — `git clone` refuses a non-empty target, so it makes the dir
+/// itself; (2) `folder.path` is UNIQUE, so the child dir is disambiguated
+/// (`slug`, `slug-2`, …) against anything already on disk before cloning.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_repo_subfolder_core(
+    db: &AppDatabase,
+    data_dir: &std::path::Path,
+    parent_id: i32,
+    name: String,
+    full_name: String,
+    branch: String,
+    create_branch: bool,
+    credentials: Option<&GitCredentials>,
+) -> Result<FolderDetail, AppCommandError> {
+    let display_name = name.trim().to_string();
+    let slug = slugify_subfolder_name(&name);
+    let branch = branch.trim().to_string();
+    let full_name = full_name.trim().to_string();
+    if display_name.is_empty() || slug.is_empty() {
+        return Err(AppCommandError::invalid_input(
+            "Subfolder name cannot be empty",
+        ));
+    }
+    if branch.is_empty() {
+        return Err(AppCommandError::invalid_input("Branch is required"));
+    }
+    if full_name.is_empty() {
+        return Err(AppCommandError::invalid_input("Repository is required"));
+    }
+
+    let parent = folder_service::get_folder_by_id(&db.conn, parent_id)
+        .await
+        .map_err(AppCommandError::from)?
+        .ok_or_else(|| AppCommandError::not_found(format!("Folder {parent_id} not found")))?;
+
+    // Pick a child dir that does not yet exist on disk. `folder.path` is UNIQUE
+    // and `git clone` refuses a non-empty dir, so an existing target would fail
+    // both ways — disambiguate up front. We do NOT create the dir here: the
+    // clone makes it (pre-creating would trip git's non-empty check).
+    let parent_dir = std::path::Path::new(&parent.path);
+    let mut child_path = parent_dir.join(&slug);
+    let mut suffix = 2;
+    while child_path.exists() {
+        child_path = parent_dir.join(format!("{slug}-{suffix}"));
+        suffix += 1;
+    }
+    let child_path = child_path.to_string_lossy().to_string();
+
+    let url = format!("https://github.com/{full_name}.git");
+    clone_repository_core(&url, &child_path, credentials, db, data_dir).await?;
+
+    if create_branch {
+        // A brand-new branch off the freshly cloned HEAD.
+        git_new_branch(child_path.clone(), branch.clone(), None).await?;
+    } else {
+        // Land on the requested existing branch. A checkout to the branch the
+        // clone already landed on (the repo default) is a harmless no-op.
+        git_checkout(child_path.clone(), branch.clone()).await?;
+    }
+
+    folder_service::create_repo_subfolder(
+        &db.conn,
+        parent_id,
+        &child_path,
+        &display_name,
+        &branch,
+        &full_name,
+    )
+    .await
+    .map_err(AppCommandError::from)
+}
+
 pub async fn open_folder_by_id_core(
     db: &AppDatabase,
     folder_id: i32,
@@ -1144,6 +1271,16 @@ pub async fn open_folder_by_id(
     folder_id: i32,
 ) -> Result<FolderDetail, AppCommandError> {
     open_folder_by_id_core(&db, folder_id).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[cfg_attr(feature = "tauri-runtime", tauri::command)]
+pub async fn create_subfolder(
+    db: tauri::State<'_, AppDatabase>,
+    parent_id: i32,
+    name: String,
+) -> Result<FolderDetail, AppCommandError> {
+    create_subfolder_core(&db, parent_id, name).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -6445,6 +6582,7 @@ mod tests {
                 kind: FolderKind::Regular,
                 alias: None,
                 group_id: None,
+                repo_full_name: None,
             },
         );
 

@@ -668,6 +668,7 @@ mod tests {
                     kind: FolderKind::Regular,
                     alias: None,
                     group_id: None,
+                    repo_full_name: None,
                 }),
             },
         );

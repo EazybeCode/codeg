@@ -7,6 +7,7 @@ import type {
 import {
   DEFAULT_SECTION_ORDER,
   normalizeSectionOrder,
+  type FolderSortMode,
   type SidebarSortMode,
   type SidebarSectionKey,
   type SidebarSectionOrder,
@@ -76,6 +77,24 @@ export function compareByChildCreatedAtDesc(
     parseTimestamp(right.created_at) - parseTimestamp(left.created_at)
   if (createdDiff !== 0) return createdDiff
   return right.id - left.id
+}
+
+/**
+ * Title A–Z (locale-aware, case-insensitive), with a stable id tie-break so two
+ * same-titled conversations keep a deterministic order. A null/blank title sorts
+ * last (empty string compares after real titles via the length fallback below).
+ */
+export function compareByTitleAsc(
+  left: DbConversationSummary,
+  right: DbConversationSummary
+): number {
+  const lt = (left.title ?? "").trim()
+  const rt = (right.title ?? "").trim()
+  // Untitled rows sink to the bottom rather than clustering at the top.
+  if (lt === "" && rt !== "") return 1
+  if (rt === "" && lt !== "") return -1
+  const byName = lt.localeCompare(rt, undefined, { sensitivity: "base" })
+  return byName !== 0 ? byName : left.id - right.id
 }
 
 /**
@@ -197,7 +216,12 @@ export function groupByFolderWithReuse(
   filtered: readonly DbConversationSummary[],
   sortMode: SidebarSortMode,
   prev: Map<number, DbConversationSummary[]>,
-  childToParent?: ReadonlyMap<number, number>
+  childToParent?: ReadonlyMap<number, number>,
+  /** Optional per-folder sort override. Returns `manual`/`undefined` to fall
+   *  back to the global `sortMode`, `name` for A–Z, `recent` for updated-desc.
+   *  Keyed by the DISPLAY folder id (the bucket key), so it matches whatever the
+   *  header shows the "Sort by" menu on. */
+  folderSortMode?: (folderId: number) => FolderSortMode | undefined
 ): Map<number, DbConversationSummary[]> {
   const next = new Map<number, DbConversationSummary[]>()
   for (const conv of filtered) {
@@ -207,9 +231,16 @@ export function groupByFolderWithReuse(
     else next.set(groupId, [conv])
   }
 
-  const comparator =
+  const globalComparator =
     sortMode === "updated" ? compareByUpdatedAtDesc : compareByCreatedAtDesc
   for (const [folderId, list] of next) {
+    const mode = folderSortMode?.(folderId)
+    const comparator =
+      mode === "name"
+        ? compareByTitleAsc
+        : mode === "recent"
+          ? compareByUpdatedAtDesc
+          : globalComparator
     list.sort(comparator)
     const prevList = prev.get(folderId)
     // Replacing an existing key's value mid-iteration is safe (we never add or
@@ -321,11 +352,17 @@ export function selectRecentConversationsWithReuse(
 
 // ── Folder display ordering (worktree nesting) ──────────────────────────────
 
-/** The folder fields needed to nest worktree children under their repo root. */
+/**
+ * The folder fields needed to nest worktree children under their repo root, plus
+ * an OPTIONAL `kind` used to tell organizational subfolders apart from real
+ * worktrees. `kind` is optional so existing callers/tests that build bare order
+ * inputs still type-check; a missing `kind` reads as "not a subfolder".
+ */
 export type FolderOrderInput = Pick<
   FolderDetail,
   "id" | "parent_id" | "sort_order" | "name"
->
+> &
+  Partial<Pick<FolderDetail, "kind">>
 
 /**
  * Group each top-level repo's OPEN worktree child folders under it, returning a
@@ -350,6 +387,12 @@ export function worktreeChildrenByParent(
   const childrenByParent = new Map<number, FolderOrderInput[]>()
   for (const f of folders) {
     if (f.parent_id == null) continue
+    // Organizational subfolders also carry `parent_id`, but they are NOT
+    // worktrees — they nest via `subfolderChildrenByParent` instead. Skipping
+    // them here keeps a repo whose only children are subfolders from being
+    // mistaken for a worktree container (no spurious "root" sub-group) and
+    // prevents each subfolder from being rendered twice.
+    if (f.kind === "subfolder") continue
     if (!topLevel.has(f.parent_id)) continue
     const list = childrenByParent.get(f.parent_id)
     if (list) list.push(f)
@@ -364,6 +407,57 @@ export function worktreeChildrenByParent(
       if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
       const byName = a.name.localeCompare(b.name)
       return byName !== 0 ? byName : a.id - b.id
+    })
+    out.set(
+      parentId,
+      list.map((f) => f.id)
+    )
+  }
+  return out
+}
+
+/**
+ * Group every `kind === "subfolder"` folder under its DIRECT parent, returning a
+ * `parentId → [subfolderId, ...]` map that only contains parents with at least
+ * one subfolder child. Children are ordered `sort_order`, then `name`, then
+ * `id`, for a stable, input-order-independent sequence.
+ *
+ * Unlike {@link worktreeChildrenByParent}, there is NO top-level cap: a
+ * subfolder's parent may itself be a subfolder, so the map describes the whole
+ * tree and `buildRows` recurses through it to render arbitrary depth. Pure — no
+ * side effects, never mutates inputs.
+ *
+ * `folderSortMode` (optional) applies the PARENT's per-folder sort to the order
+ * of its subfolder children: `name` orders them A–Z, everything else keeps the
+ * manual `sort_order` order (the default). Keyed by the parent folder id.
+ */
+export function subfolderChildrenByParent(
+  folders: readonly FolderOrderInput[],
+  folderSortMode?: (folderId: number) => FolderSortMode | undefined
+): Map<number, number[]> {
+  const childrenByParent = new Map<number, FolderOrderInput[]>()
+  for (const f of folders) {
+    if (f.kind !== "subfolder") continue
+    if (f.parent_id == null) continue
+    const list = childrenByParent.get(f.parent_id)
+    if (list) list.push(f)
+    else childrenByParent.set(f.parent_id, [f])
+  }
+
+  const out = new Map<number, number[]>()
+  for (const [parentId, list] of childrenByParent) {
+    const byName = folderSortMode?.(parentId) === "name"
+    list.sort((a, b) => {
+      if (byName) {
+        const n = a.name.localeCompare(b.name, undefined, {
+          sensitivity: "base",
+        })
+        if (n !== 0) return n
+        return a.id - b.id
+      }
+      if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
+      const nameCmp = a.name.localeCompare(b.name)
+      return nameCmp !== 0 ? nameCmp : a.id - b.id
     })
     out.set(
       parentId,
@@ -1035,6 +1129,17 @@ export interface SubsessionLoadingRow {
   recent?: true
 }
 
+/**
+ * The transient inline "create a subfolder" input row, shown as the first child
+ * under the folder the user chose "New Subfolder" on (once that folder is
+ * expanded). Committing it calls `createSubfolder(parentId, typedName)`; escape
+ * or an empty name discards it. Only ever one at a time.
+ */
+export interface SubfolderCreateRow {
+  kind: "subfolder-create"
+  parentId: number
+}
+
 export type SidebarRow =
   | SectionHeaderRow
   | FolderGroupHeaderRow
@@ -1048,6 +1153,7 @@ export type SidebarRow =
   | RecentEmptyRow
   | RecentMoreRow
   | SubsessionLoadingRow
+  | SubfolderCreateRow
 
 const MAX_RENDER_DEPTH = 32
 
@@ -1060,6 +1166,10 @@ const EMPTY_CHILDREN: ReadonlyMap<number, readonly DbConversationSummary[]> =
 // No repo is a worktree container by default (Show worktrees off) — every folder
 // then takes the flat path, identical to the pre-worktree row model.
 const EMPTY_CONTAINER_CHILDREN: ReadonlyMap<number, readonly number[]> =
+  new Map()
+// No folder has subfolder children by default — the flat model, identical to the
+// pre-subfolder row output.
+const EMPTY_SUBFOLDER_CHILDREN: ReadonlyMap<number, readonly number[]> =
   new Map()
 // No Recent rows by default (the section is opt-in at the buildRows layer), so
 // the row output stays identical to the pre-Recent model for callers that don't
@@ -1251,6 +1361,18 @@ export function buildRows(args: {
    *  hidden). Absent = expanded (the default). Only consulted for container
    *  repos. Optional. */
   rootGroupCollapsed?: ReadonlySet<number>
+  /** Subfolder tree: `parentId → [subfolderId, ...]` for every folder that has
+   *  organizational subfolder children (see {@link subfolderChildrenByParent}).
+   *  A folder present as a key renders its children nested at depth+1 when
+   *  expanded (via `folderExpanded[parentId]`), recursively for arbitrary depth.
+   *  Absent/empty (the default) = the flat model. Independent of the worktree
+   *  "Show worktrees" container tree. Optional. */
+  subfolderChildren?: ReadonlyMap<number, readonly number[]>
+  /** The folder id the user is currently creating a subfolder under (via "New
+   *  Subfolder"), or null/undefined when none. When set, an inline
+   *  {@link SubfolderCreateRow} is emitted as the first child under that folder
+   *  once it is expanded. Optional. */
+  pendingSubfolderParentId?: number | null
   /** The mixed top-level layout: folder GROUPS interleaved with ungrouped
    *  folders, plus each group's members. Omitted (or group-free) reproduces the
    *  pre-groups row model exactly — `orderedFolderIds` is then the whole story,
@@ -1284,6 +1406,8 @@ export function buildRows(args: {
     childrenLoading = EMPTY_EXPANDED,
     containerChildren = EMPTY_CONTAINER_CHILDREN,
     rootGroupCollapsed = EMPTY_EXPANDED,
+    subfolderChildren = EMPTY_SUBFOLDER_CHILDREN,
+    pendingSubfolderParentId = null,
     layout,
     groupExpanded = EMPTY_GROUP_EXPANDED,
   } = args
@@ -1345,13 +1469,32 @@ export function buildRows(args: {
   // `baseDepth` is 0 for a top-level folder and 1 for a folder inside a group —
   // a group member reuses the SAME depth machinery as a worktree sub-group, so
   // its indent, connector rails and conversation rows all shift together.
+  // Render a folder header + (when expanded) its body, its nested organizational
+  // subfolders (recursively, arbitrary depth), and — under "Show worktrees" — its
+  // worktree container subtree. `baseDepth` is 0 at the top level and grows by
+  // one per nesting level. Subfolder recursion is bounded by `MAX_RENDER_DEPTH`
+  // as defense against pathological data; the tree is acyclic by construction
+  // (`parent_id` set once at insert).
   const pushFolderEntry = (folderId: number, baseDepth: number) => {
+    // Nested organizational subfolders, emitted after the folder's own body.
+    const pushSubfolders = (childDepth: number) => {
+      if (childDepth > MAX_RENDER_DEPTH) return
+      const subfolders = subfolderChildren.get(folderId)
+      if (!subfolders || subfolders.length === 0) return
+      for (const subId of subfolders) pushFolderEntry(subId, childDepth)
+    }
+
     const worktrees = containerChildren.get(folderId)
     if (!worktrees || worktrees.length === 0) {
       // Plain folder (or, under Show worktrees, a repo with no open worktrees):
-      // header + its own bucket — the flat model.
+      // header + its own bucket — the flat model, plus any nested subfolders.
       rows.push({ kind: "folder", folderId })
-      if (folderExpanded[folderId] ?? true) pushFolderBody(folderId, baseDepth)
+      if (folderExpanded[folderId] ?? true) {
+        pushFolderBody(folderId, baseDepth)
+        if (pendingSubfolderParentId === folderId)
+          rows.push({ kind: "subfolder-create", parentId: folderId })
+        pushSubfolders(baseDepth + 1)
+      }
       return
     }
     // Container repo: its header gates the WHOLE subtree (root sub-group +
@@ -1370,6 +1513,10 @@ export function buildRows(args: {
         pushFolderBody(worktreeId, baseDepth + 1)
       }
     }
+    // Finally any organizational subfolders of the repo itself.
+    if (pendingSubfolderParentId === folderId)
+      rows.push({ kind: "subfolder-create", parentId: folderId })
+    pushSubfolders(baseDepth + 1)
   }
 
   const pushFolders = () => {
@@ -1497,8 +1644,15 @@ export function buildRows(args: {
   // order can never drop a section off the sidebar or emit one twice.
   for (const section of normalizeSectionOrder(sectionOrder)) {
     if (section === "folders") pushFolders()
-    else if (section === "chats") pushChats()
-    else if (showRecent) pushRecent()
+    // Eazybe WorkOS: ONLY the Projects (folders/subfolders) tree is shown. The
+    // folderless "Chat" section (a.k.a. "chat mode") and the flat "Recent"
+    // section are both hidden per Sagar — everything lives inside a Project.
+    // Helpers are retained (referenced here) so re-enabling is a one-liner.
+    else if (section === "chats" || section === "recent") {
+      void pushChats
+      void pushRecent
+      void showRecent
+    }
   }
 
   return rows

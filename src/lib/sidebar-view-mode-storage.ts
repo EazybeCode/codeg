@@ -7,11 +7,26 @@ const SHOW_WORKTREES_KEY = "workspace:sidebar-show-worktrees"
 const SHOW_RECENT_KEY = "workspace:sidebar-show-recent"
 const NAV_ITEMS_KEY = "workspace:sidebar-nav-items"
 const SORT_MODE_KEY = "workspace:sidebar-sort-mode"
+const FOLDER_SORT_MODES_KEY = "workspace:sidebar-folder-sort-modes"
 const SECTION_ORDER_KEY = "workspace:sidebar-section-order"
 const SECTION_COLLAPSED_KEY = "workspace:sidebar-section-collapsed"
 const CONVERSATION_EXPANDED_KEY = "workspace:sidebar-conversation-expanded"
 
 export type SidebarSortMode = "created" | "updated"
+
+/**
+ * Per-folder conversation sort override.
+ * - `manual`: no override — fall back to the global {@link SidebarSortMode}
+ *   (and, once conversation drag lands, to the user's manual order).
+ * - `name`: title A–Z.
+ * - `recent`: most recently updated first.
+ * Absent (no entry for a folder) is treated exactly like `manual`.
+ */
+export type FolderSortMode = "manual" | "name" | "recent"
+
+export function isFolderSortMode(value: unknown): value is FolderSortMode {
+  return value === "manual" || value === "name" || value === "recent"
+}
 
 /** The reorderable top-level sidebar sections. "Pinned" is deliberately absent:
  *  it is a transient override bucket and always stays on top. */
@@ -351,6 +366,35 @@ export function saveSortMode(value: SidebarSortMode): void {
   if (typeof window === "undefined") return
   try {
     localStorage.setItem(SORT_MODE_KEY, value)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Per-folder sort overrides, keyed by folder id. Absent key = `manual` (use
+ *  the global sort). Device-local, like the other sidebar view preferences. */
+export function loadFolderSortModes(): Record<number, FolderSortMode> {
+  if (typeof window === "undefined") return {}
+  try {
+    const raw = localStorage.getItem(FOLDER_SORT_MODES_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== "object") return {}
+    const result: Record<number, FolderSortMode> = {}
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      const id = Number(k)
+      if (!Number.isNaN(id) && isFolderSortMode(v)) result[id] = v
+    }
+    return result
+  } catch {
+    return {}
+  }
+}
+
+export function saveFolderSortModes(state: Record<number, FolderSortMode>): void {
+  if (typeof window === "undefined") return
+  try {
+    localStorage.setItem(FOLDER_SORT_MODES_KEY, JSON.stringify(state))
   } catch {
     /* ignore */
   }

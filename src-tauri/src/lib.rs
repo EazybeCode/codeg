@@ -1194,6 +1194,7 @@ mod tauri_app {
                 folders::resolve_worktree_folder,
                 folders::open_folder_in_workspace,
                 folders::open_folder_by_id,
+                folders::create_subfolder,
                 open_in::open_in_code,
                 folders::remove_folder_from_workspace,
                 folders::list_folder_groups,

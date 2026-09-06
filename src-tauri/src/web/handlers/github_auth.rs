@@ -96,6 +96,166 @@ pub async fn current_user(
         .flatten()
 }
 
+/// Why [`ensure_github_token`] could not hand back a usable token. The handler
+/// layer maps [`GithubTokenError::ReauthRequired`] to HTTP 401 with the sentinel
+/// message `github_reauth_required` so the frontend can prompt a re-login;
+/// [`GithubTokenError::Network`] maps to 502 (transient — retry).
+#[derive(Debug)]
+pub enum GithubTokenError {
+    /// The stored token is gone/expired and could not be refreshed (no refresh
+    /// token on record, or GitHub rejected/rotated it). The user must sign in
+    /// again. Carries a short reason for logs, not for the user.
+    ReauthRequired(String),
+    /// A transient failure talking to GitHub (or decrypt) — safe to retry.
+    Network(String),
+}
+
+impl std::fmt::Display for GithubTokenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GithubTokenError::ReauthRequired(_) => write!(f, "github_reauth_required"),
+            GithubTokenError::Network(m) => write!(f, "github_unavailable: {m}"),
+        }
+    }
+}
+
+/// The shape GitHub returns from the refresh-token exchange.
+#[derive(Deserialize)]
+struct RefreshResp {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+    expires_in: Option<i64>,
+    error: Option<String>,
+    #[allow(dead_code)]
+    error_description: Option<String>,
+}
+
+/// Return a currently-valid GitHub access token for `user`, refreshing it in
+/// place when it has expired (or is within 60s of expiring).
+///
+/// Fast path (no network): if `gh_token_expires_at` is unknown or comfortably in
+/// the future, just decrypt and return the stored access token — tokens issued
+/// before app-expiration was enabled have no expiry recorded and are used as-is.
+///
+/// Slow path: exchange the stored refresh token for a fresh access token (GitHub
+/// ROTATES the refresh token, so the new one is stored too) and persist the new
+/// access token + refresh token + expiry on the user row before returning.
+///
+/// Concurrency: rather than a per-user lock, the row is re-read right before the
+/// network refresh — if another in-flight request already refreshed it (the
+/// re-read now shows a valid, un-expired token), we return that instead of
+/// spending a second (rotating) refresh call. A rare double-refresh is harmless
+/// beyond wasting one call; GitHub keeps the latest issued pair.
+pub async fn ensure_github_token(
+    db: &sea_orm::DatabaseConnection,
+    user: &user::Model,
+) -> Result<String, GithubTokenError> {
+    let now = Utc::now();
+    let skew = ChronoDuration::seconds(60);
+
+    let still_valid = |expires_at: Option<chrono::DateTime<Utc>>| -> bool {
+        match expires_at {
+            // No recorded expiry → a legacy (non-expiring) token; use as-is.
+            None => true,
+            Some(exp) => exp > now + skew,
+        }
+    };
+
+    // Fast path: the stored token is still good.
+    if still_valid(user.gh_token_expires_at) {
+        if let Some(tok) = user.gh_token_enc.as_deref().and_then(decrypt) {
+            return Ok(tok);
+        }
+        // Expiry says valid but the ciphertext won't decrypt — treat as reauth.
+        return Err(GithubTokenError::ReauthRequired(
+            "stored access token could not be decrypted".into(),
+        ));
+    }
+
+    // Slow path: re-read the row so a concurrent refresh that just landed wins
+    // without us spending another (rotating) refresh call.
+    let fresh = user::Entity::find_by_id(user.id)
+        .one(db)
+        .await
+        .map_err(|e| GithubTokenError::Network(e.to_string()))?
+        .ok_or_else(|| GithubTokenError::ReauthRequired("user row vanished".into()))?;
+    if still_valid(fresh.gh_token_expires_at) {
+        if let Some(tok) = fresh.gh_token_enc.as_deref().and_then(decrypt) {
+            return Ok(tok);
+        }
+    }
+
+    let refresh_token = match fresh.gh_refresh_token_enc.as_deref().and_then(decrypt) {
+        Some(rt) => rt,
+        None => {
+            return Err(GithubTokenError::ReauthRequired(
+                "no refresh token on record".into(),
+            ))
+        }
+    };
+    let (client_id, client_secret) = match (env("GITHUB_CLIENT_ID"), env("GITHUB_CLIENT_SECRET")) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            return Err(GithubTokenError::Network(
+                "server missing GitHub OAuth config".into(),
+            ))
+        }
+    };
+
+    let http = reqwest::Client::new();
+    let resp: RefreshResp = match http
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .header("User-Agent", "EazyWorkOS")
+        .form(&[
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token.as_str()),
+        ])
+        .send()
+        .await
+        .and_then(|r| r.error_for_status())
+    {
+        Ok(r) => r
+            .json()
+            .await
+            .map_err(|e| GithubTokenError::Network(e.to_string()))?,
+        Err(e) => return Err(GithubTokenError::Network(e.to_string())),
+    };
+
+    // A rejected/expired refresh token comes back as a 200 with an `error` body
+    // (e.g. `bad_refresh_token`) — the user must re-auth. Don't loop.
+    if let Some(err) = resp.error {
+        return Err(GithubTokenError::ReauthRequired(err));
+    }
+    let access = match resp.access_token {
+        Some(a) if !a.is_empty() => a,
+        _ => {
+            return Err(GithubTokenError::ReauthRequired(
+                "refresh returned no access token".into(),
+            ))
+        }
+    };
+    // GitHub rotates the refresh token; keep the new one when present, else fall
+    // back to the one we just used (so we never drop the ability to refresh).
+    let new_refresh = resp.refresh_token.unwrap_or(refresh_token);
+    let expires_at = resp.expires_in.map(|s| now + ChronoDuration::seconds(s));
+
+    let mut m: user::ActiveModel = fresh.into();
+    m.gh_token_enc = Set(encrypt(&access));
+    m.gh_refresh_token_enc = Set(encrypt(&new_refresh));
+    m.gh_token_expires_at = Set(expires_at);
+    m.updated_at = Set(now);
+    if let Err(e) = m.update(db).await {
+        // The refresh itself succeeded; a failed persist is transient (the next
+        // call refreshes again). Still return the token we just got.
+        tracing::warn!("[github_auth] could not persist refreshed token: {e}");
+    }
+
+    Ok(access)
+}
+
 fn random_id() -> String {
     // 24 random bytes → url-safe-ish base64; used for session ids and OAuth state.
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng); // 12 bytes

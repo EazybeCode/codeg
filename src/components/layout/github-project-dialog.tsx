@@ -5,6 +5,7 @@ import { Loader2, Search } from "lucide-react"
 import { toast } from "sonner"
 import { getCodegToken } from "@/lib/transport/web-auth"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
+import { useTabActions } from "@/stores/tab-store"
 import {
   Dialog,
   DialogContent,
@@ -51,6 +52,7 @@ export function GithubProjectDialog({
   onOpenChange: (open: boolean) => void
 }) {
   const openFolder = useAppWorkspaceStore((s) => s.openFolder)
+  const { openNewConversationTab } = useTabActions()
   const [repos, setRepos] = useState<Repo[]>([])
   const [q, setQ] = useState("")
   const [loading, setLoading] = useState(false)
@@ -79,8 +81,15 @@ export function GithubProjectDialog({
       const { path } = await apiPost<{ path: string }>("clone_github_repo", {
         full_name: r.full_name,
       })
-      await openFolder(path)
+      // Add the cloned repo to the workspace AND drop the user straight into a
+      // folder-scoped new conversation in it. Without this second step the repo
+      // is only added to the sidebar and a "New chat" runs in a scratch dir with
+      // no repo context — the agent literally can't see the files. Landing in a
+      // folder-scoped tab is what makes "pick a repo → start working in it" true
+      // for a non-technical user (no extra clicks). See openNewConversationTab.
+      const detail = await openFolder(path)
       onOpenChange(false)
+      openNewConversationTab(detail.id, detail.path)
     } catch (e) {
       toast.error("Couldn't open repository", { description: String(e) })
     } finally {

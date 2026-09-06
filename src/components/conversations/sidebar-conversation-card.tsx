@@ -17,7 +17,6 @@ import {
   XCircle,
   Pin,
   PinOff,
-  CheckCircle2,
   FolderX,
   Info,
   ChevronRight,
@@ -305,7 +304,6 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
   const isRunning = status === "in_progress"
   const isCancelled = status === "cancelled"
   const isPinned = conversation.pinned_at != null
-  const isCompleted = status === "completed"
   // Delegation sub-sessions (a child of another conversation) don't get the
   // hover quick actions: pinning a sub-agent run to the root Pinned section or
   // hand-toggling its status doesn't fit — its lifecycle is the sub-agent's. The
@@ -598,27 +596,27 @@ export const SidebarConversationCard = memo(function SidebarConversationCard({
                             )}
                           </button>
                         )}
+                        {/* Eazybe WorkOS: the "mark completed" tick was removed
+                            (Sagar — a conversation should just stay in its
+                            Project, not be toggled complete). In its place, a
+                            delete button opens the same confirm dialog the
+                            context-menu Delete uses. */}
                         <button
                           type="button"
                           tabIndex={-1}
                           onClick={(e) => {
                             e.stopPropagation()
-                            onStatusChange(
-                              conversation.id,
-                              isCompleted ? "in_progress" : "completed"
-                            )
+                            setDeleteOpen(true)
                           }}
-                          title={isCompleted ? t("reopen") : t("markCompleted")}
-                          aria-label={
-                            isCompleted ? t("reopen") : t("markCompleted")
-                          }
+                          title={t("delete")}
+                          aria-label={t("delete")}
                           className={cn(
                             "flex h-6 w-6 shrink-0 items-center justify-end rounded-[0.375rem]",
                             "cursor-pointer outline-none transition-colors duration-150",
-                            "text-muted-foreground/90 hover:text-sidebar-foreground"
+                            "text-muted-foreground/90 hover:text-destructive"
                           )}
                         >
-                          <CheckCircle2 className="h-[0.875rem] w-[0.875rem]" />
+                          <Trash2 className="h-[0.875rem] w-[0.875rem]" />
                         </button>
                       </div>
                     )}

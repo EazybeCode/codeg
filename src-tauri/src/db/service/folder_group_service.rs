@@ -297,6 +297,7 @@ mod tests {
             kind: Set(FolderKind::Regular),
             alias: Set(None),
             group_id: Set(group_id),
+            repo_full_name: Set(None),
         }
         .insert(conn)
         .await

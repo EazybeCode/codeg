@@ -75,6 +75,7 @@ fn to_detail(m: folder::Model) -> FolderDetail {
         kind: m.kind,
         alias: m.alias,
         group_id: m.group_id,
+        repo_full_name: m.repo_full_name,
     }
 }
 
@@ -121,6 +122,82 @@ pub async fn add_folder_with_parent(
     parent_id: Option<i32>,
 ) -> Result<FolderHistoryEntry, DbError> {
     add_folder_inner(conn, path, ParentWrite::Set(parent_id)).await
+}
+
+/// Create a nested organizational subfolder: a `kind = Subfolder` row whose
+/// `parent_id` is its DIRECT parent (not flattened like a worktree). `path` is a
+/// freshly created real directory inside the parent, so it never collides on the
+/// `UNIQUE(path)` constraint. Opened immediately so it shows in the sidebar.
+/// Returns the full [`FolderDetail`] for the caller to hand to the frontend.
+pub async fn create_subfolder(
+    conn: &DatabaseConnection,
+    parent_id: i32,
+    path: &str,
+    name: &str,
+) -> Result<FolderDetail, DbError> {
+    let now = Utc::now();
+    let next_order = next_sort_order(conn).await?;
+    let active = folder::ActiveModel {
+        id: NotSet,
+        name: Set(name.to_string()),
+        path: Set(path.to_string()),
+        git_branch: Set(None),
+        default_agent_type: Set(None),
+        last_opened_at: Set(now),
+        created_at: Set(now),
+        updated_at: Set(now),
+        deleted_at: Set(None),
+        is_open: Set(true),
+        sort_order: Set(next_order),
+        color: Set(DEFAULT_FOLDER_COLOR.to_string()),
+        parent_id: Set(Some(parent_id)),
+        kind: Set(FolderKind::Subfolder),
+        alias: Set(None),
+        // Subfolders follow their parent in the tree, never a sidebar group.
+        group_id: Set(None),
+        // Plain container subfolder — not a repo clone.
+        repo_full_name: Set(None),
+    };
+    let model = active.insert(conn).await?;
+    Ok(to_detail(model))
+}
+
+/// Create a subfolder that is a CLONE of a GitHub repo: like [`create_subfolder`]
+/// but records the checked-out `branch` and the `repo_full_name` (`owner/repo`).
+/// The directory at `path` has already been cloned (and the branch checked out /
+/// created) by the caller.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_repo_subfolder(
+    conn: &DatabaseConnection,
+    parent_id: i32,
+    path: &str,
+    name: &str,
+    branch: &str,
+    repo_full_name: &str,
+) -> Result<FolderDetail, DbError> {
+    let now = Utc::now();
+    let next_order = next_sort_order(conn).await?;
+    let active = folder::ActiveModel {
+        id: NotSet,
+        name: Set(name.to_string()),
+        path: Set(path.to_string()),
+        git_branch: Set(Some(branch.to_string())),
+        default_agent_type: Set(None),
+        last_opened_at: Set(now),
+        created_at: Set(now),
+        updated_at: Set(now),
+        deleted_at: Set(None),
+        is_open: Set(true),
+        sort_order: Set(next_order),
+        color: Set(DEFAULT_FOLDER_COLOR.to_string()),
+        parent_id: Set(Some(parent_id)),
+        kind: Set(FolderKind::Subfolder),
+        alias: Set(None),
+        group_id: Set(None),
+        repo_full_name: Set(Some(repo_full_name.to_string())),
+    };
+    let model = active.insert(conn).await?;
+    Ok(to_detail(model))
 }
 
 async fn add_folder_inner(
@@ -176,6 +253,7 @@ async fn add_folder_inner(
             // A newly opened folder always lands at the top level; the user
             // moves it into a group afterwards.
             group_id: Set(None),
+            repo_full_name: Set(None),
         };
         active.insert(conn).await?
     };
@@ -254,6 +332,7 @@ pub async fn ensure_folder_for_path(
             kind: Set(FolderKind::Regular),
             alias: Set(None),
             group_id: Set(None),
+            repo_full_name: Set(None),
         };
         active.insert(conn).await?
     };
@@ -294,6 +373,7 @@ pub async fn add_chat_folder(
         // Hidden chat folders never appear in the sidebar's folder list, so
         // they are never in a group.
         group_id: Set(None),
+        repo_full_name: Set(None),
     };
     let model = active.insert(conn).await?;
     Ok(to_detail(model))
@@ -394,6 +474,9 @@ pub async fn list_worktree_folders_missing_alias(
     let rows = folder::Entity::find()
         .filter(folder::Column::DeletedAt.is_null())
         .filter(folder::Column::ParentId.is_not_null())
+        // Subfolders also carry `parent_id` but are NOT worktrees — exclude them
+        // so the worktree alias backfill never relabels an organizational folder.
+        .filter(folder::Column::Kind.eq(FolderKind::Regular))
         .filter(
             sea_orm::Condition::any()
                 .add(folder::Column::Alias.is_null())
@@ -544,13 +627,15 @@ pub async fn list_open_folders(
 pub async fn list_open_folder_details(
     conn: &DatabaseConnection,
 ) -> Result<Vec<FolderDetail>, DbError> {
-    // Excludes hidden chat folders from the workspace "open folders" surface.
-    // `list_all_folder_details` (below) intentionally keeps them so the frontend
-    // can still resolve an active chat conversation's cwd / active folder by id.
+    // Excludes hidden chat folders from the workspace "open folders" surface,
+    // but KEEPS regular folders, worktree children AND organizational subfolders
+    // (all user-facing sidebar rows). `list_all_folder_details` (below)
+    // additionally keeps chat folders so the frontend can still resolve an active
+    // chat conversation's cwd / active folder by id.
     let rows = folder::Entity::find()
         .filter(folder::Column::DeletedAt.is_null())
         .filter(folder::Column::IsOpen.eq(true))
-        .filter(folder::Column::Kind.eq(FolderKind::Regular))
+        .filter(folder::Column::Kind.ne(FolderKind::Chat))
         .order_by_asc(folder::Column::SortOrder)
         .order_by_desc(folder::Column::LastOpenedAt)
         .all(conn)

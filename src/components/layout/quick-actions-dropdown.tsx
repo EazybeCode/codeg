@@ -11,7 +11,6 @@ import {
   Map as MapIcon,
   MonitorCloud,
   PawPrint,
-  Rocket,
   Settings,
   Zap,
 } from "lucide-react"
@@ -33,7 +32,6 @@ import { useAutomationsView } from "@/contexts/automations-view-context"
 import { useTasksView } from "@/contexts/tasks-view-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useRemoteWorkspaceConnections } from "@/hooks/use-remote-workspace-connections"
-import { openProjectBootWindow } from "@/lib/api"
 import { toErrorMessage } from "@/lib/app-error"
 import { openPetWindow } from "@/lib/pet/api"
 import { CloneDialog } from "./clone-dialog"
@@ -88,12 +86,6 @@ export function QuickActionsDropdown() {
     refresh: refreshRemote,
     open: handleOpenRemote,
   } = useRemoteWorkspaceConnections()
-
-  const handleProjectBoot = useCallback(() => {
-    openProjectBootWindow().catch((err) => {
-      console.error("[QuickActionsDropdown] failed to open project boot:", err)
-    })
-  }, [])
 
   // Summoning fails when no pet has been made active yet (the backend refuses
   // rather than opening an empty window), so surface that instead of a silent
@@ -150,10 +142,6 @@ export function QuickActionsDropdown() {
           <DropdownMenuItem onSelect={() => setCloneOpen(true)}>
             <FolderGit2 />
             {tFolderDropdown("cloneRepository")}
-          </DropdownMenuItem>
-          <DropdownMenuItem onSelect={handleProjectBoot}>
-            <Rocket />
-            {tFolderDropdown("projectBoot")}
           </DropdownMenuItem>
           {desktop && (
             <DropdownMenuSub

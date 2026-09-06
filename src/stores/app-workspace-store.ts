@@ -13,6 +13,8 @@ import {
   openFolder as apiOpenFolder,
   openFolderById as apiOpenFolderById,
   openWorktreeFolder as apiOpenWorktreeFolder,
+  createSubfolder as apiCreateSubfolder,
+  createRepoSubfolder as apiCreateRepoSubfolder,
   removeFolderFromWorkspace as apiRemoveFolderFromWorkspace,
   setFolderGroup as apiSetFolderGroup,
   updateFolderGroup as apiUpdateFolderGroup,
@@ -134,6 +136,18 @@ export interface AppWorkspaceStoreState {
     sourceFolderId: number
   ) => Promise<FolderDetail>
   addFolderToWorkspaceById: (folderId: number) => Promise<FolderDetail>
+  /** Create a nested organizational subfolder under `parentId` (Project or
+   *  subfolder), upsert it into local state, and refresh conversations. */
+  createSubfolder: (parentId: number, name: string) => Promise<FolderDetail>
+  /** Create a subfolder that is a clone of a GitHub repo under `parentId`,
+   *  upsert it, seed its branch, and refresh conversations. */
+  createRepoSubfolder: (
+    parentId: number,
+    name: string,
+    fullName: string,
+    branch: string,
+    createBranch: boolean
+  ) => Promise<FolderDetail>
   removeFolderFromWorkspace: (folderId: number) => Promise<void>
   /**
    * Persist a whole sidebar layout (top-level order + each group's members)
@@ -636,6 +650,31 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
       const detail = await apiOpenFolderById(folderId)
       const { upsertFolder, setBranch, refreshConversations } = get()
       upsertFolder(detail)
+      setBranch(detail.id, detail.git_branch ?? null)
+      void refreshConversations()
+      return detail
+    },
+
+    createSubfolder: async (parentId, name) => {
+      const detail = await apiCreateSubfolder(parentId, name)
+      const { upsertFolder, refreshConversations } = get()
+      upsertFolder(detail)
+      void refreshConversations()
+      return detail
+    },
+
+    createRepoSubfolder: async (parentId, name, fullName, branch, createBranch) => {
+      const detail = await apiCreateRepoSubfolder(
+        parentId,
+        name,
+        fullName,
+        branch,
+        createBranch
+      )
+      const { upsertFolder, setBranch, refreshConversations } = get()
+      upsertFolder(detail)
+      // Seed the branch map so the header reads the clone's branch immediately,
+      // before the live HEAD poll runs.
       setBranch(detail.id, detail.git_branch ?? null)
       void refreshConversations()
       return detail

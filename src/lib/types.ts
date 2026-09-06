@@ -398,6 +398,12 @@ export interface FolderDetail {
    * folder back to the top level rather than hiding it.
    */
   group_id: number | null
+  /**
+   * For a `subfolder` cloned from GitHub: the `owner/repo` it clones; null for a
+   * plain container subfolder and every other folder. Paired with `git_branch`
+   * (the clone's branch) to render an `owner/repo @ branch` label on the row.
+   */
+  repo_full_name: string | null
 }
 
 /**
@@ -854,8 +860,10 @@ export type ConversationStatus =
 export type ConversationKind = "regular" | "chat" | "loop" | "delegate"
 
 /** Mirrors Rust `FolderKind` (src-tauri/src/db/entities/folder.rs).
+ *  `subfolder` is a pure organizational container nested under another folder
+ *  (its `parent_id` is its DIRECT parent, arbitrary depth).
  *  `loop_worktree` is reserved for M2+ — add it here when the variant lands. */
-export type FolderKind = "regular" | "chat"
+export type FolderKind = "regular" | "chat" | "subfolder"
 
 export const STATUS_ORDER: ConversationStatus[] = [
   "in_progress",

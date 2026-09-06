@@ -1705,6 +1705,18 @@
       "newConversation": "New Conversation",
       "newConversationShort": "New",
       "newChat": "New chat",
+      "subfolder": {
+        "new": "New Subfolder",
+        "namePrompt": "Subfolder name",
+        "empty": "Empty folder",
+        "fromRepo": "From GitHub repo"
+      },
+      "folderSortBy": {
+        "label": "Sort by",
+        "manual": "Manual",
+        "name": "Name (A–Z)",
+        "recent": "Recent"
+      },
       "search": "Search",
       "noConversationsFound": "No conversations found.",
       "importLocalSessions": "Import local sessions",
@@ -1806,7 +1818,7 @@
         "toastOpFailed": "Operation failed: {message}"
       },
       "sectionPinned": "Pinned",
-      "sectionFolders": "Folders",
+      "sectionFolders": "Projects",
       "sectionChats": "Chat",
       "sectionRecent": "Recent",
       "noChats": "No chats",
