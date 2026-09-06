@@ -2148,16 +2148,18 @@ pub async fn create_chat_conversation_core(
             .filter(crate::db::entities::folder::Column::Kind.eq(FolderKind::WorkspaceChat))
             .all(conn).await.map_err(crate::db::error::DbError::from)?;
         let candidate = std::path::Path::new(dir);
-        let canonical = candidate.canonicalize().ok();
-        if managed.iter().any(|folder| {
-            candidate == std::path::Path::new(&folder.path)
-                || canonical.as_ref().is_some_and(|path| {
-                    std::path::Path::new(&folder.path).canonicalize().ok().as_ref() == Some(path)
-                })
-        }) {
-            return Err(AppCommandError::from(crate::db::error::DbError::Validation(
-                "workspace chat requires managed execution".into(),
-            )));
+        if !managed.is_empty() {
+            let resolved = resolve_chat_creation_path(candidate)?;
+            for folder in managed {
+                let root = std::path::Path::new(&folder.path);
+                if candidate.starts_with(root)
+                    || resolved.starts_with(resolve_chat_creation_path(root)?)
+                {
+                    return Err(AppCommandError::from(crate::db::error::DbError::Validation(
+                        "workspace chat requires managed execution".into(),
+                    )));
+                }
+            }
         }
     }
     let path = match existing_dir {
@@ -2198,6 +2200,38 @@ pub async fn create_chat_conversation_core(
         folder_id: folder.id,
         folder,
     })
+}
+
+/// Resolve existing ancestors before mkdir, retaining missing descendants.
+/// Walk components in order so a symlink is resolved before a subsequent '..'.
+/// Filesystem errors other than a missing component fail closed.
+fn resolve_chat_creation_path(
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, AppCommandError> {
+    use std::path::{Component, PathBuf};
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(AppCommandError::io)?.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => resolved.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => { resolved.pop(); }
+            Component::Normal(name) => {
+                resolved.push(name);
+                match std::fs::symlink_metadata(&resolved) {
+                    Ok(_) => resolved = resolved.canonicalize().map_err(AppCommandError::io)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(AppCommandError::io(error)),
+                }
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 #[cfg(feature = "tauri-runtime")]

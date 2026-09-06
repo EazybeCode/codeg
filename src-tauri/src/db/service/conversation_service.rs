@@ -69,6 +69,7 @@ pub async fn create_with_delegation(
     git_branch: Option<String>,
     delegation: Option<crate::acp::delegation::spawner::DelegationLink>,
 ) -> Result<conversation::Model, DbError> {
+    reject_workspace_chat_folder(conn, folder_id).await?;
     let kind = if delegation.is_some() {
         ConversationKind::Delegate
     } else {

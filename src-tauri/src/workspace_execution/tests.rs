@@ -182,3 +182,80 @@ async fn workspace_execution_legacy_creation_cannot_reuse_managed_folder() {
     assert!(!std::path::Path::new(&path).exists(), "legacy creation must reject before mkdir");
     assert_eq!(conversation::Entity::find().count(&db.conn).await.unwrap(), 1);
 }
+
+async fn ready_fixture() -> (AppDatabase, tempfile::TempDir, super::WorkspaceChatRuntime) {
+    let (db, scope, _, draft, dir, commit) = fixture().await;
+    let row = reserve(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &commit)
+        .await.unwrap();
+    lease(&db, row.clone(), Some("owner"), 60).await;
+    let path = dir.path().join(&row.worktree_relpath);
+    std::fs::create_dir_all(&path).unwrap();
+    let runtime = finalize_ready(
+        &db.conn, &scope, draft.id, &row.allocation_id, path.to_str().unwrap(), "owner",
+    ).await.unwrap();
+    (db, dir, runtime)
+}
+
+#[tokio::test]
+async fn workspace_execution_folderless_rejects_uncreated_managed_descendant() {
+    let (db, dir, runtime) = ready_fixture().await;
+    let descendant = std::path::Path::new(&runtime.folder.unwrap().path).join("new/subdir");
+    let result = crate::commands::conversations::create_chat_conversation_core(
+        &db.conn, dir.path(), AgentType::ClaudeCode, None, descendant.to_str(),
+    ).await;
+    assert!(result.is_err(), "managed descendants must not become scratch chats");
+    assert!(!descendant.parent().unwrap().exists(), "reject before mkdir");
+    assert_eq!(folder::Entity::find().count(&db.conn).await.unwrap(), 1);
+    assert_eq!(conversation::Entity::find().count(&db.conn).await.unwrap(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_execution_folderless_rejects_missing_descendant_through_symlink_ancestor() {
+    let (db, dir, runtime) = ready_fixture().await;
+    let managed = runtime.folder.unwrap().path;
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&managed, &alias).unwrap();
+    let descendant = alias.join("new/subdir");
+    let result = crate::commands::conversations::create_chat_conversation_core(
+        &db.conn, dir.path(), AgentType::ClaudeCode, None, descendant.to_str(),
+    ).await;
+    assert!(result.is_err(), "an existing symlink ancestor must resolve before checking scope");
+    assert!(!std::path::Path::new(&managed).join("new").exists());
+    assert_eq!(folder::Entity::find().count(&db.conn).await.unwrap(), 1);
+    assert_eq!(conversation::Entity::find().count(&db.conn).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn workspace_execution_folderless_allows_unrelated_sibling_prefix() {
+    let (db, dir, runtime) = ready_fixture().await;
+    let managed = runtime.folder.unwrap().path;
+    let sibling = std::path::PathBuf::from(format!("{managed}-scratch")).join("new");
+    let created = crate::commands::conversations::create_chat_conversation_core(
+        &db.conn, dir.path(), AgentType::ClaudeCode, None, sibling.to_str(),
+    ).await.unwrap();
+    assert_eq!(std::path::Path::new(&created.folder.path), sibling.as_path());
+    assert!(sibling.is_dir());
+    assert_eq!(folder::Entity::find().count(&db.conn).await.unwrap(), 2);
+    assert_eq!(conversation::Entity::find().count(&db.conn).await.unwrap(), 2);
+}
+
+#[tokio::test]
+async fn workspace_execution_delegation_constructor_cannot_reuse_managed_folder() {
+    let (db, _dir, runtime) = ready_fixture().await;
+    let folder_id = runtime.folder.unwrap().id;
+    let parent_id = runtime.conversation.unwrap().id;
+    let mut results = Vec::new();
+    for delegation in [None, Some(crate::acp::delegation::spawner::DelegationLink {
+        parent_conversation_id: parent_id,
+        parent_tool_use_id: "tool-fixture".into(),
+        delegation_call_id: "call-fixture".into(),
+    })] {
+        results.push(crate::db::service::conversation_service::create_with_delegation(
+            &db.conn, folder_id, AgentType::ClaudeCode, None, None, delegation,
+        ).await);
+    }
+    assert!(results.iter().all(Result::is_err), "both regular and delegated legacy construction must reject");
+    assert_eq!(folder::Entity::find().count(&db.conn).await.unwrap(), 1);
+    assert_eq!(conversation::Entity::find().count(&db.conn).await.unwrap(), 1);
+}
