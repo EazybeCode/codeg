@@ -204,13 +204,29 @@ pub async fn connect_repository(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepositoryIdentityExpectation {
+    pub repository_id: i32,
+    pub github_repository_id: String,
+}
+
 async fn validate_repository_default(
     txn: &DatabaseTransaction,
     scope: &Scope,
     default: &Option<RepositoryDefault>,
+    expected_identity: Option<&RepositoryIdentityExpectation>,
 ) -> Result<(), CatalogError> {
     if let Some(default) = default {
-        verify_repository(txn, scope, default.repository_id).await?;
+        let repository = verify_repository(txn, scope, default.repository_id).await?;
+        if let Some(expected) = expected_identity {
+            if expected.repository_id != default.repository_id
+                || repository.github_repository_id != expected.github_repository_id
+            {
+                return Err(CatalogError::RepositoryUnavailable);
+            }
+        }
+    } else if expected_identity.is_some() {
+        return Err(CatalogError::RepositoryUnavailable);
     }
     Ok(())
 }
@@ -260,12 +276,27 @@ pub async fn create_node(
     scope: &Scope,
     input: CreateNodeInput,
 ) -> Result<WorkspaceNode, CatalogError> {
+    create_node_with_repository_identity(db, scope, input, None).await
+}
+
+pub(crate) async fn create_node_with_repository_identity(
+    db: &DatabaseConnection,
+    scope: &Scope,
+    input: CreateNodeInput,
+    expected_identity: Option<RepositoryIdentityExpectation>,
+) -> Result<WorkspaceNode, CatalogError> {
     validate_label(&input.name)?;
     validate_node_shape(&input.kind, input.parent_id, &input.repository_default)?;
 
     let txn = begin_scoped_write(db, scope).await?;
     validate_parent_hierarchy(&txn, scope, input.parent_id, None).await?;
-    validate_repository_default(&txn, scope, &input.repository_default).await?;
+    validate_repository_default(
+        &txn,
+        scope,
+        &input.repository_default,
+        expected_identity.as_ref(),
+    )
+    .await?;
 
     let now = Utc::now();
     let (repository_id, starting_branch) = input
@@ -295,6 +326,15 @@ pub async fn update_node(
     scope: &Scope,
     input: UpdateNodeInput,
 ) -> Result<WorkspaceNode, CatalogError> {
+    update_node_with_repository_identity(db, scope, input, None).await
+}
+
+pub(crate) async fn update_node_with_repository_identity(
+    db: &DatabaseConnection,
+    scope: &Scope,
+    input: UpdateNodeInput,
+    expected_identity: Option<RepositoryIdentityExpectation>,
+) -> Result<WorkspaceNode, CatalogError> {
     validate_label(&input.name)?;
     if input.expected_revision < 0 {
         return Err(CatalogError::InvalidInput(
@@ -311,7 +351,13 @@ pub async fn update_node(
     let kind = parse_kind(&existing.kind)?;
     validate_node_shape(&kind, input.parent_id, &input.repository_default)?;
     validate_parent_hierarchy(&txn, scope, input.parent_id, Some(input.node_id)).await?;
-    validate_repository_default(&txn, scope, &input.repository_default).await?;
+    validate_repository_default(
+        &txn,
+        scope,
+        &input.repository_default,
+        expected_identity.as_ref(),
+    )
+    .await?;
 
     let (repository_id, starting_branch) = input
         .repository_default

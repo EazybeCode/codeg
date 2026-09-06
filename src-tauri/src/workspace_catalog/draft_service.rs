@@ -282,6 +282,11 @@ pub async fn list_drafts(
     node_id: i32,
 ) -> Result<Vec<WorkspaceChatDraft>, CatalogError> {
     verify_scope(db, scope).await?;
+    workspace_node::Entity::find_by_id(node_id)
+        .filter(workspace_node::Column::OrgId.eq(scope.org_id))
+        .one(db)
+        .await?
+        .ok_or(CatalogError::NotFound)?;
     Ok(workspace_chat_draft::Entity::find()
         .filter(workspace_chat_draft::Column::OrgId.eq(scope.org_id))
         .filter(workspace_chat_draft::Column::CreatorUserId.eq(scope.user_id))

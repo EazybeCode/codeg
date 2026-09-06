@@ -18,6 +18,7 @@ pub mod folder_commands;
 pub mod folder_links;
 pub mod gh;
 pub mod github_auth;
+pub mod workspace_catalog;
 pub mod folders;
 pub mod forge;
 pub mod git;
@@ -41,3 +42,6 @@ pub mod web_server;
 pub mod work_task;
 pub mod workspace_files;
 pub mod workspace_state;
+
+#[cfg(test)]
+mod workspace_catalog_tests;

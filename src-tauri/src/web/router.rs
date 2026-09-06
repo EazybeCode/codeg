@@ -39,6 +39,30 @@ pub fn build_router(
             post(handlers::gh::list_github_branches),
         )
         .route("/clone_github_repo", post(handlers::gh::clone_github_repo))
+        .route(
+            "/list_workspace_nodes",
+            post(handlers::workspace_catalog::list_workspace_nodes),
+        )
+        .route(
+            "/create_workspace_node",
+            post(handlers::workspace_catalog::create_workspace_node),
+        )
+        .route(
+            "/update_workspace_node",
+            post(handlers::workspace_catalog::update_workspace_node),
+        )
+        .route(
+            "/connect_workspace_repository",
+            post(handlers::workspace_catalog::connect_workspace_repository),
+        )
+        .route(
+            "/create_workspace_chat_draft",
+            post(handlers::workspace_catalog::create_workspace_chat_draft),
+        )
+        .route(
+            "/list_workspace_chat_drafts",
+            post(handlers::workspace_catalog::list_workspace_chat_drafts),
+        )
         // Debug endpoint: operator-facing snapshot of `EventBusMetrics`
         // (emit volume, lag/eviction counts, attach decision counts).
         // Sits behind the same auth middleware as every other route.
