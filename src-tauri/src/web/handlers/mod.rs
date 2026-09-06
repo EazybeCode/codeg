@@ -45,3 +45,5 @@ pub mod workspace_state;
 
 #[cfg(test)]
 mod workspace_catalog_tests;
+#[cfg(test)]
+mod workspace_catalog_integration_tests;
