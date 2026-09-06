@@ -11,8 +11,9 @@ use sea_orm::{
 use crate::db::entities::{org, user, workspace_node, workspace_repository};
 
 use super::{
-    validate_label, validate_node_shape, CatalogError, CreateNodeInput, RepositoryDefault, Scope,
-    UpdateNodeInput, WorkspaceNode, WorkspaceNodeKind,
+    repository_access::validate_repository_full_name, validate_branch, validate_label,
+    validate_node_shape, CatalogError, CreateNodeInput, RepositoryAccess, RepositoryDefault, Scope,
+    UpdateNodeInput, WorkspaceNode, WorkspaceNodeKind, WorkspaceRepository,
 };
 
 fn kind_as_str(kind: &WorkspaceNodeKind) -> &'static str {
@@ -135,6 +136,70 @@ pub(crate) async fn verify_repository(
         .one(txn)
         .await?
         .ok_or(CatalogError::NotFound)
+}
+
+pub async fn connect_repository(
+    db: &DatabaseConnection,
+    scope: &Scope,
+    access: &dyn RepositoryAccess,
+    full_name: &str,
+    branch: &str,
+) -> Result<WorkspaceRepository, CatalogError> {
+    validate_repository_full_name(full_name)?;
+    validate_branch(branch)?;
+    verify_scope(db, scope).await?;
+
+    let verified = access.verify(scope, full_name, branch).await?;
+    if verified.github_repository_id.is_empty()
+        || !verified
+            .github_repository_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return Err(CatalogError::UpstreamUnavailable);
+    }
+    validate_repository_full_name(&verified.full_name)
+        .map_err(|_| CatalogError::UpstreamUnavailable)?;
+    validate_branch(&verified.starting_branch).map_err(|_| CatalogError::UpstreamUnavailable)?;
+    if verified.starting_branch != branch {
+        return Err(CatalogError::RepositoryUnavailable);
+    }
+
+    let txn = begin_scoped_write(db, scope).await?;
+    let now = Utc::now();
+    let model = match workspace_repository::Entity::find()
+        .filter(workspace_repository::Column::OrgId.eq(scope.org_id))
+        .filter(
+            workspace_repository::Column::GithubRepositoryId
+                .eq(verified.github_repository_id.as_str()),
+        )
+        .one(&txn)
+        .await?
+    {
+        Some(existing) => {
+            let mut active: workspace_repository::ActiveModel = existing.into();
+            active.full_name = Set(verified.full_name);
+            active.updated_at = Set(now);
+            active.update(&txn).await?
+        }
+        None => workspace_repository::ActiveModel {
+            id: NotSet,
+            org_id: Set(scope.org_id),
+            github_repository_id: Set(verified.github_repository_id),
+            full_name: Set(verified.full_name),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(&txn)
+        .await?,
+    };
+    txn.commit().await?;
+    Ok(WorkspaceRepository {
+        id: model.id,
+        org_id: model.org_id,
+        github_repository_id: model.github_repository_id,
+        full_name: model.full_name,
+    })
 }
 
 async fn validate_repository_default(

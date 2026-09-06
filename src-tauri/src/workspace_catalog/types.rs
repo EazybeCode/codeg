@@ -32,6 +32,14 @@ pub struct WorkspaceNode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRepository {
+    pub id: i32,
+    pub org_id: i32,
+    pub github_repository_id: String,
+    pub full_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateNodeInput {
     pub parent_id: Option<i32>,
