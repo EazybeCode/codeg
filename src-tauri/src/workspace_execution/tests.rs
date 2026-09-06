@@ -7,7 +7,7 @@ use crate::{
 };
 use super::{get_runtime, get_runtime_for_conversation, reserve, legacy_bridge::finalize_ready, ExecutionError, WorkspaceExecutionState};
 
-async fn fixture() -> (AppDatabase, Scope, Scope, WorkspaceChatDraft, tempfile::TempDir, String) {
+pub(super) async fn fixture() -> (AppDatabase, Scope, Scope, WorkspaceChatDraft, tempfile::TempDir, String) {
     let (db, scope, other) = setup().await;
     let repository = seed_repository(&db, scope.org_id, "123", "acme/docs").await;
     let node = create_node(&db.conn, &scope, CreateNodeInput {

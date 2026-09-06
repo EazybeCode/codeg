@@ -19,6 +19,7 @@ pub mod folder_links;
 pub mod gh;
 pub mod github_auth;
 pub mod workspace_catalog;
+pub mod workspace_execution;
 pub mod folders;
 pub mod forge;
 pub mod git;

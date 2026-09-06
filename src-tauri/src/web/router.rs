@@ -33,6 +33,10 @@ pub fn build_router(
 
     let api = Router::new()
         .route("/health", post(health_check))
+        .route("/get_workspace_chat_runtime", post(handlers::workspace_execution::get_workspace_chat_runtime))
+        .route("/get_workspace_chat_runtime_for_conversation", post(handlers::workspace_execution::get_workspace_chat_runtime_for_conversation))
+        .route("/get_workspace_runtime_capabilities", post(handlers::workspace_execution::get_workspace_runtime_capabilities))
+        .route("/provision_workspace_chat", post(handlers::workspace_execution::provision_workspace_chat))
         .route("/list_github_repos", post(handlers::gh::list_github_repos))
         .route(
             "/list_github_branches",

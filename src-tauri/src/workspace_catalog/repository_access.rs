@@ -59,7 +59,7 @@ impl GitHubRepositoryAccess {
         })
     }
 
-    async fn token(&self, scope: &Scope) -> Result<String, CatalogError> {
+    pub(crate) async fn token(&self, scope: &Scope) -> Result<String, CatalogError> {
         match &self.token_source {
             TokenSource::Database(db) => {
                 let scoped_user = user::Entity::find_by_id(scope.user_id)
@@ -101,6 +101,46 @@ impl GitHubRepositoryAccess {
             .send()
             .await
             .map_err(|_| CatalogError::UpstreamUnavailable)
+    }
+
+    /// Metadata-only authorization also works after a starting branch is deleted.
+    pub(crate) async fn verified_identity(&self, scope: &Scope, full_name: &str) -> Result<(String, String), CatalogError> {
+        let token = self.token(scope).await?;
+        let metadata = self.metadata(&token, full_name).await?;
+        Ok((metadata.id.to_string(), metadata.full_name))
+    }
+
+    async fn metadata(&self, token: &str, full_name: &str) -> Result<GitHubRepositoryResponse, CatalogError> {
+        let (owner, repository) = validate_repository_full_name(full_name)?;
+        let response = self.get(token, self.endpoint(&["repos", owner, repository])?).await?;
+        if let Some(error) = response_error(&response) { return Err(error); }
+        let metadata: GitHubRepositoryResponse = response.json().await.map_err(|_| CatalogError::UpstreamUnavailable)?;
+        validate_repository_full_name(&metadata.full_name).map_err(|_| CatalogError::UpstreamUnavailable)?;
+        if metadata.id == 0 { return Err(CatalogError::UpstreamUnavailable); }
+        Ok(metadata)
+    }
+
+    async fn branch(&self, token: &str, full_name: &str, branch: &str) -> Result<GitHubBranchResponse, CatalogError> {
+        let (owner, repository) = validate_repository_full_name(full_name)?;
+        validate_branch(branch)?;
+        let response = self.get(token, self.endpoint(&["repos", owner, repository, "branches", branch])?).await?;
+        if let Some(error) = response_error(&response) { return Err(error); }
+        let found: GitHubBranchResponse = response.json().await.map_err(|_| CatalogError::UpstreamUnavailable)?;
+        if found.name != branch { return Err(CatalogError::RepositoryUnavailable); }
+        Ok(found)
+    }
+
+    pub(crate) async fn resolve_commit(&self, scope: &Scope, full_name: &str, branch: &str) -> Result<(String, String, String), CatalogError> {
+        validate_repository_full_name(full_name)?;
+        validate_branch(branch)?;
+        let token = self.token(scope).await?;
+        let metadata = self.metadata(&token, full_name).await?;
+        let found = self.branch(&token, &metadata.full_name, branch).await?;
+        let sha = found.commit.ok_or(CatalogError::UpstreamUnavailable)?.sha;
+        if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CatalogError::UpstreamUnavailable);
+        }
+        Ok((metadata.id.to_string(), metadata.full_name, sha.to_ascii_lowercase()))
     }
 }
 
@@ -176,7 +216,10 @@ struct GitHubRepositoryResponse {
 #[derive(Deserialize)]
 struct GitHubBranchResponse {
     name: String,
+    commit: Option<GitHubCommit>,
 }
+#[derive(Deserialize)]
+struct GitHubCommit { sha: String }
 
 #[async_trait]
 impl RepositoryAccess for GitHubRepositoryAccess {
@@ -186,49 +229,11 @@ impl RepositoryAccess for GitHubRepositoryAccess {
         full_name: &str,
         branch: &str,
     ) -> Result<VerifiedRepository, CatalogError> {
-        let (owner, repository) = validate_repository_full_name(full_name)?;
+        validate_repository_full_name(full_name)?;
         validate_branch(branch)?;
         let token = self.token(scope).await?;
-
-        let metadata_response = self
-            .get(
-                &token,
-                self.endpoint(&["repos", owner, repository])?,
-            )
-            .await?;
-        if let Some(error) = response_error(&metadata_response) {
-            return Err(error);
-        }
-        let metadata: GitHubRepositoryResponse = metadata_response
-            .json()
-            .await
-            .map_err(|_| CatalogError::UpstreamUnavailable)?;
-        let (canonical_owner, canonical_repository) =
-            validate_repository_full_name(&metadata.full_name)
-                .map_err(|_| CatalogError::UpstreamUnavailable)?;
-
-        let branch_response = self
-            .get(
-                &token,
-                self.endpoint(&[
-                    "repos",
-                    canonical_owner,
-                    canonical_repository,
-                    "branches",
-                    branch,
-                ])?,
-            )
-            .await?;
-        if let Some(error) = response_error(&branch_response) {
-            return Err(error);
-        }
-        let found_branch: GitHubBranchResponse = branch_response
-            .json()
-            .await
-            .map_err(|_| CatalogError::UpstreamUnavailable)?;
-        if found_branch.name != branch {
-            return Err(CatalogError::RepositoryUnavailable);
-        }
+        let metadata = self.metadata(&token, full_name).await?;
+        let found_branch = self.branch(&token, &metadata.full_name, branch).await?;
 
         Ok(VerifiedRepository {
             github_repository_id: metadata.id.to_string(),
@@ -487,5 +492,22 @@ mod tests {
             access.verify(&scope(), "acme/empty", "main").await,
             Err(CatalogError::RepositoryUnavailable)
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_execution_metadata_access_survives_deleted_branch_but_resolve_requires_full_commit() {
+        let fixtures = HashMap::from([
+            ("/repos/acme/docs".into(), ok(r#"{"id":123,"full_name":"acme/docs"}"#)),
+            ("/repos/acme/docs/branches/main".into(), ok(r#"{"name":"main","commit":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#)),
+            ("/repos/acme/docs/branches/bad".into(), ok(r#"{"name":"bad","commit":{"sha":"abc"}}"#)),
+        ]);
+        let (origin, requests) = start_server(fixtures).await;
+        let access = GitHubRepositoryAccess::new_for_test(&origin).unwrap();
+        assert_eq!(access.verified_identity(&scope(), "acme/docs").await.unwrap(), ("123".into(), "acme/docs".into()));
+        assert_eq!(*requests.lock().unwrap(), vec!["/repos/acme/docs"]);
+        assert_eq!(access.resolve_commit(&scope(), "acme/docs", "deleted").await.unwrap_err(), CatalogError::RepositoryUnavailable);
+        assert_eq!(access.resolve_commit(&scope(), "acme/docs", "bad").await.unwrap_err(), CatalogError::UpstreamUnavailable);
+        assert_eq!(access.resolve_commit(&scope(), "acme/docs", "main").await.unwrap().2, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert!(access.verified_identity(&scope(), "acme/docs").await.is_ok());
     }
 }

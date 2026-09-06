@@ -301,12 +301,7 @@ pub fn ensure_askpass_script(app_data_dir: &Path) -> std::io::Result<PathBuf> {
     {
         let script_path = app_data_dir.join("git-askpass.sh");
         if !script_path.exists() {
-            let content = r#"#!/bin/sh
-case "$1" in
-*[Uu]sername*) echo "$CODEG_GIT_USERNAME" ;;
-*[Pp]assword*) echo "$CODEG_GIT_PASSWORD" ;;
-esac
-"#;
+            let content = askpass_script_content();
             std::fs::write(&script_path, content)?;
             // Make executable
             use std::os::unix::fs::PermissionsExt;
@@ -319,7 +314,23 @@ esac
     {
         let script_path = app_data_dir.join("git-askpass.bat");
         if !script_path.exists() {
-            let content = r#"@echo off
+            let content = askpass_script_content();
+            std::fs::write(&script_path, content)?;
+        }
+        Ok(script_path)
+    }
+}
+
+pub(crate) fn askpass_script_content() -> &'static str {
+    #[cfg(unix)]
+    { r#"#!/bin/sh
+case "$1" in
+*[Uu]sername*) echo "$CODEG_GIT_USERNAME" ;;
+*[Pp]assword*) echo "$CODEG_GIT_PASSWORD" ;;
+esac
+"# }
+    #[cfg(windows)]
+    { r#"@echo off
 echo %1 | findstr /i "username" >nul
 if %errorlevel% equ 0 (
     echo %CODEG_GIT_USERNAME%
@@ -330,11 +341,7 @@ if %errorlevel% equ 0 (
     echo %CODEG_GIT_PASSWORD%
     exit /b
 )
-"#;
-            std::fs::write(&script_path, content)?;
-        }
-        Ok(script_path)
-    }
+"# }
 }
 
 /// Inject GitHub credentials into a git command via GIT_ASKPASS.
@@ -343,6 +350,12 @@ pub fn inject_credentials(
     username: &str,
     token: &str,
     askpass_path: &Path,
+) {
+    inject_credentials_std(cmd.as_std_mut(), username, token, askpass_path);
+}
+
+pub(crate) fn inject_credentials_std(
+    cmd: &mut std::process::Command, username: &str, token: &str, askpass_path: &Path,
 ) {
     // Clear all system credential helpers (e.g. macOS Keychain `osxkeychain`)
     // so git falls through to GIT_ASKPASS. Without this, a system credential

@@ -137,7 +137,7 @@ fn content_type_is_json(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
 }
 
-fn parse_json<T: DeserializeOwned>(headers: &HeaderMap, body: &[u8]) -> Result<T, CatalogError> {
+pub(crate) fn parse_json<T: DeserializeOwned>(headers: &HeaderMap, body: &[u8]) -> Result<T, CatalogError> {
     if !content_type_is_json(headers) {
         return Err(CatalogError::InvalidInput(
             "application/json content type required".into(),
