@@ -159,7 +159,6 @@ async fn validate_parent_hierarchy(
     };
     let mut cursor = Some(parent_id);
     let mut seen = HashSet::new();
-    let mut direct = true;
     while let Some(id) = cursor {
         if moving_node_id == Some(id) || !seen.insert(id) {
             return Err(CatalogError::InvalidInput("hierarchy cycle".into()));
@@ -169,14 +168,7 @@ async fn validate_parent_hierarchy(
             .one(txn)
             .await?
             .ok_or(CatalogError::NotFound)?;
-        let kind = parse_kind(&row.kind)?;
-        if direct && kind == WorkspaceNodeKind::WorkingDirectory {
-            return Err(CatalogError::InvalidInput(
-                "working directory cannot contain child nodes".into(),
-            ));
-        }
         cursor = row.parent_id;
-        direct = false;
     }
     Ok(())
 }

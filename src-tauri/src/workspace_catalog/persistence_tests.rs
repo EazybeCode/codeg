@@ -244,10 +244,9 @@ async fn workspace_catalog_rejects_cross_tenant_parent_and_repository_ids() {
 }
 
 #[tokio::test]
-async fn workspace_catalog_rejects_self_parent_descendant_move_and_leaf_parent() {
+async fn workspace_catalog_rejects_self_parent_and_descendant_move() {
     let db = fresh_in_memory_db().await;
     let (scope, _) = seed_two_scopes(&db).await;
-    let repository_id = seed_repository(&db, scope.org_id, "1000").await;
     let root = create_node(
         &db.conn,
         &scope,
@@ -279,22 +278,6 @@ async fn workspace_catalog_rejects_self_parent_descendant_move_and_leaf_parent()
     )
     .await
     .unwrap();
-    let checkout = create_node(
-        &db.conn,
-        &scope,
-        create_input(
-            Some(root.id),
-            WorkspaceNodeKind::WorkingDirectory,
-            "Checkout",
-            Some(RepositoryDefault {
-                repository_id,
-                starting_branch: "main".into(),
-            }),
-        ),
-    )
-    .await
-    .unwrap();
-
     for input in [
         UpdateNodeInput {
             node_id: parent.id,
@@ -316,20 +299,53 @@ async fn workspace_catalog_rejects_self_parent_descendant_move_and_leaf_parent()
             Err(CatalogError::InvalidInput(_))
         ));
     }
-    assert!(matches!(
-        create_node(
-            &db.conn,
-            &scope,
-            create_input(
-                Some(checkout.id),
-                WorkspaceNodeKind::Folder,
-                "Below leaf",
-                None,
-            ),
-        )
-        .await,
-        Err(CatalogError::InvalidInput(_))
-    ));
+}
+
+#[tokio::test]
+async fn workspace_catalog_allows_logical_folder_below_working_directory_without_filesystem() {
+    let db = fresh_in_memory_db().await;
+    let (scope, _) = seed_two_scopes(&db).await;
+    let repository_id = seed_repository(&db, scope.org_id, "1000").await;
+    let root = create_node(
+        &db.conn,
+        &scope,
+        create_input(None, WorkspaceNodeKind::Project, "Root", None),
+    )
+    .await
+    .unwrap();
+    let checkout = create_node(
+        &db.conn,
+        &scope,
+        create_input(
+            Some(root.id),
+            WorkspaceNodeKind::WorkingDirectory,
+            "Checkout",
+            Some(RepositoryDefault {
+                repository_id,
+                starting_branch: "main".into(),
+            }),
+        ),
+    )
+    .await
+    .unwrap();
+    let before = folder::Entity::find().count(&db.conn).await.unwrap();
+
+    let logical_folder = create_node(
+        &db.conn,
+        &scope,
+        create_input(
+            Some(checkout.id),
+            WorkspaceNodeKind::Folder,
+            "Nested context",
+            None,
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(logical_folder.parent_id, Some(checkout.id));
+    assert_eq!(logical_folder.repository_default, None);
+    assert_eq!(folder::Entity::find().count(&db.conn).await.unwrap(), before);
 }
 
 #[tokio::test]
