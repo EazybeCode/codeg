@@ -1,7 +1,7 @@
 # Repository-backed organization workspace
 
-Status: product model approved in conversation on 2026-09-07; consolidated written
-spec awaiting user review before implementation planning. This is a design, not
+Status: consolidated product model approved in conversation on 2026-09-07;
+implementation and testing authorized while the user sleeps. This is a design, not
 a statement that SaaS isolation or onboarding has shipped.
 
 This spec supersedes conflicting product rules in
