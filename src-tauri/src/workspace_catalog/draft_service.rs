@@ -86,7 +86,7 @@ fn request_fingerprint(
     format!("{:x}", hasher.finalize())
 }
 
-fn to_workspace_chat_draft(model: workspace_chat_draft::Model) -> WorkspaceChatDraft {
+pub(crate) fn to_workspace_chat_draft(model: workspace_chat_draft::Model) -> WorkspaceChatDraft {
     WorkspaceChatDraft {
         id: model.id,
         org_id: model.org_id,

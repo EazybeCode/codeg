@@ -471,6 +471,11 @@ async fn workspace_catalog_migration_rerun_preserves_legacy_rows_and_schema() {
 #[tokio::test]
 async fn workspace_catalog_migration_down_refuses_data_then_drops_empty_tables() {
     let db = fresh_in_memory_db().await;
+    // Exercise this migration explicitly; later additive migrations are independent.
+    let migration = Migrator::migrations().into_iter()
+        .find(|migration| migration.name() == "m20260907_000001_workspace_catalog")
+        .unwrap();
+    let manager = sea_orm_migration::SchemaManager::new(&db.conn);
     let (scope, _) = seed_two_scopes(&db).await;
     let created = create_node(
         &db.conn,
@@ -480,7 +485,7 @@ async fn workspace_catalog_migration_down_refuses_data_then_drops_empty_tables()
     .await
     .unwrap();
 
-    assert!(Migrator::down(&db.conn, Some(1)).await.is_err());
+    assert!(migration.down(&manager).await.is_err());
     assert_eq!(
         list_nodes(&db.conn, &scope).await.unwrap(),
         vec![created.clone()]
@@ -490,14 +495,14 @@ async fn workspace_catalog_migration_down_refuses_data_then_drops_empty_tables()
         .exec(&db.conn)
         .await
         .unwrap();
-    Migrator::down(&db.conn, Some(1))
+    migration.down(&manager)
         .await
         .expect("drop empty catalog tables");
     let remaining = db
         .conn
         .query_all(sea_orm::Statement::from_string(
             sea_orm::DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'workspace_%'",
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('workspace_repository', 'workspace_node', 'workspace_chat_draft')",
         ))
         .await
         .unwrap();

@@ -593,7 +593,9 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
       // lookups). Seeding a chat folder into `folders` would render a "Chat"
       // header row in the sidebar until the next refetch.
       set({
-        ...(detail.kind !== "chat" ? { folders: upsert(folders) } : {}),
+        ...(detail.kind !== "chat" && detail.kind !== "workspace_chat"
+          ? { folders: upsert(folders) }
+          : {}),
         allFolders: upsert(allFolders),
       })
     },

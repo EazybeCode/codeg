@@ -25,6 +25,7 @@ pub mod forge;
 pub mod git_credential;
 pub mod git_repo;
 pub mod workspace_catalog;
+pub mod workspace_execution;
 pub mod intern;
 pub mod keyring_store;
 pub mod logging;

@@ -28,5 +28,6 @@ pub mod work_task_event;
 pub mod work_task_settings;
 pub mod work_task_template;
 pub mod workspace_chat_draft;
+pub mod workspace_chat_execution;
 pub mod workspace_node;
 pub mod workspace_repository;

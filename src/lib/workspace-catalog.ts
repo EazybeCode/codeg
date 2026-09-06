@@ -34,7 +34,7 @@ export interface WorkspaceChatDraft {
   full_name: string
   starting_branch: string
   title: string | null
-  execution_state: string
+  execution_state: "unprovisioned"
 }
 
 export type CreateNodeInput = {

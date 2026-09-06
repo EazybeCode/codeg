@@ -30,7 +30,7 @@ pub const DEFAULT_FOLDER_COLOR: &str = "inherit";
 /// The folder side is deliberately unfiltered — worktree children and hidden
 /// chat folders count too — so the result only ever moves forward. That is the
 /// pre-groups behavior, kept as-is.
-async fn next_sort_order(conn: &DatabaseConnection) -> Result<i32, DbError> {
+async fn next_sort_order<C: ConnectionTrait>(conn: &C) -> Result<i32, DbError> {
     let max_folder = folder::Entity::find()
         .order_by_desc(folder::Column::SortOrder)
         .one(conn)
@@ -60,7 +60,7 @@ fn parse_agent_type(s: &Option<String>) -> Option<AgentType> {
         .and_then(|v| serde_json::from_value(serde_json::Value::String(v.to_string())).ok())
 }
 
-fn to_detail(m: folder::Model) -> FolderDetail {
+pub(crate) fn to_detail(m: folder::Model) -> FolderDetail {
     let default_agent_type = parse_agent_type(&m.default_agent_type);
     FolderDetail {
         id: m.id,
@@ -352,13 +352,35 @@ pub async fn add_chat_folder(
     conn: &DatabaseConnection,
     path: &str,
 ) -> Result<FolderDetail, DbError> {
+    insert_hidden_folder(conn, path, "Chat", FolderKind::Chat, None, None).await
+}
+
+/// Insert only: path collisions must never adopt an unrelated legacy folder.
+pub(crate) async fn create_workspace_chat_folder<C: ConnectionTrait>(
+    conn: &C,
+    path: &str,
+    name: &str,
+    branch: &str,
+    repo_full_name: &str,
+) -> Result<FolderDetail, DbError> {
+    insert_hidden_folder(conn, path, name, FolderKind::WorkspaceChat, Some(branch), Some(repo_full_name)).await
+}
+
+async fn insert_hidden_folder<C: ConnectionTrait>(
+    conn: &C,
+    path: &str,
+    name: &str,
+    kind: FolderKind,
+    branch: Option<&str>,
+    repo_full_name: Option<&str>,
+) -> Result<FolderDetail, DbError> {
     let now = Utc::now();
     let next_order = next_sort_order(conn).await?;
     let active = folder::ActiveModel {
         id: NotSet,
-        name: Set("Chat".to_string()),
+        name: Set(name.to_string()),
         path: Set(path.to_string()),
-        git_branch: Set(None),
+        git_branch: Set(branch.map(Into::into)),
         default_agent_type: Set(None),
         last_opened_at: Set(now),
         created_at: Set(now),
@@ -368,12 +390,12 @@ pub async fn add_chat_folder(
         sort_order: Set(next_order),
         color: Set(DEFAULT_FOLDER_COLOR.to_string()),
         parent_id: Set(None),
-        kind: Set(FolderKind::Chat),
+        kind: Set(kind),
         alias: Set(None),
         // Hidden chat folders never appear in the sidebar's folder list, so
         // they are never in a group.
         group_id: Set(None),
-        repo_full_name: Set(None),
+        repo_full_name: Set(repo_full_name.map(Into::into)),
     };
     let model = active.insert(conn).await?;
     Ok(to_detail(model))
@@ -636,6 +658,7 @@ pub async fn list_open_folder_details(
         .filter(folder::Column::DeletedAt.is_null())
         .filter(folder::Column::IsOpen.eq(true))
         .filter(folder::Column::Kind.ne(FolderKind::Chat))
+        .filter(folder::Column::Kind.ne(FolderKind::WorkspaceChat))
         .order_by_asc(folder::Column::SortOrder)
         .order_by_desc(folder::Column::LastOpenedAt)
         .all(conn)

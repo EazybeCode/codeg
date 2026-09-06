@@ -20,7 +20,7 @@ use crate::db::{
 };
 
 #[derive(Clone)]
-struct FakeRepositoryAccess {
+pub(crate) struct FakeRepositoryAccess {
     repositories: Arc<HashMap<(String, String), VerifiedRepository>>,
     calls: Arc<Mutex<Vec<(Scope, String, String)>>>,
     revoked: Arc<Mutex<bool>>,
@@ -28,7 +28,7 @@ struct FakeRepositoryAccess {
 }
 
 impl FakeRepositoryAccess {
-    fn new(entries: &[(&str, &str, &str, &str)]) -> Self {
+    pub(crate) fn new(entries: &[(&str, &str, &str, &str)]) -> Self {
         let repositories = entries
             .iter()
             .map(|(full_name, branch, github_id, canonical_name)| {
@@ -142,7 +142,7 @@ async fn seed_scope(db: &AppDatabase, scope: &Scope, github_org_id: i64) {
     .unwrap();
 }
 
-async fn setup() -> (AppDatabase, Scope, Scope) {
+pub(crate) async fn setup() -> (AppDatabase, Scope, Scope) {
     let db = fresh_in_memory_db().await;
     let scope = Scope {
         org_id: 1,
@@ -157,7 +157,7 @@ async fn setup() -> (AppDatabase, Scope, Scope) {
     (db, scope, other)
 }
 
-async fn seed_repository(
+pub(crate) async fn seed_repository(
     db: &AppDatabase,
     org_id: i32,
     github_repository_id: &str,

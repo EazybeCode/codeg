@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, DatabaseConnection, EntityTrait,
+    ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
     QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
@@ -18,6 +18,7 @@ pub async fn create(
     title: Option<String>,
     git_branch: Option<String>,
 ) -> Result<conversation::Model, DbError> {
+    reject_workspace_chat_folder(conn, folder_id).await?;
     create_inner(
         conn,
         folder_id,
@@ -41,6 +42,7 @@ pub async fn create_chat(
     title: Option<String>,
     git_branch: Option<String>,
 ) -> Result<conversation::Model, DbError> {
+    reject_workspace_chat_folder(conn, folder_id).await?;
     create_inner(
         conn,
         folder_id,
@@ -78,8 +80,28 @@ pub async fn create_with_delegation(
     .await
 }
 
-async fn create_inner(
-    conn: &DatabaseConnection,
+/// Legacy creation must not multiply conversations on one managed checkout.
+pub(crate) async fn reject_workspace_chat_folder<C: ConnectionTrait>(conn: &C, folder_id: i32) -> Result<(), DbError> {
+    if folder::Entity::find_by_id(folder_id).one(conn).await?
+        .is_some_and(|row| row.kind == folder::FolderKind::WorkspaceChat) {
+        return Err(DbError::Validation("workspace chat requires managed execution".into()));
+    }
+    Ok(())
+}
+
+pub(crate) async fn create_workspace_chat<C: ConnectionTrait>(
+    conn: &C, folder_id: i32, agent_type: AgentType, title: Option<String>, git_branch: String,
+) -> Result<conversation::Model, DbError> {
+    let managed = folder::Entity::find_by_id(folder_id).one(conn).await?
+        .is_some_and(|row| row.kind == folder::FolderKind::WorkspaceChat && row.deleted_at.is_none());
+    if !managed {
+        return Err(DbError::Validation("workspace chat requires managed execution".into()));
+    }
+    create_inner(conn, folder_id, agent_type, title, Some(git_branch), None, ConversationKind::Regular).await
+}
+
+async fn create_inner<C: ConnectionTrait>(
+    conn: &C,
     folder_id: i32,
     agent_type: AgentType,
     title: Option<String>,
@@ -1058,7 +1080,7 @@ fn parse_agent_type(s: &str) -> AgentType {
     }
 }
 
-fn conv_to_summary(r: conversation::Model) -> DbConversationSummary {
+pub(crate) fn conv_to_summary(r: conversation::Model) -> DbConversationSummary {
     let status = serde_json::to_value(&r.status)
         .ok()
         .and_then(|v| v.as_str().map(String::from))

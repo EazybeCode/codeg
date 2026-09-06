@@ -1913,6 +1913,8 @@ pub async fn create_conversation_core(
     agent_type: AgentType,
     title: Option<String>,
 ) -> Result<i32, AppCommandError> {
+    conversation_service::reject_workspace_chat_folder(conn, folder_id).await
+        .map_err(AppCommandError::from)?;
     let git_branch = if let Some(folder) = folder_service::get_folder_by_id(conn, folder_id)
         .await
         .map_err(AppCommandError::from)?
@@ -2140,6 +2142,24 @@ pub async fn create_chat_conversation_core(
     title: Option<String>,
     existing_dir: Option<&str>,
 ) -> Result<CreateChatConversationResult, AppCommandError> {
+    if let Some(dir) = existing_dir {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let managed = crate::db::entities::folder::Entity::find()
+            .filter(crate::db::entities::folder::Column::Kind.eq(FolderKind::WorkspaceChat))
+            .all(conn).await.map_err(crate::db::error::DbError::from)?;
+        let candidate = std::path::Path::new(dir);
+        let canonical = candidate.canonicalize().ok();
+        if managed.iter().any(|folder| {
+            candidate == std::path::Path::new(&folder.path)
+                || canonical.as_ref().is_some_and(|path| {
+                    std::path::Path::new(&folder.path).canonicalize().ok().as_ref() == Some(path)
+                })
+        }) {
+            return Err(AppCommandError::from(crate::db::error::DbError::Validation(
+                "workspace chat requires managed execution".into(),
+            )));
+        }
+    }
     let path = match existing_dir {
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(AppCommandError::io)?;

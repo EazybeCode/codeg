@@ -14,6 +14,9 @@ pub enum FolderKind {
     Regular,
     #[sea_orm(string_value = "chat")]
     Chat,
+    /// Hidden isolated execution folder; its conversation is regular for Files/Git.
+    #[sea_orm(string_value = "workspace_chat")]
+    WorkspaceChat,
     /// A pure organizational container nested under another folder. Unlike a
     /// worktree folder (also carries `parent_id`), a subfolder's `parent_id` is
     /// its DIRECT parent, not the flattened root, and it can nest arbitrarily

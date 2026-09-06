@@ -863,7 +863,7 @@ export type ConversationKind = "regular" | "chat" | "loop" | "delegate"
  *  `subfolder` is a pure organizational container nested under another folder
  *  (its `parent_id` is its DIRECT parent, arbitrary depth).
  *  `loop_worktree` is reserved for M2+ — add it here when the variant lands. */
-export type FolderKind = "regular" | "chat" | "subfolder"
+export type FolderKind = "regular" | "chat" | "subfolder" | "workspace_chat"
 
 export const STATUS_ORDER: ConversationStatus[] = [
   "in_progress",

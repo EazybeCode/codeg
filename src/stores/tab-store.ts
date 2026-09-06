@@ -1008,10 +1008,16 @@ function makeReplacementDraftTab(preferred?: TabItemInternal): TabItemInternal {
   // Detection reads `allFolders` (the in-memory draft flag is dropped on reload,
   // and `folders` excludes chat folders after refetch), while the fallback pool
   // reads the user-facing `folders`.
+  const preferredKind = allFolders.find(
+    (f) => f.id === preferred?.folderId
+  )?.kind
   const preferredIsChat =
     preferred?.isChat === true ||
-    allFolders.find((f) => f.id === preferred?.folderId)?.kind === "chat"
-  const nonChatFallbackId = folders.find((f) => f.kind !== "chat")?.id ?? 0
+    preferredKind === "chat" ||
+    preferredKind === "workspace_chat"
+  const nonChatFallbackId =
+    folders.find((f) => f.kind !== "chat" && f.kind !== "workspace_chat")?.id ??
+    0
   const folderId = preferredIsChat
     ? nonChatFallbackId
     : (preferred?.folderId ?? nonChatFallbackId)
