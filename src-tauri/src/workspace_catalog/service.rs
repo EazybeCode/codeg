@@ -36,7 +36,9 @@ fn parse_kind(value: &str) -> Result<WorkspaceNodeKind, CatalogError> {
     }
 }
 
-fn to_workspace_node(model: workspace_node::Model) -> Result<WorkspaceNode, CatalogError> {
+pub(crate) fn to_workspace_node(
+    model: workspace_node::Model,
+) -> Result<WorkspaceNode, CatalogError> {
     let repository_default = match (model.repository_id, model.starting_branch) {
         (Some(repository_id), Some(starting_branch)) => Some(RepositoryDefault {
             repository_id,
