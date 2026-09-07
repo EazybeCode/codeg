@@ -3,6 +3,36 @@ import { expect, it, vi } from "vitest"
 import { useWorkspaceCatalog } from "./use-workspace-catalog"
 const call = vi.hoisted(() => vi.fn())
 vi.mock("@/lib/transport", () => ({ getTransport: () => ({ call }) }))
+it.each([true, false])(
+  "only retains old tree metadata for a same-session refresh (identity reset: %s)",
+  async (resetIdentity) => {
+    const nodes = [{ id: 1, name: "Previous private project" }]
+    const repositories = [{ id: 8, full_name: "acme/private" }]
+    call.mockImplementation(async (cmd) =>
+      cmd === "list_workspace_nodes" ? nodes : repositories
+    )
+    const hook = renderHook(({ scope }) => useWorkspaceCatalog(scope), {
+      initialProps: { scope: "1:7" as string | null },
+    })
+    await waitFor(() => expect(hook.result.current.nodes).toEqual(nodes))
+    call.mockRejectedValue({ error: "upstream_unavailable" })
+    if (resetIdentity) {
+      hook.rerender({ scope: null })
+      hook.rerender({ scope: "1:7" })
+    } else {
+      await act(() => hook.result.current.refresh())
+    }
+    await waitFor(() =>
+      expect(hook.result.current.error).toEqual({
+        error: "upstream_unavailable",
+      })
+    )
+    expect(hook.result.current.nodes).toEqual(resetIdentity ? [] : nodes)
+    expect(hook.result.current.repositories).toEqual(
+      resetIdentity ? [] : repositories
+    )
+  }
+)
 it("clears organization caches and ignores a stale tree and draft response", async () => {
   let resolveTree!: (value: unknown) => void
   let resolveDraft!: (value: unknown) => void

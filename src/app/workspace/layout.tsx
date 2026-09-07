@@ -1268,32 +1268,32 @@ function WorkbenchRouteConversationSync() {
 
 function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
   return (
-    <WorkspaceCatalogProvider>
-      <AppWorkspaceProvider>
-        <AlertProvider>
-          <GitCredentialProvider>
-            <TaskProvider>
-              <AcpConnectionsProvider>
-                <DelegationProvider>
-                  <ConversationStatusEventBridge />
-                  <ConversationRuntimeProvider>
-                    <WorkspaceProvider>
-                      <TabProvider>
-                        <WorkspaceDocumentTitle />
-                        <TabKeysSync />
-                        <HeavyPluginsWarmup />
-                        <DeepLinkBootstrap />
-                        <PetFocusBridge />
-                        {/* Always mounted: external-change conflicts must be
+    <WorkbenchRouteProvider>
+      <WorkspaceCatalogProvider>
+        <AppWorkspaceProvider>
+          <AlertProvider>
+            <GitCredentialProvider>
+              <TaskProvider>
+                <AcpConnectionsProvider>
+                  <DelegationProvider>
+                    <ConversationStatusEventBridge />
+                    <ConversationRuntimeProvider>
+                      <WorkspaceProvider>
+                        <TabProvider>
+                          <WorkspaceDocumentTitle />
+                          <TabKeysSync />
+                          <HeavyPluginsWarmup />
+                          <DeepLinkBootstrap />
+                          <PetFocusBridge />
+                          {/* Always mounted: external-change conflicts must be
                             resolvable even with the aux file tree closed. */}
-                        <ExternalConflictDialog />
-                        <SidebarProvider>
-                          <AuxPanelProvider>
-                            <TerminalProvider>
-                              <SearchDialogProvider>
-                                <AutomationsViewProvider>
-                                  <TasksViewProvider>
-                                    <WorkbenchRouteProvider>
+                          <ExternalConflictDialog />
+                          <SidebarProvider>
+                            <AuxPanelProvider>
+                              <TerminalProvider>
+                                <SearchDialogProvider>
+                                  <AutomationsViewProvider>
+                                    <TasksViewProvider>
                                       <WorkbenchRouteConversationSync />
                                       {/* Inside WorkbenchRouteProvider: the
                                           listener calls openConversations() to
@@ -1302,23 +1302,23 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
                                       <FolderLayoutShell>
                                         {children}
                                       </FolderLayoutShell>
-                                    </WorkbenchRouteProvider>
-                                  </TasksViewProvider>
-                                </AutomationsViewProvider>
-                              </SearchDialogProvider>
-                            </TerminalProvider>
-                          </AuxPanelProvider>
-                        </SidebarProvider>
-                      </TabProvider>
-                    </WorkspaceProvider>
-                  </ConversationRuntimeProvider>
-                </DelegationProvider>
-              </AcpConnectionsProvider>
-            </TaskProvider>
-          </GitCredentialProvider>
-        </AlertProvider>
-      </AppWorkspaceProvider>
-    </WorkspaceCatalogProvider>
+                                    </TasksViewProvider>
+                                  </AutomationsViewProvider>
+                                </SearchDialogProvider>
+                              </TerminalProvider>
+                            </AuxPanelProvider>
+                          </SidebarProvider>
+                        </TabProvider>
+                      </WorkspaceProvider>
+                    </ConversationRuntimeProvider>
+                  </DelegationProvider>
+                </AcpConnectionsProvider>
+              </TaskProvider>
+            </GitCredentialProvider>
+          </AlertProvider>
+        </AppWorkspaceProvider>
+      </WorkspaceCatalogProvider>
+    </WorkbenchRouteProvider>
   )
 }
 

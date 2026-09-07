@@ -12,6 +12,7 @@ import {
 import { useTabStore } from "@/stores/tab-store"
 import { useWorkspaceCatalog } from "@/hooks/use-workspace-catalog"
 import { useWorkspaceIdentity } from "@/components/layout/workspace-identity"
+import { useOptionalWorkbenchRoute } from "@/contexts/workbench-route-context"
 import type { WorkspaceNodeKind } from "@/lib/workspace-catalog"
 import type { WorkspaceChatRuntime } from "@/lib/workspace-execution"
 import { WorkspaceNodeDialog } from "./workspace-node-dialog"
@@ -42,6 +43,7 @@ export function WorkspaceCatalogProvider({
   children: ReactNode
 }) {
   const identity = useWorkspaceIdentity()
+  const openConversations = useOptionalWorkbenchRoute()?.openConversations
   useLayoutEffect(() => {
     useTabStore.setState({ catalogMode: identity.status !== "local" })
     return () => {
@@ -61,7 +63,9 @@ export function WorkspaceCatalogProvider({
   >(null)
   const [chatId, setChatId] = useState<number | null>(null)
   const activeTabId = useTabStore((state) => state.activeTabId)
+  const localFocusRevision = useTabStore((state) => state.localFocusRevision)
   const previousActive = useRef(activeTabId)
+  const previousFocus = useRef(localFocusRevision)
   const [readyState, setReadyState] = useState<{
     scope: string | null
     items: Map<number, WorkspaceChatRuntime>
@@ -90,26 +94,34 @@ export function WorkspaceCatalogProvider({
     },
     [scope]
   )
-  const openChat = useCallback((id: number, push = true) => {
-    if (push && window.location.search !== `?chatId=${id}`)
-      window.history.pushState({}, "", `/workspace?chatId=${id}`)
-    setChatId(id)
-    const current = readyRef.current
-    const runtime =
-      current.readyState.scope === current.scope
-        ? current.readyState.items.get(id)
-        : null
-    if (runtime?.folder && runtime.conversation)
-      useTabStore
-        .getState()
-        .openTab(
-          runtime.folder.id,
-          runtime.conversation.id,
-          runtime.conversation.agent_type,
-          true,
-          runtime.draft.title ?? undefined
-        )
-  }, [])
+  const openChat = useCallback(
+    (id: number, push = true) => {
+      openConversations?.()
+      // A new canonical destination supersedes any preceding tab focus in the
+      // same event. Cache/hydration updates must not replay that old selection.
+      previousActive.current = useTabStore.getState().activeTabId
+      previousFocus.current = useTabStore.getState().localFocusRevision
+      if (push && window.location.search !== `?chatId=${id}`)
+        window.history.pushState({}, "", `/workspace?chatId=${id}`)
+      setChatId(id)
+      const current = readyRef.current
+      const runtime =
+        current.readyState.scope === current.scope
+          ? current.readyState.items.get(id)
+          : null
+      if (runtime?.folder && runtime.conversation)
+        useTabStore
+          .getState()
+          .openTab(
+            runtime.folder.id,
+            runtime.conversation.id,
+            runtime.conversation.agent_type,
+            true,
+            runtime.draft.title ?? undefined
+          )
+    },
+    [openConversations]
+  )
   useEffect(() => {
     const sync = () => {
       const raw = new URLSearchParams(window.location.search).get("chatId")
@@ -122,11 +134,20 @@ export function WorkspaceCatalogProvider({
     return () => window.removeEventListener("popstate", sync)
   }, [openChat])
   useEffect(() => {
-    const changed = previousActive.current !== activeTabId
+    const explicitFocus = previousFocus.current !== localFocusRevision
     const closedLast = previousActive.current != null && activeTabId == null
+    const changed = previousActive.current !== activeTabId || explicitFocus
     previousActive.current = activeTabId
+    previousFocus.current = localFocusRevision
     if (readyState.scope !== scope) return
-    if (!changed && chatId != null && !readyState.items.has(chatId)) return
+    // An inbound tab snapshot is not an explicit request to leave a launcher.
+    if (
+      !explicitFocus &&
+      !closedLast &&
+      chatId != null &&
+      !readyState.items.has(chatId)
+    )
+      return
     const tab = useTabStore
       .getState()
       .tabs.find((item) => item.id === activeTabId)
@@ -140,11 +161,11 @@ export function WorkspaceCatalogProvider({
       // Bridge the external persisted-tab store to the canonical browser URL.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setChatId(runtime.draft.id)
-    } else if (closedLast) {
+    } else if (changed) {
       window.history.replaceState({}, "", "/workspace")
       setChatId(null)
     }
-  }, [activeTabId, readyState, scope, chatId])
+  }, [activeTabId, localFocusRevision, readyState, scope, chatId])
   const selectedNodeId = selection?.scope === scope ? selection.id : null
   const create = (
     kind: Creation["kind"],

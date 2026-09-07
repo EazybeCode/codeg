@@ -15,7 +15,11 @@ import {
   WorkspaceCatalogProvider,
   useWorkspaceCatalogContext,
 } from "./workspace-catalog-provider"
-import { WorkbenchRouteProvider } from "@/contexts/workbench-route-context"
+import {
+  WorkbenchRouteProvider,
+  useWorkbenchRoute,
+} from "@/contexts/workbench-route-context"
+import { WorkspaceChatLauncher } from "./workspace-chat-launcher"
 import { TabBar } from "@/components/tabs/tab-bar"
 import { resetTabStore, useTabStore } from "@/stores/tab-store"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
@@ -66,6 +70,7 @@ const runtime = (id: number) =>
   }) as WorkspaceChatRuntime
 function Controls() {
   const catalog = useWorkspaceCatalogContext()!
+  const route = useWorkbenchRoute()
   const remember = catalog.rememberReady
   useEffect(() => {
     if (catalog.scope) {
@@ -77,19 +82,25 @@ function Controls() {
     <>
       <button onClick={() => catalog.openChat(1)}>Open first</button>
       <button onClick={() => catalog.openChat(2)}>Open second</button>
+      <button onClick={() => catalog.openChat(42)}>Open pending</button>
+      <button onClick={() => route.setRoute("automations")}>Tools</button>
+      <button onClick={() => catalog.create("chat", 1)}>
+        Create contextual chat
+      </button>
       <button onClick={() => remember(runtime(1))}>
         Refresh first metadata
       </button>
       <p>{catalog.chatId}</p>
+      <output aria-label="Destination">{`${route.routeId}:${catalog.chatId}`}</output>
     </>
   )
 }
 function mount(children: ReactNode) {
   return render(
     <NextIntlClientProvider locale="en" messages={en}>
-      <WorkspaceCatalogProvider>
-        <WorkbenchRouteProvider>{children}</WorkbenchRouteProvider>
-      </WorkspaceCatalogProvider>
+      <WorkbenchRouteProvider>
+        <WorkspaceCatalogProvider>{children}</WorkspaceCatalogProvider>
+      </WorkbenchRouteProvider>
     </NextIntlClientProvider>
   )
 }
@@ -139,6 +150,150 @@ it("does not offer root New chat and never seeds a scratch tab", async () => {
   expect(screen.queryByRole("button", { name: "New chat" })).toBeNull()
   expect(useTabStore.getState().tabs).toHaveLength(0)
 })
+it.each(["Open pending", "Open first"])(
+  "returns from Tools for %s even without a new active tab",
+  async (button) => {
+    mount(<Controls />)
+    await waitFor(() =>
+      expect(call).toHaveBeenCalledWith("list_workspace_nodes", {})
+    )
+    await userEvent.click(screen.getByText("Open first"))
+    const active = useTabStore.getState().activeTabId
+    await userEvent.click(screen.getByText("Tools"))
+    expect(screen.getByLabelText("Destination")).toHaveTextContent(
+      "automations:1"
+    )
+    await userEvent.click(screen.getByText(button))
+    expect(screen.getByLabelText("Destination")).toHaveTextContent(
+      `conversations:${button === "Open pending" ? 42 : 1}`
+    )
+    expect(useTabStore.getState().activeTabId).toBe(active)
+  }
+)
+
+it("returns from Tools after successful contextual draft creation", async () => {
+  const original = call.getMockImplementation()!
+  call.mockImplementation((cmd, args) =>
+    cmd === "create_workspace_chat_draft"
+      ? Promise.resolve(runtime(42).draft)
+      : original(cmd, args)
+  )
+  mount(<Controls />)
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith("list_workspace_nodes", {})
+  )
+  await userEvent.click(screen.getByText("Tools"))
+  await userEvent.click(screen.getByText("Create contextual chat"))
+  await userEvent.click(screen.getByRole("button", { name: "Create chat" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  expect(screen.getByLabelText("Destination")).toHaveTextContent(
+    "conversations:42"
+  )
+})
+
+it.each([
+  ["unprovisioned", "different"],
+  ["failed", "different"],
+  ["unprovisioned", "same history"],
+  ["failed", "same tab"],
+])(
+  "reconciles a %s launcher when selecting %s legacy history",
+  async (state, target) => {
+    const original = call.getMockImplementation()!
+    call.mockImplementation((cmd, args) => {
+      if (cmd === "get_workspace_chat_runtime")
+        return Promise.resolve({
+          ...runtime(42),
+          state,
+          folder: null,
+          conversation: null,
+          error_code: state === "failed" ? "upstream_unavailable" : null,
+        })
+      if (cmd === "get_workspace_runtime_capabilities")
+        return Promise.resolve({ execution_enabled: true })
+      return original(cmd, args)
+    })
+    function Launcher() {
+      const catalog = useWorkspaceCatalogContext()!
+      return catalog.chatId === 42 ? (
+        <WorkspaceChatLauncher draftId={42} />
+      ) : (
+        <p>Legacy content available</p>
+      )
+    }
+    mount(
+      <>
+        <Controls />
+        <Launcher />
+      </>
+    )
+    await waitFor(() =>
+      expect(call).toHaveBeenCalledWith("list_workspace_nodes", {})
+    )
+    act(() =>
+      useTabStore.getState().openTab(99, 101, "codex", true, "Legacy one")
+    )
+    const legacy = useTabStore.getState().activeTabId!
+    await userEvent.click(screen.getByText("Open pending"))
+    await screen.findByRole("heading", { name: "Chat 42" })
+    if (state === "failed") expect(screen.getByRole("alert")).toBeVisible()
+    // Cache/hydration updates are not a request to abandon this launcher.
+    await userEvent.click(screen.getByText("Refresh first metadata"))
+    act(() => useAppWorkspaceStore.setState({ conversations: [] }))
+    expect(screen.getByLabelText("Destination")).toHaveTextContent(
+      "conversations:42"
+    )
+    act(() => {
+      if (target === "same tab") useTabStore.getState().switchTab(legacy)
+      else
+        useTabStore
+          .getState()
+          .openTab(
+            99,
+            target === "different" ? 102 : 101,
+            "codex",
+            true,
+            "Legacy"
+          )
+    })
+    expect(screen.getByLabelText("Destination")).toHaveTextContent(
+      "conversations:null"
+    )
+    expect(window.location.search).toBe("")
+    expect(screen.getByText("Legacy content available")).toBeVisible()
+  }
+)
+it("keeps the requested launcher when a remote tab snapshot hydrates legacy history", async () => {
+  mount(<Controls />)
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith("list_workspace_nodes", {})
+  )
+  await userEvent.click(screen.getByText("Open pending"))
+  act(() => {
+    useTabStore.setState({ tabsHydrated: true })
+    useTabStore.getState().handleTabsChanged({
+      version: 1,
+      origin: "other-device",
+      tabs: [
+        {
+          id: 1,
+          folder_id: 99,
+          conversation_id: 101,
+          agent_type: "codex",
+          position: 0,
+          is_active: true,
+          is_pinned: true,
+        },
+      ],
+    })
+  })
+  expect(useTabStore.getState().tabs[0]?.conversationId).toBe(101)
+  expect(screen.getByLabelText("Destination")).toHaveTextContent(
+    "conversations:42"
+  )
+  expect(window.location.search).toBe("?chatId=42")
+})
+
 it("reopens canonical tabs with back/forward without provisioning or metadata-driven refocus", async () => {
   mount(<Controls />)
   await waitFor(() =>

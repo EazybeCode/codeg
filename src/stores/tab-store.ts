@@ -148,6 +148,8 @@ export interface TabStoreState {
   catalogMode: boolean
   rawTabs: TabItemInternal[]
   activeTabId: string | null
+  /** Device-local explicit focus, including same-tab reselection; never synced. */
+  localFocusRevision: number
   previewReplacedTabIds: string[]
   draftRetargetRequests: DraftRetargetRequest[]
   tabsHydrated: boolean
@@ -915,9 +917,10 @@ function applyGroupInvariants() {
  *  for every activeTabId-only write (rawTabs writes get the same invariant
  *  pass via `recomputeTabs`). */
 function focusTab(tabId: string) {
-  if (useTabStore.getState().activeTabId !== tabId) {
-    useTabStore.setState({ activeTabId: tabId })
-  }
+  useTabStore.setState((state) => ({
+    activeTabId: tabId,
+    localFocusRevision: state.localFocusRevision + 1,
+  }))
   applyGroupInvariants()
 }
 
@@ -1053,6 +1056,7 @@ function initialTabState() {
   return {
     rawTabs: [] as TabItemInternal[],
     activeTabId: null as string | null,
+    localFocusRevision: 0,
     previewReplacedTabIds: [] as string[],
     draftRetargetRequests: [] as DraftRetargetRequest[],
     tabsHydrated: false,
@@ -1083,7 +1087,11 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
       if (pin && !prevState.rawTabs[existingIndex].isPinned) {
         const updated = [...prevState.rawTabs]
         updated[existingIndex] = { ...updated[existingIndex], isPinned: true }
-        set({ rawTabs: updated, activeTabId: activateTabId })
+        set({
+          rawTabs: updated,
+          activeTabId: activateTabId,
+          localFocusRevision: prevState.localFocusRevision + 1,
+        })
         recomputeTabs()
       } else {
         focusTab(activateTabId)
@@ -1127,6 +1135,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
       set({
         rawTabs: [...prevState.rawTabs, newTab],
         activeTabId: tabId,
+        localFocusRevision: prevState.localFocusRevision + 1,
         groupOf: { ...prevState.groupOf, [tabId]: targetGroup },
       })
       recomputeTabs()
@@ -1149,6 +1158,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
       set({
         rawTabs: updated,
         activeTabId: tabId,
+        localFocusRevision: prevState.localFocusRevision + 1,
         groupOf: { ...prevState.groupOf, [tabId]: targetGroup },
         previewReplacedTabIds: [
           ...prevState.previewReplacedTabIds,
@@ -1163,6 +1173,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
     set({
       rawTabs: [...prevState.rawTabs, newTab],
       activeTabId: tabId,
+      localFocusRevision: prevState.localFocusRevision + 1,
       groupOf: { ...prevState.groupOf, [tabId]: targetGroup },
     })
     recomputeTabs()

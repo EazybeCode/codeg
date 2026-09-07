@@ -106,7 +106,7 @@ export function useWorkspaceCatalog(scope: string | null) {
   }, [])
   useEffect(() => {
     // Scope changes discard local caches before new organization data can render.
-
+    setTree(EMPTY)
     setExpanded(new Set())
     setDrafts({})
     void refresh()
