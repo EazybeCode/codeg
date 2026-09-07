@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "contextUnavailable": "ワークスペースのチャット情報を利用できません。",
+    "loadingFolder": "会話フォルダーを読み込み中…",
     "repositoryLoadError": "リポジトリを読み込めませんでした",
     "repositoryLoadHint": "接続を確認して再試行してください。既存のプロジェクトは変更されていません。",
     "account": "ワークスペースのアカウント",

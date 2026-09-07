@@ -2713,6 +2713,15 @@ export type LiveMessageSink = (
 ) => void
 
 export interface AcpActionsValue {
+  attachWorkspaceViewer(
+    contextKey: string,
+    agentType: AgentType,
+    workingDir: string,
+    sessionId: string | undefined,
+    conversationId: number,
+    workspaceChatId: number,
+    signal?: AbortSignal
+  ): Promise<void>
   connect(
     contextKey: string,
     agentType: AgentType,
@@ -6348,8 +6357,56 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
     [dispatch, releaseConnectionRoute, teardownAttachSubscription]
   )
 
+  const attachWorkspaceViewer = useCallback(
+    async (
+      contextKey: string,
+      agentType: AgentType,
+      workingDir: string,
+      sessionId: string | undefined,
+      conversationId: number,
+      workspaceChatId: number,
+      signal?: AbortSignal
+    ) => {
+      if (
+        signal?.aborted ||
+        storeRef.current.connections.has(contextKey) ||
+        connectingKeysRef.current.has(contextKey)
+      )
+        return
+      const discovered = await acpFindConnectionForConversation(
+        conversationId,
+        sessionId,
+        agentType,
+        workspaceChatId
+      )
+      // Discovery is strictly observational. Absence and errors never enter the
+      // writer path, and activation cancelled while awaiting cannot install a route.
+      if (
+        !discovered ||
+        signal?.aborted ||
+        storeRef.current.connections.has(contextKey) ||
+        connectingKeysRef.current.has(contextKey)
+      )
+        return
+      lastConnectParamsRef.current.set(contextKey, {
+        agentType,
+        workingDir,
+        sessionId,
+        conversationId,
+        workspaceChatId,
+      })
+      await connectAsViewer(
+        contextKey,
+        discovered.connection_id,
+        agentType,
+        workingDir
+      )
+    },
+    [connectAsViewer]
+  )
   const actions = useMemo<AcpActionsValue>(
     () => ({
+      attachWorkspaceViewer,
       connect,
       disconnect,
       disconnectIfIdle,
@@ -6377,6 +6434,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       dismissSessionFailures: dismissSessionFailuresAction,
     }),
     [
+      attachWorkspaceViewer,
       connect,
       disconnect,
       disconnectIfIdle,

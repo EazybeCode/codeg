@@ -126,9 +126,75 @@ export function useConnectionLifecycle({
   const managed = managedWorkspace || workspaceChatId != null
   const t = useTranslations("Folder.chat.connectionLifecycle")
   const tCatalog = useTranslations("WorkspaceCatalog")
-  const { setActiveKey, touchActivity } = useAcpActions()
+  const { setActiveKey, touchActivity, attachWorkspaceViewer } = useAcpActions()
   const { addTask, updateTask, removeTask } = useTaskContext()
   const conn = useConnection(contextKey)
+  const [lastAutoConnectError, setLastAutoConnectError] = useState<{
+    contextKey: string
+    agentType: AgentType
+    message: string
+  } | null>(null)
+  const attachmentRef = useRef<Promise<void> | null>(null)
+  const activationRef = useRef<AbortController | null>(null)
+  const attachManaged = useCallback(() => {
+    if (
+      !managed ||
+      !isActive ||
+      !workingDir ||
+      conversationId == null ||
+      workspaceChatId == null
+    )
+      return Promise.resolve()
+    if (attachmentRef.current) return attachmentRef.current
+    const activation = activationRef.current
+    if (!activation || activation.signal.aborted) return Promise.resolve()
+    const pending = attachWorkspaceViewer(
+      contextKey,
+      agentType,
+      workingDir,
+      sessionId,
+      conversationId,
+      workspaceChatId,
+      activation.signal
+    )
+      .then(() => {
+        if (!activation.signal.aborted) setLastAutoConnectError(null)
+      })
+      .catch((error: unknown) => {
+        if (!activation.signal.aborted)
+          setLastAutoConnectError({
+            contextKey,
+            agentType,
+            message: tCatalog(workspaceErrorKey(error)),
+          })
+      })
+      .finally(() => {
+        if (attachmentRef.current === pending) attachmentRef.current = null
+      })
+    attachmentRef.current = pending
+    return pending
+  }, [
+    managed,
+    isActive,
+    workingDir,
+    conversationId,
+    workspaceChatId,
+    attachWorkspaceViewer,
+    contextKey,
+    agentType,
+    sessionId,
+    tCatalog,
+  ])
+  useEffect(() => {
+    if (!managed || !isActive) return
+    const activation = new AbortController()
+    activationRef.current = activation
+    void attachManaged()
+    return () => {
+      activation.abort()
+      attachmentRef.current = null
+    }
+  }, [managed, isActive, attachManaged])
 
   // Destructure stable callbacks (depend only on actions + contextKey)
   // vs. volatile derived state (status, modes, etc.)
@@ -165,11 +231,6 @@ export function useConnectionLifecycle({
   // Gate for send button: block until the backend session is fully
   // initialized (selectorsReady from the real backend event, not cache).
   const selectorsLoading = isInteractiveStatus && !selectorsReady
-  const [lastAutoConnectError, setLastAutoConnectError] = useState<{
-    contextKey: string
-    agentType: AgentType
-    message: string
-  } | null>(null)
 
   // Refs for auto-connect effect, which intentionally avoids volatile
   // dependencies to prevent reconnect loops. Synced via useEffect —
@@ -388,7 +449,10 @@ export function useConnectionLifecycle({
     // avoid connecting with sessionId=undefined and orphaning context.
     if (!isActive) return
     touchActivity(contextKey)
-    if (managed) return
+    if (managed) {
+      void attachManaged()
+      return
+    }
     if (!status || status === "disconnected" || status === "error") {
       setLastAutoConnectError(null)
       connConnect(agentType, workingDir, sessionId, conversationId).catch(
@@ -406,6 +470,7 @@ export function useConnectionLifecycle({
     sessionId,
     conversationId,
     managed,
+    attachManaged,
     status,
     connConnect,
     contextKey,
@@ -439,6 +504,7 @@ export function useConnectionLifecycle({
       const onSendFailed = opts?.onSendFailed
       return (async () => {
         if (managed) {
+          await attachmentRef.current
           if (
             workspaceChatId == null ||
             conversationId == null ||

@@ -24,6 +24,18 @@ async fn workspace_browser_fixture_server() {
         session::ActiveModel { id: Set(COOKIE.into()), user_id: Set(1), created_at: Set(now), expires_at: Set(now + chrono::Duration::days(1)) }.insert(&db.conn).await.unwrap();
     }
     let state = Arc::new(AppState::new_for_test(db, root.join("managed")));
+    // A real server restart plus an explicitly simulated passage of lease time
+    // for the one interrupted fixture reservation. Production has no such seam.
+    if root.join("interrupted-allocation.json").exists() && !root.join("interrupt-provision").exists() {
+        use crate::db::entities::workspace_chat_execution;
+        let receipt: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root.join("interrupted-allocation.json")).unwrap()).unwrap();
+        let row = workspace_chat_execution::Entity::find_by_id(receipt["draft_id"].as_i64().unwrap() as i32).one(&state.db.conn).await.unwrap().unwrap();
+        if row.state == "provisioning" {
+            let mut active: workspace_chat_execution::ActiveModel = row.into();
+            active.provisioning_lease_expires_at = Set(Some(chrono::Utc::now() - chrono::Duration::seconds(1)));
+            active.update(&state.db.conn).await.unwrap();
+        }
+    }
     std::fs::create_dir_all(&state.data_dir).unwrap();
     // This function subscribes synchronously before returning its future.
     let lifecycle = tokio::spawn(crate::acp::lifecycle::lifecycle_subscriber_task(

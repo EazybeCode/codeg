@@ -9,7 +9,7 @@ struct Access { denied: AtomicBool }
 impl ExecutionRepositoryAccess for Access {
     async fn verify_access(&self, _: &Scope, _: i32) -> Result<VerifiedExecutionIdentity, ExecutionError> {
         if self.denied.load(Ordering::SeqCst) { return Err(ExecutionError::ReauthRequired); }
-        Ok(VerifiedExecutionIdentity { github_repository_id: "123".into(), full_name: "acme/docs".into() })
+        Ok(VerifiedExecutionIdentity { github_repository_id: "123".into(), verified_names: vec!["acme/docs".into()], full_name: "acme/docs".into() })
     }
     async fn resolve(&self, _: &Scope, _: i32, _: &str) -> Result<VerifiedExecutionRepository, ExecutionError> {
         // Existing ready writers must not require the original branch to exist.
@@ -49,7 +49,7 @@ fn git(path: &std::path::Path, args: &[&str]) -> String {
 }
 async fn ready(db: &crate::db::AppDatabase, scope: &Scope, draft: i32, root: &std::path::Path, remote: &std::path::Path, commit: &str) -> WorkspaceChatRuntime {
     let row = reserve(&db.conn, scope, draft, AgentType::ClaudeCode, commit).await.unwrap();
-    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), full_name: "acme/docs".into(), starting_commit: commit.into() };
+    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), verified_names: vec!["acme/docs".into()], full_name: "acme/docs".into(), starting_commit: commit.into() };
     let allocated = git_allocator::allocate_local(root, &row, &repo, remote.to_str().unwrap()).unwrap();
     // Provision using a disposable local remote, then record the production
     // identity which read-only ready validation must enforce.

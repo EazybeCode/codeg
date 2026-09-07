@@ -6,22 +6,24 @@ const assert = require("node:assert/strict")
 const fs = require("node:fs")
 const path = require("node:path")
 const { spawn } = require("node:child_process")
-const { chromium } = require(
-  process.env.PLAYWRIGHT_MODULE ||
-    "/Users/air1/.npm/_npx/5e2e484947874241/node_modules/playwright"
-)
+const {
+  createFixtureRoot,
+  assertDiagnostics,
+} = require("./workspace-e2e-support.cjs")
+let chromium
+try {
+  ;({ chromium } = require(process.env.PLAYWRIGHT_MODULE || "playwright"))
+} catch {
+  throw new Error(
+    "Playwright is unavailable. Set PLAYWRIGHT_MODULE to an existing Playwright module path; this driver does not install dependencies."
+  )
+}
 const repository = path.resolve(__dirname, "../..")
 const scratch = path.join(
   repository,
   ".superpowers/sdd/2026-09-07-workspace-execution-ui"
 )
-const root =
-  process.env.WORKOS_E2E_ROOT ||
-  fs.mkdtempSync(path.join(scratch, "task5-fixture-"))
-fs.writeFileSync(
-  path.join(root, "fixture-owned"),
-  "Isolated workspace browser fixture\n"
-)
+const root = createFixtureRoot(scratch, process.env.WORKOS_E2E_ROOT)
 const origin = "http://localhost:3097"
 const token = "workspace-e2e-installation"
 let server,
@@ -133,6 +135,7 @@ async function createChat(page, title, testReauth = false) {
       .waitFor()
     assert.equal(await page.getByLabel("Chat title").inputValue(), title)
     fs.unlinkSync(path.join(root, "external-access"))
+    phase = "happy-path:github-reauth-retry"
     const accepted = page.waitForResponse((r) =>
       r.url().endsWith("/api/create_workspace_chat_draft")
     )
@@ -173,16 +176,6 @@ async function prepare(page, draftId, liveCount = 0) {
     "Viewing ready must not start a provider"
   )
   return runtime
-}
-async function send(page, text) {
-  const editor = page.locator('[contenteditable="true"]').last()
-  await editor.fill(text)
-  await editor.press("Enter")
-  await page
-    .locator("#workspace-conversation-panel")
-    .getByRole("heading", { name: "Generated Markdown", exact: true })
-    .first()
-    .waitFor({ timeout: 20000 })
 }
 async function panelGeometry(page) {
   await page.evaluate(() => {
@@ -293,7 +286,11 @@ async function run() {
   })
   page.on("response", (r) => {
     if (new URL(r.url()).pathname.startsWith("/api/"))
-      requests.push({ path: new URL(r.url()).pathname, status: r.status() })
+      requests.push({
+        path: new URL(r.url()).pathname,
+        status: r.status(),
+        body: r.request().postDataJSON(),
+      })
   })
   page.on("websocket", (ws) =>
     ws.on("framereceived", (event) => {
@@ -331,10 +328,51 @@ async function run() {
     .click()
   // An unprepared draft keeps draft IDs distinct from legacy conversation IDs.
   await createChat(page, "Unprepared intent")
+  const interrupted = await createChat(page, "Interrupted preparation")
+  fs.writeFileSync(
+    path.join(root, "interrupt-provision"),
+    "pause after worktree allocation"
+  )
+  await page.getByRole("button", { name: /Prepare/ }).click()
+  for (
+    let i = 0;
+    i < 100 && !fs.existsSync(path.join(root, "interrupted-allocation.json"));
+    i++
+  )
+    await pause(100)
+  const reserved = JSON.parse(
+    fs.readFileSync(path.join(root, "interrupted-allocation.json"), "utf8")
+  )
+  await page.goto("about:blank")
+  await stop()
+  fs.unlinkSync(path.join(root, "interrupt-provision"))
+  await start()
+  await page.goto(`${origin}/workspace?chatId=${interrupted}`)
+  const recovered = await prepare(page, interrupted)
+  assert.equal(recovered.folder.path, reserved.path)
+  assert.equal(recovered.reserved_agent_type, "claude_code")
+  const recoveredAllocation = JSON.parse(
+    fs.readFileSync(path.join(root, "last-allocation.json"), "utf8")
+  )
+  assert.equal(recoveredAllocation.allocation_id, reserved.allocation_id)
+  console.log(
+    "PASS crash/restart preparation resumes the original reservation and worktree through the launcher"
+  )
   const a = await createChat(page, "Alpha draft")
   const first = await prepare(page, a)
   assert.notEqual(first.draft.id, first.conversation.id)
-  await send(page, "Alpha independent content")
+  fs.writeFileSync(
+    path.join(root, "hold-turn"),
+    "keep the fixture turn open across reload"
+  )
+  // This HTTP request remains open while the fixture produces a live turn.
+  const liveEditor = page.locator('[contenteditable="true"]:visible').last()
+  await liveEditor.fill("Alpha independent content")
+  await liveEditor.press("Enter")
+  await page
+    .locator("#workspace-conversation-panel")
+    .getByText("Generated Markdown", { exact: true })
+    .waitFor()
   assert.equal(
     fs.readFileSync(path.join(first.folder.path, "generated.md"), "utf8"),
     "# Generated Markdown\n\nAlpha independent content\n"
@@ -384,24 +422,68 @@ async function run() {
   console.log("PASS second writer Busy; existing writer retained")
   await pause(100) // Flush the browser's intentional HTTP409 diagnostic.
   phase = "happy-path:reload-and-resize"
+  const processEvents = fs.readFileSync(
+    path.join(root, "process-events.log"),
+    "utf8"
+  )
+  const discoveryStart = requests.length
+  const frameStart = frames.length
   await page.goto(`${origin}/workspace?chatId=${a}`)
   await page
     .locator("#workspace-conversation-panel")
     .getByText("Alpha independent content", { exact: true })
     .last()
     .waitFor()
+  for (
+    let i = 0;
+    i < 100 &&
+    !requests
+      .slice(discoveryStart)
+      .some(
+        (r) =>
+          r.path === "/api/acp_find_connection_for_conversation" &&
+          r.body.workspaceChatId === a &&
+          r.body.conversationId === first.conversation.id
+      );
+    i++
+  )
+    await pause(100)
+  assert(
+    requests
+      .slice(discoveryStart)
+      .some(
+        (r) =>
+          r.path === "/api/acp_find_connection_for_conversation" &&
+          r.status === 200 &&
+          r.body.workspaceChatId === a &&
+          r.body.conversationId === first.conversation.id
+      ),
+    "Application must initiate scoped discovery on reload"
+  )
+  fs.unlinkSync(path.join(root, "hold-turn"))
+  await page
+    .locator("#workspace-conversation-panel")
+    .getByText("Live output after reload", { exact: true })
+    .waitFor()
+  assert(
+    frames
+      .slice(frameStart)
+      .some(
+        (frame) =>
+          frame.envelope?.type === "content_delta" &&
+          frame.envelope.text.includes("Live output after reload")
+      ),
+    "New live WS content must reach the fresh client"
+  )
   assert.equal(
-    (
-      await call(page, "acp_find_connection_for_conversation", {
-        conversationId: first.conversation.id,
-        workspaceChatId: a,
-        agentType: "claude_code",
-      })
-    ).connection_id,
-    firstConnection
+    fs.readFileSync(path.join(root, "process-events.log"), "utf8"),
+    processEvents,
+    "Reload neither spawns nor stops a writer"
   )
   assert.equal((await call(page, "acp_list_connections")).length, 1)
-  console.log("PASS ready deep-link reload attaches to same live writer")
+  console.log(
+    "PASS application reload attaches and receives new live output without Send, spawn or stop"
+  )
   await panelGeometry(page)
   phase = "expected-failure:github-reauth-and-retry"
   const b = await createChat(page, "Beta draft", true)
@@ -414,7 +496,7 @@ async function run() {
     "fail external spawn"
   )
   phase = "expected-failure:provider-spawn-and-retry"
-  const editor = page.locator('[contenteditable="true"]').last()
+  const editor = page.locator('[contenteditable="true"]:visible').last()
   await editor.fill("Beta independent content")
   await editor.press("Enter")
   await page
@@ -424,6 +506,7 @@ async function run() {
   assert.equal((await call(page, "acp_list_connections")).length, 1)
   assert(!fs.existsSync(path.join(second.folder.path, "generated.md")))
   fs.unlinkSync(path.join(root, "provider-fail-start"))
+  phase = "happy-path:provider-spawn-retry"
   const retryAccepted = page.waitForResponse((response) =>
     response.url().endsWith("/api/acp_prompt")
   )
@@ -487,7 +570,7 @@ async function run() {
   // contract while the actual composer keeps the rejected draft and history.
   fs.writeFileSync(path.join(root, "external-access"), "reauth")
   phase = "expected-failure:revoked-access"
-  const activeEditor = page.locator('[contenteditable="true"]').last()
+  const activeEditor = page.locator('[contenteditable="true"]:visible').last()
   await activeEditor.fill("Retain this rejected follow-up")
   await activeEditor.press("Enter")
   await page
@@ -559,14 +642,22 @@ async function run() {
     .waitFor()
   await page.screenshot({ path: path.join(root, "restart-beta-files.png") })
   assert.deepEqual(exceptions, [])
-  assert.deepEqual(
-    consoleErrors.filter(
-      (entry) =>
-        entry.type === "warning" || !entry.phase.startsWith("expected-failure:")
-    ),
-    [],
-    "No warnings or console errors outside intentional failure/retry phases; all diagnostics retained"
-  )
+  assertDiagnostics(exceptions, consoleErrors, {
+    "expected-failure:second-writer-busy": [
+      "Failed to load resource: the server responded with a status of 409 (Conflict)",
+    ],
+    "expected-failure:github-reauth-and-retry": [
+      "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    ],
+    "expected-failure:provider-spawn-and-retry": [
+      "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      "[ConnLifecycle] sendPrompt: {error: failed}",
+    ],
+    "expected-failure:revoked-access": [
+      "Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+      "[ConnLifecycle] sendPrompt: {error: reauth_required}",
+    ],
+  })
   assert(
     frames.some(
       (f) =>

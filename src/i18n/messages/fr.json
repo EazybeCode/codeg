@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "contextUnavailable": "Le contexte du chat de l’espace de travail est indisponible.",
+    "loadingFolder": "Chargement du dossier de conversation…",
     "repositoryLoadError": "Impossible de charger les dépôts",
     "repositoryLoadHint": "Vérifiez votre connexion et réessayez. Vos projets existants n’ont pas été modifiés.",
     "account": "Compte de l’espace de travail",

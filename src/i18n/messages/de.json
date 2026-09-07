@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "contextUnavailable": "Der Chat-Kontext des Arbeitsbereichs ist nicht verfügbar.",
+    "loadingFolder": "Gesprächsordner wird geladen…",
     "repositoryLoadError": "Repositories konnten nicht geladen werden",
     "repositoryLoadHint": "Prüfe die Verbindung und versuche es erneut. Bestehende Projekte wurden nicht verändert.",
     "account": "Arbeitsbereichskonto",

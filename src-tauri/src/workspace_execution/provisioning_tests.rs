@@ -9,12 +9,12 @@ struct Access { commit: String, deleted_branch: AtomicBool, denied: AtomicBool }
 impl ExecutionRepositoryAccess for Access {
     async fn verify_access(&self, _: &Scope, _: i32) -> Result<VerifiedExecutionIdentity, ExecutionError> {
         if self.denied.load(Ordering::SeqCst) { return Err(ExecutionError::ReauthRequired); }
-        Ok(VerifiedExecutionIdentity { github_repository_id: "123".into(), full_name: "acme/docs".into() })
+        Ok(VerifiedExecutionIdentity { github_repository_id: "123".into(), verified_names: vec!["acme/docs".into()], full_name: "acme/docs".into() })
     }
     async fn resolve(&self, scope: &Scope, id: i32, _: &str) -> Result<VerifiedExecutionRepository, ExecutionError> {
         let identity = self.verify_access(scope, id).await?;
         if self.deleted_branch.load(Ordering::SeqCst) { return Err(ExecutionError::RepositoryUnavailable); }
-        Ok(VerifiedExecutionRepository { github_repository_id: identity.github_repository_id, full_name: identity.full_name, starting_commit: self.commit.clone() })
+        Ok(VerifiedExecutionRepository { github_repository_id: identity.github_repository_id, verified_names: identity.verified_names, full_name: identity.full_name, starting_commit: self.commit.clone() })
     }
 }
 struct Local { root: PathBuf, remote: String }
@@ -31,11 +31,82 @@ fn git(path: &std::path::Path, args: &[&str]) -> String {
 }
 
 #[tokio::test]
+async fn workspace_execution_verified_renames_reuse_ready_and_new_allocations() {
+    let (db, scope, _, draft, remote, commit) = tests::fixture().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut row = reserve(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &commit).await.unwrap();
+    let mut repo = VerifiedExecutionRepository { github_repository_id: "123".into(), full_name: "acme/docs".into(), verified_names: vec!["acme/docs".into()], starting_commit: commit.clone() };
+    let first = allocate_local(root.path(), &row, &repo, remote.path().to_str().unwrap()).unwrap();
+    let cache = root.path().join("orgs/1/repositories/123/repo.git");
+    git(&cache, &["remote", "set-url", "origin", "https://github.com/acme/docs.git"]);
+    std::fs::write(first.worktree_path.join("unpublished.md"), "keep this work").unwrap();
+    git(&first.worktree_path, &["add", "unpublished.md"]);
+    git(&first.worktree_path, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "unpublished"]);
+    std::fs::write(first.worktree_path.join("dirty.md"), "dirty work").unwrap();
+    let unpublished_head = git(&first.worktree_path, &["rev-parse", "HEAD"]);
+    row.state = "ready".into();
+    for name in ["acme/renamed", "acme/renamed-again"] {
+        repo.full_name = name.into();
+        repo.verified_names.push(name.into());
+        let identity = VerifiedExecutionIdentity { github_repository_id: "123".into(), full_name: name.into(), verified_names: repo.verified_names.clone() };
+        assert_eq!(super::git_allocator::validate_ready_checkout(root.path(), &row, &identity).unwrap(), first.worktree_path);
+        assert_eq!(git(&cache, &["config", "--get", "remote.origin.url"]), format!("https://github.com/{name}.git"));
+    }
+    let second_row = reserve(&db.conn, &scope, draft.id - 1, AgentType::ClaudeCode, &commit).await.unwrap();
+    // Exercise allocation's reconciliation independently of ready validation.
+    git(&cache, &["remote", "set-url", "origin", "https://github.com/acme/docs.git"]);
+    let second = allocate_local(root.path(), &second_row, &repo, "https://github.com/acme/renamed-again.git").unwrap();
+    assert_eq!(git(&cache, &["config", "--get", "remote.origin.url"]), "https://github.com/acme/renamed-again.git");
+    assert_ne!(second.allocation_id, first.allocation_id);
+    assert_eq!(git(&first.worktree_path, &["rev-parse", "HEAD"]), unpublished_head);
+    assert_eq!(std::fs::read_to_string(first.worktree_path.join("dirty.md")).unwrap(), "dirty work");
+    git(&cache, &["remote", "set-url", "origin", "https://github.com/unrelated/repo.git"]);
+    let identity = VerifiedExecutionIdentity { github_repository_id: "123".into(), full_name: repo.full_name.clone(), verified_names: repo.verified_names.clone() };
+    assert_eq!(super::git_allocator::validate_ready_checkout(root.path(), &row, &identity).unwrap_err(), ExecutionError::AllocationMismatch);
+    assert_eq!(allocate_local(root.path(), &second_row, &repo, "https://github.com/acme/renamed-again.git").unwrap_err(), ExecutionError::AllocationMismatch);
+}
+
+#[tokio::test]
+async fn workspace_execution_rename_backfill_uses_scoped_verified_draft_snapshots() {
+    use sea_orm::{ActiveModelTrait, Set};
+    use sea_orm_migration::{MigrationTrait, SchemaManager, prelude::Table};
+    use crate::db::entities::{workspace_repository, workspace_chat_draft};
+    let (db, scope, _, draft, remote, commit) = tests::fixture().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut row = reserve(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &commit).await.unwrap();
+    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), full_name: "acme/docs".into(), verified_names: vec!["acme/docs".into()], starting_commit: commit };
+    let allocation = allocate_local(root.path(), &row, &repo, remote.path().to_str().unwrap()).unwrap();
+    let cache = root.path().join("orgs/1/repositories/123/repo.git");
+    git(&cache, &["remote", "set-url", "origin", "https://github.com/acme/docs.git"]);
+    let repository = workspace_repository::Entity::find_by_id(draft.repository_id).one(&db.conn).await.unwrap().unwrap();
+    let mut renamed: workspace_repository::ActiveModel = repository.into();
+    renamed.full_name = Set("acme/already-renamed".into());
+    renamed.update(&db.conn).await.unwrap();
+    // An inconsistent foreign-ID snapshot must not contribute history even
+    // when its repository_id happens to refer to this catalog row.
+    let mut foreign: workspace_chat_draft::ActiveModel = workspace_chat_draft::Entity::find_by_id(draft.id - 1).one(&db.conn).await.unwrap().unwrap().into();
+    foreign.github_repository_id = Set("999".into());
+    foreign.full_name = Set("unrelated/repo".into());
+    foreign.update(&db.conn).await.unwrap();
+    // This in-memory DB alone emulates the pre-fix schema after reconnection.
+    let manager = SchemaManager::new(&db.conn);
+    manager.alter_table(Table::alter().table(workspace_repository::Entity).drop_column(workspace_repository::Column::VerifiedNames).to_owned()).await.unwrap();
+    crate::db::migration::m20260907_000004_workspace_repository_names::Migration.up(&manager).await.unwrap();
+    let repository = workspace_repository::Entity::find_by_id(draft.repository_id).one(&db.conn).await.unwrap().unwrap();
+    let names = crate::workspace_catalog::verified_repository_names(&repository).unwrap();
+    assert_eq!(names, vec!["acme/already-renamed", "acme/docs"]);
+    row.state = "ready".into();
+    let identity = VerifiedExecutionIdentity { github_repository_id: "123".into(), full_name: repository.full_name, verified_names: names };
+    assert_eq!(super::git_allocator::validate_ready_checkout(root.path(), &row, &identity).unwrap(), allocation.worktree_path);
+    assert_eq!(git(&cache, &["config", "--get", "remote.origin.url"]), "https://github.com/acme/already-renamed.git");
+}
+
+#[tokio::test]
 async fn workspace_execution_git_reattaches_reserved_branch_and_rejects_cache_identity_change() {
     let (db, scope, _, draft, remote, commit) = tests::fixture().await;
     let root = tempfile::tempdir().unwrap();
     let row = reserve(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &commit).await.unwrap();
-    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), full_name: "acme/docs".into(), starting_commit: commit };
+    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), verified_names: vec!["acme/docs".into()], full_name: "acme/docs".into(), starting_commit: commit };
     let allocated = allocate_local(root.path(), &row, &repo, remote.path().to_str().unwrap()).unwrap();
     let cache = root.path().join("orgs/1/repositories/123/repo.git");
     git(&cache, &["worktree", "remove", allocated.worktree_path.to_str().unwrap()]);
@@ -54,7 +125,7 @@ async fn workspace_execution_git_rejects_symlink_inside_cache_metadata() {
     let (db, scope, _, draft, remote, commit) = tests::fixture().await;
     let root = tempfile::tempdir().unwrap();
     let row = reserve(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &commit).await.unwrap();
-    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), full_name: "acme/docs".into(), starting_commit: commit };
+    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), verified_names: vec!["acme/docs".into()], full_name: "acme/docs".into(), starting_commit: commit };
     allocate_local(root.path(), &row, &repo, remote.path().to_str().unwrap()).unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("keep"), "preserved").unwrap();
@@ -93,11 +164,16 @@ async fn workspace_execution_live_lease_blocks_disk_and_expired_lease_reauthoriz
     active.provisioning_owner_token = Set(Some("previous-worker".into()));
     active.provisioning_lease_expires_at = Set(Some(chrono::Utc::now() + chrono::Duration::hours(1)));
     let row = active.update(&db.conn).await.unwrap();
+    let live = serde_json::to_value(get_runtime(&db.conn, &scope, draft.id).await.unwrap()).unwrap();
+    assert_eq!(live["reserved_agent_type"], "claude_code");
+    assert_eq!(live["provisioning_retryable"], false);
     assert_eq!(provisioning::provision(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &access, &allocator, true).await.unwrap_err(), ExecutionError::Busy);
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     let mut active: workspace_chat_execution::ActiveModel = row.into();
     active.provisioning_lease_expires_at = Set(Some(chrono::Utc::now() - chrono::Duration::seconds(1)));
     active.update(&db.conn).await.unwrap();
+    let interrupted = serde_json::to_value(get_runtime(&db.conn, &scope, draft.id).await.unwrap()).unwrap();
+    assert_eq!(interrupted["provisioning_retryable"], true);
     access.denied.store(true, Ordering::SeqCst);
     assert_eq!(provisioning::provision(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &access, &allocator, true).await.unwrap_err(), ExecutionError::ReauthRequired);
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
@@ -144,7 +220,7 @@ async fn workspace_execution_disabled_provision_has_no_reservation_or_disk_effec
 async fn workspace_execution_git_rejects_ambient_home_credentials_and_helper_collisions() {
     let (db, scope, _, draft, remote, commit) = tests::fixture().await;
     let row = reserve(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &commit).await.unwrap();
-    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), full_name: "acme/docs".into(), starting_commit: commit };
+    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), verified_names: vec!["acme/docs".into()], full_name: "acme/docs".into(), starting_commit: commit };
     for filename in [".netrc", "git-askpass.sh"] {
         let root = tempfile::tempdir().unwrap();
         let home = root.path().join("orgs/1/repositories/123/git-home");
@@ -159,7 +235,7 @@ async fn workspace_execution_git_allocates_isolated_chats_and_reconciles_without
     let (db, scope, _, draft, remote, commit) = tests::fixture().await;
     let root = tempfile::tempdir().unwrap();
     let row = reserve(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &commit).await.unwrap();
-    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), full_name: "acme/docs".into(), starting_commit: commit.clone() };
+    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), verified_names: vec!["acme/docs".into()], full_name: "acme/docs".into(), starting_commit: commit.clone() };
     let first = allocate_local(root.path(), &row, &repo, remote.path().to_str().unwrap()).unwrap();
     std::fs::write(first.worktree_path.join("plan.md"), "first chat").unwrap();
     let retry = allocate_local(root.path(), &row, &repo, remote.path().to_str().unwrap()).unwrap();
@@ -177,7 +253,7 @@ async fn workspace_execution_git_allocates_isolated_chats_and_reconciles_without
 async fn workspace_execution_git_collision_and_symlink_preserve_files() {
     let (db, scope, _, draft, remote, commit) = tests::fixture().await;
     let row = reserve(&db.conn, &scope, draft.id, AgentType::ClaudeCode, &commit).await.unwrap();
-    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), full_name: "acme/docs".into(), starting_commit: commit };
+    let repo = VerifiedExecutionRepository { github_repository_id: "123".into(), verified_names: vec!["acme/docs".into()], full_name: "acme/docs".into(), starting_commit: commit };
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join(&row.worktree_relpath);
     std::fs::create_dir_all(&path).unwrap();

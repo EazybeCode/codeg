@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "contextUnavailable": "سياق محادثة مساحة العمل غير متاح.",
+    "loadingFolder": "جارٍ تحميل مجلد المحادثة…",
     "repositoryLoadError": "تعذّر تحميل المستودعات",
     "repositoryLoadHint": "تحقق من اتصالك وحاول مجددًا. لم تتغير مشاريعك الحالية.",
     "account": "حساب مساحة العمل",

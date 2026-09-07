@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "contextUnavailable": "工作區聊天內容無法使用。",
+    "loadingFolder": "正在載入對話資料夾…",
     "repositoryLoadError": "無法載入儲存庫",
     "repositoryLoadHint": "請檢查網路連線後重試。現有專案沒有變更。",
     "account": "工作區帳戶",

@@ -189,7 +189,10 @@ pub async fn connect_repository(
         .await?
     {
         Some(existing) => {
+            let mut names = verified_repository_names(&existing)?;
+            if !names.contains(&verified.full_name) { names.push(verified.full_name.clone()); }
             let mut active: workspace_repository::ActiveModel = existing.into();
+            active.verified_names = Set(serde_json::to_string(&names).map_err(|_| CatalogError::Database)?);
             active.full_name = Set(verified.full_name);
             active.updated_at = Set(now);
             active.update(&txn).await?
@@ -198,6 +201,7 @@ pub async fn connect_repository(
             id: NotSet,
             org_id: Set(scope.org_id),
             github_repository_id: Set(verified.github_repository_id),
+            verified_names: Set(serde_json::to_string(&vec![verified.full_name.clone()]).map_err(|_| CatalogError::Database)?),
             full_name: Set(verified.full_name),
             created_at: Set(now),
             updated_at: Set(now),
@@ -212,6 +216,16 @@ pub async fn connect_repository(
         github_repository_id: model.github_repository_id,
         full_name: model.full_name,
     })
+}
+
+/// Server-owned name history is evidence only for the numerical repository ID
+/// on this row. Invalid persistence must never widen cache-origin admission.
+pub(crate) fn verified_repository_names(repository: &workspace_repository::Model) -> Result<Vec<String>, CatalogError> {
+    let names: Vec<String> = serde_json::from_str(&repository.verified_names).map_err(|_| CatalogError::Database)?;
+    if names.is_empty() || !names.contains(&repository.full_name)
+        || names.iter().any(|name| validate_repository_full_name(name).is_err())
+    { return Err(CatalogError::Database); }
+    Ok(names)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

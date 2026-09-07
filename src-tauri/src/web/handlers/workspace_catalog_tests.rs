@@ -182,6 +182,7 @@ async fn catalog_repository_metadata_is_cookie_scoped_and_credential_free() {
         seed_session(&db, &format!("session-{id}"), id, false).await;
         workspace_repository::ActiveModel {
             id: Set(id), org_id: Set(id), github_repository_id: Set(format!("{id}00")),
+            verified_names: Set(serde_json::to_string(&vec![format!("org-{id}/docs")]).unwrap()),
             full_name: Set(format!("org-{id}/docs")), created_at: Set(Utc::now()), updated_at: Set(Utc::now()),
         }.insert(&db.conn).await.unwrap();
     }

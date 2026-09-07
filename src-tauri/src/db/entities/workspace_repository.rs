@@ -10,6 +10,8 @@ pub struct Model {
     pub github_repository_id: String,
     #[sea_orm(column_type = "Text")]
     pub full_name: String,
+    #[sea_orm(column_type = "Text")]
+    pub verified_names: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

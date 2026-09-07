@@ -110,8 +110,8 @@ fn allocate_git(root: &Path, row: &workspace_chat_execution::Model, repo: &Verif
         super::managed_paths::reject_metadata_symlinks(&cache)?;
         for name in ["config", "HEAD", "objects", "refs"] { checked(root, &parent.join("repo.git").join(name))?; }
         if git.run(&cache, &["rev-parse", "--is-bare-repository"]).ok().as_deref() != Some("true")
-            || git.run(&cache, &["config", "--get", "remote.origin.url"]).ok().as_deref() != Some(remote)
         { return Err(ExecutionError::AllocationMismatch); }
+        reconcile_remote(&git, &cache, remote, &repo.verified_names)?;
     } else {
         if worktree.exists() { return Err(ExecutionError::AllocationMismatch); }
         // Rename a complete clone while holding the filesystem cache lock. A
@@ -140,8 +140,8 @@ fn allocate_git(root: &Path, row: &workspace_chat_execution::Model, repo: &Verif
     Ok(AllocatedWorktree { allocation_id: row.allocation_id.clone(), worktree_path: worktree, branch_name: row.branch_name.clone() })
 }
 fn path_str(path: &Path) -> Result<&str, ExecutionError> { path.to_str().ok_or(ExecutionError::AllocationMismatch) }
-/// Read-only validation before starting a writer. Ready chats may have moved
-/// forward on their reserved branch, but may never change repository or cwd.
+/// Authorized writer-start validation may reconcile verified remote metadata
+/// under the cache lock. It never changes a ready checkout's branch or HEAD.
 pub(crate) fn validate_ready_checkout(root: &Path, row: &workspace_chat_execution::Model, repo: &super::VerifiedExecutionIdentity) -> Result<PathBuf, ExecutionError> {
     use super::managed_paths::{checked, reject_metadata_symlinks};
     if row.state != "ready" || row.org_id <= 0 || row.draft_id <= 0
@@ -151,6 +151,7 @@ pub(crate) fn validate_ready_checkout(root: &Path, row: &workspace_chat_executio
     { return Err(ExecutionError::AllocationMismatch); }
     crate::workspace_catalog::validate_repository_full_name(&repo.full_name)?;
     let parent = PathBuf::from(format!("orgs/{}/repositories/{}", row.org_id, repo.github_repository_id));
+    let _lock = super::managed_paths::cache_lock(root, &parent)?;
     let cache = checked(root, &parent.join("repo.git"))?;
     let worktree = checked(root, Path::new(&row.worktree_relpath))?;
     checked(root, &PathBuf::from(&row.worktree_relpath).join(".git"))?;
@@ -159,10 +160,22 @@ pub(crate) fn validate_ready_checkout(root: &Path, row: &workspace_chat_executio
     let git = Git { home: checked(root, &parent.join("git-home"))?, askpass: None, token: None };
     let remote = format!("https://github.com/{}.git", repo.full_name);
     if git.run(&cache, &["rev-parse", "--is-bare-repository"]).ok().as_deref() != Some("true")
-        || git.run(&cache, &["config", "--get", "remote.origin.url"]).ok().as_deref() != Some(remote.as_str())
     { return Err(ExecutionError::AllocationMismatch); }
+    reconcile_remote(&git, &cache, &remote, &repo.verified_names)?;
     verify_checkout(&git, &cache, &worktree, row)?;
     Ok(worktree)
+}
+fn reconcile_remote(git: &Git, cache: &Path, remote: &str, verified_names: &[String]) -> Result<(), ExecutionError> {
+    if verified_names.is_empty() || verified_names.iter().any(|name| crate::workspace_catalog::validate_repository_full_name(name).is_err()) {
+        return Err(ExecutionError::AllocationMismatch);
+    }
+    let origin = git.run(cache, &["config", "--get", "remote.origin.url"]).map_err(|_| ExecutionError::AllocationMismatch)?;
+    if origin == remote { return Ok(()); }
+    if !verified_names.iter().any(|name| origin == format!("https://github.com/{name}.git")) {
+        return Err(ExecutionError::AllocationMismatch);
+    }
+    git.run(cache, &["remote", "set-url", "origin", remote])?;
+    Ok(())
 }
 fn verify_checkout(git: &Git, cache: &Path, worktree: &Path, row: &workspace_chat_execution::Model) -> Result<(), ExecutionError> {
     let common = git.run(worktree, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).map_err(|_| ExecutionError::AllocationMismatch)?;

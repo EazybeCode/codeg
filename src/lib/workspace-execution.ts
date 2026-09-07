@@ -1,4 +1,4 @@
-import type { DbConversationSummary, FolderDetail } from "./types"
+import type { AgentType, DbConversationSummary, FolderDetail } from "./types"
 import type { WorkspaceChatDraft } from "./workspace-catalog"
 
 export type WorkspaceExecutionState =
@@ -15,4 +15,6 @@ export interface WorkspaceChatRuntime {
   branch_name: string | null
   starting_commit: string | null
   error_code: string | null
+  reserved_agent_type: AgentType | null
+  provisioning_retryable: boolean
 }

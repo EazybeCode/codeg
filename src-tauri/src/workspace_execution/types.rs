@@ -20,6 +20,8 @@ pub struct WorkspaceChatRuntime {
     pub branch_name: Option<String>,
     pub starting_commit: Option<String>,
     pub error_code: Option<String>,
+    pub reserved_agent_type: Option<String>,
+    pub provisioning_retryable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

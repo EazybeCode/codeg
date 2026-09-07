@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "contextUnavailable": "Workspace chat context is unavailable.",
+    "loadingFolder": "Loading conversation folder…",
     "repositoryLoadError": "Couldn’t load repositories",
     "repositoryLoadHint": "Check your connection and try again. Your existing projects haven’t changed.",
     "account": "Workspace account",

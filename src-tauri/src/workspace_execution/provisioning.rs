@@ -30,7 +30,7 @@ pub async fn provision(db: &sea_orm::DatabaseConnection, scope: &Scope, draft_id
     if existing.as_ref().is_some_and(|row| row.agent_type != agent.as_wire()) { return Err(ExecutionError::Conflict); }
     let mut verified = if let Some(row) = &existing {
         let identity = verify_draft_access(db, scope, draft_id, access).await?;
-        super::repository_access::VerifiedExecutionRepository { github_repository_id: identity.github_repository_id, full_name: identity.full_name, starting_commit: row.starting_commit.clone() }
+        super::repository_access::VerifiedExecutionRepository { github_repository_id: identity.github_repository_id, verified_names: identity.verified_names, full_name: identity.full_name, starting_commit: row.starting_commit.clone() }
     } else {
         access.resolve(scope, draft.repository_id, &draft.starting_branch).await?
     };

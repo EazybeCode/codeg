@@ -33,12 +33,20 @@ import {
   resetConversationRuntimeStore,
 } from "@/stores/conversation-runtime-store"
 
-const managedAgent = vi.hoisted(() => ({ connect: vi.fn(), prompt: vi.fn() }))
+const managedAgent = vi.hoisted(() => ({
+  connect: vi.fn(),
+  prompt: vi.fn(),
+  attach: vi.fn().mockResolvedValue(undefined),
+}))
 const managedHttp = vi.hoisted(() => ({
   transport: null as import("@/lib/transport/types").Transport | null,
 }))
 vi.mock("@/contexts/acp-connections-context", () => ({
-  useAcpActions: () => ({ setActiveKey: vi.fn(), touchActivity: vi.fn() }),
+  useAcpActions: () => ({
+    setActiveKey: vi.fn(),
+    touchActivity: vi.fn(),
+    attachWorkspaceViewer: managedAgent.attach,
+  }),
 }))
 vi.mock("@/contexts/task-context", () => ({
   useTaskContext: () => ({
@@ -555,7 +563,7 @@ describe("managed first Send through the panel send path", () => {
     expect(send).toBeEnabled()
     fireEvent.click(send)
     fireEvent.click(send)
-    expect(managedAgent.connect).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(managedAgent.connect).toHaveBeenCalledTimes(1))
     expect(managedAgent.prompt).not.toHaveBeenCalled()
     await act(async () => {
       connected()

@@ -3614,7 +3614,7 @@ export function SidebarConversationList({
             type="button"
             onClick={() => setGhOpen(true)}
             className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            title="Create a workspace project from a GitHub repository"
+            title={t("newProject")}
           >
             <Github className="h-4 w-4 text-muted-foreground" />
             {t("newProject")}

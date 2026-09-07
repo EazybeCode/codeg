@@ -32,6 +32,7 @@ pub(crate) async fn runtime_in<C: ConnectionTrait>(
         draft: to_workspace_chat_draft(draft),
         state: WorkspaceExecutionState::Unprovisioned,
         folder: None, conversation: None, branch_name: None, starting_commit: None, error_code: None,
+        reserved_agent_type: None, provisioning_retryable: false,
     };
     let Some(execution) = execution else { return Ok(runtime); };
     runtime.state = match execution.state.as_str() {
@@ -41,6 +42,10 @@ pub(crate) async fn runtime_in<C: ConnectionTrait>(
         _ => return Err(ExecutionError::Database),
     };
     runtime.branch_name = Some(execution.branch_name.clone());
+    runtime.reserved_agent_type = Some(execution.agent_type.clone());
+    runtime.provisioning_retryable = runtime.state == WorkspaceExecutionState::Provisioning
+        && !(execution.provisioning_owner_token.is_some()
+            && execution.provisioning_lease_expires_at.is_some_and(|expiry| expiry > Utc::now()));
     runtime.starting_commit = Some(execution.starting_commit);
     runtime.error_code = execution.last_error_code.as_deref().map(scrub_error_code);
     if runtime.state == WorkspaceExecutionState::Ready {

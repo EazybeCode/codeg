@@ -169,6 +169,7 @@ pub(crate) async fn seed_repository(
         org_id: Set(org_id),
         github_repository_id: Set(github_repository_id.into()),
         full_name: Set(full_name.into()),
+        verified_names: Set(serde_json::to_string(&vec![full_name]).unwrap()),
         created_at: Set(now),
         updated_at: Set(now),
     }

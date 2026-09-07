@@ -109,8 +109,10 @@ export function WorkspaceChatLauncher({ draftId }: { draftId: number }) {
   const current = result?.key === currentKey ? result : null
   const agents = current?.agents?.filter((agent) => agent.enabled) ?? []
   const agentType =
+    current?.runtime?.reserved_agent_type ??
     agents.find((agent) => agent.agent_type === selected && agent.available)
-      ?.agent_type ?? agents.find((agent) => agent.available)?.agent_type
+      ?.agent_type ??
+    agents.find((agent) => agent.available)?.agent_type
   async function prepare() {
     if (!agentType || inFlight.current || !current?.enabled) return
     inFlight.current = true
@@ -148,7 +150,9 @@ export function WorkspaceChatLauncher({ draftId }: { draftId: number }) {
       {current?.error != null && (
         <WorkspaceCatalogError
           error={current.error}
-          retry={() => setAttempt((old) => old + 1)}
+          retry={() =>
+            current?.runtime ? void prepare() : setAttempt((old) => old + 1)
+          }
         />
       )}
       {current?.runtime?.error_code && (
@@ -158,7 +162,9 @@ export function WorkspaceChatLauncher({ draftId }: { draftId: number }) {
         <p role="status" className="text-sm text-muted-foreground">
           {t("disabledError")}
         </p>
-      ) : busy || current?.runtime?.state === "provisioning" ? (
+      ) : busy ||
+        (current?.runtime?.state === "provisioning" &&
+          !current.runtime.provisioning_retryable) ? (
         <p role="status" className="flex items-center gap-2 text-sm">
           <Loader2 className="size-4 animate-spin" />
           {t("provisioning")}
@@ -172,11 +178,16 @@ export function WorkspaceChatLauncher({ draftId }: { draftId: number }) {
               <select
                 className="mt-2 h-9 w-full rounded-md border border-input bg-background px-2"
                 value={agentType ?? ""}
+                disabled={current.runtime.reserved_agent_type != null}
                 onChange={(event) =>
                   setSelected(event.target.value as AgentType)
                 }
               >
                 {!agentType && <option value="">{t("chooseAgent")}</option>}
+                {agentType &&
+                  !agents.some((agent) => agent.agent_type === agentType) && (
+                    <option value={agentType}>{agentType}</option>
+                  )}
                 {agents.map((agent) => (
                   <option
                     key={agent.agent_type}

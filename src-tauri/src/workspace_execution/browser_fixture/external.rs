@@ -51,12 +51,13 @@ impl ExecutionRepositoryAccess for External {
             .filter(crate::db::entities::workspace_repository::Column::OrgId.eq(scope.org_id))
             .one(&self.state.db.conn).await?.ok_or(ExecutionError::NotFound)?;
         if repo.github_repository_id != "910003" { return Err(ExecutionError::RepositoryUnavailable); }
-        Ok(VerifiedExecutionIdentity { github_repository_id: repo.github_repository_id, full_name: repo.full_name })
+        let verified_names = crate::workspace_catalog::verified_repository_names(&repo)?;
+        Ok(VerifiedExecutionIdentity { github_repository_id: repo.github_repository_id, verified_names, full_name: repo.full_name })
     }
     async fn resolve(&self, scope: &Scope, repository_id: i32, branch: &str) -> Result<VerifiedExecutionRepository, ExecutionError> {
         let identity = self.verify_access(scope, repository_id).await?;
         if branch != "main" { return Err(ExecutionError::RepositoryUnavailable); }
-        Ok(VerifiedExecutionRepository { github_repository_id: identity.github_repository_id, full_name: identity.full_name, starting_commit: self.commit.clone() })
+        Ok(VerifiedExecutionRepository { github_repository_id: identity.github_repository_id, verified_names: identity.verified_names, full_name: identity.full_name, starting_commit: self.commit.clone() })
     }
 }
 #[async_trait]
@@ -67,6 +68,14 @@ impl GitAllocator for External {
         if cache.exists() { git(&cache, &["remote", "set-url", "origin", self.remote.to_str().unwrap()]); }
         let result = allocate_local(&self.state.data_dir, row, repo, self.remote.to_str().unwrap());
         if cache.exists() { git(&cache, &["remote", "set-url", "origin", "https://github.com/fixture-org/docs.git"]); }
+        if let Ok(allocation) = &result {
+            let receipt = serde_json::json!({"draft_id": row.draft_id, "allocation_id": allocation.allocation_id, "path": allocation.worktree_path});
+            std::fs::write(self.root.join("last-allocation.json"), receipt.to_string()).unwrap();
+            if self.root.join("interrupt-provision").exists() {
+                std::fs::write(self.root.join("interrupted-allocation.json"), receipt.to_string()).unwrap();
+                std::future::pending::<()>().await;
+            }
+        }
         result
     }
 }
@@ -81,6 +90,8 @@ impl WorkspaceRunner for External {
     async fn spawn(&self, context: &ReadyExecutionContext) -> Result<String, ExecutionError> {
         if self.root.join("provider-fail-start").exists() { return Err(ExecutionError::Failed); }
         let id = uuid::Uuid::new_v4().to_string();
+        let process_log = self.root.join("process-events.log");
+        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(&process_log).unwrap(), "spawn {id}").unwrap();
         let mut rx = self.state.connection_manager.insert_test_connection_live(&id, context.agent_type, Some(context.working_dir.clone()), self.state.emitter.clone()).await;
         let state = self.state.connection_manager.get_state(&id).await.unwrap();
         let emitter = self.state.emitter.clone();
@@ -91,6 +102,7 @@ impl WorkspaceRunner for External {
         let stopped = self.stopped.clone();
         let connection_id = id.clone();
         let session_id = format!("fixture-chat-{}", context.draft_id);
+        let hold_turn = self.root.join("hold-turn");
         tokio::spawn(async move {
             while let Some(command) = rx.recv().await {
                 match command {
@@ -110,12 +122,19 @@ impl WorkspaceRunner for External {
                         emit_with_state(&state, &emitter, AcpEvent::SessionStarted { session_id: session_id.clone() }).await;
                         emit_with_state(&state, &emitter, AcpEvent::UserMessage { message_id, blocks: user_blocks }).await;
                         emit_with_state(&state, &emitter, AcpEvent::ContentDelta { text: answer, parent_tool_use_id: None }).await;
+                        if hold_turn.exists() {
+                            while hold_turn.exists() { tokio::time::sleep(std::time::Duration::from_millis(25)).await; }
+                            let continuation = "\nLive output after reload\n";
+                            writeln!(transcript, "{}", serde_json::json!({"type":"assistant","uuid":uuid::Uuid::new_v4().to_string(),"sessionId":session_id,"cwd":directory,"timestamp":chrono::Utc::now().to_rfc3339(),"message":{"id":uuid::Uuid::new_v4().to_string(),"role":"assistant","model":"fixture-provider","content":[{"type":"text","text":continuation}],"stop_reason":"end_turn"}})).unwrap();
+                            emit_with_state(&state, &emitter, AcpEvent::ContentDelta { text: continuation.into(), parent_tool_use_id: None }).await;
+                        }
                         emit_with_state(&state, &emitter, AcpEvent::TurnComplete { session_id: session_id.clone(), stop_reason: "end_turn".into(), agent_type: "claude_code".into() }).await;
                     },
                     ConnectionCommand::Disconnect => break,
                     _ => {},
                 }
             }
+            writeln!(std::fs::OpenOptions::new().create(true).append(true).open(&process_log).unwrap(), "stop {connection_id}").unwrap();
             stopped.lock().unwrap().insert(connection_id);
         });
         Ok(id)

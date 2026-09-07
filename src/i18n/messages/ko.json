@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "contextUnavailable": "워크스페이스 채팅 정보를 사용할 수 없습니다.",
+    "loadingFolder": "대화 폴더를 불러오는 중…",
     "repositoryLoadError": "저장소를 불러올 수 없습니다",
     "repositoryLoadHint": "연결을 확인하고 다시 시도하세요. 기존 프로젝트는 변경되지 않았습니다.",
     "account": "워크스페이스 계정",

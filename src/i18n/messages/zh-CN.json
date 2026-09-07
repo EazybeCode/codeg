@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "contextUnavailable": "工作区聊天上下文不可用。",
+    "loadingFolder": "正在加载会话文件夹…",
     "repositoryLoadError": "无法加载仓库",
     "repositoryLoadHint": "请检查网络连接后重试。现有项目没有变更。",
     "account": "工作区账户",

@@ -2767,10 +2767,10 @@ export function ConversationDetailPanel() {
             )}
           </WorkspaceChatRuntimeGate>
         ) : (
-          <p role="status">Workspace chat context is unavailable.</p>
+          <p role="status">{tCatalog("contextUnavailable")}</p>
         )
       ) : tab.folderId != null && !tabFolder ? (
-        <p role="status">Loading conversation folder…</p>
+        <p role="status">{tCatalog("loadingFolder")}</p>
       ) : (
         renderView()
       )

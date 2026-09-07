@@ -71,6 +71,7 @@ async fn seed_repository(db: &AppDatabase, org_id: i32, github_id: &str) -> i32 
         org_id: Set(org_id),
         github_repository_id: Set(github_id.into()),
         full_name: Set(format!("org-{org_id}/repo-{github_id}")),
+        verified_names: Set(serde_json::to_string(&vec![format!("org-{org_id}/repo-{github_id}")]).unwrap()),
         created_at: Set(now),
         updated_at: Set(now),
     }
@@ -78,6 +79,39 @@ async fn seed_repository(db: &AppDatabase, org_id: i32, github_id: &str) -> i32 
     .await
     .expect("seed repository")
     .id
+}
+
+#[tokio::test]
+async fn workspace_catalog_verified_name_history_survives_renames_and_backfills() {
+    use sea_orm_migration::SchemaManager;
+    let db = fresh_in_memory_db().await;
+    let manager = SchemaManager::new(&db.conn);
+    assert!(manager.has_column("workspace_repository", "verified_names").await.unwrap(), "trusted repository name history must be persisted");
+    let (scope, _) = seed_two_scopes(&db).await;
+    use sea_orm_migration::MigrationTrait;
+    use crate::db::migration::m20260907_000004_workspace_repository_names::Migration as NamesMigration;
+    NamesMigration.down(&manager).await.unwrap();
+    // Simulate an existing pre-fix catalog row before the additive migration.
+    db.conn.execute_unprepared("INSERT INTO workspace_repository (org_id, github_repository_id, full_name, created_at, updated_at) VALUES (1, '123', 'acme/old', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)").await.unwrap();
+    NamesMigration.up(&manager).await.unwrap();
+    let access = super::draft_tests::FakeRepositoryAccess::new(&[
+        ("acme/old", "main", "123", "acme/old"),
+        ("acme/new", "main", "123", "acme/new"),
+        ("acme/latest", "main", "123", "acme/latest"),
+        ("foreign/repo", "main", "999", "foreign/repo"),
+    ]);
+    let first = super::connect_repository(&db.conn, &scope, &access, "acme/old", "main").await.unwrap();
+    for name in ["acme/new", "acme/latest"] {
+        assert_eq!(super::connect_repository(&db.conn, &scope, &access, name, "main").await.unwrap().id, first.id);
+    }
+    let row = db.conn.query_one(sea_orm::Statement::from_sql_and_values(db.conn.get_database_backend(), "SELECT verified_names FROM workspace_repository WHERE id = $1", [first.id.into()])).await.unwrap().unwrap();
+    let names: String = row.try_get("", "verified_names").unwrap();
+    assert_eq!(serde_json::from_str::<Vec<String>>(&names).unwrap(), ["acme/old", "acme/new", "acme/latest"]);
+    let foreign = super::connect_repository(&db.conn, &scope, &access, "foreign/repo", "main").await.unwrap();
+    assert_ne!(foreign.id, first.id);
+    assert!(NamesMigration.down(&manager).await.is_err(), "downgrade cannot discard trusted identity history");
+    db.conn.execute_unprepared("UPDATE workspace_repository SET verified_names = 'not-json' WHERE github_repository_id = '123'").await.unwrap();
+    assert!(super::connect_repository(&db.conn, &scope, &access, "acme/latest", "main").await.is_err());
 }
 
 fn create_input(

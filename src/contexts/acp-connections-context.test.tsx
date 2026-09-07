@@ -311,6 +311,90 @@ describe("AcpConnectionsProvider cross-client viewer lifecycle", () => {
       expect.anything()
     )
   })
+  it("managed activation attaches read-only and detaches without stopping the writer", async () => {
+    h.acpFindConnectionForConversation.mockResolvedValue({
+      connection_id: "owner-conn",
+      event_seq: 5,
+    })
+    await mountProvider()
+    await act(async () => {
+      await h.actions!.attachWorkspaceViewer(
+        TAB,
+        "claude_code",
+        "/tmp/x",
+        "sess-1",
+        42,
+        88
+      )
+      await h.actions!.attachWorkspaceViewer(
+        TAB,
+        "claude_code",
+        "/tmp/x",
+        "sess-1",
+        42,
+        88
+      )
+    })
+    expect(h.acpFindConnectionForConversation).toHaveBeenCalledWith(
+      42,
+      "sess-1",
+      "claude_code",
+      88
+    )
+    expect(h.attach).toHaveBeenCalledTimes(1)
+    expect(h.store!.getConnection(TAB)?.isViewer).toBe(true)
+    expect(h.acpConnect).not.toHaveBeenCalled()
+    expect(h.acpTouchConnection).not.toHaveBeenCalled()
+    await act(async () => {
+      await h.actions!.disconnect(TAB)
+    })
+    expect(h.acpDisconnect).not.toHaveBeenCalled()
+  })
+  it("managed discovery absence, revoked scope and cancelled activation never spawn", async () => {
+    await mountProvider()
+    h.acpFindConnectionForConversation.mockResolvedValue(null)
+    await act(async () => {
+      await h.actions!.attachWorkspaceViewer(
+        TAB,
+        "claude_code",
+        "/tmp/x",
+        undefined,
+        42,
+        88
+      )
+    })
+    expect(h.store!.getConnection(TAB)).toBeUndefined()
+    h.acpFindConnectionForConversation.mockRejectedValue({ error: "not_found" })
+    await expect(
+      h.actions!.attachWorkspaceViewer(
+        TAB,
+        "claude_code",
+        "/tmp/x",
+        undefined,
+        42,
+        88
+      )
+    ).rejects.toEqual({ error: "not_found" })
+    const abort = new AbortController()
+    h.acpFindConnectionForConversation.mockImplementation(async () => {
+      abort.abort()
+      return { connection_id: "owner-conn", event_seq: 5 }
+    })
+    await act(async () => {
+      await h.actions!.attachWorkspaceViewer(
+        TAB,
+        "claude_code",
+        "/tmp/x",
+        undefined,
+        42,
+        88,
+        abort.signal
+      )
+    })
+    expect(h.attach).not.toHaveBeenCalled()
+    expect(h.acpConnect).not.toHaveBeenCalled()
+    expect(h.acpDisconnect).not.toHaveBeenCalled()
+  })
 
   it("spawns + owns when no live connection is discovered", async () => {
     h.acpFindConnectionForConversation.mockResolvedValue(null)

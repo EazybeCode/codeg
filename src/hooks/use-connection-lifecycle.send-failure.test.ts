@@ -37,10 +37,15 @@ vi.mock("next-intl", () => ({
 
 const sendPrompt = vi.fn()
 const connect = vi.fn().mockResolvedValue(undefined)
+const attachWorkspaceViewer = vi.fn().mockResolvedValue(undefined)
 let connectionStatus = "connected"
 
 vi.mock("@/contexts/acp-connections-context", () => ({
-  useAcpActions: () => ({ setActiveKey: vi.fn(), touchActivity: vi.fn() }),
+  useAcpActions: () => ({
+    setActiveKey: vi.fn(),
+    touchActivity: vi.fn(),
+    attachWorkspaceViewer,
+  }),
 }))
 
 vi.mock("@/contexts/task-context", () => ({
@@ -116,6 +121,15 @@ describe("useConnectionLifecycle send-failure surfacing", () => {
     )
     act(() => result.current.handleFocus())
     expect(connect).not.toHaveBeenCalled()
+    expect(attachWorkspaceViewer).toHaveBeenCalledWith(
+      "managed",
+      "claude_code",
+      "/managed",
+      undefined,
+      17,
+      42,
+      expect.any(AbortSignal)
+    )
     let sent: unknown
     await act(async () => {
       sent = await result.current.handleSend(draft(), null, {

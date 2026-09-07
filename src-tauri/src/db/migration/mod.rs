@@ -49,6 +49,7 @@ mod m20260906_000001_folder_repo_full_name;
 mod m20260907_000001_workspace_catalog;
 mod m20260907_000002_workspace_execution;
 mod m20260907_000003_workspace_writer_lease;
+pub(crate) mod m20260907_000004_workspace_repository_names;
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -104,6 +105,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260907_000001_workspace_catalog::Migration),
             Box::new(m20260907_000002_workspace_execution::Migration),
             Box::new(m20260907_000003_workspace_writer_lease::Migration),
+            Box::new(m20260907_000004_workspace_repository_names::Migration),
         ]
     }
 }

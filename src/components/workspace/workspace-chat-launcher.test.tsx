@@ -188,3 +188,40 @@ it("provisions only on explicit preparation and upserts returned IDs", async () 
     agentType: "codex",
   })
 })
+it("resumes an interrupted reservation with its original agent after reload", async () => {
+  const normal = call.getMockImplementation()!
+  call.mockImplementation(async (cmd, body) =>
+    cmd === "get_workspace_chat_runtime"
+      ? {
+          ...pending,
+          state: "provisioning",
+          reserved_agent_type: "claude_code",
+          provisioning_retryable: true,
+        }
+      : normal(cmd, body)
+  )
+  mount()
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Prepare chat" })
+  )
+  await waitFor(() => expect(useTabStore.getState().tabs).toHaveLength(1))
+  expect(call).toHaveBeenCalledWith("provision_workspace_chat", {
+    draftId: 20,
+    agentType: "claude_code",
+  })
+})
+it("retries failed preparation rather than just reloading metadata", async () => {
+  const normal = call.getMockImplementation()!
+  let attempts = 0
+  call.mockImplementation(async (cmd, body) => {
+    if (cmd === "provision_workspace_chat" && attempts++ === 0)
+      throw { error: "busy" }
+    return normal(cmd, body)
+  })
+  mount()
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Prepare chat" })
+  )
+  await userEvent.click(await screen.findByRole("button", { name: "Retry" }))
+  await waitFor(() => expect(useTabStore.getState().tabs).toHaveLength(1))
+})
