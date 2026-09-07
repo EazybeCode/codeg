@@ -42,6 +42,8 @@ pub enum ExecutionError {
     AllocationMismatch,
     #[error("busy")]
     Busy,
+    #[error("turn_in_progress")]
+    TurnInProgress,
     #[error("failed")]
     Failed,
     #[error("database_error")]

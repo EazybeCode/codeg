@@ -312,6 +312,27 @@ async fn workspace_execution_acp_http_requires_cookie_origin_and_canonical_ids()
     assert!(renewed.expires_at > chrono::Utc::now());
     assert_eq!(runner.spawned.lock().unwrap().len(), 1);
     assert!(matches!(runner.receivers.lock().unwrap()[0].try_recv().unwrap(), crate::acp::connection::ConnectionCommand::Prompt { .. }));
+    // Ownership/readiness conflicts must not look like permission to retry a
+    // dequeued prompt. Only the real manager's occupied turn has that meaning.
+    let busy = handler.handle(Operation::Connect, &headers, &body).await;
+    assert_eq!(busy.status(), StatusCode::CONFLICT);
+    let busy: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(busy.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(busy, serde_json::json!({"error":"busy"}));
+    let cwd = session.read().await.working_dir.clone();
+    session.write().await.working_dir = Some(root.path().join("not-the-ready-checkout"));
+    let unready = handler.handle(Operation::Prompt, &headers, &prompt).await;
+    assert_eq!(unready.status(), StatusCode::CONFLICT);
+    let unready: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(unready.into_body(), 1024).await.unwrap()).unwrap();
+    assert_eq!(unready, serde_json::json!({"error":"busy"}));
+    session.write().await.working_dir = cwd;
+    let concurrent = handler.handle(Operation::Prompt, &headers, &prompt).await;
+    assert_eq!(concurrent.status(), StatusCode::CONFLICT);
+    let concurrent: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(concurrent.into_body(), 1024).await.unwrap()).unwrap();
+    // This exact real-handler wire body is consumed by the rendered TS queue
+    // test through WebTransport/acpPrompt, not a fabricated TurnBusyError.
+    let expected: serde_json::Value = serde_json::from_str(include_str!("../../../src/lib/__fixtures__/workspace-acp-turn-in-progress.json")).unwrap();
+    assert_eq!(concurrent, expected);
+    assert!(runner.receivers.lock().unwrap()[0].try_recv().is_err());
     headers.insert("cookie", HeaderValue::from_static("workos_session=writer-other"));
     assert_eq!(handler.handle(Operation::Discover, &headers, &discover).await.status(), StatusCode::NOT_FOUND);
     assert_eq!(runner.spawned.lock().unwrap().len(), 1);

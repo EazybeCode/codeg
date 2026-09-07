@@ -69,7 +69,7 @@ impl WorkspaceAcpHandler<'_> {
                 writer::connection_lease(db, &scope, id, true).await?;
                 self.state.connection_manager.send_prompt_linked_with_message_id(&self.state.db, id,
                     input.blocks.ok_or(ExecutionError::Conflict)?, Some(context.folder_id), Some(context.conversation_id), None, input.client_message_id)
-                    .await.map_err(|e| match e { crate::acp::error::AcpError::TurnInProgress => ExecutionError::Busy, _ => ExecutionError::Failed })?;
+                    .await.map_err(|e| match e { crate::acp::error::AcpError::TurnInProgress => ExecutionError::TurnInProgress, _ => ExecutionError::Failed })?;
                 Ok(serde_json::Value::Null)
             },
             Operation::Disconnect => {

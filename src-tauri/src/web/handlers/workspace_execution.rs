@@ -91,6 +91,12 @@ pub(crate) fn error_response(error: ExecutionError) -> Response<Body> {
         ExecutionError::Unauthorized | ExecutionError::ReauthRequired => StatusCode::UNAUTHORIZED,
         ExecutionError::NotFound | ExecutionError::RepositoryUnavailable => StatusCode::NOT_FOUND,
         ExecutionError::Conflict | ExecutionError::AllocationMismatch | ExecutionError::Busy => StatusCode::CONFLICT,
+        // Only a positively rejected concurrent prompt is safe to requeue.
+        // Preserve the existing ACP wire contract, distinct from writer Busy.
+        ExecutionError::TurnInProgress => return crate::app_error::AppCommandError::new(
+            crate::app_error::AppErrorCode::TurnInProgress,
+            crate::acp::error::AcpError::TurnInProgress.to_string(),
+        ).into_response(),
         ExecutionError::Disabled => StatusCode::SERVICE_UNAVAILABLE,
         ExecutionError::UpstreamUnavailable => StatusCode::BAD_GATEWAY,
         ExecutionError::Failed | ExecutionError::Database => StatusCode::INTERNAL_SERVER_ERROR,

@@ -24,12 +24,19 @@ import type { DbConversationSummary, PromptDraft } from "@/lib/types"
 import { ChatInput } from "./chat-input"
 import { useConnectionLifecycle } from "@/hooks/use-connection-lifecycle"
 import { useWorkspaceChatSend } from "@/hooks/use-workspace-chat-send"
+import { useMessageQueue } from "@/hooks/use-message-queue"
+import { acpPrompt } from "@/lib/api"
+import { WebTransport } from "@/lib/transport/web-transport"
+import turnInProgressResponse from "@/lib/__fixtures__/workspace-acp-turn-in-progress.json"
 import {
   getRuntimeSession,
   resetConversationRuntimeStore,
 } from "@/stores/conversation-runtime-store"
 
 const managedAgent = vi.hoisted(() => ({ connect: vi.fn(), prompt: vi.fn() }))
+const managedHttp = vi.hoisted(() => ({
+  transport: null as import("@/lib/transport/types").Transport | null,
+}))
 vi.mock("@/contexts/acp-connections-context", () => ({
   useAcpActions: () => ({ setActiveKey: vi.fn(), touchActivity: vi.fn() }),
 }))
@@ -128,11 +135,14 @@ vi.mock("@/lib/platform", () => ({
   openFileDialog: vi.fn(),
 }))
 vi.mock("@/lib/transport", () => ({
+  getTransport: () => managedHttp.transport,
+  isDesktop: () => false,
   getActiveRemoteConnectionId: () => null,
 }))
 // Real classifier only recognizes actual backend NoActiveTurn payloads; the
 // steering tests flip this per-case to drive the enqueue fallback.
-vi.mock("@/lib/turn-busy", () => ({
+vi.mock("@/lib/turn-busy", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/turn-busy")>()),
   isNoActiveTurnRejection: vi.fn(() => false),
 }))
 // Nothing here mounts a Toaster, so toasts would vanish silently — record them
@@ -333,8 +343,11 @@ describe("managed first Send through the panel send path", () => {
     attachmentsOverride.current = null
     managedAgent.connect.mockReset()
     managedAgent.prompt.mockReset()
+    managedHttp.transport = null
+    vi.unstubAllGlobals()
   })
-  function ManagedComposer() {
+  function ManagedComposer({ queued = false }: { queued?: boolean }) {
+    const queue = useMessageQueue()
     const lifecycle = useConnectionLifecycle({
       contextKey: "saved-tab",
       agentType: "claude_code",
@@ -351,20 +364,49 @@ describe("managed first Send through the panel send path", () => {
       attachedResourcesFallback: "Attached resources",
     })
     return (
-      <ChatInput
-        status="disconnected"
-        allowOfflineCompose={send.eligible}
-        promptCapabilities={CAPS}
-        onSend={send.sendDraft}
-        onFocus={lifecycle.handleFocus}
-        onCancel={() => {}}
-      />
+      <>
+        <button
+          disabled={queue.queue.length === 0}
+          onClick={() => {
+            // Same dequeue-before-send and front-on-bounce route as the panel's
+            // idle flush. The button stands in only for the next idle signal.
+            const next = queue.dequeue()
+            if (next)
+              void send.sendDraft(next.draft, next.modeId, () =>
+                queue.requeueFront(next.draft, next.modeId)
+              )
+          }}
+        >
+          Flush queued draft
+        </button>
+        <ChatInput
+          status="disconnected"
+          allowOfflineCompose={send.eligible}
+          promptCapabilities={CAPS}
+          onSend={(draft, mode) => {
+            if (queued) {
+              queue.enqueue(draft, mode ?? null)
+              return Promise.resolve(true)
+            }
+            return send.sendDraft(draft, mode, () =>
+              queue.enqueue(draft, mode ?? null)
+            )
+          }}
+          queue={queue.queue}
+          onQueueReorder={queue.reorder}
+          onQueueEdit={queue.startEditing}
+          onQueueDelete={queue.remove}
+          editingItemId={queue.editingItemId}
+          onFocus={lifecycle.handleFocus}
+          onCancel={() => {}}
+        />
+      </>
     )
   }
-  async function mount() {
+  async function mount(queued = false) {
     const view = render(
       <NextIntlClientProvider locale="en" messages={enMessages}>
-        <ManagedComposer />
+        <ManagedComposer queued={queued} />
       </NextIntlClientProvider>
     )
     await waitFor(() =>
@@ -381,6 +423,124 @@ describe("managed first Send through the panel send path", () => {
       )!,
     }
   }
+  function configurePromptHttp() {
+    managedHttp.transport = new WebTransport("http://localhost:3080")
+    managedAgent.connect.mockResolvedValue(undefined)
+    managedAgent.prompt.mockImplementation((blocks, opts) =>
+      acpPrompt(
+        "same-writer",
+        blocks,
+        opts.folderId,
+        opts.conversationId,
+        opts.clientMessageId,
+        42
+      )
+    )
+  }
+  function stageQueuedImage() {
+    const image = {
+      type: "image" as const,
+      data: "aGk=",
+      mime_type: "image/png",
+    }
+    attachmentsOverride.current = {
+      attachments: [
+        {
+          id: "queued-image",
+          type: "image",
+          data: "aGk=",
+          uri: null,
+          name: "queued.png",
+          mimeType: "image/png",
+        },
+      ],
+      imagePromptBlocks: () => [image],
+    }
+    return image
+  }
+  it("requeues a dequeued managed draft with full attachments only for the real turn-in-progress wire response", async () => {
+    configurePromptHttp()
+    const requests: Record<string, unknown>[] = []
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      requests.push(JSON.parse(init.body as string))
+      return new Response(
+        JSON.stringify(requests.length === 1 ? turnInProgressResponse : null),
+        {
+          status: requests.length === 1 ? 409 : 200,
+        }
+      )
+    })
+    const image = stageQueuedImage()
+    const { editor, send } = await mount(true)
+    fireEvent.click(send)
+    await waitFor(() => expect(serializeDocToText(editor.state.doc)).toBe(""))
+    act(() => {
+      editor.commands.insertContent("later queued turn")
+    })
+    fireEvent.click(send)
+    await waitFor(() => expect(serializeDocToText(editor.state.doc)).toBe(""))
+    expect(requests).toHaveLength(0)
+    fireEvent.click(screen.getByRole("button", { name: "Flush queued draft" }))
+    await waitFor(() => expect(requests).toHaveLength(1))
+    await waitFor(() =>
+      expect(screen.getByText("first managed turn")).toBeInTheDocument()
+    )
+    const first = screen.getByText("first managed turn")
+    const later = screen.getByText("later queued turn")
+    expect(
+      first.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).not.toBe(0)
+    expect(getRuntimeSession(17)?.localTurns).toHaveLength(0)
+    expect(getRuntimeSession(17)?.syncState).toBe("idle")
+    expect(
+      screen.queryByRole("button", { name: "Retry retained draft" })
+    ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Flush queued draft" }))
+    await waitFor(() => expect(requests).toHaveLength(2))
+    expect(requests[1]).toMatchObject({
+      workspaceChatId: 42,
+      folderId: 8,
+      conversationId: 17,
+      connectionId: "same-writer",
+    })
+    expect(requests[1].blocks).toEqual(requests[0].blocks)
+    expect(requests[1].blocks).toContainEqual(image)
+    expect(requests[1].blocks).toContainEqual({
+      type: "text",
+      text: "first managed turn",
+    })
+    expect(screen.queryByText("first managed turn")).not.toBeInTheDocument()
+    expect(screen.getByText("later queued turn")).toBeInTheDocument()
+  })
+  it.each(["ownership/readiness busy", "ambiguous transport failure"])(
+    "retains a managed draft without requeue or automatic retry for %s",
+    async (failure) => {
+      const quiet = vi.spyOn(console, "error").mockImplementation(() => {})
+      configurePromptHttp()
+      const requests: Record<string, unknown>[] = []
+      vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+        requests.push(JSON.parse(init.body as string))
+        if (failure === "ambiguous transport failure")
+          throw new Error("connection lost after write")
+        return new Response(JSON.stringify({ error: "busy" }), { status: 409 })
+      })
+      const image = stageQueuedImage()
+      const { editor, send } = await mount()
+      fireEvent.click(send)
+      expect(
+        await screen.findByRole("button", { name: "Retry retained draft" })
+      ).toBeInTheDocument()
+      expect(serializeDocToText(editor.state.doc)).toBe("first managed turn")
+      expect(
+        screen.getByRole("button", { name: "Flush queued draft" })
+      ).toBeDisabled()
+      expect(getRuntimeSession(17)?.localTurns).toHaveLength(0)
+      expect(getRuntimeSession(17)?.syncState).toBe("idle")
+      expect(requests).toHaveLength(1)
+      expect(requests[0].blocks).toContainEqual(image)
+      quiet.mockRestore()
+    }
+  )
   it("enables disconnected first Send, awaits connection, and uses persisted IDs", async () => {
     let connected!: () => void
     managedAgent.connect.mockImplementation(
