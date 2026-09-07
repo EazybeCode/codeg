@@ -26,6 +26,7 @@ pub mod git_credential;
 pub mod git_repo;
 pub mod workspace_catalog;
 pub mod workspace_execution;
+pub mod workspace_repo;
 pub mod intern;
 pub mod keyring_store;
 pub mod logging;
@@ -1189,6 +1190,7 @@ mod tauri_app {
                 conversations::delete_conversation,
                 folders::load_folder_history,
                 folders::get_folder,
+                folders::get_folder_repo_context,
                 folders::list_open_folder_details,
                 folders::list_all_folder_details,
                 folders::open_folder,

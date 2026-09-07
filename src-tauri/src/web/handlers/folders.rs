@@ -39,6 +39,13 @@ pub async fn get_folder(
     ))
 }
 
+pub async fn get_folder_repo_context(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(params): Json<FolderIdParams>,
+) -> Result<Json<crate::workspace_repo::FolderRepoContext>, AppCommandError> {
+    Ok(Json(crate::workspace_repo::get_folder_repo_context(&state.db, params.folder_id).await?))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddFolderParams {

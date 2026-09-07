@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "repositoryLoadError": "Impossible de charger les dépôts",
+    "repositoryLoadHint": "Vérifiez votre connexion et réessayez. Vos projets existants n’ont pas été modifiés.",
     "account": "Compte de l’espace de travail",
     "accountLoading": "Chargement du compte…",
     "accountError": "Compte indisponible",
@@ -1769,16 +1771,16 @@
     "sidebar": {
       "newProject": "Nouveau projet",
       "subfolder": {
-        "new": "New Subfolder",
-        "namePrompt": "Subfolder name",
-        "empty": "Empty folder",
-        "fromRepo": "From GitHub repo"
+        "new": "Nouveau sous-dossier",
+        "namePrompt": "Nom du sous-dossier",
+        "empty": "Dossier vide",
+        "fromRepo": "Depuis un dépôt GitHub"
       },
       "folderSortBy": {
-        "label": "Sort by",
-        "manual": "Manual",
-        "name": "Name (A–Z)",
-        "recent": "Recent"
+        "label": "Trier par",
+        "manual": "Manuel",
+        "name": "Nom (A–Z)",
+        "recent": "Récents"
       },
       "title": "Discussions",
       "locateActiveConversation": "Localiser la conversation active",
@@ -3741,6 +3743,9 @@
       }
     },
     "conversationContextBar": {
+      "folderPath": "Chemin du dossier",
+      "repositoryUnavailable": "Dépôt indisponible",
+      "repositoryChecking": "Vérification du dépôt…",
       "folderTitle": "Dossier de travail",
       "branchTitle": "Branche de travail",
       "searchFolder": "Rechercher un dossier...",

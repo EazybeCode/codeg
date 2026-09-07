@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "repositoryLoadError": "No se pudieron cargar los repositorios",
+    "repositoryLoadHint": "Comprueba tu conexión e inténtalo de nuevo. Tus proyectos existentes no han cambiado.",
     "account": "Cuenta del espacio de trabajo",
     "accountLoading": "Cargando cuenta…",
     "accountError": "Cuenta no disponible",
@@ -1769,16 +1771,16 @@
     "sidebar": {
       "newProject": "Nuevo proyecto",
       "subfolder": {
-        "new": "New Subfolder",
-        "namePrompt": "Subfolder name",
-        "empty": "Empty folder",
-        "fromRepo": "From GitHub repo"
+        "new": "Nueva subcarpeta",
+        "namePrompt": "Nombre de la subcarpeta",
+        "empty": "Carpeta vacía",
+        "fromRepo": "Desde un repositorio de GitHub"
       },
       "folderSortBy": {
-        "label": "Sort by",
+        "label": "Ordenar por",
         "manual": "Manual",
-        "name": "Name (A–Z)",
-        "recent": "Recent"
+        "name": "Nombre (A–Z)",
+        "recent": "Recientes"
       },
       "title": "Conversaciones",
       "locateActiveConversation": "Ubicar conversación activa",
@@ -3741,6 +3743,9 @@
       }
     },
     "conversationContextBar": {
+      "folderPath": "Ruta de la carpeta",
+      "repositoryUnavailable": "Repositorio no disponible",
+      "repositoryChecking": "Comprobando el repositorio…",
       "folderTitle": "Carpeta de trabajo",
       "branchTitle": "Rama de trabajo",
       "searchFolder": "Search folder...",

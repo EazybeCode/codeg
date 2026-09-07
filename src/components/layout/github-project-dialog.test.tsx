@@ -7,6 +7,8 @@ import {
 } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { GithubProjectDialog } from "./github-project-dialog"
+import { NextIntlClientProvider } from "next-intl"
+import en from "@/i18n/messages/en.json"
 
 vi.mock("@/stores/tab-store", () => ({
   useTabActions: () => ({ openNewConversationTab: vi.fn() }),
@@ -28,9 +30,13 @@ describe("GitHub project recovery", () => {
         })
       )
     )
-    render(<GithubProjectDialog open onOpenChange={() => {}} />)
+    render(
+      <NextIntlClientProvider locale="en" messages={en}>
+        <GithubProjectDialog open onOpenChange={() => {}} />
+      </NextIntlClientProvider>
+    )
     expect(
-      await screen.findByRole("link", { name: "Connect GitHub" })
+      await screen.findByRole("link", { name: "Reconnect GitHub" })
     ).toHaveAttribute("href", "/auth/github/login")
     expect(screen.queryByText("No repositories found.")).toBeNull()
   })
@@ -53,8 +59,12 @@ describe("GitHub project recovery", () => {
         )
       )
     vi.stubGlobal("fetch", fetch)
-    render(<GithubProjectDialog open onOpenChange={() => {}} />)
-    fireEvent.click(await screen.findByRole("button", { name: "Try again" }))
+    render(
+      <NextIntlClientProvider locale="en" messages={en}>
+        <GithubProjectDialog open onOpenChange={() => {}} />
+      </NextIntlClientProvider>
+    )
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }))
     expect(await screen.findByText("acme/docs")).toBeTruthy()
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
   })

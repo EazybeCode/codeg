@@ -189,7 +189,7 @@ export const ConversationHeaderFolderPicker = memo(
     return (
       <div className="flex min-w-0 items-center gap-2">
         <nav
-          aria-label="Folder path"
+          aria-label={t("folderPath")}
           className="flex min-w-0 items-center gap-1 overflow-hidden text-sm"
         >
           {ancestors.map((ancestor) => (
@@ -261,11 +261,11 @@ export const ConversationHeaderFolderPicker = memo(
               title={repoError}
               className="text-xs text-amber-700 dark:text-amber-400"
             >
-              Repository unavailable
+              {t("repositoryUnavailable")}
             </span>
           ) : repoLoading ? (
             <span className="text-xs text-muted-foreground">
-              Checking repository…
+              {t("repositoryChecking")}
             </span>
           ) : (
             <BranchDropdown folder={branchFolder} isChatMode={isChatMode} />

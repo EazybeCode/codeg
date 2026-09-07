@@ -219,6 +219,7 @@ pub fn build_router(
             post(handlers::folders::list_all_folder_details),
         )
         .route("/get_folder", post(handlers::folders::get_folder))
+        .route("/get_folder_repo_context", post(handlers::folders::get_folder_repo_context))
         .route("/open_folder", post(handlers::folders::open_folder))
         .route("/open_in_code", post(handlers::folders::open_in_code))
         .route(

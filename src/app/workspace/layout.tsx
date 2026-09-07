@@ -116,6 +116,8 @@ const FOLDER_MAIN_GROUP_ID = "folder-main-group"
 const FOLDER_MAIN_WORKSPACE_PANEL_ID = "folder-main-workspace-panel"
 const FOLDER_MAIN_TERMINAL_PANEL_ID = "folder-main-terminal-panel"
 const DEFAULT_FUSION_LAYOUT: [number, number] = [56, 44]
+import { workspacePanelSizing } from "@/lib/workspace-panel-sizing"
+
 const MIN_CENTER_WIDTH_PX = 420
 const MIN_WORKSPACE_HEIGHT_PX = 220
 const LAYOUT_EPSILON = 0.25
@@ -143,22 +145,6 @@ function isSameLayout(a: number[], b: number[]): boolean {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
-}
-
-function toPercent(pixels: number, totalPixels: number): number {
-  if (totalPixels <= 0) return 0
-  return (pixels / totalPixels) * 100
-}
-
-function resolvePanelSizeRange(
-  minPixels: number,
-  maxPixels: number,
-  totalPixels: number
-): { minSize: number; maxSize: number } {
-  const safeTotal = totalPixels > 0 ? totalPixels : 1
-  const minSize = clamp(toPercent(minPixels, safeTotal), 0, 100)
-  const maxSize = clamp(toPercent(maxPixels, safeTotal), minSize, 100)
-  return { minSize, maxSize }
 }
 
 /**
@@ -752,6 +738,8 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
   const shellAppliedLayoutRef = useRef<[number, number, number] | null>(null)
   const mainDesiredLayoutRef = useRef<[number, number]>([100, 0])
   const mainAppliedLayoutRef = useRef<[number, number] | null>(null)
+  const shellUserResizeRef = useRef(false)
+  const mainUserResizeRef = useRef(false)
 
   useEffect(() => {
     const container = shellContainerRef.current
@@ -928,7 +916,10 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
         return
       }
 
-      if (shellWidth <= 0) return
+      // PanelGroup also reports constraint/viewport normalization here. Only
+      // a user's resize changes the saved preference; otherwise a narrow
+      // viewport overwrites it using an intermediate percentage layout.
+      if (!shellUserResizeRef.current || shellWidth <= 0) return
 
       if (sidebarOpen) {
         const nextSidebarWidth = (normalizedLayout[0] / 100) * shellWidth
@@ -985,7 +976,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
         return
       }
 
-      if (!terminalOpen || mainHeight <= 0) return
+      if (!mainUserResizeRef.current || !terminalOpen || mainHeight <= 0) return
 
       const nextTerminalHeight = (normalizedLayout[1] / 100) * mainHeight
       const withinTerminalRange =
@@ -1010,19 +1001,24 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
   )
 
   const safeShellWidth = shellWidth > 0 ? shellWidth : 1440
-  const sidebarSizeRange = resolvePanelSizeRange(
+  const shellLayout = buildShellLayout()
+  const mainLayout = buildMainLayout()
+  const sidebarSizing = workspacePanelSizing(
+    shellLayout[0],
     sidebarMinWidth,
     sidebarMaxWidth,
     safeShellWidth
   )
-  const auxSizeRange = resolvePanelSizeRange(
+  const auxSizing = workspacePanelSizing(
+    shellLayout[2],
     auxMinWidth,
     auxMaxWidth,
     safeShellWidth
   )
 
   const safeMainHeight = mainHeight > 0 ? mainHeight : 900
-  const terminalSizeRange = resolvePanelSizeRange(
+  const terminalSizing = workspacePanelSizing(
+    mainLayout[1],
     terminalMinHeight,
     terminalMaxHeight,
     safeMainHeight
@@ -1043,9 +1039,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
         <ResizablePanel
           id={FOLDER_SHELL_LEFT_PANEL_ID}
           order={1}
-          defaultSize={18}
-          minSize={sidebarOpen ? sidebarSizeRange.minSize : 0}
-          maxSize={sidebarOpen ? sidebarSizeRange.maxSize : 0}
+          {...sidebarSizing}
         >
           {/* `bg-sidebar` on the wrapper (not just the Sidebar surface) so the
               collapse never flashes white: Sidebar `return null`s the instant
@@ -1059,6 +1053,15 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
 
         <ResizableHandle
           withHandle
+          onDragging={(dragging) => {
+            shellUserResizeRef.current = dragging
+          }}
+          onKeyDownCapture={() => {
+            shellUserResizeRef.current = true
+            requestAnimationFrame(() => {
+              shellUserResizeRef.current = false
+            })
+          }}
           disabled={!sidebarOpen}
           className={
             sidebarOpen ? "" : "pointer-events-none w-0 opacity-0 after:w-0"
@@ -1068,7 +1071,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
         <ResizablePanel
           id={FOLDER_SHELL_MAIN_PANEL_ID}
           order={2}
-          defaultSize={64}
+          defaultSize={shellLayout[1]}
           minSize={10}
         >
           <main
@@ -1087,7 +1090,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
               <ResizablePanel
                 id={FOLDER_MAIN_WORKSPACE_PANEL_ID}
                 order={1}
-                defaultSize={72}
+                defaultSize={mainLayout[0]}
                 minSize={15}
               >
                 <WorkspaceContent>{children}</WorkspaceContent>
@@ -1095,6 +1098,15 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
 
               <ResizableHandle
                 withHandle
+                onDragging={(dragging) => {
+                  mainUserResizeRef.current = dragging
+                }}
+                onKeyDownCapture={() => {
+                  mainUserResizeRef.current = true
+                  requestAnimationFrame(() => {
+                    mainUserResizeRef.current = false
+                  })
+                }}
                 disabled={!terminalOpen}
                 className={
                   terminalOpen
@@ -1106,9 +1118,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
               <ResizablePanel
                 id={FOLDER_MAIN_TERMINAL_PANEL_ID}
                 order={2}
-                defaultSize={28}
-                minSize={terminalOpen ? terminalSizeRange.minSize : 0}
-                maxSize={terminalOpen ? terminalSizeRange.maxSize : 0}
+                {...terminalSizing}
               >
                 <div className="h-full min-h-0 overflow-hidden">
                   <TerminalPanel />
@@ -1120,6 +1130,15 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
 
         <ResizableHandle
           withHandle
+          onDragging={(dragging) => {
+            shellUserResizeRef.current = dragging
+          }}
+          onKeyDownCapture={() => {
+            shellUserResizeRef.current = true
+            requestAnimationFrame(() => {
+              shellUserResizeRef.current = false
+            })
+          }}
           disabled={!auxOpen}
           className={
             auxOpen ? "" : "pointer-events-none w-0 opacity-0 after:w-0"
@@ -1129,9 +1148,7 @@ function FolderWorkspaceShell({ children }: { children: React.ReactNode }) {
         <ResizablePanel
           id={FOLDER_SHELL_RIGHT_PANEL_ID}
           order={3}
-          defaultSize={18}
-          minSize={auxOpen ? auxSizeRange.minSize : 0}
-          maxSize={auxOpen ? auxSizeRange.maxSize : 0}
+          {...auxSizing}
         >
           {/* Transparent canvas so the right column reads like the middle
               conversation area (its own frosted chrome — the aux toolbar — sits

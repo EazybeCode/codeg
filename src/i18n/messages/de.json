@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "repositoryLoadError": "Repositories konnten nicht geladen werden",
+    "repositoryLoadHint": "Prüfe die Verbindung und versuche es erneut. Bestehende Projekte wurden nicht verändert.",
     "account": "Arbeitsbereichskonto",
     "accountLoading": "Konto wird geladen…",
     "accountError": "Kontodaten nicht verfügbar",
@@ -1769,16 +1771,16 @@
     "sidebar": {
       "newProject": "Neues Projekt",
       "subfolder": {
-        "new": "New Subfolder",
-        "namePrompt": "Subfolder name",
-        "empty": "Empty folder",
-        "fromRepo": "From GitHub repo"
+        "new": "Neuer Unterordner",
+        "namePrompt": "Name des Unterordners",
+        "empty": "Leerer Ordner",
+        "fromRepo": "Aus GitHub-Repository"
       },
       "folderSortBy": {
-        "label": "Sort by",
-        "manual": "Manual",
+        "label": "Sortieren nach",
+        "manual": "Manuell",
         "name": "Name (A–Z)",
-        "recent": "Recent"
+        "recent": "Zuletzt verwendet"
       },
       "title": "Konversationen",
       "locateActiveConversation": "Aktive Konversation finden",
@@ -3741,6 +3743,9 @@
       }
     },
     "conversationContextBar": {
+      "folderPath": "Ordnerpfad",
+      "repositoryUnavailable": "Repository nicht verfügbar",
+      "repositoryChecking": "Repository wird geprüft…",
       "folderTitle": "Arbeitsordner",
       "branchTitle": "Arbeits-Branch",
       "searchFolder": "Search folder...",

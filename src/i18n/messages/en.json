@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "repositoryLoadError": "Couldn’t load repositories",
+    "repositoryLoadHint": "Check your connection and try again. Your existing projects haven’t changed.",
     "account": "Workspace account",
     "accountLoading": "Loading account…",
     "accountError": "Account details unavailable",
@@ -3741,6 +3743,9 @@
       }
     },
     "conversationContextBar": {
+      "folderPath": "Folder path",
+      "repositoryUnavailable": "Repository unavailable",
+      "repositoryChecking": "Checking repository…",
       "folderTitle": "Working folder",
       "branchTitle": "Working branch",
       "searchFolder": "Search folder...",

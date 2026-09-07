@@ -859,7 +859,15 @@ pub async fn create_subfolder_core(
         .ok_or_else(|| AppCommandError::not_found(format!("Folder {parent_id} not found")))?;
 
     let child_path = std::path::Path::new(&parent.path).join(&slug);
-    std::fs::create_dir_all(&child_path).map_err(AppCommandError::io)?;
+    // Do not silently adopt an existing directory or leak a database UNIQUE
+    // error. create_dir is also atomic against concurrent requests.
+    std::fs::create_dir(&child_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            AppCommandError::invalid_input("A folder with this name already exists")
+        } else {
+            AppCommandError::io(error)
+        }
+    })?;
     let child_path = child_path.to_string_lossy().to_string();
 
     folder_service::create_subfolder(&db.conn, parent_id, &child_path, &display_name)
@@ -1234,6 +1242,15 @@ pub async fn get_folder(
     folder_id: i32,
 ) -> Result<FolderDetail, DbError> {
     get_folder_core(&db, folder_id).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
+pub async fn get_folder_repo_context(
+    db: tauri::State<'_, AppDatabase>,
+    folder_id: i32,
+) -> Result<crate::workspace_repo::FolderRepoContext, AppCommandError> {
+    crate::workspace_repo::get_folder_repo_context(&db, folder_id).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -6534,6 +6551,18 @@ async fn get_unpushed_hashes(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn workspace_duplicate_subfolder_is_a_validation_error() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = super::open_folder_core(&db, dir.path().to_string_lossy().into()).await.unwrap();
+        let first = super::create_subfolder_core(&db, parent.id, "Marketing".into()).await.unwrap();
+        let err = super::create_subfolder_core(&db, parent.id, "Marketing".into()).await.unwrap_err();
+        assert_eq!(serde_json::to_value(&err).unwrap()["code"], "invalid_input");
+        assert!(std::path::Path::new(&first.path).is_dir());
+        assert_eq!(super::list_all_folder_details_core(&db).await.unwrap().len(), 2);
+    }
+
     use super::*;
     use crate::db::test_helpers::fresh_in_memory_db;
     use crate::models::agent::AgentType;

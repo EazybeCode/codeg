@@ -20,3 +20,5 @@ mod tests;
 mod provisioning_tests;
 #[cfg(test)]
 mod writer_tests;
+#[cfg(test)]
+mod browser_fixture;

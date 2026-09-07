@@ -1,8 +1,10 @@
 # Deploy Eazybe WorkOS on Coolify + Postgres
 
-This guide is for a trusted internal pilot with GitHub login and Postgres. It is
-not a public SaaS isolation guide: the bearer-token and agent-runner boundaries
-described under Security still apply.
+This guide is for a trusted single-user pilot with GitHub login and Postgres.
+Team access and public hosting remain gated on organization membership and
+revocation, personal provider credentials, complete file/Git/terminal/event
+authorization, and runner sandboxing. The local runtime flag does not satisfy
+those boundaries. Guided publication and wiki compilation are not implemented.
 
 ## 0. Provision
 
@@ -41,6 +43,7 @@ GITHUB_CLIENT_ID     = <your-github-app-client-id>
 GITHUB_CLIENT_SECRET = <your-github-app-client-secret>
 GITHUB_CALLBACK_URL  = https://workos.example.com/auth/github/callback
 WORKOS_APP_ORIGIN    = https://workos.example.com
+WORKOS_ENABLE_CATALOG_RUNTIME = false          # default; see trusted-runtime note
 WORKOS_ENC_KEY       = <openssl rand -hex 32>   # AES key for GitHub tokens at rest
 ```
 
@@ -49,9 +52,18 @@ WORKOS_ENC_KEY       = <openssl rand -hex 32>   # AES key for GitHub tokens at r
   closed when it is missing or malformed. Do not derive it from forwarded host
   headers.
 - Mark the secret ones as **secrets** in Coolify.
+- Repository-backed chat preparation requires `WORKOS_ENABLE_CATALOG_RUNTIME=true`.
+  Enable it only for an operator-controlled, trusted single-user runtime with
+  durable repository/worktree storage. It is not a public-team authorization gate.
+  The verified local preview and fixture-test instructions are in
+  [the local runtime guide](../LOCAL-WORKSPACE-PREVIEW.md).
 - Add [persistent storage](https://coolify.io/docs/knowledge-base/persistent-storage)
-  mounted at `/data` for repositories/worktrees, attachments, and agent state.
-  The Postgres database is a separate resource.
+  mounted at `/data` for WorkOS repositories/worktrees and attachments.
+  The Postgres database is a separate resource. Also persist and back up each
+  provider's native configuration/transcript directory: Claude uses
+  `CLAUDE_CONFIG_DIR` or, by default, `~/.claude`, independently of
+  `CODEG_DATA_DIR`. Postgres plus `/data` alone does not preserve that history
+  across container replacement.
 - ⚠ `WORKOS_ENC_KEY` must be **stable forever** — changing it makes stored GitHub
   tokens undecryptable (users just re-login, but don't rotate it casually).
 

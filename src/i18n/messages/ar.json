@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "repositoryLoadError": "تعذّر تحميل المستودعات",
+    "repositoryLoadHint": "تحقق من اتصالك وحاول مجددًا. لم تتغير مشاريعك الحالية.",
     "account": "حساب مساحة العمل",
     "accountLoading": "جارٍ تحميل الحساب…",
     "accountError": "تفاصيل الحساب غير متاحة",
@@ -1769,16 +1771,16 @@
     "sidebar": {
       "newProject": "مشروع جديد",
       "subfolder": {
-        "new": "New Subfolder",
-        "namePrompt": "Subfolder name",
-        "empty": "Empty folder",
-        "fromRepo": "From GitHub repo"
+        "new": "مجلد فرعي جديد",
+        "namePrompt": "اسم المجلد الفرعي",
+        "empty": "مجلد فارغ",
+        "fromRepo": "من مستودع GitHub"
       },
       "folderSortBy": {
-        "label": "Sort by",
-        "manual": "Manual",
-        "name": "Name (A–Z)",
-        "recent": "Recent"
+        "label": "ترتيب حسب",
+        "manual": "يدوي",
+        "name": "الاسم (A–Z)",
+        "recent": "الأحدث"
       },
       "title": "المحادثات",
       "locateActiveConversation": "تحديد المحادثة النشطة",
@@ -3741,6 +3743,9 @@
       }
     },
     "conversationContextBar": {
+      "folderPath": "مسار المجلد",
+      "repositoryUnavailable": "المستودع غير متاح",
+      "repositoryChecking": "جارٍ التحقق من المستودع…",
       "folderTitle": "مجلد العمل",
       "branchTitle": "فرع العمل",
       "searchFolder": "Search folder...",

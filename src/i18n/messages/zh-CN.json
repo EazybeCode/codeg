@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "repositoryLoadError": "无法加载仓库",
+    "repositoryLoadHint": "请检查网络连接后重试。现有项目没有变更。",
     "account": "工作区账户",
     "accountLoading": "正在加载账户…",
     "accountError": "账户信息暂不可用",
@@ -1769,16 +1771,16 @@
     "sidebar": {
       "newProject": "新建项目",
       "subfolder": {
-        "new": "New Subfolder",
-        "namePrompt": "Subfolder name",
-        "empty": "Empty folder",
-        "fromRepo": "From GitHub repo"
+        "new": "新建子文件夹",
+        "namePrompt": "子文件夹名称",
+        "empty": "空文件夹",
+        "fromRepo": "从 GitHub 仓库"
       },
       "folderSortBy": {
-        "label": "Sort by",
-        "manual": "Manual",
-        "name": "Name (A–Z)",
-        "recent": "Recent"
+        "label": "排序方式",
+        "manual": "手动",
+        "name": "名称（A–Z）",
+        "recent": "最近"
       },
       "title": "会话",
       "locateActiveConversation": "定位当前会话",
@@ -3741,6 +3743,9 @@
       }
     },
     "conversationContextBar": {
+      "folderPath": "文件夹路径",
+      "repositoryUnavailable": "仓库不可用",
+      "repositoryChecking": "正在检查仓库…",
       "folderTitle": "工作文件夹",
       "branchTitle": "工作分支",
       "searchFolder": "搜索文件夹...",

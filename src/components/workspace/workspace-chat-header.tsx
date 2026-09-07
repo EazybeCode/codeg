@@ -13,16 +13,18 @@ export function WorkspaceChatHeader({
   const t = useTranslations("WorkspaceCatalog")
   const catalog = useWorkspaceCatalogContext()
   const { revealInFileTree } = useAuxPanelContext()
+  const logicalPath = catalog
+    ?.pathFor(runtime.draft.node_id)
+    .map((node) => node.name)
+    .join(" / ")
   return (
     <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 px-4 py-2 text-xs">
       <nav
         aria-label={t("projects")}
-        className="min-w-0 flex-1 truncate text-muted-foreground"
+        title={logicalPath}
+        className="min-w-0 flex-1 basis-48 truncate text-muted-foreground"
       >
-        {catalog
-          ?.pathFor(runtime.draft.node_id)
-          .map((node) => node.name)
-          .join(" / ")}
+        {logicalPath}
       </nav>
       <span className="max-w-full truncate">{runtime.draft.full_name}</span>
       <span

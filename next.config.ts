@@ -31,7 +31,15 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
-  assetPrefix: isProd ? undefined : `http://${internalHost}:3000`,
+  assetPrefix: isProd
+    ? undefined
+    : (process.env.NEXT_PUBLIC_DEV_ASSET_ORIGIN ??
+      `http://${internalHost}:3000`),
+  experimental: {
+    // Constrained local previews can opt out of the rebuildable disk cache.
+    turbopackFileSystemCacheForDev:
+      process.env.NEXT_DISABLE_TURBO_CACHE !== "1",
+  },
 }
 
 export default withNextIntl(nextConfig)

@@ -148,7 +148,7 @@ describe("ConversationHeaderFolderPicker", () => {
     tabs = [{ id: "nested", folderId: 3, conversationId: null }]
     activeTabId = "nested"
     render(<ConversationHeaderFolderPicker tabId="nested" />)
-    const breadcrumb = screen.getByRole("navigation", { name: "Folder path" })
+    const breadcrumb = screen.getByRole("navigation", { name: "folderPath" })
     expect(breadcrumb.textContent).toContain("repo")
     expect(breadcrumb.textContent).toContain("docs")
     expect(screen.getByRole("button", { name: /API/ })).toBeTruthy()

@@ -1,5 +1,7 @@
 {
   "WorkspaceCatalog": {
+    "repositoryLoadError": "無法載入儲存庫",
+    "repositoryLoadHint": "請檢查網路連線後重試。現有專案沒有變更。",
     "account": "工作區帳戶",
     "accountLoading": "正在載入帳戶…",
     "accountError": "帳戶資訊暫不可用",
@@ -1769,16 +1771,16 @@
     "sidebar": {
       "newProject": "新增專案",
       "subfolder": {
-        "new": "New Subfolder",
-        "namePrompt": "Subfolder name",
-        "empty": "Empty folder",
-        "fromRepo": "From GitHub repo"
+        "new": "新增子資料夾",
+        "namePrompt": "子資料夾名稱",
+        "empty": "空資料夾",
+        "fromRepo": "從 GitHub 儲存庫"
       },
       "folderSortBy": {
-        "label": "Sort by",
-        "manual": "Manual",
-        "name": "Name (A–Z)",
-        "recent": "Recent"
+        "label": "排序方式",
+        "manual": "手動",
+        "name": "名稱（A–Z）",
+        "recent": "最近"
       },
       "title": "會話",
       "locateActiveConversation": "定位目前會話",
@@ -3741,6 +3743,9 @@
       }
     },
     "conversationContextBar": {
+      "folderPath": "資料夾路徑",
+      "repositoryUnavailable": "儲存庫無法使用",
+      "repositoryChecking": "正在檢查儲存庫…",
       "folderTitle": "工作資料夾",
       "branchTitle": "工作分支",
       "searchFolder": "Search folder...",
