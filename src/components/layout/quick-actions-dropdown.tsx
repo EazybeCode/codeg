@@ -38,6 +38,8 @@ import { CloneDialog } from "./clone-dialog"
 import { GithubProjectDialog } from "./github-project-dialog"
 import { RemoteWorkspaceManageDialog } from "./remote-workspace-manage-dialog"
 import { WorkspaceFolderDialog } from "./workspace-folder-dialog"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
+import { isCatalogWorkspaceMode } from "@/lib/workspace-catalog-mode"
 
 /**
  * The quick-actions launcher pinned to the status bar's leading edge — the
@@ -62,6 +64,7 @@ import { WorkspaceFolderDialog } from "./workspace-folder-dialog"
  * unmounts its content on close, which would take a nested dialog with it.
  */
 export function QuickActionsDropdown() {
+  const catalog = useWorkspaceCatalogContext()
   const t = useTranslations("Folder.statusBar.quickActions")
   const tFolderDropdown = useTranslations("Folder.folderNameDropdown")
   const tSidebar = useTranslations("Folder.sidebar")
@@ -97,6 +100,8 @@ export function QuickActionsDropdown() {
       })
     })
   }, [tPet])
+
+  if (isCatalogWorkspaceMode(catalog)) return null
 
   return (
     <>

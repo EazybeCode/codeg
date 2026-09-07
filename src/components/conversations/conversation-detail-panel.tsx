@@ -46,6 +46,10 @@ import {
   buildOptimisticUserTurnFromDraft,
 } from "@/hooks/use-workspace-chat-send"
 import { WorkspaceChatRuntimeGate } from "@/components/workspace/workspace-chat-runtime-gate"
+import {
+  useWorkspacePresentationGroups,
+  useWorkspacePresentationTabs,
+} from "@/hooks/use-workspace-presentation-tabs"
 import { useMessageQueue, type QueuedMessage } from "@/hooks/use-message-queue"
 import { MessageListView } from "@/components/message/message-list-view"
 import {
@@ -2394,11 +2398,12 @@ export function ConversationDetailPanel() {
   const { activeFolder: folder } = useActiveFolder()
   const conversations = useAppWorkspaceStore((s) => s.conversations)
   const allFolders = useAppWorkspaceStore((s) => s.allFolders)
-  const tabs = useTabStore((s) => s.tabs)
+  const tabs = useWorkspacePresentationTabs()
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const groupLayout = useTabStore((s) => s.groupLayout)
   const groupOf = useTabStore((s) => s.groupOf)
-  const groupSelection = useTabStore((s) => s.groupSelection)
+  const presentationGroups = useWorkspacePresentationGroups(tabs)
+  const groupLayout = presentationGroups.layout
+  const groupSelection = presentationGroups.selection
   const tileByGroup = useTabStore((s) => s.tileByGroup)
   // Narrow: only the drop-TARGET group id (for the shell highlight ring) — the
   // per-frame x/y writes during a drag never re-render the panel.
@@ -2498,7 +2503,7 @@ export function ConversationDetailPanel() {
     )
   )
 
-  const hasNoTabs = tabs.length === 0 && !activeTabId
+  const hasNoTabs = tabs.length === 0
   const activeConversationTab = useMemo(
     () =>
       tabs.find(
@@ -2872,7 +2877,7 @@ export function ConversationDetailPanel() {
             // (same gesture as clicking its content) — capture phase so the
             // header's own controls still receive the event afterwards.
             onPointerDownCapture={() => {
-              const selected = groupSelection[groupId]
+              const selected = selTab.id
               if (selected && selected !== useTabStore.getState().activeTabId) {
                 switchTab(selected)
               }
@@ -2948,6 +2953,7 @@ export function ConversationDetailPanel() {
                   down. */}
               {orderedGroupIds.map((groupId) => renderGroupShell(groupId))}
               {isSplit &&
+                presentationGroups.sourceLayoutUnchanged &&
                 groupHandles.map((handle) => (
                   <GroupSplitHandle
                     key={`${handle.splitId}:${handle.index}`}

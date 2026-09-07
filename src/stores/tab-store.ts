@@ -1070,6 +1070,39 @@ function initialTabState() {
   }
 }
 
+function isCatalogPresentationTab(tab: TabItemInternal): boolean {
+  return useAppWorkspaceStore
+    .getState()
+    .allFolders.some(
+      (folder) => folder.id === tab.folderId && folder.kind === "workspace_chat"
+    )
+}
+
+function mergeCatalogTabOrder(
+  rawTabs: TabItemInternal[],
+  orderedTabs: TabItem[]
+): TabItemInternal[] | null {
+  const slots = rawTabs
+    .map((tab, index) => (isCatalogPresentationTab(tab) ? index : -1))
+    .filter((index) => index >= 0)
+  if (slots.length !== orderedTabs.length) return null
+  const slotIds = new Set(slots.map((index) => rawTabs[index].id))
+  const seen = new Set<string>()
+  const ordered: TabItemInternal[] = []
+  for (const tab of orderedTabs) {
+    if (!slotIds.has(tab.id) || seen.has(tab.id)) return null
+    seen.add(tab.id)
+    const raw = rawTabs.find((candidate) => candidate.id === tab.id)
+    if (!raw) return null
+    ordered.push(raw)
+  }
+  const next = [...rawTabs]
+  slots.forEach((slot, index) => {
+    next[slot] = ordered[index]
+  })
+  return next
+}
+
 export const useTabStore = create<TabStoreState>()((set, get) => ({
   ...initialTabState(),
 
@@ -1233,8 +1266,11 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
         const indexInGroup = prevState.rawTabs
           .filter(inGroup)
           .findIndex((t) => t.id === tabId)
-        const groupAfter = next.filter(inGroup)
-        let newActiveId: string
+        const presentedNext = prevState.catalogMode
+          ? next.filter(isCatalogPresentationTab)
+          : next
+        const groupAfter = presentedNext.filter(inGroup)
+        let newActiveId: string | null
         if (groupAfter.length > 0) {
           newActiveId =
             groupAfter[Math.min(indexInGroup, groupAfter.length - 1)].id
@@ -1245,9 +1281,9 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
             : undefined
           newActiveId =
             neighborSelection != null &&
-            next.some((t) => t.id === neighborSelection)
+            presentedNext.some((t) => t.id === neighborSelection)
               ? neighborSelection
-              : next[0].id
+              : (presentedNext[0]?.id ?? null)
         }
         set({ rawTabs: next, activeTabId: newActiveId })
       } else {
@@ -1281,18 +1317,19 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
     const prevState = get()
     const target = prevState.rawTabs.find((tab) => tab.id === tabId)
     if (!target) return
+    if (prevState.catalogMode && !isCatalogPresentationTab(target)) return
     // Group-scoped while split: "others" are the target's group siblings only —
     // the other groups keep their tabs (IDEA semantics).
     const { groupOf, groupLayout } = prevState
     const targetGroup = groupOfTab(groupOf, groupLayout, tabId)
-    const keep =
-      groupLayout.type === "group"
-        ? [target]
-        : prevState.rawTabs.filter(
-            (tab) =>
-              tab.id === tabId ||
-              groupOfTab(groupOf, groupLayout, tab.id) !== targetGroup
-          )
+    const keep = prevState.rawTabs.filter((tab) => {
+      if (tab.id === tabId) return true
+      if (prevState.catalogMode && !isCatalogPresentationTab(tab)) return true
+      return (
+        groupLayout.type !== "group" &&
+        groupOfTab(groupOf, groupLayout, tab.id) !== targetGroup
+      )
+    })
     if (keep.length === prevState.rawTabs.length) {
       // Nothing to close (already alone in its group) — just focus.
       focusTab(tabId)
@@ -1309,10 +1346,22 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   closeAllTabs: () => {
-    if (
-      get().catalogMode ||
-      useAppWorkspaceStore.getState().folders.length === 0
-    ) {
+    if (get().catalogMode) {
+      const prevState = get()
+      const closing = prevState.rawTabs.filter(isCatalogPresentationTab)
+      if (closing.length === 0) return
+      const closingIds = new Set(closing.map((tab) => tab.id))
+      for (const tab of closing) {
+        pushClosedTab(snapshotConversationTab(tab))
+      }
+      set({
+        rawTabs: prevState.rawTabs.filter((tab) => !closingIds.has(tab.id)),
+        activeTabId: null,
+      })
+      recomputeTabs()
+      return
+    }
+    if (useAppWorkspaceStore.getState().folders.length === 0) {
       const prevState = get()
       if (prevState.rawTabs.length === 0 && prevState.activeTabId == null) {
         return
@@ -1359,7 +1408,10 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   switchTab: (tabId) => {
-    if (!get().rawTabs.some((t) => t.id === tabId)) return
+    const state = get()
+    const tab = state.rawTabs.find((candidate) => candidate.id === tabId)
+    if (!tab) return
+    if (state.catalogMode && !isCatalogPresentationTab(tab)) return
     focusTab(tabId)
     runtime.activateConversationPane()
   },
@@ -1600,7 +1652,10 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
     const raw = st.rawTabs
     const slots: number[] = []
     raw.forEach((tab, i) => {
-      if (groupOfTab(st.groupOf, st.groupLayout, tab.id) === groupId) {
+      if (
+        groupOfTab(st.groupOf, st.groupLayout, tab.id) === groupId &&
+        (!st.catalogMode || isCatalogPresentationTab(tab))
+      ) {
         slots.push(i)
       }
     })
@@ -1640,7 +1695,13 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   reorderTabs: (reorderedTabs) => {
-    set({ rawTabs: reorderedTabs })
+    const st = get()
+    const next = st.catalogMode
+      ? mergeCatalogTabOrder(st.rawTabs, reorderedTabs)
+      : reorderedTabs
+    if (!next) return
+    if (next.every((tab, index) => tab === st.rawTabs[index])) return
+    set({ rawTabs: next })
     recomputeTabs()
   },
 
@@ -2235,6 +2296,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
     const rawTabs = get().rawTabs
     const openChildIds = new Set<number>()
     for (const tab of rawTabs) {
+      if (get().catalogMode && !isCatalogPresentationTab(tab)) continue
       const id = tab.conversationId
       if (id == null) continue
       if (conversationKeys.has(`${tab.folderId}-${tab.agentType}-${id}`)) {
@@ -2401,6 +2463,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   correctDraftAgents: () => {
+    if (get().catalogMode) return
     const candidates = get().rawTabs.filter((tab) => {
       if (tab.conversationId != null) return false
       if (tab.agentTypeProvisional) return true
@@ -2558,11 +2621,16 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
     const activeTab = st.rawTabs.find((t) => t.id === st.activeTabId) ?? null
     useAppWorkspaceStore
       .getState()
-      .setActiveFolderId(activeTab?.folderId ?? null)
+      .setActiveFolderId(
+        activeTab && (!st.catalogMode || isCatalogPresentationTab(activeTab))
+          ? activeTab.folderId
+          : null
+      )
   },
 
   persistLastActiveContext: () => {
     const st = get()
+    if (st.catalogMode) return
     if (!st.tabsHydrated) return
     const active = st.rawTabs.find((t) => t.id === st.activeTabId)
     if (!active) return
@@ -2617,6 +2685,7 @@ export function runRecoveryOnce() {
  * Chat drafts are folderless (`folderId` 0) and always survive.
  */
 export function pruneOrphanDraftsOnce() {
+  if (useTabStore.getState().catalogMode) return
   if (orphanDraftPruneRan) return
   orphanDraftPruneRan = true
   const st = useTabStore.getState()

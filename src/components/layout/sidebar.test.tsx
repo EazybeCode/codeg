@@ -36,6 +36,15 @@ const spies = vi.hoisted(() => ({
 }))
 const mockState = vi.hoisted(() => ({
   activeFolder: { id: 7, path: "/x" } as { id: number; path: string } | null,
+  catalogEnabled: false,
+}))
+
+vi.mock("@/components/workspace/workspace-catalog-provider", () => ({
+  useWorkspaceCatalogContext: () => ({
+    enabled: mockState.catalogEnabled,
+    scope: null,
+    identity: { value: null, status: "loading", retry: vi.fn() },
+  }),
 }))
 
 // The conversation list is irrelevant here — stub it so the test exercises only
@@ -119,6 +128,10 @@ function renderSidebar() {
   )
 }
 
+beforeEach(() => {
+  mockState.catalogEnabled = false
+})
+
 /**
  * Walk into one of the view-options menu's two visibility inventories, which
  * live behind submenus. Clicking a sub-trigger opens it synchronously; opening
@@ -147,6 +160,7 @@ describe("Sidebar — fixed nav region", () => {
     spies.setRoute.mockClear()
     spies.openConversations.mockClear()
     mockState.activeFolder = { id: 7, path: "/x" }
+    mockState.catalogEnabled = false
   })
 
   it("Automations navigates to the automations route", () => {
@@ -189,6 +203,14 @@ describe("Sidebar — fixed nav region", () => {
     renderSidebar()
     expect(screen.queryByRole("button", { name: /^New chat/ })).toBeNull()
     expect(spies.openChatModeTab).not.toHaveBeenCalled()
+  })
+
+  it("shows no legacy history or legacy tools in catalog mode", () => {
+    mockState.catalogEnabled = true
+    renderSidebar()
+
+    expect(screen.queryByText("Legacy / local history")).toBeNull()
+    expect(screen.queryByRole("button", { name: "Tools" })).toBeNull()
   })
 })
 

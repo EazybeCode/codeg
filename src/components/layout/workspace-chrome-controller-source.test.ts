@@ -66,6 +66,11 @@ describe("tab close/navigation shortcuts live in the always-mounted controller",
     )
   })
 
+  it("gates catalog reopen entries through the managed-chat predicate", () => {
+    expect(controllerSource).toMatch(/canRestoreCatalogConversation/)
+    expect(controllerSource).toMatch(/closed\.conversationId/)
+  })
+
   it("removes the keydown shortcut listeners from both tab strips", () => {
     // The strips are conditionally mounted (desktop only; the file strip only
     // when a file tab is open), so they must not own any global shortcut.

@@ -12,6 +12,10 @@ import type { ImperativePanelGroupHandle } from "react-resizable-panels"
 import { FolderTitleBar } from "@/components/layout/folder-title-bar"
 import { Sidebar } from "@/components/layout/sidebar"
 import { WorkspaceCatalogProvider } from "@/components/workspace/workspace-catalog-provider"
+import {
+  useWorkspacePresentationGroups,
+  useWorkspacePresentationTabs,
+} from "@/hooks/use-workspace-presentation-tabs"
 import { StatusBar } from "@/components/layout/status-bar"
 import {
   AppWorkspaceProvider,
@@ -27,7 +31,7 @@ import {
 import { DelegationProvider } from "@/contexts/delegation-context"
 import { ConversationRuntimeProvider } from "@/contexts/conversation-runtime-context"
 import { TabProvider, useTabStore, useTabActions } from "@/contexts/tab-context"
-import { selectIsSplit } from "@/stores/tab-store"
+import { leafIds } from "@/lib/tab-group-layout"
 import { SidebarProvider, useSidebarContext } from "@/contexts/sidebar-context"
 import { SearchDialogProvider } from "@/contexts/search-dialog-context"
 import { AutomationsViewProvider } from "@/contexts/automations-view-context"
@@ -303,8 +307,10 @@ function WorkspaceContent({ children }: { children: React.ReactNode }) {
   const { isOpen: auxOpen } = useAuxPanelContext()
   const { isMac, isWindows, isLinux } = usePlatform()
   const { zoomLevel } = useZoomLevel()
-  const hasConvTabs = useTabStore((s) => s.tabs.length > 0)
-  const isConvSplit = useTabStore(selectIsSplit)
+  const presentationTabs = useWorkspacePresentationTabs()
+  const presentationGroups = useWorkspacePresentationGroups(presentationTabs)
+  const hasConvTabs = presentationTabs.length > 0
+  const isConvSplit = leafIds(presentationGroups.layout).length > 1
   const winLinuxControls = isDesktop() && (isWindows || isLinux)
   // The window chrome (toggle/search left, terminal/aux/settings right) now
   // lives in fixed corner overlays (see FolderLayoutShell) that never move on

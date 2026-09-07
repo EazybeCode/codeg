@@ -19,6 +19,7 @@ import {
 import {
   groupOfTab,
   isReparentUnmount,
+  pruneOrphanDraftsOnce,
   resetTabStore,
   selectIsSplit,
   useTabStore,
@@ -266,15 +267,148 @@ describe("TabProvider tab state transitions", () => {
     ).toThrow("canonical workspace chat")
     expect(useTabStore.getState().rawTabs).toBe(before)
   })
-  it("catalog mode closes the last chat to welcome despite populated legacy folders", () => {
+  it("catalog mode closes the last managed chat to welcome despite preserved legacy tabs", () => {
+    seedWorkspaceStore()
+    const managed = {
+      ...useAppWorkspaceStore.getState().allFolders[1],
+      kind: "workspace_chat" as const,
+    }
+    useAppWorkspaceStore.setState({
+      allFolders: [defaultFoldersMock[0], managed],
+    })
+    useTabStore.setState({ catalogMode: true })
+    useTabStore.getState().openTab(1, 1, "codex", true, "Legacy")
+    useTabStore.getState().openTab(2, 3, "codex", true, "Managed")
+    useTabStore.getState().closeTab("conv-2-codex-3")
+    expect(useTabStore.getState().rawTabs.map((tab) => tab.id)).toEqual([
+      "conv-1-codex-1",
+    ])
+    expect(useTabStore.getState().activeTabId).toBeNull()
+    useTabStore.getState().recoverActiveContext()
+    expect(useTabStore.getState().rawTabs.map((tab) => tab.id)).toEqual([
+      "conv-1-codex-1",
+    ])
+    expect(useTabStore.getState().activeTabId).toBeNull()
+    useTabStore.setState({ catalogMode: false })
+  })
+
+  it("catalog tab actions preserve hidden legacy rows and never activate them", () => {
+    seedWorkspaceStore()
+    const managed = {
+      ...defaultFoldersMock[1],
+      kind: "workspace_chat" as const,
+    }
+    useAppWorkspaceStore.setState({
+      allFolders: [defaultFoldersMock[0], managed],
+    })
+    useTabStore.setState({ catalogMode: true })
+    const store = useTabStore.getState()
+    store.openTab(1, 1, "codex", true, "Legacy")
+    store.openTab(2, 3, "codex", true, "Managed one")
+    store.openTab(2, 4, "codex", true, "Managed two")
+
+    store.switchTab("conv-1-codex-1")
+    expect(useTabStore.getState().activeTabId).toBe("conv-2-codex-4")
+
+    store.closeOtherTabs("conv-2-codex-3")
+    expect(useTabStore.getState().rawTabs.map((tab) => tab.id)).toEqual([
+      "conv-1-codex-1",
+      "conv-2-codex-3",
+    ])
+
+    useTabStore.getState().closeAllTabs()
+    expect(useTabStore.getState().rawTabs.map((tab) => tab.id)).toEqual([
+      "conv-1-codex-1",
+    ])
+    expect(useTabStore.getState().activeTabId).toBeNull()
+  })
+
+  it("catalog reorders only presented tabs while keeping hidden rows in place", () => {
+    seedWorkspaceStore()
+    const managed = {
+      ...defaultFoldersMock[1],
+      kind: "workspace_chat" as const,
+    }
+    useAppWorkspaceStore.setState({
+      allFolders: [defaultFoldersMock[0], managed],
+    })
+    useTabStore.setState({ catalogMode: true })
+    const store = useTabStore.getState()
+    store.openTab(1, 1, "codex", true, "Legacy")
+    store.openTab(2, 3, "codex", true, "Managed one")
+    store.openTab(2, 4, "codex", true, "Managed two")
+
+    const presented = useTabStore
+      .getState()
+      .tabs.filter((tab) => tab.folderId === managed.id)
+    store.reorderTabs([presented[1], presented[0]])
+    expect(useTabStore.getState().rawTabs.map((tab) => tab.id)).toEqual([
+      "conv-1-codex-1",
+      "conv-2-codex-4",
+      "conv-2-codex-3",
+    ])
+
+    useTabStore.setState({
+      groupLayout: {
+        type: "split",
+        id: "split",
+        orientation: "horizontal",
+        children: [
+          { type: "group", id: "mixed" },
+          { type: "group", id: "other" },
+        ],
+        ratios: [0.5, 0.5],
+      },
+      groupOf: {
+        "conv-1-codex-1": "mixed",
+        "conv-2-codex-4": "mixed",
+        "conv-2-codex-3": "mixed",
+      },
+    })
+    const mixedPresented = useTabStore
+      .getState()
+      .tabs.filter((tab) => tab.folderId === managed.id)
+    store.reorderGroupTabs("mixed", [mixedPresented[1], mixedPresented[0]])
+    expect(useTabStore.getState().rawTabs.map((tab) => tab.id)).toEqual([
+      "conv-1-codex-1",
+      "conv-2-codex-3",
+      "conv-2-codex-4",
+    ])
+  })
+
+  it("catalog active-folder sync masks a restored legacy active tab", () => {
     seedWorkspaceStore()
     useTabStore.setState({ catalogMode: true })
-    useTabStore.getState().openTab(1, 1, "codex", true, "Existing")
-    useTabStore.getState().closeTab(useTabStore.getState().tabs[0].id)
-    expect(useTabStore.getState().tabs).toHaveLength(0)
-    useTabStore.getState().recoverActiveContext()
-    expect(useTabStore.getState().tabs).toHaveLength(0)
-    useTabStore.setState({ catalogMode: false })
+    useTabStore.getState().openTab(1, 1, "codex", true, "Legacy")
+
+    useTabStore.getState().syncActiveFolderId()
+
+    expect(setActiveFolderIdMock).toHaveBeenLastCalledWith(null)
+  })
+
+  it("catalog reconciliation does not read hidden legacy tab details", () => {
+    seedWorkspaceStore()
+    useAppWorkspaceStore.setState({ conversations: [] })
+    useTabStore.setState({ catalogMode: true })
+    useTabStore.getState().openTab(1, 99, "codex", true, "Legacy child")
+
+    useTabStore.getState().reconcileChildSummaries()
+
+    expect(getFolderConversationMock).not.toHaveBeenCalled()
+  })
+
+  it("catalog hydration cleanup preserves orphaned legacy drafts", () => {
+    seedWorkspaceStore()
+    useTabStore.getState().openNewConversationTab(1, "/repo")
+    const draftId = useTabStore.getState().activeTabId
+    useAppWorkspaceStore.setState({ allFolders: [], folders: [] })
+    useTabStore.setState({ catalogMode: true })
+
+    pruneOrphanDraftsOnce()
+
+    expect(useTabStore.getState().rawTabs.map((tab) => tab.id)).toContain(
+      draftId
+    )
   })
   beforeEach(() => {
     vi.clearAllMocks()

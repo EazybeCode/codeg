@@ -241,7 +241,6 @@ export function Sidebar() {
   }, [allExpanded])
 
   const catalog = useWorkspaceCatalogContext()
-  const tCatalog = useTranslations("WorkspaceCatalog")
   if (!isOpen) return null
 
   return (
@@ -470,21 +469,6 @@ export function Sidebar() {
         {catalog?.enabled ? (
           <div className="flex-1 min-h-0 overflow-y-auto">
             <WorkspaceCatalogSidebar />
-            <details className="mx-2 border-t border-sidebar-border/60 pt-2">
-              <summary className="cursor-pointer rounded px-2 py-2 text-xs text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring">
-                {tCatalog("legacy")}
-              </summary>
-              <div className="flex h-[min(45dvh,24rem)] min-h-40 flex-col">
-                <SidebarConversationList
-                  ref={listRef}
-                  legacyHistory
-                  hideRootCreation
-                  showCompleted={showCompleted}
-                  showWorktrees={showWorktrees}
-                  sortMode={sortMode}
-                />
-              </div>
-            </details>
           </div>
         ) : (
           <SidebarConversationList
@@ -497,92 +481,94 @@ export function Sidebar() {
           />
         )}
       </div>
-      <div className="shrink-0 border-t border-sidebar-border/60 p-2">
-        <button
-          type="button"
-          onClick={() => setToolsExpanded((value) => !value)}
-          aria-expanded={toolsExpanded}
-          aria-controls="workspace-tools"
-          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <Menu className="size-4 text-muted-foreground" />
-          {tWorkspace("tools")}
-          <ChevronDown
-            aria-hidden="true"
-            className={cn(
-              "ml-auto size-3.5 transition-transform",
-              toolsExpanded && "rotate-180"
+      {!catalog?.enabled && (
+        <div className="shrink-0 border-t border-sidebar-border/60 p-2">
+          <button
+            type="button"
+            onClick={() => setToolsExpanded((value) => !value)}
+            aria-expanded={toolsExpanded}
+            aria-controls="workspace-tools"
+            className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Menu className="size-4 text-muted-foreground" />
+            {tWorkspace("tools")}
+            <ChevronDown
+              aria-hidden="true"
+              className={cn(
+                "ml-auto size-3.5 transition-transform",
+                toolsExpanded && "rotate-180"
+              )}
+            />
+          </button>
+          <nav
+            id="workspace-tools"
+            aria-label={tWorkspace("tools")}
+            hidden={!toolsExpanded}
+            className="mt-1 max-h-[30dvh] overflow-y-auto space-y-0.5 border-l border-sidebar-border/60 pl-3 ml-3"
+          >
+            {isNavItemVisible(navItems, "automations") && (
+              <SidebarNavButton
+                icon={Zap}
+                label={t("automations")}
+                active={routeId === "automations"}
+                onClick={() => {
+                  if (isMobile) toggle()
+                  setRoute("automations")
+                }}
+                trailing={
+                  unseenFailures > 0 ? (
+                    <span className="ml-auto inline-flex h-[0.9375rem] min-w-[0.9375rem] shrink-0 items-center justify-center rounded-full bg-destructive/15 px-1 font-mono text-[0.625rem] font-medium leading-none text-destructive">
+                      {unseenFailures}
+                    </span>
+                  ) : null
+                }
+              />
             )}
-          />
-        </button>
-        <nav
-          id="workspace-tools"
-          aria-label={tWorkspace("tools")}
-          hidden={!toolsExpanded}
-          className="mt-1 max-h-[30dvh] overflow-y-auto space-y-0.5 border-l border-sidebar-border/60 pl-3 ml-3"
-        >
-          {isNavItemVisible(navItems, "automations") && (
-            <SidebarNavButton
-              icon={Zap}
-              label={t("automations")}
-              active={routeId === "automations"}
-              onClick={() => {
-                if (isMobile) toggle()
-                setRoute("automations")
-              }}
-              trailing={
-                unseenFailures > 0 ? (
-                  <span className="ml-auto inline-flex h-[0.9375rem] min-w-[0.9375rem] shrink-0 items-center justify-center rounded-full bg-destructive/15 px-1 font-mono text-[0.625rem] font-medium leading-none text-destructive">
-                    {unseenFailures}
-                  </span>
-                ) : null
-              }
-            />
-          )}
-          {isNavItemVisible(navItems, "tasks") && (
-            <SidebarNavButton
-              icon={ListTodo}
-              label={t("tasks")}
-              active={routeId === "tasks"}
-              onClick={() => {
-                if (isMobile) toggle()
-                setRoute("tasks")
-              }}
-              trailing={
-                attentionCount > 0 ? (
-                  // Attention (not failure): tasks waiting on the user — primary
-                  // tint like the shortcut chips, not destructive.
-                  <span className="ml-auto inline-flex h-[0.9375rem] min-w-[0.9375rem] shrink-0 items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[0.625rem] font-medium leading-none text-primary">
-                    {attentionCount}
-                  </span>
-                ) : null
-              }
-            />
-          )}
-          {isNavItemVisible(navItems, "forge") && (
-            <SidebarNavButton
-              icon={LayoutTemplate}
-              label={t("forge")}
-              active={routeId === "forge"}
-              onClick={() => {
-                if (isMobile) toggle()
-                setRoute("forge")
-              }}
-            />
-          )}
-          {isNavItemVisible(navItems, "canvas") && (
-            <SidebarNavButton
-              icon={MapIcon}
-              label={t("canvas")}
-              active={routeId === "canvas"}
-              onClick={() => {
-                if (isMobile) toggle()
-                setRoute("canvas")
-              }}
-            />
-          )}
-        </nav>
-      </div>
+            {isNavItemVisible(navItems, "tasks") && (
+              <SidebarNavButton
+                icon={ListTodo}
+                label={t("tasks")}
+                active={routeId === "tasks"}
+                onClick={() => {
+                  if (isMobile) toggle()
+                  setRoute("tasks")
+                }}
+                trailing={
+                  attentionCount > 0 ? (
+                    // Attention (not failure): tasks waiting on the user — primary
+                    // tint like the shortcut chips, not destructive.
+                    <span className="ml-auto inline-flex h-[0.9375rem] min-w-[0.9375rem] shrink-0 items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[0.625rem] font-medium leading-none text-primary">
+                      {attentionCount}
+                    </span>
+                  ) : null
+                }
+              />
+            )}
+            {isNavItemVisible(navItems, "forge") && (
+              <SidebarNavButton
+                icon={LayoutTemplate}
+                label={t("forge")}
+                active={routeId === "forge"}
+                onClick={() => {
+                  if (isMobile) toggle()
+                  setRoute("forge")
+                }}
+              />
+            )}
+            {isNavItemVisible(navItems, "canvas") && (
+              <SidebarNavButton
+                icon={MapIcon}
+                label={t("canvas")}
+                active={routeId === "canvas"}
+                onClick={() => {
+                  if (isMobile) toggle()
+                  setRoute("canvas")
+                }}
+              />
+            )}
+          </nav>
+        </div>
+      )}
     </aside>
   )
 }

@@ -7,6 +7,8 @@ import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { subscribe } from "@/lib/platform"
 import { FOLDER_OPEN_IN_WORKSPACE_EVENT } from "@/lib/api"
 import type { FolderDetail } from "@/lib/types"
+import { useWorkspaceCatalogContext } from "./workspace-catalog-provider"
+import { isCatalogWorkspaceMode } from "@/lib/workspace-catalog-mode"
 
 /**
  * Surfaces folders opened from the project launcher (a separate window/tab).
@@ -21,6 +23,7 @@ import type { FolderDetail } from "@/lib/types"
  * extra round-trip is required to apply it.
  */
 export function WorkspaceOpenFolderListener() {
+  const catalog = useWorkspaceCatalogContext()
   const { openNewConversationTab } = useTabActions()
   const { openConversations } = useWorkbenchRoute()
 
@@ -32,6 +35,7 @@ export function WorkspaceOpenFolderListener() {
       const dispose = await subscribe<FolderDetail>(
         FOLDER_OPEN_IN_WORKSPACE_EVENT,
         (detail) => {
+          if (isCatalogWorkspaceMode(catalog)) return
           const store = useAppWorkspaceStore.getState()
           store.upsertFolder(detail)
           store.setBranch(detail.id, detail.git_branch ?? null)
@@ -52,7 +56,7 @@ export function WorkspaceOpenFolderListener() {
       disposed = true
       unlisten?.()
     }
-  }, [openNewConversationTab, openConversations])
+  }, [catalog, openNewConversationTab, openConversations])
 
   return null
 }

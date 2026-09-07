@@ -365,6 +365,33 @@ describe("useReferenceSearch", () => {
     expect(itemsOf(groups, "file")).toHaveLength(1)
   })
 
+  it("keeps managed files, agents, and commits without exposing legacy sessions", async () => {
+    mocks.agents = [makeAgent("codex", { name: "Codex" })]
+    mocks.files = { allFiles: [makeFile("a.ts")], loaded: true }
+    mocks.gitLog.mockResolvedValue({
+      entries: [makeCommit("abc1234", "fix")],
+      has_upstream: false,
+    })
+
+    const { result } = renderHook(() =>
+      useReferenceSearch({
+        defaultPath: "/managed/chat",
+        enabled: true,
+        includeSessions: false,
+      })
+    )
+    let groups!: SuggestionGroup[]
+    await act(async () => {
+      groups = (await result.current("")) as SuggestionGroup[]
+    })
+
+    expect(mocks.listAllConversations).not.toHaveBeenCalled()
+    expect(itemsOf(groups, "session")).toHaveLength(0)
+    expect(itemsOf(groups, "file")).toHaveLength(1)
+    expect(itemsOf(groups, "agent")).toHaveLength(1)
+    expect(itemsOf(groups, "commit")).toHaveLength(1)
+  })
+
   it("reuses the cached network promises across repeated searches", async () => {
     const { result } = renderHook(() =>
       useReferenceSearch({ defaultPath: "/repo", enabled: true })

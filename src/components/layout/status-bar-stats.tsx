@@ -6,6 +6,8 @@ import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useRemoteConnection } from "@/contexts/remote-connection-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { cn } from "@/lib/utils"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
+import { isCatalogWorkspaceMode } from "@/lib/workspace-catalog-mode"
 
 /**
  * The workspace-stats cluster at the left end of the status bar.
@@ -27,8 +29,10 @@ export function StatusBarStats() {
   // codeg-server); local windows have no RemoteConnection in context.
   const remoteConnection = useRemoteConnection()?.connection ?? null
   const { routeId, setRoute } = useWorkbenchRoute()
+  const catalog = useWorkspaceCatalogContext()
+  const visibleStats = isCatalogWorkspaceMode(catalog) ? null : stats
 
-  if (!remoteConnection && !stats) return null
+  if (!remoteConnection && !visibleStats) return null
 
   return (
     <div className="flex items-center gap-3">
@@ -43,7 +47,7 @@ export function StatusBarStats() {
           <span className="truncate">{remoteConnection.name}</span>
         </span>
       )}
-      {stats && (
+      {visibleStats && (
         <button
           type="button"
           onClick={() => setRoute("tokenUsage")}
@@ -55,7 +59,9 @@ export function StatusBarStats() {
         >
           <ChartNoAxesColumn className="h-3 w-3" />
           <span>
-            {t("conversations", { count: stats.total_conversations })}
+            {t("conversations", {
+              count: visibleStats.total_conversations,
+            })}
           </span>
         </button>
       )}

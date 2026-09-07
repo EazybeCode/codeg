@@ -11,6 +11,7 @@ import { resolveActiveSessionDetails } from "@/components/conversations/active-s
 import { SessionDetailsContent } from "@/components/conversations/session-details-content"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useAuxPanelContext } from "@/contexts/aux-panel-context"
+import { useWorkspacePresentationTabs } from "@/hooks/use-workspace-presentation-tabs"
 
 // Stable empty-turns reference so the `useShallow` slice below stays
 // reference-equal when there's no active session — otherwise a fresh `[]` each
@@ -32,7 +33,7 @@ export function SessionDetailsTab() {
   const t = useTranslations("Folder.sessionDetails")
   const { isOpen, activeTab } = useAuxPanelContext()
 
-  const tabs = useTabStore((s) => s.tabs)
+  const tabs = useWorkspacePresentationTabs()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const activeConversationTab = useMemo(
     () =>

@@ -12,6 +12,8 @@ import { useShortcutSettings } from "@/hooks/use-shortcut-settings"
 import { useZoomLevel } from "@/hooks/use-appearance"
 import { formatShortcutLabel } from "@/lib/keyboard-shortcuts"
 import { MAC_TRAFFIC_LIGHT_INSET, leftChromeReserve } from "@/lib/window-chrome"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
+import { isCatalogWorkspaceMode } from "@/lib/workspace-catalog-mode"
 
 /**
  * Contents of the window's fixed top-LEFT chrome overlay: the sidebar toggle +
@@ -42,6 +44,7 @@ export function LeftEdgeChrome() {
   const { shortcuts } = useShortcutSettings()
   const { isMac: platformIsMac } = usePlatform()
   const { zoomLevel } = useZoomLevel()
+  const catalog = useWorkspaceCatalogContext()
   // The traffic lights only exist on the macOS desktop runtime (not web / not
   // Windows-Linux), so only reserve their inset there.
   const showMacInset = platformIsMac && isDesktop()
@@ -74,19 +77,21 @@ export function LeftEdgeChrome() {
         >
           <PanelLeft className="h-3.5 w-3.5" />
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6 hover:bg-foreground/10 hover:text-foreground/80 dark:hover:bg-foreground/10"
-          onClick={() => setSearchOpen(true)}
-          title={tTitleBar("withShortcut", {
-            label: tTitleBar("search"),
-            shortcut: formatShortcutLabel(shortcuts.toggle_search, isMac),
-          })}
-          aria-label={tTitleBar("search")}
-        >
-          <Search aria-hidden="true" className="h-3.5 w-3.5" />
-        </Button>
+        {!isCatalogWorkspaceMode(catalog) && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 hover:bg-foreground/10 hover:text-foreground/80 dark:hover:bg-foreground/10"
+            onClick={() => setSearchOpen(true)}
+            title={tTitleBar("withShortcut", {
+              label: tTitleBar("search"),
+              shortcut: formatShortcutLabel(shortcuts.toggle_search, isMac),
+            })}
+            aria-label={tTitleBar("search")}
+          >
+            <Search aria-hidden="true" className="h-3.5 w-3.5" />
+          </Button>
+        )}
       </div>
       {/* Empty tail is a window-drag region. */}
       <div data-tauri-drag-region className="h-full min-w-0 flex-1" />

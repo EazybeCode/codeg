@@ -9,6 +9,11 @@ const spies = vi.hoisted(() => ({
   setSearchOpen: vi.fn(),
   toggleSidebar: vi.fn(),
 }))
+const mode = vi.hoisted(() => ({ catalog: false }))
+
+vi.mock("@/components/workspace/workspace-catalog-provider", () => ({
+  useWorkspaceCatalogContext: () => ({ enabled: mode.catalog }),
+}))
 
 vi.mock("@/contexts/sidebar-context", () => ({
   useSidebarContext: () => ({ isOpen: true, toggle: spies.toggleSidebar }),
@@ -42,6 +47,7 @@ describe("LeftEdgeChrome", () => {
   beforeEach(() => {
     spies.setSearchOpen.mockClear()
     spies.toggleSidebar.mockClear()
+    mode.catalog = false
   })
 
   it("opens the shared search dialog from the search button", () => {
@@ -74,5 +80,13 @@ describe("LeftEdgeChrome", () => {
     renderChrome()
     fireEvent.click(screen.getByRole("button", { name: /Hide Sidebar/ }))
     expect(spies.toggleSidebar).toHaveBeenCalled()
+  })
+
+  it("does not expose legacy conversation search in catalog mode", () => {
+    mode.catalog = true
+    renderChrome()
+
+    expect(screen.queryByRole("button", { name: "Search" })).toBeNull()
+    expect(screen.getByRole("button", { name: /Hide Sidebar/ })).toBeVisible()
   })
 })

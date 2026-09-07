@@ -21,7 +21,11 @@ const mocks = vi.hoisted(() => {
 })
 
 let desktop = true
+let catalog = false
 vi.mock("@/lib/platform", () => ({ isDesktop: () => desktop }))
+vi.mock("@/components/workspace/workspace-catalog-provider", () => ({
+  useWorkspaceCatalogContext: () => ({ enabled: catalog }),
+}))
 
 vi.mock("@/lib/api", () => ({}))
 
@@ -95,10 +99,22 @@ const FORGE_ROW = "Repository panel"
 
 beforeEach(() => {
   desktop = true
+  catalog = false
   vi.clearAllMocks()
 })
 
 describe("QuickActionsDropdown", () => {
+  it("does not expose legacy repository or workbench navigation in catalog mode", () => {
+    catalog = true
+    render(
+      <NextIntlClientProvider locale="en" messages={enMessages}>
+        <QuickActionsDropdown />
+      </NextIntlClientProvider>
+    )
+
+    expect(screen.queryByRole("button", { name: "Quick actions" })).toBeNull()
+  })
+
   it("groups workspace and navigation actions under their headings on desktop", async () => {
     await mountAndOpen()
 

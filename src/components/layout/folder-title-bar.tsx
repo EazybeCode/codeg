@@ -27,6 +27,7 @@ import { WorkbenchRouteChromeActions } from "@/components/workbench/workbench-co
 import { MAC_TRAFFIC_LIGHT_INSET } from "@/lib/window-chrome"
 import { cn } from "@/lib/utils"
 import { WindowControls } from "./window-controls"
+import { isCatalogWorkspaceMode } from "@/lib/workspace-catalog-mode"
 
 /**
  * Mobile-only workspace title bar (`h-10`, matching the desktop column strip).
@@ -127,16 +128,18 @@ export function FolderTitleBar() {
             the sidebar is a Drawer that covers the workspace, and there is no ⌘K
             on a phone — so without this button search would have no visible
             entry point at all. No shortcut suffix on the tooltip, same reason. */}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={() => setSearchOpen(true)}
-          title={tTitleBar("search")}
-          aria-label={tTitleBar("search")}
-        >
-          <Search className="h-4 w-4" />
-        </Button>
+        {!isCatalogWorkspaceMode(catalog) && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={() => setSearchOpen(true)}
+            title={tTitleBar("search")}
+            aria-label={tTitleBar("search")}
+          >
+            <Search className="h-4 w-4" />
+          </Button>
+        )}
         {(!catalog?.enabled || catalogNodeId != null) && (
           <Button
             variant="ghost"

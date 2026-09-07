@@ -135,6 +135,8 @@ import { ComposerAddMenu } from "@/components/chat/composer/composer-add-menu"
 import { ComposerImageThumbnails } from "@/components/chat/composer/composer-image-thumbnails"
 import { useComposerAttachments } from "@/components/chat/composer/use-composer-attachments"
 import { useComposerShortcuts } from "@/components/chat/composer/use-composer-shortcuts"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
+import { isCatalogWorkspaceMode } from "@/lib/workspace-catalog-mode"
 
 /**
  * Payload pushed into the composer from outside (e.g. a welcome-page quick
@@ -194,6 +196,8 @@ interface MessageInputProps {
   folderPickerOverride?: ConversationFolderPickerOverride
   draftStorageKey?: string | null
   isActive?: boolean
+  /** Hide the legacy global-session mention source for managed catalog chats. */
+  includeSessionReferences?: boolean
   /** Paint the flowing active-session gradient on the composer border. Set only
    *  for the active tab while tiled across multiple sessions; a lone or
    *  non-tiled session keeps the plain default border. Independent of
@@ -327,6 +331,7 @@ export function MessageInput({
   folderPickerOverride,
   draftStorageKey,
   isActive = false,
+  includeSessionReferences,
   showActiveFlow = false,
   onEnqueue,
   editingItemId,
@@ -342,6 +347,7 @@ export function MessageInput({
   injectContent,
   onInjectConsumed,
 }: MessageInputProps) {
+  const catalog = useWorkspaceCatalogContext()
   const t = useTranslations("Folder.chat.messageInput")
   const tCatalog = useTranslations("WorkspaceCatalog")
   const tQueue = useTranslations("Folder.chat.messageQueue")
@@ -458,6 +464,8 @@ export function MessageInput({
   const referenceSearch = useReferenceSearch({
     defaultPath: defaultPath ?? null,
     enabled: isActive,
+    includeSessions:
+      includeSessionReferences ?? !isCatalogWorkspaceMode(catalog),
     labels: referenceGroupLabels,
   })
 

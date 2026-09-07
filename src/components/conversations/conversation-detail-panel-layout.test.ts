@@ -42,6 +42,11 @@ const messageListViewSource = readFileSync(
 )
 
 describe("ConversationDetailPanel new conversation layout", () => {
+  it("uses the projected catalog split model for both strips and resize handles", () => {
+    expect(workspaceLayoutSource).toContain("useWorkspacePresentationGroups")
+    expect(workspaceLayoutSource).not.toContain("selectIsSplit")
+    expect(source).toContain("presentationGroups.sourceLayoutUnchanged")
+  })
   it("keeps the new-conversation input in the welcome panel with the original scroll layout", () => {
     expect(source).toMatch(
       /hideInput=\{\s*isWelcomeMode \|\| \(Boolean\(acpLoadError\) && workspaceChatId == null\)/
@@ -275,7 +280,9 @@ describe("ConversationDetailPanel split-group render model", () => {
     expect(source).toContain("<TabBar groupId={groupId} />")
     const handlesIdx = source.indexOf("groupHandles.map((handle) => (")
     expect(handlesIdx).toBeGreaterThan(-1)
-    expect(source.slice(handlesIdx - 80, handlesIdx)).toContain("{isSplit &&")
+    const handleGuard = source.slice(handlesIdx - 180, handlesIdx)
+    expect(handleGuard).toContain("{isSplit &&")
+    expect(handleGuard).toContain("presentationGroups.sourceLayoutUnchanged")
   })
 
   // Each split group keeps the unsplit layout's "tabs + conversation title

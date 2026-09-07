@@ -23,6 +23,9 @@ vi.mock("@/lib/api", () => ({ getFolderConversation: vi.fn() }))
 
 vi.mock("@/contexts/aux-panel-context", () => ({ useAuxPanelContext: vi.fn() }))
 vi.mock("@/contexts/tab-context", () => ({ useTabStore: vi.fn() }))
+vi.mock("@/hooks/use-workspace-presentation-tabs", () => ({
+  useWorkspacePresentationTabs: vi.fn(),
+}))
 vi.mock("@/stores/conversation-runtime-store", () => ({
   useConversationRuntimeStore: vi.fn(),
 }))
@@ -33,11 +36,13 @@ vi.mock("@/stores/app-workspace-store", () => ({
 import { SessionDetailsTab } from "./aux-panel-session-details-tab"
 import { useAuxPanelContext } from "@/contexts/aux-panel-context"
 import { useTabStore } from "@/contexts/tab-context"
+import { useWorkspacePresentationTabs } from "@/hooks/use-workspace-presentation-tabs"
 import { useConversationRuntimeStore } from "@/stores/conversation-runtime-store"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 
 const mockAux = useAuxPanelContext as unknown as Mock
 const mockTabs = useTabStore as unknown as Mock
+const mockPresentationTabs = useWorkspacePresentationTabs as unknown as Mock
 const mockRuntime = useConversationRuntimeStore as unknown as Mock
 const mockWorkspace = useAppWorkspaceStore as unknown as Mock
 
@@ -83,6 +88,7 @@ function setupScene(opts: { hasActiveConversation: boolean }) {
     activeTabId: opts.hasActiveConversation ? 1 : null,
   }
   mockTabs.mockImplementation((sel: (s: TabSlice) => unknown) => sel(tabState))
+  mockPresentationTabs.mockReturnValue(tabState.tabs)
   mockRuntime.mockImplementation((sel: (s: RuntimeSlice) => unknown) =>
     sel({ byConversationId: new Map() })
   )
@@ -121,5 +127,15 @@ describe("SessionDetailsTab", () => {
     expect(getByText("No active session")).toBeTruthy()
     expect(queryByTestId("branch-dropdown")).toBeNull()
     expect(queryByTestId("command-dropdown")).toBeNull()
+  })
+
+  it("does not expose a restored legacy session hidden by catalog mode", () => {
+    setupScene({ hasActiveConversation: true })
+    mockPresentationTabs.mockReturnValue([])
+
+    const { getByText, queryByText } = renderTab()
+
+    expect(getByText("No active session")).toBeTruthy()
+    expect(queryByText("My session")).toBeNull()
   })
 })

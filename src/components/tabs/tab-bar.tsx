@@ -24,6 +24,10 @@ import {
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
 import { useIsCoarsePointer } from "@/hooks/use-is-coarse-pointer"
 import { TabItem, type TabMoveTarget } from "./tab-item"
+import {
+  useWorkspacePresentationGroups,
+  useWorkspacePresentationTabs,
+} from "@/hooks/use-workspace-presentation-tabs"
 
 interface TabBarProps {
   /** Split-group strip: render only this group's tabs, highlight the GROUP's
@@ -39,11 +43,12 @@ interface TabBarProps {
 export function TabBar({ groupId }: TabBarProps) {
   const t = useTranslations("Folder.conversationCard")
   const tCatalog = useTranslations("WorkspaceCatalog")
-  const tabs = useTabStore((s) => s.tabs)
+  const tabs = useWorkspacePresentationTabs()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const groupOf = useTabStore((s) => s.groupOf)
-  const groupLayout = useTabStore((s) => s.groupLayout)
-  const groupSelection = useTabStore((s) => s.groupSelection)
+  const presentationGroups = useWorkspacePresentationGroups(tabs)
+  const groupLayout = presentationGroups.layout
+  const groupSelection = presentationGroups.selection
   const tileByGroup = useTabStore((s) => s.tileByGroup)
   const {
     switchTab,

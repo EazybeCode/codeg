@@ -183,6 +183,8 @@ export interface UseReferenceSearchOptions {
    * tree is never fetched — let the host pre-warm only the active composer.
    */
   enabled?: boolean
+  /** Catalog chats omit the legacy global-conversation source. */
+  includeSessions?: boolean
   /** Localized group headings; English fallbacks when omitted. */
   labels?: ReferenceGroupLabels
 }
@@ -208,6 +210,7 @@ export interface UseReferenceSearchOptions {
 export function useReferenceSearch({
   defaultPath,
   enabled = true,
+  includeSessions = true,
   labels,
 }: UseReferenceSearchOptions): ReferenceSearch {
   const path = defaultPath || null
@@ -228,6 +231,7 @@ export function useReferenceSearch({
   const agentsRef = useRef(agents)
   const pathRef = useRef(path)
   const enabledRef = useRef(enabled)
+  const includeSessionsRef = useRef(includeSessions)
   const labelsRef = useRef(labels)
 
   // `pathRef` and `enabledRef` gate the post-await freshness check in `search`,
@@ -239,7 +243,8 @@ export function useReferenceSearch({
   useIsomorphicLayoutEffect(() => {
     pathRef.current = path
     enabledRef.current = enabled
-  }, [path, enabled])
+    includeSessionsRef.current = includeSessions
+  }, [path, enabled, includeSessions])
 
   useEffect(() => {
     // Only expose files once the tree has loaded for the *current* path, so the
@@ -280,18 +285,21 @@ export function useReferenceSearch({
     if (!enabledRef.current) return []
 
     const path = pathRef.current
+    const includeSessions = includeSessionsRef.current
 
     // Lazy session fetch. On rejection the cache entry is cleared (not cached as
     // an empty result) so the next `@` retries instead of wedging on `[]`.
-    const sessionsKey = "all"
+    const sessionsKey = includeSessions ? "all" : "none"
     let sessionsEntry = sessionsRef.current
     if (sessionsEntry?.key !== sessionsKey) {
       const created: NonNullable<typeof sessionsRef.current> = {
         key: sessionsKey,
-        promise: listAllConversations().catch(() => {
-          if (sessionsRef.current === created) sessionsRef.current = null
-          return [] as DbConversationSummary[]
-        }),
+        promise: includeSessions
+          ? listAllConversations().catch(() => {
+              if (sessionsRef.current === created) sessionsRef.current = null
+              return [] as DbConversationSummary[]
+            })
+          : Promise.resolve([]),
       }
       sessionsRef.current = created
       sessionsEntry = created
@@ -329,7 +337,12 @@ export function useReferenceSearch({
     // query change, so a folder switch would otherwise leak the old repo's
     // commits — built against `path` — into the new folder's panel). The next
     // keystroke re-runs the search against the current folder.
-    if (signal?.aborted || !enabledRef.current || pathRef.current !== path) {
+    if (
+      signal?.aborted ||
+      !enabledRef.current ||
+      pathRef.current !== path ||
+      includeSessionsRef.current !== includeSessions
+    ) {
       return []
     }
 

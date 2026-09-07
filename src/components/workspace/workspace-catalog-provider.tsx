@@ -45,9 +45,12 @@ export function WorkspaceCatalogProvider({
   const identity = useWorkspaceIdentity()
   const openConversations = useOptionalWorkbenchRoute()?.openConversations
   useLayoutEffect(() => {
-    useTabStore.setState({ catalogMode: identity.status !== "local" })
+    const catalogMode = identity.status !== "local"
+    useTabStore.setState({ catalogMode })
+    useTabStore.getState().syncActiveFolderId()
     return () => {
       useTabStore.setState({ catalogMode: false })
+      useTabStore.getState().syncActiveFolderId()
     }
   }, [identity.status])
   const scope = identity.value
@@ -161,11 +164,21 @@ export function WorkspaceCatalogProvider({
       // Bridge the external persisted-tab store to the canonical browser URL.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setChatId(runtime.draft.id)
-    } else if (changed) {
+    } else if (
+      changed &&
+      (identity.status === "local" || activeTabId == null)
+    ) {
       window.history.replaceState({}, "", "/workspace")
       setChatId(null)
     }
-  }, [activeTabId, localFocusRevision, readyState, scope, chatId])
+  }, [
+    activeTabId,
+    localFocusRevision,
+    readyState,
+    scope,
+    chatId,
+    identity.status,
+  ])
   const selectedNodeId = selection?.scope === scope ? selection.id : null
   const create = (
     kind: Creation["kind"],

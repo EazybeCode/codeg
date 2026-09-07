@@ -1,5 +1,9 @@
 "use client"
 import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
+import {
+  canRestoreCatalogConversation,
+  isCatalogWorkspaceMode,
+} from "@/lib/workspace-catalog-mode"
 
 import { useCallback, useEffect, useState } from "react"
 import { openSettingsWindow } from "@/lib/api"
@@ -29,6 +33,7 @@ import {
 } from "@/lib/keyboard-shortcuts"
 import { SearchCommandDialog } from "@/components/conversations/search-command-dialog"
 import { WorkspaceFolderDialog } from "@/components/layout/workspace-folder-dialog"
+import { useWorkspacePresentationTabs } from "@/hooks/use-workspace-presentation-tabs"
 
 /**
  * Headless owner of the workspace's global keyboard shortcuts and the two
@@ -47,8 +52,11 @@ export function WorkspaceChromeController() {
   const { toggle: toggleTerminal } = useTerminalContext()
   const { openNewConversationTab, openTab, switchTab, closeTab } =
     useTabActions()
-  const tabs = useTabStore((s) => s.tabs)
-  const activeTabId = useTabStore((s) => s.activeTabId)
+  const tabs = useWorkspacePresentationTabs()
+  const storedActiveTabId = useTabStore((s) => s.activeTabId)
+  const activeTabId = tabs.some((tab) => tab.id === storedActiveTabId)
+    ? storedActiveTabId
+    : null
   // Tab-close/navigation shortcuts used to live in the visible tab strips.
   // Mobile no longer mounts those strips, so this always-mounted controller now
   // owns them too (see the keydown handler below).
@@ -79,6 +87,7 @@ export function WorkspaceChromeController() {
     function handleKeyDown(e: KeyboardEvent) {
       if (matchShortcutEvent(e, shortcuts.toggle_search)) {
         e.preventDefault()
+        if (isCatalogWorkspaceMode(catalog)) return
         setSearchOpen((prev) => !prev)
         return
       }
@@ -122,6 +131,7 @@ export function WorkspaceChromeController() {
       }
       if (matchShortcutEvent(e, shortcuts.open_folder)) {
         e.preventDefault()
+        if (isCatalogWorkspaceMode(catalog)) return
         void handleOpenFolder()
         return
       }
@@ -227,6 +237,23 @@ export function WorkspaceChromeController() {
             })
             return
           }
+          const folder = useAppWorkspaceStore
+            .getState()
+            .getFolder(closed.folderId)
+          const managedFolder =
+            folder?.kind === "workspace_chat" ||
+            [...(catalog?.ready.values() ?? [])].some(
+              (runtime) => runtime.folder?.id === closed.folderId
+            )
+          if (
+            !canRestoreCatalogConversation(
+              isCatalogWorkspaceMode(catalog),
+              managedFolder,
+              closed.conversationId
+            )
+          ) {
+            continue
+          }
           if (closed.conversationId != null) {
             // A deletion seen at any point wins. `applyConversationRemove`
             // purges what is on the stack when it runs, but a tab that was
@@ -243,9 +270,6 @@ export function WorkspaceChromeController() {
             )
             return
           }
-          const folder = useAppWorkspaceStore
-            .getState()
-            .getFolder(closed.folderId)
           const workingDir = closed.workingDir ?? folder?.path
           if (!workingDir) continue
           openConversations()
@@ -287,8 +311,15 @@ export function WorkspaceChromeController() {
 
   return (
     <>
-      <SearchCommandDialog open={searchOpen} onOpenChange={setSearchOpen} />
-      <WorkspaceFolderDialog open={browserOpen} onOpenChange={setBrowserOpen} />
+      {!isCatalogWorkspaceMode(catalog) && (
+        <>
+          <SearchCommandDialog open={searchOpen} onOpenChange={setSearchOpen} />
+          <WorkspaceFolderDialog
+            open={browserOpen}
+            onOpenChange={setBrowserOpen}
+          />
+        </>
+      )}
     </>
   )
 }

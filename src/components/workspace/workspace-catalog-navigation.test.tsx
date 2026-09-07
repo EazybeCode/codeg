@@ -197,7 +197,7 @@ it.each([
   ["unprovisioned", "same history"],
   ["failed", "same tab"],
 ])(
-  "reconciles a %s launcher when selecting %s legacy history",
+  "keeps a %s launcher when stale client state selects %s legacy history",
   async (state, target) => {
     const original = call.getMockImplementation()!
     call.mockImplementation((cmd, args) => {
@@ -257,10 +257,10 @@ it.each([
           )
     })
     expect(screen.getByLabelText("Destination")).toHaveTextContent(
-      "conversations:null"
+      "conversations:42"
     )
-    expect(window.location.search).toBe("")
-    expect(screen.getByText("Legacy content available")).toBeVisible()
+    expect(window.location.search).toBe("?chatId=42")
+    expect(screen.getByRole("heading", { name: "Chat 42" })).toBeVisible()
   }
 )
 it("keeps the requested launcher when a remote tab snapshot hydrates legacy history", async () => {
@@ -341,6 +341,28 @@ it("routes an active managed tab's New chat through its logical project", async 
   expect(await screen.findByRole("dialog")).toHaveTextContent("Project 2")
   expect(screen.getByLabelText("Chat title")).toBeVisible()
   expect(useTabStore.getState().tabs).toHaveLength(1)
+})
+
+it("renders only managed chat tabs while preserving stale legacy tab state", async () => {
+  useAppWorkspaceStore.setState({
+    allFolders: [
+      { id: 99, kind: "regular", name: "Legacy", path: "/legacy" },
+      runtime(1).folder!,
+    ] as never,
+  })
+  act(() => {
+    useTabStore.getState().openTab(99, 101, "claude_code", true, "Legacy")
+    useTabStore.getState().openTab(11, 21, "codex", true, "Chat 1")
+  })
+
+  mount(<TabBar />)
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith("list_workspace_nodes", {})
+  )
+
+  expect(screen.queryByRole("tab", { name: /Legacy/ })).toBeNull()
+  expect(screen.getByRole("tab", { name: /Chat 1/ })).toBeVisible()
+  expect(useTabStore.getState().tabs).toHaveLength(2)
 })
 
 it("disables draft-seeding split actions while preserving persisted-tab split moves", async () => {

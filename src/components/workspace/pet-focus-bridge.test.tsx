@@ -12,6 +12,11 @@ import {
 let tabs: { tabsHydrated: boolean; openTab: ReturnType<typeof vi.fn> }
 let addFolderToWorkspaceById: ReturnType<typeof vi.fn>
 let capturedHandler: ((p: unknown) => void) | null = null
+let catalogEnabled = false
+
+vi.mock("./workspace-catalog-provider", () => ({
+  useWorkspaceCatalogContext: () => ({ enabled: catalogEnabled }),
+}))
 
 vi.mock("@/contexts/tab-context", () => ({
   useTabStore: (selector: (s: typeof tabs) => unknown) => selector(tabs),
@@ -26,7 +31,36 @@ vi.mock("@/lib/transport", () => ({
   }),
 }))
 
-import { PetFocusBridge } from "./deep-link-bootstrap"
+import { DeepLinkBootstrap, PetFocusBridge } from "./deep-link-bootstrap"
+
+describe("DeepLinkBootstrap", () => {
+  beforeEach(() => {
+    catalogEnabled = true
+    addFolderToWorkspaceById = vi.fn()
+    resetAppWorkspaceStore()
+    useAppWorkspaceStore.setState({
+      foldersHydrated: true,
+      folders: [{ id: 7 }] as never,
+      conversations: [{ id: 9, folder_id: 7, agent_type: "codex" }] as never,
+      addFolderToWorkspaceById,
+    })
+    tabs = { tabsHydrated: true, openTab: vi.fn() }
+    window.history.replaceState(
+      {},
+      "",
+      "/workspace?folderId=7&conversationId=9&agent=codex"
+    )
+  })
+  afterEach(() => cleanup())
+
+  it("clears a legacy conversation deep link without activating it in catalog mode", async () => {
+    render(<DeepLinkBootstrap />)
+
+    await waitFor(() => expect(window.location.search).toBe(""))
+    expect(tabs.openTab).not.toHaveBeenCalled()
+    expect(addFolderToWorkspaceById).not.toHaveBeenCalled()
+  })
+})
 
 describe("PetFocusBridge", () => {
   beforeEach(() => {
@@ -39,6 +73,7 @@ describe("PetFocusBridge", () => {
       addFolderToWorkspaceById,
     })
     tabs = { tabsHydrated: false, openTab: vi.fn() }
+    catalogEnabled = false
   })
   afterEach(() => cleanup())
 
@@ -85,6 +120,19 @@ describe("PetFocusBridge", () => {
     capturedHandler!({ folderId: "x", conversationId: 1, agent: "codex" })
     capturedHandler!({ folderId: 7, conversationId: 1 }) // missing agent
     await Promise.resolve()
+    expect(tabs.openTab).not.toHaveBeenCalled()
+  })
+
+  it("ignores legacy focus requests in catalog mode", async () => {
+    catalogEnabled = true
+    useAppWorkspaceStore.setState({ foldersHydrated: true })
+    tabs = { ...tabs, tabsHydrated: true }
+    render(<PetFocusBridge />)
+    await waitFor(() => expect(capturedHandler).toBeTruthy())
+
+    capturedHandler!({ folderId: 7, conversationId: 9, agent: "codex" })
+    await Promise.resolve()
+
     expect(tabs.openTab).not.toHaveBeenCalled()
   })
 })
