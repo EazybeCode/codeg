@@ -3,6 +3,9 @@ import { useEffect, useState, type ReactNode } from "react"
 import { getTransport } from "@/lib/transport"
 import type { WorkspaceChatRuntime } from "@/lib/workspace-execution"
 import { Button } from "@/components/ui/button"
+import { useTranslations } from "next-intl"
+import { useWorkspaceCatalogContext } from "./workspace-catalog-provider"
+import { WorkspaceCatalogError } from "./workspace-catalog-error"
 
 /** Persisted tabs carry legacy IDs. Never mount ACP until their scoped
  * inverse mapping has identified the canonical ready workspace chat. */
@@ -13,15 +16,21 @@ export function WorkspaceChatRuntimeGate({
 }: {
   conversationId: number
   folderId: number
-  children: (draftId: number) => ReactNode
+  children: (draftId: number, runtime: WorkspaceChatRuntime) => ReactNode
 }) {
+  const t = useTranslations("WorkspaceCatalog")
+  const catalog = useWorkspaceCatalogContext()
+  const scope = catalog?.scope
+  const rememberReady = catalog?.rememberReady
   const [attempt, setAttempt] = useState(0)
   const [result, setResult] = useState<{
+    scope: string | null | undefined
     conversationId: number
     folderId: number
     attempt: number
     draftId?: number
-    error?: string
+    runtime?: WorkspaceChatRuntime
+    error?: unknown
   } | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -39,47 +48,49 @@ export function WorkspaceChatRuntimeGate({
         ) {
           throw new Error("Workspace chat mapping is not ready")
         }
-        if (!cancelled)
+        if (!cancelled) {
+          rememberReady?.(runtime)
           setResult({
+            scope,
             conversationId,
             folderId,
             attempt,
             draftId: runtime.draft.id,
+            runtime,
           })
+        }
       })
       .catch((error: unknown) => {
-        const code =
-          error && typeof error === "object" && "error" in error
-            ? error.error
-            : null
-        const message =
-          code === "unauthorized" || code === "reauth_required"
-            ? "Sign in again to load this workspace chat."
-            : "Unable to load this workspace chat."
         if (!cancelled)
-          setResult({ conversationId, folderId, attempt, error: message })
+          setResult({ conversationId, folderId, attempt, error, scope })
       })
     return () => {
       cancelled = true
     }
-  }, [conversationId, folderId, attempt])
+  }, [conversationId, folderId, attempt, scope, rememberReady])
   const current =
+    result?.scope === scope &&
     result?.conversationId === conversationId &&
     result.folderId === folderId &&
     result.attempt === attempt
       ? result
       : null
-  if (current?.draftId != null) return <>{children(current.draftId)}</>
+  if (current?.draftId != null && current.runtime)
+    return <>{children(current.draftId, current.runtime)}</>
   return (
     <div role="status" className="p-4 text-sm">
-      <p>{current?.error ?? "Loading workspace chat…"}</p>
-      {current?.error && (
+      {current?.error != null ? (
+        <WorkspaceCatalogError error={current.error} />
+      ) : (
+        <p>{t("loadingChat")}</p>
+      )}
+      {current?.error != null && (
         <Button
           variant="outline"
           className="mt-2"
           onClick={() => setAttempt((value) => value + 1)}
         >
-          Retry
+          {t("retry")}
         </Button>
       )}
     </div>

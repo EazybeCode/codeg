@@ -43,8 +43,8 @@ const messageListViewSource = readFileSync(
 
 describe("ConversationDetailPanel new conversation layout", () => {
   it("keeps the new-conversation input in the welcome panel with the original scroll layout", () => {
-    expect(source).toContain(
-      "hideInput={isWelcomeMode || Boolean(acpLoadError)}"
+    expect(source).toMatch(
+      /hideInput=\{\s*isWelcomeMode \|\| \(Boolean\(acpLoadError\) && workspaceChatId == null\)/
     )
 
     const welcomeBranchStart = source.indexOf("{isWelcomeMode ? (")
@@ -352,11 +352,14 @@ describe("ConversationDetailPanel chat-mode send path", () => {
     expect(block).not.toContain("mqEnqueue")
   })
 
-  it("gates the chat-draft composer on a live connection (no offline compose)", () => {
-    // allowOfflineCompose let the user send before connecting, which is what
-    // parked the first prompt in the never-flushed queue. The composer now
-    // waits for `connected` like a normal conversation.
-    expect(source).not.toContain("allowOfflineCompose")
+  it("keeps legacy drafts connection-gated and allows only the managed first-send path offline", () => {
+    expect(source).toContain("allowOfflineCompose={workspaceSender.eligible}")
+    expect(source).not.toContain("allowOfflineCompose={true}")
+    const welcomeStart = source.indexOf("{isWelcomeMode ? (")
+    const welcomeEnd = source.indexOf(") : showDraftHeader ?", welcomeStart)
+    expect(source.slice(welcomeStart, welcomeEnd)).not.toContain(
+      "allowOfflineCompose"
+    )
   })
 
   it("surfaces a non-silent error when the eager scratch-dir prepare fails", () => {
@@ -457,8 +460,10 @@ describe("ConversationDetailPanel session-load failure surface", () => {
 
   it("docks the load error at the composer with the recovery actions", () => {
     // The composer input stays hidden (a send can't reach the dead session)…
-    expect(source).toContain(
-      "hideInput={isWelcomeMode || Boolean(acpLoadError)}"
+    // Managed errors retain the retryable draft composer; legacy dead-session
+    // input still hides behind its established recovery banner.
+    expect(source).toMatch(
+      /hideInput=\{\s*isWelcomeMode \|\| \(Boolean\(acpLoadError\) && workspaceChatId == null\)/
     )
     // …and the banner takes its place, explaining why and offering recovery.
     expect(source).toContain("composerBanner={acpLoadErrorBanner}")

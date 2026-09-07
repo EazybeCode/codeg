@@ -10,6 +10,10 @@ import { Sidebar } from "./sidebar"
 import type { SidebarConversationListHandle } from "@/components/conversations/sidebar-conversation-list"
 import enMessages from "@/i18n/messages/en.json"
 
+// Identity has its own request/response tests; navigation tests don't need a
+// network request that settles after their synchronous assertions.
+vi.mock("./workspace-identity", () => ({ WorkspaceIdentity: () => null }))
+
 // Stable spies + mutable active-folder, referenced from the hoisted mock
 // factories below (vi.mock is hoisted above imports).
 const spies = vi.hoisted(() => ({
@@ -147,27 +151,29 @@ describe("Sidebar — fixed nav region", () => {
 
   it("Automations navigates to the automations route", () => {
     const { getByText } = renderSidebar()
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }))
     fireEvent.click(getByText("Automations"))
     expect(spies.setRoute).toHaveBeenCalledWith("automations")
   })
 
-  it("New chat returns to the conversation workspace", () => {
-    const { getByText } = renderSidebar()
-    fireEvent.click(getByText("New chat"))
-    expect(spies.openConversations).toHaveBeenCalled()
+  it("does not create unscoped chats from the workspace navigation", () => {
+    renderSidebar()
+    expect(screen.queryByRole("button", { name: /^New chat/ })).toBeNull()
+    expect(spies.openChatModeTab).not.toHaveBeenCalled()
   })
 
-  it("New chat opens a conversation tab in the active folder", () => {
-    const { getByText } = renderSidebar()
-    fireEvent.click(getByText("New chat"))
-    expect(spies.openNewConversationTab).toHaveBeenCalledWith(7, "/x")
-  })
-
-  it("renders the New chat shortcut hint", () => {
-    const { getByText } = renderSidebar()
-    // isMac=false → "mod" formats as "Ctrl". The badge is opacity-0 until the
-    // row is hovered/focused but stays in the DOM, so getByText resolves it.
-    expect(getByText("Ctrl+T")).toBeTruthy()
+  it("expands and collapses Tools with accessible keyboard controls", async () => {
+    const user = userEvent.setup()
+    renderSidebar()
+    const tools = screen.getByRole("button", { name: "Tools" })
+    expect(tools).toHaveAttribute("aria-expanded", "false")
+    expect(screen.queryByRole("button", { name: "Automations" })).toBeNull()
+    tools.focus()
+    await user.keyboard("{Enter}")
+    expect(tools).toHaveAttribute("aria-expanded", "true")
+    expect(screen.getByRole("button", { name: "Automations" })).toBeVisible()
+    await user.keyboard("{Enter}")
+    expect(screen.queryByRole("button", { name: "Automations" })).toBeNull()
   })
 
   it("no longer carries a Search row — it moved to the window chrome", () => {
@@ -178,16 +184,11 @@ describe("Sidebar — fixed nav region", () => {
     expect(queryByText("Ctrl+K")).toBeNull()
   })
 
-  it("falls back to chat mode (never disabled) when no folder is active", () => {
+  it("does not offer a folderless chat when no project is selected", () => {
     mockState.activeFolder = null
-    const { getByText } = renderSidebar()
-    const btn = getByText("New chat").closest("button") as HTMLButtonElement
-    // Defense-in-depth: the button stays clickable so a workspace that recovered
-    // to no active folder is never a dead end — it opens folderless chat mode.
-    expect(btn.disabled).toBe(false)
-    fireEvent.click(btn)
-    expect(spies.openChatModeTab).toHaveBeenCalled()
-    expect(spies.openNewConversationTab).not.toHaveBeenCalled()
+    renderSidebar()
+    expect(screen.queryByRole("button", { name: /^New chat/ })).toBeNull()
+    expect(spies.openChatModeTab).not.toHaveBeenCalled()
   })
 })
 
@@ -355,6 +356,7 @@ describe("Sidebar — Navigation item visibility", () => {
 
   it("shows every route row by default", () => {
     renderSidebar()
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }))
     expect(navRow("Automations")).toBeTruthy()
     expect(navRow("To-dos")).toBeTruthy()
     expect(navRow(FORGE_ROW)).toBeTruthy()
@@ -362,6 +364,7 @@ describe("Sidebar — Navigation item visibility", () => {
 
   it("hides a row when its menu toggle is switched off, and persists it", async () => {
     renderSidebar()
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }))
 
     await openViewOptionsGroup("Navigation items")
     await userEvent.click(
@@ -392,6 +395,7 @@ describe("Sidebar — Navigation item visibility", () => {
       JSON.stringify({ forge: false })
     )
     renderSidebar()
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }))
     expect(navRow(FORGE_ROW)).toBeNull()
     expect(navRow("Automations")).toBeTruthy()
   })
@@ -402,6 +406,7 @@ describe("Sidebar — Navigation item visibility", () => {
       JSON.stringify({ retired: false, tasks: false })
     )
     renderSidebar()
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }))
     expect(navRow("To-dos")).toBeNull()
     expect(navRow("Automations")).toBeTruthy()
   })
@@ -418,6 +423,7 @@ describe("Sidebar — Expand / collapse all groups", () => {
   it("is an icon-only header button on desktop, no longer a menu row", async () => {
     const user = userEvent.setup()
     renderSidebar()
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }))
 
     // Icon-only, so the accessible name comes from aria-label and names the
     // action the click performs.
@@ -434,6 +440,7 @@ describe("Sidebar — Expand / collapse all groups", () => {
   it("drives the list from the header in one click, and flips direction", async () => {
     const user = userEvent.setup()
     renderSidebar()
+    fireEvent.click(screen.getByRole("button", { name: "Tools" }))
 
     // One click, from the header — it used to cost a trip through the menu.
     await user.click(
@@ -472,7 +479,7 @@ describe("Sidebar — Section order control", () => {
     await user.click(screen.getByRole("button", { name: "View options" }))
 
     expect(orderRowNames()).toEqual([
-      "Folders — position 1 of 3",
+      "Projects — position 1 of 3",
       "Chat — position 2 of 3",
       "Recent — position 3 of 3",
     ])
@@ -490,7 +497,7 @@ describe("Sidebar — Section order control", () => {
     await user.click(screen.getByRole("button", { name: "Recent — Move up" }))
 
     expect(orderRowNames()).toEqual([
-      "Folders — position 1 of 3",
+      "Projects — position 1 of 3",
       "Recent — position 2 of 3",
       "Chat — position 3 of 3",
     ])
@@ -510,13 +517,13 @@ describe("Sidebar — Section order control", () => {
     await user.click(screen.getByRole("button", { name: "View options" }))
 
     expect(
-      screen.getByRole("button", { name: "Folders — Move up" })
+      screen.getByRole("button", { name: "Projects — Move up" })
     ).toBeDisabled()
     expect(
       screen.getByRole("button", { name: "Recent — Move down" })
     ).toBeDisabled()
     expect(
-      screen.getByRole("button", { name: "Folders — Move down" })
+      screen.getByRole("button", { name: "Projects — Move down" })
     ).not.toBeDisabled()
   })
 
@@ -529,7 +536,7 @@ describe("Sidebar — Section order control", () => {
     // and by the roving focus, so Alt+Arrow on the row is the ONLY keyboard
     // path — if this regresses, the control becomes mouse-only.
     const foldersRow = screen.getByRole("menuitem", {
-      name: "Folders — position 1 of 3",
+      name: "Projects — position 1 of 3",
     })
     // Focusing a menu item updates Radix's roving-focus state, so it has to run
     // inside act().
@@ -538,12 +545,12 @@ describe("Sidebar — Section order control", () => {
 
     expect(orderRowNames()).toEqual([
       "Chat — position 1 of 3",
-      "Folders — position 2 of 3",
+      "Projects — position 2 of 3",
       "Recent — position 3 of 3",
     ])
     // Focus follows the row it moved, so a second press keeps going.
     expect(document.activeElement?.getAttribute("aria-label")).toBe(
-      "Folders — position 2 of 3"
+      "Projects — position 2 of 3"
     )
   })
 
@@ -555,7 +562,7 @@ describe("Sidebar — Section order control", () => {
 
     expect(orderRowNames()).toEqual([
       "Chat — position 1 of 3",
-      "Folders — position 2 of 3",
+      "Projects — position 2 of 3",
       "Recent — position 3 of 3",
     ])
   })

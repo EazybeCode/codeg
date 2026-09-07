@@ -669,7 +669,13 @@ export const useAppWorkspaceStore = create<AppWorkspaceStoreState>()(
       return detail
     },
 
-    createRepoSubfolder: async (parentId, name, fullName, branch, createBranch) => {
+    createRepoSubfolder: async (
+      parentId,
+      name,
+      fullName,
+      branch,
+      createBranch
+    ) => {
       const detail = await apiCreateRepoSubfolder(
         parentId,
         name,

@@ -1,4 +1,5 @@
 "use client"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Reorder } from "motion/react"
@@ -37,6 +38,7 @@ interface TabBarProps {
 // and navigates tabs from the sidebar.
 export function TabBar({ groupId }: TabBarProps) {
   const t = useTranslations("Folder.conversationCard")
+  const tCatalog = useTranslations("WorkspaceCatalog")
   const tabs = useTabStore((s) => s.tabs)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const groupOf = useTabStore((s) => s.groupOf)
@@ -83,6 +85,11 @@ export function TabBar({ groupId }: TabBarProps) {
   const displayActiveId =
     groupId == null ? activeTabId : (groupSelection[groupId] ?? null)
   const isTileMode = !!tileByGroup[stripGroupId]
+  const catalog = useWorkspaceCatalogContext()
+  const catalogNodeId =
+    catalog?.nodeForConversation(
+      groupTabs.find((tab) => tab.id === displayActiveId)?.conversationId
+    ) ?? null
   const handleToggleTile = useCallback(
     () => toggleGroupTile(stripGroupId),
     [toggleGroupTile, stripGroupId]
@@ -203,6 +210,10 @@ export function TabBar({ groupId }: TabBarProps) {
   // its own workspace slice, and the focused group may be a different one.
   const handleNewConversation = useCallback(() => {
     openConversations()
+    if (catalog?.enabled) {
+      if (catalogNodeId != null) catalog.create("chat", catalogNodeId)
+      return
+    }
     const groupOptions = groupId != null ? { targetGroup: groupId } : undefined
     if (groupId != null) {
       const selTab =
@@ -232,6 +243,8 @@ export function TabBar({ groupId }: TabBarProps) {
     openNewConversationTab(activeFolder.id, activeFolder.path, groupOptions)
   }, [
     activeFolder,
+    catalog,
+    catalogNodeId,
     allFolders,
     displayActiveId,
     groupId,
@@ -344,6 +357,7 @@ export function TabBar({ groupId }: TabBarProps) {
             folderBranch={branches.get(tab.folderId) ?? null}
             isSplit={isSplit}
             canSplitMove={canSplitMove && !isDraft}
+            canSplitDraft={!catalog?.enabled}
             canMoveToGroup={!isDraft}
             moveTargets={moveTargets}
             onTabDrag={crossDragEnabled && !isDraft ? handleTabDrag : undefined}
@@ -391,27 +405,33 @@ export function TabBar({ groupId }: TabBarProps) {
         data-adjacent-active={lastTabActive ? "after" : undefined}
         className="tab-strip-tail relative flex h-full flex-1 items-stretch ws-strip-line"
       >
-        <button
-          type="button"
-          onClick={handleNewConversation}
-          // Ghost-style CIRCULAR icon button, evenly inset from the strip's three
-          // visible edges so its round hover fill never touches the last tab.
-          // `self-start` seats it against the group's `pt-1.5` top rather than
-          // centering in the pt-shortened trailing box: with `h-7` on the `h-10`
-          // strip that yields an equal 6px top and 6px bottom gap, so its center
-          // still lands on the strip midline (matching the tab content). `ml-1.5`
-          // adds a matching 6px LEFT gap from the last tab's edge. The hover uses
-          // the chrome-standard adaptive tint (`bg-foreground/10`, matching the
-          // bottom branch/command blocks) plus `backdrop-blur-sm`: over the fully
-          // transparent strip (workspace bg image on) the fill reads as frosted
-          // glass rather than a muddy patch, and the tint is clearly visible in
-          // both light and dark themes (unlike the old near-white `bg-accent/40`).
-          className="ml-1.5 mr-0.5 flex h-7 w-7 shrink-0 items-center justify-center self-start rounded-full text-muted-foreground backdrop-blur-sm transition-colors hover:bg-foreground/10 hover:text-foreground"
-          aria-label={t("newConversation")}
-          title={t("newConversation")}
-        >
-          <SquarePen className="h-3.5 w-3.5" />
-        </button>
+        {(!catalog?.enabled || catalogNodeId != null) && (
+          <button
+            type="button"
+            onClick={handleNewConversation}
+            // Ghost-style CIRCULAR icon button, evenly inset from the strip's three
+            // visible edges so its round hover fill never touches the last tab.
+            // `self-start` seats it against the group's `pt-1.5` top rather than
+            // centering in the pt-shortened trailing box: with `h-7` on the `h-10`
+            // strip that yields an equal 6px top and 6px bottom gap, so its center
+            // still lands on the strip midline (matching the tab content). `ml-1.5`
+            // adds a matching 6px LEFT gap from the last tab's edge. The hover uses
+            // the chrome-standard adaptive tint (`bg-foreground/10`, matching the
+            // bottom branch/command blocks) plus `backdrop-blur-sm`: over the fully
+            // transparent strip (workspace bg image on) the fill reads as frosted
+            // glass rather than a muddy patch, and the tint is clearly visible in
+            // both light and dark themes (unlike the old near-white `bg-accent/40`).
+            className="ml-1.5 mr-0.5 flex h-7 w-7 shrink-0 items-center justify-center self-start rounded-full text-muted-foreground backdrop-blur-sm transition-colors hover:bg-foreground/10 hover:text-foreground"
+            aria-label={
+              catalog?.enabled ? tCatalog("new_chat") : t("newConversation")
+            }
+            title={
+              catalog?.enabled ? tCatalog("new_chat") : t("newConversation")
+            }
+          >
+            <SquarePen className="h-3.5 w-3.5" />
+          </button>
+        )}
         {/* Drag spacer, floored at `min-w-10` (40px) instead of `min-w-0`: even
             when many tabs overflow and squeeze this region, a grabbable
             window-drag gap always remains to the RIGHT of the new-conversation

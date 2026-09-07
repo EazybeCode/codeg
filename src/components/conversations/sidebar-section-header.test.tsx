@@ -126,7 +126,7 @@ describe("SidebarSectionHeader folders-section actions", () => {
         onCloneRepository={onCloneRepository}
       />
     )
-    fireEvent.click(getByText("Folders"))
+    fireEvent.click(getByText(enMessages.Folder.sidebar.sectionFolders))
     expect(onToggle).toHaveBeenCalledWith("folders")
   })
 })

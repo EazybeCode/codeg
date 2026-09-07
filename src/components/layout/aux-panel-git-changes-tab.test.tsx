@@ -130,6 +130,7 @@ describe("capChangeTreeToBudget", () => {
 // ---------------------------------------------------------------------------
 
 const store = vi.hoisted(() => ({
+  folderKind: "regular",
   git: [] as {
     path: string
     status: string
@@ -165,7 +166,9 @@ vi.mock("@/hooks/use-workspace-state-store", () => ({
 }))
 
 vi.mock("@/contexts/active-folder-context", () => ({
-  useActiveFolder: () => ({ activeFolder: { id: "f1", path: "/repo" } }),
+  useActiveFolder: () => ({
+    activeFolder: { id: "f1", path: "/repo", kind: store.folderKind },
+  }),
 }))
 
 // The toolbar's git operations pull in the task/alert/credential contexts and
@@ -261,6 +264,25 @@ function renderTab() {
 }
 
 describe("GitChangesTab render cap", () => {
+  it("keeps managed diffs visible while hiding legacy checkout mutations", () => {
+    store.folderKind = "workspace_chat"
+    store.git = flatGit(1)
+    const view = renderTab()
+    try {
+      expect(screen.getByText("f0001")).toBeInTheDocument()
+      expect(
+        screen.queryByPlaceholderText(
+          enMessages.Folder.gitChangesTab.quickCommit.placeholder
+        )
+      ).toBeNull()
+      expect(
+        screen.queryByText(enMessages.Folder.branchDropdown.pushCode)
+      ).toBeNull()
+    } finally {
+      view.unmount()
+      store.folderKind = "regular"
+    }
+  })
   it("renders every row and no reveal control for a small change set", () => {
     store.git = flatGit(3)
     renderTab()

@@ -110,6 +110,7 @@ const defaultFoldersMock: FolderDetail[] = [
     kind: "regular",
     alias: null,
     group_id: null,
+    repo_full_name: null,
   },
   {
     id: 2,
@@ -124,6 +125,7 @@ const defaultFoldersMock: FolderDetail[] = [
     kind: "regular",
     alias: null,
     group_id: null,
+    repo_full_name: null,
   },
 ]
 
@@ -251,6 +253,29 @@ function openConversationTab(
 }
 
 describe("TabProvider tab state transitions", () => {
+  it("rejects the legacy draft factory for a managed worktree without changing tabs", () => {
+    seedWorkspaceStore()
+    const managed = {
+      ...useAppWorkspaceStore.getState().allFolders[0],
+      kind: "workspace_chat" as const,
+    }
+    useAppWorkspaceStore.setState({ allFolders: [managed] })
+    const before = useTabStore.getState().rawTabs
+    expect(() =>
+      useTabStore.getState().openNewConversationTab(managed.id, managed.path)
+    ).toThrow("canonical workspace chat")
+    expect(useTabStore.getState().rawTabs).toBe(before)
+  })
+  it("catalog mode closes the last chat to welcome despite populated legacy folders", () => {
+    seedWorkspaceStore()
+    useTabStore.setState({ catalogMode: true })
+    useTabStore.getState().openTab(1, 1, "codex", true, "Existing")
+    useTabStore.getState().closeTab(useTabStore.getState().tabs[0].id)
+    expect(useTabStore.getState().tabs).toHaveLength(0)
+    useTabStore.getState().recoverActiveContext()
+    expect(useTabStore.getState().tabs).toHaveLength(0)
+    useTabStore.setState({ catalogMode: false })
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     seedWorkspaceStore()
@@ -436,6 +461,7 @@ describe("TabProvider tab state transitions", () => {
       kind: "chat",
       alias: null,
       group_id: null,
+      repo_full_name: null,
     }
     act(() => {
       useAppWorkspaceStore.setState({
@@ -471,6 +497,7 @@ describe("TabProvider tab state transitions", () => {
       kind: "chat",
       alias: null,
       group_id: null,
+      repo_full_name: null,
     }
     act(() => {
       useAppWorkspaceStore.setState({

@@ -499,6 +499,7 @@ export function GitChangesTab() {
   // snapshot (path-keyed), so same-path metadata churn is a no-op.
   const { activeFolder } = useActiveFolder()
   const folder = useDeferredValue(activeFolder)
+  const managed = folder?.kind === "workspace_chat"
   // True while the deferred render lags a cross-folder switch. During that gap we
   // render the loading skeleton (below) instead of the PREVIOUS folder's rows:
   // besides keeping the heavy rebuild off the switch commit, unmounting those
@@ -1127,49 +1128,51 @@ export function GitChangesTab() {
                   : null}
               </FileTreeFolder>
             </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ContextMenuItem
-                onSelect={() => {
-                  handleOpenCommitWindow()
-                }}
-              >
-                {t("actions.commitCode")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  void openWorkingTreeDiff(node.path, { mode: "overview" })
-                }}
-              >
-                {tCommon("viewDiff")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  handleAttachToSession(node.path)
-                }}
-                disabled={!canAttachToSession}
-              >
-                {tFileTree("attachToCurrentSession")}
-              </ContextMenuItem>
-              <ContextMenuItem disabled>
-                {t("actions.addToVcs")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  handleRequestRollback(target)
-                }}
-                variant="destructive"
-              >
-                {t("actions.rollback")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  handleRequestDelete(target, "tracked")
-                }}
-                variant="destructive"
-              >
-                {t("actions.delete")}
-              </ContextMenuItem>
-            </ContextMenuContent>
+            {!managed && (
+              <ContextMenuContent>
+                <ContextMenuItem
+                  onSelect={() => {
+                    handleOpenCommitWindow()
+                  }}
+                >
+                  {t("actions.commitCode")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    void openWorkingTreeDiff(node.path, { mode: "overview" })
+                  }}
+                >
+                  {tCommon("viewDiff")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    handleAttachToSession(node.path)
+                  }}
+                  disabled={!canAttachToSession}
+                >
+                  {tFileTree("attachToCurrentSession")}
+                </ContextMenuItem>
+                <ContextMenuItem disabled>
+                  {t("actions.addToVcs")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    handleRequestRollback(target)
+                  }}
+                  variant="destructive"
+                >
+                  {t("actions.rollback")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    handleRequestDelete(target, "tracked")
+                  }}
+                  variant="destructive"
+                >
+                  {t("actions.delete")}
+                </ContextMenuItem>
+              </ContextMenuContent>
+            )}
           </ContextMenu>
         )
       }
@@ -1210,61 +1213,66 @@ export function GitChangesTab() {
               </>
             </FileTreeFile>
           </ContextMenuTrigger>
-          <ContextMenuContent>
-            <ContextMenuItem
-              onSelect={() => {
-                handleOpenCommitWindow()
-              }}
-            >
-              {t("actions.commitCode")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              disabled={!canOpenCurrentFile}
-              onSelect={() => {
-                if (!canOpenCurrentFile) return
-                void openFilePreview(file.path)
-              }}
-            >
-              {tCommon("openFile")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                void openWorkingTreeDiff(file.path)
-              }}
-            >
-              {tCommon("viewDiff")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                handleAttachToSession(file.path)
-              }}
-              disabled={!canAttachToSession}
-            >
-              {tFileTree("attachToCurrentSession")}
-            </ContextMenuItem>
-            <ContextMenuItem disabled>{t("actions.addToVcs")}</ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                handleRequestRollback(target)
-              }}
-              variant="destructive"
-            >
-              {t("actions.rollback")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                handleRequestDelete(target, "tracked")
-              }}
-              variant="destructive"
-            >
-              {t("actions.delete")}
-            </ContextMenuItem>
-          </ContextMenuContent>
+          {!managed && (
+            <ContextMenuContent>
+              <ContextMenuItem
+                onSelect={() => {
+                  handleOpenCommitWindow()
+                }}
+              >
+                {t("actions.commitCode")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                disabled={!canOpenCurrentFile}
+                onSelect={() => {
+                  if (!canOpenCurrentFile) return
+                  void openFilePreview(file.path)
+                }}
+              >
+                {tCommon("openFile")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  void openWorkingTreeDiff(file.path)
+                }}
+              >
+                {tCommon("viewDiff")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  handleAttachToSession(file.path)
+                }}
+                disabled={!canAttachToSession}
+              >
+                {tFileTree("attachToCurrentSession")}
+              </ContextMenuItem>
+              <ContextMenuItem disabled>
+                {t("actions.addToVcs")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  handleRequestRollback(target)
+                }}
+                variant="destructive"
+              >
+                {t("actions.rollback")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  handleRequestDelete(target, "tracked")
+                }}
+                variant="destructive"
+              >
+                {t("actions.delete")}
+              </ContextMenuItem>
+            </ContextMenuContent>
+          )}
         </ContextMenu>
       )
     },
     [
       canAttachToSession,
+      managed,
       expandedTrackedPaths,
       handleAttachToSession,
       handleOpenCommitWindow,
@@ -1306,53 +1314,55 @@ export function GitChangesTab() {
                   : null}
               </FileTreeFolder>
             </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ContextMenuItem
-                onSelect={() => {
-                  handleOpenCommitWindow()
-                }}
-              >
-                {t("actions.commitCode")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  void openWorkingTreeDiff(node.path, { mode: "overview" })
-                }}
-              >
-                {tCommon("viewDiff")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  handleAttachToSession(node.path)
-                }}
-                disabled={!canAttachToSession}
-              >
-                {tFileTree("attachToCurrentSession")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  void handleAddToVcs(target)
-                }}
-              >
-                {t("actions.addToVcs")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  handleRequestRollback(target)
-                }}
-                variant="destructive"
-              >
-                {t("actions.rollback")}
-              </ContextMenuItem>
-              <ContextMenuItem
-                onSelect={() => {
-                  handleRequestDelete(target, "untracked")
-                }}
-                variant="destructive"
-              >
-                {t("actions.delete")}
-              </ContextMenuItem>
-            </ContextMenuContent>
+            {!managed && (
+              <ContextMenuContent>
+                <ContextMenuItem
+                  onSelect={() => {
+                    handleOpenCommitWindow()
+                  }}
+                >
+                  {t("actions.commitCode")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    void openWorkingTreeDiff(node.path, { mode: "overview" })
+                  }}
+                >
+                  {tCommon("viewDiff")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    handleAttachToSession(node.path)
+                  }}
+                  disabled={!canAttachToSession}
+                >
+                  {tFileTree("attachToCurrentSession")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    void handleAddToVcs(target)
+                  }}
+                >
+                  {t("actions.addToVcs")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    handleRequestRollback(target)
+                  }}
+                  variant="destructive"
+                >
+                  {t("actions.rollback")}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  onSelect={() => {
+                    handleRequestDelete(target, "untracked")
+                  }}
+                  variant="destructive"
+                >
+                  {t("actions.delete")}
+                </ContextMenuItem>
+              </ContextMenuContent>
+            )}
           </ContextMenu>
         )
       }
@@ -1385,65 +1395,68 @@ export function GitChangesTab() {
               </>
             </FileTreeFile>
           </ContextMenuTrigger>
-          <ContextMenuContent>
-            <ContextMenuItem
-              onSelect={() => {
-                handleOpenCommitWindow()
-              }}
-            >
-              {t("actions.commitCode")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                void openFilePreview(file.path)
-              }}
-            >
-              {tCommon("openFile")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                void openWorkingTreeDiff(file.path)
-              }}
-            >
-              {tCommon("viewDiff")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                handleAttachToSession(file.path)
-              }}
-              disabled={!canAttachToSession}
-            >
-              {tFileTree("attachToCurrentSession")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                void handleAddToVcs(target)
-              }}
-            >
-              {t("actions.addToVcs")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                handleRequestRollback(target)
-              }}
-              variant="destructive"
-            >
-              {t("actions.rollback")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                handleRequestDelete(target, "untracked")
-              }}
-              variant="destructive"
-            >
-              {t("actions.delete")}
-            </ContextMenuItem>
-          </ContextMenuContent>
+          {!managed && (
+            <ContextMenuContent>
+              <ContextMenuItem
+                onSelect={() => {
+                  handleOpenCommitWindow()
+                }}
+              >
+                {t("actions.commitCode")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  void openFilePreview(file.path)
+                }}
+              >
+                {tCommon("openFile")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  void openWorkingTreeDiff(file.path)
+                }}
+              >
+                {tCommon("viewDiff")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  handleAttachToSession(file.path)
+                }}
+                disabled={!canAttachToSession}
+              >
+                {tFileTree("attachToCurrentSession")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  void handleAddToVcs(target)
+                }}
+              >
+                {t("actions.addToVcs")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  handleRequestRollback(target)
+                }}
+                variant="destructive"
+              >
+                {t("actions.rollback")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  handleRequestDelete(target, "untracked")
+                }}
+                variant="destructive"
+              >
+                {t("actions.delete")}
+              </ContextMenuItem>
+            </ContextMenuContent>
+          )}
         </ContextMenu>
       )
     },
     [
       canAttachToSession,
+      managed,
       expandedUntrackedPaths,
       handleAttachToSession,
       handleOpenCommitWindow,
@@ -1493,7 +1506,7 @@ export function GitChangesTab() {
           already do. The circle matches the commits tab's header, so the two
           tabs read as one panel. Hidden on a non-repo folder — there is nothing
           to commit to (the body shows the "not a repo" hint). */}
-      {workspaceState.isGitRepo && (
+      {workspaceState.isGitRepo && !managed && (
         <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/50 px-2">
           <Input
             value={commitMessage}
@@ -1697,63 +1710,65 @@ export function GitChangesTab() {
                         )}
                       </FileTreeFolder>
                     </ContextMenuTrigger>
-                    <ContextMenuContent>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          handleOpenCommitWindow()
-                        }}
-                      >
-                        {t("actions.commitCode")}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          void openWorkingTreeDiff(".", {
-                            mode: "overview",
-                          })
-                        }}
-                      >
-                        {tCommon("viewDiff")}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          handleAttachToSession("")
-                        }}
-                        disabled={!canAttachToSession}
-                      >
-                        {tFileTree("attachToCurrentSession")}
-                      </ContextMenuItem>
-                      <ContextMenuItem disabled>
-                        {t("actions.addToVcs")}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          handleRequestRollback({
-                            kind: "dir",
-                            path: "",
-                            name: folderName,
-                          })
-                        }}
-                        variant="destructive"
-                      >
-                        {t("actions.rollback")}
-                      </ContextMenuItem>
-
-                      <ContextMenuItem
-                        onSelect={() => {
-                          handleRequestDelete(
-                            {
+                    {!managed && (
+                      <ContextMenuContent>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            handleOpenCommitWindow()
+                          }}
+                        >
+                          {t("actions.commitCode")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            void openWorkingTreeDiff(".", {
+                              mode: "overview",
+                            })
+                          }}
+                        >
+                          {tCommon("viewDiff")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            handleAttachToSession("")
+                          }}
+                          disabled={!canAttachToSession}
+                        >
+                          {tFileTree("attachToCurrentSession")}
+                        </ContextMenuItem>
+                        <ContextMenuItem disabled>
+                          {t("actions.addToVcs")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            handleRequestRollback({
                               kind: "dir",
                               path: "",
                               name: folderName,
-                            },
-                            "tracked"
-                          )
-                        }}
-                        variant="destructive"
-                      >
-                        {t("actions.delete")}
-                      </ContextMenuItem>
-                    </ContextMenuContent>
+                            })
+                          }}
+                          variant="destructive"
+                        >
+                          {t("actions.rollback")}
+                        </ContextMenuItem>
+
+                        <ContextMenuItem
+                          onSelect={() => {
+                            handleRequestDelete(
+                              {
+                                kind: "dir",
+                                path: "",
+                                name: folderName,
+                              },
+                              "tracked"
+                            )
+                          }}
+                          variant="destructive"
+                        >
+                          {t("actions.delete")}
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    )}
                   </ContextMenu>
                 </FileTree>
               </section>
@@ -1815,70 +1830,72 @@ export function GitChangesTab() {
                         )}
                       </FileTreeFolder>
                     </ContextMenuTrigger>
-                    <ContextMenuContent>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          handleOpenCommitWindow()
-                        }}
-                      >
-                        {t("actions.commitCode")}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          void openWorkingTreeDiff(".", {
-                            mode: "overview",
-                          })
-                        }}
-                      >
-                        {tCommon("viewDiff")}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          handleAttachToSession("")
-                        }}
-                        disabled={!canAttachToSession}
-                      >
-                        {tFileTree("attachToCurrentSession")}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          void handleAddToVcs({
-                            kind: "dir",
-                            path: "",
-                            name: folderName,
-                          })
-                        }}
-                      >
-                        {t("actions.addToVcs")}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          handleRequestRollback({
-                            kind: "dir",
-                            path: "",
-                            name: folderName,
-                          })
-                        }}
-                        variant="destructive"
-                      >
-                        {t("actions.rollback")}
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onSelect={() => {
-                          handleRequestDelete(
-                            {
+                    {!managed && (
+                      <ContextMenuContent>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            handleOpenCommitWindow()
+                          }}
+                        >
+                          {t("actions.commitCode")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            void openWorkingTreeDiff(".", {
+                              mode: "overview",
+                            })
+                          }}
+                        >
+                          {tCommon("viewDiff")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            handleAttachToSession("")
+                          }}
+                          disabled={!canAttachToSession}
+                        >
+                          {tFileTree("attachToCurrentSession")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            void handleAddToVcs({
                               kind: "dir",
                               path: "",
                               name: folderName,
-                            },
-                            "untracked"
-                          )
-                        }}
-                        variant="destructive"
-                      >
-                        {t("actions.delete")}
-                      </ContextMenuItem>
-                    </ContextMenuContent>
+                            })
+                          }}
+                        >
+                          {t("actions.addToVcs")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            handleRequestRollback({
+                              kind: "dir",
+                              path: "",
+                              name: folderName,
+                            })
+                          }}
+                          variant="destructive"
+                        >
+                          {t("actions.rollback")}
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          onSelect={() => {
+                            handleRequestDelete(
+                              {
+                                kind: "dir",
+                                path: "",
+                                name: folderName,
+                              },
+                              "untracked"
+                            )
+                          }}
+                          variant="destructive"
+                        >
+                          {t("actions.delete")}
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    )}
                   </ContextMenu>
                 </FileTree>
               </section>

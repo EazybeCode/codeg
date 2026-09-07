@@ -173,6 +173,29 @@ fn project_input(name: &str) -> CreateNodeInput {
 }
 
 #[tokio::test]
+async fn catalog_repository_metadata_is_cookie_scoped_and_credential_free() {
+    use crate::db::entities::workspace_repository;
+    let db = fresh_in_memory_db().await;
+    for id in [1, 2] {
+        seed_org(&db, id).await;
+        seed_user(&db, id, id, &format!("user-{id}")).await;
+        seed_session(&db, &format!("session-{id}"), id, false).await;
+        workspace_repository::ActiveModel {
+            id: Set(id), org_id: Set(id), github_repository_id: Set(format!("{id}00")),
+            full_name: Set(format!("org-{id}/docs")), created_at: Set(Utc::now()), updated_at: Set(Utc::now()),
+        }.insert(&db.conn).await.unwrap();
+    }
+    let access = denied_access();
+    let policy = BrowserMutationPolicy::from_app_origin(None);
+    let handler = WorkspaceCatalogHandler::new(&db.conn, &access, &policy);
+    let (status, value) = body_json(handler.list_workspace_repositories(&json_headers(Some("session-1")), b"{}").await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value, serde_json::json!([{ "id": 1, "org_id": 1, "github_repository_id": "100", "full_name": "org-1/docs" }]));
+    assert_eq!(handler.list_workspace_repositories(&json_headers(None), b"{}").await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(handler.list_workspace_repositories(&json_headers(Some("session-1")), br#"{"orgId":2}"#).await.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn catalog_handlers_require_a_live_user_cookie_even_with_the_shared_bearer() {
     let db = fresh_in_memory_db().await;
     seed_org(&db, 1).await;

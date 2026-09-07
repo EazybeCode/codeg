@@ -35,6 +35,7 @@ function folder(
     kind: "regular",
     alias: null,
     group_id: null,
+    repo_full_name: null,
     ...overrides,
   }
 }
@@ -479,8 +480,6 @@ describe("buildRows with folder groups", () => {
       "folder-group", // 7
       "folder", // 5
       "conversation", // 51
-      "section", // Chat
-      "chats-empty",
     ])
   })
 
@@ -511,8 +510,6 @@ describe("buildRows with folder groups", () => {
       "section",
       "folder-group",
       "group-empty",
-      "section",
-      "chats-empty",
     ])
   })
 
@@ -528,8 +525,6 @@ describe("buildRows with folder groups", () => {
       "folder",
       "empty",
       "folder-group",
-      "section",
-      "chats-empty",
     ])
     const header = rows.find((r) => r.kind === "folder-group")
     expect(header).toEqual({

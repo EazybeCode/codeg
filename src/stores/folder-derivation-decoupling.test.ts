@@ -19,6 +19,7 @@ function makeFolder(id: number): FolderDetail {
     kind: "regular",
     alias: null,
     group_id: null,
+    repo_full_name: null,
   }
 }
 

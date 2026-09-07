@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ConversationHeaderFolderPicker } from "./conversation-context-bar"
 import type { FolderDetail } from "@/lib/types"
+import { getFolderRepoContext } from "@/lib/api"
 import {
   resetAppWorkspaceStore,
   useAppWorkspaceStore,
@@ -16,12 +17,29 @@ import {
 
 const openNewConversationTab = vi.fn()
 
+vi.mock("@/lib/api", () => ({
+  getFolderRepoContext: vi.fn(),
+  getGitHead: vi.fn(async () => ({
+    is_repo: true,
+    branch: "main",
+    detached: false,
+    short_sha: "abc123",
+  })),
+}))
+
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
 }))
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
+}))
+
+vi.mock("@/components/layout/branch-dropdown", () => ({
+  BranchDropdown: ({ folder }: { folder: FolderDetail | null }) =>
+    folder ? (
+      <button aria-label={`Branch for ${folder.id}`}>main</button>
+    ) : null,
 }))
 
 // Tab state, mutated per test before render. Workspace state (folders /
@@ -60,6 +78,7 @@ function mkFolder(p: Partial<FolderDetail> & { id: number }): FolderDetail {
     kind: "regular",
     alias: null,
     group_id: null,
+    repo_full_name: null,
     ...p,
   }
 }
@@ -73,6 +92,16 @@ const repo = mkFolder({
 
 beforeEach(() => {
   openNewConversationTab.mockClear()
+  vi.mocked(getFolderRepoContext).mockResolvedValue({
+    folder_id: 1,
+    project_folder_id: 1,
+    repo_folder_id: 1,
+    repo_full_name: "acme/repo",
+    branch: "main",
+    relative_path: "",
+    is_inherited: false,
+    git_root: "/repo",
+  })
   resetAppWorkspaceStore()
   useAppWorkspaceStore.setState({
     folders: [repo],
@@ -88,6 +117,76 @@ afterEach(() => cleanup())
 // the header never opens a popover, even for a draft. `next-intl` is mocked to
 // echo keys, so a translated label like the chat-mode item reads back as its key.
 describe("ConversationHeaderFolderPicker", () => {
+  it("shows nested ancestry while targeting the enclosing repo for Git", async () => {
+    vi.mocked(getFolderRepoContext).mockResolvedValue({
+      folder_id: 3,
+      project_folder_id: 1,
+      repo_folder_id: 1,
+      repo_full_name: "acme/repo",
+      branch: "main",
+      relative_path: "docs/api",
+      is_inherited: true,
+      git_root: "/repo",
+    })
+    const docs = mkFolder({
+      id: 2,
+      name: "docs",
+      parent_id: 1,
+      kind: "subfolder",
+    })
+    const api = mkFolder({
+      id: 3,
+      name: "api",
+      alias: "API",
+      parent_id: 2,
+      kind: "subfolder",
+    })
+    useAppWorkspaceStore.setState({
+      folders: [repo, docs, api],
+      allFolders: [repo, docs, api],
+    })
+    tabs = [{ id: "nested", folderId: 3, conversationId: null }]
+    activeTabId = "nested"
+    render(<ConversationHeaderFolderPicker tabId="nested" />)
+    const breadcrumb = screen.getByRole("navigation", { name: "Folder path" })
+    expect(breadcrumb.textContent).toContain("repo")
+    expect(breadcrumb.textContent).toContain("docs")
+    expect(screen.getByRole("button", { name: /API/ })).toBeTruthy()
+    expect(
+      await screen.findByRole("button", { name: "Branch for 1" })
+    ).toBeTruthy()
+    expect(openNewConversationTab).not.toHaveBeenCalled()
+  })
+
+  it("targets a nested repository override instead of its logical parent", async () => {
+    vi.mocked(getFolderRepoContext).mockResolvedValue({
+      folder_id: 2,
+      project_folder_id: 1,
+      repo_folder_id: 2,
+      repo_full_name: "acme/wiki",
+      branch: "main",
+      relative_path: "",
+      is_inherited: false,
+      git_root: "/repo/folder-2",
+    })
+    const nested = mkFolder({
+      id: 2,
+      name: "wiki",
+      parent_id: 1,
+      kind: "subfolder",
+      repo_full_name: "acme/wiki",
+    })
+    useAppWorkspaceStore.setState({
+      folders: [repo, nested],
+      allFolders: [repo, nested],
+    })
+    tabs = [{ id: "nested", folderId: 2, conversationId: null }]
+    activeTabId = "nested"
+    render(<ConversationHeaderFolderPicker tabId="nested" />)
+    expect(
+      await screen.findByRole("button", { name: "Branch for 2" })
+    ).toBeTruthy()
+  })
   it("renders a draft's folder name as a static (non-switchable) breadcrumb", async () => {
     const other = mkFolder({ id: 2, name: "other-repo", path: "/repo/other" })
     useAppWorkspaceStore.setState({

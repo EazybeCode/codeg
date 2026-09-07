@@ -1,11 +1,20 @@
 import {
   cleanup,
-  render,
+  render as rtlRender,
   screen,
   waitFor,
   fireEvent,
 } from "@testing-library/react"
 import { afterEach, expect, it, vi } from "vitest"
+import { NextIntlClientProvider } from "next-intl"
+import enMessages from "@/i18n/messages/en.json"
+import type { ReactNode } from "react"
+const render = (ui: ReactNode) =>
+  rtlRender(
+    <NextIntlClientProvider locale="en" messages={enMessages}>
+      {ui}
+    </NextIntlClientProvider>
+  )
 import { WorkspaceChatRuntimeGate } from "./workspace-chat-runtime-gate"
 const call = vi.hoisted(() => vi.fn())
 vi.mock("@/lib/transport", () => ({ getTransport: () => ({ call }) }))

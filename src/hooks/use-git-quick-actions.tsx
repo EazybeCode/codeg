@@ -36,6 +36,7 @@ interface GitDialogTarget {
 }
 
 export interface GitQuickActions {
+  readonly?: boolean
   /** A git task is in flight — callers disable their operation rows/buttons. */
   running: boolean
   /**
@@ -100,6 +101,11 @@ export function useGitQuickActions({
   const { pushAlert } = useAlertContext()
   const { withCredentialRetry } = useGitCredential()
   const refreshFolder = useAppWorkspaceStore((s) => s.refreshFolder)
+  const managed = useAppWorkspaceStore((s) =>
+    s.allFolders.some(
+      (folder) => folder.id === folderId && folder.kind === "workspace_chat"
+    )
+  )
 
   const [running, setRunning] = useState(false)
   // Both dialogs carry the repo they belong to rather than reading the hook's
@@ -125,10 +131,10 @@ export function useGitQuickActions({
   // after the hook re-renders under folder B.
   const target = useMemo<GitDialogTarget | null>(
     () =>
-      folderId != null && folderPath
+      !managed && folderId != null && folderPath
         ? { id: folderId, path: folderPath }
         : null,
-    [folderId, folderPath]
+    [folderId, folderPath, managed]
   )
 
   const refresh = useCallback(() => {
@@ -305,6 +311,7 @@ export function useGitQuickActions({
   )
 
   return {
+    readonly: managed,
     running,
     runGitTask,
     pull,

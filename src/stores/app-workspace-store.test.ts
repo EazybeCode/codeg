@@ -142,6 +142,7 @@ function makeFolder(
     kind: "regular",
     alias: null,
     group_id: null,
+    repo_full_name: null,
     ...overrides,
   }
 }
@@ -465,6 +466,7 @@ describe("folder groups", () => {
     expect(useAppWorkspaceStore.getState().folders[0]).toMatchObject({
       sort_order: 3,
       group_id: null,
+      repo_full_name: null,
     })
     // ...and the resync then confirms it against the server, which is what
     // stops the restore from erasing anything that landed mid-request.
@@ -473,6 +475,7 @@ describe("folder groups", () => {
     expect(useAppWorkspaceStore.getState().folders[0]).toMatchObject({
       sort_order: 3,
       group_id: null,
+      repo_full_name: null,
     })
   })
 

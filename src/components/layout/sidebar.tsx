@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   Crosshair,
+  ChevronDown,
   Eye,
   ListChevronsDownUp,
   ListChevronsUpDown,
@@ -11,14 +12,11 @@ import {
   Map as MapIcon,
   Menu,
   MessagesSquare,
-  SquarePen,
   Zap,
   type LucideIcon,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
-import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useSidebarContext } from "@/contexts/sidebar-context"
-import { useTabActions } from "@/contexts/tab-context"
 import { useAutomationsView } from "@/contexts/automations-view-context"
 import { useTasksView } from "@/contexts/tasks-view-context"
 import { useWorkbenchRoute } from "@/contexts/workbench-route-context"
@@ -41,11 +39,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useIsMobile } from "@/hooks/use-mobile"
-import { useIsMac } from "@/hooks/use-is-mac"
 import { usePlatform } from "@/hooks/use-platform"
 import { useZoomLevel } from "@/hooks/use-appearance"
-import { useShortcutSettings } from "@/hooks/use-shortcut-settings"
-import { formatShortcutLabel } from "@/lib/keyboard-shortcuts"
 import { isDesktop } from "@/lib/platform"
 import { leftChromeReserve } from "@/lib/window-chrome"
 import {
@@ -72,22 +67,10 @@ import {
   type SidebarSectionOrder,
 } from "@/lib/sidebar-view-mode-storage"
 import { SidebarSectionOrderControl } from "./sidebar-section-order-control"
+import { WorkspaceIdentity } from "./workspace-identity"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
+import { WorkspaceCatalogSidebar } from "@/components/workspace/workspace-catalog-sidebar"
 import { cn } from "@/lib/utils"
-
-// Keyboard-shortcut hint at the trailing edge of the New chat row.
-// Mirrors the folder count badge exactly — same chip (0.9375rem height,
-// 0.3125rem radius, bg-primary/10, text-primary, 0.625rem text) per the request
-// to match it. That pairing is also solidly legible (text-primary on
-// primary/10 ≈ 14:1 light / 11:1 dark), unlike the muted-on-muted kbd it
-// replaces (4.34:1). Revealed only on hover / keyboard focus of its row (each
-// row is a `group`); font-mono renders the shortcut glyphs cleanly.
-const SHORTCUT_BADGE_CLASS = cn(
-  "ml-auto inline-flex h-[0.9375rem] shrink-0 items-center justify-center",
-  "rounded-[0.3125rem] bg-primary/10 px-[0.25rem]",
-  "font-mono text-[0.625rem] font-medium leading-none text-primary",
-  "opacity-0 transition-opacity duration-150",
-  "group-hover:opacity-100 group-focus-visible:opacity-100"
-)
 
 // Which sections the order editor should render as switched-off. Module
 // constants rather than a per-render `new Set`, so the reference is stable and
@@ -133,7 +116,7 @@ function SidebarNavButton({
       title={label}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "group flex h-8 w-full items-center gap-[0.4375rem] rounded-full pl-[0.4375rem] pr-1.5",
+        "group flex h-8 w-full items-center gap-[0.4375rem] rounded-md pl-[0.4375rem] pr-1.5",
         "text-[0.875rem] text-sidebar-foreground outline-none",
         "transition-colors duration-150 hover:bg-sidebar-accent",
         "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
@@ -149,16 +132,15 @@ function SidebarNavButton({
 
 export function Sidebar() {
   const t = useTranslations("Folder.sidebar")
+  const tWorkspace = useTranslations("WorkspaceNavigation")
+  const tFileTree = useTranslations("Folder.fileTreeTab")
   const { isOpen, toggle } = useSidebarContext()
-  const { activeFolder } = useActiveFolder()
-  const { openNewConversationTab, openChatModeTab } = useTabActions()
   const { unseenFailures } = useAutomationsView()
   const { attentionCount } = useTasksView()
-  const { routeId, setRoute, openConversations } = useWorkbenchRoute()
-  const isMac = useIsMac()
+  const { routeId, setRoute } = useWorkbenchRoute()
+  const [toolsExpanded, setToolsExpanded] = useState(false)
   const { isMac: platformIsMac } = usePlatform()
   const { zoomLevel } = useZoomLevel()
-  const { shortcuts } = useShortcutSettings()
   const isMobile = useIsMobile()
   const listRef = useRef<SidebarConversationListHandle>(null)
   // On desktop the header's top-left is owned by the fixed window-chrome overlay
@@ -182,10 +164,6 @@ export function Sidebar() {
     DEFAULT_SECTION_ORDER
   )
   const [allExpanded, setAllExpanded] = useState(true)
-  const newConversationShortcutLabel = formatShortcutLabel(
-    shortcuts.new_conversation,
-    isMac
-  )
   // General umbrella name for the eye menu (list toggles + nav rows + sort +
   // section order). Kept generic so the accessible name / tooltip stays
   // accurate as the menu gains options.
@@ -262,31 +240,8 @@ export function Sidebar() {
     }
   }, [allExpanded])
 
-  const handleNewConversation = useCallback(() => {
-    // On mobile the sidebar is a Drawer overlay — close it so the new
-    // conversation is visible (mirrors tapping a conversation card, which the
-    // list wrapper already closes on).
-    if (isMobile) toggle()
-    // Starting a conversation always returns to the conversation workspace (in
-    // case a route like Automations was taking over the content region).
-    openConversations()
-    // Defense-in-depth: with no active folder (e.g. a cold start that recovered
-    // to nothing, or all folders closed) fall back to folderless chat mode
-    // rather than no-op, so this entry point is never a dead end.
-    if (!activeFolder) {
-      openChatModeTab()
-      return
-    }
-    openNewConversationTab(activeFolder.id, activeFolder.path)
-  }, [
-    activeFolder,
-    openChatModeTab,
-    openNewConversationTab,
-    openConversations,
-    isMobile,
-    toggle,
-  ])
-
+  const catalog = useWorkspaceCatalogContext()
+  const tCatalog = useTranslations("WorkspaceCatalog")
   if (!isOpen) return null
 
   return (
@@ -311,7 +266,7 @@ export function Sidebar() {
         {isMobile ? (
           <div className="flex min-w-0 items-center gap-4">
             <h2 className="truncate text-[0.875rem] font-bold tracking-[-0.00625rem] text-sidebar-foreground">
-              {t("title")}
+              {catalog?.enabled ? tFileTree("workspace") : t("title")}
             </h2>
           </div>
         ) : (
@@ -326,62 +281,69 @@ export function Sidebar() {
         {/* Draggable filler between the two clusters — the header is the
             window's top edge, so its empty space must move the window. */}
         <div data-tauri-drag-region className="h-full min-w-0 flex-1" />
-        <div className="flex items-center gap-0.5">
-          {/* Locate the active conversation in the list below (moved here from
+        {!catalog?.enabled && (
+          <div className="flex items-center gap-0.5">
+            {/* Locate the active conversation in the list below (moved here from
               the conversation detail header). Always shown, leading the header
               cluster. The sidebar is unmounted while collapsed, so `listRef` is
               live whenever this button is visible. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6 shrink-0 text-muted-foreground"
-            onClick={() => listRef.current?.scrollToActive()}
-            title={t("locateActiveConversation")}
-            aria-label={t("locateActiveConversation")}
-          >
-            <Crosshair aria-hidden="true" className="h-3.5 w-3.5" />
-          </Button>
-          {/* Expand/collapse-all is an icon-only header button on every
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0 text-muted-foreground"
+              onClick={() => listRef.current?.scrollToActive()}
+              title={t("locateActiveConversation")}
+              aria-label={t("locateActiveConversation")}
+            >
+              <Crosshair aria-hidden="true" className="h-3.5 w-3.5" />
+            </Button>
+            {/* Expand/collapse-all is an icon-only header button on every
               viewport (it used to be a labelled row inside the view-options
               menu on desktop): it acts on the list right now instead of storing
               a display preference, so it does not belong among that menu's
               settings rows — and it took two clicks there. The icon itself
               states the direction, hence label-free with a tooltip. */}
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6 shrink-0 text-muted-foreground"
-            onClick={handleToggleExpandAll}
-            title={toggleExpandLabel}
-            aria-label={toggleExpandLabel}
-          >
-            {allExpanded ? (
-              <ListChevronsDownUp aria-hidden="true" className="h-3.5 w-3.5" />
-            ) : (
-              <ListChevronsUpDown aria-hidden="true" className="h-3.5 w-3.5" />
-            )}
-          </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 shrink-0 text-muted-foreground"
-                title={viewOptionsLabel}
-                aria-label={viewOptionsLabel}
-              >
-                {/* An eye, not a funnel: nothing in this menu filters the list
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0 text-muted-foreground"
+              onClick={handleToggleExpandAll}
+              title={toggleExpandLabel}
+              aria-label={toggleExpandLabel}
+            >
+              {allExpanded ? (
+                <ListChevronsDownUp
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5"
+                />
+              ) : (
+                <ListChevronsUpDown
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5"
+                />
+              )}
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 shrink-0 text-muted-foreground"
+                  title={viewOptionsLabel}
+                  aria-label={viewOptionsLabel}
+                >
+                  {/* An eye, not a funnel: nothing in this menu filters the list
                     down to matches — every option decides what is shown and in
                     what order. */}
-                <Eye aria-hidden="true" className="h-3.5 w-3.5" />
-              </Button>
-            </DropdownMenuTrigger>
-            {/* Wider than the shared `min-w-48`: the section-order rows carry a
+                  <Eye aria-hidden="true" className="h-3.5 w-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              {/* Wider than the shared `min-w-48`: the section-order rows carry a
                 position chip and two move buttons beside the name, and the menu
                 clips overflow-x — 48 would start truncating longer localized
                 section names. */}
-            <DropdownMenuContent align="end" className="min-w-56">
-              {/* Four groups: what the list shows → which nav rows exist → how
+              <DropdownMenuContent align="end" className="min-w-56">
+                {/* Four groups: what the list shows → which nav rows exist → how
                   the list is sorted → how its sections are stacked. The first
                   two are hover-opened submenus rather than inline blocks: they
                   are set-and-forget on/off inventories, six checkboxes between
@@ -395,190 +357,101 @@ export function Sidebar() {
                   flipping two of them used to cost two round trips through the
                   trigger. The one action it used to carry — expand/collapse
                   all — is now a header button of its own. */}
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <MessagesSquare className="text-muted-foreground" />
-                  {t("listOptions")}
-                </DropdownMenuSubTrigger>
-                {/* No width override: unlike the root content — held at exactly
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <MessagesSquare className="text-muted-foreground" />
+                    {t("listOptions")}
+                  </DropdownMenuSubTrigger>
+                  {/* No width override: unlike the root content — held at exactly
                     `min-w-56` and clipping overflow-x — the sub-content grows to
                     fit its rows, which is the headroom these three (the longest
                     labels in the menu) want. */}
-                <DropdownMenuSubContent>
-                  <DropdownMenuCheckboxItem
-                    checked={showCompleted}
-                    onCheckedChange={handleSetShowCompleted}
-                    onSelect={(event) => event.preventDefault()}
-                  >
-                    {t("showCompleted")}
-                  </DropdownMenuCheckboxItem>
-                  <DropdownMenuCheckboxItem
-                    checked={showWorktrees}
-                    onCheckedChange={handleSetShowWorktrees}
-                    onSelect={(event) => event.preventDefault()}
-                  >
-                    {t("showWorktrees")}
-                  </DropdownMenuCheckboxItem>
-                  <DropdownMenuCheckboxItem
-                    checked={showRecent}
-                    onCheckedChange={handleSetShowRecent}
-                    onSelect={(event) => event.preventDefault()}
-                  >
-                    {t("showRecent")}
-                  </DropdownMenuCheckboxItem>
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <Menu className="text-muted-foreground" />
-                  {t("navigationItems")}
-                </DropdownMenuSubTrigger>
-                {/* Driven by the id list itself, so a route added there can
+                  <DropdownMenuSubContent>
+                    <DropdownMenuCheckboxItem
+                      checked={showCompleted}
+                      onCheckedChange={handleSetShowCompleted}
+                      onSelect={(event) => event.preventDefault()}
+                    >
+                      {t("showCompleted")}
+                    </DropdownMenuCheckboxItem>
+                    <DropdownMenuCheckboxItem
+                      checked={showWorktrees}
+                      onCheckedChange={handleSetShowWorktrees}
+                      onSelect={(event) => event.preventDefault()}
+                    >
+                      {t("showWorktrees")}
+                    </DropdownMenuCheckboxItem>
+                    <DropdownMenuCheckboxItem
+                      checked={showRecent}
+                      onCheckedChange={handleSetShowRecent}
+                      onSelect={(event) => event.preventDefault()}
+                    >
+                      {t("showRecent")}
+                    </DropdownMenuCheckboxItem>
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <Menu className="text-muted-foreground" />
+                    {t("navigationItems")}
+                  </DropdownMenuSubTrigger>
+                  {/* Driven by the id list itself, so a route added there can
                     never ship a row without its toggle. Each id doubles as its
                     message key. Hiding one only drops the sidebar shortcut: the
                     status bar's quick-actions menu still reaches every route, so
                     no choice here can strand the user on a page. */}
-                <DropdownMenuSubContent>
-                  {SIDEBAR_NAV_ITEM_IDS.map((id) => {
-                    const Icon = NAV_ITEM_ICONS[id]
-                    return (
-                      <DropdownMenuCheckboxItem
-                        key={id}
-                        checked={isNavItemVisible(navItems, id)}
-                        onCheckedChange={(value) => handleSetNavItem(id, value)}
-                        onSelect={(event) => event.preventDefault()}
-                      >
-                        <Icon className="text-muted-foreground" />
-                        {t(id)}
-                      </DropdownMenuCheckboxItem>
-                    )
-                  })}
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>{t("sortBy")}</DropdownMenuLabel>
-              <DropdownMenuRadioGroup
-                value={sortMode}
-                onValueChange={handleSetSortMode}
-              >
-                <DropdownMenuRadioItem
-                  value="created"
-                  onSelect={(event) => event.preventDefault()}
+                  <DropdownMenuSubContent>
+                    {SIDEBAR_NAV_ITEM_IDS.map((id) => {
+                      const Icon = NAV_ITEM_ICONS[id]
+                      return (
+                        <DropdownMenuCheckboxItem
+                          key={id}
+                          checked={isNavItemVisible(navItems, id)}
+                          onCheckedChange={(value) =>
+                            handleSetNavItem(id, value)
+                          }
+                          onSelect={(event) => event.preventDefault()}
+                        >
+                          <Icon className="text-muted-foreground" />
+                          {t(id)}
+                        </DropdownMenuCheckboxItem>
+                      )
+                    })}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>{t("sortBy")}</DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  value={sortMode}
+                  onValueChange={handleSetSortMode}
                 >
-                  {t("sortByCreatedAt")}
-                </DropdownMenuRadioItem>
-                <DropdownMenuRadioItem
-                  value="updated"
-                  onSelect={(event) => event.preventDefault()}
-                >
-                  {t("sortByUpdatedAt")}
-                </DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
-              <DropdownMenuSeparator />
-              <DropdownMenuLabel>{t("sectionOrder")}</DropdownMenuLabel>
-              <SidebarSectionOrderControl
-                order={sectionOrder}
-                onMove={handleMoveSection}
-                hiddenSections={hiddenSections}
-              />
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+                  <DropdownMenuRadioItem
+                    value="created"
+                    onSelect={(event) => event.preventDefault()}
+                  >
+                    {t("sortByCreatedAt")}
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem
+                    value="updated"
+                    onSelect={(event) => event.preventDefault()}
+                  >
+                    {t("sortByUpdatedAt")}
+                  </DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>{t("sectionOrder")}</DropdownMenuLabel>
+                <SidebarSectionOrderControl
+                  order={sectionOrder}
+                  onMove={handleMoveSection}
+                  hiddenSections={hiddenSections}
+                />
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )}
       </div>
 
-      {/* Fixed actions above the scrollable list. `shrink-0` keeps them pinned —
-          they never scroll with the conversation list. Rows are `rounded-full`
-          like the conversation pills, and the icon/text geometry matches the
-          folder header: a 0.875rem icon + 0.875rem label at a 0.4375rem gap, with
-          the row's pl-[0.4375rem] (atop the container's px-1.5) placing the icon
-          center on the same 0.875rem rail axis as the folder/conversation icons in
-          the list below. Each row is a `group` so its shortcut hint reveals on
-          hover / keyboard focus. */}
-      <div className="flex shrink-0 flex-col gap-0.5 px-1.5 pt-1.5">
-        <SidebarNavButton
-          icon={SquarePen}
-          label={t("newChat")}
-          onClick={handleNewConversation}
-          trailing={
-            newConversationShortcutLabel ? (
-              <kbd className={SHORTCUT_BADGE_CLASS}>
-                {newConversationShortcutLabel}
-              </kbd>
-            ) : null
-          }
-        />
-        {/* Search is deliberately NOT a row here: it moved to the fixed top-left
-            window chrome (`LeftEdgeChrome`, plus the mobile `FolderTitleBar`),
-            which — unlike this sidebar — never unmounts, so the button survives
-            a collapse. ⌘K still works from anywhere. */}
-        {/* Each route row can be switched off from the view-options menu's
-            "Navigation items" group — for a workspace that never uses one of
-            them, this block is pure noise above the list. The routes stay
-            reachable from the status bar's quick-actions menu either way.
-            All three close the mobile Drawer on the way out, like tapping a
-            conversation card (handled by the list wrapper below) — otherwise the
-            page they just opened stays hidden behind the sidebar. */}
-        {isNavItemVisible(navItems, "automations") && (
-          <SidebarNavButton
-            icon={Zap}
-            label={t("automations")}
-            active={routeId === "automations"}
-            onClick={() => {
-              if (isMobile) toggle()
-              setRoute("automations")
-            }}
-            trailing={
-              unseenFailures > 0 ? (
-                <span className="ml-auto inline-flex h-[0.9375rem] min-w-[0.9375rem] shrink-0 items-center justify-center rounded-full bg-destructive/15 px-1 font-mono text-[0.625rem] font-medium leading-none text-destructive">
-                  {unseenFailures}
-                </span>
-              ) : null
-            }
-          />
-        )}
-        {isNavItemVisible(navItems, "tasks") && (
-          <SidebarNavButton
-            icon={ListTodo}
-            label={t("tasks")}
-            active={routeId === "tasks"}
-            onClick={() => {
-              if (isMobile) toggle()
-              setRoute("tasks")
-            }}
-            trailing={
-              attentionCount > 0 ? (
-                // Attention (not failure): tasks waiting on the user — primary
-                // tint like the shortcut chips, not destructive.
-                <span className="ml-auto inline-flex h-[0.9375rem] min-w-[0.9375rem] shrink-0 items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[0.625rem] font-medium leading-none text-primary">
-                  {attentionCount}
-                </span>
-              ) : null
-            }
-          />
-        )}
-        {isNavItemVisible(navItems, "forge") && (
-          <SidebarNavButton
-            icon={LayoutTemplate}
-            label={t("forge")}
-            active={routeId === "forge"}
-            onClick={() => {
-              if (isMobile) toggle()
-              setRoute("forge")
-            }}
-          />
-        )}
-        {isNavItemVisible(navItems, "canvas") && (
-          <SidebarNavButton
-            icon={MapIcon}
-            label={t("canvas")}
-            active={routeId === "canvas"}
-            onClick={() => {
-              if (isMobile) toggle()
-              setRoute("canvas")
-            }}
-          />
-        )}
-      </div>
+      <WorkspaceIdentity state={catalog?.identity} />
 
       {/* On mobile, clicking a conversation card auto-closes the Drawer */}
       <div
@@ -594,14 +467,121 @@ export function Sidebar() {
             : undefined
         }
       >
-        <SidebarConversationList
-          ref={listRef}
-          showCompleted={showCompleted}
-          showWorktrees={showWorktrees}
-          showRecent={showRecent}
-          sortMode={sortMode}
-          sectionOrder={sectionOrder}
-        />
+        {catalog?.enabled ? (
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <WorkspaceCatalogSidebar />
+            <details className="mx-2 border-t border-sidebar-border/60 pt-2">
+              <summary className="cursor-pointer rounded px-2 py-2 text-xs text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring">
+                {tCatalog("legacy")}
+              </summary>
+              <div className="flex h-[min(45dvh,24rem)] min-h-40 flex-col">
+                <SidebarConversationList
+                  ref={listRef}
+                  legacyHistory
+                  hideRootCreation
+                  showCompleted={showCompleted}
+                  showWorktrees={showWorktrees}
+                  sortMode={sortMode}
+                />
+              </div>
+            </details>
+          </div>
+        ) : (
+          <SidebarConversationList
+            ref={listRef}
+            showCompleted={showCompleted}
+            showWorktrees={showWorktrees}
+            showRecent={showRecent}
+            sortMode={sortMode}
+            sectionOrder={sectionOrder}
+          />
+        )}
+      </div>
+      <div className="shrink-0 border-t border-sidebar-border/60 p-2">
+        <button
+          type="button"
+          onClick={() => setToolsExpanded((value) => !value)}
+          aria-expanded={toolsExpanded}
+          aria-controls="workspace-tools"
+          className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Menu className="size-4 text-muted-foreground" />
+          {tWorkspace("tools")}
+          <ChevronDown
+            aria-hidden="true"
+            className={cn(
+              "ml-auto size-3.5 transition-transform",
+              toolsExpanded && "rotate-180"
+            )}
+          />
+        </button>
+        <nav
+          id="workspace-tools"
+          aria-label={tWorkspace("tools")}
+          hidden={!toolsExpanded}
+          className="mt-1 max-h-[30dvh] overflow-y-auto space-y-0.5 border-l border-sidebar-border/60 pl-3 ml-3"
+        >
+          {isNavItemVisible(navItems, "automations") && (
+            <SidebarNavButton
+              icon={Zap}
+              label={t("automations")}
+              active={routeId === "automations"}
+              onClick={() => {
+                if (isMobile) toggle()
+                setRoute("automations")
+              }}
+              trailing={
+                unseenFailures > 0 ? (
+                  <span className="ml-auto inline-flex h-[0.9375rem] min-w-[0.9375rem] shrink-0 items-center justify-center rounded-full bg-destructive/15 px-1 font-mono text-[0.625rem] font-medium leading-none text-destructive">
+                    {unseenFailures}
+                  </span>
+                ) : null
+              }
+            />
+          )}
+          {isNavItemVisible(navItems, "tasks") && (
+            <SidebarNavButton
+              icon={ListTodo}
+              label={t("tasks")}
+              active={routeId === "tasks"}
+              onClick={() => {
+                if (isMobile) toggle()
+                setRoute("tasks")
+              }}
+              trailing={
+                attentionCount > 0 ? (
+                  // Attention (not failure): tasks waiting on the user — primary
+                  // tint like the shortcut chips, not destructive.
+                  <span className="ml-auto inline-flex h-[0.9375rem] min-w-[0.9375rem] shrink-0 items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[0.625rem] font-medium leading-none text-primary">
+                    {attentionCount}
+                  </span>
+                ) : null
+              }
+            />
+          )}
+          {isNavItemVisible(navItems, "forge") && (
+            <SidebarNavButton
+              icon={LayoutTemplate}
+              label={t("forge")}
+              active={routeId === "forge"}
+              onClick={() => {
+                if (isMobile) toggle()
+                setRoute("forge")
+              }}
+            />
+          )}
+          {isNavItemVisible(navItems, "canvas") && (
+            <SidebarNavButton
+              icon={MapIcon}
+              label={t("canvas")}
+              active={routeId === "canvas"}
+              onClick={() => {
+                if (isMobile) toggle()
+                setRoute("canvas")
+              }}
+            />
+          )}
+        </nav>
       </div>
     </aside>
   )

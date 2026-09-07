@@ -9,24 +9,22 @@ const contextBarSource = read(
 )
 const branchDropdownSource = read("src/components/layout/branch-dropdown.tsx")
 
-// The rich git BranchDropdown moved out of the bottom status bar and into the
-// below-composer folder/branch row, replacing the basic popover BranchPicker.
+// The rich git BranchDropdown lives in the document-like conversation header,
+// not beside the composer. Logical subfolders resolve the physical repo root
+// before handing a folder to Git controls.
 describe("branch selector placement", () => {
   it("removes the branch selector from the bottom status bar", () => {
     expect(statusBarSource).not.toContain("BranchDropdown")
     expect(statusBarSource).not.toContain("branch-dropdown")
   })
 
-  it("hosts the rich BranchDropdown in the below-composer row, once per tile", () => {
+  it("hosts the rich BranchDropdown in the conversation header", () => {
     expect(contextBarSource).toContain(
       'import { BranchDropdown } from "@/components/layout/branch-dropdown"'
     )
-    // Mounted per tile with the tile's OWN folder (not gated to the active tile)
-    // so a tiled view keeps every tile's branch chip live.
     expect(contextBarSource).toContain(
-      "<BranchDropdown folder={ownFolder} isChatMode={isChatMode} />"
+      "<BranchDropdown folder={branchFolder} isChatMode={isChatMode} />"
     )
-    expect(contextBarSource).not.toContain("isActiveTab && <BranchDropdown")
   })
 
   it("retires the basic BranchPicker and the status-bar variant", () => {

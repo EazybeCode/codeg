@@ -29,11 +29,13 @@ import {
   filterTopLevelFolders,
   formatFolderLabelWithAlias,
   resolveFolderDisplayName,
+  resolveFolderBreadcrumb,
   resolvePickerSelectedFolderId,
 } from "@/lib/folder-display"
 import { FolderAliasLabel } from "@/components/conversations/folder-alias-label"
 import { FolderOptionItem } from "@/components/shared/folder-select"
 import { BranchDropdown } from "@/components/layout/branch-dropdown"
+import { useFolderRepoContext } from "@/hooks/use-folder-repo-context"
 
 interface ConversationContextBarProps {
   extraContent?: React.ReactNode
@@ -136,6 +138,12 @@ export const ConversationHeaderFolderPicker = memo(
       [ownTab, allFolders]
     )
 
+    const {
+      folder: branchFolder,
+      unavailable: repoError,
+      loading: repoLoading,
+    } = useFolderRepoContext(ownFolder, allFolders, ownTab?.id === activeTabId)
+
     // Only top-level repos are switchable here; worktree folders are reached
     // via the branch picker, and hidden chat folders are a per-conversation
     // implementation detail, so both are excluded from the list.
@@ -145,6 +153,7 @@ export const ConversationHeaderFolderPicker = memo(
     )
 
     if (!ownTab) return null
+    if (ownFolder?.kind === "workspace_chat") return null
     // Chat mode: a draft flagged `isChat` (no folder yet) or a conversation
     // bound to a hidden chat folder. The chip still shows so the user can
     // switch back to a real folder while drafting.
@@ -169,57 +178,100 @@ export const ConversationHeaderFolderPicker = memo(
     const titleFolderName = displayFolder
       ? formatFolderLabelWithAlias(displayFolder)
       : displayFolderName
+    const ancestors = displayFolder
+      ? resolveFolderBreadcrumb(displayFolder.id, allFolders).slice(0, -1)
+      : []
 
     // The header folder is a static, un-themed breadcrumb: folder (and chat-mode)
     // switching now lives in the below-composer picker row, so even a new
     // conversation draft shows a plain label here — never a popover trigger,
     // never the theme color.
     return (
-      <FolderPicker
-        variant="header"
-        folders={topLevelFolders}
-        currentFolderId={pickerSelectedId}
-        currentFolderName={displayFolderName}
-        alias={displayFolderAlias}
-        title={`${t("folderTitle")}: ${titleFolderName}`}
-        editable={false}
-        onSelect={async (folderId) => {
-          const target = folders.find((f) => f.id === folderId)
-          if (!target) return
-          try {
-            // Route through openNewConversationTab so the target folder's saved
-            // default agent is applied; the existing-draft branch reuses ownTab
-            // via the singleton invariant. `inheritFromActive: true` keeps the
-            // user's current agent when the target folder has no pinned default.
-            openNewConversationTab(target.id, target.path, {
-              inheritFromActive: true,
-            })
-            toast.success(t("toasts.folderChanged", { name: target.name }))
-          } catch (err) {
-            console.error(
-              "[ConversationHeaderFolderPicker] switch folder failed:",
-              err
-            )
-            toast.error(t("toasts.openFolderFailed"))
-          }
-        }}
-        labelEmpty={t("noFolders")}
-        labelSearch={t("searchFolder")}
-        labelChatMode={t("chatModeLabel")}
-        isChatMode={isChatMode}
-        onSelectChatMode={() => {
-          try {
-            openChatModeTab()
-            toast.success(t("toasts.switchedToChatMode"))
-          } catch (err) {
-            console.error(
-              "[ConversationHeaderFolderPicker] switch to chat mode failed:",
-              err
-            )
-            toast.error(t("toasts.openFolderFailed"))
-          }
-        }}
-      />
+      <div className="flex min-w-0 items-center gap-2">
+        <nav
+          aria-label="Folder path"
+          className="flex min-w-0 items-center gap-1 overflow-hidden text-sm"
+        >
+          {ancestors.map((ancestor) => (
+            <span
+              key={ancestor.id}
+              className="hidden min-w-0 items-center gap-1 text-muted-foreground sm:inline-flex"
+            >
+              <span className="max-w-32 truncate" title={ancestor.name}>
+                {ancestor.label}
+              </span>
+              <span
+                aria-hidden="true"
+                className="px-1 text-muted-foreground/50"
+              >
+                /
+              </span>
+            </span>
+          ))}
+          <FolderPicker
+            variant="header"
+            folders={topLevelFolders}
+            currentFolderId={pickerSelectedId}
+            currentFolderName={displayFolderName}
+            alias={displayFolderAlias}
+            title={`${t("folderTitle")}: ${titleFolderName}`}
+            editable={false}
+            onSelect={async (folderId) => {
+              const target = folders.find((f) => f.id === folderId)
+              if (!target) return
+              try {
+                // Route through openNewConversationTab so the target folder's saved
+                // default agent is applied; the existing-draft branch reuses ownTab
+                // via the singleton invariant. `inheritFromActive: true` keeps the
+                // user's current agent when the target folder has no pinned default.
+                openNewConversationTab(target.id, target.path, {
+                  inheritFromActive: true,
+                })
+                toast.success(t("toasts.folderChanged", { name: target.name }))
+              } catch (err) {
+                console.error(
+                  "[ConversationHeaderFolderPicker] switch folder failed:",
+                  err
+                )
+                toast.error(t("toasts.openFolderFailed"))
+              }
+            }}
+            labelEmpty={t("noFolders")}
+            labelSearch={t("searchFolder")}
+            labelChatMode={t("chatModeLabel")}
+            isChatMode={isChatMode}
+            onSelectChatMode={() => {
+              try {
+                openChatModeTab()
+                toast.success(t("toasts.switchedToChatMode"))
+              } catch (err) {
+                console.error(
+                  "[ConversationHeaderFolderPicker] switch to chat mode failed:",
+                  err
+                )
+                toast.error(t("toasts.openFolderFailed"))
+              }
+            }}
+          />
+        </nav>
+        <div className="shrink-0 border-l border-border/60 pl-2">
+          {repoError ? (
+            <span
+              role="status"
+              title={repoError}
+              className="text-xs text-amber-700 dark:text-amber-400"
+            >
+              Repository unavailable
+            </span>
+          ) : repoLoading ? (
+            <span className="text-xs text-muted-foreground">
+              Checking repository…
+            </span>
+          ) : (
+            <BranchDropdown folder={branchFolder} isChatMode={isChatMode} />
+          )}
+        </div>
+      </div>
     )
   }
 )

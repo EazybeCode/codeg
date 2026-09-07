@@ -1,43 +1,24 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Loader2, Search } from "lucide-react"
 import { toast } from "sonner"
-import { getCodegToken } from "@/lib/transport/web-auth"
+import {
+  githubProjectPost as apiPost,
+  type GithubRepository as Repo,
+} from "@/lib/github-project-api"
+import { useGithubRepositories } from "@/hooks/use-github-repositories"
+import { GithubLoadError } from "@/components/shared/github-load-error"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import { useTabActions } from "@/stores/tab-store"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
+  DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-
-type Repo = {
-  full_name: string
-  name: string
-  owner: string
-  private: boolean
-  default_branch: string
-  description?: string | null
-}
-
-async function apiPost<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api/${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getCodegToken()}`,
-    },
-    body: JSON.stringify(body ?? {}),
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok || (data && (data as { error?: string }).error)) {
-    throw new Error((data as { error?: string }).error || res.statusText)
-  }
-  return data as T
-}
 
 /**
  * "Open GitHub project" — the cloud-native, no-local-clone flow. Lists the
@@ -53,23 +34,9 @@ export function GithubProjectDialog({
 }) {
   const openFolder = useAppWorkspaceStore((s) => s.openFolder)
   const { openNewConversationTab } = useTabActions()
-  const [repos, setRepos] = useState<Repo[]>([])
+  const { repos, loading, error, retry } = useGithubRepositories(open)
   const [q, setQ] = useState("")
-  const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!open) return
-    setLoading(true)
-    apiPost<Repo[]>("list_github_repos")
-      .then(setRepos)
-      .catch((e) =>
-        toast.error("Couldn't load your GitHub repos", {
-          description: String(e),
-        })
-      )
-      .finally(() => setLoading(false))
-  }, [open])
 
   const filtered = repos.filter((r) =>
     r.full_name.toLowerCase().includes(q.trim().toLowerCase())
@@ -102,6 +69,10 @@ export function GithubProjectDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Open a GitHub project</DialogTitle>
+          <DialogDescription>
+            Choose a repository for your project. Nested folders keep your work
+            organized inside it.
+          </DialogDescription>
         </DialogHeader>
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -118,6 +89,8 @@ export function GithubProjectDialog({
             <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading your repos…
             </div>
+          ) : error ? (
+            <GithubLoadError error={error} retry={retry} />
           ) : filtered.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">
               {repos.length === 0 ? "No repositories found." : "No matches."}

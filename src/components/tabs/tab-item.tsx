@@ -53,6 +53,7 @@ interface TabItemProps {
   /** This tab's group has ≥ 2 tabs, so "Split and Move" leaves a non-empty
    *  group behind (moving the only tab would just shift the group). */
   canSplitMove: boolean
+  canSplitDraft?: boolean
   /** This tab may change groups at all. False for DRAFTS: an unsent draft is the
    *  group's own scratch slot (its composer text, folder and agent live with the
    *  group), and every group can spawn one from its own strip. Only the move
@@ -99,6 +100,7 @@ export const TabItem = memo(function TabItem({
   folderBranch,
   isSplit,
   canSplitMove,
+  canSplitDraft = true,
   canMoveToGroup,
   moveTargets,
   onTabDrag,
@@ -384,10 +386,13 @@ export const TabItem = memo(function TabItem({
           {/* IDEA-style split-group vocabulary. Plain "Split" seeds the new
               group with a fresh draft (a conversation can't be open in two
               groups at once), "Split and Move" relocates this tab. */}
-          <ContextMenuItem onSelect={handleSplitRight}>
+          <ContextMenuItem
+            disabled={!canSplitDraft}
+            onSelect={handleSplitRight}
+          >
             {t("splitRight")}
           </ContextMenuItem>
-          <ContextMenuItem onSelect={handleSplitDown}>
+          <ContextMenuItem disabled={!canSplitDraft} onSelect={handleSplitDown}>
             {t("splitDown")}
           </ContextMenuItem>
           <ContextMenuItem

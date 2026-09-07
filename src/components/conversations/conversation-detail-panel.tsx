@@ -1,4 +1,6 @@
 "use client"
+import { WorkspaceChatHeader } from "@/components/workspace/workspace-chat-header"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
@@ -2382,6 +2384,8 @@ function SplitStripCornerReserve({ side }: { side: "left" | "right" }) {
 
 export function ConversationDetailPanel() {
   const t = useTranslations("Folder.conversation")
+  const tCatalog = useTranslations("WorkspaceCatalog")
+  const catalog = useWorkspaceCatalogContext()
   const tDetails = useTranslations("Folder.sessionDetails")
   const {
     completeTurn: runtimeCompleteTurn,
@@ -2503,6 +2507,8 @@ export function ConversationDetailPanel() {
     [tabs, activeTabId]
   )
   const canReloadActiveConversation = activeConversationTab != null
+  const catalogNodeId =
+    catalog?.nodeForConversation(activeConversationTab?.conversationId) ?? null
   const handleReloadActiveConversation = useCallback(() => {
     if (!activeConversationTab) return
     setReloadByTabId((prev) => ({
@@ -2512,11 +2518,15 @@ export function ConversationDetailPanel() {
   }, [activeConversationTab])
 
   const handleNewConversation = useCallback(() => {
+    if (catalog?.enabled) {
+      if (catalogNodeId != null) catalog.create("chat", catalogNodeId)
+      return
+    }
     if (!folder) return
     // Right-click "new conversation" inside a conversation tab: keep the
     // active agent when the target folder has no pinned default.
     openNewConversationTab(folder.id, folder.path, { inheritFromActive: true })
-  }, [folder, openNewConversationTab])
+  }, [folder, openNewConversationTab, catalog, catalogNodeId])
 
   const handleCloseActiveTab = useCallback(() => {
     if (!activeTabId) return
@@ -2640,6 +2650,7 @@ export function ConversationDetailPanel() {
     if (!folder) return
 
     if (hasNoTabs) {
+      if (useTabStore.getState().catalogMode) return
       openNewConversationTab(
         folder.id,
         newConversation?.workingDir ?? folder.path
@@ -2748,7 +2759,12 @@ export function ConversationDetailPanel() {
             conversationId={tab.conversationId}
             folderId={tabFolder.id}
           >
-            {(draftId) => renderView(draftId)}
+            {(draftId, runtime) => (
+              <div className="flex h-full min-h-0 flex-col">
+                <WorkspaceChatHeader runtime={runtime} />
+                <div className="min-h-0 flex-1">{renderView(draftId)}</div>
+              </div>
+            )}
           </WorkspaceChatRuntimeGate>
         ) : (
           <p role="status">Workspace chat context is unavailable.</p>
@@ -2943,13 +2959,15 @@ export function ConversationDetailPanel() {
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>
-            <ContextMenuItem
-              disabled={!folder?.path}
-              onSelect={handleNewConversation}
-            >
-              <SquarePen className="h-4 w-4" />
-              {t("newConversation")}
-            </ContextMenuItem>
+            {(!catalog?.enabled || catalogNodeId != null) && (
+              <ContextMenuItem
+                disabled={!folder?.path}
+                onSelect={handleNewConversation}
+              >
+                <SquarePen className="h-4 w-4" />
+                {catalog?.enabled ? tCatalog("new_chat") : t("newConversation")}
+              </ContextMenuItem>
+            )}
             <ContextMenuSub>
               <ContextMenuSubTrigger disabled={!canExport}>
                 <Download className="h-4 w-4" />

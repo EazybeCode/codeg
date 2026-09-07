@@ -13,7 +13,6 @@ const mocks = vi.hoisted(() => {
   ]
   return {
     connections,
-    openProjectBootWindow: vi.fn(() => Promise.resolve()),
     openPetWindow: vi.fn(() => Promise.resolve()),
     openRemoteWorkspace: vi.fn(() => Promise.resolve()),
     listRemoteWorkspaceConnections: vi.fn(() => Promise.resolve(connections)),
@@ -24,9 +23,7 @@ const mocks = vi.hoisted(() => {
 let desktop = true
 vi.mock("@/lib/platform", () => ({ isDesktop: () => desktop }))
 
-vi.mock("@/lib/api", () => ({
-  openProjectBootWindow: mocks.openProjectBootWindow,
-}))
+vi.mock("@/lib/api", () => ({}))
 
 vi.mock("@/lib/pet/api", () => ({ openPetWindow: mocks.openPetWindow }))
 
@@ -52,6 +49,10 @@ vi.mock("@/contexts/workbench-route-context", () => ({
 
 // Dialogs render nothing until opened and drag in large trees; the menu only
 // owns their open state, which the assertions below read off these stubs.
+vi.mock("./github-project-dialog", () => ({
+  GithubProjectDialog: ({ open }: { open: boolean }) =>
+    open ? <div>GITHUB-PROJECT-DIALOG</div> : null,
+}))
 vi.mock("./clone-dialog", () => ({
   CloneDialog: ({ open }: { open: boolean }) =>
     open ? <div>CLONE-DIALOG</div> : null,
@@ -98,7 +99,7 @@ beforeEach(() => {
 })
 
 describe("QuickActionsDropdown", () => {
-  it("groups all eight actions under their headings on desktop", async () => {
+  it("groups workspace and navigation actions under their headings on desktop", async () => {
     await mountAndOpen()
 
     for (const group of ["Workspace", "Navigation", "More"]) {
@@ -107,7 +108,7 @@ describe("QuickActionsDropdown", () => {
     for (const label of [
       "Open Folder",
       "Clone Repository",
-      "Project Boot",
+      "Open GitHub project",
       "Open remote workspace",
       AUTOMATIONS_ROW,
       "To-dos",
@@ -167,8 +168,8 @@ describe("QuickActionsDropdown", () => {
     expect(mocks.setRoute).toHaveBeenCalledWith("automations")
 
     await reopen()
-    await clickItem("Project Boot")
-    expect(mocks.openProjectBootWindow).toHaveBeenCalled()
+    await clickItem("Open GitHub project")
+    expect(screen.getByText("GITHUB-PROJECT-DIALOG")).toBeVisible()
 
     await reopen()
     await clickItem("To-dos")
@@ -177,6 +178,10 @@ describe("QuickActionsDropdown", () => {
     await reopen()
     await clickItem(FORGE_ROW)
     expect(mocks.setRoute).toHaveBeenCalledWith("forge")
+
+    await reopen()
+    await clickItem(enMessages.Folder.sidebar.canvas)
+    expect(mocks.setRoute).toHaveBeenCalledWith("canvas")
 
     await reopen()
     await clickItem("Show pet")

@@ -343,6 +343,7 @@ export function MessageInput({
   onInjectConsumed,
 }: MessageInputProps) {
   const t = useTranslations("Folder.chat.messageInput")
+  const tCatalog = useTranslations("WorkspaceCatalog")
   const tQueue = useTranslations("Folder.chat.messageQueue")
   // Kept as a separate binding from `t` so its call sites — exclusively
   // upload / attachment toasts — read as a single coherent group when
@@ -1805,14 +1806,14 @@ export function MessageInput({
     >
       {failedSend && (
         <div role="status" className="mb-2 flex items-center gap-2 text-sm">
-          <span>Send was not confirmed. Your draft is retained.</span>
+          <span>{tCatalog("retainedDraft")}</span>
           <Button
             size="sm"
             variant="outline"
             disabled={sendPending}
             onClick={() => submitDraft(failedSend.draft, failedSend.modeId)}
           >
-            Retry retained draft
+            {tCatalog("retryDraft")}
           </Button>
         </div>
       )}

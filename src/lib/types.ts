@@ -358,6 +358,17 @@ export interface FolderHistoryEntry {
   last_opened_at: string
 }
 
+export interface FolderRepoContext {
+  folder_id: number
+  project_folder_id: number
+  repo_folder_id: number
+  repo_full_name: string | null
+  branch: string | null
+  relative_path: string
+  is_inherited: boolean
+  git_root: string | null
+}
+
 export interface FolderDetail {
   id: number
   name: string

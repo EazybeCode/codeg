@@ -24,6 +24,9 @@ export function DeepLinkBootstrap() {
     if (typeof window === "undefined") return
 
     const params = new URLSearchParams(window.location.search)
+    // Canonical catalog links are resolved by the scoped launcher. Draft IDs
+    // must never enter the legacy folder/conversation lookup or clearUrl path.
+    if (params.has("chatId")) return
     const rawFolderId = params.get("folderId")
     const rawConversationId = params.get("conversationId")
     const rawAgent = params.get("agent") as AgentType | null

@@ -1305,6 +1305,7 @@ function pushConversationRow(
  *   Folders / Chat (see {@link ConversationRow.recent}).
  */
 export function buildRows(args: {
+  legacyHistory?: boolean
   pinned: readonly DbConversationSummary[]
   pinnedExpanded: boolean
   orderedFolderIds: readonly number[]
@@ -1644,15 +1645,11 @@ export function buildRows(args: {
   // order can never drop a section off the sidebar or emit one twice.
   for (const section of normalizeSectionOrder(sectionOrder)) {
     if (section === "folders") pushFolders()
-    // Eazybe WorkOS: ONLY the Projects (folders/subfolders) tree is shown. The
-    // folderless "Chat" section (a.k.a. "chat mode") and the flat "Recent"
-    // section are both hidden per Sagar — everything lives inside a Project.
-    // Helpers are retained (referenced here) so re-enabling is a one-liner.
-    else if (section === "chats" || section === "recent") {
-      void pushChats
-      void pushRecent
-      void showRecent
-    }
+    else if (section === "chats" && args.legacyHistory) pushChats()
+    else if (section === "recent" && args.legacyHistory && showRecent)
+      pushRecent()
+    // The default surface is Projects-only. Existing folderless chats remain
+    // reachable when this same list is explicitly mounted as legacy history.
   }
 
   return rows

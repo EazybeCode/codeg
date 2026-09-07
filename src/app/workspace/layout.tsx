@@ -11,6 +11,7 @@ import {
 import type { ImperativePanelGroupHandle } from "react-resizable-panels"
 import { FolderTitleBar } from "@/components/layout/folder-title-bar"
 import { Sidebar } from "@/components/layout/sidebar"
+import { WorkspaceCatalogProvider } from "@/components/workspace/workspace-catalog-provider"
 import { StatusBar } from "@/components/layout/status-bar"
 import {
   AppWorkspaceProvider,
@@ -1267,55 +1268,57 @@ function WorkbenchRouteConversationSync() {
 
 function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
   return (
-    <AppWorkspaceProvider>
-      <AlertProvider>
-        <GitCredentialProvider>
-          <TaskProvider>
-            <AcpConnectionsProvider>
-              <DelegationProvider>
-                <ConversationStatusEventBridge />
-                <ConversationRuntimeProvider>
-                  <WorkspaceProvider>
-                    <TabProvider>
-                      <WorkspaceDocumentTitle />
-                      <TabKeysSync />
-                      <HeavyPluginsWarmup />
-                      <DeepLinkBootstrap />
-                      <PetFocusBridge />
-                      {/* Always mounted: external-change conflicts must be
+    <WorkspaceCatalogProvider>
+      <AppWorkspaceProvider>
+        <AlertProvider>
+          <GitCredentialProvider>
+            <TaskProvider>
+              <AcpConnectionsProvider>
+                <DelegationProvider>
+                  <ConversationStatusEventBridge />
+                  <ConversationRuntimeProvider>
+                    <WorkspaceProvider>
+                      <TabProvider>
+                        <WorkspaceDocumentTitle />
+                        <TabKeysSync />
+                        <HeavyPluginsWarmup />
+                        <DeepLinkBootstrap />
+                        <PetFocusBridge />
+                        {/* Always mounted: external-change conflicts must be
                             resolvable even with the aux file tree closed. */}
-                      <ExternalConflictDialog />
-                      <SidebarProvider>
-                        <AuxPanelProvider>
-                          <TerminalProvider>
-                            <SearchDialogProvider>
-                              <AutomationsViewProvider>
-                                <TasksViewProvider>
-                                  <WorkbenchRouteProvider>
-                                    <WorkbenchRouteConversationSync />
-                                    {/* Inside WorkbenchRouteProvider: the
+                        <ExternalConflictDialog />
+                        <SidebarProvider>
+                          <AuxPanelProvider>
+                            <TerminalProvider>
+                              <SearchDialogProvider>
+                                <AutomationsViewProvider>
+                                  <TasksViewProvider>
+                                    <WorkbenchRouteProvider>
+                                      <WorkbenchRouteConversationSync />
+                                      {/* Inside WorkbenchRouteProvider: the
                                           listener calls openConversations() to
                                           surface a launcher-opened folder. */}
-                                    <WorkspaceOpenFolderListener />
-                                    <FolderLayoutShell>
-                                      {children}
-                                    </FolderLayoutShell>
-                                  </WorkbenchRouteProvider>
-                                </TasksViewProvider>
-                              </AutomationsViewProvider>
-                            </SearchDialogProvider>
-                          </TerminalProvider>
-                        </AuxPanelProvider>
-                      </SidebarProvider>
-                    </TabProvider>
-                  </WorkspaceProvider>
-                </ConversationRuntimeProvider>
-              </DelegationProvider>
-            </AcpConnectionsProvider>
-          </TaskProvider>
-        </GitCredentialProvider>
-      </AlertProvider>
-    </AppWorkspaceProvider>
+                                      <WorkspaceOpenFolderListener />
+                                      <FolderLayoutShell>
+                                        {children}
+                                      </FolderLayoutShell>
+                                    </WorkbenchRouteProvider>
+                                  </TasksViewProvider>
+                                </AutomationsViewProvider>
+                              </SearchDialogProvider>
+                            </TerminalProvider>
+                          </AuxPanelProvider>
+                        </SidebarProvider>
+                      </TabProvider>
+                    </WorkspaceProvider>
+                  </ConversationRuntimeProvider>
+                </DelegationProvider>
+              </AcpConnectionsProvider>
+            </TaskProvider>
+          </GitCredentialProvider>
+        </AlertProvider>
+      </AppWorkspaceProvider>
+    </WorkspaceCatalogProvider>
   )
 }
 

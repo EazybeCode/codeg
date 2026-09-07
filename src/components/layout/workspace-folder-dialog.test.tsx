@@ -70,6 +70,7 @@ const folder = (overrides: Partial<FolderDetail> = {}): FolderDetail => ({
   kind: "regular",
   alias: null,
   group_id: null,
+  repo_full_name: null,
   ...overrides,
 })
 

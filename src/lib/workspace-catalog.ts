@@ -63,6 +63,10 @@ export function listWorkspaceNodes(): Promise<WorkspaceNode[]> {
   return getTransport().call("list_workspace_nodes", {})
 }
 
+export function listWorkspaceRepositories(): Promise<WorkspaceRepository[]> {
+  return getTransport().call("list_workspace_repositories", {})
+}
+
 export function createWorkspaceNode(
   input: CreateNodeInput
 ): Promise<WorkspaceNode> {

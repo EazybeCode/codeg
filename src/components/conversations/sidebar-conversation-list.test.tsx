@@ -6,7 +6,7 @@ import {
   useImperativeHandle,
   useState,
 } from "react"
-import { act, fireEvent, render } from "@testing-library/react"
+import { act, fireEvent, render, screen } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -304,7 +304,9 @@ function Harness() {
   useEffect(() => {
     harness.rerender = () => setTick((n) => n + 1)
   }, [])
-  return <SidebarConversationList showCompleted sortMode="created" />
+  return (
+    <SidebarConversationList legacyHistory showCompleted sortMode="created" />
+  )
 }
 
 function tree() {
@@ -398,6 +400,16 @@ describe("SidebarConversationList — single status event re-render scope", () =
     expect(probes.folder).toBe(0)
   })
 
+  it("keeps New project reachable in a populated workspace", () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("[]")))
+    render(tree())
+    fireEvent.click(screen.getByRole("button", { name: "New project" }))
+    expect(screen.getByRole("dialog").textContent).toContain(
+      "Open a GitHub project"
+    )
+    vi.unstubAllGlobals()
+  })
+
   it("re-renders nothing when conversations are unchanged despite tab churn", () => {
     render(tree())
 
@@ -435,9 +447,9 @@ describe("SidebarConversationList — Pinned section (migration semantics)", () 
     // The Pinned section header exists only because something is pinned, and it
     // sits above the Folders section.
     expect(text).toContain("Pinned")
-    expect(text).toContain("Folders")
+    expect(text).toContain(enMessages.Folder.sidebar.sectionFolders)
     const iPinned = text.indexOf("Pinned")
-    const iFolders = text.indexOf("Folders")
+    const iFolders = text.indexOf(enMessages.Folder.sidebar.sectionFolders)
     const iConv12 = text.indexOf("conv-12") // the pinned conversation
     const iConv11 = text.indexOf("conv-11") // unpinned → stays in its folder
     // conv-12 renders under the Pinned header and above the Folders section…
@@ -454,7 +466,7 @@ describe("SidebarConversationList — Pinned section (migration semantics)", () 
     render(tree())
     const text = document.body.textContent ?? ""
     expect(text).not.toContain("Pinned")
-    expect(text).toContain("Folders")
+    expect(text).toContain(enMessages.Folder.sidebar.sectionFolders)
   })
 })
 
@@ -703,7 +715,7 @@ describe("SidebarConversationList — sticky folder header overlay", () => {
       })
       // The folder collapsed (its conversation rows are gone).
       expect(document.body.textContent).not.toContain("conv-21")
-      // The "Folders" section header occupies flat index 0, so folder 2's header
+      // The enMessages.Folder.sidebar.sectionFolders section header occupies flat index 0, so folder 2's header
       // is flat index 4 → scrolled to the top, instant.
       expect(virtuaCtl.scrollToIndex).toHaveBeenCalledWith(
         4,
@@ -785,7 +797,12 @@ describe("SidebarConversationList — scrollToActive across a worktree merge", (
     const ref = createRef<SidebarConversationListHandle>()
     render(
       <NextIntlClientProvider locale="en" messages={enMessages}>
-        <SidebarConversationList showCompleted sortMode="created" ref={ref} />
+        <SidebarConversationList
+          legacyHistory
+          showCompleted
+          sortMode="created"
+          ref={ref}
+        />
       </NextIntlClientProvider>
     )
 
@@ -848,6 +865,7 @@ describe("SidebarConversationList — worktree grouping (Show worktrees)", () =>
     }, [])
     return (
       <SidebarConversationList
+        legacyHistory
         showCompleted
         showWorktrees={showWorktrees}
         sortMode="created"
@@ -1087,6 +1105,7 @@ describe("SidebarConversationList — Recent section", () => {
     return (
       <NextIntlClientProvider locale="en" messages={enMessages}>
         <SidebarConversationList
+          legacyHistory
           showCompleted
           showRecent={showRecent}
           sortMode="created"
@@ -1320,11 +1339,13 @@ describe("SidebarConversationList — expand / collapse all", () => {
   const expandedOf = (label: string) =>
     sectionHeader(label)?.getAttribute("aria-expanded")
 
-  function renderList() {
+  function renderList(hideRootCreation = false) {
     const ref = createRef<SidebarConversationListHandle>()
     render(
       <NextIntlClientProvider locale="en" messages={enMessages}>
         <SidebarConversationList
+          legacyHistory
+          hideRootCreation={hideRootCreation}
           showCompleted
           showRecent
           sortMode="created"
@@ -1385,7 +1406,7 @@ describe("SidebarConversationList — expand / collapse all", () => {
 
     for (const label of ALL_SECTIONS) expect(expandedOf(label)).toBe("true")
     // Section collapse and per-folder collapse are stored separately, so
-    // re-opening "Folders" is not enough on its own — conv-11 is only back if
+    // re-opening enMessages.Folder.sidebar.sectionFolders is not enough on its own — conv-11 is only back if
     // its folder group was restored too.
     for (const title of ["conv-11", "conv-12", "conv-14"])
       expect(document.body.textContent).toContain(title)
@@ -1408,6 +1429,32 @@ describe("SidebarConversationList — expand / collapse all", () => {
 
     expect(localStorage.getItem(SECTION_COLLAPSED_KEY)).toBe(afterFirst)
     for (const label of ALL_SECTIONS) expect(expandedOf(label)).toBe("false")
+  })
+
+  it("retains folderless history without a root scratch-chat action in catalog mode", () => {
+    renderList(true)
+    expect(document.body.textContent).toContain("conv-12")
+    expect(screen.queryByRole("button", { name: "New project" })).toBeNull()
+    fireEvent.contextMenu(sectionHeader(sectionFolders)!)
+    expect(
+      screen.queryByRole("menuitem", {
+        name: enMessages.Folder.sidebar.newConversation,
+      })
+    ).toBeNull()
+  })
+
+  it("expands physical subfolders as well as root folders", () => {
+    const nested = { ...folder(2, "Nested"), parent_id: 1 }
+    useAppWorkspaceStore.setState({
+      folders: [folder(1, "Repo"), nested],
+      allFolders: [folder(1, "Repo"), nested],
+      conversations: [conv(21, 2)],
+    })
+    const ref = renderList()
+    act(() => ref.current?.collapseAll())
+    expect(document.body.textContent).not.toContain("conv-21")
+    act(() => ref.current?.expandAll())
+    expect(document.body.textContent).toContain("conv-21")
   })
 })
 

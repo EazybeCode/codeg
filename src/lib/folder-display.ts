@@ -13,12 +13,87 @@ import type { FolderDetail } from "@/lib/types"
  * blanks out.
  */
 export function resolveFolderDisplayName(
-  folder: Pick<FolderDetail, "name" | "parent_id">,
+  folder: Pick<FolderDetail, "name" | "parent_id" | "kind">,
   folders: readonly Pick<FolderDetail, "id" | "name">[]
 ): string {
-  if (folder.parent_id == null) return folder.name
+  // `parent_id` carries two different relationships in legacy data: runtime
+  // worktrees point at their repository, while organizational subfolders point
+  // at their logical parent. Only the former should borrow the parent's label.
+  if (folder.parent_id == null || folder.kind === "subfolder")
+    return folder.name
   const parent = folders.find((f) => f.id === folder.parent_id)
   return parent?.name ?? folder.name
+}
+
+export interface FolderBreadcrumbItem {
+  id: number
+  /** Alias when present, otherwise the real folder name. */
+  label: string
+  /** Retained for an informative tooltip when an alias masks the real name. */
+  name: string
+}
+
+/**
+ * Resolve a folder's logical ancestry without touching its runtime path/id.
+ * Missing parents produce the useful known suffix; cycles and corrupt chains
+ * are bounded so workspace chrome can never hang on malformed legacy data.
+ */
+export function resolveFolderBreadcrumb(
+  folderId: number,
+  folders: readonly Pick<FolderDetail, "id" | "name" | "alias" | "parent_id">[],
+  maxDepth = 64
+): FolderBreadcrumbItem[] {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]))
+  const seen = new Set<number>()
+  const reversed: FolderBreadcrumbItem[] = []
+  let currentId: number | null = folderId
+
+  while (
+    currentId != null &&
+    reversed.length < maxDepth &&
+    !seen.has(currentId)
+  ) {
+    const folder = byId.get(currentId)
+    if (!folder) break
+    seen.add(currentId)
+    const alias = folder.alias?.trim()
+    reversed.push({
+      id: folder.id,
+      label: alias || folder.name,
+      name: folder.name,
+    })
+    currentId = folder.parent_id
+  }
+
+  return reversed.reverse()
+}
+
+/**
+ * Best-effort Git root while the authoritative repo-context endpoint is
+ * loading or unavailable. Runtime worktrees are real Git roots in their own
+ * right. Organizational subfolders inherit upward unless they carry an
+ * explicit repository override (`repo_full_name`).
+ */
+export function resolveKnownRepoFolder<
+  T extends Pick<FolderDetail, "id" | "parent_id" | "kind" | "repo_full_name">,
+>(folder: T, folders: readonly T[], maxDepth = 64): T | null {
+  if (folder.kind !== "subfolder" || folder.repo_full_name) return folder
+
+  const byId = new Map(folders.map((entry) => [entry.id, entry]))
+  const seen = new Set<number>([folder.id])
+  let currentId = folder.parent_id
+  let depth = 0
+
+  while (currentId != null && depth < maxDepth && !seen.has(currentId)) {
+    const current = byId.get(currentId)
+    if (!current) return null
+    if (current.kind !== "subfolder" || current.repo_full_name) return current
+    seen.add(current.id)
+    currentId = current.parent_id
+    depth++
+  }
+
+  return null
 }
 
 /**
@@ -67,7 +142,10 @@ export function excludeChatFolders<T extends Pick<FolderDetail, "kind">>(
  * conversation's real working directory.
  */
 export function resolvePickerSelectedFolderId(
-  folder: Pick<FolderDetail, "id" | "parent_id">
+  folder: Pick<FolderDetail, "id" | "parent_id"> &
+    Partial<Pick<FolderDetail, "kind">>
 ): number {
-  return folder.parent_id ?? folder.id
+  return folder.kind === "subfolder"
+    ? folder.id
+    : (folder.parent_id ?? folder.id)
 }

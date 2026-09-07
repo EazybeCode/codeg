@@ -44,6 +44,10 @@ pub fn build_router(
         )
         .route("/clone_github_repo", post(handlers::gh::clone_github_repo))
         .route(
+            "/list_workspace_repositories",
+            post(handlers::workspace_catalog::list_workspace_repositories),
+        )
+        .route(
             "/list_workspace_nodes",
             post(handlers::workspace_catalog::list_workspace_nodes),
         )
@@ -1765,6 +1769,7 @@ pub fn build_router(
     // Browser-facing auth routes live at the ROOT (not under /api): a person hits
     // /auth/github/login in a browser and GitHub redirects to /auth/github/callback.
     let auth_routes = Router::new()
+        .route("/auth/me", get(handlers::workspace_identity::me))
         .route("/login", get(handlers::github_auth::login_redirect))
         .route(
             "/auth/github/login",

@@ -140,6 +140,16 @@ pub(crate) async fn verify_repository(
         .ok_or(CatalogError::NotFound)
 }
 
+pub async fn list_repositories(db: &DatabaseConnection, scope: &Scope) -> Result<Vec<WorkspaceRepository>, CatalogError> {
+    verify_scope(db, scope).await?;
+    Ok(workspace_repository::Entity::find()
+        .filter(workspace_repository::Column::OrgId.eq(scope.org_id))
+        .order_by_asc(workspace_repository::Column::Id)
+        .all(db).await?.into_iter().map(|model| WorkspaceRepository {
+            id: model.id, org_id: model.org_id, github_repository_id: model.github_repository_id, full_name: model.full_name,
+        }).collect())
+}
+
 pub async fn connect_repository(
     db: &DatabaseConnection,
     scope: &Scope,

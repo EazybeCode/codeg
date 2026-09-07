@@ -849,6 +849,18 @@ function GitActionsMenu({
   const t = useTranslations("Folder.gitLogTab")
   const tBranch = useTranslations("Folder.branchDropdown")
   const tSelector = useTranslations("Folder.gitLogTab.branchSelector")
+  if (actions.readonly)
+    return (
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label={tSelector("refreshCommitHistory")}
+        disabled={refreshing}
+        onClick={onRefresh}
+      >
+        <RefreshCw className="size-3.5" />
+      </Button>
+    )
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -1273,6 +1285,7 @@ export function GitLogTab() {
   // changes tabs). Path-keyed effects ride the deferred folder.
   const { activeFolder } = useActiveFolder()
   const folder = useDeferredValue(activeFolder)
+  const managed = folder?.kind === "workspace_chat"
   // True while the deferred render lags a cross-folder switch. During that gap we
   // render the loading skeleton (below) instead of the PREVIOUS folder's commit
   // rows: besides keeping the heavy rebuild off the switch commit, unmounting
@@ -2455,67 +2468,69 @@ export function GitLogTab() {
                               </Commit>
                             </div>
                           </ContextMenuTrigger>
-                          <ContextMenuContent>
-                            <ContextMenuItem
-                              onSelect={() => {
-                                handleOpenNewBranchDialog(entry)
-                              }}
-                            >
-                              <GitBranchPlus className="h-3.5 w-3.5" />
-                              {t("newBranch")}
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              onSelect={() => {
-                                void openCommitDiff(
-                                  entry.full_hash,
-                                  undefined,
-                                  entry.message
-                                )
-                              }}
-                            >
-                              <GitCompare className="h-3.5 w-3.5" />
-                              {tCommon("viewDiff")}
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              disabled={!isResetAllowed}
-                              onSelect={() => {
-                                handleOpenResetDialog(entry)
-                              }}
-                            >
-                              <RotateCcw className="size-3.5" />
-                              {t("resetToHere")}
-                            </ContextMenuItem>
-                            {!isResetAllowed && (
-                              <ContextMenuItem disabled>
-                                {t("resetDisabledReasonNotCurrentBranchView")}
+                          {!managed && (
+                            <ContextMenuContent>
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  handleOpenNewBranchDialog(entry)
+                                }}
+                              >
+                                <GitBranchPlus className="h-3.5 w-3.5" />
+                                {t("newBranch")}
                               </ContextMenuItem>
-                            )}
-                            <ContextMenuItem
-                              onSelect={() => {
-                                void fetchLog()
-                              }}
-                            >
-                              <RefreshCw className="size-3.5" />
-                              {tCommon("refresh")}
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              onSelect={() => {
-                                if (!folder) return
-                                openPushWindow(folder.id).catch((err) => {
-                                  const msg = toErrorMessage(err)
-                                  toast.error(
-                                    t("toasts.openPushWindowFailed"),
-                                    {
-                                      description: msg,
-                                    }
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  void openCommitDiff(
+                                    entry.full_hash,
+                                    undefined,
+                                    entry.message
                                   )
-                                })
-                              }}
-                            >
-                              <Upload className="size-3.5" />
-                              {tCommon("push")}
-                            </ContextMenuItem>
-                          </ContextMenuContent>
+                                }}
+                              >
+                                <GitCompare className="h-3.5 w-3.5" />
+                                {tCommon("viewDiff")}
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                disabled={!isResetAllowed}
+                                onSelect={() => {
+                                  handleOpenResetDialog(entry)
+                                }}
+                              >
+                                <RotateCcw className="size-3.5" />
+                                {t("resetToHere")}
+                              </ContextMenuItem>
+                              {!isResetAllowed && (
+                                <ContextMenuItem disabled>
+                                  {t("resetDisabledReasonNotCurrentBranchView")}
+                                </ContextMenuItem>
+                              )}
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  void fetchLog()
+                                }}
+                              >
+                                <RefreshCw className="size-3.5" />
+                                {tCommon("refresh")}
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onSelect={() => {
+                                  if (!folder) return
+                                  openPushWindow(folder.id).catch((err) => {
+                                    const msg = toErrorMessage(err)
+                                    toast.error(
+                                      t("toasts.openPushWindowFailed"),
+                                      {
+                                        description: msg,
+                                      }
+                                    )
+                                  })
+                                }}
+                              >
+                                <Upload className="size-3.5" />
+                                {tCommon("push")}
+                              </ContextMenuItem>
+                            </ContextMenuContent>
+                          )}
                         </ContextMenu>
                       </div>
                     )
@@ -2532,30 +2547,32 @@ export function GitLogTab() {
               )}
             </ScrollArea>
           </ContextMenuTrigger>
-          <ContextMenuContent>
-            <ContextMenuItem
-              onSelect={() => {
-                void fetchLog()
-              }}
-            >
-              <RefreshCw className="size-3.5" />
-              {tCommon("refresh")}
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                if (!folder) return
-                openPushWindow(folder.id).catch((err) => {
-                  const msg = toErrorMessage(err)
-                  toast.error(t("toasts.openPushWindowFailed"), {
-                    description: msg,
+          {!managed && (
+            <ContextMenuContent>
+              <ContextMenuItem
+                onSelect={() => {
+                  void fetchLog()
+                }}
+              >
+                <RefreshCw className="size-3.5" />
+                {tCommon("refresh")}
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() => {
+                  if (!folder) return
+                  openPushWindow(folder.id).catch((err) => {
+                    const msg = toErrorMessage(err)
+                    toast.error(t("toasts.openPushWindowFailed"), {
+                      description: msg,
+                    })
                   })
-                })
-              }}
-            >
-              <Upload className="size-3.5" />
-              {tCommon("push")}
-            </ContextMenuItem>
-          </ContextMenuContent>
+                }}
+              >
+                <Upload className="size-3.5" />
+                {tCommon("push")}
+              </ContextMenuItem>
+            </ContextMenuContent>
+          )}
         </ContextMenu>
       )}
 

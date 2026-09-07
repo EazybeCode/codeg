@@ -1,4 +1,5 @@
 "use client"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
 
 import { useCallback } from "react"
 import {
@@ -64,17 +65,37 @@ export function FolderTitleBar() {
     })
   }, [])
 
+  const catalog = useWorkspaceCatalogContext()
+  const tCatalog = useTranslations("WorkspaceCatalog")
+  const catalogNodeId =
+    catalog && activeFolder
+      ? ([...catalog.ready.values()].find(
+          (runtime) => runtime.folder?.id === activeFolder.id
+        )?.draft.node_id ?? catalog.selectedNodeId)
+      : catalog?.selectedNodeId
+
   // Mirror the sidebar's "New chat": return to the conversation workspace, then
   // start a new conversation in the active folder — or folderless chat mode when
   // there's none, so this entry point is never a dead end.
   const handleNewConversation = useCallback(() => {
     openConversations()
+    if (catalog?.enabled) {
+      if (catalogNodeId != null) catalog.create("chat", catalogNodeId)
+      return
+    }
     if (!activeFolder) {
       openChatModeTab()
       return
     }
     openNewConversationTab(activeFolder.id, activeFolder.path)
-  }, [activeFolder, openChatModeTab, openNewConversationTab, openConversations])
+  }, [
+    activeFolder,
+    openChatModeTab,
+    openNewConversationTab,
+    openConversations,
+    catalog,
+    catalogNodeId,
+  ])
 
   return (
     <div className="flex h-10 shrink-0 items-stretch border-b border-border ws-chrome-border bg-muted/70 select-none">
@@ -116,16 +137,22 @@ export function FolderTitleBar() {
         >
           <Search className="h-4 w-4" />
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 shrink-0"
-          onClick={handleNewConversation}
-          title={tCard("newConversation")}
-          aria-label={tCard("newConversation")}
-        >
-          <SquarePen className="h-4 w-4" />
-        </Button>
+        {(!catalog?.enabled || catalogNodeId != null) && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            onClick={handleNewConversation}
+            title={
+              catalog?.enabled ? tCatalog("new_chat") : tCard("newConversation")
+            }
+            aria-label={
+              catalog?.enabled ? tCatalog("new_chat") : tCard("newConversation")
+            }
+          >
+            <SquarePen className="h-4 w-4" />
+          </Button>
+        )}
       </div>
       {/* Empty middle is a full-height window-drag region. */}
       <div data-tauri-drag-region className="h-full min-w-0 flex-1" />

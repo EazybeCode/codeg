@@ -1992,6 +1992,12 @@ export async function getFolder(folderId: number): Promise<FolderDetail> {
   return getTransport().call("get_folder", { folderId })
 }
 
+export async function getFolderRepoContext(
+  folderId: number
+): Promise<import("./types").FolderRepoContext> {
+  return getTransport().call("get_folder_repo_context", { folderId })
+}
+
 export async function listAllConversations(params?: {
   folder_ids?: number[] | null
   agent_type?: AgentType | null

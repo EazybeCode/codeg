@@ -10,7 +10,7 @@ pub(crate) use service::{begin_scoped_write, verify_repository, verify_scope};
 pub use resolve::{resolve_default, validate_branch, validate_label, validate_node_shape};
 pub use repository_access::{GitHubRepositoryAccess, RepositoryAccess, VerifiedRepository};
 pub(crate) use repository_access::validate_repository_full_name;
-pub use service::{connect_repository, create_node, list_nodes, update_node};
+pub use service::{connect_repository, create_node, list_nodes, list_repositories, update_node};
 pub(crate) use service::{
     create_node_with_repository_identity, update_node_with_repository_identity,
     RepositoryIdentityExpectation,

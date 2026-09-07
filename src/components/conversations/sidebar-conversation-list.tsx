@@ -465,7 +465,7 @@ const FolderHeader = memo(function FolderHeader({
               onPointerDown={(e) => onGripPointerDown?.(folderId, e)}
               className={cn(
                 "group flex h-[1.9375rem] w-full items-center",
-                "rounded-full",
+                "rounded-md",
                 "transition-colors duration-150",
                 isDragging
                   ? "cursor-grabbing"
@@ -479,7 +479,7 @@ const FolderHeader = memo(function FolderHeader({
                 aria-expanded={expanded}
                 className={cn(
                   "relative flex h-full min-w-0 flex-1 items-center pr-[0.5rem] outline-none",
-                  "rounded-full focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+                  "rounded-md focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
                   "text-sidebar-foreground",
                   isDragging ? "cursor-grabbing" : "cursor-grab"
                 )}
@@ -575,16 +575,14 @@ const FolderHeader = memo(function FolderHeader({
                       it is distinguishable from a plain container subfolder. */}
                   {variant === "subfolder" && repoFullName ? (
                     <span
-                      className="min-w-0 shrink truncate text-[0.6875rem] text-muted-foreground/70"
+                      className="shrink-0 text-muted-foreground/60"
                       title={
                         repoBranch
                           ? `${repoFullName} @ ${repoBranch}`
                           : repoFullName
                       }
                     >
-                      {repoBranch
-                        ? `${repoFullName} @ ${repoBranch}`
-                        : repoFullName}
+                      <Github className="size-3" aria-label={repoFullName} />
                     </span>
                   ) : null}
                   {/* Live-activity badge: the number of RUNNING sessions in this
@@ -1045,6 +1043,8 @@ export interface SidebarConversationListHandle {
 }
 
 export interface SidebarConversationListProps {
+  legacyHistory?: boolean
+  hideRootCreation?: boolean
   showCompleted?: boolean
   sortMode?: SidebarSortMode
   sectionOrder?: SidebarSectionOrder
@@ -1064,6 +1064,8 @@ export function SidebarConversationList({
   sectionOrder = DEFAULT_SECTION_ORDER,
   showWorktrees = false,
   showRecent = false,
+  legacyHistory = false,
+  hideRootCreation = false,
 }: SidebarConversationListProps & {
   ref?: Ref<SidebarConversationListHandle>
 }) {
@@ -1369,9 +1371,8 @@ export function SidebarConversationList({
   const reorderingRef = useRef(false)
   // Read by the imperative subfolder-drag handlers without re-subscribing them.
   const folderIndexRef = useRef<typeof folderIndex>(folderIndex)
-  const folderSortModesRef = useRef<Record<number, FolderSortMode>>(
-    folderSortModes
-  )
+  const folderSortModesRef =
+    useRef<Record<number, FolderSortMode>>(folderSortModes)
   const subfolderChildrenRef = useRef<ReadonlyMap<number, readonly number[]>>(
     new Map()
   )
@@ -1696,9 +1697,7 @@ export function SidebarConversationList({
   // them from the open-folder set (`folder_service::list_open_folder_details`).
   const reorderableFolders = useMemo(
     () =>
-      folders.filter(
-        (f) => !childToParent.has(f.id) && f.kind !== "subfolder"
-      ),
+      folders.filter((f) => !childToParent.has(f.id) && f.kind !== "subfolder"),
     [folders, childToParent]
   )
 
@@ -1799,6 +1798,7 @@ export function SidebarConversationList({
   const rows = useMemo(
     () =>
       buildRows({
+        legacyHistory,
         pinned,
         pinnedExpanded,
         // Top-level (reorderable) folders drive the outer order; buildRows nests
@@ -1826,6 +1826,7 @@ export function SidebarConversationList({
         groupExpanded: folderGroupExpanded,
       }),
     [
+      legacyHistory,
       pinned,
       pinnedExpanded,
       reorderableFolderIds,
@@ -1899,6 +1900,8 @@ export function SidebarConversationList({
       setFolderExpanded((prev) => {
         const next: Record<number, boolean> = { ...prev }
         for (const id of reorderableFolderIds) next[id] = true
+        for (const kids of subfolderChildren.values())
+          for (const id of kids) next[id] = true
         // Worktree children (containers only) are separate folder ids.
         for (const kids of containerChildren.values())
           for (const id of kids) next[id] = true
@@ -1916,6 +1919,8 @@ export function SidebarConversationList({
       setFolderExpanded((prev) => {
         const next: Record<number, boolean> = { ...prev }
         for (const id of reorderableFolderIds) next[id] = false
+        for (const kids of subfolderChildren.values())
+          for (const id of kids) next[id] = false
         for (const kids of containerChildren.values())
           for (const id of kids) next[id] = false
         saveFolderExpanded(next)
@@ -2443,12 +2448,15 @@ export function SidebarConversationList({
   // Stable callback ref (identity fixed) so it fires ONLY on mount/unmount, not
   // on every keystroke — an inline arrow ref re-ran each render and re-selected
   // the text, which swallowed typing. Mirrors the inline-rename input's ref.
-  const subfolderCreateInputRef = useCallback((node: HTMLInputElement | null) => {
-    if (node) {
-      node.focus()
-      node.select()
-    }
-  }, [])
+  const subfolderCreateInputRef = useCallback(
+    (node: HTMLInputElement | null) => {
+      if (node) {
+        node.focus()
+        node.select()
+      }
+    },
+    []
+  )
   const handleNewSubfolder = useCallback((parentId: number) => {
     setFolderExpanded((prev) => ({ ...prev, [parentId]: true }))
     setNewSubfolderName("")
@@ -2649,7 +2657,9 @@ export function SidebarConversationList({
       try {
         await reorderSubfoldersAction(parentId, order)
       } catch (e) {
-        toast.error(t("toasts.applyLayoutFailed", { message: toErrorMessage(e) }))
+        toast.error(
+          t("toasts.applyLayoutFailed", { message: toErrorMessage(e) })
+        )
       } finally {
         setReordering(false)
       }
@@ -3235,11 +3245,13 @@ export function SidebarConversationList({
           // section spans folders and chats alike, and the folder is where a
           // "continue where I left off" list lands you.
           onNewChat={
-            row.section === "chats"
-              ? openChatModeTab
-              : row.section === "recent"
-                ? handleNewConversation
-                : undefined
+            hideRootCreation
+              ? undefined
+              : row.section === "chats"
+                ? openChatModeTab
+                : row.section === "recent"
+                  ? handleNewConversation
+                  : undefined
           }
           // The folders section gets two right-edge hover actions mirroring the
           // top-of-page NewFolderDropdown: Open Folder and Clone Repository.
@@ -3596,6 +3608,25 @@ export function SidebarConversationList({
 
   return (
     <div className="relative flex flex-col flex-1 min-h-0">
+      {!hideRootCreation && (
+        <div className="shrink-0 px-2 pb-2">
+          <button
+            type="button"
+            onClick={() => setGhOpen(true)}
+            className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            title="Create a workspace project from a GitHub repository"
+          >
+            <Github className="h-4 w-4 text-muted-foreground" />
+            {t("newProject")}
+            <span
+              aria-hidden="true"
+              className="ml-auto text-lg leading-none text-muted-foreground"
+            >
+              +
+            </span>
+          </button>
+        </div>
+      )}
       {(loading || refreshing) && (
         // z-20 keeps the refresh spinner above the sticky header overlay (z-10),
         // which lives in a later sibling and would otherwise paint over it.
@@ -3616,7 +3647,7 @@ export function SidebarConversationList({
             {t("error", { message: error })}
           </p>
         </div>
-      ) : showEmptyWorkspaceActions ? (
+      ) : showEmptyWorkspaceActions && !hideRootCreation ? (
         <div className="flex-1 flex flex-col items-center justify-center px-3 gap-2">
           {/* Primary, cloud-native path (Eazybe WorkOS): pick a repo straight
               from the signed-in GitHub account — no manual clone URL, no local
@@ -3815,14 +3846,18 @@ export function SidebarConversationList({
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>
-            <ContextMenuItem
-              onSelect={handleNewConversation}
-              disabled={!activeFolder}
-            >
-              <SquarePen className="h-4 w-4" />
-              {t("newConversation")}
-            </ContextMenuItem>
-            <ContextMenuSeparator />
+            {!hideRootCreation && (
+              <>
+                <ContextMenuItem
+                  onSelect={handleNewConversation}
+                  disabled={!activeFolder}
+                >
+                  <SquarePen className="h-4 w-4" />
+                  {t("newConversation")}
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+              </>
+            )}
             <ContextMenuItem onSelect={handleOpenFolderAction}>
               <FolderOpenDot className="h-4 w-4" />
               {tFolderDropdown("openFolder")}

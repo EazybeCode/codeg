@@ -1,6 +1,14 @@
 import { type ReactElement } from "react"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
+import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi, beforeEach } from "vitest"
 
 import { SidebarConversationCard } from "./sidebar-conversation-card"
@@ -257,23 +265,48 @@ describe("SidebarConversationCard hover quick actions", () => {
     expect(onTogglePin).toHaveBeenCalledWith(2, false)
   })
 
-  it("marks an unfinished conversation completed via the hover done button", () => {
-    const { getByLabelText } = renderCard(conv(3)) // status: pending
-    fireEvent.click(getByLabelText("Mark as completed"))
-    expect(onStatusChange).toHaveBeenCalledWith(3, "completed")
+  it("requires confirmation before deleting and preserves cancel", async () => {
+    onDelete.mockClear()
+    renderCard(conv(3))
+    fireEvent.click(screen.getByLabelText("Delete"))
+    expect(onDelete).not.toHaveBeenCalled()
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", {
+        name: "Cancel",
+      })
+    )
+    expect(onDelete).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByLabelText("Delete"))
+    await act(async () => {
+      fireEvent.click(
+        within(screen.getByRole("alertdialog")).getByRole("button", {
+          name: "Delete",
+        })
+      )
+    })
+    expect(onDelete).toHaveBeenCalledWith(3, "claude_code", 1)
   })
 
-  it("reopens a completed conversation via the hover done button", () => {
-    const done: DbConversationSummary = { ...conv(4), status: "completed" }
-    const { getByLabelText } = renderCard(done)
-    fireEvent.click(getByLabelText("Reopen"))
-    expect(onStatusChange).toHaveBeenCalledWith(4, "in_progress")
-  })
-
-  it("omits the pin button when onTogglePin is absent but keeps the done button", () => {
-    const { queryByLabelText } = renderCard(conv(5), { withPin: false })
+  it("keeps Delete available for completed chats without a Pin callback", () => {
+    const { queryByLabelText } = renderCard(
+      { ...conv(5), status: "completed" },
+      { withPin: false }
+    )
     expect(queryByLabelText("Pin")).toBeNull()
-    expect(queryByLabelText("Mark as completed")).not.toBeNull()
+    expect(queryByLabelText("Delete")).not.toBeNull()
+  })
+
+  it("keeps manual status changes in the context menu", async () => {
+    onStatusChange.mockClear()
+    renderCard(conv(8))
+    fireEvent.contextMenu(screen.getByText("conv-8"))
+    await userEvent.click(screen.getByRole("menuitem", { name: "Status" }))
+    await userEvent.click(
+      await screen.findByRole("menuitem", {
+        name: enMessages.Folder.statusLabels.completed,
+      })
+    )
+    expect(onStatusChange).toHaveBeenCalledWith(8, "completed")
   })
 
   it("hides both hover quick actions for a delegation sub-session (parent_id set)", () => {
@@ -286,6 +319,7 @@ describe("SidebarConversationCard hover quick actions", () => {
     expect(queryByLabelText("Unpin")).toBeNull()
     expect(queryByLabelText("Mark as completed")).toBeNull()
     expect(queryByLabelText("Reopen")).toBeNull()
+    expect(queryByLabelText("Delete")).toBeNull()
   })
 })
 
@@ -545,6 +579,7 @@ describe("SidebarConversationCard hover details bubble", () => {
           kind: "regular",
           alias: null,
           group_id: null,
+          repo_full_name: null,
         },
       ],
     })

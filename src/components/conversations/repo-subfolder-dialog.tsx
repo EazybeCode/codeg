@@ -4,7 +4,9 @@ import { useEffect, useState } from "react"
 import { Loader2, Search } from "lucide-react"
 import { toast } from "sonner"
 import { listGithubBranches } from "@/lib/api"
-import { getCodegToken } from "@/lib/transport/web-auth"
+import type { GithubRepository as Repo } from "@/lib/github-project-api"
+import { useGithubRepositories } from "@/hooks/use-github-repositories"
+import { GithubLoadError } from "@/components/shared/github-load-error"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
 import {
   Dialog,
@@ -25,31 +27,6 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 
-type Repo = {
-  full_name: string
-  name: string
-  owner: string
-  private: boolean
-  default_branch: string
-  description?: string | null
-}
-
-async function apiPost<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api/${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${getCodegToken()}`,
-    },
-    body: JSON.stringify(body ?? {}),
-  })
-  const data = await res.json().catch(() => ({}))
-  if (!res.ok || (data && (data as { error?: string }).error)) {
-    throw new Error((data as { error?: string }).error || res.statusText)
-  }
-  return data as T
-}
-
 /**
  * "New subfolder from a GitHub repo": pick a repo → pick (or create) a branch →
  * name the folder → the server clones it into a fresh dir beneath `parentId` and
@@ -66,9 +43,13 @@ export function RepoSubfolderDialog({
   const createRepoSubfolder = useAppWorkspaceStore((s) => s.createRepoSubfolder)
   const open = parentId !== null
 
-  const [repos, setRepos] = useState<Repo[]>([])
+  const {
+    repos,
+    loading: loadingRepos,
+    error: repoError,
+    retry,
+  } = useGithubRepositories(open)
   const [q, setQ] = useState("")
-  const [loadingRepos, setLoadingRepos] = useState(false)
 
   // The picked repo (step 2), or null while still choosing (step 1).
   const [picked, setPicked] = useState<Repo | null>(null)
@@ -85,20 +66,13 @@ export function RepoSubfolderDialog({
     if (!open) return
     setPicked(null)
     setQ("")
-    setLoadingRepos(true)
-    apiPost<Repo[]>("list_github_repos")
-      .then(setRepos)
-      .catch((e) =>
-        toast.error("Couldn't load your GitHub repos", {
-          description: String(e),
-        })
-      )
-      .finally(() => setLoadingRepos(false))
-  }, [open])
+  }, [open, parentId])
 
   // On repo pick, load its branches and seed the name (default = repo name).
   useEffect(() => {
-    if (!picked) return
+    if (!open || !picked) return
+    let current = true
+    setBranches([])
     setName(picked.name)
     setBranch(picked.default_branch)
     setCreateBranch(false)
@@ -106,6 +80,7 @@ export function RepoSubfolderDialog({
     setLoadingBranches(true)
     listGithubBranches(picked.full_name)
       .then((bs) => {
+        if (!current) return
         const names = bs.map((b) => b.name)
         setBranches(names)
         // Keep the default branch selected if present, else the first branch.
@@ -115,11 +90,17 @@ export function RepoSubfolderDialog({
             : (names[0] ?? picked.default_branch)
         )
       })
-      .catch((e) =>
-        toast.error("Couldn't load branches", { description: String(e) })
-      )
-      .finally(() => setLoadingBranches(false))
-  }, [picked])
+      .catch((e) => {
+        if (current)
+          toast.error("Couldn't load branches", { description: String(e) })
+      })
+      .finally(() => {
+        if (current) setLoadingBranches(false)
+      })
+    return () => {
+      current = false
+    }
+  }, [picked, open])
 
   const filtered = repos.filter((r) =>
     r.full_name.toLowerCase().includes(q.trim().toLowerCase())
@@ -179,6 +160,8 @@ export function RepoSubfolderDialog({
                   <Loader2 className="h-4 w-4 animate-spin" /> Loading your
                   repos…
                 </div>
+              ) : repoError ? (
+                <GithubLoadError error={repoError} retry={retry} />
               ) : filtered.length === 0 ? (
                 <div className="py-10 text-center text-sm text-muted-foreground">
                   {repos.length === 0
@@ -291,9 +274,7 @@ export function RepoSubfolderDialog({
               Back
             </Button>
             <Button onClick={submit} disabled={submitting}>
-              {submitting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : null}
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               Create
             </Button>
           </DialogFooter>

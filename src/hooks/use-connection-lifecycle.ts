@@ -1,4 +1,5 @@
 "use client"
+import { workspaceErrorCode, workspaceErrorKey } from "@/lib/workspace-errors"
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
@@ -124,6 +125,7 @@ export function useConnectionLifecycle({
 }: UseConnectionLifecycleOptions): UseConnectionLifecycleReturn {
   const managed = managedWorkspace || workspaceChatId != null
   const t = useTranslations("Folder.chat.connectionLifecycle")
+  const tCatalog = useTranslations("WorkspaceCatalog")
   const { setActiveKey, touchActivity } = useAcpActions()
   const { addTask, updateTask, removeTask } = useTaskContext()
   const conn = useConnection(contextKey)
@@ -478,8 +480,10 @@ export function useConnectionLifecycle({
         // message over a bare stringification.
         const appError = extractAppCommandError(e)
         const message =
-          appError?.message ??
-          (e instanceof Error ? e.message : String(e ?? "unknown error"))
+          managed && workspaceErrorCode(e) !== "unavailable"
+            ? tCatalog(workspaceErrorKey(e))
+            : (appError?.message ??
+              (e instanceof Error ? e.message : String(e ?? "unknown error")))
         toast.error(t("errors.sendPromptFailed", { error: message }))
         // Let the caller settle its optimistic state (roll back the phantom
         // user turn, drop out of awaiting_persist so the queue keeps
@@ -495,6 +499,7 @@ export function useConnectionLifecycle({
       contextKey,
       touchActivity,
       t,
+      tCatalog,
       managed,
       workspaceChatId,
       conversationId,

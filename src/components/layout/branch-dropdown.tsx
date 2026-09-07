@@ -134,6 +134,11 @@ interface BranchDropdownProps {
 // conversation tile with that tile's own `folder`, and carries per-instance
 // machinery (git event subscriptions + dialogs).
 export function BranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
+  if (folder?.kind === "workspace_chat") return null
+  return <LegacyBranchDropdown folder={folder} isChatMode={isChatMode} />
+}
+
+function LegacyBranchDropdown({ folder, isChatMode }: BranchDropdownProps) {
   const t = useTranslations("Folder.branchDropdown")
   const ime = useImeGuard()
   const tCommon = useTranslations("Folder.common")

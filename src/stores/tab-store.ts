@@ -145,6 +145,7 @@ export interface TabLabels {
 }
 
 export interface TabStoreState {
+  catalogMode: boolean
   rawTabs: TabItemInternal[]
   activeTabId: string | null
   previewReplacedTabIds: string[]
@@ -1055,6 +1056,7 @@ function initialTabState() {
     previewReplacedTabIds: [] as string[],
     draftRetargetRequests: [] as DraftRetargetRequest[],
     tabsHydrated: false,
+    catalogMode: false,
     ...readPersistedGroupState(),
     tabDrag: null as TabStoreState["tabDrag"],
     childSummaries: new Map<number, DbConversationSummary>(),
@@ -1194,7 +1196,10 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
       let draftKeyHandedOver = false
 
       if (next.length === 0) {
-        if (useAppWorkspaceStore.getState().folders.length === 0) {
+        if (
+          get().catalogMode ||
+          useAppWorkspaceStore.getState().folders.length === 0
+        ) {
           set({ rawTabs: [], activeTabId: null })
         } else {
           const replacementTab = makeReplacementDraftTab(closingTab)
@@ -1293,7 +1298,10 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   closeAllTabs: () => {
-    if (useAppWorkspaceStore.getState().folders.length === 0) {
+    if (
+      get().catalogMode ||
+      useAppWorkspaceStore.getState().folders.length === 0
+    ) {
       const prevState = get()
       if (prevState.rawTabs.length === 0 && prevState.activeTabId == null) {
         return
@@ -1367,6 +1375,9 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
 
   splitTab: (tabId, direction, opts) => {
     const st = get()
+    // A catalog chat requires an explicit scoped draft intent; plain Split
+    // must not manufacture a legacy scratch conversation in its worktree.
+    if (st.catalogMode && !opts.move) return
     const tab = st.rawTabs.find((t) => t.id === tabId)
     if (!tab) return
     const sourceGroup = groupOfTab(st.groupOf, st.groupLayout, tabId)
@@ -1623,6 +1634,14 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   openNewConversationTab: (folderId, workingDir, options) => {
+    if (
+      useAppWorkspaceStore
+        .getState()
+        .allFolders.find((folder) => folder.id === folderId)?.kind ===
+      "workspace_chat"
+    ) {
+      throw new Error("Managed worktrees require a canonical workspace chat")
+    }
     // "New conversation" while a chat conversation is active resolves the active
     // (hidden) chat folder. Never pile a second conversation into a
     // per-conversation chat folder — start a fresh folderless chat draft
@@ -2434,6 +2453,7 @@ export const useTabStore = create<TabStoreState>()((set, get) => ({
   },
 
   recoverActiveContext: () => {
+    if (get().catalogMode) return
     const hint = loadLastActiveContext()
     if (hint?.isChat) {
       get().openChatModeTab()
@@ -2823,7 +2843,7 @@ function applyRemoteSnapshot(change: TabsChanged) {
 
   // Never leave the workspace blank: synthesize a draft when empty.
   if (nextTabs.length === 0) {
-    if (folders.length === 0) {
+    if (prev.catalogMode || folders.length === 0) {
       lastSavedPayload = diverged ? null : JSON.stringify([])
       useTabStore.setState({ rawTabs: [], activeTabId: null })
       recomputeTabs()

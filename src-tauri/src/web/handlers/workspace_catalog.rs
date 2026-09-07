@@ -209,6 +209,14 @@ pub(crate) struct WorkspaceCatalogHandler<'a> {
 }
 
 impl<'a> WorkspaceCatalogHandler<'a> {
+    pub(crate) async fn list_workspace_repositories(&self, headers: &HeaderMap, body: &[u8]) -> Response<Body> {
+        let result = async {
+            let scope = scope_from_headers(headers, self.db).await?;
+            let _: EmptyInput = parse_json(headers, body)?;
+            crate::workspace_catalog::list_repositories(self.db, &scope).await
+        }.await;
+        catalog_response(result)
+    }
     pub(crate) fn new(
         db: &'a DatabaseConnection,
         repository_access: &'a dyn RepositoryAccess,
@@ -372,6 +380,17 @@ fn production_dependencies(
         GitHubRepositoryAccess::new(&state.db.conn)?,
         BrowserMutationPolicy::from_environment(),
     ))
+}
+
+pub async fn list_workspace_repositories(
+    Extension(state): Extension<Arc<AppState>>, headers: HeaderMap, body: Bytes,
+) -> Response<Body> {
+    let (access, policy) = match production_dependencies(&state) {
+        Ok(dependencies) => dependencies,
+        Err(error) => return catalog_error_response(error),
+    };
+    WorkspaceCatalogHandler::new(&state.db.conn, &access, &policy)
+        .list_workspace_repositories(&headers, &body).await
 }
 
 pub async fn list_workspace_nodes(

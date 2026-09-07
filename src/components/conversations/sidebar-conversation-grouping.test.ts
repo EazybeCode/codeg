@@ -333,6 +333,7 @@ describe("buildRows", () => {
     foldersExpanded = true
   ): SidebarRow[] {
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds,
@@ -454,6 +455,7 @@ describe("buildRows", () => {
     const p1 = conv(1, 10, { pinned_at: new Date(2000).toISOString() })
     const byFolder = new Map([[10, [conv(2, 10)]]])
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [p1],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -486,6 +488,7 @@ describe("buildRows", () => {
   it("hides pinned conversations when the Pinned section is collapsed", () => {
     const p1 = conv(1, 10, { pinned_at: new Date(2000).toISOString() })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [p1],
       pinnedExpanded: false,
       orderedFolderIds: [],
@@ -519,6 +522,7 @@ describe("buildRows", () => {
     const c1 = conv(1, 99)
     const c2 = conv(2, 99)
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -562,6 +566,7 @@ describe("buildRows", () => {
   it("follows sectionOrder for Folders/Chat/Recent, keeping Pinned on top", () => {
     const p1 = conv(1, 10, { pinned_at: new Date(2000).toISOString() })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [p1],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -598,16 +603,21 @@ describe("buildRows", () => {
     }
     // The explicit default order and the omitted one agree — and neither emits
     // a Recent section, since `showRecent` is off unless a caller opts in.
-    expect(sectionSequence(buildRows(args))).toEqual(["folders", "chats"])
+    expect(sectionSequence(buildRows(args))).toEqual(["folders"])
     expect(
       sectionSequence(
-        buildRows({ ...args, sectionOrder: ["folders", "chats", "recent"] })
+        buildRows({
+          legacyHistory: true,
+          ...args,
+          sectionOrder: ["folders", "chats", "recent"],
+        })
       )
     ).toEqual(["folders", "chats"])
   })
 
   it("normalizes a partial or repeated sectionOrder into a full permutation", () => {
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -628,6 +638,7 @@ describe("buildRows", () => {
 
   it("always emits the Chat section, with an empty hint when there are no chat conversations", () => {
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -654,6 +665,7 @@ describe("buildRows", () => {
 
   it("shows only the Chat header (no empty hint) when the empty section is collapsed", () => {
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [],
@@ -674,6 +686,7 @@ describe("buildRows", () => {
 
   it("hides chat conversations when the Chat section is collapsed", () => {
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [],
@@ -696,6 +709,7 @@ describe("buildRows", () => {
     // initial workspace — no folders AND no conversations — is handled by the
     // list's open-folder call-to-action, not buildRows.)
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [],
@@ -725,6 +739,7 @@ describe("buildRows", () => {
     const childA = conv(100, 10, { kind: "delegate", parent_id: 1 })
     const childB = conv(101, 10, { kind: "delegate", parent_id: 1 })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -748,6 +763,7 @@ describe("buildRows", () => {
     const parent = conv(1, 10, { child_count: 2 })
     const childA = conv(100, 10, { parent_id: 1 })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -768,6 +784,7 @@ describe("buildRows", () => {
   it("emits a loading row when expanded but children are not yet fetched", () => {
     const parent = conv(1, 10, { child_count: 3 })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -790,6 +807,7 @@ describe("buildRows", () => {
   it("renders nothing extra when expanded children loaded empty (stale count)", () => {
     const parent = conv(1, 10, { child_count: 1 })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -813,6 +831,7 @@ describe("buildRows", () => {
     const child = conv(100, 10, { child_count: 1, parent_id: 1 })
     const grandchild = conv(200, 10, { parent_id: 100 })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -839,6 +858,7 @@ describe("buildRows", () => {
     const parent = conv(1, 10, { child_count: 1 })
     const child = conv(100, 10, { parent_id: 1 })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -860,6 +880,7 @@ describe("buildRows", () => {
   it("shows a loading row for an in-flight placeholder (empty array + loading)", () => {
     const parent = conv(1, 10, { child_count: 2 })
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -896,6 +917,7 @@ describe("buildRows — Recent section", () => {
 
   it("emits no rows at all — not even a header — when showRecent is off", () => {
     const rows = buildRows({
+      legacyHistory: true,
       ...baseArgs,
       recentConversations: [conv(1, 10)],
       showRecent: false,
@@ -907,6 +929,7 @@ describe("buildRows — Recent section", () => {
   it("tags its conversation rows `recent` so they don't collide with their twins", () => {
     const c1 = conv(1, 10)
     const rows = buildRows({
+      legacyHistory: true,
       ...baseArgs,
       recentConversations: [c1],
       showRecent: true,
@@ -926,6 +949,7 @@ describe("buildRows — Recent section", () => {
     const parent = conv(1, 10, { child_count: 1 })
     const kid = conv(2, 10)
     const rows = buildRows({
+      legacyHistory: true,
       ...baseArgs,
       byFolder: new Map([[10, [parent]]]),
       recentConversations: [parent],
@@ -943,6 +967,7 @@ describe("buildRows — Recent section", () => {
     ])
 
     const loadingRows = buildRows({
+      legacyHistory: true,
       ...baseArgs,
       byFolder: new Map([[10, [parent]]]),
       recentConversations: [parent],
@@ -959,6 +984,7 @@ describe("buildRows — Recent section", () => {
 
   it("emits an empty hint when shown with nothing in it", () => {
     const rows = buildRows({
+      legacyHistory: true,
       ...baseArgs,
       recentConversations: [],
       showRecent: true,
@@ -968,6 +994,7 @@ describe("buildRows — Recent section", () => {
 
   it("emits only its header while collapsed", () => {
     const rows = buildRows({
+      legacyHistory: true,
       ...baseArgs,
       recentConversations: [conv(1, 10)],
       recentExpanded: false,
@@ -989,6 +1016,7 @@ describe("buildRows — Recent section", () => {
 
     it("stops at recentLimit and appends a show-more row with the remainder", () => {
       const rows = buildRows({
+        legacyHistory: true,
         ...baseArgs,
         byFolder: new Map([[10, many]]),
         folderTotalCounts: new Map([[10, many.length]]),
@@ -1011,6 +1039,7 @@ describe("buildRows — Recent section", () => {
 
     it("omits the show-more row once the limit covers everything", () => {
       const rows = buildRows({
+        legacyHistory: true,
         ...baseArgs,
         byFolder: new Map([[10, many]]),
         folderTotalCounts: new Map([[10, many.length]]),
@@ -1023,6 +1052,7 @@ describe("buildRows — Recent section", () => {
 
     it("emits every conversation when no limit is given", () => {
       const rows = buildRows({
+        legacyHistory: true,
         ...baseArgs,
         byFolder: new Map([[10, many]]),
         folderTotalCounts: new Map([[10, many.length]]),
@@ -1037,6 +1067,7 @@ describe("buildRows — Recent section", () => {
 
     it("does not page a collapsed section", () => {
       const rows = buildRows({
+        legacyHistory: true,
         ...baseArgs,
         byFolder: new Map([[10, many]]),
         folderTotalCounts: new Map([[10, many.length]]),
@@ -1062,13 +1093,18 @@ describe("buildRows — Recent section", () => {
       }
 
       it("leaves the first page un-resettable", () => {
-        const rows = buildRows({ ...pagedArgs, recentLimit: RECENT_PAGE_SIZE })
+        const rows = buildRows({
+          legacyHistory: true,
+          ...pagedArgs,
+          recentLimit: RECENT_PAGE_SIZE,
+        })
         // Exact equality: nothing to fold back yet, so no `canReset` at all.
         expect(rows).toContainEqual({ kind: "recent-more", remaining: 4 })
       })
 
       it("marks the footer resettable once past the first page", () => {
         const rows = buildRows({
+          legacyHistory: true,
           ...pagedArgs,
           recentLimit: RECENT_PAGE_SIZE + 2,
         })
@@ -1084,6 +1120,7 @@ describe("buildRows — Recent section", () => {
         // took the only way back to a short list away exactly when the list was
         // longest.
         const rows = buildRows({
+          legacyHistory: true,
           ...pagedArgs,
           recentLimit: RECENT_PAGE_SIZE * 2,
         })
@@ -1101,6 +1138,7 @@ describe("buildRows — Recent section", () => {
         // Same raised limit, but the conversations are gone: collapsing back
         // would hide nothing, so the row must not offer it.
         const rows = buildRows({
+          legacyHistory: true,
           ...pagedArgs,
           byFolder: new Map([[10, many]]),
           folderTotalCounts: new Map([[10, many.length]]),
@@ -1126,6 +1164,7 @@ describe("buildRows — Show worktrees container tree", () => {
     const rootConv = conv(1, 10)
     const wtConv = conv(2, 11)
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -1155,6 +1194,7 @@ describe("buildRows — Show worktrees container tree", () => {
 
   it("hides the whole subtree when the container is collapsed", () => {
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -1179,6 +1219,7 @@ describe("buildRows — Show worktrees container tree", () => {
   it("collapses only the root sub-group, leaving worktrees visible", () => {
     const wtConv = conv(2, 11)
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -1205,6 +1246,7 @@ describe("buildRows — Show worktrees container tree", () => {
 
   it("emits an empty hint for an empty root sub-group / worktree", () => {
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10],
@@ -1232,6 +1274,7 @@ describe("buildRows — Show worktrees container tree", () => {
   it("renders a repo with no worktree children flat at depth 0 (no root-group)", () => {
     const c = conv(1, 20)
     const rows = buildRows({
+      legacyHistory: true,
       pinned: [],
       pinnedExpanded: true,
       orderedFolderIds: [10, 20],

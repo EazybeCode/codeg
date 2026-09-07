@@ -1,4 +1,5 @@
 "use client"
+import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
 
 import { useCallback, useEffect, useState } from "react"
 import { openSettingsWindow } from "@/lib/api"
@@ -38,6 +39,7 @@ import { WorkspaceFolderDialog } from "@/components/layout/workspace-folder-dial
  * visible bar. Renders no visible chrome — only the dialogs.
  */
 export function WorkspaceChromeController() {
+  const catalog = useWorkspaceCatalogContext()
   const { activeFolder } = useActiveFolder()
   const isChatMode = useIsActiveChatMode()
   const { toggle } = useSidebarContext()
@@ -99,6 +101,17 @@ export function WorkspaceChromeController() {
         return
       }
       if (matchShortcutEvent(e, shortcuts.new_conversation)) {
+        if (catalog?.enabled) {
+          e.preventDefault()
+          const nodeId = catalog.nodeForConversation(
+            tabs.find((tab) => tab.id === activeTabId)?.conversationId
+          )
+          if (nodeId != null) {
+            openConversations()
+            catalog.create("chat", nodeId)
+          }
+          return
+        }
         if (!activeFolder) return
         e.preventDefault()
         // Return to the conversation workspace if a route (e.g. Automations) was
@@ -245,6 +258,7 @@ export function WorkspaceChromeController() {
     return () => document.removeEventListener("keydown", handleKeyDown)
   }, [
     activeFolder,
+    catalog,
     handleOpenFolder,
     handleOpenSettings,
     openConversations,
