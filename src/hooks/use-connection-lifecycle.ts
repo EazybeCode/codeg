@@ -24,6 +24,9 @@ interface UseConnectionLifecycleOptions {
    * (cross-client viewing) instead of always spawning a fresh agent.
    */
   conversationId?: number
+  workspaceChatId?: number
+  /** Also defer while a saved managed tab is resolving its canonical identity. */
+  managedWorkspace?: boolean
   /**
    * Read at unmount-cleanup time: true when the component is unmounting
    * because the view is being REPARENTED (its tab moved between split groups /
@@ -65,7 +68,7 @@ export interface UseConnectionLifecycleReturn {
        */
       onSendFailed?: (error: unknown) => void
     }
-  ) => void
+  ) => Promise<boolean>
   handleSetConfigOption: (configId: string, valueId: string) => void
   handleCancel: () => void
   handleRespondPermission: (requestId: string, optionId: string) => void
@@ -115,8 +118,11 @@ export function useConnectionLifecycle({
   workingDir,
   sessionId,
   conversationId,
+  workspaceChatId,
+  managedWorkspace = false,
   isTransientUnmount,
 }: UseConnectionLifecycleOptions): UseConnectionLifecycleReturn {
+  const managed = managedWorkspace || workspaceChatId != null
   const t = useTranslations("Folder.chat.connectionLifecycle")
   const { setActiveKey, touchActivity } = useAcpActions()
   const { addTask, updateTask, removeTask } = useTaskContext()
@@ -217,6 +223,7 @@ export function useConnectionLifecycle({
   // infinite reconnect loops on transient errors.
   useEffect(() => {
     if (!isActive) return
+    if (managed) return
     if (!workingDir) return
     let cancelled = false
     connConnectRef
@@ -246,7 +253,7 @@ export function useConnectionLifecycle({
     return () => {
       cancelled = true
     }
-  }, [isActive, workingDir, agentType])
+  }, [isActive, workingDir, agentType, managed])
 
   // Manage task status for connection progress
   const taskIdRef = useRef<string | null>(null)
@@ -379,6 +386,7 @@ export function useConnectionLifecycle({
     // avoid connecting with sessionId=undefined and orphaning context.
     if (!isActive) return
     touchActivity(contextKey)
+    if (managed) return
     if (!status || status === "disconnected" || status === "error") {
       setLastAutoConnectError(null)
       connConnect(agentType, workingDir, sessionId, conversationId).catch(
@@ -395,6 +403,7 @@ export function useConnectionLifecycle({
     workingDir,
     sessionId,
     conversationId,
+    managed,
     status,
     connConnect,
     contextKey,
@@ -426,7 +435,23 @@ export function useConnectionLifecycle({
       touchActivity(contextKey)
       const onTurnInProgress = opts?.onTurnInProgress
       const onSendFailed = opts?.onSendFailed
-      void (async () => {
+      return (async () => {
+        if (managed) {
+          if (
+            workspaceChatId == null ||
+            conversationId == null ||
+            !workingDir
+          ) {
+            throw new Error("Workspace chat context is not ready")
+          }
+          await connConnect(
+            agentType,
+            workingDir,
+            sessionId,
+            conversationId,
+            workspaceChatId
+          )
+        }
         const currentModeId = modeIdRef.current
         if (modeId && modeId !== currentModeId) {
           await connSetMode(modeId)
@@ -435,6 +460,7 @@ export function useConnectionLifecycle({
           modeIdRef.current = modeId
         }
         await sendPrompt(draft.blocks, opts)
+        return true
       })().catch((e: unknown) => {
         if (e instanceof TurnBusyError) {
           // A turn was already in flight on the connection (another
@@ -442,7 +468,7 @@ export function useConnectionLifecycle({
           // observed yet). Not an error — the draft is re-queued by the caller
           // so it auto-sends when the current turn finishes.
           onTurnInProgress?.()
-          return
+          return onTurnInProgress != null
         }
         console.error("[ConnLifecycle] sendPrompt:", e)
         // The composer already cleared itself (sends are fire-and-forget), so
@@ -460,9 +486,23 @@ export function useConnectionLifecycle({
         // flushing). Runs after the toast so the state rollback can't hide
         // the failure.
         onSendFailed?.(e)
+        return false
       })
     },
-    [connSetMode, sendPrompt, contextKey, touchActivity, t]
+    [
+      connSetMode,
+      sendPrompt,
+      contextKey,
+      touchActivity,
+      t,
+      managed,
+      workspaceChatId,
+      conversationId,
+      workingDir,
+      connConnect,
+      agentType,
+      sessionId,
+    ]
   )
 
   const handleCancel = useCallback(() => {

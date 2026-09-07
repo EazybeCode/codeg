@@ -20,7 +20,44 @@ import {
   emitAttachFileToSession,
   emitAttachSessionToSession,
 } from "@/lib/session-attachment-events"
-import type { DbConversationSummary } from "@/lib/types"
+import type { DbConversationSummary, PromptDraft } from "@/lib/types"
+import { ChatInput } from "./chat-input"
+import { useConnectionLifecycle } from "@/hooks/use-connection-lifecycle"
+import { useWorkspaceChatSend } from "@/hooks/use-workspace-chat-send"
+import {
+  getRuntimeSession,
+  resetConversationRuntimeStore,
+} from "@/stores/conversation-runtime-store"
+
+const managedAgent = vi.hoisted(() => ({ connect: vi.fn(), prompt: vi.fn() }))
+vi.mock("@/contexts/acp-connections-context", () => ({
+  useAcpActions: () => ({ setActiveKey: vi.fn(), touchActivity: vi.fn() }),
+}))
+vi.mock("@/contexts/task-context", () => ({
+  useTaskContext: () => ({
+    addTask: vi.fn(),
+    updateTask: vi.fn(),
+    removeTask: vi.fn(),
+  }),
+}))
+vi.mock("@/hooks/use-connection", () => ({
+  useConnection: () => ({
+    status: "disconnected",
+    selectorsReady: false,
+    connect: managedAgent.connect,
+    sendPrompt: managedAgent.prompt,
+    disconnect: vi.fn().mockResolvedValue(undefined),
+    setMode: vi.fn(),
+    setConfigOption: vi.fn(),
+    cancel: vi.fn(),
+    respondPermission: vi.fn(),
+    modes: null,
+    configOptions: null,
+    hasCachedSelectors: false,
+    isViewer: false,
+    backgroundOutstanding: 0,
+  }),
+}))
 
 // MessageInput holds its RichComposer handle internally and does not forward a
 // ref, so capture that handle through a partial mock that still renders the real
@@ -194,6 +231,225 @@ function renderInput(
     </NextIntlClientProvider>
   )
 }
+
+describe("MessageInput confirmed sends", () => {
+  afterEach(() => {
+    cleanup()
+    composerHandle.current = null
+    attachmentsOverride.current = null
+  })
+
+  it("retains the full draft through a failed send and suppresses duplicate submits", async () => {
+    let settle!: (sent: boolean) => void
+    const onSend = vi.fn<(draft: PromptDraft) => Promise<boolean>>(
+      () =>
+        new Promise<boolean>((resolve) => {
+          settle = resolve
+        })
+    )
+    const image = {
+      type: "image" as const,
+      data: "aGk=",
+      mime_type: "image/png",
+    }
+    attachmentsOverride.current = {
+      attachments: [
+        {
+          id: "retained",
+          type: "image",
+          data: "aGk=",
+          uri: null,
+          name: "draft.png",
+          mimeType: "image/png",
+        },
+      ],
+      imagePromptBlocks: () => [image],
+    }
+    const { container } = renderInput({ onSend })
+    await waitFor(() =>
+      expect(composerHandle.current?.getEditor()).toBeTruthy()
+    )
+    const editor = composerHandle.current!.getEditor()!
+    act(() => {
+      editor.commands.insertContent("keep this draft")
+    })
+    const send = container.querySelector<HTMLButtonElement>(
+      `button[title="${enMessages.Folder.chat.messageInput.send}"]`
+    )!
+    fireEvent.click(send)
+    fireEvent.click(send)
+    expect(onSend).toHaveBeenCalledTimes(1)
+    expect(serializeDocToText(editor.state.doc)).toBe("keep this draft")
+    await act(async () => {
+      settle(false)
+    })
+    expect(serializeDocToText(editor.state.doc)).toBe("keep this draft")
+    expect(onSend.mock.calls[0][0]).toEqual({
+      blocks: [{ type: "text", text: "keep this draft" }, image],
+      displayText: "keep this draft",
+    })
+  })
+
+  it("clears only a confirmed unchanged draft and preserves newer composer text", async () => {
+    let settle!: (sent: boolean) => void
+    const onSend = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          settle = resolve
+        })
+    )
+    const { container } = renderInput({ onSend })
+    await waitFor(() =>
+      expect(composerHandle.current?.getEditor()).toBeTruthy()
+    )
+    const editor = composerHandle.current!.getEditor()!
+    act(() => {
+      editor.commands.insertContent("first")
+    })
+    const send = container.querySelector<HTMLButtonElement>(
+      `button[title="${enMessages.Folder.chat.messageInput.send}"]`
+    )!
+    fireEvent.click(send)
+    act(() => {
+      editor.commands.insertContent(" newer")
+    })
+    await act(async () => {
+      settle(true)
+    })
+    expect(serializeDocToText(editor.state.doc)).toBe("first newer")
+    fireEvent.click(send)
+    await act(async () => {
+      settle(true)
+    })
+    expect(serializeDocToText(editor.state.doc)).toBe("")
+  })
+})
+
+describe("managed first Send through the panel send path", () => {
+  afterEach(() => {
+    cleanup()
+    resetConversationRuntimeStore()
+    composerHandle.current = null
+    attachmentsOverride.current = null
+    managedAgent.connect.mockReset()
+    managedAgent.prompt.mockReset()
+  })
+  function ManagedComposer() {
+    const lifecycle = useConnectionLifecycle({
+      contextKey: "saved-tab",
+      agentType: "claude_code",
+      isActive: true,
+      workingDir: "/managed",
+      conversationId: 17,
+      workspaceChatId: 42,
+    })
+    const send = useWorkspaceChatSend({
+      workspaceChatId: 42,
+      conversationId: 17,
+      folderId: 8,
+      send: lifecycle.handleSend,
+      attachedResourcesFallback: "Attached resources",
+    })
+    return (
+      <ChatInput
+        status="disconnected"
+        allowOfflineCompose={send.eligible}
+        promptCapabilities={CAPS}
+        onSend={send.sendDraft}
+        onFocus={lifecycle.handleFocus}
+        onCancel={() => {}}
+      />
+    )
+  }
+  async function mount() {
+    const view = render(
+      <NextIntlClientProvider locale="en" messages={enMessages}>
+        <ManagedComposer />
+      </NextIntlClientProvider>
+    )
+    await waitFor(() =>
+      expect(composerHandle.current?.getEditor()).toBeTruthy()
+    )
+    const editor = composerHandle.current!.getEditor()!
+    act(() => {
+      editor.commands.insertContent("first managed turn")
+    })
+    return {
+      editor,
+      send: view.container.querySelector<HTMLButtonElement>(
+        `button[title="${enMessages.Folder.chat.messageInput.send}"]`
+      )!,
+    }
+  }
+  it("enables disconnected first Send, awaits connection, and uses persisted IDs", async () => {
+    let connected!: () => void
+    managedAgent.connect.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          connected = resolve
+        })
+    )
+    managedAgent.prompt.mockResolvedValue(undefined)
+    const { editor, send } = await mount()
+    expect(managedAgent.connect).not.toHaveBeenCalled()
+    expect(send).toBeEnabled()
+    fireEvent.click(send)
+    fireEvent.click(send)
+    expect(managedAgent.connect).toHaveBeenCalledTimes(1)
+    expect(managedAgent.prompt).not.toHaveBeenCalled()
+    await act(async () => {
+      connected()
+    })
+    await waitFor(() => expect(managedAgent.prompt).toHaveBeenCalledTimes(1))
+    expect(managedAgent.prompt.mock.calls[0][1]).toMatchObject({
+      folderId: 8,
+      conversationId: 17,
+    })
+    expect(serializeDocToText(editor.state.doc)).toBe("")
+  })
+  it.each(["connect", "prompt"] as const)(
+    "retains text and attachments after failed %s without a phantom turn",
+    async (failure) => {
+      const quiet = vi.spyOn(console, "error").mockImplementation(() => {})
+      managedAgent.connect.mockResolvedValue(undefined)
+      managedAgent.prompt.mockResolvedValue(undefined)
+      managedAgent[failure].mockRejectedValue(
+        new Error("External boundary failed")
+      )
+      const image = {
+        type: "image" as const,
+        data: "aGk=",
+        mime_type: "image/png",
+      }
+      attachmentsOverride.current = {
+        attachments: [
+          {
+            id: "failed",
+            type: "image",
+            data: "aGk=",
+            uri: null,
+            name: "draft.png",
+            mimeType: "image/png",
+          },
+        ],
+        imagePromptBlocks: () => [image],
+      }
+      const { editor, send } = await mount()
+      expect(send).toBeEnabled()
+      fireEvent.click(send)
+      expect(
+        await screen.findByRole("button", { name: "Retry retained draft" })
+      ).toBeInTheDocument()
+      expect(serializeDocToText(editor.state.doc)).toBe("first managed turn")
+      expect(getRuntimeSession(17)?.localTurns).toHaveLength(0)
+      expect(getRuntimeSession(17)?.syncState).not.toBe("awaiting_persist")
+      if (failure === "connect")
+        expect(managedAgent.prompt).not.toHaveBeenCalled()
+      else expect(managedAgent.prompt.mock.calls[0][0]).toContainEqual(image)
+      quiet.mockRestore()
+    }
+  )
+})
 
 describe("MessageInput (RichComposer integration)", () => {
   afterEach(() => cleanup())

@@ -153,7 +153,10 @@ async fn workspace_execution_finalization_is_atomic_hidden_regular_and_idempoten
         assert!(conflicting.insert(&db.conn).await.is_err(), "duplicate {duplicate} must be rejected");
     }
     use sea_orm_migration::MigratorTrait;
-    assert!(crate::db::migration::Migrator::down(&db.conn, Some(1)).await.is_err());
+    // Exercise the mapping migration, independent of later additive migrations.
+    let mapping = crate::db::migration::Migrator::migrations().into_iter()
+        .find(|migration| migration.name() == "m20260907_000002_workspace_execution").unwrap();
+    assert!(mapping.down(&sea_orm_migration::SchemaManager::new(&db.conn)).await.is_err());
     assert_eq!(conversation::Entity::find().count(&db.conn).await.unwrap(), 1);
 }
 

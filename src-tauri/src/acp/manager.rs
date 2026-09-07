@@ -212,6 +212,9 @@ async fn wait_for_session_started(
 
 pub struct ConnectionManager {
     pub(crate) connections: Arc<Mutex<HashMap<String, AgentConnection>>>,
+    // Retain shutdown observations across a bounded stop timeout and map
+    // cleanup, so a subsequent scoped disconnect can confirm a later reap.
+    managed_stops: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     /// Per-(agent, working_dir, session_id) async mutex. Held across the
     /// dedup-lookup + spawn + SessionStarted-wait critical section so two
     /// concurrent `spawn_agent` calls for the same logical session can't
@@ -291,6 +294,7 @@ impl ConnectionManager {
     pub fn new() -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
+            managed_stops: Arc::new(Mutex::new(HashMap::new())),
             spawn_locks: Arc::new(Mutex::new(HashMap::new())),
             spawn_handshake_timeout: spawn_handshake_timeout_from_env(),
             terminal_shell_config: TerminalShellRuntimeConfig::new(),
@@ -306,6 +310,7 @@ impl ConnectionManager {
     pub fn clone_ref(&self) -> Self {
         Self {
             connections: self.connections.clone(),
+            managed_stops: self.managed_stops.clone(),
             spawn_locks: self.spawn_locks.clone(),
             spawn_handshake_timeout: self.spawn_handshake_timeout,
             terminal_shell_config: self.terminal_shell_config.clone(),
@@ -357,6 +362,7 @@ impl ConnectionManager {
     fn with_spawn_handshake_timeout(timeout: Duration) -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
+            managed_stops: Arc::new(Mutex::new(HashMap::new())),
             spawn_locks: Arc::new(Mutex::new(HashMap::new())),
             spawn_handshake_timeout: timeout,
             terminal_shell_config: TerminalShellRuntimeConfig::new(),
@@ -408,6 +414,7 @@ impl ConnectionManager {
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
             child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            child_reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let mut map = self.connections.lock().await;
         map.insert(id.to_string(), conn);
@@ -451,6 +458,7 @@ impl ConnectionManager {
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
             child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            child_reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         self.connections.lock().await.insert(id.to_string(), conn);
         rx
@@ -526,6 +534,11 @@ impl ConnectionManager {
         // installs the SessionStarted dedup signal on the state, registers
         // a cleanup hook, and returns the rx half of the signal. Any spawn
         // failure short-circuits before we touch the rx wait.
+        let runtime_env_is_managed = runtime_env.get("WORKOS_MANAGED_CHAT").map(String::as_str) == Some("true");
+        let child_reaped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if runtime_env_is_managed {
+            self.observe_workspace_process(&connection_id, child_reaped.clone()).await;
+        }
         let session_started_rx = spawn_agent_connection(
             connection_id.clone(),
             agent_type,
@@ -537,8 +550,9 @@ impl ConnectionManager {
             self.connections.clone(),
             preferred_mode_id,
             preferred_config_values,
-            self.delegation_snapshot(),
+            if runtime_env_is_managed { None } else { self.delegation_snapshot() },
             self.terminal_shell_config.clone(),
+            child_reaped,
         )
         .await?;
 
@@ -2122,6 +2136,37 @@ impl ConnectionManager {
         } else {
             Err(AcpError::ConnectionNotFound(conn_id.into()))
         }
+    }
+
+    pub(crate) async fn observe_workspace_process(&self, conn_id: &str, reaped: Arc<std::sync::atomic::AtomicBool>) {
+        self.managed_stops.lock().await.insert(conn_id.into(), reaped);
+    }
+
+    pub(crate) async fn workspace_process_stopped(&self, conn_id: &str) -> bool {
+        self.managed_stops.lock().await.get(conn_id)
+            .is_some_and(|proof| proof.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    pub(crate) async fn disconnect_confirmed(&self, conn_id: &str, timeout: Duration) -> Result<(), AcpError> {
+        let observation = {
+            let mut stops = self.managed_stops.lock().await;
+            if let Some(observation) = stops.get(conn_id) { observation.clone() }
+            else {
+                let connections = self.connections.lock().await;
+                let conn = connections.get(conn_id).ok_or_else(|| AcpError::ConnectionNotFound(conn_id.into()))?;
+                let observation = conn.child_reaped.clone();
+                stops.insert(conn_id.into(), observation.clone());
+                observation
+            }
+        };
+        tokio::time::timeout(timeout, async {
+            let _ = self.disconnect(conn_id).await;
+            while !observation.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.map_err(|_| AcpError::protocol("workspace writer stop not confirmed"))?;
+        // Keep the positive observation for idempotent DB-release retries.
+        Ok(())
     }
 
     /// Probe an agent for the modes / config_options it advertises on a fresh
@@ -3825,6 +3870,7 @@ mod tests {
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
             child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            child_reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -4155,6 +4201,7 @@ mod tests {
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
             child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            child_reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         mgr.connections
             .lock()
@@ -5048,6 +5095,7 @@ mod tests {
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
             child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            child_reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let mgr = ConnectionManager::new();
         mgr.connections
@@ -6689,6 +6737,7 @@ mod tests {
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
             child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            child_reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let mgr = Arc::new(ConnectionManager::new());
         {
@@ -7360,6 +7409,7 @@ mod tests {
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
             child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            child_reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         let mgr = ConnectionManager::new();
         {

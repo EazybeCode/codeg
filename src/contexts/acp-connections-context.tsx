@@ -420,11 +420,13 @@ type ConnectRequest = {
   // (sessionId already distinguishes), but carried so a re-fired pending
   // request still runs discovery.
   conversationId?: number
+  workspaceChatId?: number
 }
 
 function sameConnectRequest(a: ConnectRequest, b: ConnectRequest) {
   return (
     a.agentType === b.agentType &&
+    a.workspaceChatId === b.workspaceChatId &&
     (a.workingDir ?? null) === (b.workingDir ?? null) &&
     (a.sessionId ?? null) === (b.sessionId ?? null)
   )
@@ -2716,7 +2718,8 @@ export interface AcpActionsValue {
     agentType: AgentType,
     workingDir?: string,
     sessionId?: string,
-    conversationId?: number
+    conversationId?: number,
+    workspaceChatId?: number
   ): Promise<void>
   /**
    * Release the connection for `contextKey`. The LOCAL entry always goes away
@@ -5197,13 +5200,15 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       agentType: AgentType,
       workingDir?: string,
       sessionId?: string,
-      conversationId?: number
+      conversationId?: number,
+      workspaceChatId?: number
     ) => {
       const request: ConnectRequest = {
         agentType,
         workingDir,
         sessionId,
         conversationId,
+        workspaceChatId,
       }
       // Remember BEFORE the in-flight early return and before the preflight can
       // throw: a connect that never produced a store entry is precisely when
@@ -5441,9 +5446,11 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
             discovered = await acpFindConnectionForConversation(
               conversationId,
               sessionId,
-              agentType
+              agentType,
+              ...(workspaceChatId == null ? [] : [workspaceChatId])
             )
           } catch (e) {
+            if (workspaceChatId != null) throw e
             console.warn(
               "[acp-context] connection discovery failed for conversation",
               conversationId,
@@ -5515,7 +5522,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           workingDir,
           sessionId,
           savedPrefs.modeId,
-          savedPrefs.configValues
+          savedPrefs.configValues,
+          ...(workspaceChatId == null ? [] : [workspaceChatId])
         )
 
         // If disconnect was requested while connect was in flight, tear down
@@ -5697,7 +5705,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
                   pendingRequest.agentType,
                   pendingRequest.workingDir,
                   pendingRequest.sessionId,
-                  pendingRequest.conversationId
+                  pendingRequest.conversationId,
+                  pendingRequest.workspaceChatId
                 )
                 .catch(() => {})
             })
@@ -5865,6 +5874,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         workingDir: conn?.workingDir ?? remembered?.workingDir ?? undefined,
         sessionId: conn?.sessionId ?? remembered?.sessionId ?? undefined,
         conversationId: remembered?.conversationId,
+        workspaceChatId: remembered?.workspaceChatId,
       }
     },
     []
@@ -5960,7 +5970,8 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
         request.agentType,
         request.workingDir,
         request.sessionId,
-        request.conversationId
+        request.conversationId,
+        request.workspaceChatId
       )
       return true
     },
@@ -6021,7 +6032,7 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
       }
     ) => {
       const conn = storeRef.current.connections.get(contextKey)
-      if (!conn) return
+      if (!conn) throw new Error("Agent connection is not ready")
       lastActivityRef.current.set(contextKey, Date.now())
       try {
         await acpPrompt(
@@ -6029,7 +6040,11 @@ export function AcpConnectionsProvider({ children }: { children: ReactNode }) {
           blocks,
           opts?.folderId ?? null,
           opts?.conversationId ?? null,
-          opts?.clientMessageId ?? null
+          opts?.clientMessageId ?? null,
+          ...(lastConnectParamsRef.current.get(contextKey)?.workspaceChatId ==
+          null
+            ? []
+            : [lastConnectParamsRef.current.get(contextKey)!.workspaceChatId])
         )
       } catch (e) {
         // Same reasoning as `cancel`: the backend disowning this id proves the

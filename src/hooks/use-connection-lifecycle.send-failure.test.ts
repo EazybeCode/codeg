@@ -36,6 +36,8 @@ vi.mock("next-intl", () => ({
 }))
 
 const sendPrompt = vi.fn()
+const connect = vi.fn().mockResolvedValue(undefined)
+let connectionStatus = "connected"
 
 vi.mock("@/contexts/acp-connections-context", () => ({
   useAcpActions: () => ({ setActiveKey: vi.fn(), touchActivity: vi.fn() }),
@@ -51,9 +53,9 @@ vi.mock("@/contexts/task-context", () => ({
 
 vi.mock("@/hooks/use-connection", () => ({
   useConnection: () => ({
-    status: "connected",
+    status: connectionStatus,
     selectorsReady: true,
-    connect: vi.fn().mockResolvedValue(undefined),
+    connect,
     disconnect: vi.fn().mockResolvedValue(undefined),
     sendPrompt,
     setMode: vi.fn().mockResolvedValue(undefined),
@@ -95,6 +97,44 @@ async function flush() {
 describe("useConnectionLifecycle send-failure surfacing", () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    connectionStatus = "connected"
+    connect.mockResolvedValue(undefined)
+  })
+
+  it("starts a managed writer only on first Send and awaits connection with persisted IDs", async () => {
+    connectionStatus = "disconnected"
+    sendPrompt.mockResolvedValue(undefined)
+    const { result } = renderHook(() =>
+      useConnectionLifecycle({
+        contextKey: "managed",
+        agentType: "claude_code",
+        isActive: true,
+        workingDir: "/managed",
+        conversationId: 17,
+        workspaceChatId: 42,
+      })
+    )
+    act(() => result.current.handleFocus())
+    expect(connect).not.toHaveBeenCalled()
+    let sent: unknown
+    await act(async () => {
+      sent = await result.current.handleSend(draft(), null, {
+        folderId: 8,
+        conversationId: 17,
+      })
+    })
+    expect(sent).toBe(true)
+    expect(connect).toHaveBeenCalledWith(
+      "claude_code",
+      "/managed",
+      undefined,
+      17,
+      42
+    )
+    expect(sendPrompt).toHaveBeenCalledWith(draft().blocks, {
+      folderId: 8,
+      conversationId: 17,
+    })
   })
 
   it("toasts a structured backend error with its message", async () => {

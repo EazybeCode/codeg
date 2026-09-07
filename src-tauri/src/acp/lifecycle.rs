@@ -1755,6 +1755,7 @@ mod tests {
             config_fingerprint: String::new(),
             last_observed_fingerprint: String::new(),
             child_pid: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            child_reaped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 

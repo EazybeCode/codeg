@@ -67,7 +67,11 @@ interface ConversationShellProps {
   /** Awaiting-decision Grok `exit_plan_mode` approval. */
   pendingPlanApproval: PendingPlanApprovalState | null
   onFocus: () => void
-  onSend: (draft: PromptDraft, modeId?: string | null) => void
+  onSend: (
+    draft: PromptDraft,
+    modeId?: string | null
+  ) => void | Promise<boolean | void>
+  allowOfflineCompose?: boolean
   onCancel: () => void
   onRespondPermission: (requestId: string, optionId: string) => void
   onAnswerQuestion: (answer: string) => void
@@ -165,6 +169,7 @@ export function ConversationShell({
   pendingPlanApproval,
   onFocus,
   onSend,
+  allowOfflineCompose,
   onCancel,
   onRespondPermission,
   onAnswerQuestion,
@@ -340,6 +345,7 @@ export function ConversationShell({
         {!hideInput && (
           <div className="mx-auto w-full max-w-3xl">
             <ChatInput
+              allowOfflineCompose={allowOfflineCompose}
               status={status}
               promptCapabilities={promptCapabilities}
               defaultPath={defaultPath}

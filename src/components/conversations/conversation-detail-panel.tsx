@@ -39,6 +39,11 @@ import {
   type AskSelectionParkedDetail,
 } from "@/lib/ask-selection-handoff"
 import { useConnectionLifecycle } from "@/hooks/use-connection-lifecycle"
+import {
+  useWorkspaceChatSend,
+  buildOptimisticUserTurnFromDraft,
+} from "@/hooks/use-workspace-chat-send"
+import { WorkspaceChatRuntimeGate } from "@/components/workspace/workspace-chat-runtime-gate"
 import { useMessageQueue, type QueuedMessage } from "@/hooks/use-message-queue"
 import { MessageListView } from "@/components/message/message-list-view"
 import {
@@ -99,13 +104,9 @@ import {
 } from "@/stores/conversation-runtime-store"
 import { useShallow } from "zustand/react/shallow"
 import { useConversationDetail } from "@/hooks/use-conversation-detail"
-import {
-  extractUserImagesFromDraft,
-  getPromptDraftDisplayText,
-} from "@/lib/prompt-draft"
+import { getPromptDraftDisplayText } from "@/lib/prompt-draft"
 import {
   type AgentType,
-  type ContentBlock,
   type ConversationStatus,
   type EventEnvelope,
   type MessageTurn,
@@ -155,6 +156,7 @@ import { ConversationDetailHeader } from "./conversation-detail-header"
 import { SessionDetailsDialog } from "./session-details-dialog"
 
 interface ConversationTabViewProps {
+  workspaceChatId?: number
   tabId: string
   conversationId: number | null
   agentType: AgentType
@@ -171,36 +173,6 @@ interface ConversationTabViewProps {
    *  reparent (the tab moved to another group — remount, keep the connection)
    *  apart from a real teardown (pane switch / route change — disconnect). */
   groupId: string
-}
-
-function buildOptimisticUserTurnFromDraft(
-  draft: PromptDraft,
-  attachedResourcesFallback: string
-): MessageTurn {
-  // `draft.displayText` is the composer's full Markdown, which already renders
-  // every inline file/resource badge as a `[label](uri)` link (see
-  // `referenceToMarkdown`). Re-appending the resource blocks here would duplicate
-  // each attached file in the optimistic bubble, so the display text is used
-  // as-is — images are the only out-of-band content left to add as blocks.
-  const text = getPromptDraftDisplayText(draft, attachedResourcesFallback)
-
-  const blocks: ContentBlock[] = []
-  for (const image of extractUserImagesFromDraft(draft)) {
-    blocks.push({
-      type: "image",
-      data: image.data,
-      mime_type: image.mime_type,
-      uri: image.uri ?? null,
-    })
-  }
-  blocks.push({ type: "text", text })
-
-  return {
-    id: `optimistic-${randomUUID()}`,
-    role: "user",
-    blocks,
-    timestamp: new Date().toISOString(),
-  }
 }
 
 /** Build a user `MessageTurn` from a broadcast `user_message` (event or
@@ -229,6 +201,7 @@ function buildVirtualConversationId(seed: string): number {
 }
 
 const ConversationTabView = memo(function ConversationTabView({
+  workspaceChatId,
   tabId,
   conversationId,
   agentType,
@@ -598,6 +571,7 @@ const ConversationTabView = memo(function ConversationTabView({
     // Drives cross-client viewer discovery: when another client is already
     // live on this conversation, attach to its connection instead of spawning.
     conversationId: dbConversationId ?? undefined,
+    workspaceChatId,
     // A cross-group move / unsplit reparents this view (React remounts it)
     // while the tab stays open — that unmount must not tear the connection
     // down. See `isReparentUnmount` for why "still open" alone is too broad.
@@ -965,6 +939,13 @@ const ConversationTabView = memo(function ConversationTabView({
     }
   }, [effectiveConversationId, removeConversation, setPendingCleanup])
 
+  const workspaceSender = useWorkspaceChatSend({
+    workspaceChatId,
+    conversationId: dbConversationId,
+    folderId,
+    send: lifecycleSend,
+    attachedResourcesFallback: sharedT("attachedResources"),
+  })
   const handleSend = useCallback(
     (
       draft: PromptDraft,
@@ -976,6 +957,32 @@ const ConversationTabView = memo(function ConversationTabView({
       // re-queues at the TAIL.
       opts?: { fromQueueFlush?: boolean }
     ) => {
+      if (workspaceChatId != null) {
+        if (!workspaceSender.eligible) return Promise.resolve(false)
+        if (
+          shouldQueueDirectSend(
+            opts?.fromQueueFlush ?? false,
+            mqGetQueueLength()
+          )
+        ) {
+          mqEnqueue(draft, selectedModeIdArg ?? null)
+          return Promise.resolve(true)
+        }
+        return workspaceSender
+          .sendDraft(draft, selectedModeIdArg, () => {
+            lastFlushBounceAtRef.current = Date.now()
+            if (opts?.fromQueueFlush)
+              mqRequeueFront(draft, selectedModeIdArg ?? null)
+            else mqEnqueue(draft, selectedModeIdArg ?? null)
+          })
+          .then((sent) => {
+            if (sent) {
+              setSendSignal((value) => value + 1)
+              if (ownTab && !ownTab.isPinned) pinTab(tabId)
+            }
+            return sent
+          })
+      }
       // Capture the tab's chat-draft state + eager scratch dir synchronously,
       // before any await. A folderless chat draft is NOT special-cased here:
       // its first send takes the exact same gated, inline path as a normal new
@@ -1225,6 +1232,8 @@ const ConversationTabView = memo(function ConversationTabView({
       bindConversationTab,
       canAutoConnect,
       connectionReady,
+      workspaceChatId,
+      workspaceSender,
       effectiveConversationId,
       folderId,
       hasPersistedConversation,
@@ -1643,7 +1652,10 @@ const ConversationTabView = memo(function ConversationTabView({
   // that row regularly, and this handler has to stay referentially stable (it is
   // a MessageListView prop).
   const askFolderId = folder?.id ?? null
-  const canAskSelection = askFolderId != null && workingDirForConnection != null
+  const canAskSelection =
+    workspaceChatId == null &&
+    askFolderId != null &&
+    workingDirForConnection != null
   const handleAskSelection = useCallback(
     (selected: string, question: string) => {
       if (askFolderId == null || workingDirForConnection == null) return
@@ -1733,7 +1745,7 @@ const ConversationTabView = memo(function ConversationTabView({
   // drafts. Doing it in this order means the second `setTabs` (closeTab)
   // runs against the result of the first.
   const handleOpenNewSession = useCallback(() => {
-    if (!folder) return
+    if (!folder || workspaceChatId != null) return
     // Retry-from-error: user wants a fresh draft in the same conversation
     // context, so inherit the active tab's agent when the folder has no
     // pinned default.
@@ -1741,7 +1753,14 @@ const ConversationTabView = memo(function ConversationTabView({
       inheritFromActive: true,
     })
     closeTab(tabId)
-  }, [closeTab, folder, openNewConversationTab, tabId, workingDirForConnection])
+  }, [
+    closeTab,
+    folder,
+    openNewConversationTab,
+    tabId,
+    workingDirForConnection,
+    workspaceChatId,
+  ])
 
   // Some load failures come with a shell command that undoes them (today:
   // `codex unarchive <id>`). The banner names it in prose, but prose here is
@@ -1829,14 +1848,16 @@ const ConversationTabView = memo(function ConversationTabView({
               )}
               {tMessageList("errorActionReload")}
             </button>
-            <button
-              type="button"
-              onClick={handleOpenNewSession}
-              className="flex shrink-0 items-center gap-1 rounded border border-destructive/40 px-2 py-0.5 font-medium transition-colors hover:bg-destructive/10"
-            >
-              <Plus aria-hidden="true" className="h-3 w-3" />
-              {tMessageList("errorActionNewSession")}
-            </button>
+            {workspaceChatId == null && (
+              <button
+                type="button"
+                onClick={handleOpenNewSession}
+                className="flex shrink-0 items-center gap-1 rounded border border-destructive/40 px-2 py-0.5 font-medium transition-colors hover:bg-destructive/10"
+              >
+                <Plus aria-hidden="true" className="h-3 w-3" />
+                {tMessageList("errorActionNewSession")}
+              </button>
+            )}
           </>
         )}
       </div>
@@ -1963,7 +1984,9 @@ const ConversationTabView = memo(function ConversationTabView({
         hideEmptyState={!hasPersistedConversation || hasSentMessage}
         onReload={canShowDetailErrorActions ? handleReloadDetail : undefined}
         onNewSession={
-          canShowDetailErrorActions ? handleOpenNewSession : undefined
+          canShowDetailErrorActions && workspaceChatId == null
+            ? handleOpenNewSession
+            : undefined
         }
         onQuoteSelection={composerAvailable ? handleQuoteSelection : undefined}
         // Asking opens its own conversation, so it needs a folder to open it in
@@ -1984,7 +2007,8 @@ const ConversationTabView = memo(function ConversationTabView({
         onForkFromTurn={
           (connStatus === "connected" || connStatus === "prompting") &&
           hasPersistedConversation &&
-          conn.supportsFork
+          conn.supportsFork &&
+          workspaceChatId == null
             ? handleForkFromTurn
             : undefined
         }
@@ -2051,7 +2075,16 @@ const ConversationTabView = memo(function ConversationTabView({
       agentName={getAgentLabel(selectedAgent)}
       error={conn.error}
       claudeApiRetry={conn.claudeApiRetry}
-      sessionFailures={conn.sessionFailures}
+      sessionFailures={
+        workspaceChatId == null
+          ? conn.sessionFailures
+          : conn.sessionFailures.map((failure) => ({
+              ...failure,
+              actions: failure.actions?.filter(
+                (action) => action !== "new_session"
+              ),
+            }))
+      }
       onSessionFailureAction={
         // Owners of a live connection only — mirrors the goal-control gate:
         // viewers must see the strips but not drive recovery.
@@ -2074,6 +2107,7 @@ const ConversationTabView = memo(function ConversationTabView({
       pendingPlanApproval={conn.pendingPlanApproval}
       onFocus={handleFocus}
       onSend={handleSend}
+      allowOfflineCompose={workspaceSender.eligible}
       onCancel={handleCancel}
       onRespondPermission={handleRespondPermission}
       onAnswerQuestion={handleAnswerQuestion}
@@ -2091,7 +2125,9 @@ const ConversationTabView = memo(function ConversationTabView({
       availableCommands={connectionCommands}
       attachmentTabId={tabId}
       draftStorageKey={draftStorageKey}
-      hideInput={isWelcomeMode || Boolean(acpLoadError)}
+      hideInput={
+        isWelcomeMode || (Boolean(acpLoadError) && workspaceChatId == null)
+      }
       injectContent={composerInject}
       onInjectConsumed={handleComposerInjectConsumed}
       composerBanner={acpLoadErrorBanner}
@@ -2690,9 +2726,11 @@ export function ConversationDetailPanel() {
     const active = tab.id === activeTabId
     // Visible = tiled (all group members shown) or the group's selected tab.
     const visible = canTileG || tab.id === groupSelection[groupId]
-    const folderPath = allFolders.find((f) => f.id === tab.folderId)?.path
-    const view = (
+    const tabFolder = allFolders.find((f) => f.id === tab.folderId)
+    const folderPath = tabFolder?.path
+    const renderView = (workspaceChatId?: number) => (
       <ConversationTabView
+        workspaceChatId={workspaceChatId}
         tabId={tab.id}
         conversationId={tab.conversationId}
         agentType={tab.agentType}
@@ -2703,6 +2741,23 @@ export function ConversationDetailPanel() {
         groupId={groupId}
       />
     )
+    const view =
+      tabFolder?.kind === "workspace_chat" ? (
+        tab.conversationId != null ? (
+          <WorkspaceChatRuntimeGate
+            conversationId={tab.conversationId}
+            folderId={tabFolder.id}
+          >
+            {(draftId) => renderView(draftId)}
+          </WorkspaceChatRuntimeGate>
+        ) : (
+          <p role="status">Workspace chat context is unavailable.</p>
+        )
+      ) : tab.folderId != null && !tabFolder ? (
+        <p role="status">Loading conversation folder…</p>
+      ) : (
+        renderView()
+      )
     return (
       <div
         key={tab.id}

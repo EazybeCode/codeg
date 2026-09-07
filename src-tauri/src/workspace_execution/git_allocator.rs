@@ -140,6 +140,30 @@ fn allocate_git(root: &Path, row: &workspace_chat_execution::Model, repo: &Verif
     Ok(AllocatedWorktree { allocation_id: row.allocation_id.clone(), worktree_path: worktree, branch_name: row.branch_name.clone() })
 }
 fn path_str(path: &Path) -> Result<&str, ExecutionError> { path.to_str().ok_or(ExecutionError::AllocationMismatch) }
+/// Read-only validation before starting a writer. Ready chats may have moved
+/// forward on their reserved branch, but may never change repository or cwd.
+pub(crate) fn validate_ready_checkout(root: &Path, row: &workspace_chat_execution::Model, repo: &super::VerifiedExecutionIdentity) -> Result<PathBuf, ExecutionError> {
+    use super::managed_paths::{checked, reject_metadata_symlinks};
+    if row.state != "ready" || row.org_id <= 0 || row.draft_id <= 0
+        || repo.github_repository_id.is_empty() || !repo.github_repository_id.bytes().all(|b| b.is_ascii_digit())
+        || row.branch_name != format!("workos/chat/{}", row.draft_id)
+        || row.worktree_relpath != format!("orgs/{}/workspace-chats/{}/worktree", row.org_id, row.draft_id)
+    { return Err(ExecutionError::AllocationMismatch); }
+    crate::workspace_catalog::validate_repository_full_name(&repo.full_name)?;
+    let parent = PathBuf::from(format!("orgs/{}/repositories/{}", row.org_id, repo.github_repository_id));
+    let cache = checked(root, &parent.join("repo.git"))?;
+    let worktree = checked(root, Path::new(&row.worktree_relpath))?;
+    checked(root, &PathBuf::from(&row.worktree_relpath).join(".git"))?;
+    if !worktree.is_dir() || !worktree.join(".git").is_file() || !cache.is_dir() { return Err(ExecutionError::AllocationMismatch); }
+    reject_metadata_symlinks(&cache)?;
+    let git = Git { home: checked(root, &parent.join("git-home"))?, askpass: None, token: None };
+    let remote = format!("https://github.com/{}.git", repo.full_name);
+    if git.run(&cache, &["rev-parse", "--is-bare-repository"]).ok().as_deref() != Some("true")
+        || git.run(&cache, &["config", "--get", "remote.origin.url"]).ok().as_deref() != Some(remote.as_str())
+    { return Err(ExecutionError::AllocationMismatch); }
+    verify_checkout(&git, &cache, &worktree, row)?;
+    Ok(worktree)
+}
 fn verify_checkout(git: &Git, cache: &Path, worktree: &Path, row: &workspace_chat_execution::Model) -> Result<(), ExecutionError> {
     let common = git.run(worktree, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).map_err(|_| ExecutionError::AllocationMismatch)?;
     let common = Path::new(&common).canonicalize().map_err(|_| ExecutionError::AllocationMismatch)?;

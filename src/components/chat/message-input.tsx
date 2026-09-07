@@ -158,7 +158,10 @@ export interface ComposerInjectContent {
 }
 
 interface MessageInputProps {
-  onSend: (draft: PromptDraft, modeId?: string | null) => void
+  onSend: (
+    draft: PromptDraft,
+    modeId?: string | null
+  ) => void | Promise<boolean | void>
   placeholder?: string
   defaultPath?: string
   disabled?: boolean
@@ -1219,7 +1222,62 @@ export function MessageInput({
     closeSlashMenu()
   }, [clearAttachments, closeSlashMenu])
 
+  const sendPendingRef = useRef(false)
+  const [sendPending, setSendPending] = useState(false)
+  const [failedSend, setFailedSend] = useState<{
+    draft: PromptDraft
+    modeId: string | null
+  } | null>(null)
+  const currentBuildDraft = useRef(buildDraft)
+  useEffect(() => {
+    currentBuildDraft.current = buildDraft
+  }, [buildDraft])
+  const submitDraft = useCallback(
+    (draft: PromptDraft, modeId: string | null) => {
+      if (sendPendingRef.current) return
+      sendPendingRef.current = true
+      const clearConfirmed = () => {
+        // The editor remains usable while a first connection/prompt is pending.
+        // A late result must never erase text or attachments added meanwhile.
+        if (
+          JSON.stringify(currentBuildDraft.current()) === JSON.stringify(draft)
+        ) {
+          if (effectiveDraftStorageKey)
+            clearMessageInputDraftV2(effectiveDraftStorageKey)
+          resetComposer()
+        }
+        setFailedSend(null)
+      }
+      try {
+        const result = onSend(draft, modeId)
+        if (result && typeof result.then === "function") {
+          setSendPending(true)
+          void result
+            .then((sent) => {
+              if (sent === false) setFailedSend({ draft, modeId })
+              else clearConfirmed()
+            })
+            .catch(() => {
+              setFailedSend({ draft, modeId })
+            })
+            .finally(() => {
+              sendPendingRef.current = false
+              setSendPending(false)
+            })
+        } else {
+          clearConfirmed()
+          sendPendingRef.current = false
+        }
+      } catch {
+        setFailedSend({ draft, modeId })
+        sendPendingRef.current = false
+      }
+    },
+    [onSend, effectiveDraftStorageKey, resetComposer]
+  )
+
   const handleSend = useCallback(() => {
+    if (sendPendingRef.current) return
     // The editor stays editable while `disabled` (the agent is busy) so the user
     // can keep typing, but a plain send is blocked — only enqueue / queue-edit
     // save go through. Mirrors the legacy textarea's keydown guard.
@@ -1250,11 +1308,7 @@ export function MessageInput({
       return
     }
 
-    onSend(draft, showModeSelector ? effectiveModeId : null)
-    if (effectiveDraftStorageKey) {
-      clearMessageInputDraftV2(effectiveDraftStorageKey)
-    }
-    resetComposer()
+    submitDraft(draft, showModeSelector ? effectiveModeId : null)
   }, [
     disabled,
     hasUploadingImage,
@@ -1264,10 +1318,9 @@ export function MessageInput({
     isPrompting,
     onSaveQueueEdit,
     onEnqueue,
-    onSend,
+    submitDraft,
     effectiveModeId,
     showModeSelector,
-    effectiveDraftStorageKey,
     resetComposer,
   ])
 
@@ -1728,7 +1781,7 @@ export function MessageInput({
   ) : (
     <Button
       onClick={handleSend}
-      disabled={disabled || !hasSendableContent}
+      disabled={disabled || sendPending || !hasSendableContent}
       size="icon"
       className="h-8 w-8"
       title={t("send")}
@@ -1750,6 +1803,19 @@ export function MessageInput({
       onKeyDown={handleContainerKeyDown}
       {...attach.containerDragProps}
     >
+      {failedSend && (
+        <div role="status" className="mb-2 flex items-center gap-2 text-sm">
+          <span>Send was not confirmed. Your draft is retained.</span>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={sendPending}
+            onClick={() => submitDraft(failedSend.draft, failedSend.modeId)}
+          >
+            Retry retained draft
+          </Button>
+        </div>
+      )}
       {slashMenuVisible && (
         <div
           data-testid="slash-menu"

@@ -1126,6 +1126,9 @@ pub struct AgentConnection {
     /// the tree without waiting, so the agent may still be alive and still
     /// needs the backstop.
     pub child_pid: Arc<std::sync::atomic::AtomicU32>,
+    /// Set only by the child reaping callback; unlike PID 0, false is also
+    /// the initial state before spawning. Used for managed writer release.
+    pub child_reaped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentConnection {
@@ -1946,6 +1949,7 @@ pub async fn spawn_agent_connection(
     preferred_config_values: BTreeMap<String, String>,
     delegation_injection: Option<DelegationInjection>,
     terminal_shell_config: TerminalShellRuntimeConfig,
+    child_reaped: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<tokio::sync::oneshot::Receiver<()>, AcpError> {
     // Create the authoritative session state up front. Subsequent emit_with_state
     // calls write through this state and increment its seq counter so the first
@@ -2013,7 +2017,11 @@ pub async fn spawn_agent_connection(
         // may still be running.
         .on_exit({
             let child_pid = Arc::clone(&child_pid);
-            move || child_pid.store(0, std::sync::atomic::Ordering::SeqCst)
+            let child_reaped = Arc::clone(&child_reaped);
+            move || {
+                child_pid.store(0, std::sync::atomic::Ordering::SeqCst);
+                child_reaped.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
         });
 
     // Path policy for the ACP `fs/*` channel. Built HERE rather than inside
@@ -2077,6 +2085,7 @@ pub async fn spawn_agent_connection(
             last_observed_fingerprint: config_fingerprint.clone(),
             config_fingerprint,
             child_pid,
+            child_reaped,
         },
     );
 

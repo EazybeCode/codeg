@@ -2205,7 +2205,7 @@ pub async fn create_chat_conversation_core(
 /// Resolve existing ancestors before mkdir, retaining missing descendants.
 /// Walk components in order so a symlink is resolved before a subsequent '..'.
 /// Filesystem errors other than a missing component fail closed.
-fn resolve_chat_creation_path(
+pub(crate) fn resolve_chat_creation_path(
     path: &std::path::Path,
 ) -> Result<std::path::PathBuf, AppCommandError> {
     use std::path::{Component, PathBuf};

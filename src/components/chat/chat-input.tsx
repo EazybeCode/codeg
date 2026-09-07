@@ -27,7 +27,10 @@ interface ChatInputProps {
   defaultPath?: string
   agentName?: string
   onFocus?: () => void
-  onSend: (draft: PromptDraft, modeId?: string | null) => void
+  onSend: (
+    draft: PromptDraft,
+    modeId?: string | null
+  ) => void | Promise<boolean | void>
   onCancel: () => void
   modes?: SessionModeInfo[]
   configOptions?: SessionConfigOptionInfo[]

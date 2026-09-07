@@ -10035,6 +10035,8 @@ pub async fn acp_connect(
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
     let runtime_env =
         build_session_runtime_env(&db, agent_type, session_id.as_deref(), &app_data_dir).await?;
+    crate::workspace_execution::acp_guard::reject_managed_root(&app_data_dir, working_dir.as_deref()).map_err(|e| AcpError::protocol(e.to_string()))?;
+    crate::workspace_execution::acp_guard::reject_generic(&db.conn, working_dir.as_deref(), None, None).await.map_err(|e| AcpError::protocol(e.to_string()))?;
 
     // Guard: the session page must never trigger a download or install.
     // If the agent isn't ready, return SdkNotInstalled here so the frontend
@@ -10067,6 +10069,7 @@ pub async fn acp_prompt(
     db: State<'_, crate::db::AppDatabase>,
     manager: State<'_, ConnectionManager>,
 ) -> Result<(), AcpError> {
+    crate::workspace_execution::acp_guard::reject_generic(&db.conn, None, conversation_id, Some(&connection_id)).await.map_err(|e| AcpError::protocol(e.to_string()))?;
     manager
         .send_prompt_linked_with_message_id(
             &db,
@@ -10133,6 +10136,8 @@ pub async fn acp_describe_agent_options_core(
     agent_type: AgentType,
     working_dir: Option<String>,
 ) -> Result<crate::acp::types::AgentOptionsSnapshot, AcpError> {
+    crate::workspace_execution::acp_guard::reject_managed_root(data_dir, working_dir.as_deref()).map_err(|e| AcpError::protocol(e.to_string()))?;
+    crate::workspace_execution::acp_guard::reject_generic(&db.conn, working_dir.as_deref(), None, None).await.map_err(|e| AcpError::protocol(e.to_string()))?;
     verify_agent_installed(agent_type).await?;
     // Build the same runtime env delegation/acp_connect would build so
     // probe sees exactly what `delegate_to_agent` will see at runtime.
@@ -10184,6 +10189,7 @@ pub async fn acp_fork(
     db: State<'_, AppDatabase>,
     manager: State<'_, ConnectionManager>,
 ) -> Result<ForkResultInfo, AcpError> {
+    crate::workspace_execution::acp_guard::reject_generic(&db.conn, None, conversation_id, Some(&connection_id)).await.map_err(|e| AcpError::protocol(e.to_string()))?;
     manager
         .fork_session(
             &db,
@@ -10251,8 +10257,10 @@ pub async fn acp_answer_plan_approval(
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn acp_disconnect(
     connection_id: String,
+    db: State<'_, AppDatabase>,
     manager: State<'_, ConnectionManager>,
 ) -> Result<(), AcpError> {
+    crate::workspace_execution::acp_guard::reject_generic(&db.conn, None, None, Some(&connection_id)).await.map_err(|e| AcpError::protocol(e.to_string()))?;
     manager.disconnect(&connection_id).await
 }
 
@@ -10260,8 +10268,10 @@ pub async fn acp_disconnect(
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn acp_touch_connection(
     connection_id: String,
+    db: State<'_, AppDatabase>,
     manager: State<'_, ConnectionManager>,
 ) -> Result<bool, AcpError> {
+    crate::workspace_execution::acp_guard::reject_generic(&db.conn, None, None, Some(&connection_id)).await.map_err(|e| AcpError::protocol(e.to_string()))?;
     Ok(manager.touch(&connection_id).await)
 }
 
@@ -10390,7 +10400,9 @@ pub async fn acp_find_connection_for_conversation(
     session_id: Option<String>,
     agent_type: AgentType,
     manager: State<'_, ConnectionManager>,
+    db: State<'_, AppDatabase>,
 ) -> Result<Option<crate::acp::ConversationConnectionInfo>, AcpError> {
+    crate::workspace_execution::acp_guard::reject_generic(&db.conn, None, Some(conversation_id), None).await.map_err(|e| AcpError::protocol(e.to_string()))?;
     acp_find_connection_for_conversation_core(
         &manager,
         conversation_id,

@@ -220,7 +220,8 @@ export async function acpConnect(
   workingDir?: string,
   sessionId?: string,
   preferredModeId?: string | null,
-  preferredConfigValues?: Record<string, string> | null
+  preferredConfigValues?: Record<string, string> | null,
+  workspaceChatId?: number
 ): Promise<string> {
   return getTransport().call("acp_connect", {
     agentType,
@@ -228,6 +229,7 @@ export async function acpConnect(
     sessionId: sessionId ?? null,
     preferredModeId: preferredModeId ?? null,
     preferredConfigValues: preferredConfigValues ?? null,
+    ...(workspaceChatId == null ? {} : { workspaceChatId }),
   })
 }
 
@@ -282,7 +284,8 @@ export async function acpPrompt(
   blocks: PromptInputBlock[],
   folderId: number | null = null,
   conversationId: number | null = null,
-  clientMessageId: string | null = null
+  clientMessageId: string | null = null,
+  workspaceChatId?: number
 ): Promise<void> {
   try {
     await getTransport().call("acp_prompt", {
@@ -296,6 +299,7 @@ export async function acpPrompt(
       folderId,
       conversationId,
       clientMessageId,
+      ...(workspaceChatId == null ? {} : { workspaceChatId }),
     })
   } catch (e) {
     if (isTurnInProgressRejection(e)) throw new TurnBusyError()
@@ -469,12 +473,14 @@ export async function acpGetSessionSnapshotByConversation(
 export async function acpFindConnectionForConversation(
   conversationId: number,
   sessionId: string | undefined,
-  agentType: AgentType
+  agentType: AgentType,
+  workspaceChatId?: number
 ): Promise<ConversationConnectionInfo | null> {
   return getTransport().call("acp_find_connection_for_conversation", {
     conversationId,
     sessionId,
     agentType,
+    ...(workspaceChatId == null ? {} : { workspaceChatId }),
   })
 }
 

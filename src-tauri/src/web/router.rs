@@ -752,13 +752,13 @@ pub fn build_router(
             "/acp_env_diagnostics",
             post(handlers::acp::acp_env_diagnostics),
         )
-        .route("/acp_connect", post(handlers::acp::acp_connect))
-        .route("/acp_disconnect", post(handlers::acp::acp_disconnect))
+        .route("/acp_connect", post(handlers::workspace_acp::acp_connect))
+        .route("/acp_disconnect", post(handlers::workspace_acp::acp_disconnect))
         .route(
             "/acp_touch_connection",
-            post(handlers::acp::acp_touch_connection),
+            post(handlers::workspace_acp::acp_touch_connection),
         )
-        .route("/acp_prompt", post(handlers::acp::acp_prompt))
+        .route("/acp_prompt", post(handlers::workspace_acp::acp_prompt))
         .route("/acp_preflight", post(handlers::acp::acp_preflight))
         .route("/acp_set_mode", post(handlers::acp::acp_set_mode))
         .route(
@@ -805,7 +805,7 @@ pub fn build_router(
         )
         .route(
             "/acp_find_connection_for_conversation",
-            post(handlers::acp::acp_find_connection_for_conversation),
+            post(handlers::workspace_acp::acp_find_connection_for_conversation),
         )
         .route(
             "/acp_clear_binary_cache",

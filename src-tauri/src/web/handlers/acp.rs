@@ -429,6 +429,8 @@ pub async fn acp_fork(
     Extension(state): Extension<Arc<AppState>>,
     Json(params): Json<AcpForkParams>,
 ) -> Result<Json<ForkResultInfo>, AppCommandError> {
+    crate::workspace_execution::acp_guard::reject_generic(&state.db.conn, None, params.conversation_id, Some(&params.connection_id)).await
+        .map_err(|_| AppCommandError::new(AppErrorCode::PermissionDenied, "Use New chat for managed workspace chats"))?;
     let manager = &state.connection_manager;
     let result = manager
         .fork_session(

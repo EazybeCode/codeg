@@ -20,6 +20,7 @@ pub mod gh;
 pub mod github_auth;
 pub mod workspace_catalog;
 pub mod workspace_execution;
+pub mod workspace_acp;
 pub mod folders;
 pub mod forge;
 pub mod git;

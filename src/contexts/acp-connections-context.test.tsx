@@ -43,6 +43,7 @@ const h = vi.hoisted(() => {
     acpGetAgentStatus: vi.fn(),
     acpFindConnectionForConversation: vi.fn(),
     acpConnect: vi.fn(),
+    acpPrompt: vi.fn(),
     acpDisconnect: vi.fn(),
     acpGetSessionSnapshot: vi.fn(),
     acpTouchConnection: vi.fn(),
@@ -110,7 +111,7 @@ vi.mock("@/lib/api", () => ({
   acpConnect: h.acpConnect,
   acpDisconnect: h.acpDisconnect,
   acpGetSessionSnapshot: h.acpGetSessionSnapshot,
-  acpPrompt: vi.fn(),
+  acpPrompt: h.acpPrompt,
   acpSetMode: vi.fn(),
   acpSetConfigOption: vi.fn(),
   acpCancel: h.acpCancel,
@@ -191,6 +192,8 @@ beforeEach(() => {
     is_acp_adapter: true,
   })
   h.acpConnect.mockResolvedValue("spawned-conn")
+  h.acpPrompt.mockReset()
+  h.acpPrompt.mockResolvedValue(undefined)
   h.acpDisconnect.mockResolvedValue(undefined)
   h.acpGetSessionSnapshot.mockResolvedValue(null)
   h.acpTouchConnection.mockReset()
@@ -229,6 +232,57 @@ function hydrateSnapshot(
 }
 
 describe("AcpConnectionsProvider cross-client viewer lifecycle", () => {
+  it("reuses a discovered managed writer and carries canonical identity on prompts", async () => {
+    h.acpFindConnectionForConversation.mockResolvedValue({
+      connection_id: "managed-owner",
+      event_seq: 5,
+    })
+    await mountProvider()
+    await act(async () => {
+      await h.actions!.connect(
+        TAB,
+        "claude_code",
+        "/managed",
+        undefined,
+        17,
+        42
+      )
+      await h.actions!.sendPrompt(TAB, [{ type: "text", text: "continue" }], {
+        folderId: 8,
+        conversationId: 17,
+        clientMessageId: "managed-message",
+      })
+    })
+    expect(h.acpFindConnectionForConversation).toHaveBeenCalledWith(
+      17,
+      undefined,
+      "claude_code",
+      42
+    )
+    expect(h.acpConnect).not.toHaveBeenCalled()
+    expect(h.acpPrompt).toHaveBeenCalledWith(
+      "managed-owner",
+      [{ type: "text", text: "continue" }],
+      8,
+      17,
+      "managed-message",
+      42
+    )
+  })
+
+  it("never falls back to an unscoped spawn when managed discovery is denied", async () => {
+    h.acpFindConnectionForConversation.mockRejectedValue({
+      error: "unauthorized",
+    })
+    await mountProvider()
+    await act(async () => {
+      await expect(
+        h.actions!.connect(TAB, "claude_code", "/managed", undefined, 17, 42)
+      ).rejects.toMatchObject({ error: "unauthorized" })
+    })
+    expect(h.acpConnect).not.toHaveBeenCalled()
+  })
+
   it("attaches as a viewer (no spawn) when a live connection is discovered", async () => {
     h.acpFindConnectionForConversation.mockResolvedValue({
       connection_id: "owner-conn",
