@@ -23,6 +23,12 @@ const BOB_TOKEN: &str =
     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const CAROL_TOKEN: &str =
     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const SHORT_TOKEN: &str =
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const UPPERCASE_TOKEN: &str =
+    "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF";
+const NON_HEX_TOKEN: &str =
+    "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg";
 const POSTGRES_ADMIN_URL: &str = "postgres://air1@localhost:5432/postgres";
 const POSTGRES_DATABASE_PREFIX: &str = "workos_team_session_test_";
 
@@ -208,14 +214,20 @@ async fn organization_bound_cookie_resolves_membership_instead_of_legacy_user_sc
 #[tokio::test]
 async fn session_cookie_is_required_unique_well_formed_and_not_replaceable_by_operator_auth() {
     let fixture = sqlite_fixture().await;
+    for malformed_token in [SHORT_TOKEN, UPPERCASE_TOKEN, NON_HEX_TOKEN] {
+        session(malformed_token, 301, 202, 402, fixture.now)
+            .insert(&fixture.db)
+            .await
+            .expect("seed otherwise valid session for malformed-token digest");
+    }
     let mut bearer_only = HeaderMap::new();
     bearer_only.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer operator-token"));
     let malformed = [
         HeaderMap::new(),
         bearer_only,
-        cookie_headers("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        cookie_headers("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-        cookie_headers("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"),
+        cookie_headers(SHORT_TOKEN),
+        cookie_headers(UPPERCASE_TOKEN),
+        cookie_headers(NON_HEX_TOKEN),
     ];
     for headers in malformed {
         assert_eq!(
