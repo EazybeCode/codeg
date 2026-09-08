@@ -176,7 +176,13 @@ Separate workspace/settings entry wrappers from their existing operator componen
 
 Publish the validated browser transport mode before setting React state that mounts its branch; do not defer mode publication to a parent effect, because child render/effects can request transport first. Test a child that requests transport immediately on mounting. Login/onboarding are public-flow pages: do not redirect them to the old signed-in workspace merely because a previous session cookie remains valid during organization/account switching. Keep old workspace content out of those pages and cancel old session-bootstrap responses before displaying a new account's selected scope.
 
+Apply the same browser-mode denial before `getTransport` can return its cached remote transport; guarding only `getShellTransport` leaves that earlier return unchecked. On browser entry to unknown/team mode, destroy any cached remote transport and clear its configuration as well as the shell transport. Refuse creation of a remote desktop transport in a non-native unknown/team browser. Preserve native Tauri remote-desktop behavior and test both the cached-remote bypass attempt and the valid native control. This gate is separate from the following catalog plan's direct GitHub-picker fetch conversion; do not mount that legacy picker in this intermediate shell.
+
 Team onboarding matches existing restrained centered sign-in visual style: clear GitHub identity, labelled organization choices, search when list is long, explicit Continue button disabled until selection, recovery for zero membership/pending invite/unavailable/reconnect, and Sign out/restart link. Even one org requires explicit choice. Display organization login distinctly from preserved display name after selection. Keyboard navigation, focus on validation errors, aria-busy and mobile375px layout. Keep unsent choice on retryable errors;401restarts onboarding without inventing organization.
+
+For zero eligible organizations, explain that an active organization membership and access for the EazyWorkOS GitHub App are needed. Offer a clearly labelled external link to the user's existing app installation page `https://github.com/apps/eazyworkos/installations/new`, alongside Retry and Restart sign-in. The user/organization owner performs any installation approval in GitHub; the app never auto-installs or accepts invitations. Keep this fixed official destination out of query parameters, and do not claim installation alone proves membership. The callback's already-specified unbound-installation-entry restart handles the return flow. Include a zero-choice UI test for this recovery path.
+
+The install-link format is documented by [GitHub](https://docs.github.com/en/apps/sharing-github-apps/sharing-your-github-app). Real acceptance must still confirm this app is available to the intended organizations; a public metadata response alone does not prove installation approval.
 
 The existing static login/page.tsx contains an operator password-token form, while today's standalone legacy server overrides /login with generated GitHub HTML. The team static /login branch must render a translated GitHub sign-in link to `/auth/github/login`, never the operator token input or `/api/health` token validation. Preserve the operator component separately for its explicit mode; do not infer that the current hosted HTML means the static page is already safe.
 
@@ -206,6 +212,8 @@ expect(legacyTransport.call).not.toHaveBeenCalled();
 
 The accepted OAuth and membership test constructors in `team_access/oauth.rs` and `team_access/github.rs` are pub(super). Permit only changing those cfg(test)-only constructor visibilities to pub(crate) for this sibling fixture's real local HTTP adapters; do not add a production environment URL override or duplicate the adapters. Their existing loopback-origin validation remains enforced.
 
+If reusable fake HTTP helpers are reached through the currently private `team_access::test_http` module, this task may change only the necessary cfg(test) module/helper visibility to pub(crate), preserving the existing helper behavior and protocol tests. Prefer that visibility adjustment to a duplicate fake-server implementation.
+
 **Interfaces:** Existing cached Playwright through PLAYWRIGHT_MODULE; opt-in Rust test binary path through WORKOS_E2E_TEST_BINARY. Use dynamic127.0.0.1:0 listeners and driver-owned temporary directories, not existing hardcoded3097 legacy fixture. Driver exercises actual HTTP and page navigation; separate contexts for Alice A/B, Bob A and Carol B. Fake GitHub authorization/code/token/identity/membership endpoints produce invented evidence but the application performs its actual OAuth attempt, pending, selection and session logic. Do not inject legacy owner/session/operator cookies or bypass onboarding to pass acceptance.
 
 Start the browser fixture with `crate::db::test_helpers::fresh_in_memory_db().await.conn`, which migrates without seeding identities; do not call `team_access::test_auth::sqlite_fixture`, which intentionally seeds malformed/legacy authority for unit regressions. Reuse the shared clock and fake HTTP infrastructure independently. Only organization branding may be preseeded for the preservation scenario; all browser users, membership bindings, credentials and sessions must arise through the actual onboarding flow. No new database harness is needed.
@@ -223,3 +231,17 @@ Task reviews and combined review must verify no fallback to legacy startup/route
 ## Self-review status
 
 Draft prepared while authentication orchestration executes; do not dispatch until the controller rechecks final consumed interfaces and performs the normal plan preflight. The approved spec's HTTP/session/initial UI requirements map to tasks1–4. Catalog/branding editing/private-org chat/event/file/runner controls are explicitly next slices, not certified here. No live server changes are authorized by this document alone.
+
+Provisional interface/self-consistency checks (repeat against the accepted authentication commit before execution):
+
+| Tasks | Shared interface or internal check | Result |
+| --- | --- | --- |
+| 1 → 2 | TeamConfig, dedicated pool, public entry/module visibility | Config stays nonserializable; the binary imports only the public mode/entry functions. Dedicated startup bypasses legacy initialization before any side effects. |
+| 1 → 4 | Test-only DB and provider fixture visibility | Reuse the existing disposable-DB guard; browser fixture uses unseeded fresh_in_memory_db. Necessary test-only sibling visibility is explicitly scoped. |
+| 2 → 3 | Capabilities, session/pending JSON, error codes and cookies | GitHub IDs remain decimal strings; opaque session scope is not a raw cookie; browser timeout65s exceeds server handler budget60s. |
+| 2 → 4 | Actual OAuth flow, fake HTTP adapters and static routes | No seeded operator identity/cookie; callback failure redirects and zero-choice installation recovery are included, not only successful sign-in. |
+| 3 → 4 | Static export, independent contexts, scope invalidation | Driver exercises exported fixed pages and actual API, including delayed prior-scope responses and mobile375px. |
+| 1 | Pure mode/config validation versus initialization tests | Non-Unicode mode never means absent; production DB is Postgres-only. Test SQLite construction is separate and does not weaken startup validation. |
+| 2 | Route manifest, strict parsing and startup file ownership | Uses codeg_server.rs, shared named-cookie parser, exact serialized Origin, bounded bodies and explicit404 fallback. No legacy runtime route is mounted. |
+| 3 | Provider ordering and transport factory behavior | Root capability gate precedes hooks; browser mode is published before branch mount. Both shell and cached-remote paths are denied before team-safe providers render. |
+| 4 | Fixture scope and acceptance claims | Only cfg(test) origins/helpers are adjustable. Fake-provider browser success does not establish real GitHub/provider consent or rollout readiness. |
