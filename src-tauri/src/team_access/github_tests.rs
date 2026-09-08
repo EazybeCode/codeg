@@ -1,183 +1,26 @@
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::time::Duration;
 
-use axum::{
-    body::Body,
-    extract::State,
-    http::{HeaderMap, Method, StatusCode, Uri},
-    response::Response,
-    routing::any,
-    Router,
-};
-use futures_util::stream;
+use axum::http::{Method, StatusCode};
 use serde_json::{json, Value};
-use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 use super::{
     github::{
         GithubEvidenceError, GithubMembershipClient, GithubMembershipSource,
     },
     session::TeamRole,
+    test_http::{FixtureBody, FixtureResponse, FixtureServer},
 };
 
 const TOKEN: &str = "team-github-fixture-token";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RecordedRequest {
-    method: Method,
-    path: String,
-    query: Option<String>,
-    authorization: Option<String>,
-    user_agent: Option<String>,
-    accept: Option<String>,
-    api_version: Option<String>,
-}
-
-enum FixtureBody {
-    Bytes(Vec<u8>),
-    Chunks(Vec<Vec<u8>>),
-    Delayed(Duration, Vec<u8>),
-}
-
-struct FixtureResponse {
-    status: StatusCode,
-    headers: Vec<(String, String)>,
-    body: FixtureBody,
-}
-
-impl FixtureResponse {
-    fn json(status: StatusCode, value: Value) -> Self {
-        Self {
-            status,
-            headers: vec![("content-type".into(), "application/json".into())],
-            body: FixtureBody::Bytes(serde_json::to_vec(&value).unwrap()),
-        }
-    }
-
-    fn raw(status: StatusCode, bytes: impl Into<Vec<u8>>) -> Self {
-        Self {
-            status,
-            headers: vec![],
-            body: FixtureBody::Bytes(bytes.into()),
-        }
-    }
-
-    fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.push((name.into(), value.into()));
-        self
-    }
-}
-
-struct FixtureState {
-    responses: Mutex<VecDeque<FixtureResponse>>,
-    requests: Mutex<Vec<RecordedRequest>>,
-}
-
-struct FixtureServer {
-    origin: String,
-    state: Arc<FixtureState>,
-    shutdown: Option<oneshot::Sender<()>>,
-    task: JoinHandle<()>,
-}
-
 impl FixtureServer {
-    async fn start(responses: Vec<FixtureResponse>) -> Self {
-        let state = Arc::new(FixtureState {
-            responses: Mutex::new(responses.into()),
-            requests: Mutex::new(Vec::new()),
-        });
-        let app = Router::new()
-            .fallback(any(fixture_handler))
-            .with_state(Arc::clone(&state));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let (shutdown, receiver) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = receiver.await;
-                })
-                .await
-                .unwrap();
-        });
-        Self {
-            origin: format!("http://{address}"),
-            state,
-            shutdown: Some(shutdown),
-            task,
-        }
-    }
-
     fn client(&self) -> GithubMembershipClient {
-        GithubMembershipClient::new_for_test(&self.origin, Duration::from_secs(2)).unwrap()
+        GithubMembershipClient::new_for_test(self.origin(), Duration::from_secs(2)).unwrap()
     }
 
     fn client_with_timeout(&self, timeout: Duration) -> GithubMembershipClient {
-        GithubMembershipClient::new_for_test(&self.origin, timeout).unwrap()
+        GithubMembershipClient::new_for_test(self.origin(), timeout).unwrap()
     }
-
-    fn requests(&self) -> Vec<RecordedRequest> {
-        self.state.requests.lock().unwrap().clone()
-    }
-}
-
-impl Drop for FixtureServer {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        self.task.abort();
-    }
-}
-
-async fn fixture_handler(
-    State(state): State<Arc<FixtureState>>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-) -> Response {
-    fn header(headers: &HeaderMap, name: &str) -> Option<String> {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-    }
-
-    state.requests.lock().unwrap().push(RecordedRequest {
-        method,
-        path: uri.path().to_owned(),
-        query: uri.query().map(str::to_owned),
-        authorization: header(&headers, "authorization"),
-        user_agent: header(&headers, "user-agent"),
-        accept: header(&headers, "accept"),
-        api_version: header(&headers, "x-github-api-version"),
-    });
-    let scripted = state
-        .responses
-        .lock()
-        .unwrap()
-        .pop_front()
-        .expect("fixture received an unexpected request");
-    let mut builder = Response::builder().status(scripted.status);
-    for (name, value) in scripted.headers {
-        builder = builder.header(name, value);
-    }
-    let body = match scripted.body {
-        FixtureBody::Bytes(bytes) => Body::from(bytes),
-        FixtureBody::Chunks(chunks) => Body::from_stream(stream::iter(
-            chunks
-                .into_iter()
-                .map(Ok::<Vec<u8>, std::io::Error>),
-        )),
-        FixtureBody::Delayed(delay, bytes) => {
-            tokio::time::sleep(delay).await;
-            Body::from(bytes)
-        }
-    };
-    builder.body(body).unwrap()
 }
 
 fn user(id: i64, login: &str) -> Value {
@@ -503,7 +346,7 @@ async fn listing_non_rate_limited_forbidden_and_not_found_are_unavailable() {
 #[tokio::test]
 async fn redirects_are_rejected_without_contacting_the_target() {
     let target = FixtureServer::start(vec![FixtureResponse::json(StatusCode::OK, user(301, "alice"))]).await;
-    let redirect = format!("{}/stolen", target.origin);
+    let redirect = format!("{}/stolen", target.origin());
     let source = FixtureServer::start(vec![
         FixtureResponse::raw(StatusCode::FOUND, "").with_header("location", redirect),
     ]).await;
