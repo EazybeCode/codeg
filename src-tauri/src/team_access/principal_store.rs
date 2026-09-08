@@ -294,12 +294,13 @@ pub(super) async fn recheck_context(
         clock,
     )
     .await?;
-    if authority.csrf_hash != context.csrf_hash
-        || authority.verified_at != Some(context.verified_at)
-    {
+    if authority.csrf_hash != context.csrf_hash {
         return Err(TeamAuthError::Unauthorized);
     }
-    ensure_fresh_proof(context.verified_at, clock.now())
+    ensure_fresh_proof(
+        authority.verified_at.ok_or(TeamAuthError::Unauthorized)?,
+        clock.now(),
+    )
 }
 
 fn validate_authority_row(

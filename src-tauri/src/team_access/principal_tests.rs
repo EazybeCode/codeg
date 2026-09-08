@@ -705,6 +705,32 @@ async fn recheck_in_transaction_is_a_current_no_network_guard() {
 }
 
 #[tokio::test]
+async fn final_guard_accepts_a_newer_proof_for_unchanged_authority() {
+    let fixture = principal_fixture(vec![Ok(alice_a_evidence(TeamRole::Admin))]).await;
+    let service = fixture.service();
+    let original = service
+        .resolve(&cookie_headers(ALICE_A_TOKEN), ProofRequirement::Cached)
+        .await
+        .unwrap();
+    fixture.clock.advance(Duration::seconds(1));
+    let renewed = service
+        .resolve(&cookie_headers(ALICE_A_TOKEN), ProofRequirement::Fresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        renewed.verified_at,
+        original.verified_at + Duration::seconds(1)
+    );
+
+    let transaction = fixture.db.begin().await.unwrap();
+    service
+        .recheck_in_transaction(&transaction, &original)
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_live_refresh_lease_never_authorizes_with_the_old_token() {
     let fixture = principal_fixture(vec![Ok(alice_a_evidence(TeamRole::Admin))]).await;
     let refresh_gate = fixture.oauth.gate_refresh();
