@@ -1,5 +1,18 @@
 use sea_orm_migration::prelude::*;
 
+const MEMBERSHIP_ROLE_CHECK: &str =
+    r#"CONSTRAINT "ck_organization_membership_role""#;
+const MEMBERSHIP_STATE_CHECK: &str =
+    r#"CONSTRAINT "ck_organization_membership_state""#;
+const MEMBERSHIP_AUTHORIZATION_REVISION_CHECK: &str =
+    r#"CONSTRAINT "ck_organization_membership_authorization_revision_nonnegative""#;
+const MEMBERSHIP_CREDENTIAL_GENERATION_CHECK: &str =
+    r#"CONSTRAINT "ck_organization_membership_credential_generation_nonnegative""#;
+const TEAM_SESSION_AUTHORIZATION_REVISION_CHECK: &str =
+    r#"CONSTRAINT "ck_team_session_authorization_revision_nonnegative""#;
+const TEAM_SESSION_CREDENTIAL_GENERATION_CHECK: &str =
+    r#"CONSTRAINT "ck_team_session_credential_generation_nonnegative""#;
+
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -81,24 +94,38 @@ pub(super) fn table_statements() -> Vec<TableCreateStatement> {
             .col(
                 ColumnDef::new(OrganizationMembership::Role)
                     .text()
-                    .not_null(),
+                    .not_null()
+                    .extra(MEMBERSHIP_ROLE_CHECK)
+                    .check(
+                        Expr::col(OrganizationMembership::Role)
+                            .is_in(["admin", "member"]),
+                    ),
             )
             .col(
                 ColumnDef::new(OrganizationMembership::State)
                     .text()
-                    .not_null(),
+                    .not_null()
+                    .extra(MEMBERSHIP_STATE_CHECK)
+                    .check(
+                        Expr::col(OrganizationMembership::State)
+                            .is_in(["active", "revoked", "blocked"]),
+                    ),
             )
             .col(
                 ColumnDef::new(OrganizationMembership::AuthorizationRevision)
                     .big_integer()
                     .not_null()
-                    .default(0),
+                    .default(0)
+                    .extra(MEMBERSHIP_AUTHORIZATION_REVISION_CHECK)
+                    .check(Expr::col(OrganizationMembership::AuthorizationRevision).gte(0)),
             )
             .col(
                 ColumnDef::new(OrganizationMembership::CredentialGeneration)
                     .big_integer()
                     .not_null()
-                    .default(0),
+                    .default(0)
+                    .extra(MEMBERSHIP_CREDENTIAL_GENERATION_CHECK)
+                    .check(Expr::col(OrganizationMembership::CredentialGeneration).gte(0)),
             )
             .col(
                 ColumnDef::new(OrganizationMembership::VerifiedAt)
@@ -115,16 +142,6 @@ pub(super) fn table_statements() -> Vec<TableCreateStatement> {
                     .timestamp_with_time_zone()
                     .not_null(),
             )
-            .check(
-                Expr::col(OrganizationMembership::Role)
-                    .is_in(["admin", "member"]),
-            )
-            .check(
-                Expr::col(OrganizationMembership::State)
-                    .is_in(["active", "revoked", "blocked"]),
-            )
-            .check(Expr::col(OrganizationMembership::AuthorizationRevision).gte(0))
-            .check(Expr::col(OrganizationMembership::CredentialGeneration).gte(0))
             .to_owned(),
         Table::create()
             .table(TeamSession::Table)
@@ -145,12 +162,16 @@ pub(super) fn table_statements() -> Vec<TableCreateStatement> {
             .col(
                 ColumnDef::new(TeamSession::AuthorizationRevision)
                     .big_integer()
-                    .not_null(),
+                    .not_null()
+                    .extra(TEAM_SESSION_AUTHORIZATION_REVISION_CHECK)
+                    .check(Expr::col(TeamSession::AuthorizationRevision).gte(0)),
             )
             .col(
                 ColumnDef::new(TeamSession::CredentialGeneration)
                     .big_integer()
-                    .not_null(),
+                    .not_null()
+                    .extra(TEAM_SESSION_CREDENTIAL_GENERATION_CHECK)
+                    .check(Expr::col(TeamSession::CredentialGeneration).gte(0)),
             )
             .col(ColumnDef::new(TeamSession::CsrfHash).text().not_null())
             .col(
@@ -163,8 +184,6 @@ pub(super) fn table_statements() -> Vec<TableCreateStatement> {
                     .timestamp_with_time_zone()
                     .not_null(),
             )
-            .check(Expr::col(TeamSession::AuthorizationRevision).gte(0))
-            .check(Expr::col(TeamSession::CredentialGeneration).gte(0))
             .to_owned(),
     ]
 }

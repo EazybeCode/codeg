@@ -445,6 +445,22 @@ fn team_access_migration_schema_builds_for_sqlite_and_postgres() {
         assert!(sql.contains("credential_generation"));
         assert!(sql.contains("CHECK"));
     }
+    for tables in [&sqlite_tables, &postgres_tables] {
+        let sql = tables.join("\n");
+        for constraint_name in [
+            "ck_organization_membership_role",
+            "ck_organization_membership_state",
+            "ck_organization_membership_authorization_revision_nonnegative",
+            "ck_organization_membership_credential_generation_nonnegative",
+            "ck_team_session_authorization_revision_nonnegative",
+            "ck_team_session_credential_generation_nonnegative",
+        ] {
+            assert!(
+                sql.contains(constraint_name),
+                "generated schema omitted {constraint_name}: {sql}"
+            );
+        }
+    }
     assert!(postgres_tables.iter().all(|sql| sql.contains("timestamp with time zone")));
     for indexes in [&sqlite_indexes, &postgres_indexes] {
         assert!(indexes
@@ -519,6 +535,90 @@ async fn team_access_migration_postgres_round_trip() {
         Migrator::up(&db, None)
             .await
             .map_err(|error| format!("run migrations: {error}"))?;
+        let invalid_role = membership(7362, 7101, 7202, "owner", "active")
+            .insert(&db)
+            .await
+            .expect_err("Postgres must reject an invalid membership role");
+        if !invalid_role
+            .to_string()
+            .contains("ck_organization_membership_role")
+        {
+            return Err(format!("Postgres returned the wrong role constraint: {invalid_role}"));
+        }
+        let invalid_state = membership(7363, 7101, 7203, "member", "pending")
+            .insert(&db)
+            .await
+            .expect_err("Postgres must reject an invalid membership state");
+        if !invalid_state
+            .to_string()
+            .contains("ck_organization_membership_state")
+        {
+            return Err(format!("Postgres returned the wrong state constraint: {invalid_state}"));
+        }
+        let mut invalid_membership_authorization =
+            membership(7364, 7101, 7204, "member", "active");
+        invalid_membership_authorization.authorization_revision = Set(-1);
+        let invalid_membership_authorization = invalid_membership_authorization
+            .insert(&db)
+            .await
+            .expect_err("Postgres must reject a negative membership authorization revision");
+        if !invalid_membership_authorization
+            .to_string()
+            .contains("ck_organization_membership_authorization_revision_nonnegative")
+        {
+            return Err(format!(
+                "wrong Postgres membership authorization constraint: {error}",
+                error = invalid_membership_authorization
+            ));
+        }
+        let mut invalid_membership_credential =
+            membership(7365, 7101, 7205, "member", "active");
+        invalid_membership_credential.credential_generation = Set(-1);
+        let invalid_membership_credential = invalid_membership_credential
+            .insert(&db)
+            .await
+            .expect_err("Postgres must reject a negative membership credential generation");
+        if !invalid_membership_credential
+            .to_string()
+            .contains("ck_organization_membership_credential_generation_nonnegative")
+        {
+            return Err(format!(
+                "wrong Postgres membership credential constraint: {error}",
+                error = invalid_membership_credential
+            ));
+        }
+        let mut invalid_session_authorization =
+            bound_session("hash-postgres-negative-auth", 7201, 7101, 7361);
+        invalid_session_authorization.authorization_revision = Set(-1);
+        let invalid_session_authorization = invalid_session_authorization
+            .insert(&db)
+            .await
+            .expect_err("Postgres must reject a negative session authorization revision");
+        if !invalid_session_authorization
+            .to_string()
+            .contains("ck_team_session_authorization_revision_nonnegative")
+        {
+            return Err(format!(
+                "wrong Postgres session authorization constraint: {error}",
+                error = invalid_session_authorization
+            ));
+        }
+        let mut invalid_session_credential =
+            bound_session("hash-postgres-negative-credential", 7201, 7101, 7361);
+        invalid_session_credential.credential_generation = Set(-1);
+        let invalid_session_credential = invalid_session_credential
+            .insert(&db)
+            .await
+            .expect_err("Postgres must reject a negative session credential generation");
+        if !invalid_session_credential
+            .to_string()
+            .contains("ck_team_session_credential_generation_nonnegative")
+        {
+            return Err(format!(
+                "wrong Postgres session credential constraint: {error}",
+                error = invalid_session_credential
+            ));
+        }
         membership(7361, 7101, 7201, "admin", "active")
             .insert(&db)
             .await
