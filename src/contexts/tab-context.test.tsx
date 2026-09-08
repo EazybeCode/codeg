@@ -386,6 +386,30 @@ describe("TabProvider tab state transitions", () => {
     expect(setActiveFolderIdMock).toHaveBeenLastCalledWith(null)
   })
 
+  it("restores the active managed folder when folder metadata arrives after tabs", async () => {
+    listOpenedTabsMock.mockResolvedValue({ items: [], version: 0 })
+    useAppWorkspaceStore.setState({
+      allFolders: [],
+      folders: [],
+      foldersHydrated: false,
+    })
+    useTabStore.setState({ catalogMode: true })
+    renderTabs()
+    await waitFor(() => expect(useTabStore.getState().tabsHydrated).toBe(true))
+    openConversationTab(1, 1, "Restored managed chat")
+    expect(setActiveFolderIdMock).toHaveBeenLastCalledWith(null)
+    const activeTab = useTabStore.getState().activeTabId
+    act(() =>
+      useAppWorkspaceStore.setState({
+        allFolders: [{ ...defaultFoldersMock[0], kind: "workspace_chat" }],
+      })
+    )
+    await waitFor(() =>
+      expect(setActiveFolderIdMock).toHaveBeenLastCalledWith(1)
+    )
+    expect(useTabStore.getState().activeTabId).toBe(activeTab)
+  })
+
   it("catalog reconciliation does not read hidden legacy tab details", () => {
     seedWorkspaceStore()
     useAppWorkspaceStore.setState({ conversations: [] })

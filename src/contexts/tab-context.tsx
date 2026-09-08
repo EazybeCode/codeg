@@ -57,6 +57,7 @@ export function TabProvider({ children }: TabProviderProps) {
 
   // App-workspace gates for the correction / recovery / child-reconcile effects.
   const foldersHydrated = useAppWorkspaceStore((s) => s.foldersHydrated)
+  const allFolders = useAppWorkspaceStore((s) => s.allFolders)
   const conversations = useAppWorkspaceStore((s) => s.conversations)
   const conversationsLoading = useAppWorkspaceStore(
     (s) => s.conversationsLoading
@@ -97,9 +98,11 @@ export function TabProvider({ children }: TabProviderProps) {
 
   // Sync the active tab's folderId up to the app-workspace store so derived
   // consumers (useActiveFolder, branch polling) reflect the focused folder.
+  // In catalog mode eligibility depends on folder metadata, which may hydrate
+  // after the saved tab. Recheck it without requiring another tab switch.
   useEffect(() => {
     useTabStore.getState().syncActiveFolderId()
-  }, [rawTabs, activeTabId])
+  }, [rawTabs, activeTabId, allFolders])
 
   // Fire the preview-replacement callbacks and trim the consumed queue.
   useEffect(() => {
