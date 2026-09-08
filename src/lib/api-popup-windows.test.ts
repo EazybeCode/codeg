@@ -50,6 +50,7 @@ function deferred<T>() {
 
 describe("web-mode app popup windows", () => {
   beforeEach(() => {
+    window.history.replaceState({}, "", "/workspace")
     mocks.call.mockReset()
     mocks.shellCall.mockReset()
     mocks.isDesktop.mockReset()
@@ -57,6 +58,25 @@ describe("web-mode app popup windows", () => {
     mocks.getActiveRemoteConnectionId.mockReset()
     mocks.getActiveRemoteConnectionId.mockReturnValue(null)
     vi.restoreAllMocks()
+  })
+
+  it("carries the initiating chat into settings without forwarding unrelated query data", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/workspace?chatId=42&token=do-not-forward"
+    )
+    const popup = fakePopup()
+    vi.spyOn(window, "open").mockReturnValue(popup as never)
+    const roundTrip = deferred<{ path: string }>()
+    mocks.call.mockReturnValue(roundTrip.promise)
+    const pending = openSettingsWindow("agents")
+    window.history.replaceState({}, "", "/workspace?chatId=99")
+    roundTrip.resolve({ path: "/settings/agents?agentType=claude_code" })
+    await pending
+    expect(popup.location.href).toBe(
+      "/settings/agents?agentType=claude_code&returnChatId=42"
+    )
   })
 
   it("reserves the window before the backend round trip, then navigates it", async () => {

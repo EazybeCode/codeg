@@ -7,6 +7,7 @@ import {
   notifyRemoteDesktopUnauthorized,
 } from "./transport"
 import { getCodegToken } from "./transport/web-auth"
+import { settingsReturnPath } from "./settings-return"
 import { notifyWebUnauthorized } from "./transport/web-connection-store"
 import { getCurrentEffectiveAppLocale } from "./i18n"
 import {
@@ -3087,14 +3088,23 @@ export async function openSettingsWindow(
       remoteConnectionId: getActiveRemoteConnectionId(),
     })
   }
-  // Web mode: open in new window
-  return openAppWindow(`settings-${section ?? "general"}`, () =>
-    getTransport().call<{ path: string }>("open_settings_window", {
-      section: section ?? null,
-      agentType: options?.agentType ?? null,
-      locale,
-    })
+  // Capture before the round trip: the user may switch chats while it resolves.
+  const workspaceSearch = /^\/workspace(?:\.html)?\/?$/.test(
+    window.location.pathname
   )
+    ? window.location.search
+    : ""
+  return openAppWindow(`settings-${section ?? "general"}`, async () => {
+    const { path } = await getTransport().call<{ path: string }>(
+      "open_settings_window",
+      {
+        section: section ?? null,
+        agentType: options?.agentType ?? null,
+        locale,
+      }
+    )
+    return { path: settingsReturnPath(path, workspaceSearch) }
+  })
 }
 
 export interface OpenImportSessionsWindowOptions {

@@ -107,6 +107,7 @@
     "generateToken": "Générer un jeton"
   },
   "SettingsShell": {
+    "backToWorkspace": "Retour à l’espace de travail",
     "title": "Paramètres",
     "preferences": "Préférences",
     "nav": {

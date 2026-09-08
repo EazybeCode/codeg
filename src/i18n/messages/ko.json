@@ -107,6 +107,7 @@
     "generateToken": "토큰 생성"
   },
   "SettingsShell": {
+    "backToWorkspace": "워크스페이스로 돌아가기",
     "title": "설정",
     "preferences": "환경설정",
     "nav": {

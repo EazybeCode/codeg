@@ -296,6 +296,7 @@ export function GeneralSettings() {
             </>
           }
           htmlFor="terminal-default-shell"
+          stackControlOnMobile
           control={
             <Select
               value={selectedShellId}
@@ -308,7 +309,7 @@ export function GeneralSettings() {
               <SelectTrigger
                 id="terminal-default-shell"
                 size="sm"
-                className="w-52 bg-background text-xs"
+                className="w-full bg-background text-xs sm:w-52"
               >
                 <SelectValue />
               </SelectTrigger>

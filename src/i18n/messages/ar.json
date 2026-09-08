@@ -107,6 +107,7 @@
     "generateToken": "إنشاء رمز"
   },
   "SettingsShell": {
+    "backToWorkspace": "العودة إلى مساحة العمل",
     "title": "الإعدادات",
     "preferences": "التفضيلات",
     "nav": {

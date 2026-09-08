@@ -107,6 +107,7 @@
     "generateToken": "Generar token"
   },
   "SettingsShell": {
+    "backToWorkspace": "Volver al espacio de trabajo",
     "title": "Configuración",
     "preferences": "Preferencias",
     "nav": {

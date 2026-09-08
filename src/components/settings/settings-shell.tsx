@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react"
 import {
+  ArrowLeft,
   Bot,
   BookOpenText,
   Boxes,
@@ -25,13 +26,14 @@ import {
   SlidersHorizontal,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
-import { usePathname } from "next/navigation"
+import { usePathname, useSearchParams } from "next/navigation"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { AppToaster } from "@/components/ui/app-toaster"
 import { cn } from "@/lib/utils"
 import { detectEnvironment } from "@/lib/transport/detect"
+import { workspaceReturnHref } from "@/lib/settings-return"
 import { AppTitleBar } from "@/components/layout/app-title-bar"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { Drawer, DrawerContent, DrawerTitle } from "@/components/ui/drawer"
@@ -149,6 +151,7 @@ function isWindowsRuntime(): boolean {
 export function SettingsShell({ children }: SettingsShellProps) {
   const t = useTranslations("SettingsShell")
   const pathname = usePathname()
+  const searchParams = useSearchParams()
   const router = useRouter()
   const normalizedPathname = normalizePath(pathname)
   const isMobile = useIsMobile()
@@ -231,16 +234,33 @@ export function SettingsShell({ children }: SettingsShellProps) {
     <div className="h-screen flex flex-col overflow-hidden bg-background text-foreground">
       <AppTitleBar
         left={
-          isMobile ? (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8"
-              onClick={() => setNavOpen(true)}
-            >
-              <Menu className="h-4 w-4" />
-            </Button>
-          ) : undefined
+          <div className="flex items-center gap-1">
+            {isMobile && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setNavOpen(true)}
+                aria-label={t("preferences")}
+              >
+                <Menu className="h-4 w-4" />
+              </Button>
+            )}
+            {detectEnvironment() === "web" && (
+              <Button asChild variant="ghost" size="sm" className="h-7 px-2">
+                <a
+                  href={workspaceReturnHref(searchParams.toString())}
+                  aria-label={t("backToWorkspace")}
+                  title={t("backToWorkspace")}
+                >
+                  <ArrowLeft className="size-4 rtl:rotate-180" />
+                  <span className="hidden sm:inline">
+                    {t("backToWorkspace")}
+                  </span>
+                </a>
+              </Button>
+            )}
+          </div>
         }
         center={
           <div className="text-sm font-bold tracking-tight">{t("title")}</div>

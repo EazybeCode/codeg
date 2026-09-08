@@ -107,6 +107,7 @@
     "generateToken": "產生權杖"
   },
   "SettingsShell": {
+    "backToWorkspace": "返回工作區",
     "title": "設定",
     "preferences": "偏好設定",
     "nav": {

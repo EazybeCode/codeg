@@ -31,6 +31,8 @@ interface SettingsSectionProps {
    * heading back at the reader.
    */
   control?: React.ReactNode
+  /** Wide controls sit below the explanation on narrow screens. */
+  stackControlOnMobile?: boolean
   /** Ties the heading to the control it labels (`Switch`, `Select`, …). */
   htmlFor?: string
   children?: React.ReactNode
@@ -58,6 +60,7 @@ export function SettingsSection({
   title,
   description,
   control,
+  stackControlOnMobile = false,
   htmlFor,
   children,
   className,
@@ -83,7 +86,9 @@ export function SettingsSection({
       <div
         className={cn(
           "flex justify-between gap-3",
-          description ? "items-start" : "items-center"
+          description ? "items-start" : "items-center",
+          stackControlOnMobile &&
+            "flex-col items-stretch sm:flex-row sm:items-start"
         )}
       >
         <div className="min-w-0 space-y-1">

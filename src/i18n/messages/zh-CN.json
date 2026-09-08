@@ -107,6 +107,7 @@
     "generateToken": "生成令牌"
   },
   "SettingsShell": {
+    "backToWorkspace": "返回工作区",
     "title": "设置",
     "preferences": "偏好设置",
     "nav": {

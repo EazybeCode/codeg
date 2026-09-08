@@ -107,6 +107,7 @@
     "generateToken": "トークンを生成"
   },
   "SettingsShell": {
+    "backToWorkspace": "ワークスペースに戻る",
     "title": "設定",
     "preferences": "環境設定",
     "nav": {
