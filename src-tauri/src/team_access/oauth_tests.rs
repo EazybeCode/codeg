@@ -564,7 +564,11 @@ async fn redirects_are_rejected_without_contacting_the_receiver() {
     .await;
     let redirect = format!("{}/login/oauth/access_token", receiver.origin());
     let source = FixtureServer::start(vec![
-        FixtureResponse::raw(StatusCode::FOUND, "").with_header("location", redirect),
+        FixtureResponse::json(
+            StatusCode::FOUND,
+            json!({"error": "bad_verification_code"}),
+        )
+        .with_header("location", redirect),
     ])
     .await;
 

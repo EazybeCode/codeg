@@ -101,6 +101,9 @@ async fn request_tokens(
                 .get("x-ratelimit-remaining")
                 .is_some_and(|value| value.as_bytes() == b"0")
                 || response.headers().contains_key(header::RETRY_AFTER)));
+    if status.is_redirection() {
+        return Err(OAuthError::Unavailable);
+    }
     let body = bounded_body(&mut response).await?;
 
     if status == StatusCode::UNAUTHORIZED {
