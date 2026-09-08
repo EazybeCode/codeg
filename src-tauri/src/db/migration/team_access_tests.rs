@@ -635,7 +635,16 @@ async fn team_access_migration_postgres_round_trip() {
             .exec(&db)
             .await
             .map_err(|error| format!("clear Postgres memberships: {error}"))?;
-        Migrator::down(&db, Some(1))
+        let migrations = Migrator::migrations();
+        let team_access_position = migrations
+            .iter()
+            .position(|migration| migration.name() == "m20260908_000001_team_access")
+            .ok_or_else(|| "team-access migration is not registered".to_string())?;
+        let team_access_and_later_count = migrations
+            .len()
+            .checked_sub(team_access_position)
+            .ok_or_else(|| "team-access migration position is invalid".to_string())?;
+        Migrator::down(&db, Some(team_access_and_later_count as u32))
             .await
             .map_err(|error| format!("revert team-access migration: {error}"))?;
         let manager = SchemaManager::new(&db);
