@@ -29,6 +29,7 @@ const server = spawn(
       CODEG_DATA_DIR: path.join(root, "managed"),
       CODEG_STATIC_DIR: path.join(repo, "out"),
       WORKOS_ENABLE_CATALOG_RUNTIME: "true",
+      WORKOS_APP_ORIGIN: "http://localhost:3097",
     },
     stdio: ["ignore", "pipe", "pipe"],
   }
@@ -79,6 +80,7 @@ server.stderr.on("data", (b) => (log += b))
     const errors = []
     page.on("pageerror", (e) => errors.push(e.message))
     const routes = [
+      "organization",
       "appearance",
       "general",
       "agents",
@@ -109,7 +111,9 @@ server.stderr.on("data", (b) => (log += b))
       await back.waitFor()
       assert.equal(await back.getAttribute("href"), "/workspace?chatId=42")
     }
-    console.log("PASS 17 settings routes expose chat-preserving return link")
+    console.log(
+      `PASS ${routes.length} settings routes expose chat-preserving return link`
+    )
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 800 })
       await page.goto("http://localhost:3097/settings/general")
@@ -150,6 +154,68 @@ server.stderr.on("data", (b) => (log += b))
       await page.waitForURL("**/workspace")
       console.log("PASS return navigation viewport " + width)
     }
+    await page.setViewportSize({ width: 1440, height: 960 })
+    await page.goto("http://localhost:3097/settings/organization")
+    const organizationName = page.getByLabel("Display name", { exact: true })
+    await organizationName.waitFor()
+    await organizationName.fill("Browser Test Organization")
+    const data = await page.evaluate(() => {
+      const canvas = document.createElement("canvas")
+      canvas.width = 2
+      canvas.height = 2
+      const context = canvas.getContext("2d")
+      context.fillStyle = "#277d62"
+      context.fillRect(0, 0, 2, 2)
+      return canvas.toDataURL("image/png")
+    })
+    await page
+      .getByLabel("Upload organization logo", { exact: true })
+      .setInputFiles({
+        name: "fixture-logo.png",
+        mimeType: "image/png",
+        buffer: Buffer.from(data.split(",")[1], "base64"),
+      })
+    await page.getByRole("img", { name: "Organization logo preview" }).waitFor()
+    const saved = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/auth/organization") &&
+        response.request().method() === "PATCH"
+    )
+    await page
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click()
+    assert.equal((await saved).status(), 200)
+    await page.reload()
+    await organizationName.waitFor()
+    assert.equal(
+      await organizationName.inputValue(),
+      "Browser Test Organization"
+    )
+    const logo = page.getByRole("img", { name: "Organization logo preview" })
+    await logo.waitFor()
+    await logo.evaluate((image) => image.decode())
+    assert(
+      await logo.evaluate((image) => image.complete && image.naturalWidth === 2)
+    )
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: 800 })
+      assert(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= window.innerWidth
+        )
+      )
+      await page.screenshot({
+        path: path.join(root, `organization-${width}.png`),
+      })
+    }
+    await page.setViewportSize({ width: 1440, height: 960 })
+    await page
+      .getByRole("link", { name: "Back to workspace", exact: true })
+      .click()
+    await page.getByText("Browser Test Organization", { exact: true }).waitFor()
+    console.log(
+      "PASS organization name/logo round-trip persists and updates sidebar identity"
+    )
     assert.deepEqual(errors, [])
     console.log("PASS no page exceptions; screenshots: " + root)
   } finally {

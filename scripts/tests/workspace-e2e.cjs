@@ -112,14 +112,27 @@ async function action(page, name, menu) {
     .click()
   await page.getByRole("menuitem", { name: menu, exact: true }).click()
 }
-async function createChat(page, title, testReauth = false) {
-  for (const name of ["Website refresh", "Launch planning"]) {
-    const expand = page.getByRole("button", {
-      name: `Expand ${name}`,
-      exact: true,
-    })
-    if (await expand.isVisible()) await expand.click()
+async function ensureExpanded(page, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const toggle = page.getByRole("button", {
+    name: new RegExp(`^(?:Expand|Collapse) ${escapedName}$`),
+  })
+  await toggle.waitFor({ state: "visible" })
+  const expanded = await toggle.getAttribute("aria-expanded")
+  assert(
+    expanded === "true" || expanded === "false",
+    `${name} disclosure must expose aria-expanded`
+  )
+  if (expanded === "false") {
+    await toggle.click()
+    await page
+      .getByRole("button", { name: `Collapse ${name}`, exact: true })
+      .waitFor({ state: "visible" })
   }
+}
+async function createChat(page, title, testReauth = false) {
+  for (const name of ["Website refresh", "Launch planning"])
+    await ensureExpanded(page, name)
   await action(page, "Campaign site", "New chat")
   await page.getByLabel("Chat title").fill(title)
   if (testReauth) {
