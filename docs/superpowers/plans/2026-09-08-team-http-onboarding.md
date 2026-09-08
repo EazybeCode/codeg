@@ -111,7 +111,7 @@ Postgres test uses the accepted auth test helper's exact disposable database gua
 
 ### Task 2: Serve the explicit authentication manifest with safe cookies
 
-**Files:** Create `src-tauri/src/team_server/state.rs`, `router.rs`, `cookies.rs`, `handlers.rs`, `startup.rs`, `http_tests.rs`, `test_server.rs`. Update team_server/mod.rs exports, codeg_server.rs early mode dispatch, web/router.rs only to expose the safe operator capability response outside its bearer middleware, and team_access/session.rs plus session_tests.rs for the shared strict cookie parser. test_server is cfg(test)-only and reuses auth test fixture infrastructure; no duplicate database/clock/fake-source implementations.
+**Files:** Create `src-tauri/src/team_server/state.rs`, `router.rs`, `cookies.rs`, `handlers.rs`, `startup.rs`, `http_tests.rs`, `test_server.rs`. Update `src-tauri/src/team_server/mod.rs` exports, `src-tauri/src/bin/codeg_server.rs` early mode dispatch, `src-tauri/src/web/router.rs` only to expose the safe operator capability response outside its bearer middleware, and `src-tauri/src/team_access/session.rs` plus `session_tests.rs` for the shared strict cookie parser. test_server is cfg(test)-only and reuses auth test fixture infrastructure; no duplicate database/clock/fake-source implementations.
 
 **Interfaces consumed:** Task1 TeamConfig/initialize_database and completed authentication services. **Produces:** `pub fn run_team_server() -> std::process::ExitCode`; crate-private `build_router(state: Arc<TeamState>) -> axum::Router`; TeamState contains db/config/vault/oauth/onboarding/credentials/principals/clock and a bounded authentication limiter, but never legacy AppState, global credentials or event broadcaster. Task3 consumes the JSON contracts below.
 
