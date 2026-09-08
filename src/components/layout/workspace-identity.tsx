@@ -1,12 +1,18 @@
 "use client"
 import { useCallback, useEffect, useState } from "react"
+import Image from "next/image"
 import { Building2, RefreshCw } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { isDesktop } from "@/lib/platform"
 
 export type Identity = {
   user: { id: number; login: string; name: string | null; role: string }
-  organization: { id: number; login: string; name: string | null }
+  organization: {
+    id: number
+    login: string
+    name: string | null
+    avatar_url: string | null
+  }
 }
 type IdentityState = {
   value: Identity | null
@@ -26,7 +32,11 @@ export function useWorkspaceIdentity(enabled = true) {
     if (!enabled || isDesktop()) return
     const revalidate = () => setAttempt((old) => old + 1)
     window.addEventListener("focus", revalidate)
-    return () => window.removeEventListener("focus", revalidate)
+    window.addEventListener("workos:identity-changed", revalidate)
+    return () => {
+      window.removeEventListener("focus", revalidate)
+      window.removeEventListener("workos:identity-changed", revalidate)
+    }
   }, [enabled])
   useEffect(() => {
     if (!enabled || isDesktop()) return
@@ -68,11 +78,17 @@ export function WorkspaceIdentity({
       aria-label={t("account")}
       className="mx-3 mb-3 flex min-h-16 shrink-0 items-center gap-2.5 border-b border-sidebar-border/60 py-3"
     >
-      <span
-        aria-hidden="true"
-        className="flex size-8 shrink-0 items-center justify-center rounded-md border border-sidebar-border bg-background text-sm font-semibold"
-      >
-        {organization ? (
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-sidebar-border bg-background text-sm font-semibold">
+        {identity?.organization.avatar_url ? (
+          <Image
+            src={identity.organization.avatar_url}
+            alt={organization ?? identity.organization.login}
+            width={32}
+            height={32}
+            unoptimized
+            className="size-full rounded-md object-cover"
+          />
+        ) : organization ? (
           organization.slice(0, 1).toUpperCase()
         ) : (
           <Building2 className="size-4 text-muted-foreground" />

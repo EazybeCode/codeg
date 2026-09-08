@@ -1771,6 +1771,11 @@ pub fn build_router(
     // /auth/github/login in a browser and GitHub redirects to /auth/github/callback.
     let auth_routes = Router::new()
         .route("/auth/me", get(handlers::workspace_identity::me))
+        .route(
+            "/auth/organization",
+            get(handlers::organization_settings::get)
+                .patch(handlers::organization_settings::patch),
+        )
         .route("/login", get(handlers::github_auth::login_redirect))
         .route(
             "/auth/github/login",

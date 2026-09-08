@@ -30,6 +30,7 @@ pub mod mcp;
 pub mod model_provider;
 pub mod office_tools;
 pub mod office_watch_proxy;
+pub mod organization_settings;
 pub mod pet;
 pub mod project_boot;
 pub mod question;
@@ -50,3 +51,5 @@ pub mod workspace_state;
 mod workspace_catalog_tests;
 #[cfg(test)]
 mod workspace_catalog_integration_tests;
+#[cfg(test)]
+mod organization_settings_tests;

@@ -44,6 +44,15 @@ describe("Settings workspace return", () => {
     expect(
       screen.getByRole("link", { name: "Back to workspace" })
     ).toHaveAttribute("href", "/workspace")
+    expect(screen.getByRole("button", { name: "Organization" })).toBeVisible()
+  })
+
+  it("does not show organization settings in the desktop runtime", () => {
+    Object.assign(window, { __TAURI_INTERNALS__: {} })
+    showSettings()
+    expect(screen.queryByRole("button", { name: "Organization" })).toBeNull()
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown })
+      .__TAURI_INTERNALS__
   })
 
   it("keeps the return action outside the closed mobile navigation drawer", () => {

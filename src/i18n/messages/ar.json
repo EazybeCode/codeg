@@ -127,8 +127,31 @@
       "office_tools": "أدوات المكتب",
       "skill_packs": "حزم المهارات",
       "quick_messages": "رسائل سريعة",
+      "organization": "المؤسسة",
       "logs": "سجلات التشغيل"
     }
+  },
+  "OrganizationSettings": {
+    "title": "المؤسسة",
+    "description": "إدارة كيفية ظهور مؤسستك في مساحة العمل.",
+    "loading": "جارٍ تحميل إعدادات المؤسسة",
+    "loadError": "تعذر تحميل إعدادات المؤسسة.",
+    "saveError": "تعذر حفظ إعدادات المؤسسة.",
+    "fileError": "اختر صورة PNG أو JPEG أو WebP لا يزيد حجمها عن 1 ميجابايت.",
+    "retry": "إعادة المحاولة",
+    "memberReadOnly": "يمكن لمالكي المؤسسة والمسؤولين فقط إجراء تغييرات.",
+    "displayName": "اسم العرض",
+    "displayNameDescription": "الاسم الذي يظهر للجميع في مساحة العمل هذه.",
+    "githubLogin": "مؤسسة GitHub",
+    "githubLoginDescription": "لا يمكن تغيير هوية GitHub المرتبطة من هنا.",
+    "logo": "الشعار",
+    "logoDescription": "PNG أو JPEG أو WebP. بحد أقصى 1 ميجابايت و1024 × 1024 بكسل.",
+    "previewAlt": "معاينة شعار المؤسسة",
+    "upload": "اختيار صورة",
+    "uploadLabel": "تحميل شعار المؤسسة",
+    "remove": "إزالة الشعار",
+    "save": "حفظ التغييرات",
+    "saving": "جارٍ الحفظ…"
   },
   "AppearanceSettings": {
     "sectionTitle": "مظهر السمة",
@@ -3146,6 +3169,10 @@
         }
       },
       "agentSelector": {
+        "title": "الوكيل",
+        "chooseAgent": "اختر وكيلاً",
+        "disabled": "معطّل",
+        "unavailable": "غير متاح",
         "noEnabledAgents": "لا يوجد وكلاء مفعّلون",
         "openAgentsSettings": "فتح إعدادات الوكلاء",
         "notInstalled": "غير مثبّت",

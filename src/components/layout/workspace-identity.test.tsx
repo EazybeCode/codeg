@@ -1,4 +1,9 @@
-import { cleanup, render as rtlRender, screen } from "@testing-library/react"
+import {
+  act,
+  cleanup,
+  render as rtlRender,
+  screen,
+} from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NextIntlClientProvider } from "next-intl"
 import enMessages from "@/i18n/messages/en.json"
@@ -36,7 +41,12 @@ describe("workspace account identity", () => {
         new Response(
           JSON.stringify({
             user: { id: 7, login: "maya", name: "Maya Rao", role: "member" },
-            organization: { id: 4, login: "acme", name: "Acme Product" },
+            organization: {
+              id: 4,
+              login: "acme",
+              name: "Acme Product",
+              avatar_url: "data:image/png;base64,bG9nbw==",
+            },
           })
         )
       )
@@ -45,6 +55,63 @@ describe("workspace account identity", () => {
     expect(await screen.findByText("Acme Product")).toBeVisible()
     expect(screen.getByText("Maya Rao")).toBeVisible()
     expect(screen.getByText("@maya")).toBeVisible()
+    expect(screen.getByRole("img", { name: "Acme Product" })).toHaveAttribute(
+      "src",
+      "data:image/png;base64,bG9nbw=="
+    )
+  })
+
+  it("refreshes after organization settings change without losing focus refresh", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            user: { id: 7, login: "maya", name: "Maya", role: "owner" },
+            organization: {
+              id: 4,
+              login: "acme",
+              name: "Before",
+              avatar_url: null,
+            },
+          })
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            user: { id: 7, login: "maya", name: "Maya", role: "owner" },
+            organization: {
+              id: 4,
+              login: "acme",
+              name: "After",
+              avatar_url: null,
+            },
+          })
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            user: { id: 7, login: "maya", name: "Maya", role: "owner" },
+            organization: {
+              id: 4,
+              login: "acme",
+              name: "Focused",
+              avatar_url: null,
+            },
+          })
+        )
+      )
+    vi.stubGlobal("fetch", fetch)
+    render(<WorkspaceIdentity />)
+    expect(await screen.findByText("Before")).toBeVisible()
+
+    act(() => window.dispatchEvent(new Event("workos:identity-changed")))
+    expect(await screen.findByText("After")).toBeVisible()
+    act(() => window.dispatchEvent(new Event("focus")))
+    expect(await screen.findByText("Focused")).toBeVisible()
+    expect(fetch).toHaveBeenCalledTimes(3)
   })
 
   it("asks a token-only visitor to sign in instead of inventing a name", async () => {

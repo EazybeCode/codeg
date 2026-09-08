@@ -11,6 +11,7 @@ import {
   ArrowLeft,
   Bot,
   BookOpenText,
+  Building2,
   Boxes,
   FileSpreadsheet,
   GitBranch,
@@ -55,10 +56,16 @@ interface SettingsNavItem {
     | "system"
     | "web_service"
     | "logs"
+    | "organization"
   icon: ComponentType<{ className?: string }>
 }
 
 const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
+  {
+    href: "/settings/organization",
+    labelKey: "organization",
+    icon: Building2,
+  },
   {
     href: "/settings/appearance",
     labelKey: "appearance",
@@ -192,7 +199,10 @@ export function SettingsShell({ children }: SettingsShellProps) {
 
   const filteredNavItems = SETTINGS_NAV_ITEMS.filter(
     (item) =>
-      !(item.labelKey === "web_service" && detectEnvironment() === "web")
+      !(
+        (item.labelKey === "web_service" && detectEnvironment() === "web") ||
+        (item.labelKey === "organization" && detectEnvironment() !== "web")
+      )
   )
 
   const navContent = (

@@ -127,8 +127,31 @@
       "office_tools": "办公工具",
       "skill_packs": "技能包",
       "quick_messages": "快捷消息",
+      "organization": "组织",
       "logs": "运行日志"
     }
+  },
+  "OrganizationSettings": {
+    "title": "组织",
+    "description": "管理组织在工作区中的显示方式。",
+    "loading": "正在加载组织设置",
+    "loadError": "无法加载组织设置。",
+    "saveError": "无法保存组织设置。",
+    "fileError": "请选择不超过 1 MB 的 PNG、JPEG 或 WebP 图片。",
+    "retry": "重试",
+    "memberReadOnly": "只有组织所有者和管理员可以进行更改。",
+    "displayName": "显示名称",
+    "displayNameDescription": "向此工作区所有成员显示的名称。",
+    "githubLogin": "GitHub 组织",
+    "githubLoginDescription": "无法在此处更改已关联的 GitHub 身份。",
+    "logo": "标志",
+    "logoDescription": "PNG、JPEG 或 WebP。最大 1 MB，尺寸不超过 1024 × 1024 像素。",
+    "previewAlt": "组织标志预览",
+    "upload": "选择图片",
+    "uploadLabel": "上传组织标志",
+    "remove": "移除标志",
+    "save": "保存更改",
+    "saving": "正在保存…"
   },
   "AppearanceSettings": {
     "sectionTitle": "主题外观",
@@ -3146,6 +3169,10 @@
         }
       },
       "agentSelector": {
+        "title": "智能体",
+        "chooseAgent": "选择智能体",
+        "disabled": "已禁用",
+        "unavailable": "不可用",
         "noEnabledAgents": "暂无已启用的 Agent",
         "openAgentsSettings": "打开 Agents 设置",
         "notInstalled": "未安装",

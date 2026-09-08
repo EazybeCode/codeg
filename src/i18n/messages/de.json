@@ -127,8 +127,31 @@
       "office_tools": "Office-Tools",
       "skill_packs": "Skill-Pakete",
       "quick_messages": "Schnellnachrichten",
+      "organization": "Organisation",
       "logs": "Laufzeitprotokolle"
     }
+  },
+  "OrganizationSettings": {
+    "title": "Organisation",
+    "description": "Verwalten Sie die Darstellung Ihrer Organisation im Arbeitsbereich.",
+    "loading": "Organisationseinstellungen werden geladen",
+    "loadError": "Organisationseinstellungen konnten nicht geladen werden.",
+    "saveError": "Organisationseinstellungen konnten nicht gespeichert werden.",
+    "fileError": "Wählen Sie ein PNG-, JPEG- oder WebP-Bild bis 1 MB.",
+    "retry": "Erneut versuchen",
+    "memberReadOnly": "Nur Organisationsinhaber und Administratoren können Änderungen vornehmen.",
+    "displayName": "Anzeigename",
+    "displayNameDescription": "Der Name, der allen in diesem Arbeitsbereich angezeigt wird.",
+    "githubLogin": "GitHub-Organisation",
+    "githubLoginDescription": "Die verknüpfte GitHub-Identität kann hier nicht geändert werden.",
+    "logo": "Logo",
+    "logoDescription": "PNG, JPEG oder WebP. Maximal 1 MB und 1024 × 1024 Pixel.",
+    "previewAlt": "Vorschau des Organisationslogos",
+    "upload": "Bild auswählen",
+    "uploadLabel": "Organisationslogo hochladen",
+    "remove": "Logo entfernen",
+    "save": "Änderungen speichern",
+    "saving": "Wird gespeichert…"
   },
   "AppearanceSettings": {
     "sectionTitle": "Design-Erscheinungsbild",
@@ -3146,6 +3169,10 @@
         }
       },
       "agentSelector": {
+        "title": "Agent",
+        "chooseAgent": "Agenten auswählen",
+        "disabled": "Deaktiviert",
+        "unavailable": "Nicht verfügbar",
         "noEnabledAgents": "Keine aktivierten Agenten",
         "openAgentsSettings": "Agenten-Einstellungen öffnen",
         "notInstalled": "Nicht installiert",

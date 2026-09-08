@@ -127,8 +127,31 @@
       "office_tools": "Officeツール",
       "skill_packs": "スキルパック",
       "quick_messages": "クイックメッセージ",
+      "organization": "組織",
       "logs": "実行ログ"
     }
+  },
+  "OrganizationSettings": {
+    "title": "組織",
+    "description": "ワークスペース内での組織の表示を管理します。",
+    "loading": "組織設定を読み込んでいます",
+    "loadError": "組織設定を読み込めませんでした。",
+    "saveError": "組織設定を保存できませんでした。",
+    "fileError": "1 MB 以下の PNG、JPEG、または WebP 画像を選択してください。",
+    "retry": "再試行",
+    "memberReadOnly": "変更できるのは組織の所有者と管理者のみです。",
+    "displayName": "表示名",
+    "displayNameDescription": "このワークスペースの全員に表示される名前です。",
+    "githubLogin": "GitHub 組織",
+    "githubLoginDescription": "リンクされた GitHub ID はここでは変更できません。",
+    "logo": "ロゴ",
+    "logoDescription": "PNG、JPEG、WebP。最大 1 MB、1024 × 1024 ピクセル。",
+    "previewAlt": "組織ロゴのプレビュー",
+    "upload": "画像を選択",
+    "uploadLabel": "組織ロゴをアップロード",
+    "remove": "ロゴを削除",
+    "save": "変更を保存",
+    "saving": "保存中…"
   },
   "AppearanceSettings": {
     "sectionTitle": "テーマ外観",
@@ -3146,6 +3169,10 @@
         }
       },
       "agentSelector": {
+        "title": "エージェント",
+        "chooseAgent": "エージェントを選択",
+        "disabled": "無効",
+        "unavailable": "利用不可",
         "noEnabledAgents": "有効なエージェントがありません",
         "openAgentsSettings": "エージェント設定を開く",
         "notInstalled": "未インストール",

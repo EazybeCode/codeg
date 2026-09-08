@@ -127,8 +127,31 @@
       "office_tools": "Office Tools",
       "skill_packs": "Skill Packs",
       "quick_messages": "Quick Messages",
+      "organization": "Organization",
       "logs": "Runtime Logs"
     }
+  },
+  "OrganizationSettings": {
+    "title": "Organization",
+    "description": "Manage how your organization appears across the workspace.",
+    "loading": "Loading organization settings",
+    "loadError": "Could not load organization settings.",
+    "saveError": "Could not save organization settings.",
+    "fileError": "Choose a PNG, JPEG, or WebP image no larger than 1 MB.",
+    "retry": "Try again",
+    "memberReadOnly": "Only organization owners and admins can make changes.",
+    "displayName": "Display name",
+    "displayNameDescription": "The name shown to everyone in this workspace.",
+    "githubLogin": "GitHub organization",
+    "githubLoginDescription": "Your linked GitHub identity cannot be changed here.",
+    "logo": "Logo",
+    "logoDescription": "PNG, JPEG, or WebP. Maximum 1 MB and 1024 × 1024 pixels.",
+    "previewAlt": "Organization logo preview",
+    "upload": "Choose image",
+    "uploadLabel": "Upload organization logo",
+    "remove": "Remove logo",
+    "save": "Save changes",
+    "saving": "Saving…"
   },
   "AppearanceSettings": {
     "sectionTitle": "Theme Appearance",
@@ -3146,6 +3169,10 @@
         }
       },
       "agentSelector": {
+        "title": "Agent",
+        "chooseAgent": "Choose an agent",
+        "disabled": "Disabled",
+        "unavailable": "Unavailable",
         "noEnabledAgents": "No enabled agents",
         "openAgentsSettings": "Open Agents settings",
         "notInstalled": "Not installed",
