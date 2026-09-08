@@ -2,7 +2,7 @@
 
 Date: 2026-09-08
 
-Status: product/access direction approved in chat; written specification awaiting user review. This document is a design, not a claim that these controls are implemented or deployed.
+Status: written specification approved by the user ("looks fine"). This document is a design, not a claim that these controls are implemented or deployed.
 
 ## Approved contract
 
