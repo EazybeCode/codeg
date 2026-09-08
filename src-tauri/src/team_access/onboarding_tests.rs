@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use chrono::Duration;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, IntoActiveModel, QueryFilter,
-    PaginatorTrait, Set, Statement, TransactionTrait,
+    sea_query::LockType, ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait,
+    IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect, Set, Statement, TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 
@@ -20,7 +20,7 @@ use super::{
     session::TeamRole,
     test_auth::{
         create_postgres_fixture, drop_postgres_fixture, fixed_now, seed_accounts, tokens,
-        FakeGithub, FakeOAuth, TestClock, ALICE_GITHUB_ID, ALICE_USER_ID,
+        wait_for_postgres_lock, FakeGithub, FakeOAuth, TestClock, ALICE_GITHUB_ID, ALICE_USER_ID,
     },
 };
 use crate::db::entities::{
@@ -1198,6 +1198,132 @@ async fn secret_values_never_appear_in_errors() {
     assert!(!error.contains(csrf));
 }
 
+/// `CARGO_INCREMENTAL=0 cargo test --no-default-features --lib onboarding_postgres_previous_session_lock_rechecks_freshness -- --ignored --test-threads=1 --nocapture`
+#[tokio::test]
+#[ignore = "requires local PostgreSQL"]
+async fn onboarding_postgres_previous_session_lock_rechecks_freshness() {
+    let (name, admin, db) = create_postgres_fixture().await.expect("PostgreSQL fixture");
+    let result: Result<(), String> = async {
+        let previous_secret =
+            "9191919191919191919191919191919191919191919191919191919191919191";
+        let other_secret =
+            "9292929292929292929292929292929292929292929292929292929292929292";
+        for secret in [previous_secret, other_secret] {
+            team_session::ActiveModel {
+                token_hash: Set(hash(secret)),
+                user_id: Set(ALICE_USER_ID),
+                org_id: Set(201),
+                membership_id: Set(401),
+                authorization_revision: Set(7),
+                credential_generation: Set(11),
+                csrf_hash: Set(format!("csrf-{}", &secret[..8])),
+                created_at: Set(fixed_now()),
+                expires_at: Set(fixed_now() + Duration::days(1)),
+            }
+            .insert(&db)
+            .await
+            .map_err(|error| format!("seed previous session: {error}"))?;
+        }
+        let vault = Arc::new(
+            SecretVault::from_hex_key(
+                "6666666666666666666666666666666666666666666666666666666666666666",
+            )
+            .map_err(|error| error.to_string())?,
+        );
+        let oauth = Arc::new(FakeOAuth::with_exchange(vec![Ok(durable_tokens(
+            "late-session-access",
+        ))]));
+        let choice = organization(GITHUB_ORG_A, "alice-a", TeamRole::Member);
+        let github = Arc::new(FakeGithub::new(
+            vec![Ok(identity(GITHUB_USER_ID, "switching-user"))],
+            vec![Ok(vec![choice])],
+            vec![Ok(evidence(
+                GITHUB_USER_ID,
+                GITHUB_ORG_A,
+                "alice-a",
+                TeamRole::Member,
+            ))],
+        ));
+        let clock = Arc::new(TestClock::new(fixed_now()));
+        let credentials = Arc::new(CredentialService::new(
+            db.clone(),
+            vault.clone(),
+            oauth.clone(),
+            clock.clone(),
+        ));
+        let service = Arc::new(OnboardingService::new(
+            db.clone(), vault, oauth, github, credentials, clock.clone(),
+        ));
+        let pending = pending(&service, "late-session-code").await;
+        let holder = db.begin().await.map_err(|error| error.to_string())?;
+        team_session::Entity::find_by_id(hash(previous_secret))
+            .lock(LockType::Update)
+            .one(&holder)
+            .await
+            .map_err(|error| format!("lock previous session: {error}"))?
+            .ok_or_else(|| "previous session missing before lock".to_owned())?;
+        let selecting = {
+            let service = service.clone();
+            let browser = pending.browser_secret.clone();
+            let csrf = pending.csrf_secret.clone();
+            let previous = previous_secret.to_owned();
+            tokio::spawn(async move {
+                service
+                    .select(&browser, &csrf, GITHUB_ORG_A, Some(&previous))
+                    .await
+            })
+        };
+        wait_for_postgres_lock(&admin, &name, "DELETE FROM \"team_session\"").await?;
+        clock.advance(Duration::seconds(60));
+        holder
+            .commit()
+            .await
+            .map_err(|error| format!("release previous session: {error}"))?;
+        if !matches!(
+            selecting.await.map_err(|error| error.to_string())?,
+            Err(TeamAuthError::Unavailable)
+        ) {
+            return Err("selection committed after its proof expired behind session deletion".into());
+        }
+        if team_pending_onboarding::Entity::find_by_id(hash(&pending.browser_secret))
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            return Err("late selection consumed pending authority".into());
+        }
+        if team_github_credential::Entity::find()
+            .count(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            != 0
+        {
+            return Err("late selection persisted credentials".into());
+        }
+        for secret in [previous_secret, other_secret] {
+            if team_session::Entity::find_by_id(hash(secret))
+                .one(&db)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
+                return Err(format!("late selection removed session {}", &secret[..8]));
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        db.close().await.expect("close failed PostgreSQL fixture");
+        admin.close().await.expect("close PostgreSQL admin");
+        panic!("{error}; preserved database {name}");
+    }
+    drop_postgres_fixture(&name, admin, db)
+        .await
+        .expect("exact PostgreSQL cleanup");
+}
+
 /// `CARGO_INCREMENTAL=0 cargo test --no-default-features --lib onboarding_postgres_selection_rollback -- --ignored --test-threads=1 --nocapture`
 #[tokio::test]
 #[ignore = "requires local PostgreSQL"]
@@ -1264,7 +1390,7 @@ async fn onboarding_postgres_selection_rollback() {
 #[ignore = "requires local PostgreSQL"]
 async fn onboarding_postgres_attempt_expiry_while_consuming() {
     let (name, admin, db) = create_postgres_fixture().await.expect("PostgreSQL fixture");
-    let result = async {
+    let result: Result<(), String> = async {
         let vault = Arc::new(
             SecretVault::from_hex_key(
                 "5555555555555555555555555555555555555555555555555555555555555555",
@@ -1301,25 +1427,50 @@ async fn onboarding_postgres_attempt_expiry_while_consuming() {
             let browser = attempt.browser_secret.clone();
             tokio::spawn(async move { service.complete(&state, &browser, "waited-code").await })
         };
-        tokio::task::yield_now().await;
+        wait_for_postgres_lock(
+            &admin,
+            &name,
+            "DELETE FROM \"team_oauth_attempt\"",
+        )
+        .await?;
         clock.advance(Duration::minutes(10));
-        lock.commit().await.unwrap();
-        assert!(matches!(
-            completing.await.unwrap(),
+        lock.commit().await.map_err(|error| error.to_string())?;
+        if !matches!(
+            completing.await.map_err(|error| error.to_string())?,
             Err(TeamAuthError::Unauthorized)
-        ));
-        assert!(oauth.exchange_calls().is_empty());
-        assert_eq!(
-            team_pending_onboarding::Entity::find().count(&db).await.unwrap(),
-            0
-        );
-        Ok::<(), String>(())
+        ) {
+            return Err("expired consumed attempt did not return Unauthorized".into());
+        }
+        if !oauth.exchange_calls().is_empty() {
+            return Err("expired consumed attempt reached OAuth exchange".into());
+        }
+        if team_oauth_attempt::Entity::find_by_id(hash(&attempt.state))
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err("expired attempt was not consumed after observed DELETE wait".into());
+        }
+        if team_pending_onboarding::Entity::find()
+            .count(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            != 0
+        {
+            return Err("expired attempt created pending authority".into());
+        }
+        Ok(())
     }
     .await;
+    if let Err(error) = result {
+        db.close().await.expect("close failed PostgreSQL fixture");
+        admin.close().await.expect("close PostgreSQL admin");
+        panic!("{error}; preserved database {name}");
+    }
     drop_postgres_fixture(&name, admin, db)
         .await
         .expect("exact PostgreSQL cleanup");
-    result.unwrap();
 }
 
 /// `CARGO_INCREMENTAL=0 cargo test --no-default-features --lib onboarding_postgres_concurrent_consume -- --ignored --test-threads=1 --nocapture`

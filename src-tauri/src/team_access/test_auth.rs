@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+    time::Duration as StdDuration,
 };
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -520,6 +521,41 @@ pub(super) async fn drop_postgres_fixture(
     admin.close().await.map_err(|error| error.to_string())?;
     eprintln!("verified and removed disposable database {actual}");
     Ok(())
+}
+
+pub(super) async fn wait_for_postgres_lock(
+    admin: &DatabaseConnection,
+    database_name: &str,
+    query_fragment: &str,
+) -> Result<(), String> {
+    let pattern = format!("%{query_fragment}%");
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            let waiting = admin
+                .query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT EXISTS (\
+                        SELECT 1 FROM pg_stat_activity \
+                        WHERE datname = $1 \
+                          AND wait_event_type = 'Lock' \
+                          AND query LIKE $2\
+                    ) AS waiting"
+                        .to_owned(),
+                    [database_name.into(), pattern.clone().into()],
+                ))
+                .await
+                .map_err(|error| format!("observe PostgreSQL lock wait: {error}"))?
+                .ok_or_else(|| "PostgreSQL lock observer returned no row".to_owned())?
+                .try_get::<bool>("", "waiting")
+                .map_err(|error| format!("decode PostgreSQL lock wait: {error}"))?;
+            if waiting {
+                return Ok(());
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("timed out observing blocked PostgreSQL query containing {query_fragment}"))?
 }
 
 pub(super) fn validate_database_target(expected: &str, candidate: &str) -> Result<(), String> {

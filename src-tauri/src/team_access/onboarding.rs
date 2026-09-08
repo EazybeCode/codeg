@@ -5,7 +5,7 @@ use sea_orm::{DatabaseConnection, DatabaseTransaction, TransactionTrait};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    core::{lock_user_identity, TeamAuthError, TeamClock},
+    core::{database_error, lock_user_identity, TeamAuthError, TeamClock},
     credentials::{CredentialService, StoredTokens},
     github::{
         GithubEvidenceError, GithubIdentity, GithubMembershipSource, GithubOrganizationChoice,
@@ -326,7 +326,7 @@ impl OnboardingService {
                 transaction
                     .commit()
                     .await
-                    .map_err(|error| onboarding_store::selection_database_error(&error))?;
+                    .map_err(|error| database_error(&error))?;
                 Ok(session)
             }
             Err(error) => {
@@ -504,13 +504,13 @@ impl OnboardingService {
         )
         .await?;
 
+        onboarding_store::delete_previous_session(transaction, previous_session_hash).await?;
         let issued_at = self.clock.now();
         validate_pending_and_proof(pending, proof_at, issued_at)?;
         validate_token_time(tokens, issued_at)?;
         let expires_at = checked_add(issued_at, Duration::days(SESSION_LIFETIME_DAYS))?;
         let session_secret = random_secret()?;
         let csrf_secret = random_secret()?;
-        onboarding_store::delete_previous_session(transaction, previous_session_hash).await?;
         onboarding_store::insert_session(
             transaction,
             secret_hash(&session_secret)?,
@@ -524,6 +524,9 @@ impl OnboardingService {
             expires_at,
         )
         .await?;
+        let before_commit = self.clock.now();
+        validate_pending_and_proof(pending, proof_at, before_commit)?;
+        validate_token_time(tokens, before_commit)?;
         Ok(SessionStart {
             session_secret,
             csrf_secret,

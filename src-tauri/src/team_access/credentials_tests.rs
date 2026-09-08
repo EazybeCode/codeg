@@ -756,6 +756,54 @@ fn team_auth_database_cleanup_guard_requires_exact_name() {
     assert!(super::test_auth::validate_database_target(expected, "postgres").is_err());
 }
 
+/// `CARGO_INCREMENTAL=0 cargo test --no-default-features --lib credential_service_postgres_deadlock_is_conflict -- --ignored --test-threads=1 --nocapture`
+#[tokio::test]
+#[ignore = "requires local Postgres role air1 with CREATEDB on localhost:5432"]
+async fn credential_service_postgres_deadlock_is_conflict() {
+    let (name, admin, db) = super::test_auth::create_postgres_fixture()
+        .await
+        .expect("create PostgreSQL fixture");
+    let result: Result<(), String> = async {
+        let left = db.begin().await.map_err(|error| error.to_string())?;
+        let right = db.begin().await.map_err(|error| error.to_string())?;
+        lock_user_identity(&left, ALICE_USER_ID, ALICE_GITHUB_ID)
+            .await
+            .map_err(|error| error.to_string())?;
+        lock_user_identity(&right, 302, 20_302)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let (left_result, right_result) = tokio::join!(
+            lock_user_identity(&left, 302, 20_302),
+            lock_user_identity(&right, ALICE_USER_ID, ALICE_GITHUB_ID),
+        );
+        let _ = left.rollback().await;
+        let _ = right.rollback().await;
+        let results = [left_result, right_result];
+        if results
+            .iter()
+            .filter(|result| matches!(result, Err(TeamAuthError::Conflict)))
+            .count()
+            != 1
+            || results.iter().filter(|result| result.is_ok()).count() != 1
+        {
+            return Err(format!(
+                "controlled deadlock did not produce one Conflict and one success: {results:?}"
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        db.close().await.expect("close failed PostgreSQL fixture");
+        admin.close().await.expect("close PostgreSQL admin");
+        panic!("{error}; preserved database {name}");
+    }
+    super::test_auth::drop_postgres_fixture(&name, admin, db)
+        .await
+        .expect("drop successful PostgreSQL fixture");
+}
+
 #[tokio::test]
 #[ignore = "requires local Postgres role air1 with CREATEDB on localhost:5432"]
 async fn credential_service_postgres_revalidates_after_waiting_for_identity_lock() {

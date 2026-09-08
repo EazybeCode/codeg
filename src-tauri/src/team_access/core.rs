@@ -1,7 +1,7 @@
 use sea_orm::{
     sea_query::{Expr, LockType},
-    ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, QueryFilter,
-    QuerySelect,
+    ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, EntityTrait, QueryFilter,
+    QuerySelect, RuntimeErr, SqlErr,
 };
 
 use crate::db::entities::user;
@@ -27,6 +27,26 @@ pub(crate) struct SystemClock;
 impl TeamClock for SystemClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
         chrono::Utc::now()
+    }
+}
+
+pub(crate) fn database_error(error: &DbErr) -> TeamAuthError {
+    if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
+        return TeamAuthError::Conflict;
+    }
+    let retryable = match error {
+        DbErr::Exec(RuntimeErr::SqlxError(inner)) | DbErr::Query(RuntimeErr::SqlxError(inner)) => {
+            inner
+                .as_database_error()
+                .and_then(|database| database.code())
+                .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01"))
+        }
+        _ => false,
+    };
+    if retryable {
+        TeamAuthError::Conflict
+    } else {
+        TeamAuthError::Unavailable
     }
 }
 
@@ -61,11 +81,12 @@ pub(crate) async fn lock_user_identity(
                 .map(|result| (result.rows_affected == 1).then_some(()));
             return match updated {
                 Ok(Some(())) => Ok(()),
-                Ok(None) | Err(_) => Err(TeamAuthError::Unavailable),
+                Ok(None) => Err(TeamAuthError::Unavailable),
+                Err(error) => Err(database_error(&error)),
             };
         }
         _ => return Err(TeamAuthError::Unavailable),
     }
-    .map_err(|_| TeamAuthError::Unavailable)?;
+    .map_err(|error| database_error(&error))?;
     found.map(|_| ()).ok_or(TeamAuthError::Unavailable)
 }

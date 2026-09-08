@@ -4,7 +4,7 @@ use sea_orm::{
     QueryFilter, QuerySelect, Set,
 };
 
-use super::super::core::TeamAuthError;
+use super::super::core::{database_error, TeamAuthError};
 use crate::db::entities::{
     org, organization_membership, team_oauth_attempt, team_pending_onboarding, team_session, user,
 };
@@ -117,7 +117,7 @@ pub(super) async fn consume_pending(
         .exec(transaction)
         .await
         .map(|result| result.rows_affected == 1)
-        .map_err(|error| selection_database_error(&error))
+        .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn find_user(
@@ -128,7 +128,7 @@ pub(super) async fn find_user(
         .filter(user::Column::GithubUserId.eq(github_user_id))
         .one(transaction)
         .await
-        .map_err(|error| selection_database_error(&error))
+        .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn update_user(
@@ -147,7 +147,7 @@ pub(super) async fn update_user(
     update
         .update(transaction)
         .await
-        .map_err(|error| selection_database_error(&error))
+        .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn insert_user(
@@ -176,7 +176,7 @@ pub(super) async fn insert_user(
     }
     .insert(transaction)
     .await
-    .map_err(|error| selection_database_error(&error))
+    .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn resolve_org(
@@ -190,7 +190,7 @@ pub(super) async fn resolve_org(
         .filter(org::Column::GithubOrgId.eq(github_org_id))
         .one(transaction)
         .await
-        .map_err(|error| selection_database_error(&error))?;
+        .map_err(|error| database_error(&error))?;
     if let Some(existing) = existing {
         let mut update: org::ActiveModel = existing.into();
         update.login = Set(login);
@@ -198,7 +198,7 @@ pub(super) async fn resolve_org(
         return update
             .update(transaction)
             .await
-            .map_err(|error| selection_database_error(&error));
+            .map_err(|error| database_error(&error));
     }
     org::ActiveModel {
         id: Default::default(),
@@ -211,7 +211,7 @@ pub(super) async fn resolve_org(
     }
     .insert(transaction)
     .await
-    .map_err(|error| selection_database_error(&error))
+    .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn find_membership(
@@ -230,7 +230,7 @@ pub(super) async fn find_membership(
     query
         .one(transaction)
         .await
-        .map_err(|error| selection_database_error(&error))
+        .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn insert_membership(
@@ -254,7 +254,7 @@ pub(super) async fn insert_membership(
     }
     .insert(transaction)
     .await
-    .map_err(|error| selection_database_error(&error))
+    .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn update_membership_authority(
@@ -273,7 +273,7 @@ pub(super) async fn update_membership_authority(
     update
         .update(transaction)
         .await
-        .map_err(|error| selection_database_error(&error))
+        .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn bind_membership_proof(
@@ -306,14 +306,14 @@ pub(super) async fn bind_membership_proof(
         .filter(organization_membership::Column::State.eq("active"))
         .exec(transaction)
         .await
-        .map_err(|error| selection_database_error(&error))?;
+        .map_err(|error| database_error(&error))?;
     if changed.rows_affected != 1 {
         return Err(TeamAuthError::Conflict);
     }
     organization_membership::Entity::find_by_id(membership.id)
         .one(transaction)
         .await
-        .map_err(|error| selection_database_error(&error))?
+        .map_err(|error| database_error(&error))?
         .ok_or(TeamAuthError::Conflict)
 }
 
@@ -326,7 +326,7 @@ pub(super) async fn delete_previous_session(
             .filter(team_session::Column::TokenHash.eq(token_hash))
             .exec(transaction)
             .await
-            .map_err(|error| selection_database_error(&error))?;
+            .map_err(|error| database_error(&error))?;
     }
     Ok(())
 }
@@ -357,7 +357,7 @@ pub(super) async fn insert_session(
     .insert(transaction)
     .await
     .map(|_| ())
-    .map_err(|error| selection_database_error(&error))
+    .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn cleanup_expired<C: ConnectionTrait>(
@@ -375,25 +375,4 @@ pub(super) async fn cleanup_expired<C: ConnectionTrait>(
         .await
         .map_err(|_| TeamAuthError::Unavailable)?;
     Ok(())
-}
-
-pub(super) fn selection_database_error(error: &sea_orm::DbErr) -> TeamAuthError {
-    use sea_orm::{DbErr, RuntimeErr, SqlErr};
-    if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
-        return TeamAuthError::Conflict;
-    }
-    let retryable = match error {
-        DbErr::Exec(RuntimeErr::SqlxError(inner)) | DbErr::Query(RuntimeErr::SqlxError(inner)) => {
-            inner
-                .as_database_error()
-                .and_then(|db| db.code())
-                .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01"))
-        }
-        _ => false,
-    };
-    if retryable {
-        TeamAuthError::Conflict
-    } else {
-        TeamAuthError::Unavailable
-    }
 }

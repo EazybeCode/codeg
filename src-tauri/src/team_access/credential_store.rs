@@ -4,7 +4,7 @@ use sea_orm::{
     EntityTrait, QueryFilter, QuerySelect, Set,
 };
 
-use super::super::core::TeamAuthError;
+use super::super::core::{database_error, TeamAuthError};
 use crate::db::entities::{organization_membership, team_github_credential, team_session, user};
 
 pub(super) async fn identity_exists<C: ConnectionTrait>(
@@ -21,7 +21,7 @@ pub(super) async fn identity_exists<C: ConnectionTrait>(
         .one(db)
         .await
         .map(|identity| identity.is_some())
-        .map_err(|_| TeamAuthError::Unavailable)
+        .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn load<C: ConnectionTrait>(
@@ -31,7 +31,7 @@ pub(super) async fn load<C: ConnectionTrait>(
     team_github_credential::Entity::find_by_id(user_id)
         .one(db)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)
+        .map_err(|error| database_error(&error))
 }
 
 pub(super) async fn replace_active(
@@ -57,7 +57,7 @@ pub(super) async fn replace_active(
         active
             .update(transaction)
             .await
-            .map_err(|_| TeamAuthError::Unavailable)?;
+            .map_err(|error| database_error(&error))?;
     } else {
         team_github_credential::ActiveModel {
             user_id: Set(user_id),
@@ -72,7 +72,7 @@ pub(super) async fn replace_active(
         }
         .insert(transaction)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)?;
+        .map_err(|error| database_error(&error))?;
     }
     Ok(())
 }
@@ -103,7 +103,7 @@ pub(super) async fn advance_bindings(
         )
         .exec(transaction)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)?;
+        .map_err(|error| database_error(&error))?;
     team_session::Entity::update_many()
         .col_expr(
             team_session::Column::CredentialGeneration,
@@ -113,7 +113,7 @@ pub(super) async fn advance_bindings(
         .filter(team_session::Column::CredentialGeneration.eq(previous_generation))
         .exec(transaction)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)?;
+        .map_err(|error| database_error(&error))?;
     Ok(())
 }
 
@@ -143,7 +143,7 @@ pub(super) async fn claim_refresh(
         .filter(team_github_credential::Column::State.eq("active"))
         .exec(transaction)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)?;
+        .map_err(|error| database_error(&error))?;
     Ok(changed.rows_affected == 1)
 }
 
@@ -186,7 +186,7 @@ pub(super) async fn finish_refresh(
         .filter(team_github_credential::Column::RefreshExpiresAt.gt(now))
         .exec(transaction)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)?;
+        .map_err(|error| database_error(&error))?;
     Ok(changed.rows_affected == 1)
 }
 
@@ -231,7 +231,7 @@ pub(super) async fn invalidate(
     let changed = update
         .exec(transaction)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)?;
+        .map_err(|error| database_error(&error))?;
     if changed.rows_affected != 1 {
         return Ok(false);
     }
@@ -248,12 +248,12 @@ pub(super) async fn invalidate(
         .filter(organization_membership::Column::CredentialGeneration.eq(generation))
         .exec(transaction)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)?;
+        .map_err(|error| database_error(&error))?;
     team_session::Entity::delete_many()
         .filter(team_session::Column::UserId.eq(user_id))
         .filter(team_session::Column::CredentialGeneration.eq(generation))
         .exec(transaction)
         .await
-        .map_err(|_| TeamAuthError::Unavailable)?;
+        .map_err(|error| database_error(&error))?;
     Ok(true)
 }
