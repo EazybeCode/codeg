@@ -531,27 +531,78 @@ async fn invalid_inputs_fail_before_http_and_errors_do_not_leak_tokens() {
 }
 
 #[tokio::test]
-async fn decoded_body_cap_rejects_oversized_chunked_response() {
-    let chunks = (0..17).map(|_| vec![b'x'; 65_536]).collect();
-    let server = FixtureServer::start(vec![FixtureResponse {
-        status: StatusCode::OK,
-        headers: vec![("content-type".into(), "application/json".into())],
-        body: FixtureBody::Chunks(chunks),
-    }]).await;
+async fn decoded_body_cap_accepts_valid_bounded_json_and_rejects_valid_oversized_json() {
+    fn padded_user_chunks(padding_bytes: usize) -> Vec<Vec<u8>> {
+        let mut body = user(301, "alice");
+        body["padding"] = json!("x".repeat(padding_bytes));
+        serde_json::to_vec(&body)
+            .unwrap()
+            .chunks(65_536)
+            .map(<[u8]>::to_vec)
+            .collect()
+    }
 
-    assert_eq!(server.client().identity(TOKEN).await, Err(GithubEvidenceError::Unavailable));
+    let server = FixtureServer::start(vec![
+        FixtureResponse {
+            status: StatusCode::OK,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: FixtureBody::Chunks(padded_user_chunks(1_047_000)),
+        },
+        FixtureResponse {
+            status: StatusCode::OK,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: FixtureBody::Chunks(padded_user_chunks(1_049_000)),
+        },
+    ])
+    .await;
+
+    let identity = server.client().identity(TOKEN).await.unwrap();
+    assert_eq!(identity.github_user_id, 301);
+    assert_eq!(identity.login, "alice");
+    assert_eq!(
+        server.client().identity(TOKEN).await,
+        Err(GithubEvidenceError::Unavailable)
+    );
 }
 
 #[tokio::test]
-async fn complete_operation_timeout_is_unavailable() {
-    let server = FixtureServer::start(vec![FixtureResponse {
-        status: StatusCode::OK,
-        headers: vec![("content-type".into(), "application/json".into())],
-        body: FixtureBody::Delayed(Duration::from_millis(100), serde_json::to_vec(&user(301, "alice")).unwrap()),
-    }]).await;
+async fn pagination_is_bounded_by_complete_operation_timeout() {
+    let full_page: Vec<_> = (0..100)
+        .map(|offset| {
+            membership(
+                301,
+                30_000 + offset,
+                &format!("timed-org-{offset}"),
+                "active",
+                "member",
+            )
+        })
+        .collect();
+    let server = FixtureServer::start(vec![
+        FixtureResponse {
+            status: StatusCode::OK,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: FixtureBody::Delayed(
+                Duration::from_millis(70),
+                serde_json::to_vec(&full_page).unwrap(),
+            ),
+        },
+        FixtureResponse {
+            status: StatusCode::OK,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: FixtureBody::Delayed(
+                Duration::from_millis(70),
+                serde_json::to_vec(&json!([])).unwrap(),
+            ),
+        },
+    ])
+    .await;
 
     assert_eq!(
-        server.client_with_timeout(Duration::from_millis(20)).identity(TOKEN).await,
+        server
+            .client_with_timeout(Duration::from_millis(100))
+            .active_organizations(TOKEN, 301)
+            .await,
         Err(GithubEvidenceError::Unavailable)
     );
 }
