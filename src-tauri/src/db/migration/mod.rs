@@ -51,10 +51,14 @@ mod m20260907_000002_workspace_execution;
 mod m20260907_000003_workspace_writer_lease;
 pub(crate) mod m20260907_000004_workspace_repository_names;
 pub(crate) mod m20260908_000001_team_access;
+pub(crate) mod m20260908_000002_team_credentials;
 pub struct Migrator;
 
 #[cfg(test)]
 mod team_access_tests;
+
+#[cfg(test)]
+mod team_credentials_tests;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
@@ -111,6 +115,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260907_000003_workspace_writer_lease::Migration),
             Box::new(m20260907_000004_workspace_repository_names::Migration),
             Box::new(m20260908_000001_team_access::Migration),
+            Box::new(m20260908_000002_team_credentials::Migration),
         ]
     }
 }

@@ -36,9 +36,9 @@ async fn database_before_team_access() -> DatabaseConnection {
         .await
         .expect("open isolated SQLite database");
     let prior_migration_count = Migrator::migrations()
-        .len()
-        .checked_sub(1)
-        .expect("team-access migration must follow existing migrations");
+        .iter()
+        .position(|migration| migration.name() == "m20260908_000001_team_access")
+        .expect("team-access migration must be registered");
     Migrator::up(&db, Some(prior_migration_count as u32))
         .await
         .expect("apply migrations preceding team access");
