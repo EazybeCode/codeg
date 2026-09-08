@@ -199,6 +199,8 @@ Cover absent/malformed cookie, duplicate named cookie within one header/across m
 
 For freshness, use a controlled clock and literal ages 0, 59, 60, 61 seconds plus missing/future proof. At exactly 60 seconds, require revalidation. Revocation deletes only the session described by the principal: a second org-bound session survives and the revoked cookie fails next resolution.
 
+Also add an ignored local PostgreSQL smoke test named `team_session_postgres_round_trip` in `session_tests.rs`, using the existing exact generated-name/current_database cleanup guard pattern with local air1 at localhost:5432. Execute the real joined resolver for Alice's B/member session despite legacy A/admin, reject a mismatched binding, and verify scoped revocation preserves A. The PostgreSQL migration test alone does not prove this query's timestamp/alias/placeholder decoding. Run this test explicitly; never use production data or broadly named cleanup targets.
+
 - [ ] **Step 2: Run and observe RED.**
 
 ```bash
@@ -231,6 +233,7 @@ match principal.verified_at {
 
 ```bash
 CARGO_INCREMENTAL=0 cargo test --no-default-features --lib team_access -- --test-threads=1
+CARGO_INCREMENTAL=0 cargo test --no-default-features --lib team_session_postgres_round_trip -- --ignored --test-threads=1 --nocapture
 CARGO_INCREMENTAL=0 cargo test --no-default-features --lib oauth_state_tests -- --test-threads=1
 CARGO_INCREMENTAL=0 cargo test --no-default-features --lib workspace_catalog_tests -- --test-threads=1
 git diff --check
