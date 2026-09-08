@@ -7,28 +7,46 @@ use std::{
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend,
-    Set, Statement,
+    EntityTrait, Set, Statement, TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
+use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 
 use super::{
     core::TeamClock,
+    credentials::CredentialService,
     github::{
         GithubEvidenceError, GithubIdentity, GithubMembershipEvidence,
         GithubMembershipSource, GithubOrganizationChoice,
     },
     oauth::{GithubOAuthSource, GithubTokenSet, OAuthError},
+    principal::PrincipalService,
     secrets::SecretVault,
+    session::TeamRole,
 };
 use crate::db::{
-    entities::{org, organization_membership, team_session, user},
+    entities::{org, organization_membership, team_github_credential, team_session, user},
     migration::Migrator,
 };
 
 pub(super) const ALICE_USER_ID: i32 = 301;
 pub(super) const ALICE_GITHUB_ID: i64 = 20_301;
+pub(super) const PRINCIPAL_ORG_A_ID: i32 = 201;
+pub(super) const PRINCIPAL_ORG_B_ID: i32 = 202;
+pub(super) const PRINCIPAL_ORG_A_GITHUB_ID: i64 = 10_201;
+pub(super) const PRINCIPAL_ORG_B_GITHUB_ID: i64 = 10_202;
+pub(super) const ALICE_A_MEMBERSHIP_ID: i32 = 401;
+pub(super) const ALICE_B_MEMBERSHIP_ID: i32 = 404;
+pub(super) const ALICE_A_TOKEN: &str =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+pub(super) const ALICE_B_TOKEN: &str =
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+pub(super) const BOB_A_TOKEN: &str =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+pub(super) const CAROL_B_TOKEN: &str =
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 pub(super) const POSTGRES_ADMIN_URL: &str = "postgres://air1@localhost:5432/postgres";
 pub(super) const POSTGRES_DATABASE_PREFIX: &str = "workos_team_auth_test_";
 
@@ -132,6 +150,22 @@ impl FakeOAuth {
     pub(super) fn refresh_inputs(&self) -> Vec<String> {
         self.calls.lock().expect("fake calls lock").clone()
     }
+
+    pub(super) fn reply_refresh(&self, reply: Result<GithubTokenSet, OAuthError>) {
+        self.replies
+            .lock()
+            .expect("fake refresh replies lock")
+            .push_back(reply);
+    }
+
+    pub(super) fn gate_refresh(&self) -> Arc<RefreshGate> {
+        let gate = Arc::new(RefreshGate {
+            started: Semaphore::new(0),
+            release: Notify::new(),
+        });
+        *self.gate.lock().expect("fake refresh gate lock") = Some(gate.clone());
+        gate
+    }
 }
 
 #[async_trait::async_trait]
@@ -231,6 +265,10 @@ impl FakeGithub {
             .expect("membership calls lock")
             .clone()
     }
+
+    pub(super) fn verification_calls(&self) -> usize {
+        self.membership_calls.lock().expect("membership calls lock").len()
+    }
 }
 
 #[async_trait::async_trait]
@@ -300,6 +338,253 @@ pub(super) struct Fixture {
     pub(super) vault: Arc<SecretVault>,
     pub(super) oauth: Arc<FakeOAuth>,
     pub(super) clock: Arc<TestClock>,
+}
+
+pub(super) struct PrincipalFixture {
+    pub(super) db: DatabaseConnection,
+    pub(super) vault: Arc<SecretVault>,
+    pub(super) oauth: Arc<FakeOAuth>,
+    pub(super) github: Arc<FakeGithub>,
+    pub(super) clock: Arc<TestClock>,
+    pub(super) credentials: Arc<CredentialService>,
+}
+
+impl PrincipalFixture {
+    pub(super) fn service(&self) -> Arc<PrincipalService> {
+        Arc::new(PrincipalService::new(
+            self.db.clone(),
+            self.credentials.clone(),
+            self.github.clone(),
+            self.clock.clone(),
+        ))
+    }
+}
+
+pub(super) fn cookie_headers(token: &str) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        axum::http::HeaderValue::from_str(&format!("workos_team_session={token}"))
+            .expect("valid principal cookie"),
+    );
+    headers
+}
+
+pub(super) fn token_hash(token: &str) -> String {
+    format!("{:x}", Sha256::digest(token.as_bytes()))
+}
+
+pub(super) fn membership_evidence(
+    github_user_id: i64,
+    github_org_id: i64,
+    login: &str,
+    role: TeamRole,
+) -> GithubMembershipEvidence {
+    GithubMembershipEvidence {
+        github_user_id,
+        organization: GithubOrganizationChoice {
+            github_org_id,
+            login: login.into(),
+            avatar_url: None,
+            role,
+        },
+    }
+}
+
+pub(super) async fn principal_fixture(
+    membership_replies: Vec<Result<GithubMembershipEvidence, GithubEvidenceError>>,
+) -> PrincipalFixture {
+    let db = crate::db::test_helpers::fresh_in_memory_db().await.conn;
+    seed_principal_accounts(&db)
+        .await
+        .expect("seed principal fixture");
+    build_principal_fixture(db, membership_replies).await
+}
+
+async fn build_principal_fixture(
+    db: DatabaseConnection,
+    membership_replies: Vec<Result<GithubMembershipEvidence, GithubEvidenceError>>,
+) -> PrincipalFixture {
+    let vault = Arc::new(
+        SecretVault::from_hex_key(
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .expect("test vault"),
+    );
+    let oauth = Arc::new(FakeOAuth::new(Vec::new()));
+    let clock = Arc::new(TestClock::new(fixed_now()));
+    let credentials = Arc::new(CredentialService::new(
+        db.clone(),
+        vault.clone(),
+        oauth.clone(),
+        clock.clone(),
+    ));
+    for (user_id, github_user_id, access) in [
+        (ALICE_USER_ID, ALICE_GITHUB_ID, "alice-access"),
+        (302, 20_302, "bob-access"),
+        (303, 20_303, "carol-access"),
+    ] {
+        let transaction = db.begin().await.expect("begin credential seed");
+        assert_eq!(
+            credentials
+                .install_in_transaction(
+                    &transaction,
+                    user_id,
+                    github_user_id,
+                    &tokens(access, None, None, None),
+                    fixed_now(),
+                )
+                .await
+                .expect("install fixture credential"),
+            1
+        );
+        transaction.commit().await.expect("commit fixture credential");
+    }
+    PrincipalFixture {
+        db,
+        vault,
+        oauth,
+        github: Arc::new(FakeGithub::new(Vec::new(), Vec::new(), membership_replies)),
+        clock,
+        credentials,
+    }
+}
+
+pub(super) async fn create_postgres_principal_fixture(
+    membership_replies: Vec<Result<GithubMembershipEvidence, GithubEvidenceError>>,
+) -> Result<(String, DatabaseConnection, PrincipalFixture), String> {
+    let (name, admin, db) = create_postgres_fixture().await?;
+    for result in [
+        team_session::Entity::delete_many().exec(&db).await,
+        organization_membership::Entity::delete_many().exec(&db).await,
+        team_github_credential::Entity::delete_many().exec(&db).await,
+        user::Entity::delete_many().exec(&db).await,
+        org::Entity::delete_many().exec(&db).await,
+    ] {
+        result.map_err(|error| {
+            format!("reset principal PostgreSQL fixture: {error}; preserved database {name}")
+        })?;
+    }
+    seed_principal_accounts(&db)
+        .await
+        .map_err(|error| format!("{error}; preserved database {name}"))?;
+    let fixture = build_principal_fixture(db, membership_replies).await;
+    Ok((name, admin, fixture))
+}
+
+pub(super) async fn seed_principal_accounts(db: &DatabaseConnection) -> Result<(), String> {
+    let now = fixed_now();
+    for (id, github_org_id, login) in [
+        (PRINCIPAL_ORG_A_ID, PRINCIPAL_ORG_A_GITHUB_ID, "alice-a"),
+        (PRINCIPAL_ORG_B_ID, PRINCIPAL_ORG_B_GITHUB_ID, "alice-b"),
+    ] {
+        org::ActiveModel {
+            id: Set(id),
+            github_org_id: Set(github_org_id),
+            login: Set(login.into()),
+            name: Set(None),
+            avatar_url: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(db)
+        .await
+        .map_err(|error| format!("seed principal organization: {error}"))?;
+    }
+    for (id, github_user_id, login, legacy_org_id, legacy_role) in [
+        (
+            ALICE_USER_ID,
+            ALICE_GITHUB_ID,
+            "alice-renamable",
+            202,
+            "owner",
+        ),
+        (302, 20_302, "bob", 202, "owner"),
+        (303, 20_303, "carol", 201, "member"),
+    ] {
+        user::ActiveModel {
+            id: Set(id),
+            github_user_id: Set(github_user_id),
+            login: Set(login.into()),
+            name: Set(None),
+            email: Set(None),
+            avatar_url: Set(None),
+            org_id: Set(legacy_org_id),
+            role: Set(legacy_role.into()),
+            gh_token_enc: Set(Some("legacy-must-not-be-read".into())),
+            gh_refresh_token_enc: Set(Some("legacy-must-not-be-read".into())),
+            gh_token_expires_at: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(db)
+        .await
+        .map_err(|error| format!("seed principal user: {error}"))?;
+    }
+    for (id, org_id, user_id, role) in [
+        (
+            ALICE_A_MEMBERSHIP_ID,
+            PRINCIPAL_ORG_A_ID,
+            ALICE_USER_ID,
+            "admin",
+        ),
+        (402, PRINCIPAL_ORG_A_ID, 302, "member"),
+        (403, PRINCIPAL_ORG_B_ID, 303, "admin"),
+        (
+            ALICE_B_MEMBERSHIP_ID,
+            PRINCIPAL_ORG_B_ID,
+            ALICE_USER_ID,
+            "member",
+        ),
+    ] {
+        organization_membership::ActiveModel {
+            id: Set(id),
+            org_id: Set(org_id),
+            user_id: Set(user_id),
+            role: Set(role.into()),
+            state: Set("active".into()),
+            authorization_revision: Set(7),
+            credential_generation: Set(1),
+            verified_at: Set(Some(now)),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(db)
+        .await
+        .map_err(|error| format!("seed principal membership: {error}"))?;
+    }
+    for (token, user_id, org_id, membership_id) in [
+        (
+            ALICE_A_TOKEN,
+            ALICE_USER_ID,
+            PRINCIPAL_ORG_A_ID,
+            ALICE_A_MEMBERSHIP_ID,
+        ),
+        (
+            ALICE_B_TOKEN,
+            ALICE_USER_ID,
+            PRINCIPAL_ORG_B_ID,
+            ALICE_B_MEMBERSHIP_ID,
+        ),
+        (BOB_A_TOKEN, 302, PRINCIPAL_ORG_A_ID, 402),
+        (CAROL_B_TOKEN, 303, PRINCIPAL_ORG_B_ID, 403),
+    ] {
+        team_session::ActiveModel {
+            token_hash: Set(token_hash(token)),
+            user_id: Set(user_id),
+            org_id: Set(org_id),
+            membership_id: Set(membership_id),
+            authorization_revision: Set(7),
+            credential_generation: Set(1),
+            csrf_hash: Set(format!("{:064x}", membership_id)),
+            created_at: Set(now - Duration::seconds(120)),
+            expires_at: Set(now + Duration::hours(1)),
+        }
+        .insert(db)
+        .await
+        .map_err(|error| format!("seed principal session: {error}"))?;
+    }
+    Ok(())
 }
 
 pub(super) async fn sqlite_fixture(replies: Vec<Result<GithubTokenSet, OAuthError>>) -> Fixture {
