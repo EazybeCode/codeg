@@ -369,6 +369,67 @@ pub struct CallbackQuery {
     state: Option<String>,
 }
 
+#[cfg(test)]
+mod oauth_state_tests {
+    use super::*;
+
+    async fn callback(code: Option<&str>, state: Option<&str>, cookies: &[&str]) -> Response {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let app = Arc::new(AppState::new_for_test(db, std::env::temp_dir()));
+        let mut headers = HeaderMap::new();
+        for cookie in cookies {
+            headers.append(header::COOKIE, cookie.parse().unwrap());
+        }
+        github_callback(
+            Extension(app),
+            headers,
+            Query(CallbackQuery {
+                code: code.map(str::to_owned),
+                state: state.map(str::to_owned),
+            }),
+        ).await
+    }
+
+    #[tokio::test]
+    async fn oauth_state_install_entry_starts_a_bound_login_instead_of_accepting_code() {
+        let response = callback(Some("discard-install-code"), None, &[]).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/auth/github/login");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    #[tokio::test]
+    async fn oauth_state_missing_empty_mismatched_or_duplicate_is_rejected_before_exchange() {
+        let cases: Vec<(Option<&str>, Vec<&str>)> = vec![
+            (Some("expected"), vec![]),
+            (None, vec!["workos_oauth_state=expected"]),
+            (Some(""), vec!["workos_oauth_state="]),
+            (Some("other"), vec!["workos_oauth_state=expected"]),
+            (Some("expected"), vec!["workos_oauth_state=expected; workos_oauth_state=other"]),
+            (Some("expected"), vec!["workos_oauth_state=expected", "workos_oauth_state=other"]),
+        ];
+        for (state, cookies) in cases {
+            let response = callback(Some("never-exchange-this-code"), state, &cookies).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "state={state:?}, cookies={cookies:?}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_state_valid_pair_reaches_code_validation() {
+        let response = callback(None, Some("expected"), &["unrelated=value; workos_oauth_state=expected"]).await;
+        let body = axum::body::to_bytes(response.into_body(), 8192).await.unwrap();
+        assert!(std::str::from_utf8(&body).unwrap().contains("No authorization code"));
+    }
+
+    #[test]
+    fn oauth_state_duplicate_query_is_rejected_by_extractor() {
+        let uri = "/auth/github/callback?state=expected&state=other&code=discard"
+            .parse().unwrap();
+        assert!(Query::<CallbackQuery>::try_from_uri(&uri).is_err());
+    }
+}
+
 #[derive(Deserialize)]
 struct TokenResp {
     access_token: Option<String>,
@@ -409,12 +470,39 @@ pub async fn github_callback(
     headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
-    // CSRF: if we set a state cookie (login-initiated), it must match. The
-    // install-initiated callback carries no state of ours — tolerated.
-    if let (Some(qs), Some(cs)) = (&q.state, cookie_value(&headers, "workos_oauth_state")) {
-        if qs != &cs {
-            return html_error("OAuth state mismatch");
+    // Never exchange an unbound code, including installation-initiated codes.
+    // Inspect every Cookie header so duplicate state cookies fail closed.
+    let mut states = Vec::new();
+    let mut malformed_cookie = false;
+    for value in headers.get_all(header::COOKIE) {
+        match value.to_str() {
+            Ok(cookies) => {
+                states.extend(cookies.split(';').filter_map(|cookie| {
+                    cookie.trim().strip_prefix("workos_oauth_state=")
+                }));
+            }
+            Err(_) => malformed_cookie = true,
         }
+    }
+    if q.state.is_none() && states.is_empty() && !malformed_cookie {
+        return (
+            [(header::CACHE_CONTROL, "no-store")],
+            Redirect::to("/auth/github/login"),
+        ).into_response();
+    }
+    let valid_state = !malformed_cookie && matches!(
+        (q.state.as_deref(), states.as_slice()),
+        (Some(query), [cookie]) if !query.is_empty() && query == *cookie
+    );
+    if !valid_state {
+        let mut response = html_error("Invalid or expired sign-in request. Please try again.");
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+        response.headers_mut().insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            "workos_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".parse().unwrap(),
+        );
+        return response;
     }
     let code = match q.code {
         Some(c) if !c.is_empty() => c,
