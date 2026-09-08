@@ -1,0 +1,62 @@
+name: WorkOS upstream monitor
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workos-upstream-discovery
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    if: github.repository == 'EazybeCode/Workos'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check trusted downstream branch
+        env:
+          ACTUAL_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$DEFAULT_BRANCH" = 'workos/team-workspace'
+          test "$ACTUAL_REF" = 'refs/heads/workos/team-workspace'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Verify trusted discovery code
+        run: node --test scripts/upstream/discover.test.mjs
+      - name: Inspect public upstream without checkout or execution
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote --symref https://github.com/xintaofei/codeg.git HEAD | head -n 1)" = $'ref: refs/heads/main\tHEAD'
+          git -c core.hooksPath=/dev/null fetch --no-tags https://github.com/xintaofei/codeg.git refs/heads/main
+          incorporated="$(node -e 'const p=require("./.github/workos-upstream.json"); if(p.repository!=="xintaofei/codeg"||p.branch!=="main"||p.mode!=="discovery-only") process.exit(1); process.stdout.write(p.incorporated)')"
+          observed="$(git rev-parse FETCH_HEAD)"
+          downstream="$(git rev-parse HEAD)"
+          node scripts/upstream/discover.mjs "$incorporated" "$observed" "$downstream"
+      - name: Publish run summary
+        if: always()
+        run: |
+          if test -f upstream-report/summary.md; then
+            cat upstream-report/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Discovery failed before a report was available. No changes were incorporated or deployed; inspect the failed step.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain immutable discovery report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upstream-discovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: upstream-report/
+          retention-days: 90
+          if-no-files-found: warn
