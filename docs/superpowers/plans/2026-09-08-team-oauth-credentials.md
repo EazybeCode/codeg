@@ -115,7 +115,9 @@ assert_eq!(vault.open(SecretBinding::GithubCredential {
 
 ### Task 2: Add strict GitHub OAuth exchange and refresh client
 
-**Files:** Create `src-tauri/src/team_access/oauth.rs`, `oauth_http.rs`, `oauth_tests.rs`; register in `team_access/mod.rs` only.
+**Files:** Create `src-tauri/src/team_access/oauth.rs`, `oauth_http.rs`, `oauth_tests.rs`, and test-only `test_http.rs`. Modify `github_tests.rs` only to consume the extracted shared loopback fixture without changing its assertions. Register modules in `team_access/mod.rs` only.
+
+**Shared fixture contract:** Move the existing GitHub tests' generic `RecordedRequest`, `FixtureBody`, `FixtureResponse`, `FixtureState`, `FixtureServer`, handler and Drop behavior into `test_http.rs`, registered only under `#[cfg(test)]`. Preserve response scripting, loopback-only listener, streaming without explicit Content-Length, delay semantics, request recording and abort-on-drop. Make only the fixture types/constructors/accessors needed by sibling tests `pub(super)`, with server task/state private. Keep GitHub-specific client creation outside the generic helper (an impl in github_tests.rs is sufficient), and construct OAuth test clients from the fixture origin separately. Extend request recording with body bytes and content-type so OAuth tests assert actual form requests. Read the incoming test body with Axum's Bytes extractor; fixture credentials are invented. Do not copy a second nearly identical HTTP server into oauth_tests.rs. This test-only extraction changes no production protocol and must preserve all18 GitHub adapter tests, including the discriminating size/operation-timeout tests.
 
 **Interfaces:** Consume Task 1's `pkce_challenge` for request construction/tests where appropriate. No database calls. Produce:
 
@@ -176,7 +178,7 @@ assert_eq!(requests[0].form["grant_type"], "refresh_token");
 - [ ] **Step 2: Run RED** using `CARGO_INCREMENTAL=0 cargo test --no-default-features --lib team_access::oauth_tests -- --test-threads=1`. Record expected missing functionality and meaningful response/guard failures before implementation.
 - [ ] **Step 3: Implement only the bounded OAuth adapter** with separate private wire DTOs and strict response validation. Reuse dependency APIs and Task 1 PKCE helper; do not import legacy encrypt/decrypt/ensure_github_token or call live GitHub.
 - [ ] **Step 4: Run GREEN** for `team_access::oauth_tests`, `team_access`, `team_credentials` and existing `oauth_state_tests`. Run `git diff --check`; record actual output and known warnings.
-- [ ] **Step 5: Self-review and commit only the four owned files** with message `feat(auth): add bounded GitHub OAuth code and refresh exchanges`.
+- [ ] **Step 5: Self-review and commit only the six owned files** with message `feat(auth): add bounded GitHub OAuth code and refresh exchanges`.
 
 ## Controller acceptance and continuation
 
