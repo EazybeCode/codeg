@@ -94,6 +94,8 @@ Validate bindings before building AAD. Fresh random nonce per seal; do not expos
 
 - [ ] **Step 1: Write behavior tests before implementation.** Real SQLite migration/roundtrip tests, invalid rows and downgrade preservation. Vault tests encrypt an invented token, recover it under the same binding, and reject wrong key, user, GitHub ID, generation, pending hash/browser hash, cross-purpose copy and modified ciphertext. Reject invalid key/hashes/IDs, empty/oversized plaintext, oversized/invalid base64, truncated ciphertext and unknown versions. Independently known SHA256/PKCE vectors; assert generated secret valid shape and independent samples differ. No raw fixture value in returned errors. Include a data-bearing rerun and all three populated down cases.
 
+Resource-boundary fixtures must otherwise be valid. For oversized `open`, construct authenticated ciphertext with the fixture key and correct typed AAD using the existing AES-GCM dependency, so an omitted size check would succeed instead of failing for unrelated authentication/base64 errors. Pair limits with within-limit success. Production nonce controls remain private; tests construct external ciphertext rather than weakening the vault API.
+
 ```rust
 let blob = vault.seal(SecretBinding::GithubCredential {
     user_id: 301, github_user_id: 9301, generation: 2,
@@ -159,6 +161,8 @@ Successful response: status200, token_type `bearer`, nonempty ASCII-graphic acce
 HTTP401 and known OAuth errors bad_verification_code/bad_refresh_token/access_denied/expired_token => ReauthenticationRequired. Rate limit, 5xx, config errors such as incorrect_client_credentials/redirect_uri_mismatch, unknown error, non200 status, timeout, malformed/oversized body, redirect => Unavailable. Never return external error_description or include secrets in errors. Both error and token fields in a response still fail. Storage failure handling/leases are explicitly not this client's job.
 
 - [ ] **Step 1: Write actual loopback HTTP tests first** for authorization URL/PKCE, exact form fields and absence from URL, expiring/nonexpiring exchange, complete refresh replacement, missing rotated refresh token, partial/negative/overflow lifetimes, invalid token_type/token fields, HTTP200 OAuth errors, redirects with zero receiver calls, streaming body cap and timeouts. Fixture tokens/codes only; servers abort on drop.
+
+The streaming cap fixture must be otherwise-valid successful token JSON padded with an ignored field, and arrive without Content-Length; random non-JSON bytes cannot prove the cap. Add within-limit success. Each guard-specific negative fixture must avoid an unrelated error that would still satisfy it if the guard were omitted.
 
 ```rust
 let tokens = client.refresh("invented-refresh-token", fixture_now).await.unwrap();
