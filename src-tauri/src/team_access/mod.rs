@@ -3,6 +3,7 @@ pub(crate) mod credentials;
 pub(crate) mod github;
 mod github_http;
 pub(crate) mod oauth;
+pub(crate) mod onboarding;
 pub(crate) mod session;
 pub(crate) mod secrets;
 
@@ -14,6 +15,9 @@ mod github_tests;
 
 #[cfg(test)]
 mod oauth_tests;
+
+#[cfg(test)]
+mod onboarding_tests;
 
 #[cfg(test)]
 mod session_tests;

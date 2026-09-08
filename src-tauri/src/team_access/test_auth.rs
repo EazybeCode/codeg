@@ -14,6 +14,10 @@ use uuid::Uuid;
 
 use super::{
     core::TeamClock,
+    github::{
+        GithubEvidenceError, GithubIdentity, GithubMembershipEvidence,
+        GithubMembershipSource, GithubOrganizationChoice,
+    },
     oauth::{GithubOAuthSource, GithubTokenSet, OAuthError},
     secrets::SecretVault,
 };
@@ -74,6 +78,8 @@ pub(super) struct RefreshGate {
 pub(super) struct FakeOAuth {
     replies: Mutex<VecDeque<Result<GithubTokenSet, OAuthError>>>,
     calls: Mutex<Vec<String>>,
+    exchange_replies: Mutex<VecDeque<Result<GithubTokenSet, OAuthError>>>,
+    exchange_calls: Mutex<Vec<(String, String)>>,
     gate: Mutex<Option<Arc<RefreshGate>>>,
 }
 
@@ -82,8 +88,28 @@ impl FakeOAuth {
         Self {
             replies: Mutex::new(replies.into()),
             calls: Mutex::new(Vec::new()),
+            exchange_replies: Mutex::new(VecDeque::new()),
+            exchange_calls: Mutex::new(Vec::new()),
             gate: Mutex::new(None),
         }
+    }
+
+    pub(super) fn with_exchange(
+        replies: Vec<Result<GithubTokenSet, OAuthError>>,
+    ) -> Self {
+        let source = Self::new(Vec::new());
+        *source
+            .exchange_replies
+            .lock()
+            .expect("fake exchange replies lock") = replies.into();
+        source
+    }
+
+    pub(super) fn exchange_calls(&self) -> Vec<(String, String)> {
+        self.exchange_calls
+            .lock()
+            .expect("fake exchange calls lock")
+            .clone()
     }
 
     pub(super) fn gated(
@@ -111,11 +137,19 @@ impl FakeOAuth {
 impl GithubOAuthSource for FakeOAuth {
     async fn exchange_code(
         &self,
-        _code: &str,
-        _verifier: &str,
+        code: &str,
+        verifier: &str,
         _now: DateTime<Utc>,
     ) -> Result<GithubTokenSet, OAuthError> {
-        Err(OAuthError::Unavailable)
+        self.exchange_calls
+            .lock()
+            .expect("fake exchange calls lock")
+            .push((code.to_owned(), verifier.to_owned()));
+        self.exchange_replies
+            .lock()
+            .expect("fake exchange replies lock")
+            .pop_front()
+            .unwrap_or(Err(OAuthError::Unavailable))
     }
 
     async fn refresh(
@@ -137,6 +171,126 @@ impl GithubOAuthSource for FakeOAuth {
             .expect("fake replies lock")
             .pop_front()
             .unwrap_or(Err(OAuthError::Unavailable))
+    }
+}
+
+pub(super) struct ProviderGate {
+    pub(super) started: Semaphore,
+    pub(super) release: Notify,
+}
+
+pub(super) struct FakeGithub {
+    identities: Mutex<VecDeque<Result<GithubIdentity, GithubEvidenceError>>>,
+    organizations: Mutex<VecDeque<Result<Vec<GithubOrganizationChoice>, GithubEvidenceError>>>,
+    memberships: Mutex<VecDeque<Result<GithubMembershipEvidence, GithubEvidenceError>>>,
+    organization_calls: Mutex<Vec<(String, i64)>>,
+    membership_calls: Mutex<Vec<(String, i64, i64, String)>>,
+    membership_gate: Mutex<Option<Arc<ProviderGate>>>,
+}
+
+impl FakeGithub {
+    pub(super) fn new(
+        identities: Vec<Result<GithubIdentity, GithubEvidenceError>>,
+        organizations: Vec<Result<Vec<GithubOrganizationChoice>, GithubEvidenceError>>,
+        memberships: Vec<Result<GithubMembershipEvidence, GithubEvidenceError>>,
+    ) -> Self {
+        Self {
+            identities: Mutex::new(identities.into()),
+            organizations: Mutex::new(organizations.into()),
+            memberships: Mutex::new(memberships.into()),
+            organization_calls: Mutex::new(Vec::new()),
+            membership_calls: Mutex::new(Vec::new()),
+            membership_gate: Mutex::new(None),
+        }
+    }
+
+    pub(super) fn gate_membership(&self) -> Arc<ProviderGate> {
+        let gate = Arc::new(ProviderGate {
+            started: Semaphore::new(0),
+            release: Notify::new(),
+        });
+        *self.membership_gate.lock().expect("membership gate lock") = Some(gate.clone());
+        gate
+    }
+
+    pub(super) fn clear_membership_gate(&self) {
+        *self.membership_gate.lock().expect("membership gate lock") = None;
+    }
+
+    pub(super) fn organization_calls(&self) -> Vec<(String, i64)> {
+        self.organization_calls
+            .lock()
+            .expect("organization calls lock")
+            .clone()
+    }
+
+    pub(super) fn membership_calls(&self) -> Vec<(String, i64, i64, String)> {
+        self.membership_calls
+            .lock()
+            .expect("membership calls lock")
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl GithubMembershipSource for FakeGithub {
+    async fn identity(
+        &self,
+        _access_token: &str,
+    ) -> Result<GithubIdentity, GithubEvidenceError> {
+        self.identities
+            .lock()
+            .expect("fake identities lock")
+            .pop_front()
+            .unwrap_or(Err(GithubEvidenceError::Unavailable))
+    }
+
+    async fn active_organizations(
+        &self,
+        access_token: &str,
+        expected_user_id: i64,
+    ) -> Result<Vec<GithubOrganizationChoice>, GithubEvidenceError> {
+        self.organization_calls
+            .lock()
+            .expect("organization calls lock")
+            .push((access_token.to_owned(), expected_user_id));
+        self.organizations
+            .lock()
+            .expect("fake organizations lock")
+            .pop_front()
+            .unwrap_or(Err(GithubEvidenceError::Unavailable))
+    }
+
+    async fn verify_membership(
+        &self,
+        access_token: &str,
+        expected_user_id: i64,
+        expected_org_id: i64,
+        organization_login: &str,
+    ) -> Result<GithubMembershipEvidence, GithubEvidenceError> {
+        self.membership_calls
+            .lock()
+            .expect("membership calls lock")
+            .push((
+                access_token.to_owned(),
+                expected_user_id,
+                expected_org_id,
+                organization_login.to_owned(),
+            ));
+        let gate = self
+            .membership_gate
+            .lock()
+            .expect("membership gate lock")
+            .clone();
+        if let Some(gate) = gate {
+            gate.started.add_permits(1);
+            gate.release.notified().await;
+        }
+        self.memberships
+            .lock()
+            .expect("fake memberships lock")
+            .pop_front()
+            .unwrap_or(Err(GithubEvidenceError::Unavailable))
     }
 }
 
