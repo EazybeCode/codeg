@@ -94,7 +94,13 @@ describe("AgentSelector", () => {
     })
     const onSelect = vi.fn()
     const onSetup = vi.fn()
-    renderWithIntl(<AgentSelector defaultAgentType="claude_code" onSelect={onSelect} onOpenAgentsSettings={onSetup} />)
+    renderWithIntl(
+      <AgentSelector
+        defaultAgentType="claude_code"
+        onSelect={onSelect}
+        onOpenAgentsSettings={onSetup}
+      />
+    )
     await userEvent.click(screen.getByRole("button"))
     const codex = await screen.findByRole("menuitem", { name: /Codex/ })
     expect(codex).toHaveTextContent("Disabled")
@@ -106,15 +112,22 @@ describe("AgentSelector", () => {
 
   it("keeps the full catalog discoverable when every agent needs setup", async () => {
     mockUseAcpAgents.mockReturnValue({
-      agents: [agent("claude_code", { enabled: false }), agent("codex", { available: false })],
+      agents: [
+        agent("claude_code", { enabled: false }),
+        agent("codex", { available: false }),
+      ],
       fresh: true,
       refresh: async () => {},
     })
     const onSelect = vi.fn()
     const onSetup = vi.fn()
-    renderWithIntl(<AgentSelector onSelect={onSelect} onOpenAgentsSettings={onSetup} />)
+    renderWithIntl(
+      <AgentSelector onSelect={onSelect} onOpenAgentsSettings={onSetup} />
+    )
     await userEvent.click(screen.getByRole("button"))
-    expect(await screen.findByRole("menuitem", { name: /Claude Code/ })).toBeVisible()
+    expect(
+      await screen.findByRole("menuitem", { name: /Claude Code/ })
+    ).toBeVisible()
     const codex = await screen.findByRole("menuitem", { name: /Codex/ })
     expect(codex).toHaveTextContent("Unavailable")
     await userEvent.click(codex)
@@ -129,7 +142,13 @@ describe("AgentSelector", () => {
       refresh: async () => {},
     })
     const fallback = vi.fn()
-    renderWithIntl(<AgentSelector defaultAgentType="claude_code" onSelect={vi.fn()} onFallback={fallback} />)
+    renderWithIntl(
+      <AgentSelector
+        defaultAgentType="claude_code"
+        onSelect={vi.fn()}
+        onFallback={fallback}
+      />
+    )
     await waitFor(() => expect(fallback).toHaveBeenCalledWith("codex"))
     expect(fallback).not.toHaveBeenCalledWith("claude_code")
   })
