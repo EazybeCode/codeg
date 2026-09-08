@@ -54,7 +54,7 @@ export function discover({ cwd, incorporated, observed, downstream }) {
 }
 
 function escapeMarkdown(value) {
-  return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+  return value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, ' ')
     .replace(/[&<>]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[char])
     .replace(/[\\`*_{}[\]()#+.!|~-]/g, '\\$&');
 }

@@ -72,7 +72,7 @@ test('rewritten upstream and an unincorporated downstream fail closed', (t) => {
 
 test('untrusted filenames and commit titles cannot run commands or inject Markdown', (t) => {
   const f = fixture(t);
-  const path = '$(touch PWNED) [link](evil)\n### injected.md';
+  const path = '$(touch PWNED) [link](evil)\n### injected\u202e\u2066.md';
   const observed = f.commit(path, 'text', '$(touch PWNED)');
   const report = discover({ cwd: f.cwd, incorporated: f.base, observed, downstream: f.base });
   assert.deepEqual(report.changedPaths, [path]);
@@ -80,6 +80,7 @@ test('untrusted filenames and commit titles cannot run commands or inject Markdo
   assert.equal(existsSync(join(f.cwd, 'PWNED')), false);
   assert.equal(summary.includes('\n### injected'), false);
   assert.equal(summary.includes('[link](evil)'), false);
+  assert.equal(/[\u202e\u2066]/.test(summary), false);
   assert.match(summary, /Human review required/);
 });
 
