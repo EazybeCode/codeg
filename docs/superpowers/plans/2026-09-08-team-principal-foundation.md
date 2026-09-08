@@ -209,6 +209,8 @@ CARGO_INCREMENTAL=0 cargo test --no-default-features --lib team_access::session_
 
 The missing resolver/module is the initial compilation RED; after interfaces exist, individual behavioral failures must be recorded before adding each check. Do not let an unrelated compilation failure substitute for a regression proof.
 
+Execution review note: the implemented Task 2 recorded missing-module RED and five behavioral failures against an always-Unauthorized stub, but its rejection cases already passed against that stub. The controller accepts this historical process deviation for this task only, based on real final rejection outcomes, PostgreSQL execution and code review; do not claim branch-specific pre-implementation RED was observed. The final combined review must still assess whether each safeguard is meaningfully covered. This note does not waive any runtime check or required test case.
+
 - [ ] **Step 3: Implement the local identity checks and freshness predicate.** Parse all Cookie header values, splitting pairs with `split_once('=')`; accept exactly one `workos_team_session` value, exactly 64 lowercase hex characters. Reject malformed named cookies and ambiguous/non-UTF8 headers. Never accept an operator Bearer token as a substitute. Hash only the validated cookie value with existing sha2; never log it.
 
 ```rust
