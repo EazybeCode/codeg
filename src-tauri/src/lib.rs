@@ -43,6 +43,7 @@ pub mod preferences;
 pub mod process;
 pub mod supervise;
 mod terminal;
+pub(crate) mod team_access;
 pub mod turn_timings;
 pub mod update;
 pub mod web;
