@@ -30,6 +30,8 @@ Execute only after the OAuth credential primitives plan has passed its combined 
 
 No HTTP routes, production startup, UI, visibility, provider runner or deployment changes are owned here. Complete these services then continue to the dedicated team startup/router plan; this is not a team-readiness claim.
 
+Review integration clarification: shared authentication database helpers preserve typed unique violations and PostgreSQL SQLSTATE40001/40P01 as Conflict; all other database failures remain Unavailable. Use one classifier in core.rs, including identity locking and credential persistence consumed by onboarding. This narrow retryable-conflict exception supersedes the generic Task1 database-error wording below; it never changes invalid identity/token/state failures or grants authority. Task2's fix may touch those shared helpers and covering tests to preserve the composed transaction contract.
+
 All database writes in these services acquire the user identity row before organization then membership rows when multiple identities are involved. A portable no-op `users.id = users.id` update, filtered by local and immutable GitHub IDs and requiring exactly one affected row, acquires the user write lock inside an existing transaction. Never hold a database transaction during a GitHub call or a polling/singleflight wait. Future catalog/admin operations must not introduce an inverse organization→user lock order.
 
 ### Task 1: Persist and rotate credentials with a fail-closed lease
