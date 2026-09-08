@@ -86,6 +86,54 @@ beforeEach(() => {
 })
 
 describe("AgentSelector", () => {
+  it("shows disabled agents and routes their selection to setup without changing the draft agent", async () => {
+    mockUseAcpAgents.mockReturnValue({
+      agents: [agent("claude_code"), agent("codex", { enabled: false })],
+      fresh: true,
+      refresh: async () => {},
+    })
+    const onSelect = vi.fn()
+    const onSetup = vi.fn()
+    renderWithIntl(<AgentSelector defaultAgentType="claude_code" onSelect={onSelect} onOpenAgentsSettings={onSetup} />)
+    await userEvent.click(screen.getByRole("button"))
+    const codex = await screen.findByRole("menuitem", { name: /Codex/ })
+    expect(codex).toHaveTextContent("Disabled")
+    await userEvent.click(codex)
+    expect(onSetup).toHaveBeenCalledTimes(1)
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(screen.getByRole("button")).toHaveTextContent("Claude Code")
+  })
+
+  it("keeps the full catalog discoverable when every agent needs setup", async () => {
+    mockUseAcpAgents.mockReturnValue({
+      agents: [agent("claude_code", { enabled: false }), agent("codex", { available: false })],
+      fresh: true,
+      refresh: async () => {},
+    })
+    const onSelect = vi.fn()
+    const onSetup = vi.fn()
+    renderWithIntl(<AgentSelector onSelect={onSelect} onOpenAgentsSettings={onSetup} />)
+    await userEvent.click(screen.getByRole("button"))
+    expect(await screen.findByRole("menuitem", { name: /Claude Code/ })).toBeVisible()
+    const codex = await screen.findByRole("menuitem", { name: /Codex/ })
+    expect(codex).toHaveTextContent("Unavailable")
+    await userEvent.click(codex)
+    expect(onSetup).toHaveBeenCalledTimes(1)
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it("never falls back to a disabled agent even when that agent is first in the catalog", async () => {
+    mockUseAcpAgents.mockReturnValue({
+      agents: [agent("claude_code", { enabled: false }), agent("codex")],
+      fresh: true,
+      refresh: async () => {},
+    })
+    const fallback = vi.fn()
+    renderWithIntl(<AgentSelector defaultAgentType="claude_code" onSelect={vi.fn()} onFallback={fallback} />)
+    await waitFor(() => expect(fallback).toHaveBeenCalledWith("codex"))
+    expect(fallback).not.toHaveBeenCalledWith("claude_code")
+  })
+
   it("shows the empty state when no enabled agents are returned", () => {
     mockUseAcpAgents.mockReturnValue({
       agents: [],

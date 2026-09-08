@@ -105,7 +105,9 @@ export function AgentSelector({
     }
   }, [agents, defaultAgentType])
 
-  if (agents.length === 0) {
+  // Discovery includes disabled/unavailable agents; only the enabled list above
+  // participates in selection and fallback. Installation is not proof of login.
+  if (rawAgents.length === 0) {
     return (
       <div className="rounded-lg border border-dashed bg-muted/30 px-4 py-3 text-center text-sm text-muted-foreground">
         <div>{t("noEnabledAgents")}</div>
@@ -141,7 +143,7 @@ export function AgentSelector({
             type="button"
             disabled={disabled}
             data-slot="agent-selector-trigger"
-            aria-label={selectedLabel || t("noEnabledAgents")}
+            aria-label={selectedLabel || t("chooseAgent")}
             className={cn(
               "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border/50 bg-muted/50 px-3 py-1.5 text-xs font-medium text-foreground transition-colors",
               disabled
@@ -158,7 +160,7 @@ export function AgentSelector({
               </span>
             ) : null}
             <span className="min-w-0 truncate">
-              {selectedLabel || t("noEnabledAgents")}
+              {selectedLabel || t("chooseAgent")}
             </span>
             <ChevronDown
               className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
@@ -170,17 +172,21 @@ export function AgentSelector({
           align={align === "center" ? "center" : "start"}
           className="w-56"
         >
-          <DropdownMenuLabel>Agent</DropdownMenuLabel>
+          <DropdownMenuLabel>{t("title")}</DropdownMenuLabel>
           <DropdownMenuSeparator />
-          {agents.map((agent) => {
-            const notInstalled = agent.available && !agent.installed_version
+          {rawAgents.map((agent) => {
+            const needsSetup = !agent.enabled || !agent.available
+            const notInstalled = !needsSetup && !agent.installed_version
             const label = getAgentLabel(agent.agent_type)
             const isSelected = selected === agent.agent_type
             return (
               <DropdownMenuItem
                 key={agent.agent_type}
-                disabled={disabled || !agent.available}
-                onSelect={() => onSelect(agent.agent_type)}
+                disabled={disabled || (needsSetup && !onOpenAgentsSettings)}
+                onSelect={() => {
+                  if (needsSetup) onOpenAgentsSettings?.()
+                  else onSelect(agent.agent_type)
+                }}
                 className="gap-2"
               >
                 <span className="relative flex shrink-0 items-center">
@@ -193,6 +199,11 @@ export function AgentSelector({
                   ) : null}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{label}</span>
+                {needsSetup ? (
+                  <span className="shrink-0 text-[0.625rem] text-muted-foreground">
+                    {t(agent.available ? "disabled" : "unavailable")}
+                  </span>
+                ) : null}
                 {notInstalled ? (
                   <span className="shrink-0 text-[0.625rem] text-amber-600">
                     {t("notInstalled")}
