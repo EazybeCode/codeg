@@ -10,6 +10,8 @@ use rand::{rngs::OsRng, RngCore};
 use sea_orm::{DatabaseConnection, DatabaseTransaction, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
+#[cfg(test)]
+use tokio::sync::Semaphore;
 
 use super::{
     core::{lock_user_identity, TeamAuthError, TeamClock},
@@ -134,6 +136,12 @@ pub(crate) struct CredentialService {
     oauth: Arc<dyn GithubOAuthSource>,
     clock: Arc<dyn TeamClock>,
     locks: Mutex<HashMap<i32, Weak<AsyncMutex<()>>>>,
+    #[cfg(test)]
+    finish_lock_observer: Option<Arc<Semaphore>>,
+    #[cfg(test)]
+    live_lease_observer: Option<Arc<Semaphore>>,
+    #[cfg(test)]
+    binding_advance_observer: Option<Arc<Semaphore>>,
 }
 
 impl CredentialService {
@@ -149,7 +157,28 @@ impl CredentialService {
             oauth,
             clock,
             locks: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            finish_lock_observer: None,
+            #[cfg(test)]
+            live_lease_observer: None,
+            #[cfg(test)]
+            binding_advance_observer: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn observe_finish_lock(&mut self, observer: Arc<Semaphore>) {
+        self.finish_lock_observer = Some(observer);
+    }
+
+    #[cfg(test)]
+    pub(super) fn observe_live_lease(&mut self, observer: Arc<Semaphore>) {
+        self.live_lease_observer = Some(observer);
+    }
+
+    #[cfg(test)]
+    pub(super) fn observe_binding_advance(&mut self, observer: Arc<Semaphore>) {
+        self.binding_advance_observer = Some(observer);
     }
 
     pub(crate) async fn access(
@@ -264,6 +293,9 @@ impl CredentialService {
     ) -> Result<AccessGrant, TeamAuthError> {
         let wait_started = Instant::now();
         loop {
+            if !credential_store::identity_exists(&self.db, user_id, github_user_id).await? {
+                return Err(TeamAuthError::Unavailable);
+            }
             let row = credential_store::load(&self.db, user_id)
                 .await?
                 .ok_or(TeamAuthError::Unauthorized)?;
@@ -301,9 +333,7 @@ impl CredentialService {
                     };
                     let refreshed = self.oauth.refresh(refresh_token, now).await;
                     let tokens = match refreshed {
-                        Ok(tokens) if validate_installable(&tokens, self.clock.now()).is_ok() => {
-                            tokens
-                        }
+                        Ok(tokens) => tokens,
                         _ => {
                             if self
                                 .invalidate_claim(&row, &owner, deadline, self.clock.now())
@@ -329,6 +359,10 @@ impl CredentialService {
                     }
                     if wait_started.elapsed() >= OTHER_REFRESH_WAIT {
                         return Err(TeamAuthError::Unavailable);
+                    }
+                    #[cfg(test)]
+                    if let Some(observer) = &self.live_lease_observer {
+                        observer.add_permits(1);
                     }
                     tokio::time::sleep(OTHER_REFRESH_POLL).await;
                 }
@@ -424,7 +458,41 @@ impl CredentialService {
         deadline: DateTime<Utc>,
         tokens: &GithubTokenSet,
     ) -> Result<Option<AccessGrant>, TeamAuthError> {
+        let transaction = self.db.begin().await.map_err(|_| TeamAuthError::Unavailable)?;
+        #[cfg(test)]
+        if let Some(observer) = &self.finish_lock_observer {
+            observer.add_permits(1);
+        }
+        lock_user_identity(&transaction, snapshot.user_id, snapshot.github_user_id).await?;
+        let current = credential_store::load(&transaction, snapshot.user_id).await?;
+        let still_owned = current.as_ref().is_some_and(|row| {
+            same_snapshot(Some(row), snapshot, "refreshing", Some(owner))
+                && row.refresh_expires_at == Some(deadline)
+        });
+        if !still_owned {
+            transaction.rollback().await.map_err(|_| TeamAuthError::Unavailable)?;
+            return Ok(None);
+        }
         let now = self.clock.now();
+        if deadline <= now || validate_installable(tokens, now).is_err() {
+            let invalidated = credential_store::invalidate(
+                &transaction,
+                snapshot.user_id,
+                snapshot.github_user_id,
+                snapshot.generation,
+                "refreshing",
+                Some(owner),
+                Some(deadline),
+                now,
+            )
+            .await?;
+            if !invalidated {
+                transaction.rollback().await.map_err(|_| TeamAuthError::Unavailable)?;
+                return Ok(None);
+            }
+            transaction.commit().await.map_err(|_| TeamAuthError::Unavailable)?;
+            return Err(TeamAuthError::Unauthorized);
+        }
         let generation = snapshot
             .generation
             .checked_add(1)
@@ -435,18 +503,6 @@ impl CredentialService {
             generation,
             tokens,
         )?;
-        let transaction = self.db.begin().await.map_err(|_| TeamAuthError::Unavailable)?;
-        lock_user_identity(&transaction, snapshot.user_id, snapshot.github_user_id).await?;
-        let current = credential_store::load(&transaction, snapshot.user_id).await?;
-        let live = current.as_ref().is_some_and(|row| {
-            same_snapshot(Some(row), snapshot, "refreshing", Some(owner))
-                && row.refresh_expires_at == Some(deadline)
-                && deadline > now
-        });
-        if !live {
-            transaction.rollback().await.map_err(|_| TeamAuthError::Unavailable)?;
-            return Ok(None);
-        }
         if !credential_store::finish_refresh(
             &transaction,
             snapshot.user_id,
@@ -463,6 +519,10 @@ impl CredentialService {
             transaction.rollback().await.map_err(|_| TeamAuthError::Unavailable)?;
             return Ok(None);
         }
+        #[cfg(test)]
+        if let Some(observer) = &self.binding_advance_observer {
+            observer.add_permits(1);
+        }
         credential_store::advance_bindings(
             &transaction,
             snapshot.user_id,
@@ -471,6 +531,17 @@ impl CredentialService {
             now,
         )
         .await?;
+        let before_commit = self.clock.now();
+        if deadline <= before_commit || validate_installable(tokens, before_commit).is_err() {
+            transaction.rollback().await.map_err(|_| TeamAuthError::Unavailable)?;
+            if self
+                .invalidate_claim(snapshot, owner, deadline, before_commit)
+                .await?
+            {
+                return Err(TeamAuthError::Unauthorized);
+            }
+            return Ok(None);
+        }
         transaction.commit().await.map_err(|_| TeamAuthError::Unavailable)?;
         Ok(Some(grant(
             snapshot.user_id,

@@ -1,11 +1,28 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{
     sea_query::Expr, ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction,
-    EntityTrait, QueryFilter, Set,
+    EntityTrait, QueryFilter, QuerySelect, Set,
 };
 
 use super::super::core::TeamAuthError;
-use crate::db::entities::{organization_membership, team_github_credential, team_session};
+use crate::db::entities::{organization_membership, team_github_credential, team_session, user};
+
+pub(super) async fn identity_exists<C: ConnectionTrait>(
+    db: &C,
+    user_id: i32,
+    github_user_id: i64,
+) -> Result<bool, TeamAuthError> {
+    user::Entity::find_by_id(user_id)
+        .filter(user::Column::GithubUserId.eq(github_user_id))
+        .select_only()
+        .column(user::Column::Id)
+        .column(user::Column::GithubUserId)
+        .into_tuple::<(i32, i64)>()
+        .one(db)
+        .await
+        .map(|identity| identity.is_some())
+        .map_err(|_| TeamAuthError::Unavailable)
+}
 
 pub(super) async fn load<C: ConnectionTrait>(
     db: &C,

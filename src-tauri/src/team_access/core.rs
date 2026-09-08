@@ -64,14 +64,7 @@ pub(crate) async fn lock_user_identity(
                 Ok(None) | Err(_) => Err(TeamAuthError::Unavailable),
             };
         }
-        _ => user::Entity::find_by_id(user_id)
-            .filter(user::Column::GithubUserId.eq(github_user_id))
-            .select_only()
-            .column(user::Column::Id)
-            .column(user::Column::GithubUserId)
-            .into_tuple::<(i32, i64)>()
-            .one(transaction)
-            .await,
+        _ => return Err(TeamAuthError::Unavailable),
     }
     .map_err(|_| TeamAuthError::Unavailable)?;
     found.map(|_| ()).ok_or(TeamAuthError::Unavailable)

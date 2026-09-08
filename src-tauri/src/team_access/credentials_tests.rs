@@ -3,12 +3,13 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Duration;
 use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel, Set, Statement,
-    TransactionTrait,
+    sea_query::LockType, ActiveModelTrait, ConnectionTrait, DbBackend, EntityTrait,
+    IntoActiveModel, QuerySelect, Set, Statement, TransactionTrait,
 };
+use tokio::sync::Semaphore;
 
 use super::{
-    core::{TeamAuthError, TeamClock},
+    core::{lock_user_identity, TeamAuthError, TeamClock},
     credentials::{CredentialService, StoredTokens},
     oauth::{GithubTokenSet, OAuthError},
     secrets::{SecretBinding, SecretVault},
@@ -16,7 +17,7 @@ use super::{
         fixed_now, sqlite_fixture, tokens, ALICE_GITHUB_ID, ALICE_USER_ID,
     },
 };
-use crate::db::entities::{organization_membership, team_github_credential, team_session};
+use crate::db::entities::{organization_membership, team_github_credential, team_session, user};
 
 fn service(fixture: &super::test_auth::Fixture) -> CredentialService {
     CredentialService::new(
@@ -209,6 +210,34 @@ async fn access_more_than_sixty_seconds_from_expiry_does_not_refresh() {
         .unwrap();
     assert_eq!(grant.access_token, "invented-not-yet-due");
     assert_eq!(fixture.oauth.refresh_calls(), 0);
+}
+
+#[tokio::test]
+async fn active_grant_requires_current_stable_user_identity() {
+    for orphaned in [false, true] {
+        let fixture = sqlite_fixture(vec![]).await;
+        install(&fixture, &tokens("must-not-grant", None, None, None)).await;
+        if orphaned {
+            user::Entity::delete_by_id(ALICE_USER_ID)
+                .exec(&fixture.db)
+                .await
+                .unwrap();
+        } else {
+            let mut identity = user::Entity::find_by_id(ALICE_USER_ID)
+                .one(&fixture.db)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_active_model();
+            identity.github_user_id = Set(ALICE_GITHUB_ID + 99);
+            identity.update(&fixture.db).await.unwrap();
+        }
+
+        assert!(matches!(
+            service(&fixture).access(ALICE_USER_ID, ALICE_GITHUB_ID).await,
+            Err(TeamAuthError::Unavailable)
+        ));
+    }
 }
 
 #[tokio::test]
@@ -698,7 +727,9 @@ async fn two_service_instances_share_one_database_refresh() {
     .await;
     fixture.clock.advance(Duration::seconds(1));
     let first_service = service(&fixture);
-    let second_service = service(&fixture);
+    let lease_observed = Arc::new(Semaphore::new(0));
+    let mut second_service = service(&fixture);
+    second_service.observe_live_lease(lease_observed.clone());
     let first = tokio::spawn(async move {
         first_service.access(ALICE_USER_ID, ALICE_GITHUB_ID).await
     });
@@ -706,6 +737,8 @@ async fn two_service_instances_share_one_database_refresh() {
     let second = tokio::spawn(async move {
         second_service.access(ALICE_USER_ID, ALICE_GITHUB_ID).await
     });
+    lease_observed.acquire().await.unwrap().forget();
+    assert_eq!(fixture.oauth.refresh_calls(), 1);
     gate.release.notify_waiters();
     let first = first.await.unwrap().unwrap();
     let second = second.await.unwrap().unwrap();
@@ -721,6 +754,172 @@ fn team_auth_database_cleanup_guard_requires_exact_name() {
     let expected = "workos_team_auth_test_0123456789abcdef0123456789abcdef";
     assert!(super::test_auth::validate_database_target(expected, expected).is_ok());
     assert!(super::test_auth::validate_database_target(expected, "postgres").is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres role air1 with CREATEDB on localhost:5432"]
+async fn credential_service_postgres_revalidates_after_waiting_for_identity_lock() {
+    let (name, admin, db) = super::test_auth::create_postgres_fixture()
+        .await
+        .expect("create PostgreSQL fixture");
+    let result: Result<(), String> = async {
+        let now = fixed_now();
+        let (oauth, gate) = super::test_auth::FakeOAuth::gated(vec![Ok(tokens(
+            "expired-while-waiting",
+            Some("replacement-refresh"),
+            Some(now + Duration::seconds(30)),
+            Some(now + Duration::hours(2)),
+        ))]);
+        let fixture = super::test_auth::Fixture {
+            db: db.clone(),
+            vault: Arc::new(
+                SecretVault::from_hex_key(
+                    "3333333333333333333333333333333333333333333333333333333333333333",
+                )
+                .unwrap(),
+            ),
+            oauth: Arc::new(oauth),
+            clock: Arc::new(super::test_auth::TestClock::new(now)),
+        };
+        install(
+            &fixture,
+            &tokens(
+                "old",
+                Some("old-refresh"),
+                Some(now + Duration::seconds(1)),
+                Some(now + Duration::hours(1)),
+            ),
+        )
+        .await;
+        fixture.clock.advance(Duration::seconds(1));
+
+        let finish_lock_observed = Arc::new(Semaphore::new(0));
+        let mut refresher = service(&fixture);
+        refresher.observe_finish_lock(finish_lock_observed.clone());
+        let task = tokio::spawn(async move {
+            refresher.access(ALICE_USER_ID, ALICE_GITHUB_ID).await
+        });
+        gate.started.acquire().await.unwrap().forget();
+
+        let holder = fixture.db.begin().await.map_err(|error| error.to_string())?;
+        lock_user_identity(&holder, ALICE_USER_ID, ALICE_GITHUB_ID)
+            .await
+            .map_err(|error| error.to_string())?;
+        gate.release.notify_waiters();
+        finish_lock_observed.acquire().await.unwrap().forget();
+        fixture.clock.advance(Duration::seconds(46));
+        holder.commit().await.map_err(|error| error.to_string())?;
+
+        if !matches!(task.await.map_err(|error| error.to_string())?, Err(TeamAuthError::Unauthorized)) {
+            return Err("expired lease result was returned after identity-lock wait".into());
+        }
+        let row = team_github_credential::Entity::find_by_id(ALICE_USER_ID)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "credential disappeared after expired lease".to_owned())?;
+        if row.state != "reauth_required" || row.encrypted_payload.is_some() {
+            return Err("expired lease was not invalidated after lock wait".into());
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        db.close().await.expect("close failed fixture");
+        admin.close().await.expect("close admin after failure");
+        panic!("{error}; preserved database {name}");
+    }
+    super::test_auth::drop_postgres_fixture(&name, admin, db)
+        .await
+        .expect("drop successful PostgreSQL fixture");
+}
+
+#[tokio::test]
+#[ignore = "requires local Postgres role air1 with CREATEDB on localhost:5432"]
+async fn credential_service_postgres_revalidates_after_waiting_for_binding_lock() {
+    let (name, admin, db) = super::test_auth::create_postgres_fixture()
+        .await
+        .expect("create PostgreSQL fixture");
+    let result: Result<(), String> = async {
+        let now = fixed_now();
+        let (oauth, gate) = super::test_auth::FakeOAuth::gated(vec![Ok(tokens(
+            "expired-before-commit",
+            Some("replacement-refresh"),
+            Some(now + Duration::seconds(30)),
+            Some(now + Duration::hours(2)),
+        ))]);
+        let fixture = super::test_auth::Fixture {
+            db: db.clone(),
+            vault: Arc::new(
+                SecretVault::from_hex_key(
+                    "4444444444444444444444444444444444444444444444444444444444444444",
+                )
+                .unwrap(),
+            ),
+            oauth: Arc::new(oauth),
+            clock: Arc::new(super::test_auth::TestClock::new(now)),
+        };
+        install(
+            &fixture,
+            &tokens(
+                "old",
+                Some("old-refresh"),
+                Some(now + Duration::seconds(1)),
+                Some(now + Duration::hours(1)),
+            ),
+        )
+        .await;
+        rebind_fixture_credential_generation(&fixture, 1, 11).await;
+        fixture.clock.advance(Duration::seconds(1));
+
+        let binding_advance_observed = Arc::new(Semaphore::new(0));
+        let mut refresher = service(&fixture);
+        refresher.observe_binding_advance(binding_advance_observed.clone());
+        let task = tokio::spawn(async move {
+            refresher.access(ALICE_USER_ID, ALICE_GITHUB_ID).await
+        });
+        gate.started.acquire().await.unwrap().forget();
+
+        let holder = fixture.db.begin().await.map_err(|error| error.to_string())?;
+        organization_membership::Entity::find_by_id(401)
+            .lock(LockType::Update)
+            .one(&holder)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "matching membership missing".to_owned())?;
+        gate.release.notify_waiters();
+        binding_advance_observed.acquire().await.unwrap().forget();
+        fixture.clock.advance(Duration::seconds(46));
+        holder.commit().await.map_err(|error| error.to_string())?;
+
+        if !matches!(
+            task.await.map_err(|error| error.to_string())?,
+            Err(TeamAuthError::Unauthorized)
+        ) {
+            return Err("expired lease result was returned after binding-lock wait".into());
+        }
+        let row = team_github_credential::Entity::find_by_id(ALICE_USER_ID)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "credential disappeared after expired lease".to_owned())?;
+        if row.generation != 11
+            || row.state != "reauth_required"
+            || row.encrypted_payload.is_some()
+        {
+            return Err("expired lease transaction was not rolled back and invalidated".into());
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        db.close().await.expect("close failed fixture");
+        admin.close().await.expect("close admin after failure");
+        panic!("{error}; preserved database {name}");
+    }
+    super::test_auth::drop_postgres_fixture(&name, admin, db)
+        .await
+        .expect("drop successful PostgreSQL fixture");
 }
 
 #[tokio::test]
@@ -757,9 +956,12 @@ async fn credential_service_postgres_replacement_invalidation_and_concurrency() 
         if install(&fixture, &first).await != 1 {
             return Err("wrong PostgreSQL generation".into());
         }
+        rebind_fixture_credential_generation(&fixture, 1, 11).await;
         fixture.clock.advance(Duration::seconds(1));
         let first_service = service(&fixture);
-        let second_service = service(&fixture);
+        let lease_observed = Arc::new(Semaphore::new(0));
+        let mut second_service = service(&fixture);
+        second_service.observe_live_lease(lease_observed.clone());
         let first_task = tokio::spawn(async move {
             first_service.access(ALICE_USER_ID, ALICE_GITHUB_ID).await
         });
@@ -767,6 +969,10 @@ async fn credential_service_postgres_replacement_invalidation_and_concurrency() 
         let second_task = tokio::spawn(async move {
             second_service.access(ALICE_USER_ID, ALICE_GITHUB_ID).await
         });
+        lease_observed.acquire().await.unwrap().forget();
+        if fixture.oauth.refresh_calls() != 1 {
+            return Err("second PostgreSQL service started another refresh".into());
+        }
         gate.release.notify_waiters();
         let first_grant = first_task.await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
         let second_grant = second_task
@@ -774,21 +980,170 @@ async fn credential_service_postgres_replacement_invalidation_and_concurrency() 
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
         if fixture.oauth.refresh_calls() != 1
-            || first_grant.generation != 2
-            || second_grant.generation != 2
+            || first_grant.generation != 12
+            || second_grant.generation != 12
         {
             return Err("PostgreSQL two-instance refresh was not serialized".into());
         }
+        let matching_session = team_session::Entity::find_by_id("session-a")
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "matching PostgreSQL session disappeared".to_owned())?;
+        let stale_session = team_session::Entity::find_by_id("session-mismatch")
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "stale PostgreSQL session disappeared".to_owned())?;
+        let blocked = organization_membership::Entity::find_by_id(402)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "blocked PostgreSQL membership disappeared".to_owned())?;
+        if matching_session.credential_generation != 12
+            || matching_session.authorization_revision != 7
+            || stale_session.credential_generation != 5
+            || blocked.credential_generation != 12
+            || blocked.authorization_revision != 7
+            || blocked.state != "blocked"
+            || blocked.verified_at.is_some()
+        {
+            return Err("PostgreSQL rotation mutated the wrong bindings".into());
+        }
+        let rotated = team_github_credential::Entity::find_by_id(ALICE_USER_ID)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "rotated PostgreSQL credential missing".to_owned())?;
+        let plaintext = fixture
+            .vault
+            .open(
+                SecretBinding::GithubCredential {
+                    user_id: ALICE_USER_ID,
+                    github_user_id: ALICE_GITHUB_ID,
+                    generation: 12,
+                },
+                rotated.encrypted_payload.as_deref().unwrap_or_default(),
+            )
+            .map_err(|error| error.to_string())?;
+        let persisted = serde_json::from_slice::<StoredTokens>(&plaintext)
+            .map_err(|error| error.to_string())?
+            .to_tokens()
+            .map_err(|error| error.to_string())?;
+        if persisted.access_token != "pg-rotated"
+            || persisted.refresh_token.as_deref() != Some("pg-refresh-2")
+        {
+            return Err("PostgreSQL replacement payload was incomplete".into());
+        }
         if !service(&fixture)
-            .invalidate_if_generation(ALICE_USER_ID, ALICE_GITHUB_ID, 2)
+            .invalidate_if_generation(ALICE_USER_ID, ALICE_GITHUB_ID, 12)
             .await
             .map_err(|e| e.to_string())?
         {
             return Err("PostgreSQL invalidation lost".into());
         }
+        let invalidated = team_github_credential::Entity::find_by_id(ALICE_USER_ID)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "invalidated PostgreSQL credential missing".to_owned())?;
+        let blocked_after = organization_membership::Entity::find_by_id(402)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "blocked membership missing after invalidation".to_owned())?;
+        if invalidated.state != "reauth_required"
+            || invalidated.encrypted_payload.is_some()
+            || blocked_after.state != "blocked"
+            || blocked_after.credential_generation != 12
+            || blocked_after.verified_at.is_some()
+            || team_session::Entity::find_by_id("session-a")
+                .one(&fixture.db)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_some()
+            || team_session::Entity::find_by_id("session-mismatch")
+                .one(&fixture.db)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_none()
+            || team_session::Entity::find_by_id("session-bob")
+                .one(&fixture.db)
+                .await
+                .map_err(|error| error.to_string())?
+                .is_none()
+        {
+            return Err("PostgreSQL invalidation was not generation-atomic".into());
+        }
         let second = tokens("pg-second", None, None, None);
-        if install(&fixture, &second).await != 3 {
+        if install(&fixture, &second).await != 13 {
             return Err("PostgreSQL replacement not atomic".into());
+        }
+        let active = team_github_credential::Entity::find_by_id(ALICE_USER_ID)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "replacement PostgreSQL credential missing".to_owned())?;
+        let rebound = organization_membership::Entity::find_by_id(402)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "replacement PostgreSQL binding missing".to_owned())?;
+        if active.generation != 13
+            || active.state != "active"
+            || rebound.credential_generation != 13
+            || rebound.state != "blocked"
+            || rebound.authorization_revision != 7
+        {
+            return Err("PostgreSQL replacement did not commit atomically".into());
+        }
+
+        fixture
+            .db
+            .execute(Statement::from_string(
+                DbBackend::Postgres,
+                "CREATE TABLE deferred_pg_commit_guard (user_id INTEGER, \
+                 FOREIGN KEY(user_id) REFERENCES users(id) DEFERRABLE INITIALLY DEFERRED)"
+                    .to_owned(),
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        let failed = fixture.db.begin().await.map_err(|error| error.to_string())?;
+        service(&fixture)
+            .install_in_transaction(
+                &failed,
+                ALICE_USER_ID,
+                ALICE_GITHUB_ID,
+                &tokens("must-roll-back", None, None, None),
+                fixture.clock.now(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        failed
+            .execute(Statement::from_string(
+                DbBackend::Postgres,
+                "INSERT INTO deferred_pg_commit_guard (user_id) VALUES (999999)".to_owned(),
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        if failed.commit().await.is_ok() {
+            return Err("PostgreSQL deferred failure unexpectedly committed".into());
+        }
+        let after_failure = team_github_credential::Entity::find_by_id(ALICE_USER_ID)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "credential missing after failed PostgreSQL commit".to_owned())?;
+        let binding_after_failure = organization_membership::Entity::find_by_id(402)
+            .one(&fixture.db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "binding missing after failed PostgreSQL commit".to_owned())?;
+        if after_failure.generation != 13
+            || binding_after_failure.credential_generation != 13
+            || binding_after_failure.state != "blocked"
+        {
+            return Err("failed PostgreSQL commit leaked partial replacement state".into());
         }
         Ok(())
     }.await;
