@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use chrono::Duration;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel,
-    PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait,
+    IntoActiveModel, PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
 };
+use tokio::sync::Barrier;
 
 use super::{
     AgentError, AgentService, BeginOutcome, CleanupTicket, LoginTicket, Provider,
@@ -20,8 +21,8 @@ use crate::{
         principal::{PrincipalService, ProofRequirement},
         test_auth::{
             cookie_headers, create_postgres_principal_fixture, drop_postgres_fixture, fixed_now,
-            principal_fixture, wait_for_postgres_lock, TestClock, ALICE_A_MEMBERSHIP_ID,
-            ALICE_A_TOKEN,
+            principal_fixture, token_hash, wait_for_postgres_lock, TestClock,
+            ALICE_A_MEMBERSHIP_ID, ALICE_A_TOKEN,
         },
     },
 };
@@ -57,6 +58,70 @@ async fn service_and_context() -> (
     let context = resolve(&principals).await;
     let service = AgentService::new(fixture.db.clone(), principals, fixture.clock.clone());
     (fixture, service, context)
+}
+
+async fn wait_for_postgres_lock_count(
+    admin: &DatabaseConnection,
+    database_name: &str,
+    query_fragment: &str,
+    expected: i64,
+) -> Result<(), String> {
+    let pattern = format!("%{query_fragment}%");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting = admin
+                .query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT COUNT(*) AS waiting_count FROM pg_stat_activity \
+                     WHERE datname = $1 AND wait_event_type = 'Lock' AND query LIKE $2"
+                        .to_owned(),
+                    [database_name.into(), pattern.clone().into()],
+                ))
+                .await
+                .map_err(|error| format!("observe PostgreSQL lock count: {error}"))?
+                .ok_or_else(|| "PostgreSQL lock-count observer returned no row".to_owned())?
+                .try_get::<i64>("", "waiting_count")
+                .map_err(|error| format!("decode PostgreSQL lock count: {error}"))?;
+            if waiting >= expected {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out waiting for {expected} PostgreSQL lock waiters matching {query_fragment}"
+        )
+    })?
+}
+
+async fn finish_postgres_test(
+    name: &str,
+    admin: DatabaseConnection,
+    db: DatabaseConnection,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    match result {
+        Ok(()) => drop_postgres_fixture(name, admin, db).await,
+        Err(error) => Err(format!("{error}; preserved PostgreSQL database {name}")),
+    }
+}
+
+async fn lock_postgres_user(
+    transaction: &sea_orm::DatabaseTransaction,
+    user_id: i32,
+) -> Result<(), String> {
+    transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM users WHERE id = $1 FOR UPDATE".to_owned(),
+            [user_id.into()],
+        ))
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "user blocker found no row".to_owned())?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -311,6 +376,72 @@ async fn completion_requires_the_still_live_initiating_session() {
         .unwrap();
     assert_ne!(connection.state, "connected");
     assert!(connection.storage_handle.is_none());
+}
+
+#[tokio::test]
+async fn completion_and_failure_hide_other_session_attempts_like_missing_attempts() {
+    let (fixture, service, context) = service_and_context().await;
+    let other_token = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    team_session::ActiveModel {
+        token_hash: Set(token_hash(other_token)),
+        user_id: Set(context.user_id),
+        org_id: Set(context.org_id),
+        membership_id: Set(context.membership_id),
+        authorization_revision: Set(context.authorization_revision),
+        credential_generation: Set(context.credential_generation),
+        csrf_hash: Set(
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                .to_owned(),
+        ),
+        created_at: Set(fixed_now() - Duration::minutes(1)),
+        expires_at: Set(fixed_now() + Duration::hours(1)),
+    }
+    .insert(&fixture.db)
+    .await
+    .unwrap();
+    let other = service
+        .principals
+        .resolve(&cookie_headers(other_token), ProofRequirement::Cached)
+        .await
+        .unwrap();
+    let ticket = pending(
+        service
+            .begin(&other, Provider::Codex, "other-session-completion")
+            .await
+            .unwrap(),
+    );
+    let mut missing = ticket.clone();
+    missing.attempt_id = "ffffffffffffffffffffffffffffffff".to_owned();
+
+    assert_eq!(
+        service
+            .complete(&context, &ticket, verified("hidden@example.test"))
+            .await,
+        Err(AgentError::NotFound)
+    );
+    assert_eq!(
+        service
+            .complete(&context, &missing, verified("missing@example.test"))
+            .await,
+        Err(AgentError::NotFound)
+    );
+    assert_eq!(
+        service.fail(&context, &ticket, "provider_unavailable").await,
+        Err(AgentError::NotFound)
+    );
+    assert_eq!(
+        service
+            .fail(&context, &missing, "provider_unavailable")
+            .await,
+        Err(AgentError::NotFound)
+    );
+    let row = team_agent_connection::Entity::find_by_id(ticket.connection_id)
+        .one(&fixture.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, "connecting");
+    assert!(row.storage_handle.is_none());
 }
 
 #[tokio::test]
@@ -789,22 +920,32 @@ async fn postgres_starts_serialize_different_keys_and_replay_the_same_key() {
         fixture.clock.clone(),
     ));
     let result: Result<(), String> = async {
+        let blocker = db.begin().await.map_err(|error| error.to_string())?;
+        lock_postgres_user(&blocker, context.user_id).await?;
+        let gate = Arc::new(Barrier::new(3));
         let left = {
             let service = service.clone();
             let context = context.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
+                gate.wait().await;
                 service.begin(&context, Provider::Codex, "different-left").await
             })
         };
         let right = {
             let service = service.clone();
             let context = context.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
+                gate.wait().await;
                 service
                     .begin(&context, Provider::Codex, "different-right")
                     .await
             })
         };
+        gate.wait().await;
+        wait_for_postgres_lock_count(&admin, &name, "FROM \"users\"", 2).await?;
+        blocker.commit().await.map_err(|error| error.to_string())?;
         let (left, right) = tokio::join!(left, right);
         let outcomes = [
             left.map_err(|error| error.to_string())?,
@@ -825,20 +966,30 @@ async fn postgres_starts_serialize_different_keys_and_replay_the_same_key() {
             1
         );
 
+        let blocker = db.begin().await.map_err(|error| error.to_string())?;
+        lock_postgres_user(&blocker, context.user_id).await?;
+        let gate = Arc::new(Barrier::new(3));
         let left = {
             let service = service.clone();
             let context = context.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
+                gate.wait().await;
                 service.begin(&context, Provider::Claude, "same-key").await
             })
         };
         let right = {
             let service = service.clone();
             let context = context.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
+                gate.wait().await;
                 service.begin(&context, Provider::Claude, "same-key").await
             })
         };
+        gate.wait().await;
+        wait_for_postgres_lock_count(&admin, &name, "FROM \"users\"", 2).await?;
+        blocker.commit().await.map_err(|error| error.to_string())?;
         let left = pending(
             left.await
                 .map_err(|error| error.to_string())?
@@ -858,10 +1009,9 @@ async fn postgres_starts_serialize_different_keys_and_replay_the_same_key() {
     drop(service);
     drop(principals);
     drop(fixture);
-    drop_postgres_fixture(&name, admin, db)
+    finish_postgres_test(&name, admin, db, result)
         .await
-        .expect("exact PostgreSQL cleanup");
-    result.unwrap();
+        .unwrap();
 }
 
 /// Requires the local disposable PostgreSQL guard used by team_access tests.
@@ -912,20 +1062,30 @@ async fn postgres_member_quota_serializes_across_providers() {
             .await
             .map_err(|error| error.to_string())?;
         }
+        let blocker = db.begin().await.map_err(|error| error.to_string())?;
+        lock_postgres_user(&blocker, context.user_id).await?;
+        let gate = Arc::new(Barrier::new(3));
         let claude = {
             let service = service.clone();
             let context = context.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
+                gate.wait().await;
                 service.begin(&context, Provider::Claude, "quota-claude").await
             })
         };
         let codex = {
             let service = service.clone();
             let context = context.clone();
+            let gate = gate.clone();
             tokio::spawn(async move {
+                gate.wait().await;
                 service.begin(&context, Provider::Codex, "quota-codex").await
             })
         };
+        gate.wait().await;
+        wait_for_postgres_lock_count(&admin, &name, "FROM \"users\"", 2).await?;
+        blocker.commit().await.map_err(|error| error.to_string())?;
         let outcomes = [
             claude.await.map_err(|error| error.to_string())?,
             codex.await.map_err(|error| error.to_string())?,
@@ -950,10 +1110,9 @@ async fn postgres_member_quota_serializes_across_providers() {
     drop(service);
     drop(principals);
     drop(fixture);
-    drop_postgres_fixture(&name, admin, db)
+    finish_postgres_test(&name, admin, db, result)
         .await
-        .expect("exact PostgreSQL cleanup");
-    result.unwrap();
+        .unwrap();
 }
 
 /// Requires the local disposable PostgreSQL guard used by team_access tests.
@@ -1022,10 +1181,106 @@ async fn postgres_completion_waiting_behind_session_deletion_rejects() {
     drop(service);
     drop(principals);
     drop(fixture);
-    drop_postgres_fixture(&name, admin, db)
+    finish_postgres_test(&name, admin, db, result)
         .await
-        .expect("exact PostgreSQL cleanup");
-    result.unwrap();
+        .unwrap();
+}
+
+/// Requires the local disposable PostgreSQL guard used by team_access tests.
+#[tokio::test]
+#[ignore = "requires local PostgreSQL"]
+async fn postgres_completion_holding_session_guard_finishes_before_deletion() {
+    let (name, admin, fixture) = create_postgres_principal_fixture(Vec::new())
+        .await
+        .expect("PostgreSQL fixture");
+    let db = fixture.db.clone();
+    let principals = fixture.service();
+    let context = resolve(&principals).await;
+    let service = Arc::new(AgentService::new(
+        db.clone(),
+        principals.clone(),
+        fixture.clock.clone(),
+    ));
+    let ticket = pending(
+        service
+            .begin(&context, Provider::Codex, "completion-before-delete")
+            .await
+            .unwrap(),
+    );
+    let result: Result<(), String> = async {
+        let blocker = db.begin().await.map_err(|error| error.to_string())?;
+        blocker
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT id FROM team_agent_connection WHERE id = $1 FOR UPDATE".to_owned(),
+                [ticket.connection_id.clone().into()],
+            ))
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "connection blocker found no row".to_owned())?;
+        let completion = {
+            let service = service.clone();
+            let context = context.clone();
+            let ticket = ticket.clone();
+            tokio::spawn(async move {
+                service
+                    .complete(&context, &ticket, verified("first@example.test"))
+                    .await
+            })
+        };
+        wait_for_postgres_lock(&admin, &name, "team_agent_connection").await?;
+        let deletion = {
+            let db = db.clone();
+            let session_id = context.session_id.clone();
+            tokio::spawn(async move {
+                let transaction = db.begin().await.map_err(|error| error.to_string())?;
+                transaction
+                    .query_one(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "SELECT token_hash FROM team_session WHERE token_hash = $1 FOR UPDATE"
+                            .to_owned(),
+                        [session_id.clone().into()],
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "session deletion found no row".to_owned())?;
+                team_session::Entity::delete_by_id(&session_id)
+                    .exec(&transaction)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                transaction.commit().await.map_err(|error| error.to_string())
+            })
+        };
+        wait_for_postgres_lock(&admin, &name, "team_session").await?;
+        blocker.commit().await.map_err(|error| error.to_string())?;
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+            .await
+            .map_err(|_| "completion remained blocked".to_owned())?
+            .map_err(|error| error.to_string())?;
+        if completion.is_err() {
+            return Err(format!("completion-first positive control failed: {completion:?}"));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), deletion)
+            .await
+            .map_err(|_| "session deletion remained blocked".to_owned())?
+            .map_err(|error| error.to_string())??;
+        let row = team_agent_connection::Entity::find_by_id(&ticket.connection_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing completed connection".to_owned())?;
+        if row.state != "connected" {
+            return Err(format!("completion-first state was {}", row.state));
+        }
+        Ok(())
+    }
+    .await;
+    drop(service);
+    drop(principals);
+    drop(fixture);
+    finish_postgres_test(&name, admin, db, result)
+        .await
+        .unwrap();
 }
 
 /// Requires the local disposable PostgreSQL guard used by team_access tests.
@@ -1099,10 +1354,111 @@ async fn postgres_completion_waiting_behind_credential_generation_change_rejects
     drop(service);
     drop(principals);
     drop(fixture);
-    drop_postgres_fixture(&name, admin, db)
+    finish_postgres_test(&name, admin, db, result)
         .await
-        .expect("exact PostgreSQL cleanup");
-    result.unwrap();
+        .unwrap();
+}
+
+/// Requires the local disposable PostgreSQL guard used by team_access tests.
+#[tokio::test]
+#[ignore = "requires local PostgreSQL"]
+async fn postgres_completion_holding_membership_guard_finishes_before_generation_change() {
+    let (name, admin, fixture) = create_postgres_principal_fixture(Vec::new())
+        .await
+        .expect("PostgreSQL fixture");
+    let db = fixture.db.clone();
+    let principals = fixture.service();
+    let context = resolve(&principals).await;
+    let service = Arc::new(AgentService::new(
+        db.clone(),
+        principals.clone(),
+        fixture.clock.clone(),
+    ));
+    let ticket = pending(
+        service
+            .begin(&context, Provider::Codex, "completion-before-generation")
+            .await
+            .unwrap(),
+    );
+    let result: Result<(), String> = async {
+        let blocker = db.begin().await.map_err(|error| error.to_string())?;
+        blocker
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT id FROM team_agent_connection WHERE id = $1 FOR UPDATE".to_owned(),
+                [ticket.connection_id.clone().into()],
+            ))
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "connection blocker found no row".to_owned())?;
+        let completion = {
+            let service = service.clone();
+            let context = context.clone();
+            let ticket = ticket.clone();
+            tokio::spawn(async move {
+                service
+                    .complete(&context, &ticket, verified("first@example.test"))
+                    .await
+            })
+        };
+        wait_for_postgres_lock(&admin, &name, "team_agent_connection").await?;
+        let change = {
+            let db = db.clone();
+            let generation = context.credential_generation + 1;
+            tokio::spawn(async move {
+                let transaction = db.begin().await.map_err(|error| error.to_string())?;
+                transaction
+                    .query_one(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "SELECT id FROM organization_membership WHERE id = $1 FOR UPDATE"
+                            .to_owned(),
+                        [ALICE_A_MEMBERSHIP_ID.into()],
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "membership change found no row".to_owned())?;
+                organization_membership::Entity::update_many()
+                    .col_expr(
+                        organization_membership::Column::CredentialGeneration,
+                        sea_orm::sea_query::Expr::value(generation),
+                    )
+                    .filter(organization_membership::Column::Id.eq(ALICE_A_MEMBERSHIP_ID))
+                    .exec(&transaction)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                transaction.commit().await.map_err(|error| error.to_string())
+            })
+        };
+        wait_for_postgres_lock(&admin, &name, "organization_membership").await?;
+        blocker.commit().await.map_err(|error| error.to_string())?;
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(5), completion)
+            .await
+            .map_err(|_| "completion remained blocked".to_owned())?
+            .map_err(|error| error.to_string())?;
+        if completion.is_err() {
+            return Err(format!("completion-first positive control failed: {completion:?}"));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), change)
+            .await
+            .map_err(|_| "credential generation change remained blocked".to_owned())?
+            .map_err(|error| error.to_string())??;
+        let row = team_agent_connection::Entity::find_by_id(&ticket.connection_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing completed connection".to_owned())?;
+        if row.state != "connected" {
+            return Err(format!("completion-first state was {}", row.state));
+        }
+        Ok(())
+    }
+    .await;
+    drop(service);
+    drop(principals);
+    drop(fixture);
+    finish_postgres_test(&name, admin, db, result)
+        .await
+        .unwrap();
 }
 
 async fn postgres_cancel_completion_order(cancel_first: bool) -> Result<(), String> {
@@ -1193,10 +1549,7 @@ async fn postgres_cancel_completion_order(cancel_first: bool) -> Result<(), Stri
     drop(service);
     drop(principals);
     drop(fixture);
-    drop_postgres_fixture(&name, admin, db)
-        .await
-        .expect("exact PostgreSQL cleanup");
-    result
+    finish_postgres_test(&name, admin, db, result).await
 }
 
 /// Requires the local disposable PostgreSQL guard used by team_access tests.
@@ -1239,26 +1592,28 @@ async fn postgres_parallel_cleanup_claims_issue_one_live_lease() {
         .unwrap();
     let result: Result<(), String> = async {
         let blocker = db.begin().await.map_err(|error| error.to_string())?;
-        blocker
-            .query_one(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT id FROM team_agent_connection WHERE id = $1 FOR UPDATE".to_owned(),
-                [login.connection_id.clone().into()],
-            ))
-            .await
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "connection blocker found no row".to_owned())?;
+        lock_postgres_user(&blocker, context.user_id).await?;
+        let gate = Arc::new(Barrier::new(3));
         let left = {
             let service = service.clone();
             let operation_id = receipt.operation_id.clone();
-            tokio::spawn(async move { service.claim_cleanup(&operation_id).await })
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                gate.wait().await;
+                service.claim_cleanup(&operation_id).await
+            })
         };
-        wait_for_postgres_lock(&admin, &name, "team_agent_connection").await?;
         let right = {
             let service = service.clone();
             let operation_id = receipt.operation_id.clone();
-            tokio::spawn(async move { service.claim_cleanup(&operation_id).await })
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                gate.wait().await;
+                service.claim_cleanup(&operation_id).await
+            })
         };
+        gate.wait().await;
+        wait_for_postgres_lock_count(&admin, &name, "FROM \"users\"", 2).await?;
         blocker.commit().await.map_err(|error| error.to_string())?;
         let outcomes = [
             left.await.map_err(|error| error.to_string())?,
@@ -1284,8 +1639,7 @@ async fn postgres_parallel_cleanup_claims_issue_one_live_lease() {
     drop(service);
     drop(principals);
     drop(fixture);
-    drop_postgres_fixture(&name, admin, db)
+    finish_postgres_test(&name, admin, db, result)
         .await
-        .expect("exact PostgreSQL cleanup");
-    result.unwrap();
+        .unwrap();
 }

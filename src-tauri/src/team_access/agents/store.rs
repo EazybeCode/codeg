@@ -211,13 +211,38 @@ pub(super) async fn completion_rows(
         .await?
         .filter(|row| row.org_id == context.org_id && row.user_id == context.user_id)
         .ok_or(AgentError::NotFound)?;
-    let attempt = attempt(transaction, &connection.id, &ticket.attempt_id)
+    let attempt = completion_attempt(
+        transaction,
+        &connection.id,
+        &ticket.attempt_id,
+        &context.session_id,
+    )
         .await?
         .ok_or(AgentError::NotFound)?;
     let operation = operation_by_id(transaction, &connection.id, &ticket.operation_id)
         .await?
         .ok_or(AgentError::NotFound)?;
     Ok((connection, attempt, operation))
+}
+
+async fn completion_attempt(
+    transaction: &DatabaseTransaction,
+    connection_id: &str,
+    attempt_id: &str,
+    session_id: &str,
+) -> Result<Option<team_agent_attempt::Model>, AgentError> {
+    let query = team_agent_attempt::Entity::find_by_id(attempt_id)
+        .filter(team_agent_attempt::Column::ConnectionId.eq(connection_id))
+        .filter(team_agent_attempt::Column::SessionId.eq(session_id));
+    let query = if transaction.get_database_backend() == DbBackend::Postgres {
+        query.lock(LockType::Update)
+    } else {
+        query
+    };
+    query
+        .one(transaction)
+        .await
+        .map_err(|_| AgentError::Unavailable)
 }
 
 pub(super) async fn connection_by_id(
