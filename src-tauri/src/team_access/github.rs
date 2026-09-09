@@ -68,8 +68,6 @@ pub(crate) struct GithubMembershipClient {
 }
 
 impl GithubMembershipClient {
-    // The pilot is intentionally not wired into runtime routes yet.
-    #[allow(dead_code)]
     pub(crate) fn new() -> Result<Self, GithubEvidenceError> {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())

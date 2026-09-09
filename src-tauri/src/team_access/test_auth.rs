@@ -39,7 +39,7 @@ pub(super) const PRINCIPAL_ORG_A_GITHUB_ID: i64 = 10_201;
 pub(super) const PRINCIPAL_ORG_B_GITHUB_ID: i64 = 10_202;
 pub(super) const ALICE_A_MEMBERSHIP_ID: i32 = 401;
 pub(super) const ALICE_B_MEMBERSHIP_ID: i32 = 404;
-pub(super) const ALICE_A_TOKEN: &str =
+pub(crate) const ALICE_A_TOKEN: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub(super) const ALICE_B_TOKEN: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -50,13 +50,13 @@ pub(super) const CAROL_B_TOKEN: &str =
 pub(super) const POSTGRES_ADMIN_URL: &str = "postgres://air1@localhost:5432/postgres";
 pub(super) const POSTGRES_DATABASE_PREFIX: &str = "workos_team_auth_test_";
 
-pub(super) fn fixed_now() -> DateTime<Utc> {
+pub(crate) fn fixed_now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 8, 10, 0, 30)
         .single()
         .expect("valid controlled time")
 }
 
-pub(super) fn tokens(
+pub(crate) fn tokens(
     access: &str,
     refresh: Option<&str>,
     access_expires_at: Option<DateTime<Utc>>,
@@ -70,10 +70,10 @@ pub(super) fn tokens(
     }
 }
 
-pub(super) struct TestClock(Mutex<DateTime<Utc>>);
+pub(crate) struct TestClock(Mutex<DateTime<Utc>>);
 
 impl TestClock {
-    pub(super) fn new(now: DateTime<Utc>) -> Self {
+    pub(crate) fn new(now: DateTime<Utc>) -> Self {
         Self(Mutex::new(now))
     }
 
@@ -94,7 +94,7 @@ pub(super) struct RefreshGate {
     pub(super) release: Notify,
 }
 
-pub(super) struct FakeOAuth {
+pub(crate) struct FakeOAuth {
     replies: Mutex<VecDeque<Result<GithubTokenSet, OAuthError>>>,
     calls: Mutex<Vec<String>>,
     exchange_replies: Mutex<VecDeque<Result<GithubTokenSet, OAuthError>>>,
@@ -103,7 +103,7 @@ pub(super) struct FakeOAuth {
 }
 
 impl FakeOAuth {
-    pub(super) fn new(replies: Vec<Result<GithubTokenSet, OAuthError>>) -> Self {
+    pub(crate) fn new(replies: Vec<Result<GithubTokenSet, OAuthError>>) -> Self {
         Self {
             replies: Mutex::new(replies.into()),
             calls: Mutex::new(Vec::new()),
@@ -113,7 +113,7 @@ impl FakeOAuth {
         }
     }
 
-    pub(super) fn with_exchange(
+    pub(crate) fn with_exchange(
         replies: Vec<Result<GithubTokenSet, OAuthError>>,
     ) -> Self {
         let source = Self::new(Vec::new());
@@ -124,7 +124,7 @@ impl FakeOAuth {
         source
     }
 
-    pub(super) fn exchange_calls(&self) -> Vec<(String, String)> {
+    pub(crate) fn exchange_calls(&self) -> Vec<(String, String)> {
         self.exchange_calls
             .lock()
             .expect("fake exchange calls lock")
@@ -214,7 +214,7 @@ pub(super) struct ProviderGate {
     pub(super) release: Notify,
 }
 
-pub(super) struct FakeGithub {
+pub(crate) struct FakeGithub {
     identities: Mutex<VecDeque<Result<GithubIdentity, GithubEvidenceError>>>,
     organizations: Mutex<VecDeque<Result<Vec<GithubOrganizationChoice>, GithubEvidenceError>>>,
     memberships: Mutex<VecDeque<Result<GithubMembershipEvidence, GithubEvidenceError>>>,
@@ -224,7 +224,7 @@ pub(super) struct FakeGithub {
 }
 
 impl FakeGithub {
-    pub(super) fn new(
+    pub(crate) fn new(
         identities: Vec<Result<GithubIdentity, GithubEvidenceError>>,
         organizations: Vec<Result<Vec<GithubOrganizationChoice>, GithubEvidenceError>>,
         memberships: Vec<Result<GithubMembershipEvidence, GithubEvidenceError>>,
@@ -340,8 +340,8 @@ pub(super) struct Fixture {
     pub(super) clock: Arc<TestClock>,
 }
 
-pub(super) struct PrincipalFixture {
-    pub(super) db: DatabaseConnection,
+pub(crate) struct PrincipalFixture {
+    pub(crate) db: DatabaseConnection,
     pub(super) vault: Arc<SecretVault>,
     pub(super) oauth: Arc<FakeOAuth>,
     pub(super) github: Arc<FakeGithub>,
@@ -350,7 +350,7 @@ pub(super) struct PrincipalFixture {
 }
 
 impl PrincipalFixture {
-    pub(super) fn service(&self) -> Arc<PrincipalService> {
+    pub(crate) fn service(&self) -> Arc<PrincipalService> {
         Arc::new(PrincipalService::new(
             self.db.clone(),
             self.credentials.clone(),
@@ -370,7 +370,7 @@ pub(super) fn cookie_headers(token: &str) -> axum::http::HeaderMap {
     headers
 }
 
-pub(super) fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
@@ -450,7 +450,7 @@ async fn build_principal_fixture(
     }
 }
 
-pub(super) async fn create_postgres_principal_fixture(
+pub(crate) async fn create_postgres_principal_fixture(
     membership_replies: Vec<Result<GithubMembershipEvidence, GithubEvidenceError>>,
 ) -> Result<(String, DatabaseConnection, PrincipalFixture), String> {
     let (name, admin, db) = create_postgres_fixture().await?;
@@ -808,7 +808,7 @@ pub(crate) async fn drop_postgres_fixture(
     Ok(())
 }
 
-pub(super) async fn wait_for_postgres_lock(
+pub(crate) async fn wait_for_postgres_lock(
     admin: &DatabaseConnection,
     database_name: &str,
     query_fragment: &str,

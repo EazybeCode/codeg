@@ -10,17 +10,28 @@ use codeg_lib::web::{
 };
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| matches!(arg.as_str(), "--version" | "-V")) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+
+    let configured_mode = std::env::var_os("WORKOS_SERVER_MODE");
+    match codeg_lib::team_server::select_server_mode_from_os(&args, configured_mode.as_deref()) {
+        Ok(codeg_lib::team_server::ServerMode::Team) => {
+            return codeg_lib::team_server::run_team_server();
+        }
+        Ok(codeg_lib::team_server::ServerMode::Operator) => {}
+        Err(_) => {
+            eprintln!("[SERVER] invalid server mode configuration");
+            return ExitCode::from(2);
+        }
+    }
+
     // Capture our own executable path before anything can rename it (an
     // in-place upgrade swaps the binary mid-run; `current_exe()` would then
     // resolve to a `" (deleted)"` path on Linux). Cheap, single-shot.
     codeg_lib::update::runtime::prime_self_exe();
-
-    // Support --version flag
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{}", env!("CARGO_PKG_VERSION"));
-        return ExitCode::SUCCESS;
-    }
 
     // `--supervise`: run as the process supervisor that owns the worker's
     // lifecycle (PID 1 in Docker). It spawns `codeg-server` without this

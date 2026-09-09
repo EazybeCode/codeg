@@ -9,9 +9,44 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::session::{
-    membership_freshness, resolve_local_session, revoke_local_session, LocalPrincipal,
-    LocalSessionError, MembershipFreshness, TeamRole,
+    browser_cookie, membership_freshness, resolve_local_session, revoke_local_session,
+    LocalPrincipal, LocalSessionError, MembershipFreshness, TeamRole,
 };
+
+#[test]
+fn named_cookie_parser_distinguishes_absence_and_rejects_ambiguous_values() {
+    let mut unrelated = HeaderMap::new();
+    unrelated.insert(header::COOKIE, HeaderValue::from_static("theme=dark; other=value"));
+    assert_eq!(browser_cookie(&unrelated, "workos_team_pending"), Ok(None));
+
+    let token = ALICE_A_TOKEN;
+    let mut present = HeaderMap::new();
+    present.append(
+        header::COOKIE,
+        HeaderValue::from_str(&format!("theme=dark; workos_team_pending={token}"))
+            .expect("valid cookie"),
+    );
+    assert_eq!(
+        browser_cookie(&present, "workos_team_pending"),
+        Ok(Some(token))
+    );
+
+    for value in [
+        "workos_team_pending",
+        "workos_team_pending=",
+        "workos_team_pending=short",
+        "workos_team_pending=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "workos_team_pending=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; workos_team_pending=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static(value));
+        assert_eq!(
+            browser_cookie(&headers, "workos_team_pending"),
+            Err(LocalSessionError::Unauthorized),
+            "accepted malformed cookie: {value}"
+        );
+    }
+}
 use crate::db::entities::{organization_membership, org, team_session, user};
 use crate::db::migration::Migrator;
 

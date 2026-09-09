@@ -49,6 +49,7 @@ pub(crate) struct SessionStart {
 pub(crate) struct OnboardingChoices {
     pub(crate) identity: GithubIdentity,
     pub(crate) organizations: Vec<GithubOrganizationChoice>,
+    pub(crate) csrf_hash: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -240,12 +241,33 @@ impl OnboardingService {
         })
     }
 
+    pub(crate) async fn cancel_attempt(
+        &self,
+        state: &str,
+        browser_secret: &str,
+    ) -> Result<(), TeamAuthError> {
+        let state_hash = authenticated_hash(state)?;
+        let browser_hash = authenticated_hash(browser_secret)?;
+        let now = self.clock.now();
+        let attempt = onboarding_store::live_attempt(&self.db, &state_hash, &browser_hash, now)
+            .await?
+            .ok_or(TeamAuthError::Unauthorized)?;
+        if !onboarding_store::consume_attempt(&self.db, &attempt, now).await? {
+            return Err(TeamAuthError::Unauthorized);
+        }
+        let after_consume = self.clock.now();
+        if attempt.created_at > after_consume || after_consume >= attempt.expires_at {
+            return Err(TeamAuthError::Unauthorized);
+        }
+        Ok(())
+    }
+
     pub(crate) async fn choices(
         &self,
         browser_secret: &str,
     ) -> Result<OnboardingChoices, TeamAuthError> {
         let now = self.clock.now();
-        let (_, payload) = self.load_pending(browser_secret, now).await?;
+        let (pending, payload) = self.load_pending(browser_secret, now).await?;
         let tokens = payload.tokens(now)?;
         let organizations = self
             .github
@@ -256,6 +278,7 @@ impl OnboardingService {
         Ok(OnboardingChoices {
             identity: payload.identity(),
             organizations,
+            csrf_hash: pending.csrf_hash,
         })
     }
 

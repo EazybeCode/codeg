@@ -65,23 +65,26 @@ struct IdentityRow {
     membership_verified_at: Option<DateTime<Utc>>,
 }
 
-fn validated_cookie(headers: &HeaderMap) -> Result<&str, LocalSessionError> {
-    let mut session_cookie = None;
+pub(crate) fn browser_cookie<'a>(
+    headers: &'a HeaderMap,
+    cookie_name: &str,
+) -> Result<Option<&'a str>, LocalSessionError> {
+    let mut named_cookie = None;
     for value in headers.get_all(axum::http::header::COOKIE) {
         let cookies = value
             .to_str()
             .map_err(|_| LocalSessionError::Unauthorized)?;
         for pair in cookies.split(';').map(str::trim) {
             let Some((name, value)) = pair.split_once('=') else {
-                if pair == SESSION_COOKIE {
+                if pair == cookie_name {
                     return Err(LocalSessionError::Unauthorized);
                 }
                 continue;
             };
-            if name != SESSION_COOKIE {
+            if name != cookie_name {
                 continue;
             }
-            if session_cookie.is_some()
+            if named_cookie.is_some()
                 || value.len() != 64
                 || !value
                     .bytes()
@@ -89,10 +92,14 @@ fn validated_cookie(headers: &HeaderMap) -> Result<&str, LocalSessionError> {
             {
                 return Err(LocalSessionError::Unauthorized);
             }
-            session_cookie = Some(value);
+            named_cookie = Some(value);
         }
     }
-    session_cookie.ok_or(LocalSessionError::Unauthorized)
+    Ok(named_cookie)
+}
+
+fn validated_cookie(headers: &HeaderMap) -> Result<&str, LocalSessionError> {
+    browser_cookie(headers, SESSION_COOKIE)?.ok_or(LocalSessionError::Unauthorized)
 }
 
 pub(crate) async fn resolve_local_session(

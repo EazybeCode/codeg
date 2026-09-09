@@ -1670,6 +1670,7 @@ pub fn build_router(
     // The login page needs to read the user's preferred language before
     // authenticating so it can render in their chosen locale.
     let public_api = Router::new()
+        .route("/workos/capabilities", get(operator_capabilities))
         .route(
             "/get_system_language_settings",
             post(handlers::system_settings::get_system_language_settings),
@@ -1811,6 +1812,17 @@ async fn health_check() -> impl IntoResponse {
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+async fn operator_capabilities() -> impl IntoResponse {
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "version": 1,
+            "mode": "operator",
+            "runtimeEnabled": true,
+        })),
+    )
 }
 
 async fn api_not_found(uri: axum::http::Uri) -> impl IntoResponse {
