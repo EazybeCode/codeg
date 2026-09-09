@@ -33,4 +33,4 @@ mod secrets_tests;
 mod test_http;
 
 #[cfg(test)]
-mod test_auth;
+pub(crate) mod test_auth;

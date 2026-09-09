@@ -44,6 +44,7 @@ pub mod process;
 pub mod supervise;
 mod terminal;
 pub(crate) mod team_access;
+pub mod team_server;
 pub mod turn_timings;
 pub mod update;
 pub mod web;

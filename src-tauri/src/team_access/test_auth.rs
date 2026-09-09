@@ -744,7 +744,7 @@ pub(super) async fn connect(url: &str, max_connections: u32) -> Result<DatabaseC
         .map_err(|error| format!("connect to {url}: {error}"))
 }
 
-pub(super) async fn create_postgres_fixture(
+pub(crate) async fn create_postgres_fixture(
 ) -> Result<(String, DatabaseConnection, DatabaseConnection), String> {
     let name = format!("{POSTGRES_DATABASE_PREFIX}{}", Uuid::new_v4().simple());
     validate_database_target(&name, &name)?;
@@ -779,7 +779,7 @@ pub(super) async fn create_postgres_fixture(
     Ok((name, admin, db))
 }
 
-pub(super) async fn drop_postgres_fixture(
+pub(crate) async fn drop_postgres_fixture(
     expected: &str,
     admin: DatabaseConnection,
     db: DatabaseConnection,
