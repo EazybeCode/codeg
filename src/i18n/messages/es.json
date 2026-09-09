@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "Configuración de la organización",
     "title": "Organización",
     "description": "Administra cómo aparece tu organización en el espacio de trabajo.",
     "loading": "Cargando configuración de la organización",
@@ -151,7 +152,8 @@
     "uploadLabel": "Subir logotipo de la organización",
     "remove": "Quitar logotipo",
     "save": "Guardar cambios",
-    "saving": "Guardando…"
+    "saving": "Guardando…",
+    "saved": "Se guardó la configuración de la organización."
   },
   "AppearanceSettings": {
     "sectionTitle": "Apariencia del tema",
@@ -1722,6 +1724,7 @@
     "personLabel": "Sesión iniciada como",
     "organizationLabel": "Organización",
     "backToWorkspace": "Volver al espacio de trabajo",
+    "settings": "Configuración",
     "signOut": "Cerrar sesión",
     "runtimeTitle": "Estamos preparando tu espacio de Neev",
     "runtimeDescription": "Las rutas del espacio de equipo aún no están habilitadas en esta compilación privada de migración.",

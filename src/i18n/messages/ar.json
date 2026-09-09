@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "إعدادات المؤسسة",
     "title": "المؤسسة",
     "description": "إدارة كيفية ظهور مؤسستك في مساحة العمل.",
     "loading": "جارٍ تحميل إعدادات المؤسسة",
@@ -151,7 +152,8 @@
     "uploadLabel": "تحميل شعار المؤسسة",
     "remove": "إزالة الشعار",
     "save": "حفظ التغييرات",
-    "saving": "جارٍ الحفظ…"
+    "saving": "جارٍ الحفظ…",
+    "saved": "تم حفظ إعدادات المؤسسة."
   },
   "AppearanceSettings": {
     "sectionTitle": "مظهر السمة",
@@ -1722,6 +1724,7 @@
     "personLabel": "مسجل الدخول باسم",
     "organizationLabel": "المؤسسة",
     "backToWorkspace": "العودة إلى مساحة العمل",
+    "settings": "الإعدادات",
     "signOut": "تسجيل الخروج",
     "runtimeTitle": "جارٍ إعداد مساحة عمل Neev",
     "runtimeDescription": "مسارات مساحة عمل الفريق غير مفعلة بعد في إصدار الترحيل الخاص هذا.",

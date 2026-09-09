@@ -6,7 +6,11 @@ import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { useTeamAuth } from "./team-auth-provider"
 
-export function TeamSignedInShell() {
+export function TeamSignedInShell({
+  children,
+}: {
+  children?: React.ReactNode
+}) {
   const t = useTranslations("TeamShell")
   const auth = useTeamAuth()
   const { activate, deactivate } = auth
@@ -73,6 +77,9 @@ export function TeamSignedInShell() {
           </a>
           <div className="flex items-center gap-2">
             <Button asChild variant="ghost">
+              <a href="/settings">{t("settings")}</a>
+            </Button>
+            <Button asChild variant="ghost">
               <a href="/workspace">{t("backToWorkspace")}</a>
             </Button>
             <Button variant="outline" onClick={() => void auth.logout()}>
@@ -98,12 +105,14 @@ export function TeamSignedInShell() {
           />
         </section>
 
-        <section className="rounded-2xl border bg-card p-6 text-center">
-          <h1 className="text-xl font-semibold">{t("runtimeTitle")}</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            {t("runtimeDescription")}
-          </p>
-        </section>
+        {children ?? (
+          <section className="rounded-2xl border bg-card p-6 text-center">
+            <h1 className="text-xl font-semibold">{t("runtimeTitle")}</h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              {t("runtimeDescription")}
+            </p>
+          </section>
+        )}
 
         {auth.logoutError && (
           <p role="alert" className="text-center text-sm text-destructive">

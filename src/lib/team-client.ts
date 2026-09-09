@@ -39,6 +39,19 @@ export interface TeamAccount {
 
 export type TeamOrganization = TeamAccount
 
+export interface TeamOrganizationSettings {
+  id: number
+  login: string
+  name: string
+  avatarUrl: string | null
+  canEdit: boolean
+}
+
+export type TeamOrganizationLogo =
+  | { action: "keep" }
+  | { action: "remove" }
+  | { action: "upload"; data: string }
+
 export interface TeamSession {
   user: TeamAccount
   organization: TeamOrganization
@@ -101,6 +114,19 @@ function isAccount(value: unknown): value is TeamAccount {
     typeof value.login === "string" &&
     isNullableString(value.name) &&
     isNullableString(value.avatarUrl)
+  )
+}
+
+function isTeamOrganizationSettings(
+  value: unknown
+): value is TeamOrganizationSettings {
+  return (
+    isRecord(value) &&
+    isPositiveInternalId(value.id) &&
+    typeof value.login === "string" &&
+    typeof value.name === "string" &&
+    isNullableString(value.avatarUrl) &&
+    typeof value.canEdit === "boolean"
   )
 }
 
@@ -294,4 +320,44 @@ export async function logoutTeamSession(
     signal,
     () => Promise.resolve()
   )
+}
+
+export async function loadTeamOrganizationSettings(
+  signal?: AbortSignal
+): Promise<TeamOrganizationSettings> {
+  const payload = await request(
+    "/api/team/organization",
+    {},
+    signal,
+    responseJson
+  )
+  if (!isTeamOrganizationSettings(payload)) {
+    throw new TeamClientError("invalid_response")
+  }
+  return payload
+}
+
+export async function updateTeamOrganizationSettings(
+  input: { name: string; logo: TeamOrganizationLogo },
+  csrf: string,
+  signal?: AbortSignal
+): Promise<TeamOrganizationSettings> {
+  if (!csrf) throw new TeamClientError("invalid_request")
+  const payload = await request(
+    "/api/team/organization",
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-WorkOS-CSRF": csrf,
+      },
+      body: JSON.stringify(input),
+    },
+    signal,
+    responseJson
+  )
+  if (!isTeamOrganizationSettings(payload)) {
+    throw new TeamClientError("invalid_response")
+  }
+  return payload
 }

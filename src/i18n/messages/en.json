@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "Organization settings",
     "title": "Organization",
     "description": "Manage how your organization appears across the workspace.",
     "loading": "Loading organization settings",
@@ -151,7 +152,8 @@
     "uploadLabel": "Upload organization logo",
     "remove": "Remove logo",
     "save": "Save changes",
-    "saving": "Saving…"
+    "saving": "Saving…",
+    "saved": "Organization settings saved."
   },
   "AppearanceSettings": {
     "sectionTitle": "Theme Appearance",
@@ -1722,6 +1724,7 @@
     "personLabel": "Signed in as",
     "organizationLabel": "Organization",
     "backToWorkspace": "Back to workspace",
+    "settings": "Settings",
     "signOut": "Sign out",
     "runtimeTitle": "Your Neev workspace is being prepared",
     "runtimeDescription": "Team workspace routes are not enabled yet in this private migration build.",

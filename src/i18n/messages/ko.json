@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "조직 설정",
     "title": "조직",
     "description": "워크스페이스에서 조직이 표시되는 방식을 관리합니다.",
     "loading": "조직 설정을 불러오는 중",
@@ -151,7 +152,8 @@
     "uploadLabel": "조직 로고 업로드",
     "remove": "로고 제거",
     "save": "변경사항 저장",
-    "saving": "저장 중…"
+    "saving": "저장 중…",
+    "saved": "조직 설정을 저장했습니다."
   },
   "AppearanceSettings": {
     "sectionTitle": "테마 모양",
@@ -1722,6 +1724,7 @@
     "personLabel": "로그인 계정",
     "organizationLabel": "조직",
     "backToWorkspace": "워크스페이스로 돌아가기",
+    "settings": "설정",
     "signOut": "로그아웃",
     "runtimeTitle": "Neev 워크스페이스를 준비하고 있습니다",
     "runtimeDescription": "이 비공개 마이그레이션 빌드에서는 팀 워크스페이스 경로가 아직 활성화되지 않았습니다.",

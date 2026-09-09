@@ -10,10 +10,10 @@ vi.mock("./team-auth-provider", () => ({ useTeamAuth: () => auth.value }))
 
 import { TeamSignedInShell } from "./team-signed-in-shell"
 
-function showShell() {
+function showShell(children?: React.ReactNode) {
   return render(
     <NextIntlClientProvider locale="en" messages={messages}>
-      <TeamSignedInShell />
+      <TeamSignedInShell>{children}</TeamSignedInShell>
     </NextIntlClientProvider>
   )
 }
@@ -69,6 +69,20 @@ describe("TeamSignedInShell", () => {
     expect(
       screen.getByRole("link", { name: /back to workspace/i })
     ).toHaveAttribute("href", "/workspace")
+    expect(screen.getByRole("link", { name: /^settings$/i })).toHaveAttribute(
+      "href",
+      "/settings"
+    )
+  })
+
+  it("renders authenticated children instead of the migration explanation", () => {
+    showShell(<h1>Organization settings</h1>)
+    expect(
+      screen.getByRole("heading", { name: "Organization settings" })
+    ).toBeVisible()
+    expect(
+      screen.queryByText(/workspace routes are not enabled yet/i)
+    ).toBeNull()
   })
 
   it("pauses identity content on a 503 while retaining safe retry and sign out", () => {

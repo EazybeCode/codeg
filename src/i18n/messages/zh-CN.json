@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "组织设置",
     "title": "组织",
     "description": "管理组织在工作区中的显示方式。",
     "loading": "正在加载组织设置",
@@ -151,7 +152,8 @@
     "uploadLabel": "上传组织标志",
     "remove": "移除标志",
     "save": "保存更改",
-    "saving": "正在保存…"
+    "saving": "正在保存…",
+    "saved": "组织设置已保存。"
   },
   "AppearanceSettings": {
     "sectionTitle": "主题外观",
@@ -1722,6 +1724,7 @@
     "personLabel": "登录身份",
     "organizationLabel": "组织",
     "backToWorkspace": "返回工作区",
+    "settings": "设置",
     "signOut": "退出登录",
     "runtimeTitle": "正在准备你的 Neev 工作区",
     "runtimeDescription": "此私有迁移版本尚未启用团队工作区路由。",

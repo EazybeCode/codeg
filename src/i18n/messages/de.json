@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "Organisationseinstellungen",
     "title": "Organisation",
     "description": "Verwalten Sie die Darstellung Ihrer Organisation im Arbeitsbereich.",
     "loading": "Organisationseinstellungen werden geladen",
@@ -151,7 +152,8 @@
     "uploadLabel": "Organisationslogo hochladen",
     "remove": "Logo entfernen",
     "save": "Änderungen speichern",
-    "saving": "Wird gespeichert…"
+    "saving": "Wird gespeichert…",
+    "saved": "Organisationseinstellungen gespeichert."
   },
   "AppearanceSettings": {
     "sectionTitle": "Design-Erscheinungsbild",
@@ -1722,6 +1724,7 @@
     "personLabel": "Angemeldet als",
     "organizationLabel": "Organisation",
     "backToWorkspace": "Zurück zum Arbeitsbereich",
+    "settings": "Einstellungen",
     "signOut": "Abmelden",
     "runtimeTitle": "Ihr Neev-Arbeitsbereich wird vorbereitet",
     "runtimeDescription": "Team-Arbeitsbereichsrouten sind in diesem privaten Migrations-Build noch nicht aktiviert.",

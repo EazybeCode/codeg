@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "Paramètres de l’organisation",
     "title": "Organisation",
     "description": "Gérez l’apparence de votre organisation dans l’espace de travail.",
     "loading": "Chargement des paramètres de l’organisation",
@@ -151,7 +152,8 @@
     "uploadLabel": "Importer le logo de l’organisation",
     "remove": "Supprimer le logo",
     "save": "Enregistrer",
-    "saving": "Enregistrement…"
+    "saving": "Enregistrement…",
+    "saved": "Paramètres de l’organisation enregistrés."
   },
   "AppearanceSettings": {
     "sectionTitle": "Apparence du thème",
@@ -1722,6 +1724,7 @@
     "personLabel": "Connecté en tant que",
     "organizationLabel": "Organisation",
     "backToWorkspace": "Retour à l'espace de travail",
+    "settings": "Paramètres",
     "signOut": "Se déconnecter",
     "runtimeTitle": "Votre espace Neev est en préparation",
     "runtimeDescription": "Les routes de l'espace d'équipe ne sont pas encore activées dans cette version privée de migration.",

@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "Configurações da organização",
     "title": "Organização",
     "description": "Gerencie como sua organização aparece no espaço de trabalho.",
     "loading": "Carregando configurações da organização",
@@ -151,7 +152,8 @@
     "uploadLabel": "Enviar logotipo da organização",
     "remove": "Remover logotipo",
     "save": "Salvar alterações",
-    "saving": "Salvando…"
+    "saving": "Salvando…",
+    "saved": "Configurações da organização salvas."
   },
   "AppearanceSettings": {
     "sectionTitle": "Aparência do tema",
@@ -1722,6 +1724,7 @@
     "personLabel": "Conectado como",
     "organizationLabel": "Organização",
     "backToWorkspace": "Voltar ao espaço de trabalho",
+    "settings": "Configurações",
     "signOut": "Sair",
     "runtimeTitle": "Seu espaço de trabalho Neev está sendo preparado",
     "runtimeDescription": "As rotas do espaço de equipe ainda não estão ativadas nesta versão privada de migração.",

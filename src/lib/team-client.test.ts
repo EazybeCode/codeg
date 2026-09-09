@@ -4,9 +4,11 @@ import {
   TeamClientError,
   loadCapabilities,
   loadPendingChoices,
+  loadTeamOrganizationSettings,
   loadTeamSession,
   logoutTeamSession,
   selectOrganization,
+  updateTeamOrganizationSettings,
 } from "./team-client"
 
 const fetchMock = vi.fn<typeof fetch>()
@@ -280,5 +282,112 @@ describe("team client", () => {
       })
     )
     expect(json).not.toHaveBeenCalled()
+  })
+
+  it("loads the current organization with the private request lifetime", async () => {
+    const organization = {
+      id: 41,
+      login: "octo-org",
+      name: "Octo Operations",
+      avatarUrl: "data:image/png;base64,aW52ZW50ZWQ=",
+      canEdit: true,
+    }
+    fetchMock.mockResolvedValueOnce(jsonResponse(organization))
+
+    await expect(loadTeamOrganizationSettings()).resolves.toEqual(organization)
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/team/organization",
+      expect.objectContaining({
+        credentials: "same-origin",
+        cache: "no-store",
+      })
+    )
+  })
+
+  it.each([
+    null,
+    {},
+    { id: 0, login: "octo-org", name: "Octo", avatarUrl: null, canEdit: true },
+    { id: 41, login: 7, name: "Octo", avatarUrl: null, canEdit: true },
+    { id: 41, login: "octo-org", name: null, avatarUrl: null, canEdit: true },
+    { id: 41, login: "octo-org", name: "Octo", avatarUrl: 7, canEdit: true },
+    {
+      id: 41,
+      login: "octo-org",
+      name: "Octo",
+      avatarUrl: null,
+      canEdit: "yes",
+    },
+  ])("rejects malformed organization settings %#", async (payload) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(payload))
+    await expect(loadTeamOrganizationSettings()).rejects.toMatchObject({
+      kind: "invalid_response",
+    })
+  })
+
+  it("patches only branding with the current session CSRF", async () => {
+    const updated = {
+      id: 41,
+      login: "octo-org",
+      name: "Atlas Team",
+      avatarUrl: null,
+      canEdit: true,
+    }
+    fetchMock.mockResolvedValueOnce(jsonResponse(updated))
+
+    await expect(
+      updateTeamOrganizationSettings(
+        { name: "Atlas Team", logo: { action: "remove" } },
+        "checked-csrf"
+      )
+    ).resolves.toEqual(updated)
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/team/organization",
+      expect.objectContaining({
+        method: "PATCH",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          "Content-Type": "application/json",
+          "X-WorkOS-CSRF": "checked-csrf",
+        },
+        body: JSON.stringify({
+          name: "Atlas Team",
+          logo: { action: "remove" },
+        }),
+      })
+    )
+  })
+
+  it("rejects an empty mutation CSRF before issuing fetch", async () => {
+    await expect(
+      updateTeamOrganizationSettings(
+        { name: "Atlas Team", logo: { action: "keep" } },
+        ""
+      )
+    ).rejects.toMatchObject({ kind: "invalid_request" })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("keeps organization cancellation active while its response body stalls", async () => {
+    const external = new AbortController()
+    let requestSignal: AbortSignal | undefined
+    let bodyStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      bodyStarted = resolve
+    })
+    fetchMock.mockImplementationOnce((_input, init) => {
+      requestSignal = init?.signal ?? undefined
+      return Promise.resolve(stalledJsonResponse(requestSignal!, bodyStarted))
+    })
+
+    const pending = loadTeamOrganizationSettings(external.signal)
+    const rejection = pending.catch((error: unknown) => error)
+    await started
+    external.abort()
+    await Promise.resolve()
+
+    expect(requestSignal?.aborted).toBe(true)
+    await expect(rejection).resolves.toMatchObject({ kind: "aborted" })
   })
 })

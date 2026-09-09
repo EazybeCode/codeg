@@ -132,6 +132,7 @@
     }
   },
   "OrganizationSettings": {
+    "teamTitle": "組織設定",
     "title": "組織",
     "description": "ワークスペース内での組織の表示を管理します。",
     "loading": "組織設定を読み込んでいます",
@@ -151,7 +152,8 @@
     "uploadLabel": "組織ロゴをアップロード",
     "remove": "ロゴを削除",
     "save": "変更を保存",
-    "saving": "保存中…"
+    "saving": "保存中…",
+    "saved": "組織設定を保存しました。"
   },
   "AppearanceSettings": {
     "sectionTitle": "テーマ外観",
@@ -1722,6 +1724,7 @@
     "personLabel": "サインイン中",
     "organizationLabel": "組織",
     "backToWorkspace": "ワークスペースに戻る",
+    "settings": "設定",
     "signOut": "サインアウト",
     "runtimeTitle": "Neev ワークスペースを準備しています",
     "runtimeDescription": "この非公開移行ビルドでは、チームワークスペースのルートはまだ有効ではありません。",
