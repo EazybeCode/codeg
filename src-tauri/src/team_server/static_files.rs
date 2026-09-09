@@ -20,6 +20,22 @@ where
             get_service(ServeFile::new(root.join("settings.html"))),
         )
         .route_service(
+            "/login.txt",
+            get_service(ServeFile::new(root.join("login.txt"))),
+        )
+        .route_service(
+            "/onboarding.txt",
+            get_service(ServeFile::new(root.join("onboarding.txt"))),
+        )
+        .route_service(
+            "/workspace.txt",
+            get_service(ServeFile::new(root.join("workspace.txt"))),
+        )
+        .route_service(
+            "/settings.txt",
+            get_service(ServeFile::new(root.join("settings.txt"))),
+        )
+        .route_service(
             "/favicon.ico",
             get_service(ServeFile::new(root.join("favicon.ico"))),
         )

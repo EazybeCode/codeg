@@ -77,7 +77,7 @@ impl TestClock {
         Self(Mutex::new(now))
     }
 
-    pub(super) fn advance(&self, duration: Duration) {
+    pub(crate) fn advance(&self, duration: Duration) {
         let mut now = self.0.lock().expect("test clock lock");
         *now = now.checked_add_signed(duration).expect("test clock range");
     }

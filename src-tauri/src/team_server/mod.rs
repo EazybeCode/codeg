@@ -27,4 +27,10 @@ mod http_tests;
 mod http_onboarding_tests;
 
 #[cfg(test)]
+mod static_files_tests;
+
+#[cfg(test)]
 mod test_server;
+
+#[cfg(test)]
+mod browser_fixture;

@@ -88,7 +88,7 @@ impl GithubOAuthClient {
     }
 
     #[cfg(test)]
-    pub(super) fn new_for_test(
+    pub(crate) fn new_for_test(
         client_id: String,
         client_secret: String,
         callback_url: Url,
