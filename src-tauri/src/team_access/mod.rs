@@ -1,3 +1,4 @@
+pub(crate) mod agents;
 pub(crate) mod core;
 pub(crate) mod credentials;
 pub(crate) mod github;
