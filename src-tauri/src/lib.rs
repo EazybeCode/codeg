@@ -52,6 +52,20 @@ pub mod work_task;
 pub mod workspace_state;
 pub mod workspace_transfer;
 
+#[cfg(test)]
+mod team_server_visibility_tests {
+    use crate::team_server::{config::TeamConfig, database::initialize_database};
+
+    #[allow(dead_code)]
+    fn assert_team_startup_internal_signatures(
+        values: &std::collections::HashMap<String, String>,
+        config: &TeamConfig,
+    ) {
+        let _ = TeamConfig::from_values(values);
+        std::mem::drop(initialize_database(config));
+    }
+}
+
 /// Sweep stale ACP binary cache trash created by the rename-aside fallback in
 /// `acp::binary_cache::clear_agent_cache`. Safe to call any time; intended to
 /// be invoked once at startup from a detached OS thread. Does not block, does

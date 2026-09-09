@@ -1,5 +1,5 @@
-mod config;
-mod database;
+pub(crate) mod config;
+pub(crate) mod database;
 
 pub use config::{
     select_server_mode, select_server_mode_from_os, ServerMode, TeamConfigError,

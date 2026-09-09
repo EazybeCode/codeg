@@ -222,6 +222,31 @@ fn origin_rejects_public_http_aliases_and_non_origin_components() {
 }
 
 #[test]
+fn https_origins_reject_unspecified_ips_without_restricting_bind_wildcards() {
+    let static_root = tempfile::tempdir().unwrap();
+    let mut bind_wildcard = valid_https_values(static_root.path());
+    bind_wildcard.insert("CODEG_HOST".into(), "0.0.0.0".into());
+    assert!(TeamConfig::from_values(&bind_wildcard).is_ok());
+
+    for (origin, callback) in [
+        (
+            "https://0.0.0.0",
+            "https://0.0.0.0/auth/github/callback",
+        ),
+        ("https://[::]", "https://[::]/auth/github/callback"),
+    ] {
+        let mut values = valid_https_values(static_root.path());
+        values.insert("WORKOS_APP_ORIGIN".into(), origin.into());
+        values.insert("GITHUB_CALLBACK_URL".into(), callback.into());
+        assert_eq!(
+            TeamConfig::from_values(&values).err(),
+            Some(TeamConfigError::Origin),
+            "accepted unspecified HTTPS origin {origin}"
+        );
+    }
+}
+
+#[test]
 fn callback_must_be_the_exact_route_under_the_origin() {
     let static_root = tempfile::tempdir().unwrap();
     let mut values = valid_https_values(static_root.path());

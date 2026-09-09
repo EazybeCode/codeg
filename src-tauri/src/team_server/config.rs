@@ -242,13 +242,20 @@ fn optional_bool(
 }
 
 fn valid_origin(origin: &Url, allow_loopback: bool) -> bool {
+    let invalid_host = origin.host_str().is_some_and(|host| {
+        host.contains('*')
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<IpAddr>()
+                .is_ok_and(|address| address.is_unspecified())
+    });
     if !origin.has_host()
         || !origin.username().is_empty()
         || origin.password().is_some()
         || origin.query().is_some()
         || origin.fragment().is_some()
         || origin.path() != "/"
-        || origin.host_str().is_some_and(|host| host.contains('*'))
+        || invalid_host
     {
         return false;
     }
