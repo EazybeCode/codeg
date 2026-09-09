@@ -212,3 +212,169 @@ That command is not a Task 2 acceptance gate; both required `--lib` suites are g
 Concern for downstream work: these APIs only record verified metadata and cleanup custody. A later reviewed supervisor must perform and prove actual provider/file cleanup before calling `finish_cleanup(..., true)`. Startup recovery must be wired as an explicit single-active-server pre-admission step; it is intentionally not invoked by `AgentService::new` in this task.
 
 [org-memory: wiki/engineering/workos.md]
+
+---
+
+# Task 2 review fix round 1
+
+Date: 2026-09-10 IST
+
+Fix base: `ef0b9a4d`
+
+Source fix commit: `b9aa61d0`
+
+## Findings addressed
+
+1. Completion and failure now select an attempt by connection, attempt ID, and the exact initiating `session_id` before any state validation. A same-owner attempt created by another session is therefore indistinguishable from a missing attempt (`NotFound`) for both terminal paths. The shared Task 1 attempt/replay helper is unchanged.
+2. Guarded PostgreSQL start/quota races now hold the user row, release both contenders through a three-party barrier, and require the observer to see two sessions waiting on the generated `FROM \"users\"` query before releasing the blocker. The parallel cleanup-claim race uses the same two-waiter proof. Session-deletion and credential-generation races now also have reverse-order positive controls proving completion succeeds when it acquires the session or membership guard first.
+3. Guarded PostgreSQL fixtures are dropped only after a successful captured result. SQL, lock-observation, timeout, and propagated assertion errors now return an error naming the preserved database.
+
+No provider call, HTTP route, runtime enablement, filesystem cleanup, or cloud write was added.
+
+## Behavioral RED
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_access::agents::recovery_tests::completion_and_failure_hide_other_session_attempts_like_missing_attempts -- --exact --test-threads=1
+```
+
+Relevant output (exit 101):
+
+```text
+running 1 test
+test team_access::agents::recovery_tests::completion_and_failure_hide_other_session_attempts_like_missing_attempts ... FAILED
+
+assertion `left == right` failed
+  left: Err(Conflict)
+ right: Err(NotFound)
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3712 filtered out
+```
+
+The RED isolated the opaque-resource defect: an existing attempt owned by another session reached later state checks, while a nonexistent attempt returned `NotFound`.
+
+## Intermediate guarded run and preserved fixtures
+
+The first amended recovery run compiled and executed the complete matrix, but the raw blocker query used the incorrect singular table name `user`. The result was 18 passed and 3 failed, with PostgreSQL reporting `relation \"user\" does not exist`. This was a test identifier defect, not a production failure.
+
+The new failure-preservation behavior retained these exact databases for investigation, as required; they were not deleted:
+
+```text
+workos_team_auth_test_8d46a56232c74de4a9cc66bed020ee5d
+workos_team_auth_test_1ba39307f9a04ee38b35e39d69db96de
+workos_team_auth_test_b5fb19f65942442abe28f022dbe6be5f
+```
+
+Before the next expensive relink, all raw SQL relation names were checked against the repository entities/schema: `users`, `organization_membership`, `team_agent_connection`, and `team_session`. The lock observer deliberately kept the generated-query fragment `FROM \"users\"` and the blocker query was corrected to `SELECT id FROM users WHERE id = $1 FOR UPDATE`.
+
+The first full amended build was needed for the new tests and source fix. A second relink was needed after correcting the test-only raw SQL identifier; all final agents and HTTP results below then used that same final source and test binary.
+
+## Covering recovery matrix
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_access::agents::recovery_tests -- --include-ignored --test-threads=1
+```
+
+Relevant output (exit 0):
+
+```text
+running 21 tests
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 3694 filtered out; finished in 5.95s
+```
+
+This run covered the cross-session complete/fail controls, both two-waiter start modes, cross-provider quota, two-waiter cleanup claims, both reject-after-wait orderings, both completion-first positive controls, cancel/completion orderings, cleanup retry/takeover, stale cleanup fencing, expiry/startup recovery, and overflow rollback.
+
+## Final exact agents gate
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_access::agents -- --include-ignored --test-threads=1
+```
+
+Relevant output (exit 0):
+
+```text
+running 34 tests
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 3681 filtered out; finished in 7.66s
+```
+
+## Final exact HTTP/logout gate
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_server::http_tests -- --include-ignored --test-threads=1
+```
+
+Relevant output (exit 0):
+
+```text
+Finished `test` profile [unoptimized + debuginfo] target(s) in 1.48s
+running 9 tests
+test team_server::http_tests::local_logout_removes_only_the_cookie_selected_session_when_membership_is_missing ... ok
+test team_server::http_tests::login_ignores_client_authority_and_callback_requires_unique_browser_binding ... ok
+test team_server::http_tests::manifest_isolated_public_and_static_errors_do_not_leak_operator_routes ... ok
+test team_server::http_tests::onboarding_bootstrap_selection_session_and_local_logout_are_browser_bound ... ok
+test team_server::http_tests::postgres_guard_waiting_behind_logout_rejects_the_deleted_session ... ok
+test team_server::http_tests::postgres_logout_waits_behind_an_authorized_mutation_guard ... ok
+test team_server::http_tests::provider_denial_is_single_use_browser_bound_and_recovers_with_a_fresh_attempt ... ok
+test team_server::http_tests::unsupported_methods_and_unknown_protected_paths_are_not_found ... ok
+test team_server::http_tests::writes_require_exact_origin_csrf_json_and_canonical_github_id ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 3706 filtered out; finished in 2.34s
+```
+
+The HTTP command reused the final build; it did not relink after the agents gate.
+
+## Diff, scope, and self-review
+
+Command:
+
+```text
+git diff --check
+```
+
+Output: empty, exit 0.
+
+The source fix commit staged exactly:
+
+```text
+src-tauri/src/team_access/agents/recovery_tests.rs
+src-tauri/src/team_access/agents/store.rs
+```
+
+Self-review confirmed:
+
+- `completion_rows` performs the exact-session selection before state validation and keeps the existing row lock on PostgreSQL.
+- Complete and fail both share the corrected selection path, and tests compare another-session access with a missing-attempt control while confirming no connection mutation.
+- Each required start/quota race proves both contenders are simultaneously waiting on the held user row; sequential execution cannot satisfy the observer count.
+- Reverse-order controls observe completion holding `team_session` or `organization_membership` before the competing deletion/generation transaction proceeds, then assert the connection remains `connected`.
+- Failure databases are not passed to exact cleanup; successful fixtures retain the existing exact-name-checked teardown.
+- Task 1 replay semantics and the shared attempt helper remain unchanged.
+- Root-owned documentation, `Cargo.toml`, and `Cargo.lock` were excluded from the source commit.
+
+## Warnings and concerns
+
+Baseline maintenance warnings reproduced unchanged:
+
+```text
+unused import: `DbBackend`
+  src/db/migration/m20260817_000001_work_task_conversation_title.rs
+
+linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table
+
+the following packages contain code that will be rejected by a future version of Rust:
+proc-macro-error2 v2.0.1
+```
+
+No new warning was introduced. The three named databases above intentionally remain available because their failed runs must be preserved; cleanup requires an explicit later decision. The existing unrelated integration-target feature mismatch remains outside this Task 2 gate and scope.
+
+[org-memory: wiki/engineering/workos.md]
