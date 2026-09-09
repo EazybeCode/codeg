@@ -215,6 +215,214 @@ Concern for downstream work: these APIs only record verified metadata and cleanu
 
 ---
 
+# Task 2 final whole-plan review wave
+
+Date: 2026-09-10 IST
+
+Fix base: `3214d4bc`
+
+Source and release-evidence commit: `376af7df`
+
+## Findings addressed
+
+1. `complete` and `fail` now sample the service clock only after `completion_rows` has acquired the connection, attempt, and operation locks. Deadline validation therefore uses post-lock time for both the attempt and connect lease.
+2. The member completion connection query includes exact `org_id` and `user_id` predicates before PostgreSQL applies `FOR UPDATE`. The existing unscoped helper remains available only to already-authorized cleanup/recovery paths; shared cleanup and replay semantics are unchanged.
+3. The release summary now says explicitly that the synthetic browser characterization ran against Task 1 source `7d4a4fb9`; it no longer implies that browser evidence covered amended Task 2/logout source.
+
+No provider call, route, runtime enablement, filesystem cleanup, parser change, cloud write, or unrelated warning cleanup was added.
+
+## Behavioral RED: post-lock deadline
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_access::agents::recovery_tests::postgres_completion_samples_time_after_connection_locks -- --exact --include-ignored --test-threads=1
+```
+
+Relevant output (exit 101):
+
+```text
+Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 15s
+running 1 test
+test team_access::agents::recovery_tests::postgres_completion_samples_time_after_connection_locks ... FAILED
+
+called `Result::unwrap()` on an `Err` value: "Complete accepted a ticket that expired behind its connection lock: Ok(()); preserved PostgreSQL database workos_team_auth_test_1dc82adf8a66457f8a036d81fcd4a3e8"
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3716 filtered out; finished in 0.75s
+```
+
+The regression held the real `team_agent_connection` row, observed the completion query waiting, advanced only the service clock to the exact attempt/lease deadline, and then released the lock. The pre-fix method incorrectly returned `Ok(())` and mutated the rows. The failing fixture was preserved and was not deleted:
+
+```text
+workos_team_auth_test_1dc82adf8a66457f8a036d81fcd4a3e8
+```
+
+The final test exercises the same deadline boundary and unchanged-row assertions for both `complete` and `fail`, followed by a separate still-live control for each method that waits behind the same lock and advances the service clock only 9 minutes 59 seconds.
+
+## Behavioral RED: owner-scoped lock
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_access::agents::recovery_tests::postgres_completion_scopes_foreign_connection_before_locking -- --exact --include-ignored --test-threads=1
+```
+
+Relevant output (exit 101):
+
+```text
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
+running 1 test
+test team_access::agents::recovery_tests::postgres_completion_scopes_foreign_connection_before_locking ... FAILED
+
+called `Result::unwrap()` on an `Err` value: "foreign completion waited on another owner's connection row; eventual result Err(NotFound); preserved PostgreSQL database workos_team_auth_test_5b643603a79c4350b7125d39168e3699"
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3716 filtered out; finished in 1.75s
+```
+
+Alice's completion attempt used Bob's otherwise valid ticket while Bob's connection row was held. Before the fix it waited on Bob's row and returned the opaque `NotFound` only after release. The failing fixture was preserved and was not deleted:
+
+```text
+workos_team_auth_test_5b643603a79c4350b7125d39168e3699
+```
+
+## Focused GREEN
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features postgres_completion_s -- --include-ignored --test-threads=1
+```
+
+Relevant output (exit 0):
+
+```text
+Finished `test` profile [unoptimized + debuginfo] target(s) in 10m 56s
+running 2 tests
+test team_access::agents::recovery_tests::postgres_completion_samples_time_after_connection_locks ... ok
+test team_access::agents::recovery_tests::postgres_completion_scopes_foreign_connection_before_locking ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 3715 filtered out; finished in 1.74s
+```
+
+The relink was required by the production and test source changes. No source changed after this focused GREEN, so the covering and exact gates below used the same final source and binary.
+
+## Covering recovery matrix
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_access::agents::recovery_tests -- --include-ignored --test-threads=1
+```
+
+Relevant output (exit 0):
+
+```text
+running 23 tests
+test team_access::agents::recovery_tests::postgres_completion_samples_time_after_connection_locks ... ok
+test team_access::agents::recovery_tests::postgres_completion_scopes_foreign_connection_before_locking ... ok
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 3694 filtered out; finished in 8.44s
+```
+
+All raw SQL and observer fragments were checked against the real entity/schema names before the expensive builds: `users`, `organization_membership`, `team_agent_connection`, and `team_session`. Successful fixtures used exact-name cleanup; propagated SQL, lock-observation, timeout, and assertion failures retained the existing named-preservation path.
+
+## Final exact agents gate
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_access::agents -- --include-ignored --test-threads=1
+```
+
+Relevant output (exit 0):
+
+```text
+running 36 tests
+test team_access::agents::recovery_tests::postgres_completion_samples_time_after_connection_locks ... ok
+test team_access::agents::recovery_tests::postgres_completion_scopes_foreign_connection_before_locking ... ok
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 3681 filtered out; finished in 12.60s
+```
+
+## Final exact HTTP/logout gate
+
+Command:
+
+```text
+cd src-tauri
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --lib --no-default-features team_server::http_tests -- --include-ignored --test-threads=1
+```
+
+Relevant output (exit 0):
+
+```text
+running 9 tests
+test team_server::http_tests::local_logout_removes_only_the_cookie_selected_session_when_membership_is_missing ... ok
+test team_server::http_tests::login_ignores_client_authority_and_callback_requires_unique_browser_binding ... ok
+test team_server::http_tests::manifest_isolated_public_and_static_errors_do_not_leak_operator_routes ... ok
+test team_server::http_tests::onboarding_bootstrap_selection_session_and_local_logout_are_browser_bound ... ok
+test team_server::http_tests::postgres_guard_waiting_behind_logout_rejects_the_deleted_session ... ok
+test team_server::http_tests::postgres_logout_waits_behind_an_authorized_mutation_guard ... ok
+test team_server::http_tests::provider_denial_is_single_use_browser_bound_and_recovers_with_a_fresh_attempt ... ok
+test team_server::http_tests::unsupported_methods_and_unknown_protected_paths_are_not_found ... ok
+test team_server::http_tests::writes_require_exact_origin_csrf_json_and_canonical_github_id ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 3708 filtered out; finished in 1.68s
+```
+
+## Diff, scope, and self-review
+
+Command:
+
+```text
+git diff --check
+```
+
+Output: empty, exit 0.
+
+The source/evidence commit staged exactly:
+
+```text
+docs/operations/neev-release-plan.md
+src-tauri/src/team_access/agents/completion.rs
+src-tauri/src/team_access/agents/recovery_tests.rs
+src-tauri/src/team_access/agents/store.rs
+```
+
+Self-review confirmed:
+
+- Both terminal methods sample once, after every completion resource lock and immediately before the shared pending/deadline validation.
+- The clock regression uses an independent service clock, leaving the principal/session clock fixed and authorized throughout.
+- Exact-deadline calls return `Conflict` without changing connection, attempt, or connect-operation state; 9:59 calls succeed for both terminal methods and reach their expected final states.
+- Removing either post-lock clock move causes the corresponding complete/fail iteration to fail; moving the sample before `completion_rows` reproduces the RED.
+- The member connection query includes both owner fields in SQL before `FOR UPDATE`. Removing either predicate permits inappropriate foreign-row contention and defeats the owner regression.
+- Other-session attempts remain opaque through the earlier exact-session attempt query. The shared Task 1 attempt/replay helper and unscoped authorized cleanup/recovery helper are unchanged.
+- The only release-plan edit is the browser-source sentence, now explicitly naming `7d4a4fb9`.
+- `Cargo.toml`, `Cargo.lock`, module indexes, other documentation, runtime/provider boundaries, and cloud state are unchanged.
+
+## Warnings and concerns
+
+Baseline maintenance warnings reproduced unchanged:
+
+```text
+unused import: `DbBackend`
+  src/db/migration/m20260817_000001_work_task_conversation_title.rs
+
+linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table
+
+the following packages contain code that will be rejected by a future version of Rust:
+proc-macro-error2 v2.0.1
+```
+
+No new warning was introduced. The two named RED databases above intentionally remain available for investigation, in addition to the three already recorded in fix round 1. The exploratory integration-target error remains explained by its missing `test-utils` configuration and is outside the required `--lib` gates; no parser change was made. Optional future logout coverage remains deferred as directed.
+
+[org-memory: wiki/engineering/workos.md]
+
+---
+
 # Task 2 review fix round 1
 
 Date: 2026-09-10 IST
