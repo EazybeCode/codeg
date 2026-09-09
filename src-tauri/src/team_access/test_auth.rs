@@ -41,11 +41,11 @@ pub(super) const ALICE_A_MEMBERSHIP_ID: i32 = 401;
 pub(super) const ALICE_B_MEMBERSHIP_ID: i32 = 404;
 pub(crate) const ALICE_A_TOKEN: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-pub(super) const ALICE_B_TOKEN: &str =
+pub(crate) const ALICE_B_TOKEN: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-pub(super) const BOB_A_TOKEN: &str =
+pub(crate) const BOB_A_TOKEN: &str =
     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-pub(super) const CAROL_B_TOKEN: &str =
+pub(crate) const CAROL_B_TOKEN: &str =
     "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 pub(super) const POSTGRES_ADMIN_URL: &str = "postgres://air1@localhost:5432/postgres";
 pub(super) const POSTGRES_DATABASE_PREFIX: &str = "workos_team_auth_test_";
@@ -342,11 +342,11 @@ pub(super) struct Fixture {
 
 pub(crate) struct PrincipalFixture {
     pub(crate) db: DatabaseConnection,
-    pub(super) vault: Arc<SecretVault>,
+    pub(crate) vault: Arc<SecretVault>,
     pub(super) oauth: Arc<FakeOAuth>,
     pub(super) github: Arc<FakeGithub>,
-    pub(super) clock: Arc<TestClock>,
-    pub(super) credentials: Arc<CredentialService>,
+    pub(crate) clock: Arc<TestClock>,
+    pub(crate) credentials: Arc<CredentialService>,
 }
 
 impl PrincipalFixture {
@@ -360,7 +360,7 @@ impl PrincipalFixture {
     }
 }
 
-pub(super) fn cookie_headers(token: &str) -> axum::http::HeaderMap {
+pub(crate) fn cookie_headers(token: &str) -> axum::http::HeaderMap {
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::COOKIE,
@@ -391,7 +391,7 @@ pub(super) fn membership_evidence(
     }
 }
 
-pub(super) async fn principal_fixture(
+pub(crate) async fn principal_fixture(
     membership_replies: Vec<Result<GithubMembershipEvidence, GithubEvidenceError>>,
 ) -> PrincipalFixture {
     let db = crate::db::test_helpers::fresh_in_memory_db().await.conn;

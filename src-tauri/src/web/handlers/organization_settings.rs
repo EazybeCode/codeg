@@ -1,4 +1,4 @@
-use std::{io::Cursor, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
@@ -7,18 +7,15 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::{ImageFormat, ImageReader, Limits};
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 
 use super::workspace_catalog::BrowserMutationPolicy;
-use crate::{app_state::AppState, db::entities::org};
-
-const MAX_LOGO_BYTES: usize = 1024 * 1024;
-const MAX_LOGO_DIMENSION: u32 = 1024;
-const MAX_LOGO_ALLOCATION: u64 = 16 * 1024 * 1024;
-const MAX_ENCODED_LOGO_BYTES: usize = MAX_LOGO_BYTES.div_ceil(3) * 4;
+use crate::{
+    app_state::AppState,
+    db::entities::org,
+    organization_branding::{normalize_logo_data_uri, validate_display_name},
+};
 
 #[derive(Debug, Serialize)]
 pub struct OrganizationSettings {
@@ -107,53 +104,13 @@ pub(crate) async fn get_core(
 }
 
 fn validate_name(name: &str) -> Result<String, SettingsError> {
-    let name = name.trim();
-    let chars = name.chars().count();
-    if !(1..=80).contains(&chars) || name.chars().any(char::is_control) {
-        return Err(SettingsError::BadRequest("invalid display name".into()));
-    }
-    Ok(name.to_owned())
+    validate_display_name(name)
+        .map_err(|_| SettingsError::BadRequest("invalid display name".into()))
 }
 
 fn normalize_logo(data_uri: &str) -> Result<String, SettingsError> {
-    let (prefix, encoded) = data_uri
-        .split_once(',')
-        .ok_or_else(|| SettingsError::BadRequest("logo must be a data URI".into()))?;
-    let declared = match prefix {
-        "data:image/png;base64" => ImageFormat::Png,
-        "data:image/jpeg;base64" => ImageFormat::Jpeg,
-        "data:image/webp;base64" => ImageFormat::WebP,
-        _ => return Err(SettingsError::BadRequest("unsupported logo type".into())),
-    };
-    if encoded.len() > MAX_ENCODED_LOGO_BYTES + 4 {
-        return Err(SettingsError::BadRequest("logo is too large".into()));
-    }
-    let bytes = STANDARD
-        .decode(encoded)
-        .map_err(|_| SettingsError::BadRequest("malformed logo encoding".into()))?;
-    if bytes.len() > MAX_LOGO_BYTES {
-        return Err(SettingsError::BadRequest("logo is too large".into()));
-    }
-    if image::guess_format(&bytes).ok() != Some(declared) {
-        return Err(SettingsError::BadRequest(
-            "logo content does not match type".into(),
-        ));
-    }
-
-    let mut reader = ImageReader::with_format(Cursor::new(bytes), declared);
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_LOGO_DIMENSION);
-    limits.max_image_height = Some(MAX_LOGO_DIMENSION);
-    limits.max_alloc = Some(MAX_LOGO_ALLOCATION);
-    reader.limits(limits);
-    let image = reader
-        .decode()
-        .map_err(|_| SettingsError::BadRequest("invalid logo image".into()))?;
-    let mut png = Vec::new();
-    image
-        .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
-        .map_err(|_| SettingsError::BadRequest("could not normalize logo".into()))?;
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(png)))
+    normalize_logo_data_uri(data_uri)
+        .map_err(|_| SettingsError::BadRequest("invalid logo".into()))
 }
 
 pub(crate) async fn patch_core(

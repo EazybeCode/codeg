@@ -13,6 +13,7 @@ use crate::team_access::core::TeamAuthError;
 
 pub(super) mod oauth;
 pub(super) mod onboarding;
+pub(super) mod organization;
 pub(super) mod session;
 
 const REFERRER_POLICY: HeaderName = HeaderName::from_static("referrer-policy");

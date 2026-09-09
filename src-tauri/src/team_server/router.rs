@@ -36,6 +36,12 @@ pub(crate) fn build_router(state: Arc<TeamState>) -> Router {
             on(MethodFilter::GET, handlers::session::bootstrap)
                 .on(MethodFilter::HEAD, handlers::method_not_allowed),
         )
+        .route(
+            "/api/team/organization",
+            on(MethodFilter::GET, handlers::organization::get)
+                .on(MethodFilter::PATCH, handlers::organization::patch)
+                .on(MethodFilter::HEAD, handlers::method_not_allowed),
+        )
         .route("/api/team/logout", post(handlers::session::logout))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

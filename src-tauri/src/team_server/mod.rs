@@ -3,6 +3,7 @@ pub(crate) mod database;
 mod cookies;
 mod handlers;
 mod limiter;
+mod organization_settings;
 mod projection;
 mod router;
 mod startup;
@@ -25,6 +26,12 @@ mod http_tests;
 
 #[cfg(test)]
 mod http_onboarding_tests;
+
+#[cfg(test)]
+mod http_organization_tests;
+
+#[cfg(test)]
+mod organization_settings_tests;
 
 #[cfg(test)]
 mod static_files_tests;
