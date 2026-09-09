@@ -66,6 +66,8 @@ pub enum TeamConfigError {
 }
 pub fn select_server_mode(args: &[String], configured: Option<&str>)
     -> Result<ServerMode, TeamConfigError>;
+pub fn select_server_mode_from_os(args: &[String], configured: Option<&std::ffi::OsStr>)
+    -> Result<ServerMode, TeamConfigError>;
 pub(crate) struct TeamConfig {
     pub(crate) origin: reqwest::Url,
     pub(crate) callback: reqwest::Url,
@@ -88,6 +90,8 @@ pub(crate) async fn initialize_database(config: &TeamConfig)
 TeamConfig has no Debug or Serde. `select_server_mode` accepts `--team` or WORKOS_SERVER_MODE=team; missing mode with no team flag retains existing standalone operator compatibility. Explicit operator and `--team` conflict. Unknown/empty configured mode is fatal. When Team is selected, reject `--supervise` and `--credential-helper`; never invoke either legacy code path. The deployment must set both `--team` command and WORKOS_SERVER_MODE=team so removing one cannot silently enable operator mode.
 
 At the environment boundary distinguish an absent variable from a non-Unicode value: a configured but undecodable mode is Mode, not None/operator fallback. Required undecodable configuration values fail their static field group; do not log raw bytes. Tests can exercise pure value validation without mutating process environment alongside other tests.
+
+Task1 owns the pure public `select_server_mode_from_os` adapter and re-exports it from team_server for the separate standalone binary crate. It converts a present OsStr with `to_str().ok_or(TeamConfigError::Mode)` and otherwise delegates to `select_server_mode`; it does not read the environment. Include absent/valid/invalid-Unicode controls (Unix OsStrExt bytes where supported). Task2 reads WORKOS_SERVER_MODE once with `var_os` before legacy startup and passes `as_deref()` into this adapter. Do not drop undecodable values with `.ok()` or `.and_then(to_str)`.
 
 Read only these environment values once: WORKOS_SERVER_MODE (selection outside config), WORKOS_APP_ORIGIN, GITHUB_CALLBACK_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, WORKOS_ENC_KEY, DATABASE_URL, CODEG_HOST, CODEG_PORT, CODEG_STATIC_DIR, WORKOS_ALLOW_LOOPBACK_PREVIEW, WORKOS_ENABLE_CATALOG_RUNTIME. Reject any runtime value other than absent/false in this slice.
 
@@ -115,7 +119,9 @@ Postgres test uses the accepted auth test helper's exact disposable database gua
 
 ### Task 2: Serve the explicit authentication manifest with safe cookies
 
-**Files:** Create `src-tauri/src/team_server/state.rs`, `router.rs`, `cookies.rs`, `handlers.rs`, `startup.rs`, `http_tests.rs`, `test_server.rs`. Update `src-tauri/src/team_server/mod.rs` exports, `src-tauri/src/bin/codeg_server.rs` early mode dispatch, `src-tauri/src/web/router.rs` only to expose the safe operator capability response outside its bearer middleware, and `src-tauri/src/team_access/session.rs` plus `session_tests.rs` for the shared strict cookie parser. test_server is cfg(test)-only and reuses auth test fixture infrastructure; no duplicate database/clock/fake-source implementations.
+**Files:** Create `src-tauri/src/team_server/state.rs`, `router.rs`, `cookies.rs`, `handlers/mod.rs`, `handlers/oauth.rs`, `handlers/onboarding.rs`, `handlers/session.rs`, `projection.rs`, `limiter.rs`, `static_files.rs`, `startup.rs`, `http_tests.rs`, `test_server.rs`. Update `src-tauri/src/team_server/mod.rs` exports, `src-tauri/src/bin/codeg_server.rs` early mode dispatch, `src-tauri/src/web/router.rs` only to expose the safe operator capability response outside its bearer middleware, and `src-tauri/src/team_access/session.rs` plus `session_tests.rs` for the shared strict cookie parser. test_server is cfg(test)-only and reuses auth test fixture infrastructure; no duplicate database/clock/fake-source implementations.
+
+Keep responsibilities explicit: router.rs owns the sole method/path/policy manifest; handlers/mod.rs owns shared static response/error and extraction handling; handlers/oauth.rs owns login/callback; handlers/onboarding.rs owns pending choices/selection; handlers/session.rs owns session bootstrap and synchronized local logout. cookies.rs owns named-cookie and Origin/CSRF wire handling without duplicating the reviewed secret primitives. projection.rs owns safe JSON DTOs, decimal GitHub ID validation and scope fingerprint; limiter.rs owns the shared bounded auth budget; static_files.rs owns the exact static page/asset boundary. startup.rs constructs only team services/runtime and handles graceful shutdown. Module-internal helper signatures may stay private; no second router manifest or legacy command dispatcher is introduced. This decomposition keeps the route families independently readable without changing their contracts below.
 
 **Interfaces consumed:** Task1 TeamConfig/initialize_database and completed authentication services. **Produces:** `pub fn run_team_server() -> std::process::ExitCode`; crate-private `build_router(state: Arc<TeamState>) -> axum::Router`; TeamState contains db/config/vault/oauth/onboarding/credentials/principals/clock and a bounded authentication limiter, but never legacy AppState, global credentials or event broadcaster. Task3 consumes the JSON contracts below.
 
