@@ -4,6 +4,8 @@ Date: 2026-09-08
 
 Status: written specification approved by the user ("looks fine"). This document is a design, not a claim that these controls are implemented or deployed.
 
+Release scope update (2026-09-09, user request): defer the in-app organization switcher. Users still explicitly select an organization during sign-in; changing organizations in v1 requires logout and a new sign-in. Retain tenant-bound sessions, safe prior-cookie rotation, and cross-tab scope invalidation. References below to organization switching describe this security transition, not a requirement for a dedicated switcher control in v1.
+
 ## Approved contract
 
 - Organization is the company workspace, not a project. Preserve organization → projects/categories → arbitrarily nested folders/working directories → repository-backed chats.

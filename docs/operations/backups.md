@@ -26,6 +26,8 @@ Other providers require their own verified persistent profile/storage coverage b
 
 ## Missing disaster recovery boundary
 
+On 2026-09-09 the owner selected a Hetzner Storage Box for off-server backups. Destination creation and its hostname/username are still pending. A dedicated backup SSH key was generated on the app host at `/root/.ssh/workos-storagebox-ed25519`; only its public key was shared for adding during Storage Box creation. This is preparation, not a completed remote backup. The backup key must never enter an agent container or a Git repository. Use SSH support on port 23, keep unused protocols disabled, and initially limit reachability to the Hetzner network. See [Hetzner's creation guide](https://docs.hetzner.com/storage/storage-box/getting-started/creating-a-storage-box/).
+
 **All current data backups are on the same server as the live data. They do not protect against loss of that server.** No S3-compatible destination has been configured. An independently authorized destination, restricted credentials, encryption at rest, off-server retention and a download/restore rehearsal remain required.
 
 Use a dedicated encrypted bucket or an encrypted backup repository. Do not assume HTTPS transport means archive contents are encrypted at rest. Retain the stable application encryption key and required OAuth/deployment recovery secrets separately in an approved secret store; encrypted database credential columns are unusable without their key.
