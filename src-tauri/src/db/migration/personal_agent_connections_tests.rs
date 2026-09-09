@@ -282,6 +282,94 @@ async fn connection_constraints_enforce_ownership_bounds_shapes_and_atomic_updat
 }
 
 #[tokio::test]
+async fn length_constraints_accept_inclusive_minimum_and_maximum_values() {
+    let db = crate::db::test_helpers::fresh_in_memory_db().await;
+    seed_identity(&db.conn, 9651, 9661).await;
+
+    let minimum_connection_id = "c";
+    let minimum_attempt_id = "a";
+    let minimum_operation_id = "o";
+    let mut minimum_connection =
+        connection(minimum_connection_id, 9651, 9661, "claude", 1, "connected");
+    minimum_connection.account_label = Set(Some("a".into()));
+    minimum_connection.storage_handle = Set(Some("h".into()));
+    minimum_connection.insert(&db.conn).await.unwrap();
+
+    let mut minimum_attempt = attempt(minimum_attempt_id, minimum_connection_id, 1, "pending");
+    minimum_attempt.session_id = Set("s".into());
+    minimum_attempt.insert(&db.conn).await.unwrap();
+
+    let mut minimum_operation = operation(
+        minimum_operation_id,
+        minimum_connection_id,
+        "connect",
+        "r",
+        "leased",
+    );
+    minimum_operation.target_attempt_id = Set(Some(minimum_attempt_id.into()));
+    minimum_operation.lease_owner = Set(Some("w".into()));
+    minimum_operation.insert(&db.conn).await.unwrap();
+
+    let maximum_connection_id = "c".repeat(64);
+    let maximum_attempt_id = "a".repeat(64);
+    let maximum_operation_id = "o".repeat(64);
+    let mut maximum_connection = connection(
+        &maximum_connection_id,
+        9651,
+        9661,
+        "codex",
+        1,
+        "connected",
+    );
+    maximum_connection.account_label = Set(Some("l".repeat(160)));
+    maximum_connection.storage_handle = Set(Some("h".repeat(64)));
+    maximum_connection.insert(&db.conn).await.unwrap();
+
+    let mut maximum_attempt = attempt(&maximum_attempt_id, &maximum_connection_id, 1, "pending");
+    maximum_attempt.session_id = Set("s".repeat(128));
+    maximum_attempt.insert(&db.conn).await.unwrap();
+
+    let mut maximum_operation = operation(
+        &maximum_operation_id,
+        &maximum_connection_id,
+        "connect",
+        &"r".repeat(64),
+        "leased",
+    );
+    maximum_operation.target_attempt_id = Set(Some(maximum_attempt_id.clone()));
+    maximum_operation.lease_owner = Set(Some("w".repeat(64)));
+    maximum_operation.insert(&db.conn).await.unwrap();
+
+    for connection_id in [minimum_connection_id, maximum_connection_id.as_str()] {
+        assert!(
+            team_agent_connection::Entity::find_by_id(connection_id)
+                .one(&db.conn)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    for attempt_id in [minimum_attempt_id, maximum_attempt_id.as_str()] {
+        assert!(
+            team_agent_attempt::Entity::find_by_id(attempt_id)
+                .one(&db.conn)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    for operation_id in [minimum_operation_id, maximum_operation_id.as_str()] {
+        assert!(
+            team_agent_operation::Entity::find_by_id(operation_id)
+                .one(&db.conn)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+}
+
+#[tokio::test]
 async fn attempt_constraints_enforce_binding_lifecycle_and_generation_uniqueness() {
     let db = crate::db::test_helpers::fresh_in_memory_db().await;
     seed_identity(&db.conn, 9701, 9801).await;
@@ -426,7 +514,8 @@ async fn down_preflights_historical_operation_rows_before_any_drop() {
 #[tokio::test]
 async fn rerun_retains_rows_and_empty_rollback_is_reversible_and_complete() {
     let db = crate::db::test_helpers::fresh_in_memory_db().await;
-    seed_identity(&db.conn, 9941, 9951).await;
+    let expected_org = seed_org(&db.conn, 9941).await;
+    let expected_user = seed_user(&db.conn, 9951, expected_org.id).await;
     let c = connection(C1, 9941, 9951, "codex", 2, "connecting").insert(&db.conn).await.unwrap();
     let a = attempt(A1, C1, 2, "pending").insert(&db.conn).await.unwrap();
     let o = operation(O1, C1, "connect", "rerun", "queued").insert(&db.conn).await.unwrap();
@@ -437,19 +526,45 @@ async fn rerun_retains_rows_and_empty_rollback_is_reversible_and_complete() {
     team_agent_operation::Entity::delete_many().exec(&db.conn).await.unwrap();
     team_agent_attempt::Entity::delete_many().exec(&db.conn).await.unwrap();
     team_agent_connection::Entity::delete_many().exec(&db.conn).await.unwrap();
-    user::Entity::delete_many().exec(&db.conn).await.unwrap();
-    org::Entity::delete_many().exec(&db.conn).await.unwrap();
     let manager = SchemaManager::new(&db.conn);
     PersonalAgentMigration.down(&manager).await.unwrap();
     for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] { assert!(!manager.has_table(table).await.unwrap()); }
     assert!(manager.has_table("orgs").await.unwrap());
     assert!(manager.has_table("users").await.unwrap());
+    assert_eq!(
+        org::Entity::find_by_id(expected_org.id)
+            .one(&db.conn)
+            .await
+            .unwrap(),
+        Some(expected_org.clone())
+    );
+    assert_eq!(
+        user::Entity::find_by_id(expected_user.id)
+            .one(&db.conn)
+            .await
+            .unwrap(),
+        Some(expected_user.clone())
+    );
     PersonalAgentMigration.up(&manager).await.unwrap();
     personal_tables_exist(&db.conn).await;
     PersonalAgentMigration.down(&manager).await.unwrap();
     for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] { assert!(!manager.has_table(table).await.unwrap()); }
     assert!(manager.has_table("orgs").await.unwrap());
     assert!(manager.has_table("users").await.unwrap());
+    assert_eq!(
+        org::Entity::find_by_id(expected_org.id)
+            .one(&db.conn)
+            .await
+            .unwrap(),
+        Some(expected_org)
+    );
+    assert_eq!(
+        user::Entity::find_by_id(expected_user.id)
+            .one(&db.conn)
+            .await
+            .unwrap(),
+        Some(expected_user)
+    );
 }
 
 fn validate_database_target(expected: &str, candidate: &str) -> TestResult<()> {
