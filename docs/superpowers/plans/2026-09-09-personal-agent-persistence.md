@@ -174,7 +174,8 @@ These are storage constraints, NOT proof of authenticated service isolation.
 
 Test populated down refusal separately for each table, with all tables and parent
 rows preserved; data-bearing up rerun retains rows; empty down removes only new
-tables, up restores them, and complete empty rollback works. Name the target
+tables, up restores them, and complete empty rollback of these three tables works.
+Task2 below separately restores and verifies full-chain historical rollback. Name the target
 migration instead of assuming it is the last entry. In team_credentials_tests,
 invoke the named CredentialsMigration down for its own round-trip check and assert
 its tables are absent; do not let a new final migration silently change the test's
@@ -195,10 +196,86 @@ suites for this storage-only task. Report exact RED/GREEN commands and outputs,
 existing warnings, migrations tested, and no live rollout claim. Commit only the
 listed source/test files; exclude root-owned plan/spec/status documents.
 
+### Task 2: Fix the historical catalog rollback guard exposed by full-chain testing
+
+**Files:** modify `src-tauri/src/db/migration/m20260907_000001_workspace_catalog.rs`
+only its `down` row-presence guard; extend
+`src-tauri/src/db/migration/personal_agent_connections_tests.rs` with full-chain
+rollback and historical guard regressions. No other migration/runtime changes.
+
+**Interfaces:** consume registered Migrator and named catalog `Migration`, plus
+the guarded PostgreSQL fixture already in the test module. Keep its exact-name
+database cleanup protections. Preserve the existing catalog error message and
+drop order. This task is the explicit narrow exception to Task1's prohibition on
+changing older migrations; do not change the repository-name migration.
+
+- [ ] **Step 1: Reproduce full empty rollback before fixing the guard.** On a
+fresh SQLite connection, execute the complete registered up/down chain:
+
+```rust
+let db = Database::connect("sqlite::memory:").await.unwrap();
+Migrator::up(&db, None).await.unwrap();
+Migrator::down(&db, None).await.expect("complete empty migration chain is reversible");
+assert!(Migrator::get_applied_migrations(&db).await.unwrap().is_empty());
+```
+
+Run just this new test under the existing single-Cargo controls. Expected RED:
+`no such column: workspace_repository.verified_names` (driver rendering may omit
+the table qualifier). The later names migration already dropped that column;
+the earlier catalog guard incorrectly selects the current full entity model.
+This defect predates Task1 and was discovered by its broader rollback test.
+
+- [ ] **Step 2: Replace only the historical presence guard.** Do not project
+current entity models in this historical migration. Use fixed scalar SQL:
+
+```rust
+use sea_orm::{ConnectionTrait, Statement};
+let conn = manager.get_connection();
+for table in ["workspace_chat_draft", "workspace_node", "workspace_repository"] {
+    let present = conn.query_one(Statement::from_string(
+        conn.get_database_backend(), format!("SELECT id FROM {table} LIMIT 1"),
+    )).await?.is_some();
+    if present {
+        return Err(DbErr::Custom(
+            "workspace catalog migration cannot be reverted while catalog rows exist".into(),
+        ));
+    }
+}
+```
+
+The table names are this fixed compile-time list, not request/configuration input.
+All presence checks remain before any drop. Preserve down's three table drops
+unchanged. No up/backfill/schema/authorization behavior is changed.
+
+- [ ] **Step 3: Verify both directions and data safety.** Extend the SQLite
+full-chain test: after down, assert no applied migrations and no catalog/personal
+tables; run full up again and require usable empty personal tables. Add a focused
+historical fixture containing only an `id` column in each of the three catalog
+tables, plus an unrelated sentinel table/row. For each catalog table independently,
+insert one invented ID and require the original fixed refusal error with all
+tables/rows intact; the empty version drops only the three catalog tables and
+preserves the sentinel. These are actual SQL fixtures, not SQL-string snapshots.
+
+Extend the existing ignored PostgreSQL test after its scoped personal rollback:
+recreate the personal schema with named up, remove only that disposable fixture's
+invented parent rows, run full Migrator::down(None), assert applied migrations
+empty and named catalog/personal tables absent, then full up and usable empty
+personal tables. Keep the generated/connected database-name equality and hex-prefix
+guard before DROP; preserve any failure database. Do not duplicate the whole
+PostgreSQL setup/cleanup block or touch a configured application database.
+
+- [ ] **Step 4: Run and commit the focused fix.** Run all
+`personal_agent_connections_tests` with `--include-ignored --test-threads=1` plus
+`git diff --check`. Verify normal readable Rust formatting manually if rustfmt is
+unavailable; no toolchain/dependency install. Record RED/GREEN exact commands and
+results. Commit only the two listed files and release Cargo/index ownership.
+
 ## Plan self-review
 
 Storage/ownership/lifecycle metadata and historical migration safety map to Task1.
-Service authorization, provider protocols/custody, HTTP/UI and real deployment are
+Task2 fixes the single historical-model guard identified by the failing full-chain
+test and restores full empty-chain coverage. It shares only the regression test
+module with Task1; implementation is sequential. Service authorization, provider protocols/custody, HTTP/UI and real deployment are
 explicit subsequent plans in the coverage sequence, not claimed by this task.
 All entities, columns, state spellings, indexes and verification commands consumed
 by this task are specified above. No shared source is assigned to another worker.

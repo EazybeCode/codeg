@@ -118,10 +118,15 @@ The onboarding and chat UI should show connect/connecting/connected/reconnect
 states. Ownership is approved; the full runner specification, implementation,
 provider conditions and real-account acceptance remain separate requirements.
 
-The proposed first-stage [personal agent connection design](../superpowers/specs/2026-09-09-personal-agent-connections-design.md)
-is written for owner review. It covers isolated official-client login, status,
-disconnect and onboarding/settings, with explicit separation from later prompt-job
-execution. It is not yet an approved implementation plan or deployed functionality.
+The first-stage [personal agent connection design](../superpowers/specs/2026-09-09-personal-agent-connections-design.md)
+is now owner-approved for implementation. It covers isolated official-client login,
+status, disconnect and onboarding/settings, with explicit separation from later
+prompt-job execution. The metadata persistence task is in implementation under
+its [storage plan](../superpowers/plans/2026-09-09-personal-agent-persistence.md);
+the [lifecycle plan](../superpowers/plans/2026-09-09-personal-agent-lifecycle.md)
+defines the next transaction/recovery stage. Neither planning nor schema creation
+constitutes a working provider sign-in or deployed functionality. Provider terms,
+verified encrypted credential storage and real-account acceptance remain required.
 
 Read-only compatibility finding: the existing Claude registry installs
 `@agentclientprotocol/claude-agent-acp@0.74.0` (`acp/registry.rs`), and the adjacent
