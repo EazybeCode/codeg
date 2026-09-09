@@ -66,6 +66,7 @@ export function useTeamOrganizationSettings() {
   const requestGenerationRef = useRef(0)
   const readerRef = useRef<FileReader | null>(null)
   const readerGenerationRef = useRef(0)
+  const displayedScopeRef = useRef<string | null>(null)
   const authorityRef = useRef({
     status,
     scopeKey: authScopeKey,
@@ -76,6 +77,7 @@ export function useTeamOrganizationSettings() {
     scopeKey: authScopeKey,
     organizationId: session?.organization.id ?? null,
   }
+  if (status !== "authenticated") displayedScopeRef.current = null
 
   const updateState = useCallback(
     (next: SettingsState | ((current: SettingsState) => SettingsState)) => {
@@ -136,6 +138,7 @@ export function useTeamOrganizationSettings() {
     const sameScope = stateRef.current.scopeKey === scopeKey
     cancelRequest()
     cancelReader()
+    displayedScopeRef.current = null
     const controller = new AbortController()
     const generation = requestGenerationRef.current
     requestRef.current = controller
@@ -147,7 +150,6 @@ export function useTeamOrganizationSettings() {
             saving: false,
             logoReading: false,
             error: null,
-            saved: false,
           }
         : {
             ...emptyState,
@@ -168,6 +170,7 @@ export function useTeamOrganizationSettings() {
         if (organization.id !== organizationId) {
           throw new TeamClientError("invalid_response")
         }
+        displayedScopeRef.current = scopeKey
         updateState((current) => {
           const retainedName =
             current.organization !== null &&
@@ -195,15 +198,16 @@ export function useTeamOrganizationSettings() {
           return
         }
         if (error instanceof TeamClientError && error.kind === "unauthorized") {
+          displayedScopeRef.current = null
           updateState(emptyState)
           void refresh()
           return
         }
+        displayedScopeRef.current = scopeKey
         updateState((current) => ({
           ...current,
           loading: false,
           error: "load",
-          saved: false,
         }))
       })
       .finally(() => {
@@ -225,6 +229,7 @@ export function useTeamOrganizationSettings() {
     () => () => {
       cancelRequest()
       cancelReader()
+      displayedScopeRef.current = null
       stateRef.current = emptyState
     },
     [cancelReader, cancelRequest]
@@ -404,6 +409,7 @@ export function useTeamOrganizationSettings() {
         return
       }
       if (error instanceof TeamClientError && error.kind === "unauthorized") {
+        displayedScopeRef.current = null
         updateState(emptyState)
         void refresh()
       } else {
@@ -426,32 +432,44 @@ export function useTeamOrganizationSettings() {
     updateState,
   ])
 
-  const normalizedName = state.name.trim()
+  const displaysCurrentScope =
+    status === "authenticated" &&
+    authScopeKey !== null &&
+    displayedScopeRef.current === authScopeKey &&
+    state.scopeKey === authScopeKey &&
+    (state.organization === null ||
+      state.organization.id === session?.organization.id)
+  const visibleState = displaysCurrentScope
+    ? state
+    : { ...emptyState, loading: status === "authenticated" }
+  const normalizedName = visibleState.name.trim()
   const dirty =
-    state.organization !== null &&
-    (normalizedName !== state.organization.name || state.logo.action !== "keep")
+    visibleState.organization !== null &&
+    (normalizedName !== visibleState.organization.name ||
+      visibleState.logo.action !== "keep")
   const preview = useMemo(() => {
-    if (state.logo.action === "remove") return null
-    if (state.logo.action === "upload") return safeLogo(state.logo.data)
-    return safeLogo(state.organization?.avatarUrl ?? null)
-  }, [state.logo, state.organization?.avatarUrl])
+    if (visibleState.logo.action === "remove") return null
+    if (visibleState.logo.action === "upload")
+      return safeLogo(visibleState.logo.data)
+    return safeLogo(visibleState.organization?.avatarUrl ?? null)
+  }, [visibleState.logo, visibleState.organization?.avatarUrl])
   const hasLogo =
-    state.logo.action === "upload" ||
-    (state.logo.action === "keep" &&
-      state.organization !== null &&
-      state.organization.avatarUrl !== null)
+    visibleState.logo.action === "upload" ||
+    (visibleState.logo.action === "keep" &&
+      visibleState.organization !== null &&
+      visibleState.organization.avatarUrl !== null)
 
   return {
-    ...state,
+    ...visibleState,
     preview,
     hasLogo,
     canSave:
-      !!state.organization?.canEdit &&
+      !!visibleState.organization?.canEdit &&
       dirty &&
-      validName(state.name) &&
-      !state.loading &&
-      !state.saving &&
-      !state.logoReading,
+      validName(visibleState.name) &&
+      !visibleState.loading &&
+      !visibleState.saving &&
+      !visibleState.logoReading,
     setName,
     uploadLogo,
     removeLogo,

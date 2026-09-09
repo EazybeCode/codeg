@@ -116,7 +116,7 @@ describe("useTeamOrganizationSettings", () => {
       scopeKey: null,
     }
     rerender()
-    expect(result.current.name).toBe("Unsent Atlas")
+    expect(result.current.name).toBe("")
 
     client.loadTeamOrganizationSettings.mockRejectedValueOnce(
       new TeamClientError("unavailable", 503)
@@ -299,5 +299,50 @@ describe("useTeamOrganizationSettings", () => {
     expect(result.current.name).toBe("")
     expect(auth.value.refresh).toHaveBeenCalledOnce()
     expect(client.updateTeamOrganizationSettings).toHaveBeenCalledOnce()
+  })
+
+  it("retains scoped save success through a real refresh transition", async () => {
+    const savedOrganization = { ...organizationA, name: "Saved Atlas" }
+    client.loadTeamOrganizationSettings
+      .mockResolvedValueOnce(organizationA)
+      .mockResolvedValueOnce(savedOrganization)
+    client.updateTeamOrganizationSettings.mockResolvedValueOnce(
+      savedOrganization
+    )
+    const control = { rerender: () => {} }
+    const refresh = vi.fn(async () => {
+      auth.value = {
+        ...auth.value,
+        status: "loading",
+        session: null,
+        scopeKey: null,
+        refresh,
+      }
+      control.rerender()
+    })
+    auth.value = { ...auth.value, refresh }
+    const rendered = renderHook(() => useTeamOrganizationSettings())
+    control.rerender = rendered.rerender
+    await waitFor(() =>
+      expect(rendered.result.current.organization).toEqual(organizationA)
+    )
+    act(() => rendered.result.current.setName("Saved Atlas"))
+
+    await act(async () => rendered.result.current.save())
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(auth.value.status).toBe("loading")
+
+    auth.value = {
+      ...auth.value,
+      status: "authenticated",
+      session: sessionA,
+      scopeKey: "fingerprint-a:21:11",
+      refresh,
+    }
+    control.rerender()
+    await waitFor(() => expect(rendered.result.current.loading).toBe(false))
+
+    expect(rendered.result.current.organization).toEqual(savedOrganization)
+    expect(rendered.result.current.saved).toBe(true)
   })
 })

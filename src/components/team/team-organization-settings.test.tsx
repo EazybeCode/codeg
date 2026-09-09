@@ -1,3 +1,4 @@
+import { useLayoutEffect } from "react"
 import { act, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
@@ -46,6 +47,18 @@ const session = {
   role: "admin" as const,
   scope: "checked-session",
   csrf: "checked-csrf",
+}
+const otherSession = {
+  user: { id: 12, login: "person-b", name: "Person B", avatarUrl: null },
+  organization: {
+    id: 22,
+    login: "other-github",
+    name: "Other Organization",
+    avatarUrl: null,
+  },
+  role: "admin" as const,
+  scope: "other-session",
+  csrf: "other-csrf",
 }
 
 function showPage() {
@@ -226,6 +239,52 @@ describe("TeamOrganizationSettingsPage", () => {
     expect(screen.queryByDisplayValue("Hidden draft")).toBeNull()
     await act(async () => reload.resolve(organization))
     expect(await screen.findByDisplayValue("Hidden draft")).toBeVisible()
+  })
+
+  it("never commits a retained draft under a newly authenticated scope", async () => {
+    const committedDrafts: Array<string | null> = []
+    function CommitObserver({ children }: { children: React.ReactNode }) {
+      useLayoutEffect(() => {
+        committedDrafts.push(
+          document.querySelector<HTMLInputElement>(
+            "#team-organization-display-name"
+          )?.value ?? null
+        )
+      })
+      return children
+    }
+    const user = userEvent.setup()
+    const view = render(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <CommitObserver>
+          <TeamOrganizationSettingsPage />
+        </CommitObserver>
+      </NextIntlClientProvider>
+    )
+    const name = await screen.findByLabelText(/display name/i)
+    await user.clear(name)
+    await user.type(name, "Private account A draft")
+    committedDrafts.length = 0
+
+    client.loadTeamOrganizationSettings.mockReturnValueOnce(
+      new Promise(() => {})
+    )
+    auth.value = {
+      ...auth.value,
+      status: "authenticated",
+      session: otherSession,
+      scopeKey: "other-session:22:12",
+    }
+    view.rerender(
+      <NextIntlClientProvider locale="en" messages={messages}>
+        <CommitObserver>
+          <TeamOrganizationSettingsPage />
+        </CommitObserver>
+      </NextIntlClientProvider>
+    )
+
+    expect(committedDrafts[0]).toBeNull()
+    expect(screen.queryByDisplayValue("Private account A draft")).toBeNull()
   })
 
   it("does not render untrusted remote or SVG logo URLs and remains operable at mobile width", async () => {
