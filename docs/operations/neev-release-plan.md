@@ -2,7 +2,7 @@
 
 Date: 2026-09-09
 
-Status: implementation in progress; not approved for user rollout. The owner has selected Neev and neev.so. Domain ownership/DNS provider confirmation is outstanding. This plan is a delivery sequence, not evidence that the listed features already work.
+Status: implementation in progress; not approved for user rollout. The owner has selected Neev and neev.so and updated Namecheap DNS. Both authoritative nameservers now return the intended apex A and www CNAME; HTTPS and application cutover remain pending. This plan is a delivery sequence, not evidence that the listed features already work.
 
 ## Release outcome
 
@@ -13,8 +13,8 @@ Visible product branding becomes Neev. Keep existing database/storage keys, API 
 ## Current checkpoint
 
 - Accepted authentication library work: `76b28dfe`; accepted team startup configuration and isolated database initialization: `ae82ba38`.
-- The last accepted configuration checkpoint was verified with 171 targeted Rust tests, including disposable PostgreSQL tests. It is not an end-to-end product acceptance result.
-- The isolated team HTTP route task is active. Browser onboarding and the following workspace-access conversion are not accepted yet.
+- The isolated team HTTP route task is accepted at `4c290570` after its scoped fix re-review. Fresh controller verification passed 188 targeted Rust tests (35 team-server, 138 team-access, 11 credential-migration and 4 legacy OAuth-state controls), including disposable PostgreSQL tests; the standalone binary target also passed `cargo check`. These are not an end-to-end product acceptance result or a full-project suite.
+- Browser onboarding and the following workspace-access conversion are not accepted yet.
 - The current hosted pilot is private. Runtime execution is disabled; installed gVisor infrastructure has not yet been connected to application jobs.
 - Encrypted off-server backups and one isolated restore have been verified. The September 9 recurring backup succeeded. Monitoring and independent recovery-secret custody still need completion.
 - September 9 read-only host check: approximately 6.7 GiB available RAM, 50 GiB free disk, and no active application CPU load at sampling. This supports considering isolated staging on the existing host; it is not a concurrency/load-test result or a guarantee of agent-job capacity. No staging resources were created by this check.
@@ -63,9 +63,15 @@ Rollback must retain private/admission restrictions and preserve written tenant 
 
 ### neev.so cutover configuration
 
-Prepared September 9; not applied. A read-only lookup through the workspace's configured resolver returned NXDOMAIN for neev.so, with no A/AAAA/NS results. This is a DNS observation, not proof of purchase availability or ownership. After the owner confirms domain ownership, point the apex A record to `5.78.239.36`. No wildcard or per-organization domain is needed for this pilot. Coolify documents A records pointing at the application host, not its hosted control plane. [Coolify DNS configuration](https://coolify.io/docs/knowledge-base/dns-configuration).
+Application cutover prepared September 9; not applied. DNS history: an initial lookup returned NXDOMAIN. After the owner opened Namecheap and authorized setup, a fresh read-only lookup returned `dns1.registrar-servers.com` / `dns2.registrar-servers.com`, apex A `162.255.119.6`, and `www` CNAME `parkingpage.namecheap.com`. Existing MX records point to Namecheap forwarding hosts. These observations superseded the earlier DNS result; the owner's subsequent update is verified below.
 
-Configure the application route for `https://neev.so`, targeting the candidate's internal port 3080. Coolify requests and renews certificates for HTTPS domains, but can serve a self-signed fallback on issuance failure: verify a publicly trusted certificate before any real sign-in. Keep PostgreSQL and the application container port off the public host interface; only the intended reverse-proxy route is exposed. [Coolify domains and HTTPS](https://coolify.io/docs/knowledge-base/domains).
+Set the apex A record to `5.78.239.36` and `www` CNAME to `neev.so`, TTL Automatic, replacing only default parking/redirect records for those exact hosts. Preserve MX/TXT/email and unrelated records; do not change nameservers. The session has no connected Chrome-control tool, so these steps were supplied to the owner and no registrar write was performed. Verify the saved values and DNS resolution afterward. [Namecheap host-record setup](https://www.namecheap.com/support/knowledgebase/article/9837/46/how-to-connect-a-domain-to-a-server-or-hosting/).
+
+Owner subsequently reported the DNS update complete. Fresh queries to both `dns1.registrar-servers.com` and `dns2.registrar-servers.com` returned apex A `5.78.239.36` and `www` CNAME `neev.so`; the previously observed five forwarding MX records are unchanged. Authoritative DNS is verified, not application availability or worldwide cache convergence. No HTTPS/proxy/GitHub callback change was performed at this checkpoint.
+
+No wildcard or per-organization domain is needed for this pilot. Coolify documents A records pointing at the application host, not its hosted control plane. [Coolify DNS configuration](https://coolify.io/docs/knowledge-base/dns-configuration).
+
+Configure the application route for `https://neev.so`, targeting the candidate's internal port 3080. Configure `www` only as a separately TLS-verified redirect to that canonical origin, not an alternate authenticated application origin. Coolify requests and renews certificates for HTTPS domains, but can serve a self-signed fallback on issuance failure: verify a publicly trusted certificate before any real sign-in. Keep PostgreSQL and the application container port off the public host interface; only the intended reverse-proxy route is exposed. [Coolify domains and HTTPS](https://coolify.io/docs/knowledge-base/domains).
 
 | Setting | Candidate value / check |
 | --- | --- |
@@ -82,9 +88,19 @@ In the existing EazyWorkOS GitHub App, add the exact HTTPS callback above and up
 
 Before opening admission, verify the exact team capability response, trusted TLS, `/` redirect to `/workspace`, Secure/HttpOnly cookies, denied legacy routes, actual GitHub return flow, and restricted org admission from a browser outside the host. These are acceptance checks, not completed results. Also validate graceful container termination/restart with the eventual durable runner; the current auth startup implements Ctrl-C shutdown only.
 
+## Personal agent connection acceptance
+
+Provider authentication and hosted execution are separate release gates. Never reuse the host operator's login across users or organizations. Confirm the supported integration and commercial conditions before presenting a connection method as available; successful local CLI login alone does not establish that a public hosted service is permitted or isolated.
+
+OpenAI documents API-key authentication for programmatic CLI/CI use and a headless device-authentication flow where enabled. Cached CLI credentials are sensitive; they must not enter browser storage, logs, repository files or another user's job. Its security guidance warns against exposing Codex execution in untrusted/public environments. The runner design must explicitly address that deployment boundary before enabling it, rather than treating device-flow support as SaaS approval. [Codex authentication and security](https://learn.chatgpt.com/docs/auth).
+
+Anthropic distinguishes hosting its unmodified Claude Code binary, with each user authenticating through the official flow and paying directly, from offering Claude.ai login or intermediating subscription credentials in a third-party application. Hosted Claude Code is subject to its stated commercial conditions; SDK/product integrations need their supported API/provider authentication. Do not collect Claude.ai session tokens, resell usage, alter built-in authentication, or imply provider endorsement. Resolve any ambiguity with the provider before launch; no terms have been accepted on the owner's behalf. [Claude Code legal and compliance](https://code.claude.com/docs/en/legal-and-compliance).
+
+Keep unsupported or unverified agents visibly unavailable with an explanation, not a working-looking Connect button. The later reviewed runner/onboarding design must specify credential custody, disconnect/revocation, per-job scope, supported methods and real-user acceptance for each enabled agent.
+
 ## Owner inputs before opening access
 
-- Domain purchase and DNS-provider access/details. No domain purchase has been performed by the agent.
+- Namecheap DNS is owner-configured and authoritative records are verified. Candidate routing and trusted HTTPS still require acceptance; no domain purchase or registrar change was performed by the agent.
 - GitHub organizations to admit to the pilot and a second participant for real consent/collaboration acceptance.
 - Explicit verified founder identities for the private feedback inbox; GitHub org-admin status is not founder authority.
 - Written private-feedback design approval if not yet supplied; existing approval establishes private-to-submitter visibility but not a configured founder role.
