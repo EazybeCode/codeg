@@ -13,6 +13,9 @@ import { OverlayScrollbarsInit } from "@/components/overlay-scrollbars-init"
 import { ClipboardFallbackInit } from "@/components/clipboard-fallback-init"
 import { WebConnectionGuard } from "@/components/connection/web-connection-guard"
 import { WindowResizeGrips } from "@/components/layout/window-resize-grips"
+import { TeamModeBoundary } from "@/components/team/team-mode-boundary"
+import { TeamLocalProviders } from "@/components/team/team-local-providers"
+import { TeamAuthProvider } from "@/components/team/team-auth-provider"
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -21,8 +24,8 @@ export const viewport: Viewport = {
 }
 
 export const metadata: Metadata = {
-  title: "Eazybe WorkOS",
-  description: "Eazybe WorkOS — shared AI coding workspace",
+  title: "Neev",
+  description: "Neev — a shared AI coding workspace",
   icons: {
     icon: [
       { url: "/icon-32x32.png", sizes: "32x32", type: "image/png" },
@@ -58,25 +61,37 @@ export default async function RootLayout({
           locale={initialLocale}
           messages={initialMessages}
         >
-          <AppI18nProvider
-            initialLocale={initialLocale}
-            initialMessages={initialMessages}
-          >
-            <ThemeProvider
-              attribute="class"
-              defaultTheme="dark"
-              enableSystem
-              disableTransitionOnChange
-            >
-              <AppearanceProvider>
-                <OverlayScrollbarsInit />
-                <ClipboardFallbackInit />
-                <WebConnectionGuard />
-                <WindowResizeGrips />
-                {children}
-              </AppearanceProvider>
-            </ThemeProvider>
-          </AppI18nProvider>
+          <TeamModeBoundary
+            operator={
+              <AppI18nProvider
+                initialLocale={initialLocale}
+                initialMessages={initialMessages}
+              >
+                <ThemeProvider
+                  attribute="class"
+                  defaultTheme="dark"
+                  enableSystem
+                  disableTransitionOnChange
+                >
+                  <AppearanceProvider>
+                    <OverlayScrollbarsInit />
+                    <ClipboardFallbackInit />
+                    <WebConnectionGuard />
+                    <WindowResizeGrips />
+                    {children}
+                  </AppearanceProvider>
+                </ThemeProvider>
+              </AppI18nProvider>
+            }
+            team={
+              <TeamLocalProviders
+                initialLocale={initialLocale}
+                initialMessages={initialMessages}
+              >
+                <TeamAuthProvider>{children}</TeamAuthProvider>
+              </TeamLocalProviders>
+            }
+          />
         </NextIntlClientProvider>
       </body>
     </html>

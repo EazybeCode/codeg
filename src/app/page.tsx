@@ -3,8 +3,9 @@
 import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { isDesktop } from "@/lib/platform"
+import { useTeamMode } from "@/components/team/team-mode-boundary"
 
-export default function Page() {
+function OperatorEntry() {
   const router = useRouter()
   useEffect(() => {
     if (isDesktop()) {
@@ -50,4 +51,18 @@ export default function Page() {
       })
   }, [router])
   return null
+}
+
+function TeamEntry() {
+  const router = useRouter()
+  useEffect(() => {
+    router.replace("/workspace")
+  }, [router])
+  return null
+}
+
+export default function Page() {
+  const mode = useTeamMode()
+  if (mode === "unknown") return null
+  return mode === "team" ? <TeamEntry /> : <OperatorEntry />
 }

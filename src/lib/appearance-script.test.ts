@@ -3,21 +3,17 @@ import {
   APPEARANCE_INIT_SCRIPT,
   STORAGE_KEY_CUSTOM_CSS,
   STORAGE_KEY_CUSTOM_CSS_ENABLED,
-  STORAGE_KEY_CUSTOM_STYLE_SUSPENDED,
   STORAGE_KEY_CUSTOM_THEME,
-  STORAGE_KEY_CUSTOM_THEME_ENABLED,
   STORAGE_KEY_THEME_COLOR,
+  STORAGE_KEY_UI_FONT,
+  STORAGE_KEY_UI_FONT_STACK,
+  STORAGE_KEY_WORKSPACE_BG_ENABLED,
+  STORAGE_KEY_WORKSPACE_BG_PANEL_OPACITY,
   STORAGE_KEY_ZOOM_LEVEL,
 } from "./appearance-script"
 import { CUSTOM_CSS_ELEMENT_ID } from "./custom-style"
 
-/**
- * 这段脚本跑在第一帧渲染之前、任何模块加载之前，是整个外观体系里最脆弱的一环：
- * 它一抛错，主题色/缩放/暗色类/自定义样式会一起丢，用户看到的是「设置全部失效」。
- * 所以这里直接把它当字符串 eval 进 jsdom 跑，而不是测某个抽出来的函数。
- */
 function runInitScript() {
-  // 间接 eval：在全局作用域里跑，最贴近浏览器里 <script> 标签的执行环境。
   ;(0, eval)(APPEARANCE_INIT_SCRIPT)
 }
 
@@ -33,194 +29,87 @@ function resetDocument() {
 beforeEach(() => {
   localStorage.clear()
   resetDocument()
-  window.history.replaceState({}, "", "/")
-  // jsdom 不实现 matchMedia，而脚本用它探测系统暗色偏好。
   vi.stubGlobal(
     "matchMedia",
     vi.fn().mockReturnValue({ matches: false }) as unknown as typeof matchMedia
   )
 })
 
-describe("APPEARANCE_INIT_SCRIPT — custom theme tokens", () => {
-  it("applies the light set as inline custom properties on <html>", () => {
-    localStorage.setItem("theme", "light")
-    localStorage.setItem(
-      STORAGE_KEY_CUSTOM_THEME,
-      JSON.stringify({
-        light: { primary: "#111111", radius: "0.25rem" },
-        dark: { primary: "#eeeeee" },
-      })
-    )
-
-    runInitScript()
-
-    const style = document.documentElement.style
-    expect(style.getPropertyValue("--primary")).toBe("#111111")
-    expect(style.getPropertyValue("--radius")).toBe("0.25rem")
-  })
-
-  it("picks the dark set when the resolved mode is dark", () => {
+describe("APPEARANCE_INIT_SCRIPT safe pre-hydration subset", () => {
+  it("applies allowlisted theme color, zoom and dark mode", () => {
+    localStorage.setItem(STORAGE_KEY_THEME_COLOR, "blue")
+    localStorage.setItem(STORAGE_KEY_ZOOM_LEVEL, "125")
     localStorage.setItem("theme", "dark")
-    localStorage.setItem(
-      STORAGE_KEY_CUSTOM_THEME,
-      JSON.stringify({
-        light: { primary: "#111111" },
-        dark: { primary: "#eeeeee" },
-      })
-    )
 
     runInitScript()
 
-    expect(document.documentElement.classList.contains("dark")).toBe(true)
+    expect(document.documentElement).toHaveAttribute("data-theme", "blue")
+    expect(document.documentElement.style.fontSize).toBe("20px")
+    expect(document.documentElement).toHaveClass("dark")
+    expect(document.documentElement.style.colorScheme).toBe("dark")
+  })
+
+  it("falls back when color and zoom storage is malformed", () => {
+    localStorage.setItem(STORAGE_KEY_THEME_COLOR, "url(https://remote.invalid)")
+    localStorage.setItem(STORAGE_KEY_ZOOM_LEVEL, "999")
+
+    runInitScript()
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "neutral")
+    expect(document.documentElement.style.fontSize).toBe("16px")
+  })
+
+  it.each(["unknown browser mode", "team browser mode"])(
+    "does not inject remote stored CSS in %s",
+    () => {
+      localStorage.setItem(STORAGE_KEY_CUSTOM_CSS_ENABLED, "1")
+      localStorage.setItem(
+        STORAGE_KEY_CUSTOM_CSS,
+        '.foo { background-image: url("https://remote.invalid/pixel") }'
+      )
+
+      runInitScript()
+
+      expect(document.getElementById(CUSTOM_CSS_ELEMENT_ID)).toBeNull()
+      expect(document.documentElement.innerHTML).not.toContain("remote.invalid")
+    }
+  )
+
+  it("does not apply stored custom tokens, fonts or workspace background", () => {
+    localStorage.setItem(
+      STORAGE_KEY_CUSTOM_THEME,
+      JSON.stringify({ light: { primary: "#111111" }, dark: {} })
+    )
+    localStorage.setItem(STORAGE_KEY_UI_FONT, "custom")
+    localStorage.setItem(
+      STORAGE_KEY_UI_FONT_STACK,
+      'url("https://remote.invalid/font")'
+    )
+    localStorage.setItem(STORAGE_KEY_WORKSPACE_BG_ENABLED, "1")
+    localStorage.setItem(STORAGE_KEY_WORKSPACE_BG_PANEL_OPACITY, "0.5")
+
+    runInitScript()
+
     expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
-      "#eeeeee"
+      ""
     )
-  })
-
-  it("drops values that fail the whitelist but keeps the good ones", () => {
-    localStorage.setItem("theme", "light")
-    localStorage.setItem(
-      STORAGE_KEY_CUSTOM_THEME,
-      JSON.stringify({
-        light: {
-          primary: "#111111",
-          border: "red; } body { display:none } .x {",
-          background: "url(https://evil.example/x.png)",
-        },
-        dark: {},
-      })
+    expect(document.documentElement.style.getPropertyValue("--font-sans")).toBe(
+      ""
     )
-
-    runInitScript()
-
-    const style = document.documentElement.style
-    expect(style.getPropertyValue("--primary")).toBe("#111111")
-    expect(style.getPropertyValue("--border")).toBe("")
-    expect(style.getPropertyValue("--background")).toBe("")
-  })
-
-  it("ignores unknown keys so a hand-edited storage value cannot inject", () => {
-    localStorage.setItem("theme", "light")
-    localStorage.setItem(
-      STORAGE_KEY_CUSTOM_THEME,
-      JSON.stringify({ light: { "not-a-token": "#111111" }, dark: {} })
-    )
-
-    runInitScript()
-
+    expect(document.documentElement).not.toHaveAttribute("data-workspace-bg")
     expect(
-      document.documentElement.style.getPropertyValue("--not-a-token")
+      document.documentElement.style.getPropertyValue("--ws-surface-alpha")
     ).toBe("")
   })
 
-  it("honours the enabled flag", () => {
-    localStorage.setItem("theme", "light")
-    localStorage.setItem(STORAGE_KEY_CUSTOM_THEME_ENABLED, "0")
-    localStorage.setItem(
-      STORAGE_KEY_CUSTOM_THEME,
-      JSON.stringify({ light: { primary: "#111111" }, dark: {} })
-    )
-
-    runInitScript()
-
-    expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
-      ""
-    )
-  })
-
-  it("survives a corrupt theme payload without losing the other preferences", () => {
-    localStorage.setItem(STORAGE_KEY_THEME_COLOR, "blue")
-    localStorage.setItem(STORAGE_KEY_ZOOM_LEVEL, "125")
-    localStorage.setItem(STORAGE_KEY_CUSTOM_THEME, "{not json")
+  it("preserves deferred operator preferences in local storage", () => {
+    const css = ".operator-preference { color: red }"
     localStorage.setItem(STORAGE_KEY_CUSTOM_CSS_ENABLED, "1")
-    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS, ".x{color:red}")
-
-    expect(() => runInitScript()).not.toThrow()
-
-    expect(document.documentElement.getAttribute("data-theme")).toBe("blue")
-    expect(document.documentElement.style.fontSize).toBe("20px")
-    // 主题损坏不该连累后面的 CSS 注入 —— 两段各自包了 try/catch。
-    expect(document.getElementById(CUSTOM_CSS_ELEMENT_ID)?.textContent).toBe(
-      ".x{color:red}"
-    )
-  })
-})
-
-describe("APPEARANCE_INIT_SCRIPT — custom CSS", () => {
-  it("injects the stored CSS at the end of <head> when enabled", () => {
-    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS_ENABLED, "1")
-    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS, ".foo { color: red }")
+    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS, css)
 
     runInitScript()
 
-    const el = document.getElementById(CUSTOM_CSS_ELEMENT_ID)
-    expect(el).not.toBeNull()
-    expect(el?.textContent).toBe(".foo { color: red }")
-    expect(document.head.lastChild).toBe(el)
-  })
-
-  it("stays out of the document while the toggle is off", () => {
-    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS, ".foo { color: red }")
-
-    runInitScript()
-
-    expect(document.getElementById(CUSTOM_CSS_ELEMENT_ID)).toBeNull()
-  })
-})
-
-describe("APPEARANCE_INIT_SCRIPT — escape hatches", () => {
-  it("skips everything custom when suspended, but keeps the base appearance", () => {
-    localStorage.setItem("theme", "light")
-    localStorage.setItem(STORAGE_KEY_THEME_COLOR, "violet")
-    localStorage.setItem(STORAGE_KEY_CUSTOM_STYLE_SUSPENDED, "1")
-    localStorage.setItem(
-      STORAGE_KEY_CUSTOM_THEME,
-      JSON.stringify({ light: { primary: "#111111" }, dark: {} })
-    )
-    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS_ENABLED, "1")
-    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS, ".foo { color: red }")
-
-    runInitScript()
-
-    expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
-      ""
-    )
-    expect(document.getElementById(CUSTOM_CSS_ELEMENT_ID)).toBeNull()
-    // 逃生舱只关自定义样式，基础外观偏好必须照常生效 —— 否则「安全外观」会把
-    // 用户熟悉的界面也一并换掉。
-    expect(document.documentElement.getAttribute("data-theme")).toBe("violet")
-  })
-
-  it("skips everything custom for a window opened with safeStyle=1", () => {
-    window.history.replaceState({}, "", "/settings?safeStyle=1")
-    localStorage.setItem("theme", "light")
-    localStorage.setItem(
-      STORAGE_KEY_CUSTOM_THEME,
-      JSON.stringify({ light: { primary: "#111111" }, dark: {} })
-    )
-    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS_ENABLED, "1")
-    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS, ".foo { color: red }")
-
-    runInitScript()
-
-    expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
-      ""
-    )
-    expect(document.getElementById(CUSTOM_CSS_ELEMENT_ID)).toBeNull()
-  })
-
-  it("does not treat other query values as safe mode", () => {
-    window.history.replaceState({}, "", "/settings?safeStyle=0&section=general")
-    localStorage.setItem("theme", "light")
-    localStorage.setItem(
-      STORAGE_KEY_CUSTOM_THEME,
-      JSON.stringify({ light: { primary: "#111111" }, dark: {} })
-    )
-
-    runInitScript()
-
-    expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
-      "#111111"
-    )
+    expect(localStorage.getItem(STORAGE_KEY_CUSTOM_CSS_ENABLED)).toBe("1")
+    expect(localStorage.getItem(STORAGE_KEY_CUSTOM_CSS)).toBe(css)
   })
 })

@@ -6,6 +6,34 @@ export type { RemoteTransportConfig, Transport, UnsubscribeFn } from "./types"
 let _shellTransport: Transport | null = null
 let _remoteTransport: Transport | null = null
 let _remoteConfig: RemoteTransportConfig | null = null
+let _browserServerMode: "unknown" | "operator" | "team" = "unknown"
+
+function browserTransportDenied(): boolean {
+  return detectEnvironment() === "web" && _browserServerMode !== "operator"
+}
+
+function denyBrowserTransport(): never {
+  throw new Error("Legacy transport is not available in this browser mode")
+}
+
+function destroyCachedTransports(): void {
+  _shellTransport?.destroy?.()
+  _remoteTransport?.destroy?.()
+  _shellTransport = null
+  _remoteTransport = null
+  _remoteConfig = null
+}
+
+export function setBrowserServerMode(
+  mode: "unknown" | "operator" | "team"
+): void {
+  if (detectEnvironment() !== "web") return
+  const changed = _browserServerMode !== mode
+  _browserServerMode = mode
+  if (mode !== "operator" && (changed || _shellTransport || _remoteTransport)) {
+    destroyCachedTransports()
+  }
+}
 
 function createTauriTransport(): Transport {
   // Use dynamic require to avoid bundling tauri deps in web mode.
@@ -25,6 +53,7 @@ function createWebTransport(baseUrl: string): Transport {
 }
 
 export function getShellTransport(): Transport {
+  if (browserTransportDenied()) denyBrowserTransport()
   if (!_shellTransport) {
     const env = detectEnvironment()
     _shellTransport =
@@ -38,6 +67,7 @@ export function getShellTransport(): Transport {
 export function configureRemoteDesktopTransport(
   config: RemoteTransportConfig
 ): void {
+  if (browserTransportDenied()) denyBrowserTransport()
   _remoteTransport?.destroy?.()
   _remoteConfig = config
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -58,6 +88,7 @@ export function getActiveRemoteConnectionId(): number | null {
 }
 
 export function getTransport(): Transport {
+  if (browserTransportDenied()) denyBrowserTransport()
   return _remoteTransport ?? getShellTransport()
 }
 
@@ -112,4 +143,5 @@ export function __resetTransportForTests(): void {
   _shellTransport = null
   _remoteTransport = null
   _remoteConfig = null
+  _browserServerMode = "unknown"
 }

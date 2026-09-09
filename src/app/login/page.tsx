@@ -1,11 +1,13 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { Suspense, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import { isDesktop } from "@/lib/platform"
+import { TeamLogin } from "@/components/team/team-login"
+import { useTeamMode } from "@/components/team/team-mode-boundary"
 
-export default function LoginPage() {
+function OperatorLoginPage() {
   const router = useRouter()
   const t = useTranslations("LoginPage")
   const [token, setToken] = useState("")
@@ -90,4 +92,17 @@ export default function LoginPage() {
       </div>
     </div>
   )
+}
+
+export default function LoginPage() {
+  const mode = useTeamMode()
+  if (mode === "unknown") return null
+  if (mode === "team") {
+    return (
+      <Suspense fallback={null}>
+        <TeamLogin />
+      </Suspense>
+    )
+  }
+  return <OperatorLoginPage />
 }

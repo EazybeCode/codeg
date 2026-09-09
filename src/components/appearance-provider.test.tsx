@@ -4,9 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { AppearanceProvider } from "./appearance-provider"
 import { useCustomStyle } from "@/hooks/use-appearance"
 import {
+  STORAGE_KEY_CUSTOM_CSS,
+  STORAGE_KEY_CUSTOM_CSS_ENABLED,
   STORAGE_KEY_CUSTOM_THEME,
   STORAGE_KEY_ZOOM_LEVEL,
 } from "@/lib/appearance-script"
+import { CUSTOM_CSS_ELEMENT_ID } from "@/lib/custom-style"
 
 function Probe() {
   const { setCustomThemeToken } = useCustomStyle()
@@ -52,6 +55,20 @@ afterEach(() => {
 })
 
 describe("debounced persistence", () => {
+  it("restores deferred custom CSS when the confirmed operator provider mounts", () => {
+    localStorage.setItem(STORAGE_KEY_CUSTOM_CSS_ENABLED, "1")
+    localStorage.setItem(
+      STORAGE_KEY_CUSTOM_CSS,
+      ".operator-preference { color: red }"
+    )
+
+    renderProbe()
+
+    expect(document.getElementById(CUSTOM_CSS_ELEMENT_ID)?.textContent).toBe(
+      ".operator-preference { color: red }"
+    )
+  })
+
   it("does not resurrect a value that was reverted inside the debounce window", () => {
     // A → B → A，全程不超过防抖窗口，然后关窗触发 flush。此前 flush 会把已经被
     // 撤销的 B 写进去，重载后「撤销」凭空失效，还会经 storage 事件传染给其它窗口。

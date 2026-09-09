@@ -97,6 +97,8 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { usePlatform } from "@/hooks/use-platform"
 import { Drawer, DrawerContent, DrawerTitle } from "@/components/ui/drawer"
 import { OverlayHostHiddenProvider } from "@/components/ui/overlay-host-hidden"
+import { TeamSignedInShell } from "@/components/team/team-signed-in-shell"
+import { useTeamMode } from "@/components/team/team-mode-boundary"
 
 function WorkspaceDocumentTitle() {
   const { activeFolder } = useActiveFolder()
@@ -1345,11 +1347,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
   )
 }
 
-export default function WorkspaceLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
+function OperatorWorkspaceLayout({ children }: { children: React.ReactNode }) {
   return (
     <Suspense>
       <RemoteConnectionGate>
@@ -1359,4 +1357,15 @@ export default function WorkspaceLayout({
       </RemoteConnectionGate>
     </Suspense>
   )
+}
+
+export default function WorkspaceLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  const mode = useTeamMode()
+  if (mode === "unknown") return null
+  if (mode === "team") return <TeamSignedInShell />
+  return <OperatorWorkspaceLayout>{children}</OperatorWorkspaceLayout>
 }
