@@ -312,11 +312,12 @@ struct BrowserProviderState {
     fail_next_proof: AtomicBool,
     counts: ProviderCounts,
     session_delay: Arc<SessionResponseGate>,
+    settings_delay: Arc<SessionResponseGate>,
 }
 
-/// Controls a single delayed `/api/team/session` response. The response is
-/// produced by the real team router first, then held so the browser can rotate
-/// to another organization and prove that obsolete body never paints.
+/// Controls a single delayed browser-fixture response. The response is produced
+/// by the real team router first, then held so the browser can rotate authority
+/// and prove that an obsolete body never paints.
 pub(super) struct SessionResponseGate {
     armed: AtomicBool,
     started: AtomicBool,
@@ -362,7 +363,7 @@ impl SessionResponseGate {
         }
     }
 
-    fn release(&self) {
+    pub(super) fn release(&self) {
         self.released.store(true, Ordering::SeqCst);
         self.changed.notify_waiters();
     }
@@ -387,6 +388,7 @@ impl BrowserProviderServer {
             fail_next_proof: AtomicBool::new(false),
             counts: ProviderCounts::default(),
             session_delay: Arc::new(SessionResponseGate::new()),
+            settings_delay: Arc::new(SessionResponseGate::new()),
         });
         let app = Router::new()
             .route("/login/oauth/authorize", get(provider_authorize))
@@ -408,6 +410,14 @@ impl BrowserProviderServer {
             .route(
                 "/fixture/session-delay/release",
                 post(provider_release_session_delay),
+            )
+            .route(
+                "/fixture/settings-delay/arm",
+                post(provider_arm_settings_delay),
+            )
+            .route(
+                "/fixture/settings-delay/release",
+                post(provider_release_settings_delay),
             )
             .route("/fixture/status", get(provider_status))
             .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
@@ -439,6 +449,10 @@ impl BrowserProviderServer {
 
     pub(super) fn session_delay(&self) -> Arc<SessionResponseGate> {
         Arc::clone(&self.state.session_delay)
+    }
+
+    pub(super) fn settings_delay(&self) -> Arc<SessionResponseGate> {
+        Arc::clone(&self.state.settings_delay)
     }
 
     pub(super) async fn shutdown(&mut self) {
@@ -759,6 +773,23 @@ async fn provider_release_session_delay(
     StatusCode::NO_CONTENT
 }
 
+async fn provider_arm_settings_delay(
+    State(state): State<Arc<BrowserProviderState>>,
+) -> StatusCode {
+    if state.settings_delay.arm() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
+    }
+}
+
+async fn provider_release_settings_delay(
+    State(state): State<Arc<BrowserProviderState>>,
+) -> StatusCode {
+    state.settings_delay.release();
+    StatusCode::NO_CONTENT
+}
+
 async fn provider_status(
     State(state): State<Arc<BrowserProviderState>>,
 ) -> Json<serde_json::Value> {
@@ -768,7 +799,8 @@ async fn provider_status(
         "identity": state.counts.identity.load(Ordering::SeqCst),
         "listing": state.counts.listing.load(Ordering::SeqCst),
         "proof": state.counts.proof.load(Ordering::SeqCst),
-        "sessionDelayStarted": state.session_delay.started.load(Ordering::SeqCst)
+        "sessionDelayStarted": state.session_delay.started.load(Ordering::SeqCst),
+        "settingsDelayStarted": state.settings_delay.started.load(Ordering::SeqCst)
     }))
 }
 

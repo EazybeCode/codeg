@@ -149,10 +149,16 @@ async fn team_browser_fixture_server() {
         team_clock,
     ));
     let session_delay = provider.session_delay();
-    let app = build_router(state).layer(middleware::from_fn_with_state(
-        session_delay,
-        delay_team_session_response,
-    ));
+    let settings_delay = provider.settings_delay();
+    let app = build_router(state)
+        .layer(middleware::from_fn_with_state(
+            settings_delay.clone(),
+            delay_team_settings_response,
+        ))
+        .layer(middleware::from_fn_with_state(
+            session_delay.clone(),
+            delay_team_session_response,
+        ));
 
     println!(
         "TEAM_BROWSER_E2E_READY {}",
@@ -164,10 +170,12 @@ async fn team_browser_fixture_server() {
         })
     );
 
-    let shutdown = async {
+    let shutdown = async move {
         let mut line = String::new();
         let mut input = tokio::io::BufReader::new(tokio::io::stdin());
         let _ = input.read_line(&mut line).await;
+        session_delay.release();
+        settings_delay.release();
     };
     axum::serve(app_listener, app)
         .with_graceful_shutdown(shutdown)
@@ -177,6 +185,22 @@ async fn team_browser_fixture_server() {
     provider.shutdown().await;
     canary.shutdown().await;
     cleanup_synthetic_runtime(&artifact_root, &runtime_root);
+}
+
+async fn delay_team_settings_response(
+    State(gate): State<Arc<SessionResponseGate>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let delayed = request.method() == axum::http::Method::GET
+        && request.uri().path() == "/api/team/organization"
+        && gate.take();
+    let response = next.run(request).await;
+    if delayed {
+        gate.mark_started();
+        gate.wait_for_release().await;
+    }
+    response
 }
 
 async fn delay_team_session_response(
