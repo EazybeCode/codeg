@@ -55,6 +55,8 @@ let ready
 const allDiagnostics = []
 const allContexts = []
 const screenshots = []
+const teamProjectionChecks = []
+const observedTeamCookieValues = new Set()
 
 function timeout(ms, label) {
   return new Promise((_, reject) =>
@@ -161,7 +163,35 @@ async function newTrackedContext(label, appOrigin, canaryOrigin, viewport) {
     websockets: [],
     apiResponses: [],
     httpErrors: [],
+    remoteDescriptorProbes: 0,
+    remoteLookupAttempts: 0,
   }
+  const remoteDescriptor = {
+    id: 777,
+    name: "Controlled legacy remote",
+    base_url: canaryOrigin,
+    token: "remote-operator-canary-secret",
+    headers: [],
+    sort_order: 0,
+    created_at: "2026-09-09T00:00:00Z",
+    updated_at: "2026-09-09T00:00:00Z",
+  }
+  await context.route("**/api/get_remote_workspace_connection", async (route) => {
+    const request = route.request()
+    const positiveProbe =
+      request.headers()["x-workos-e2e-remote-probe"] === "descriptor"
+    if (positiveProbe) {
+      diagnostics.remoteDescriptorProbes += 1
+    } else {
+      diagnostics.remoteLookupAttempts += 1
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Cache-Control": "no-store" },
+      body: JSON.stringify(remoteDescriptor),
+    })
+  })
   await context.addInitScript(
     ({ canary }) => {
       localStorage.setItem("codeg_token", "operator-canary-secret")
@@ -169,14 +199,6 @@ async function newTrackedContext(label, appOrigin, canaryOrigin, viewport) {
       localStorage.setItem(
         "codeg-custom-css",
         `body{background-image:url("${canary}/custom-css-canary")}`
-      )
-      localStorage.setItem(
-        "codeg-remote-workspace-connection",
-        JSON.stringify({
-          id: 777,
-          baseUrl: canary,
-          websocketUrl: canary.replace("http:", "ws:") + "/legacy-ws",
-        })
       )
       window.__teamBroadcastMessages = []
       window.__teamWebSocketAttempts = []
@@ -251,6 +273,7 @@ function trackPage(owner, page, name) {
   })
   return {
     page,
+    contextLabel: `${owner.label}:${name}`,
     setPhase(value) {
       phase = `${owner.label}:${name}:${value}`
     },
@@ -266,12 +289,107 @@ function safePath(raw) {
   }
 }
 
-async function startSignIn(tracked, appOrigin) {
+async function validateTeamProjection(
+  context,
+  appOrigin,
+  payload,
+  kind,
+  contextLabel
+) {
+  assert(
+    typeof payload === "object" && payload !== null && !Array.isArray(payload),
+    "team JSON must be an object"
+  )
+  assert(kind === "onboarding" || kind === "session", "known team JSON kind")
+  const cookies = await context.cookies(appOrigin)
+  const csrfCookieName =
+    kind === "onboarding" ? "workos_team_pending_csrf" : "workos_team_csrf"
+  const csrfCookie = cookies.find((cookie) => cookie.name === csrfCookieName)
+  assert(csrfCookie, "team JSON must have its bound CSRF cookie")
+  assert.equal(typeof payload.csrf, "string", "team JSON CSRF must be a string")
+  assert(
+    payload.csrf === csrfCookie.value,
+    "team JSON CSRF must match its bound session cookie"
+  )
+  const scrubbed = { ...payload }
+  scrubbed.csrf = "[verified-bound-csrf]"
+
+  const serialized = JSON.stringify(scrubbed)
+  for (const cookie of cookies) {
+    if (cookie.value) observedTeamCookieValues.add(cookie.value)
+  }
+  for (const cookieValue of observedTeamCookieValues) {
+    assert(!serialized.includes(cookieValue), "team JSON contains raw cookie material")
+  }
+  for (const marker of [
+    "fixture-access-",
+    "fixture-refresh-",
+    "operator-canary-secret",
+    "7878787878787878",
+  ]) {
+    assert(!serialized.includes(marker), "team JSON contains forbidden secret material")
+  }
+  teamProjectionChecks.push({
+    context: contextLabel,
+    kind,
+    verifiedCsrf: true,
+  })
+}
+
+async function assertNoPriorWorkspaceContent(page, priorSession) {
+  if (!priorSession) return
+  const bodyText = await page.locator("body").innerText()
+  if (priorSession.organization.name) {
+    assert(
+      !bodyText.includes(priorSession.organization.name),
+      "prior stored organization branding reached login/onboarding"
+    )
+  }
+  assert(
+    !bodyText.includes(priorSession.scope),
+    "prior session scope reached login/onboarding"
+  )
+  assert.equal(
+    await page.getByText("Signed in as", { exact: true }).count(),
+    0,
+    "signed-in identity region reached login/onboarding"
+  )
+  assert.equal(
+    await page.getByText("Organization", { exact: true }).count(),
+    0,
+    "signed-in organization region reached login/onboarding"
+  )
+  assert.equal(
+    await page
+      .getByRole("heading", {
+        name: "Your Neev workspace is being prepared",
+        exact: true,
+      })
+      .count(),
+    0,
+    "signed-in workspace region reached login/onboarding"
+  )
+  if (priorSession.organization.avatarUrl) {
+    assert.equal(
+      await page
+        .locator("img")
+        .evaluateAll(
+          (images, source) => images.filter((image) => image.src === source).length,
+          priorSession.organization.avatarUrl
+        ),
+      0,
+      "prior stored organization image reached login/onboarding"
+    )
+  }
+}
+
+async function startSignIn(tracked, appOrigin, priorSession) {
   const { page } = tracked
   await page.goto(`${appOrigin}/login`)
   await page.getByRole("heading", { name: "Sign in to Neev", exact: true }).waitFor()
   assert.equal(await page.title(), "Sign in - Neev")
   assert(!(await page.locator("body").innerText()).includes("Legacy workspace content"))
+  await assertNoPriorWorkspaceContent(page, priorSession)
   await page.getByRole("link", { name: /GitHub/i }).click()
   await page.getByRole("heading", { name: "Fake GitHub consent", exact: true }).waitFor()
 }
@@ -280,8 +398,8 @@ async function chooseProviderPersona(tracked, personaLabel) {
   await tracked.page.getByRole("button", { name: personaLabel, exact: true }).click()
 }
 
-async function reachOnboarding(tracked, appOrigin, personaLabel) {
-  await startSignIn(tracked, appOrigin)
+async function reachOnboarding(tracked, appOrigin, personaLabel, priorSession) {
+  await startSignIn(tracked, appOrigin, priorSession)
   const choicesResponse = tracked.page.waitForResponse(
     (response) =>
       new URL(response.url()).origin === appOrigin &&
@@ -293,9 +411,17 @@ async function reachOnboarding(tracked, appOrigin, personaLabel) {
   assert.equal(response.status(), 200)
   assert.equal(response.headers()["cache-control"], "no-store")
   const payload = await response.json()
+  await validateTeamProjection(
+    tracked.page.context(),
+    appOrigin,
+    payload,
+    "onboarding",
+    tracked.contextLabel
+  )
   assert.equal(typeof payload.csrf, "string", "checked pending CSRF is authorized")
   assert.equal(payload.csrf.length, 64)
   assert(!(await tracked.page.locator("body").innerText()).includes("Legacy workspace content"))
+  await assertNoPriorWorkspaceContent(tracked.page, priorSession)
   return payload
 }
 
@@ -321,7 +447,7 @@ async function selectOrganization(tracked, appOrigin, login) {
   await page.waitForURL(`${appOrigin}/workspace`)
 }
 
-async function sessionJson(page, appOrigin) {
+async function sessionJson(page, appOrigin, contextLabel) {
   const result = await page.evaluate(async (origin) => {
     const response = await fetch(`${origin}/api/team/session`, {
       credentials: "same-origin",
@@ -335,6 +461,13 @@ async function sessionJson(page, appOrigin) {
   }, appOrigin)
   assert.equal(result.status, 200)
   assert.equal(result.cacheControl, "no-store")
+  await validateTeamProjection(
+    page.context(),
+    appOrigin,
+    result.body,
+    "session",
+    contextLabel
+  )
   return result.body
 }
 
@@ -491,6 +624,13 @@ async function run() {
   )
   await chooseProviderPersona(alicePage, "Continue as Alice Atlas")
   const aliceChoices = await (await aliceChoicesResponse).json()
+  await validateTeamProjection(
+    alice.context,
+    appOrigin,
+    aliceChoices,
+    "onboarding",
+    "alice-switch:primary"
+  )
   assert.equal(aliceChoices.organizations.length, 2)
   assert.deepEqual(
     aliceChoices.organizations.map((organization) => organization.login),
@@ -527,7 +667,11 @@ async function run() {
   const brandedLogo = alicePage.page.locator('img[src^="data:image/png;base64,"]')
   await brandedLogo.waitFor()
   await brandedLogo.evaluate((image) => image.decode())
-  const aliceSessionA = await sessionJson(alicePage.page, appOrigin)
+  const aliceSessionA = await sessionJson(
+    alicePage.page,
+    appOrigin,
+    "alice-switch:org-a"
+  )
   assert.equal(aliceSessionA.organization.login, "atlas-labs")
   assert.equal(aliceSessionA.organization.name, "Atlas Operations")
   assert.equal(aliceSessionA.role, "admin")
@@ -545,27 +689,95 @@ async function run() {
   await aliceStale.page.getByText("Atlas Operations", { exact: true }).waitFor()
   await control(providerOrigin, "/fixture/session-delay/arm")
   aliceStale.setPhase("delayed-org-a-refresh")
+  const delayedRequestStarted = aliceStale.page.waitForRequest(
+    (request) =>
+      request.method() === "GET" &&
+      request.url() === `${appOrigin}/api/team/session`
+  )
   await aliceStale.page.evaluate(() => window.dispatchEvent(new Event("focus")))
+  const delayedRequest = await delayedRequestStarted
   await poll(
     async () => (await status(providerOrigin)).sessionDelayStarted,
     "delayed prior-scope response"
   )
+  const delayedRequestTerminal = Promise.race([
+    aliceStale.page
+      .waitForResponse((response) => response.request() === delayedRequest)
+      .then(async (response) => {
+        const finishError = await response.finished()
+        return finishError
+          ? { outcome: "canceled", error: finishError.message }
+          : { outcome: "completed", status: response.status() }
+      }),
+    aliceStale.page
+      .waitForEvent("requestfailed", (request) => request === delayedRequest)
+      .then((request) => ({
+        outcome: "canceled",
+        error: request.failure()?.errorText || "unknown",
+      })),
+  ])
 
   alicePage.setPhase("switch-to-org-b")
   const switchedChoices = await reachOnboarding(
     alicePage,
     appOrigin,
-    "Continue as Alice Atlas"
+    "Continue as Alice Atlas",
+    aliceSessionA
   )
   assert.equal(switchedChoices.organizations.length, 2)
   await selectOrganization(alicePage, appOrigin, "beacon-works")
   await alicePage.page.getByText("beacon-works", { exact: true }).waitFor()
   await aliceStale.page.getByText("beacon-works", { exact: true }).waitFor()
+  await aliceStale.page.evaluate(
+    ({ priorBranding, priorLogin, priorScope }) => {
+      const staleValues = [priorBranding, `@${priorLogin}`, priorScope]
+      window.__staleScopePaintedAfterSwitch = false
+      window.__staleScopeObserver = new MutationObserver(() => {
+        const text = document.body.innerText
+        if (staleValues.some((value) => value && text.includes(value))) {
+          window.__staleScopePaintedAfterSwitch = true
+        }
+      })
+      window.__staleScopeObserver.observe(document.body, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      })
+    },
+    {
+      priorBranding: aliceSessionA.organization.name,
+      priorLogin: aliceSessionA.organization.login,
+      priorScope: aliceSessionA.scope,
+    }
+  )
   await control(providerOrigin, "/fixture/session-delay/release")
-  await new Promise((resolve) => setTimeout(resolve, 300))
+  const staleRequestLifecycle = await delayedRequestTerminal
+  assert(
+    (staleRequestLifecycle.outcome === "completed" &&
+      staleRequestLifecycle.status === 200) ||
+      (staleRequestLifecycle.outcome === "canceled" &&
+        staleRequestLifecycle.error.includes("ERR_ABORTED")),
+    "held prior-scope request must complete successfully or cancel fail-closed"
+  )
+  await aliceStale.page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve))
+      )
+  )
   assert.equal(await aliceStale.page.getByText("Atlas Operations", { exact: true }).count(), 0)
+  assert.equal(await aliceStale.page.getByText("@atlas-labs", { exact: true }).count(), 0)
   assert.equal(await aliceStale.page.getByText("beacon-works", { exact: true }).count(), 1)
-  const aliceSessionB = await sessionJson(alicePage.page, appOrigin)
+  assert.equal(
+    await aliceStale.page.evaluate(() => window.__staleScopePaintedAfterSwitch),
+    false,
+    "held prior-scope response repainted organization A after the switch"
+  )
+  const aliceSessionB = await sessionJson(
+    alicePage.page,
+    appOrigin,
+    "alice-switch:org-b"
+  )
   assert.equal(aliceSessionB.organization.login, "beacon-works")
   assert.notEqual(aliceSessionA.scope, aliceSessionB.scope)
   await screenshot(alicePage.page, "alice-org-b-after-stale-desktop-1440.png")
@@ -616,7 +828,7 @@ async function run() {
   assert.equal(bobChoices.organizations.length, 1)
   await selectOrganization(bobPage, appOrigin, "atlas-labs")
   await bobPage.page.getByText("Bob Birch", { exact: true }).waitFor()
-  const bobSession = await sessionJson(bobPage.page, appOrigin)
+  const bobSession = await sessionJson(bobPage.page, appOrigin, "bob-a")
   assert.equal(bobSession.organization.login, "atlas-labs")
   assert.equal(bobSession.role, "member", "Bob must not gain admin authority")
 
@@ -655,10 +867,18 @@ async function run() {
     (response) => new URL(response.url()).pathname === "/api/team/onboarding"
   )
   await carolPage.page.getByRole("button", { name: "Retry", exact: true }).click()
-  assert.equal((await (await retryChoices).json()).organizations.length, 1)
+  const carolRetryChoices = await (await retryChoices).json()
+  await validateTeamProjection(
+    carol.context,
+    appOrigin,
+    carolRetryChoices,
+    "onboarding",
+    "carol-b:retry"
+  )
+  assert.equal(carolRetryChoices.organizations.length, 1)
   await selectOrganization(carolPage, appOrigin, "beacon-works")
   await carolPage.page.getByText("Carol Coast", { exact: true }).waitFor()
-  const carolSession = await sessionJson(carolPage.page, appOrigin)
+  const carolSession = await sessionJson(carolPage.page, appOrigin, "carol-b")
   assert.equal(carolSession.organization.login, "beacon-works")
   assert.equal(carolSession.role, "admin")
   const carolRefresh = carolPage.page.waitForResponse(
@@ -667,7 +887,16 @@ async function run() {
   await carolPage.page.evaluate(() =>
     document.dispatchEvent(new Event("visibilitychange"))
   )
-  assert.equal((await carolRefresh).status(), 200)
+  const carolRefreshResponse = await carolRefresh
+  assert.equal(carolRefreshResponse.status(), 200)
+  const carolRefreshSession = await carolRefreshResponse.json()
+  await validateTeamProjection(
+    carol.context,
+    appOrigin,
+    carolRefreshSession,
+    "session",
+    "carol-b:visibility-refresh"
+  )
   assert(
     await carolPage.page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth
@@ -686,6 +915,45 @@ async function run() {
   })
   await back.waitFor()
   assert.equal(await back.getAttribute("href"), "/workspace")
+  assert.equal(
+    carol.diagnostics.remoteLookupAttempts,
+    0,
+    "team settings must not resolve the requested legacy remote connection"
+  )
+  const remoteDescriptorProbe = await carolPage.page.evaluate(async () => {
+    const response = await fetch("/api/get_remote_workspace_connection", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer operator-canary-secret",
+        "Content-Type": "application/json",
+        "X-WorkOS-E2E-Remote-Probe": "descriptor",
+      },
+      body: JSON.stringify({ id: 777 }),
+    })
+    return {
+      status: response.status,
+      cacheControl: response.headers.get("cache-control"),
+      body: await response.json(),
+    }
+  })
+  assert.equal(remoteDescriptorProbe.status, 200)
+  assert.equal(remoteDescriptorProbe.cacheControl, "no-store")
+  assert.equal(remoteDescriptorProbe.body.id, 777)
+  assert.equal(remoteDescriptorProbe.body.base_url, canaryOrigin)
+  assert(
+    remoteDescriptorProbe.body.token === "remote-operator-canary-secret",
+    "controlled remote descriptor must include its invented canary credential"
+  )
+  assert.equal(
+    carol.diagnostics.remoteDescriptorProbes,
+    1,
+    "controlled remote descriptor probe must exercise the real lookup shape"
+  )
+  assert.equal(
+    carol.diagnostics.remoteLookupAttempts,
+    0,
+    "team settings must remain unable to resolve legacy remote connections"
+  )
   await back.click()
   await carolPage.page.waitForURL(`${appOrigin}/workspace`)
   await screenshot(carolPage.page, "carol-settings-return-desktop-1440.png")
@@ -705,18 +973,55 @@ async function run() {
     }
   }
 
-  const successfulSelectionPhases = [
+  assert.deepEqual(
+    {
+      onboarding: teamProjectionChecks.filter(
+        (check) => check.kind === "onboarding"
+      ).length,
+      session: teamProjectionChecks.filter((check) => check.kind === "session")
+        .length,
+    },
+    { onboarding: 6, session: 5 },
+    "every explicitly awaited successful onboarding/session projection must be checked"
+  )
+  assert.equal(
+    allDiagnostics.reduce(
+      (total, diagnostics) => total + diagnostics.remoteDescriptorProbes,
+      0
+    ),
+    1,
+    "exactly one controlled remote descriptor positive probe must run"
+  )
+  assert.equal(
+    allDiagnostics.reduce(
+      (total, diagnostics) => total + diagnostics.remoteLookupAttempts,
+      0
+    ),
+    0,
+    "team mode must not attempt a legacy remote descriptor lookup"
+  )
+  assert.equal(
+    await aliceStale.page.evaluate(() => {
+      const painted = window.__staleScopePaintedAfterSwitch
+      window.__staleScopeObserver?.disconnect()
+      return painted
+    }),
+    false,
+    "organization A must remain absent after the held request reaches terminal state"
+  )
+
+  const successfulSelectionPhases = new Set([
     "alice-switch:primary:alice-multiple-choice",
     "alice-switch:primary:switch-to-org-b",
     "alice-independent-b:primary:sign-in",
     "bob-a:primary:single-choice",
     "carol-b:primary:zero-choice",
-  ]
+  ])
   const expectedAbortedRequest = (entry) =>
     entry.error.includes("ERR_ABORTED") &&
     ((entry.path === `${appOrigin}/api/team/onboarding/select` &&
       entry.method === "POST" &&
-      successfulSelectionPhases.includes(entry.phase)) ||
+      successfulSelectionPhases.has(entry.phase)) ||
       (entry.path === `${appOrigin}/api/team/session` &&
         entry.method === "GET" &&
         (entry.phase.includes("delayed-org-a-refresh") ||
@@ -840,6 +1145,12 @@ async function run() {
     expectedBrowserAborts: allowedFailedRequests,
     expectedBrowserHttpErrors: expectedHttpErrors,
     expectedConsoleDiagnostics,
+    teamJsonProjectionChecks: teamProjectionChecks,
+    remoteActivationControls: {
+      descriptorProbes: 1,
+      unexpectedLookups: 0,
+    },
+    staleRequestLifecycle,
   }
   fs.writeFileSync(
     path.join(artifactRoot, "evidence.json"),
