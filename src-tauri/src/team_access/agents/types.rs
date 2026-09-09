@@ -82,6 +82,50 @@ pub(crate) struct LoginTicket {
 }
 
 #[derive(Clone, Eq, PartialEq)]
+pub(crate) struct VerifiedSubscription {
+    pub(crate) account_label: String,
+    pub(crate) storage_handle: String,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct CleanupTicket {
+    pub(crate) operation_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) provider: Provider,
+    pub(crate) org_id: i32,
+    pub(crate) user_id: i32,
+    pub(crate) target_generation: i64,
+    pub(crate) result_generation: i64,
+    pub(crate) lease_owner: String,
+    pub(crate) lease_expires_at: DateTime<Utc>,
+}
+
+pub(super) fn valid_account_label(value: &str) -> bool {
+    let characters = value.chars().count();
+    (1..=160).contains(&characters)
+        && !value
+            .chars()
+            .any(|character| character.is_control() || is_bidi_formatting(character))
+}
+
+pub(super) fn valid_storage_handle(value: &str) -> bool {
+    value.len() == 32
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && uuid::Uuid::parse_str(value).is_ok()
+}
+
+fn is_bidi_formatting(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct MutationReceipt {
     pub(crate) operation_id: String,
     pub(crate) generation: i64,

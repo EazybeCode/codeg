@@ -21,9 +21,9 @@ const QUOTA_WINDOW: Duration = Duration::minutes(15);
 const MAX_ATTEMPTS: u64 = 5;
 
 pub(crate) struct AgentService {
-    db: DatabaseConnection,
-    principals: Arc<PrincipalService>,
-    clock: Arc<dyn TeamClock>,
+    pub(super) db: DatabaseConnection,
+    pub(super) principals: Arc<PrincipalService>,
+    pub(super) clock: Arc<dyn TeamClock>,
 }
 
 impl AgentService {

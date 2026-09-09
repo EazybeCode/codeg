@@ -5,7 +5,9 @@ use sea_orm::{
     QuerySelect, Set, TransactionTrait,
 };
 
-use super::types::{AgentError, ConnectionState, ConnectionView, Provider};
+use super::types::{
+    valid_account_label, AgentError, ConnectionState, ConnectionView, LoginTicket, Provider,
+};
 use crate::{
     db::entities::{
         org, team_agent_attempt, team_agent_connection, team_agent_operation, user,
@@ -42,7 +44,7 @@ pub(super) async fn authorized_transaction(
     Ok(transaction)
 }
 
-async fn lock_org(
+pub(super) async fn lock_org(
     transaction: &DatabaseTransaction,
     org_id: i32,
 ) -> Result<(), AgentError> {
@@ -143,7 +145,7 @@ pub(super) fn project(
     let (account_label, checked_at) = if state == ConnectionState::Connected {
         let label = row.account_label.clone().ok_or(AgentError::Unavailable)?;
         let checked = row.checked_at.ok_or(AgentError::Unavailable)?;
-        if label.is_empty() || label.len() > 160 || row.storage_handle.is_none() {
+        if !valid_account_label(&label) || row.storage_handle.is_none() {
             return Err(AgentError::Unavailable);
         }
         (Some(label), Some(checked))
@@ -165,11 +167,16 @@ pub(super) async fn operation(
     kind: &str,
     request_key: &str,
 ) -> Result<Option<team_agent_operation::Model>, AgentError> {
-    team_agent_operation::Entity::find()
+    let query = team_agent_operation::Entity::find()
         .filter(team_agent_operation::Column::ConnectionId.eq(connection_id))
         .filter(team_agent_operation::Column::Kind.eq(kind))
-        .filter(team_agent_operation::Column::RequestKey.eq(request_key))
-        .one(transaction)
+        .filter(team_agent_operation::Column::RequestKey.eq(request_key));
+    let query = if transaction.get_database_backend() == DbBackend::Postgres {
+        query.lock(LockType::Update)
+    } else {
+        query
+    };
+    query.one(transaction)
         .await
         .map_err(|_| AgentError::Unavailable)
 }
@@ -179,8 +186,69 @@ pub(super) async fn attempt(
     connection_id: &str,
     attempt_id: &str,
 ) -> Result<Option<team_agent_attempt::Model>, AgentError> {
-    team_agent_attempt::Entity::find_by_id(attempt_id)
-        .filter(team_agent_attempt::Column::ConnectionId.eq(connection_id))
+    let query = team_agent_attempt::Entity::find_by_id(attempt_id)
+        .filter(team_agent_attempt::Column::ConnectionId.eq(connection_id));
+    let query = if transaction.get_database_backend() == DbBackend::Postgres {
+        query.lock(LockType::Update)
+    } else {
+        query
+    };
+    query.one(transaction)
+        .await
+        .map_err(|_| AgentError::Unavailable)
+}
+
+pub(super) async fn completion_rows(
+    transaction: &DatabaseTransaction,
+    context: &AuthContext,
+    ticket: &LoginTicket,
+) -> Result<(
+    team_agent_connection::Model,
+    team_agent_attempt::Model,
+    team_agent_operation::Model,
+), AgentError> {
+    let connection = connection_by_id(transaction, &ticket.connection_id)
+        .await?
+        .filter(|row| row.org_id == context.org_id && row.user_id == context.user_id)
+        .ok_or(AgentError::NotFound)?;
+    let attempt = attempt(transaction, &connection.id, &ticket.attempt_id)
+        .await?
+        .ok_or(AgentError::NotFound)?;
+    let operation = operation_by_id(transaction, &connection.id, &ticket.operation_id)
+        .await?
+        .ok_or(AgentError::NotFound)?;
+    Ok((connection, attempt, operation))
+}
+
+pub(super) async fn connection_by_id(
+    transaction: &DatabaseTransaction,
+    connection_id: &str,
+) -> Result<Option<team_agent_connection::Model>, AgentError> {
+    let query = team_agent_connection::Entity::find_by_id(connection_id);
+    let query = if transaction.get_database_backend() == DbBackend::Postgres {
+        query.lock(LockType::Update)
+    } else {
+        query
+    };
+    query
+        .one(transaction)
+        .await
+        .map_err(|_| AgentError::Unavailable)
+}
+
+pub(super) async fn operation_by_id(
+    transaction: &DatabaseTransaction,
+    connection_id: &str,
+    operation_id: &str,
+) -> Result<Option<team_agent_operation::Model>, AgentError> {
+    let query = team_agent_operation::Entity::find_by_id(operation_id)
+        .filter(team_agent_operation::Column::ConnectionId.eq(connection_id));
+    let query = if transaction.get_database_backend() == DbBackend::Postgres {
+        query.lock(LockType::Update)
+    } else {
+        query
+    };
+    query
         .one(transaction)
         .await
         .map_err(|_| AgentError::Unavailable)
@@ -291,6 +359,46 @@ pub(super) async fn set_connection_after_invalidation(
         .update(transaction)
         .await
         .map_err(|_| AgentError::Unavailable)
+}
+
+pub(super) async fn set_connection_after_invalidation_with_error(
+    transaction: &DatabaseTransaction,
+    row: team_agent_connection::Model,
+    generation: i64,
+    error_code: &str,
+    now: DateTime<Utc>,
+) -> Result<team_agent_connection::Model, AgentError> {
+    let mut active: team_agent_connection::ActiveModel = row.into();
+    active.generation = Set(generation);
+    active.state = Set("disconnecting".to_owned());
+    active.account_label = Set(None);
+    active.checked_at = Set(None);
+    active.error_code = Set(Some(error_code.to_owned()));
+    active.updated_at = Set(now);
+    active
+        .update(transaction)
+        .await
+        .map_err(|_| AgentError::Unavailable)
+}
+
+pub(super) async fn lock_cleanup_owner(
+    transaction: &DatabaseTransaction,
+    user_id: i32,
+    org_id: i32,
+) -> Result<(), AgentError> {
+    let github_user_id = user::Entity::find_by_id(user_id)
+        .select_only()
+        .column(user::Column::GithubUserId)
+        .into_tuple::<i64>()
+        .one(transaction)
+        .await
+        .map_err(|_| AgentError::Unavailable)?
+        .filter(|value| *value > 0)
+        .ok_or(AgentError::Unavailable)?;
+    lock_user_identity(transaction, user_id, github_user_id)
+        .await
+        .map_err(AgentError::Auth)?;
+    lock_org(transaction, org_id).await
 }
 
 pub(super) async fn insert_attempt(

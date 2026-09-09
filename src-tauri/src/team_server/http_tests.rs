@@ -5,8 +5,8 @@ use axum::{
     http::{header, Method, StatusCode},
 };
 use sea_orm::{
-    ActiveModelTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel, PaginatorTrait,
-    Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, IntoActiveModel,
+    PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
 };
 use axum_test::TestServer;
 
@@ -15,11 +15,12 @@ use super::{
     test_server::{cookie_value, query_value, set_cookies, team_state},
 };
 use crate::team_access::{
+    agents::{AgentError, AgentService, BeginOutcome, Provider, VerifiedSubscription},
     github::{GithubIdentity, GithubMembershipEvidence, GithubOrganizationChoice},
     session::TeamRole,
     test_auth::{
         create_postgres_principal_fixture, drop_postgres_fixture, tokens,
-        wait_for_postgres_lock, ALICE_A_TOKEN, fixed_now,
+        wait_for_postgres_lock, ALICE_A_TOKEN, fixed_now, TestClock,
     },
 };
 
@@ -355,7 +356,13 @@ async fn onboarding_bootstrap_selection_session_and_local_logout_are_browser_bou
         })],
     )
     .await;
-    let server = TestServer::new(build_router(Arc::new(fixture.state))).expect("test server");
+    let shared_state = Arc::new(fixture.state);
+    let agent_service = AgentService::new(
+        shared_state.db.clone(),
+        shared_state.principals.clone(),
+        shared_state.clock.clone(),
+    );
+    let server = TestServer::new(build_router(shared_state.clone())).expect("test server");
 
     let login = server.get("/auth/github/login").await;
     let attempt = cookie_value(&login, "workos_team_oauth_browser");
@@ -423,6 +430,29 @@ async fn onboarding_bootstrap_selection_session_and_local_logout_are_browser_bou
     assert_ne!(bootstrap_json["scope"], session);
     assert!(bootstrap_json["user"]["id"].is_i64());
 
+    let agent_context = shared_state
+        .principals
+        .resolve(
+            &{
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(
+                    header::COOKIE,
+                    format!("workos_team_session={session}").parse().unwrap(),
+                );
+                headers
+            },
+            crate::team_access::principal::ProofRequirement::Cached,
+        )
+        .await
+        .unwrap();
+    let BeginOutcome::Pending(agent_ticket) = agent_service
+        .begin(&agent_context, Provider::Codex, "logout-agent-login")
+        .await
+        .unwrap()
+    else {
+        panic!("expected pending personal-agent login");
+    };
+
     for invalid in [
         server
             .post("/api/team/logout")
@@ -473,6 +503,50 @@ async fn onboarding_bootstrap_selection_session_and_local_logout_are_browser_bou
         .add_header(header::COOKIE, &session_cookies)
         .await
         .assert_status_unauthorized();
+    let attempt = crate::db::entities::team_agent_attempt::Entity::find_by_id(
+        &agent_ticket.attempt_id,
+    )
+    .one(&shared_state.db)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(attempt.state, "canceled");
+    let connection = crate::db::entities::team_agent_connection::Entity::find_by_id(
+        &agent_ticket.connection_id,
+    )
+    .one(&shared_state.db)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(connection.state, "disconnecting");
+    assert_eq!(connection.generation, agent_ticket.generation + 1);
+    assert_eq!(connection.error_code.as_deref(), Some("canceled"));
+    assert!(connection.storage_handle.is_none());
+    assert!(crate::db::entities::team_agent_operation::Entity::find()
+        .filter(
+            crate::db::entities::team_agent_operation::Column::ConnectionId
+                .eq(&agent_ticket.connection_id),
+        )
+        .filter(crate::db::entities::team_agent_operation::Column::Kind.eq("cancel"))
+        .one(&shared_state.db)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        agent_service
+            .complete(
+                &agent_context,
+                &agent_ticket,
+                VerifiedSubscription {
+                    account_label: "late@example.test".to_owned(),
+                    storage_handle: "11111111111111111111111111111111".to_owned(),
+                },
+            )
+            .await,
+        Err(AgentError::Auth(
+            crate::team_access::core::TeamAuthError::Unauthorized,
+        ))
+    );
 
     let login_page = server.get("/login").await;
     login_page.assert_status_ok();
@@ -532,7 +606,12 @@ async fn local_logout_removes_only_the_cookie_selected_session_when_membership_i
     .await
     .expect("orphaned expired session fixture");
 
-    super::handlers::session::synchronized_logout(&db, session, LOGOUT_CSRF)
+    super::handlers::session::synchronized_logout(
+        &db,
+        session,
+        LOGOUT_CSRF,
+        &TestClock::new(fixed_now()),
+    )
         .await
         .expect("orphaned expired session can be terminated");
     assert!(crate::db::entities::team_session::Entity::find_by_id(hash)
@@ -600,8 +679,13 @@ async fn postgres_logout_waits_behind_an_authorized_mutation_guard() {
         let logout = {
             let db = db.clone();
             tokio::spawn(async move {
-                super::handlers::session::synchronized_logout(&db, ALICE_A_TOKEN, LOGOUT_CSRF)
-                    .await
+                super::handlers::session::synchronized_logout(
+                    &db,
+                    ALICE_A_TOKEN,
+                    LOGOUT_CSRF,
+                    &TestClock::new(fixed_now()),
+                )
+                .await
             })
         };
         wait_for_postgres_lock(&admin, &name, "organization_membership").await?;
@@ -662,8 +746,13 @@ async fn postgres_guard_waiting_behind_logout_rejects_the_deleted_session() {
         let logout = {
             let db = db.clone();
             tokio::spawn(async move {
-                super::handlers::session::synchronized_logout(&db, ALICE_A_TOKEN, LOGOUT_CSRF)
-                    .await
+                super::handlers::session::synchronized_logout(
+                    &db,
+                    ALICE_A_TOKEN,
+                    LOGOUT_CSRF,
+                    &TestClock::new(fixed_now()),
+                )
+                .await
             })
         };
         wait_for_postgres_lock(&admin, &name, "team_session").await?;

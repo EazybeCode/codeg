@@ -17,7 +17,8 @@ use super::{json, ApiError};
 use crate::{
     db::entities::{organization_membership, team_session},
     team_access::{
-        core::{database_error, TeamAuthError},
+        agents::{invalidate_session_in_transaction, AgentError},
+        core::{database_error, TeamAuthError, TeamClock},
         principal::ProofRequirement,
         secrets::hash_browser_secret,
     },
@@ -83,7 +84,13 @@ pub(in crate::team_server) async fn logout(
     if serde_json::from_slice::<LogoutBody>(&body).is_err() {
         return ApiError::InvalidRequest.into_response();
     }
-    let result = synchronized_logout(&state.db, &session_secret, &csrf_header).await;
+    let result = synchronized_logout(
+        &state.db,
+        &session_secret,
+        &csrf_header,
+        state.clock.as_ref(),
+    )
+    .await;
     if let Err(error) = result {
         return ApiError::from(error).into_response();
     }
@@ -102,13 +109,14 @@ pub(in crate::team_server) async fn synchronized_logout(
     db: &DatabaseConnection,
     session_secret: &str,
     csrf_secret: &str,
+    clock: &dyn TeamClock,
 ) -> Result<(), TeamAuthError> {
     let session_hash =
         hash_browser_secret(session_secret).map_err(|_| TeamAuthError::Unauthorized)?;
     let csrf_hash =
         hash_browser_secret(csrf_secret).map_err(|_| TeamAuthError::Unauthorized)?;
     let transaction = db.begin().await.map_err(|error| database_error(&error))?;
-    let result = logout_in_transaction(&transaction, &session_hash, &csrf_hash).await;
+    let result = logout_in_transaction(&transaction, &session_hash, &csrf_hash, clock).await;
     match result {
         Ok(()) => transaction
             .commit()
@@ -128,6 +136,7 @@ async fn logout_in_transaction(
     transaction: &DatabaseTransaction,
     session_hash: &str,
     csrf_hash: &str,
+    clock: &dyn TeamClock,
 ) -> Result<(), TeamAuthError> {
     let initial = team_session::Entity::find_by_id(session_hash)
         .one(transaction)
@@ -161,6 +170,10 @@ async fn logout_in_transaction(
     {
         return Err(TeamAuthError::Unauthorized);
     }
+    let now = clock.now();
+    invalidate_session_in_transaction(transaction, session_hash, now)
+        .await
+        .map_err(map_agent_error)?;
     let deleted = team_session::Entity::delete_many()
         .filter(team_session::Column::TokenHash.eq(session_hash))
         .filter(team_session::Column::UserId.eq(current.user_id))
@@ -173,6 +186,17 @@ async fn logout_in_transaction(
         return Err(TeamAuthError::Conflict);
     }
     Ok(())
+}
+
+fn map_agent_error(error: AgentError) -> TeamAuthError {
+    match error {
+        AgentError::Auth(error) => error,
+        AgentError::Conflict => TeamAuthError::Conflict,
+        AgentError::NotFound
+        | AgentError::InvalidInput
+        | AgentError::RateLimited
+        | AgentError::Unavailable => TeamAuthError::Unavailable,
+    }
 }
 
 async fn lock_membership(
