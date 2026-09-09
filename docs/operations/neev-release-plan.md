@@ -23,6 +23,12 @@ Use separate routes/resources for the public website at `https://neev.so` and au
 - The current hosted pilot is private. Runtime execution is disabled; installed gVisor infrastructure has not yet been connected to application jobs.
 - Encrypted off-server backups and one isolated restore have been verified. The September 9 recurring backup succeeded. Monitoring and independent recovery-secret custody still need completion.
 - September 9 read-only host check: approximately 6.7 GiB available RAM, 50 GiB free disk, and no active application CPU load at sampling. This supports considering isolated staging on the existing host; it is not a concurrency/load-test result or a guarantee of agent-job capacity. No staging resources were created by this check.
+- September 9 public-origin check from the owner's Mac: both `neev.so` and
+  `app.neev.so` resolve to the expected Hetzner IPv4 address, with no AAAA answer.
+  Plain unauthenticated `curl --head --silent --show-error --max-time 10` requests
+  to each HTTPS origin failed to connect to port 443 (curl error 7). This is not a
+  completed TLS or browser acceptance check and does not establish the server-side
+  cause. No proxy, firewall, DNS or deployment configuration was changed.
 
 ## Delivery sequence and exit gates
 
@@ -130,6 +136,12 @@ constitutes a working provider sign-in or deployed functionality. The owner has
 separately confirmed the Claude hosted-use terms; see the
 [provider contract record](personal-agent-provider-contracts.md). Verified encrypted
 credential storage and real-account acceptance remain required.
+
+Lifecycle Task 1 is accepted at `7d4a4fb9`: member/org/session-scoped connection
+metadata, bounded login intents, retries, quotas, cancel and disconnect. Independent
+review found no critical or important issue; a fresh controller run passed all 13
+SQLite tests in 1.28s. Task 2 completion, cleanup, logout/restart recovery and
+PostgreSQL races remain pending. No personal-provider route or runtime was enabled.
 
 Read-only compatibility finding: the existing Claude registry installs
 `@agentclientprotocol/claude-agent-acp@0.74.0` (`acp/registry.rs`), and the adjacent

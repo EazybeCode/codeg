@@ -114,9 +114,16 @@ Disconnect operates on an existing own provider connection; absent is NotFound. 
 
 ### Task 2: Verified completion, durable cleanup and invalidation recovery
 
-**Files:** create `agents/{completion.rs,recovery.rs,recovery_tests.rs}`; modify `agents/{mod.rs,store.rs,types.rs}` for these interfaces and shared narrowly scoped helpers; modify `team_server/handlers/session.rs` to call the invalidator before session deletion within the existing logout transaction; modify `team_server/http_tests.rs` only for logout integration and clock-argument updates.
+**Files:** create `agents/{completion.rs,recovery.rs,recovery_tests.rs}`; modify `agents/{mod.rs,store.rs,types.rs}` for these interfaces and shared narrowly scoped helpers; modify `agents/intents.rs` only to make the three `AgentService` fields `pub(super)` so sibling implementation modules can use them; modify `team_server/handlers/session.rs` to call the invalidator before session deletion within the existing logout transaction; modify `team_server/http_tests.rs` only for logout integration and clock-argument updates.
 
 **Interfaces:** consume Task1 AgentService, typed provider/errors/internal login ticket and locked store helpers. Add these non-serialized internal types and async methods:
+
+Task1 defines `AgentService` in `intents.rs`. Keep that location and its existing
+methods; only its `db`, `principals` and `clock` field visibility becomes
+`pub(super)`, restricted to the containing agents module and its descendants.
+Reuse `store::authorized_transaction`, `store::final_recheck_and_commit`, the
+scoped row selectors and row mutation helpers. Extend store helpers for cleanup
+without fabricating a principal or duplicating the guarded member transaction.
 
 ```rust
 struct VerifiedSubscription { account_label: String, storage_handle: String }
