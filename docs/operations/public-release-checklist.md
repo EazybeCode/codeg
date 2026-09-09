@@ -6,7 +6,7 @@ Current decision: **not ready for public signup**. The private hosted pilot and 
 
 | Gate | Current evidence / remaining work |
 | --- | --- |
-| Authentication correctness | Library tasks 1–3 were tested; combined review found one outstanding cross-account session-rotation/final-guard race. Original final fix is interrupted at test-only changes. Finish it and run PostgreSQL concurrency regression tests. Local linker last failed with ENOSPC; about 4GB free at latest check is insufficient for a safe retry. |
+| Authentication correctness | Library orchestration accepted at `76b28dfe`: final cross-account session-rotation race fixed, both PostgreSQL ordering regressions reproduced before the fix and passed afterward, and scoped review found no remaining findings. Fresh controller verification passed 152 targeted tests. This is library evidence, not HTTP/UI/runtime acceptance; see `team-auth-acceptance.md`. |
 | Team HTTP and onboarding | Execute the existing `2026-09-08-team-http-onboarding.md` plan after auth acceptance: deny-by-default team startup, GitHub login, explicit org choice, safe browser session/bootstrap/logout, no legacy token fallback. Do not deploy the resulting shell as the completed product. |
 | Workspace access and multiplayer | Convert catalog/settings, nested projects/folders/repo mappings, chats, visibility, scoped events, search and files to checked team principals. Private and org-wide chat rules must hold for list/detail/search/download/events, not just UI hiding. Account/logout transitions clear old caches/subscriptions. In-app org switcher is intentionally deferred. |
 | Feedback for founders | Private to submitter and authorized founders only; org admins have no implicit access. Design proposed in `2026-09-09-founder-feedback-design.md`; owner confirmed visibility, written design review pending. Implement persistence, safe user/founder views, replies/status/unread after team authority is accepted. |
@@ -28,6 +28,6 @@ Current decision: **not ready for public signup**. The private hosted pilot and 
 - No mandatory Google sign-in, billing, public feedback board, Slack/email feedback integration or automatic upstream production updates for the first release.
 - Founder identities must be explicitly configured using verified immutable GitHub IDs, never organization-admin status.
 - Owner still needs to finalize the public domain, retain recovery secrets in an approved independent vault, provide a notification destination, participate in real second-user/provider acceptance and run the interactive publication gate.
-- Free at least 10–15GB on the Mac before the interrupted Rust final-fix build resumes. Do not repeatedly run the same linker into the same disk exhaustion or delete personal/cloud/GitHub data to make room.
+- Mac cleanup completed: 16GiB available at the resumed Rust build preflight. Continue monitoring available storage; stop on renewed disk exhaustion rather than repeating unchanged builds or deleting personal/cloud/GitHub data to make room.
 
 An invite-only external beta can follow successful tenant/runtime/operational acceptance. Unrestricted public signup should not precede those tests or abuse controls. No launch date or completion percentage is asserted by this checklist.
