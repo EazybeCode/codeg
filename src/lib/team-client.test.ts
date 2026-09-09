@@ -18,6 +18,26 @@ function jsonResponse(body: unknown, status = 200) {
   })
 }
 
+function stalledJsonResponse(
+  signal: AbortSignal,
+  onBodyStart: () => void
+): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: vi.fn(() => {
+      onBodyStart()
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true }
+        )
+      })
+    }),
+  } as unknown as Response
+}
+
 beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock)
   fetchMock.mockReset()
@@ -171,6 +191,64 @@ describe("team client", () => {
     await rejection
   })
 
+  it("keeps the 65 second budget active while the JSON body stalls", async () => {
+    vi.useFakeTimers()
+    let requestSignal: AbortSignal | undefined
+    let bodyStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      bodyStarted = resolve
+    })
+    fetchMock.mockImplementationOnce((_input, init) => {
+      requestSignal = init?.signal ?? undefined
+      return Promise.resolve(stalledJsonResponse(requestSignal!, bodyStarted))
+    })
+
+    const pending = loadCapabilities()
+    const rejection = pending.catch((error: unknown) => error)
+    await started
+    await vi.advanceTimersByTimeAsync(64_999)
+    expect(requestSignal?.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(requestSignal?.aborted).toBe(true)
+    await expect(rejection).resolves.toMatchObject({ kind: "unavailable" })
+  })
+
+  it("keeps external cancellation active while consuming the JSON body", async () => {
+    const external = new AbortController()
+    let requestSignal: AbortSignal | undefined
+    let bodyStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      bodyStarted = resolve
+    })
+    fetchMock.mockImplementationOnce((_input, init) => {
+      requestSignal = init?.signal ?? undefined
+      return Promise.resolve(stalledJsonResponse(requestSignal!, bodyStarted))
+    })
+
+    const pending = loadTeamSession(external.signal)
+    const rejection = pending.catch((error: unknown) => error)
+    await started
+    external.abort()
+    await Promise.resolve()
+
+    expect(requestSignal?.aborted).toBe(true)
+    await expect(rejection).resolves.toMatchObject({ kind: "aborted" })
+  })
+
+  it("rejects a pre-aborted external signal without issuing fetch", async () => {
+    const external = new AbortController()
+    external.abort()
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ version: 1, mode: "team", runtimeEnabled: false })
+    )
+
+    await expect(loadCapabilities(external.signal)).rejects.toMatchObject({
+      kind: "aborted",
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it("uses static client errors instead of reflecting server messages", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(
@@ -186,7 +264,9 @@ describe("team client", () => {
   })
 
   it("posts an empty JSON object with the session-bound CSRF on logout", async () => {
-    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }))
+    const response = new Response(null, { status: 204 })
+    const json = vi.spyOn(response, "json")
+    fetchMock.mockResolvedValueOnce(response)
     await logoutTeamSession("session-csrf")
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/team/logout",
@@ -199,5 +279,6 @@ describe("team client", () => {
         body: "{}",
       })
     )
+    expect(json).not.toHaveBeenCalled()
   })
 })

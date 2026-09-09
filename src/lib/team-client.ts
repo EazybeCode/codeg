@@ -144,11 +144,15 @@ function errorForStatus(status: number): TeamClientError {
   }
 }
 
-async function request(
+async function request<T>(
   path: string,
   init: RequestInit = {},
-  externalSignal?: AbortSignal
-): Promise<Response> {
+  externalSignal: AbortSignal | undefined,
+  consume: (response: Response) => Promise<T>
+): Promise<T> {
+  if (externalSignal?.aborted) {
+    throw new TeamClientError("aborted")
+  }
   const controller = new AbortController()
   const abort = () => controller.abort()
   externalSignal?.addEventListener("abort", abort, { once: true })
@@ -161,14 +165,14 @@ async function request(
       signal: controller.signal,
     })
     if (!response.ok) throw errorForStatus(response.status)
-    return response
+    return await consume(response)
   } catch (error) {
-    if (error instanceof TeamClientError) throw error
     if (controller.signal.aborted) {
       throw new TeamClientError(
         externalSignal?.aborted ? "aborted" : "unavailable"
       )
     }
+    if (error instanceof TeamClientError) throw error
     throw new TeamClientError("request_failed")
   } finally {
     window.clearTimeout(timeout)
@@ -187,8 +191,11 @@ async function responseJson(response: Response): Promise<unknown> {
 export async function loadCapabilities(
   signal?: AbortSignal
 ): Promise<TeamCapabilities> {
-  const payload = await responseJson(
-    await request("/api/workos/capabilities", {}, signal)
+  const payload = await request(
+    "/api/workos/capabilities",
+    {},
+    signal,
+    responseJson
   )
   if (
     !isRecord(payload) ||
@@ -204,8 +211,11 @@ export async function loadCapabilities(
 export async function loadPendingChoices(
   signal?: AbortSignal
 ): Promise<PendingChoices> {
-  const payload = await responseJson(
-    await request("/api/team/onboarding", {}, signal)
+  const payload = await request(
+    "/api/team/onboarding",
+    {},
+    signal,
+    responseJson
   )
   if (
     !isRecord(payload) ||
@@ -228,19 +238,18 @@ export async function selectOrganization(
   if (!isCanonicalGithubId(githubOrgId) || !csrf) {
     throw new TeamClientError("invalid_request")
   }
-  const payload = await responseJson(
-    await request(
-      "/api/team/onboarding/select",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-WorkOS-CSRF": csrf,
-        },
-        body: JSON.stringify({ githubOrgId }),
+  const payload = await request(
+    "/api/team/onboarding/select",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-WorkOS-CSRF": csrf,
       },
-      signal
-    )
+      body: JSON.stringify({ githubOrgId }),
+    },
+    signal,
+    responseJson
   )
   if (!isRecord(payload) || payload.redirect !== "/workspace") {
     throw new TeamClientError("invalid_response")
@@ -251,9 +260,7 @@ export async function selectOrganization(
 export async function loadTeamSession(
   signal?: AbortSignal
 ): Promise<TeamSession> {
-  const payload = await responseJson(
-    await request("/api/team/session", {}, signal)
-  )
+  const payload = await request("/api/team/session", {}, signal, responseJson)
   if (
     !isRecord(payload) ||
     !isAccount(payload.user) ||
@@ -284,6 +291,7 @@ export async function logoutTeamSession(
       },
       body: "{}",
     },
-    signal
+    signal,
+    () => Promise.resolve()
   )
 }
