@@ -583,6 +583,16 @@ async fn same_user_different_org_cookies_never_share_or_switch_tenant_authority(
 #[tokio::test]
 async fn every_shared_proof_consumer_rechecks_its_own_session() {
     let fixture = principal_fixture(vec![Ok(alice_a_evidence(TeamRole::Admin))]).await;
+    let survivor_token =
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let initiating_session = team_session::Entity::find_by_id(token_hash(ALICE_A_TOKEN))
+        .one(&fixture.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut survivor_session = initiating_session.into_active_model();
+    survivor_session.token_hash = Set(token_hash(survivor_token));
+    survivor_session.insert(&fixture.db).await.unwrap();
     let gate = fixture.github.gate_membership();
     let flight_observer = Arc::new(Semaphore::new(0));
     let mut principal = PrincipalService::new(
@@ -607,7 +617,7 @@ async fn every_shared_proof_consumer_rechecks_its_own_session() {
         let service = service.clone();
         tokio::spawn(async move {
             service
-                .resolve(&cookie_headers(ALICE_A_TOKEN), ProofRequirement::Fresh)
+                .resolve(&cookie_headers(survivor_token), ProofRequirement::Fresh)
                 .await
         })
     };
@@ -617,15 +627,23 @@ async fn every_shared_proof_consumer_rechecks_its_own_session() {
         .await
         .unwrap();
     gate.release.notify_waiters();
-    for consumer in [first, second] {
-        assert_eq!(
-            tokio::time::timeout(StdDuration::from_secs(5), consumer)
-                .await
-                .expect("revoked shared consumer completed")
-                .unwrap(),
-            Err(TeamAuthError::Unauthorized)
-        );
-    }
+    assert_eq!(
+        tokio::time::timeout(StdDuration::from_secs(5), first)
+            .await
+            .expect("revoked initiating consumer completed")
+            .unwrap(),
+        Err(TeamAuthError::Unauthorized)
+    );
+    assert_eq!(
+        tokio::time::timeout(StdDuration::from_secs(5), second)
+            .await
+            .expect("surviving shared consumer completed")
+            .unwrap()
+            .unwrap()
+            .session_id,
+        token_hash(survivor_token)
+    );
+    assert_eq!(fixture.github.verification_calls(), 1);
 }
 
 #[tokio::test]

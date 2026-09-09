@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::Duration;
 use sea_orm::{
@@ -15,12 +15,14 @@ use super::{
         GithubOrganizationChoice,
     },
     oauth::{GithubTokenSet, OAuthError},
-    onboarding::OnboardingService,
+    onboarding::{OnboardingService, PendingStart, SessionStart},
+    principal::{PrincipalService, ProofRequirement},
     secrets::{SecretBinding, SecretVault},
     session::TeamRole,
     test_auth::{
-        create_postgres_fixture, drop_postgres_fixture, fixed_now, seed_accounts, tokens,
-        wait_for_postgres_lock, FakeGithub, FakeOAuth, TestClock, ALICE_GITHUB_ID, ALICE_USER_ID,
+        cookie_headers, create_postgres_fixture, drop_postgres_fixture, fixed_now, seed_accounts,
+        tokens, wait_for_postgres_lock, FakeGithub, FakeOAuth, TestClock, ALICE_GITHUB_ID,
+        ALICE_USER_ID,
     },
 };
 use crate::db::entities::{
@@ -124,6 +126,136 @@ async fn pending(service: &OnboardingService, code: &str) -> super::onboarding::
         .complete(&attempt.state, &attempt.browser_secret, code)
         .await
         .expect("complete OAuth")
+}
+
+struct CrossAccountRotationFixture {
+    onboarding: Arc<OnboardingService>,
+    principal: Arc<PrincipalService>,
+    old_session: SessionStart,
+    other_device_secret: String,
+    new_pending: PendingStart,
+    old_membership_id: i32,
+}
+
+async fn complete_pending(
+    service: &OnboardingService,
+    code: &str,
+) -> Result<PendingStart, String> {
+    let attempt = service
+        .begin()
+        .await
+        .map_err(|error| format!("begin {code}: {error:?}"))?;
+    service
+        .complete(&attempt.state, &attempt.browser_secret, code)
+        .await
+        .map_err(|error| format!("complete {code}: {error:?}"))
+}
+
+async fn bounded_task<T>(
+    mut task: tokio::task::JoinHandle<T>,
+    timeout_message: &str,
+) -> Result<T, String> {
+    match tokio::time::timeout(StdDuration::from_secs(5), &mut task).await {
+        Ok(result) => result.map_err(|error| format!("join task: {error}")),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            Err(timeout_message.to_owned())
+        }
+    }
+}
+
+async fn cross_account_rotation_fixture(
+    db: &sea_orm::DatabaseConnection,
+) -> Result<CrossAccountRotationFixture, String> {
+    let second_github_user_id = 30_302;
+    let choice_a = organization(GITHUB_ORG_A, "alpha-company", TeamRole::Member);
+    let choice_b = organization(GITHUB_ORG_B, "beta-company", TeamRole::Admin);
+    let vault = Arc::new(
+        SecretVault::from_hex_key(
+            "7777777777777777777777777777777777777777777777777777777777777777",
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    let oauth = Arc::new(FakeOAuth::with_exchange(vec![
+        Ok(durable_tokens("old-account-access")),
+        Ok(durable_tokens("new-account-access")),
+    ]));
+    let github = Arc::new(FakeGithub::new(
+        vec![
+            Ok(identity(GITHUB_USER_ID, "old-account")),
+            Ok(identity(second_github_user_id, "new-account")),
+        ],
+        vec![Ok(vec![choice_a]), Ok(vec![choice_b])],
+        vec![
+            Ok(evidence(
+                GITHUB_USER_ID,
+                GITHUB_ORG_A,
+                "alpha-company",
+                TeamRole::Member,
+            )),
+            Ok(evidence(
+                second_github_user_id,
+                GITHUB_ORG_B,
+                "beta-company",
+                TeamRole::Admin,
+            )),
+        ],
+    ));
+    let clock = Arc::new(TestClock::new(fixed_now()));
+    let credentials = Arc::new(CredentialService::new(
+        db.clone(),
+        vault.clone(),
+        oauth.clone(),
+        clock.clone(),
+    ));
+    let onboarding = Arc::new(OnboardingService::new(
+        db.clone(),
+        vault,
+        oauth,
+        github.clone(),
+        credentials.clone(),
+        clock.clone(),
+    ));
+    let old_pending = complete_pending(&onboarding, "old-account-code").await?;
+    let old_session = onboarding
+        .select(
+            &old_pending.browser_secret,
+            &old_pending.csrf_secret,
+            GITHUB_ORG_A,
+            None,
+        )
+        .await
+        .map_err(|error| format!("select old account: {error:?}"))?;
+    let old_row = team_session::Entity::find_by_id(hash(&old_session.session_secret))
+        .one(db)
+        .await
+        .map_err(|error| format!("load old session: {error}"))?
+        .ok_or_else(|| "old session missing after selection".to_owned())?;
+    let old_membership_id = old_row.membership_id;
+    let other_device_secret =
+        "7878787878787878787878787878787878787878787878787878787878787878".to_owned();
+    let mut other_device = old_row.into_active_model();
+    other_device.token_hash = Set(hash(&other_device_secret));
+    other_device
+        .insert(db)
+        .await
+        .map_err(|error| format!("insert other-device session: {error}"))?;
+    let new_pending = complete_pending(&onboarding, "new-account-code").await?;
+    let principal = Arc::new(PrincipalService::new(
+        db.clone(),
+        credentials,
+        github,
+        clock,
+    ));
+    Ok(CrossAccountRotationFixture {
+        onboarding,
+        principal,
+        old_session,
+        other_device_secret,
+        new_pending,
+        old_membership_id,
+    })
 }
 
 fn hash(secret: &str) -> String {
@@ -256,9 +388,16 @@ async fn an_uncertain_exchange_consumes_the_attempt_and_never_retries_the_code()
 #[tokio::test]
 async fn maximum_supported_pending_payload_round_trips_without_creating_authority() {
     let at = fixed_now();
-    let mut maximum_identity = identity(GITHUB_USER_ID, "new-user");
-    maximum_identity.name = Some("n".repeat(256));
-    maximum_identity.avatar_url = Some(format!("https://example.invalid/{}", "a".repeat(2_100)));
+    let maximum_login = "l".repeat(39);
+    let maximum_name = "界".repeat(256);
+    let maximum_avatar = format!("https://example.invalid/{}", "a".repeat(2_024));
+    assert_eq!(maximum_avatar.len(), 2_048);
+    let maximum_identity = GithubIdentity {
+        github_user_id: GITHUB_USER_ID,
+        login: maximum_login.clone(),
+        name: Some(maximum_name.clone()),
+        avatar_url: Some(maximum_avatar.clone()),
+    };
     let fixture = fixture(
         vec![Ok(tokens(
             &"a".repeat(4_096),
@@ -288,8 +427,9 @@ async fn maximum_supported_pending_payload_round_trips_without_creating_authorit
     assert!(!pending_row.encrypted_payload.contains(&"b".repeat(128)));
     let choices = service.choices(&completed.browser_secret).await.unwrap();
     assert_eq!(choices.identity.github_user_id, GITHUB_USER_ID);
-    assert_eq!(choices.identity.name.as_deref(), Some(&*"n".repeat(256)));
-    assert_eq!(choices.identity.avatar_url, None);
+    assert_eq!(choices.identity.login, maximum_login);
+    assert_eq!(choices.identity.name, Some(maximum_name));
+    assert_eq!(choices.identity.avatar_url, Some(maximum_avatar));
     assert_eq!(choices.organizations.len(), 1);
     assert_eq!(user::Entity::find().count(&fixture.db).await.unwrap(), 0);
     assert_eq!(org::Entity::find().count(&fixture.db).await.unwrap(), 0);
@@ -1196,6 +1336,272 @@ async fn secret_values_never_appear_in_errors() {
         .to_string();
     assert!(!error.contains(browser));
     assert!(!error.contains(csrf));
+}
+
+/// `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --no-default-features --lib onboarding_postgres_selection_waits_for_old_account_final_guard -- --ignored --test-threads=1 --nocapture`
+#[tokio::test]
+#[ignore = "requires local PostgreSQL"]
+async fn onboarding_postgres_selection_waits_for_old_account_final_guard() {
+    let (name, admin, db) = create_postgres_fixture().await.expect("PostgreSQL fixture");
+    let result: Result<(), String> = async {
+        let fixture = cross_account_rotation_fixture(&db).await?;
+        let context = fixture
+            .principal
+            .resolve(
+                &cookie_headers(&fixture.old_session.session_secret),
+                ProofRequirement::Cached,
+            )
+            .await
+            .map_err(|error| format!("resolve old-account principal: {error:?}"))?;
+        let guard = db.begin().await.map_err(|error| error.to_string())?;
+        fixture
+            .principal
+            .recheck_in_transaction(&guard, &context)
+            .await
+            .map_err(|error| format!("old-account final guard: {error:?}"))?;
+
+        let selecting = {
+            let onboarding = fixture.onboarding.clone();
+            let browser = fixture.new_pending.browser_secret.clone();
+            let csrf = fixture.new_pending.csrf_secret.clone();
+            let previous = fixture.old_session.session_secret.clone();
+            tokio::spawn(async move {
+                onboarding
+                    .select(&browser, &csrf, GITHUB_ORG_B, Some(&previous))
+                    .await
+            })
+        };
+        if let Err(error) =
+            wait_for_postgres_lock(&admin, &name, "DELETE FROM \"team_session\"").await
+        {
+            selecting.abort();
+            let _ = selecting.await;
+            guard
+                .rollback()
+                .await
+                .map_err(|rollback| format!("{error}; rollback guard: {rollback}"))?;
+            return Err(format!(
+                "{error}; cross-account selection did not wait behind the successful final guard"
+            ));
+        }
+        if selecting.is_finished() {
+            guard.rollback().await.map_err(|error| error.to_string())?;
+            return Err("selection completed while the successful final guard stayed open".into());
+        }
+        guard
+            .commit()
+            .await
+            .map_err(|error| format!("commit final-guard transaction: {error}"))?;
+        let issued = bounded_task(
+            selecting,
+            "selection did not complete after final-guard commit",
+        )
+            .await?
+            .map_err(|error| format!("cross-account selection: {error:?}"))?;
+        let new_row = team_session::Entity::find_by_id(hash(&issued.session_secret))
+            .one(&db)
+            .await
+            .map_err(|error| format!("load new-account session: {error}"))?
+            .ok_or_else(|| "new-account session missing".to_owned())?;
+        if issued.user_id == fixture.old_session.user_id
+            || new_row.membership_id == fixture.old_membership_id
+        {
+            return Err("rotation fixture did not use different accounts and memberships".into());
+        }
+        if team_session::Entity::find_by_id(hash(&fixture.old_session.session_secret))
+            .one(&db)
+            .await
+            .map_err(|error| format!("check deleted old session: {error}"))?
+            .is_some()
+        {
+            return Err("selection preserved the exact presented old session".into());
+        }
+        if team_session::Entity::find_by_id(hash(&fixture.other_device_secret))
+            .one(&db)
+            .await
+            .map_err(|error| format!("check other-device session: {error}"))?
+            .is_none()
+        {
+            return Err("selection deleted another old-account device".into());
+        }
+        for membership_id in [fixture.old_membership_id, new_row.membership_id] {
+            if organization_membership::Entity::find_by_id(membership_id)
+                .one(&db)
+                .await
+                .map_err(|error| format!("check membership {membership_id}: {error}"))?
+                .is_none()
+            {
+                return Err(format!("selection removed membership {membership_id}"));
+            }
+        }
+        Ok(())
+    }
+    .await;
+    drop_postgres_fixture(&name, admin, db)
+        .await
+        .expect("exact PostgreSQL cleanup");
+    result.unwrap();
+}
+
+/// `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 cargo test --no-default-features --lib onboarding_postgres_old_guard_waits_for_cross_account_rotation -- --ignored --test-threads=1 --nocapture`
+#[tokio::test]
+#[ignore = "requires local PostgreSQL"]
+async fn onboarding_postgres_old_guard_waits_for_cross_account_rotation() {
+    let (name, admin, db) = create_postgres_fixture().await.expect("PostgreSQL fixture");
+    let result: Result<(), String> = async {
+        let fixture = cross_account_rotation_fixture(&db).await?;
+        let context = fixture
+            .principal
+            .resolve(
+                &cookie_headers(&fixture.old_session.session_secret),
+                ProofRequirement::Cached,
+            )
+            .await
+            .map_err(|error| format!("resolve old-account principal: {error:?}"))?;
+        db.execute(Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "CREATE FUNCTION gate_rotated_session_insert() RETURNS trigger AS $$ \
+             BEGIN PERFORM pg_advisory_xact_lock(hashtextextended(current_database(), 0)); \
+             RETURN NEW; END; $$ LANGUAGE plpgsql"
+                .to_owned(),
+        ))
+        .await
+        .map_err(|error| format!("install session-insert gate function: {error}"))?;
+        db.execute(Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "CREATE TRIGGER gate_rotated_session_insert BEFORE INSERT ON team_session \
+             FOR EACH ROW EXECUTE FUNCTION gate_rotated_session_insert()"
+                .to_owned(),
+        ))
+        .await
+        .map_err(|error| format!("install session-insert gate trigger: {error}"))?;
+        let insert_gate = db.begin().await.map_err(|error| error.to_string())?;
+        insert_gate
+            .query_one(Statement::from_string(
+                sea_orm::DbBackend::Postgres,
+                "SELECT pg_advisory_xact_lock(hashtextextended(current_database(), 0))".to_owned(),
+            ))
+            .await
+            .map_err(|error| format!("hold session-insert advisory gate: {error}"))?;
+
+        let selecting = {
+            let onboarding = fixture.onboarding.clone();
+            let browser = fixture.new_pending.browser_secret.clone();
+            let csrf = fixture.new_pending.csrf_secret.clone();
+            let previous = fixture.old_session.session_secret.clone();
+            tokio::spawn(async move {
+                onboarding
+                    .select(&browser, &csrf, GITHUB_ORG_B, Some(&previous))
+                    .await
+            })
+        };
+        if let Err(error) =
+            wait_for_postgres_lock(&admin, &name, "INSERT INTO \"team_session\"").await
+        {
+            selecting.abort();
+            let _ = selecting.await;
+            insert_gate
+                .rollback()
+                .await
+                .map_err(|rollback| format!("{error}; release insert gate: {rollback}"))?;
+            return Err(format!("{error}; selection never reached the post-delete insert gate"));
+        }
+        if selecting.is_finished() {
+            insert_gate.rollback().await.map_err(|error| error.to_string())?;
+            return Err("selection completed while its post-delete insert stayed gated".into());
+        }
+        let guard = {
+            let principal = fixture.principal.clone();
+            let guard_db = db.clone();
+            tokio::spawn(async move {
+                let transaction = guard_db.begin().await.map_err(|error| error.to_string())?;
+                let result = principal.recheck_in_transaction(&transaction, &context).await;
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|error| format!("rollback old-account guard: {error}"))?;
+                Ok::<_, String>(result)
+            })
+        };
+        if let Err(error) =
+            wait_for_postgres_lock(&admin, &name, "FROM \"team_session\"").await
+        {
+            guard.abort();
+            let _ = guard.await;
+            insert_gate
+                .commit()
+                .await
+                .map_err(|release| format!("{error}; release insert gate: {release}"))?;
+            let _ = bounded_task(selecting, "selection did not complete after gate release").await;
+            return Err(format!(
+                "{error}; old-account guard did not wait on the exact session row"
+            ));
+        }
+        if guard.is_finished() {
+            insert_gate.commit().await.map_err(|error| error.to_string())?;
+            let _ = bounded_task(selecting, "selection did not complete after gate release").await;
+            return Err("old-account guard completed before the deleting selection committed".into());
+        }
+        insert_gate
+            .commit()
+            .await
+            .map_err(|error| format!("release session-insert gate: {error}"))?;
+        let issued = bounded_task(selecting, "selection did not complete after insert gate release")
+            .await?
+            .map_err(|error| format!("cross-account selection: {error:?}"))?;
+        let guard_result = bounded_task(
+            guard,
+            "old-account guard did not complete after selection commit",
+        )
+            .await??;
+        if guard_result != Err(TeamAuthError::Unauthorized) {
+            return Err(format!(
+                "guard behind committed session deletion returned {guard_result:?}"
+            ));
+        }
+        let new_row = team_session::Entity::find_by_id(hash(&issued.session_secret))
+            .one(&db)
+            .await
+            .map_err(|error| format!("load new-account session: {error}"))?
+            .ok_or_else(|| "new-account session missing".to_owned())?;
+        if issued.user_id == fixture.old_session.user_id
+            || new_row.membership_id == fixture.old_membership_id
+        {
+            return Err("rotation fixture did not use different accounts and memberships".into());
+        }
+        if team_session::Entity::find_by_id(hash(&fixture.old_session.session_secret))
+            .one(&db)
+            .await
+            .map_err(|error| format!("check deleted old session: {error}"))?
+            .is_some()
+        {
+            return Err("selection preserved the exact presented old session".into());
+        }
+        if team_session::Entity::find_by_id(hash(&fixture.other_device_secret))
+            .one(&db)
+            .await
+            .map_err(|error| format!("check other-device session: {error}"))?
+            .is_none()
+        {
+            return Err("selection deleted another old-account device".into());
+        }
+        for membership_id in [fixture.old_membership_id, new_row.membership_id] {
+            if organization_membership::Entity::find_by_id(membership_id)
+                .one(&db)
+                .await
+                .map_err(|error| format!("check membership {membership_id}: {error}"))?
+                .is_none()
+            {
+                return Err(format!("selection removed membership {membership_id}"));
+            }
+        }
+        Ok(())
+    }
+    .await;
+    drop_postgres_fixture(&name, admin, db)
+        .await
+        .expect("exact PostgreSQL cleanup");
+    result.unwrap();
 }
 
 /// `CARGO_INCREMENTAL=0 cargo test --no-default-features --lib onboarding_postgres_previous_session_lock_rechecks_freshness -- --ignored --test-threads=1 --nocapture`

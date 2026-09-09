@@ -6,7 +6,7 @@ use sea_orm::{
 };
 
 use super::AuthContext;
-use crate::db::entities::organization_membership;
+use crate::db::entities::{organization_membership, team_session};
 use crate::team_access::{
     core::{database_error, TeamAuthError, TeamClock},
     github::{valid_login, GithubMembershipEvidence},
@@ -277,6 +277,7 @@ pub(super) async fn recheck_context(
     clock: &dyn TeamClock,
 ) -> Result<(), TeamAuthError> {
     lock_membership(transaction, context.membership_id).await?;
+    lock_session(transaction, &context.session_id).await?;
     let local = LocalPrincipal {
         session_id: context.session_id.clone(),
         user_id: context.user_id,
@@ -396,9 +397,47 @@ async fn lock_membership(
             .map_err(|error| database_error(&error))?
             .map(|_| ())
             .ok_or(TeamAuthError::Unauthorized),
-        DbBackend::Sqlite => Ok(()),
+        DbBackend::Sqlite => {
+            let changed = organization_membership::Entity::update_many()
+                .col_expr(
+                    organization_membership::Column::UpdatedAt,
+                    Expr::col(organization_membership::Column::UpdatedAt).into(),
+                )
+                .filter(organization_membership::Column::Id.eq(membership_id))
+                .exec(transaction)
+                .await
+                .map_err(|error| database_error(&error))?;
+            if changed.rows_affected == 1 {
+                Ok(())
+            } else {
+                Err(TeamAuthError::Unauthorized)
+            }
+        }
         _ => Err(TeamAuthError::Unavailable),
     }
+}
+
+async fn lock_session(
+    transaction: &DatabaseTransaction,
+    session_id: &str,
+) -> Result<(), TeamAuthError> {
+    if !valid_hash(session_id) {
+        return Err(TeamAuthError::Unauthorized);
+    }
+    let query = team_session::Entity::find_by_id(session_id)
+        .select_only()
+        .column(team_session::Column::TokenHash);
+    let found = match transaction.get_database_backend() {
+        DbBackend::Postgres => query
+            .lock(LockType::Update)
+            .into_tuple::<String>()
+            .one(transaction)
+            .await,
+        DbBackend::Sqlite => query.into_tuple::<String>().one(transaction).await,
+        _ => return Err(TeamAuthError::Unavailable),
+    }
+    .map_err(|error| database_error(&error))?;
+    found.map(|_| ()).ok_or(TeamAuthError::Unauthorized)
 }
 
 async fn load_membership_authority(
