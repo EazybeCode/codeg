@@ -1,0 +1,22 @@
+[Unit]
+Description=Encrypted WorkOS off-server backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Environment=GOMAXPROCS=2
+ExecStart=/usr/bin/flock -n /run/workos-backup.lock /usr/bin/python3 /opt/workos/backup/workos_backup.py backup
+TimeoutStartSec=7200
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=50%
+MemoryMax=512M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/cache/workos-backup /var/lib/workos-backup /run
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

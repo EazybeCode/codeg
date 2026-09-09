@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly WorkOS off-server backup after Coolify archive windows
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=workos-backup.service
+
+[Install]
+WantedBy=timers.target
