@@ -1,6 +1,7 @@
 # Personal-agent lifecycle verification
 
-September 10, 2026. **Both tasks accepted; final combined review pending.**
+September 10, 2026. **Both tasks and final combined review accepted, with two
+nonblocking test/report observations retained below.**
 This is not a provider-login, runtime, deployment or release acceptance record.
 
 Plan: [personal-agent lifecycle](../superpowers/plans/2026-09-09-personal-agent-lifecycle.md).
@@ -143,6 +144,51 @@ The owner's Claude terms confirmation is recorded in
 connected by that confirmation. See the [sandbox investigation](personal-agent-sandbox-investigation.md)
 for unresolved network and backup-compatibility checks.
 
+### Final whole-plan review and fresh acceptance
+
+The whole-plan review of `448f0361..3214d4bc` found one important expiry race
+and two minor findings. The single final fix wave (`376af7df`, report `76d82037`)
+moves both completion/failure clock samples after resource locks, scopes the
+completion connection SQL by organization and owner before locking, and names
+the earlier browser source explicitly.
+
+Both defects were reproduced before correction in disposable PostgreSQL:
+completion incorrectly accepted a deadline crossed behind a connection lock;
+a foreign-owner lookup waited on the foreign row before returning NotFound.
+The exact failed fixtures are retained and named in the committed Task 2 report.
+The corrected tests cover expired unchanged-row outcomes and 9m59 still-live
+controls for both completion and failure, plus owner-scoped no-wait denial.
+Worker gates passed 2 focused, 23 recovery, 36 total agent and 9 HTTP tests;
+these counts overlap and are not additive.
+
+Independent scoped re-review of `3214d4bc..76d82037` marked all three original
+findings addressed, with no new critical or important issue. Fresh controller
+verification at `76d82037` used the matching rebuilt library-test executable:
+
+```text
+./target/debug/deps/codeg_lib-732148cb61475fb4 team_access team_server personal_agent_connections_tests team_credentials_tests --include-ignored --skip team_browser_fixture_server --test-threads=1 --quiet
+238 passed; 0 failed; 0 ignored; 3479 filtered out; 23.09s; exit 0
+```
+
+Full output was read and working/index whitespace checks passed. This supersedes
+the earlier 236 checks, not the browser or standalone-build evidence. No new
+browser, full-repository, official provider or deployment acceptance is implied.
+
+Two minor final observations are retained, not silently dismissed:
+
+- **Coverage erratum:** the final-wave report's claim that removing either owner
+  predicate defeats its regression is too broad. The test uses Alice A and Bob A;
+  it detects removal of the user predicate, not removal of the org predicate
+  alone. Review confirmed both predicates exist in production SQL. An independent
+  cross-org lock regression remains additional coverage, not a verified result.
+- **Synthetic diagnostics:** the new regression's failure paths format complete
+  synthetic entity models rather than selected safe fields. No production logging
+  or real credential leak was found; this nevertheless violates the intended
+  test logging discipline and remains deferred maintenance.
+
+There is no second final fix wave. Neither issue changes the reviewed production
+authority or expiry behavior; the decisions and costs are recorded below.
+
 Unauthenticated HTTPS checks from the owner's Mac could not connect to either
 public origin on port 443, although both domains resolved to the expected server
 address. The server-side cause was not established and no hosting configuration
@@ -168,6 +214,16 @@ for this lifecycle work.
    old cleanup. Its operation may retry without overwriting a newer connection's
    state or metadata. Cost if wrong: the old failure is visible in its operation
    metadata rather than as the newer connection's error.
+4. Accept the lifecycle slice while retaining the report coverage overstatement
+   with the explicit erratum above. Both SQL predicates are present and the
+   production finding is addressed. Cost if wrong: a future predicate regression
+   could escape this particular test; add an independent cross-org lock case
+   before claiming that coverage.
+5. Defer narrowing complete entity Debug output in the two synthetic regression
+   failure paths. They contain invented local fixture data, not production
+   provider credentials, and no runtime is enabled here. Cost if wrong: noisier
+   test diagnostics and future exposure risk if real data is ever introduced;
+   real credentials must never be used in these fixtures.
 
 Context: [org-memory: wiki/engineering/workos.md]. Legacy operator-mode authority
 and provider homes are not the new multi-tenant authorization boundary.

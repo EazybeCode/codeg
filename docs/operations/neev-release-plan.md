@@ -154,8 +154,11 @@ PostgreSQL races are now accepted through `38811933` after a scoped fix/re-revie
 The fixes close a wrong-session error distinction and strengthen race and failed-
 fixture evidence. Fresh controller verification passed 236 distinct backend
 checks, including the amended 34 agent tests and existing HTTP/logout suite.
-Final combined lifecycle review remains pending. No personal-provider route or
-runtime was enabled.
+Final combined lifecycle review is accepted through `76d82037` after fixing
+post-lock expiry sampling and owner-scoped connection locking. Fresh controller
+verification passed 238 distinct backend checks. Two nonblocking test/report
+observations are explicitly retained in the verification record; no personal-
+provider route or runtime was enabled.
 Detailed evidence and execution decisions are in the
 [lifecycle verification record](personal-agent-lifecycle-acceptance.md).
 

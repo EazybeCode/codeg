@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-09-personal-agent-connections-design.md` (approved). Prerequisite: accepted `2026-09-09-personal-agent-persistence.md` implementation.
 
+Status: both tasks and final combined review accepted September 10 through
+`76d82037`, with fresh 238-check backend verification and two retained nonblocking
+test/report observations. See `docs/operations/personal-agent-lifecycle-acceptance.md`
+for exact evidence, limitations and rulings. This is not provider or product release
+acceptance; checklist text below preserves the original execution instructions.
+
 ## Global Constraints
 
 - Every member uses their own subscription for Claude, Codex or another supported agent.
