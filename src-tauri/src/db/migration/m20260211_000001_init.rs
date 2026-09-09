@@ -305,6 +305,7 @@ impl MigrationTrait for Migration {
             .drop_table(
                 Table::drop()
                     .table(FolderOpenedConversation::Table)
+                    .if_exists()
                     .to_owned(),
             )
             .await?;

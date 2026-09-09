@@ -16,28 +16,27 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        use sea_orm::{EntityTrait, QuerySelect};
+        use sea_orm::{ConnectionTrait, Statement};
 
         let conn = manager.get_connection();
-        let contains_data = crate::db::entities::workspace_chat_draft::Entity::find()
-            .limit(1)
-            .one(conn)
-            .await?
-            .is_some()
-            || crate::db::entities::workspace_node::Entity::find()
-                .limit(1)
-                .one(conn)
-                .await?
-                .is_some()
-            || crate::db::entities::workspace_repository::Entity::find()
-                .limit(1)
-                .one(conn)
+        for table in [
+            "workspace_chat_draft",
+            "workspace_node",
+            "workspace_repository",
+        ] {
+            let present = conn
+                .query_one(Statement::from_string(
+                    conn.get_database_backend(),
+                    format!("SELECT id FROM {table} LIMIT 1"),
+                ))
                 .await?
                 .is_some();
-        if contains_data {
-            return Err(DbErr::Custom(
-                "workspace catalog migration cannot be reverted while catalog rows exist".into(),
-            ));
+            if present {
+                return Err(DbErr::Custom(
+                    "workspace catalog migration cannot be reverted while catalog rows exist"
+                        .into(),
+                ));
+            }
         }
 
         manager

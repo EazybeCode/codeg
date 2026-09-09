@@ -7,6 +7,8 @@ use sea_orm_migration::{MigrationTrait, MigratorTrait, SchemaManager};
 use uuid::Uuid;
 
 use super::{
+    m20260211_000001_init::Migration as InitialMigration,
+    m20260907_000001_workspace_catalog::Migration as WorkspaceCatalogMigration,
     m20260909_000001_personal_agent_connections::Migration as PersonalAgentMigration,
     Migrator,
 };
@@ -22,6 +24,16 @@ const C3: &str = "10000000-0000-4000-8000-000000000003";
 const A1: &str = "20000000-0000-4000-8000-000000000001";
 const O1: &str = "30000000-0000-4000-8000-000000000001";
 const S1: &str = "40000000-0000-4000-8000-000000000001";
+const CATALOG_TABLES: [&str; 3] = [
+    "workspace_chat_draft",
+    "workspace_node",
+    "workspace_repository",
+];
+const PERSONAL_TABLES: [&str; 3] = [
+    "team_agent_connection",
+    "team_agent_attempt",
+    "team_agent_operation",
+];
 type TestResult<T> = Result<T, String>;
 
 fn ts(second: u32) -> chrono::DateTime<Utc> {
@@ -181,10 +193,171 @@ async fn reject_operation(db: &DatabaseConnection, row: team_agent_operation::Ac
 async fn personal_agent_metadata_tables_are_usable_after_full_migration_chain() {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     Migrator::up(&db, None).await.unwrap();
-    for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] {
-        let rows = db.query_all(Statement::from_string(DbBackend::Sqlite, format!("SELECT id FROM {table}"))).await.unwrap_or_else(|e| panic!("{table} must be usable: {e}"));
+    Migrator::down(&db, None)
+        .await
+        .expect("complete empty migration chain is reversible");
+    assert!(Migrator::get_applied_migrations(&db)
+        .await
+        .unwrap()
+        .is_empty());
+    let manager = SchemaManager::new(&db);
+    for table in CATALOG_TABLES.into_iter().chain(PERSONAL_TABLES) {
+        assert!(
+            !manager.has_table(table).await.unwrap(),
+            "full rollback retained {table}"
+        );
+    }
+
+    Migrator::up(&db, None).await.unwrap();
+    for table in PERSONAL_TABLES {
+        let rows = db
+            .query_all(Statement::from_string(
+                DbBackend::Sqlite,
+                format!("SELECT id FROM {table}"),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("{table} must be usable after rerun: {e}"));
         assert!(rows.is_empty());
     }
+}
+
+async fn historical_catalog_fixture() -> DatabaseConnection {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    for table in CATALOG_TABLES {
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY)"),
+        ))
+        .await
+        .unwrap();
+    }
+    create_sentinel(&db).await;
+    db
+}
+
+async fn create_sentinel(db: &DatabaseConnection) {
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "CREATE TABLE unrelated_sentinel (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+            .to_owned(),
+    ))
+    .await
+    .unwrap();
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "INSERT INTO unrelated_sentinel (id, value) VALUES (1, 'preserve-me')".to_owned(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn assert_sentinel_preserved(db: &DatabaseConnection) {
+    let row = db
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT id, value FROM unrelated_sentinel".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .expect("sentinel row must remain");
+    assert_eq!(row.try_get::<i64>("", "id").unwrap(), 1);
+    assert_eq!(
+        row.try_get::<String>("", "value").unwrap(),
+        "preserve-me"
+    );
+}
+
+#[tokio::test]
+async fn historical_catalog_down_refuses_each_id_only_table_before_any_drop() {
+    for populated_table in CATALOG_TABLES {
+        let db = historical_catalog_fixture().await;
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("INSERT INTO {populated_table} (id) VALUES (101)"),
+        ))
+        .await
+        .unwrap();
+
+        let error = WorkspaceCatalogMigration
+            .down(&SchemaManager::new(&db))
+            .await
+            .expect_err("catalog rollback with rows must fail");
+        assert_eq!(
+            error.to_string(),
+            "Custom Error: workspace catalog migration cannot be reverted while catalog rows exist"
+        );
+
+        let manager = SchemaManager::new(&db);
+        for table in CATALOG_TABLES {
+            assert!(
+                manager.has_table(table).await.unwrap(),
+                "guard dropped {table} while {populated_table} contained a row"
+            );
+            let row_count = db
+                .query_one(Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!("SELECT COUNT(*) AS count FROM {table}"),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "count")
+                .unwrap();
+            assert_eq!(
+                row_count,
+                i64::from(table == populated_table),
+                "catalog rows changed in {table}"
+            );
+        }
+        assert_sentinel_preserved(&db).await;
+    }
+}
+
+#[tokio::test]
+async fn historical_catalog_down_drops_only_empty_id_only_catalog_tables() {
+    let db = historical_catalog_fixture().await;
+    WorkspaceCatalogMigration
+        .down(&SchemaManager::new(&db))
+        .await
+        .unwrap();
+
+    let manager = SchemaManager::new(&db);
+    for table in CATALOG_TABLES {
+        assert!(
+            !manager.has_table(table).await.unwrap(),
+            "empty rollback retained {table}"
+        );
+    }
+    assert_sentinel_preserved(&db).await;
+}
+
+#[tokio::test]
+async fn initial_down_tolerates_historically_removed_opened_conversation_table() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let manager = SchemaManager::new(&db);
+    InitialMigration.up(&manager).await.unwrap();
+    create_sentinel(&db).await;
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        "DROP TABLE folder_opened_conversation".to_owned(),
+    ))
+    .await
+    .unwrap();
+
+    InitialMigration.down(&manager).await.unwrap();
+
+    for table in [
+        "app_metadata",
+        "folder",
+        "conversation",
+        "folder_opened_conversation",
+    ] {
+        assert!(
+            !manager.has_table(table).await.unwrap(),
+            "initial rollback retained {table}"
+        );
+    }
+    assert_sentinel_preserved(&db).await;
 }
 
 #[tokio::test]
@@ -628,6 +801,67 @@ async fn personal_agent_migration_postgres_constraints_rerun_and_empty_rollback(
         team_agent_connection::Entity::delete_many().exec(&db).await.map_err(|e|e.to_string())?;
         PersonalAgentMigration.down(&SchemaManager::new(&db)).await.map_err(|e|format!("empty rollback: {e}"))?;
         for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] { if SchemaManager::new(&db).has_table(table).await.map_err(|e|e.to_string())? { return Err(format!("empty Postgres rollback retained {table}")); } }
+
+        PersonalAgentMigration
+            .up(&SchemaManager::new(&db))
+            .await
+            .map_err(|error| format!("recreate personal schema: {error}"))?;
+        let deleted_user = user::Entity::delete_by_id(9971)
+            .exec(&db)
+            .await
+            .map_err(|error| error.to_string())?;
+        if deleted_user.rows_affected != 1 {
+            return Err(format!(
+                "expected to remove one invented user, removed {}",
+                deleted_user.rows_affected
+            ));
+        }
+        let deleted_org = org::Entity::delete_by_id(9961)
+            .exec(&db)
+            .await
+            .map_err(|error| error.to_string())?;
+        if deleted_org.rows_affected != 1 {
+            return Err(format!(
+                "expected to remove one invented organization, removed {}",
+                deleted_org.rows_affected
+            ));
+        }
+
+        Migrator::down(&db, None)
+            .await
+            .map_err(|error| format!("full empty rollback: {error}"))?;
+        if !Migrator::get_applied_migrations(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        {
+            return Err("full Postgres rollback retained applied migrations".into());
+        }
+        for table in CATALOG_TABLES.into_iter().chain(PERSONAL_TABLES) {
+            if SchemaManager::new(&db)
+                .has_table(table)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!("full Postgres rollback retained {table}"));
+            }
+        }
+
+        Migrator::up(&db, None)
+            .await
+            .map_err(|error| format!("full migration rerun: {error}"))?;
+        for table in PERSONAL_TABLES {
+            let rows = db
+                .query_all(Statement::from_string(
+                    DbBackend::Postgres,
+                    format!("SELECT id FROM {table}"),
+                ))
+                .await
+                .map_err(|error| format!("query rerun {table}: {error}"))?;
+            if !rows.is_empty() {
+                return Err(format!("rerun personal table {table} was not empty"));
+            }
+        }
         Ok(())
     }.await;
     if let Err(error) = outcome { db.close().await.unwrap();
