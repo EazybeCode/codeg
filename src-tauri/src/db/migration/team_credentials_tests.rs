@@ -381,7 +381,17 @@ async fn team_credentials_migration_postgres_round_trip() {
         team_oauth_attempt::Entity::delete_many().exec(&db).await.map_err(|error| error.to_string())?;
         team_pending_onboarding::Entity::delete_many().exec(&db).await.map_err(|error| error.to_string())?;
         team_github_credential::Entity::delete_many().exec(&db).await.map_err(|error| error.to_string())?;
-        Migrator::down(&db, Some(1)).await.map_err(|error| format!("revert credentials migration: {error}"))?;
+        CredentialsMigration.down(&SchemaManager::new(&db)).await.map_err(|error| format!("revert credentials migration: {error}"))?;
+        let manager = SchemaManager::new(&db);
+        for table in [
+            "team_oauth_attempt",
+            "team_pending_onboarding",
+            "team_github_credential",
+        ] {
+            if manager.has_table(table).await.map_err(|error| error.to_string())? {
+                return Err(format!("named credential rollback retained table {table}"));
+            }
+        }
         Ok(())
     }.await;
     if let Err(error) = outcome {
