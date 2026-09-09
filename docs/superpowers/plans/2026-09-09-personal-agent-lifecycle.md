@@ -36,6 +36,11 @@ The metadata tables and fields are exactly those in the prerequisite persistence
 
 **Interfaces:** the following crate-private types are not HTTP DTOs and have no serde derives. Persistence and internal tickets must never be serialized to clients. Public-in-crate fields may be used by the later fixed supervisor integration, not by untrusted request deserialization.
 
+Do not derive Debug for the new service types carrying account labels or internal
+tickets. Test their safe fields/results directly rather than printing those values
+through an assertion formatter. AgentError and label-free AttemptView may implement
+Debug; fixed errors must not retain raw database/provider errors.
+
 ```rust
 enum Provider { Claude, Codex } // exact database strings claude/codex
 enum ConnectionState {
@@ -126,7 +131,7 @@ fn recover_startup() -> Result<u64, AgentError>;
 fn invalidate_session_in_transaction(tx: &DatabaseTransaction, session_id: &str, now: DateTime<Utc>) -> Result<(), AgentError>;
 ```
 
-`VerifiedSubscription` is trusted internal evidence supplied only after a later official-client adapter validates account mode/status; this service does not claim it performs provider authentication. A forged HTTP body can never deserialize into it. Validate account_label 1..160 characters with no control or bidi formatting characters, storage_handle exactly a UUID simple hex. No Debug derive on metadata carrying an account label; error_code must be a fixed schema allowlist value.
+`VerifiedSubscription` is trusted internal evidence supplied only after a later official-client adapter validates account mode/status; this service does not claim it performs provider authentication. A forged HTTP body can never deserialize into it. Validate account_label 1..160 characters with no control or bidi formatting characters, storage_handle exactly a UUID simple hex. No Debug derive on these new service/provider-result types carrying account labels or internal tickets; error_code must be a fixed schema allowlist value. Do not modify the accepted persistence entity derives or log entity models.
 
 Both internal ticket types carry org_id/user_id from the locked connection row,
 never from an untrusted body. Completion validates these against its context and
