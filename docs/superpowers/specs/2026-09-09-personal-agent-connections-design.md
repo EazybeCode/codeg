@@ -1,6 +1,6 @@
 # Neev personal agent connections
 
-Date: 2026-09-09. Status: **draft for owner review; not an implementation or deployment result**.
+Date: 2026-09-09. Status: **owner-approved for implementation; not an implementation or deployment result**.
 
 ## Approved intent and delivery boundary
 
