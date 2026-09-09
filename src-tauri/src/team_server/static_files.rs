@@ -40,6 +40,14 @@ where
             get_service(ServeFile::new(root.join("favicon.ico"))),
         )
         .route_service(
+            "/icon.svg",
+            get_service(ServeFile::new(root.join("icon.svg"))),
+        )
+        .route_service(
+            "/icon-128x128.png",
+            get_service(ServeFile::new(root.join("icon-128x128.png"))),
+        )
+        .route_service(
             "/icon-32x32.png",
             get_service(ServeFile::new(root.join("icon-32x32.png"))),
         )

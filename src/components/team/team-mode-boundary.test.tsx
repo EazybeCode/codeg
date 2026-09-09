@@ -102,9 +102,13 @@ describe("TeamModeBoundary", () => {
       </NextIntlClientProvider>
     )
     expect(await screen.findByText("immediate operator")).toBeVisible()
-    expect(mocks.setBrowserServerMode.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.getShellTransport.mock.invocationCallOrder[0]
+    const operatorPublication = mocks.setBrowserServerMode.mock.calls.findIndex(
+      ([mode]) => mode === "operator"
     )
+    expect(operatorPublication).toBeGreaterThanOrEqual(0)
+    expect(
+      mocks.setBrowserServerMode.mock.invocationCallOrder[operatorPublication]
+    ).toBeLessThan(mocks.getShellTransport.mock.invocationCallOrder[0])
   })
 
   it("retains the native tree without loading browser capabilities", async () => {
