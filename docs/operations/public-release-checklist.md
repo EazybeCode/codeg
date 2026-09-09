@@ -28,7 +28,7 @@ Current decision: **not ready for public signup**. The private hosted pilot and 
 
 - No in-app org switching for v1: sign out and sign in again to choose another organization.
 - Every member uses their own Claude/Codex/other supported agent subscription. Each prompt uses its sender's personal connection; shared chats never grant use of another person's credentials, and disconnected users cannot fall back to an org/operator account. Ownership is owner-approved; provider support, isolated runner implementation and real-account acceptance remain pending.
-- The September9 personal-agent connection design is approved and metadata persistence is being implemented. Lifecycle, official-client supervisor and onboarding/settings integration follow under that approved design; none is currently enabled for real sign-in. This approval does not accept provider commercial terms or certify the existing host's credential encryption.
+- The September9 personal-agent connection design is approved. Metadata storage and historical rollback fixes are accepted through232aed8c with independent reviews and real SQLite/PostgreSQL tests; see [storage acceptance](personal-agent-storage-acceptance.md). Lifecycle, official-client supervisor and onboarding/settings integration follow; none is currently enabled for real sign-in. Design approval alone does not accept provider commercial terms or certify credential encryption.
 - In a separate September9 reply to the specific Claude hosting-terms question,
   the owner confirmed “accepted tnc”. Record that owner confirmation for Claude;
   no agent accepted terms or performed a provider login. Credential encryption,

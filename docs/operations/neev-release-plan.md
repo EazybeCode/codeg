@@ -121,12 +121,15 @@ provider conditions and real-account acceptance remain separate requirements.
 The first-stage [personal agent connection design](../superpowers/specs/2026-09-09-personal-agent-connections-design.md)
 is now owner-approved for implementation. It covers isolated official-client login,
 status, disconnect and onboarding/settings, with explicit separation from later
-prompt-job execution. The metadata persistence task is in implementation under
-its [storage plan](../superpowers/plans/2026-09-09-personal-agent-persistence.md);
-the [lifecycle plan](../superpowers/plans/2026-09-09-personal-agent-lifecycle.md)
+prompt-job execution. Metadata persistence and narrow historical rollback fixes
+are accepted through `232aed8c`; see the [storage acceptance](personal-agent-storage-acceptance.md)
+and [storage plan](../superpowers/plans/2026-09-09-personal-agent-persistence.md).
+The [lifecycle plan](../superpowers/plans/2026-09-09-personal-agent-lifecycle.md)
 defines the next transaction/recovery stage. Neither planning nor schema creation
-constitutes a working provider sign-in or deployed functionality. Provider terms,
-verified encrypted credential storage and real-account acceptance remain required.
+constitutes a working provider sign-in or deployed functionality. The owner has
+separately confirmed the Claude hosted-use terms; see the
+[provider contract record](personal-agent-provider-contracts.md). Verified encrypted
+credential storage and real-account acceptance remain required.
 
 Read-only compatibility finding: the existing Claude registry installs
 `@agentclientprotocol/claude-agent-acp@0.74.0` (`acp/registry.rs`), and the adjacent

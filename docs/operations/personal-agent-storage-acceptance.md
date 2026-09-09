@@ -1,8 +1,8 @@
 # Personal-agent storage acceptance
 
-Date: September 9, 2026. Status: implementation verification and independent review
-in progress. This is a storage checkpoint, not a working provider connection or
-release approval.
+Date: September 9, 2026. Status: storage implementation and independent reviews
+accepted through `232aed8c`. This is a storage checkpoint, not a working provider
+connection or release approval.
 
 ## Scope
 
@@ -20,7 +20,10 @@ Task1 was accepted through `09c78148` after independent re-review resolved exact
 length-endpoint and retained-parent rollback test gaps. Controller verification
 at that source passed 36 personal-agent, credential and team-access migration
 tests, including isolated PostgreSQL fixtures. Historical fixes are implemented at
-`9bcf9d50`. Task2 and final whole-plan reviews are still pending acceptance.
+`9bcf9d50`. Task2 and the final whole-plan review found no blocking defects. The
+final review's readability finding was fixed at `232aed8c` and independently
+re-reviewed with no new breakage. A fresh controller run at that final source
+passed all16 personal-agent tests, including guarded PostgreSQL, in2.54s.
 
 Fresh controller verification at `9bcf9d50`, using the test binary rebuilt from
 that exact source (from `src-tauri`):
@@ -48,7 +51,11 @@ organization/user rows. Forward rerun preserves data.
 Full empty-chain testing exposed two older assumptions: catalog down selected a
 newer repository model after its extra column was removed; initial down expected
 a legacy table that the opened-tabs migration had already removed. Narrow fixes
-and SQLite/PostgreSQL round-trip regressions are under review.
+and SQLite/PostgreSQL round-trip regressions are accepted.
+
+Optional follow-up hardening: directly test referenced-parent delete/update
+rejection and extend PostgreSQL scoped uniqueness/invalid-parent cases. These are
+nonblocking coverage recommendations, not identified implementation defects.
 
 An empty-schema round trip is not permission to downgrade a populated production
 database. Historical forward migrations may discard legacy UI state. Production
