@@ -104,13 +104,24 @@ their own agent subscription through the provider's official client flow. This
 choice is an architectural requirement, not evidence of implementation, provider
 approval, commercial-terms acceptance or permission to reuse host credentials.
 
-Proposed ownership model, awaiting owner confirmation: each member connects a
-personal provider account within the selected organization; each submitted prompt
-uses that person's connection. Organization-wide conversations share authorized
-work and output, not access to another member's credentials or subscription.
+Owner-confirmed ownership model (September 9): every member must use their own
+subscription for Claude, Codex or any other supported agent. Each member connects
+their personal provider account within the selected organization; each submitted
+prompt uses that person's connection. Organization-wide conversations share
+authorized work and output, not access to another member's credentials or
+subscription. No shared company/operator account or automatic fallback to another
+person's connection is permitted. If a person is not connected, require their own
+sign-in before running their prompt. Connections remain isolated by person and
+organization. Other agents are eligible only after their official subscription
+sign-in and hosted-use support are verified; listing an agent does not certify it.
 The onboarding and chat UI should show connect/connecting/connected/reconnect
-states. A shared company subscription is not implicitly authorized by the request
-for Conductor-like sign-in. This proposal is not an approved runner specification.
+states. Ownership is approved; the full runner specification, implementation,
+provider conditions and real-account acceptance remain separate requirements.
+
+The proposed first-stage [personal agent connection design](../superpowers/specs/2026-09-09-personal-agent-connections-design.md)
+is written for owner review. It covers isolated official-client login, status,
+disconnect and onboarding/settings, with explicit separation from later prompt-job
+execution. It is not yet an approved implementation plan or deployed functionality.
 
 Read-only compatibility finding: the existing Claude registry installs
 `@agentclientprotocol/claude-agent-acp@0.74.0` (`acp/registry.rs`), and the adjacent

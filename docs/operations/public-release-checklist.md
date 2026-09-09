@@ -27,6 +27,7 @@ Current decision: **not ready for public signup**. The private hosted pilot and 
 ## Decisions and external inputs
 
 - No in-app org switching for v1: sign out and sign in again to choose another organization.
+- Every member uses their own Claude/Codex/other supported agent subscription. Each prompt uses its sender's personal connection; shared chats never grant use of another person's credentials, and disconnected users cannot fall back to an org/operator account. Ownership is owner-approved; provider support, isolated runner implementation and real-account acceptance remain pending.
 - No mandatory Google sign-in, billing, public feedback board, Slack/email feedback integration or automatic upstream production updates for the first release.
 - Owner selected the founder account and its immutable GitHub ID was verified. The protected allowlist still needs to be applied/tested with the feedback implementation; organization-admin status grants no founder access.
 - Owner selected Neev: neev.so for the website, app.neev.so for the application. Namecheap website apex/www and app A records are verified; final HTTPS/callback configuration remains pending. The owner also needs to retain recovery secrets in an approved independent vault, provide a notification destination, participate in real second-user/provider acceptance and run the interactive publication gate. The staged rollout is recorded in [neev-release-plan.md](neev-release-plan.md).
