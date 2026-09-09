@@ -159,7 +159,7 @@ runtime was enabled.
 Detailed evidence and execution decisions are in the
 [lifecycle verification record](personal-agent-lifecycle-acceptance.md).
 
-Fresh synthetic browser characterization at that same library-test source passed
+Fresh synthetic browser characterization at Task 1 source `7d4a4fb9` passed
 again with the unchanged static export: desktop/mobile identity and organization
 display, settings return, stale-request cancellation and negative route controls.
 All 11 awaited JSON projections passed; canary traffic and unexpected remote

@@ -22,7 +22,7 @@ use crate::{
         test_auth::{
             cookie_headers, create_postgres_principal_fixture, drop_postgres_fixture, fixed_now,
             principal_fixture, token_hash, wait_for_postgres_lock, TestClock,
-            ALICE_A_MEMBERSHIP_ID, ALICE_A_TOKEN,
+            ALICE_A_MEMBERSHIP_ID, ALICE_A_TOKEN, BOB_A_TOKEN,
         },
     },
 };
@@ -122,6 +122,297 @@ async fn lock_postgres_user(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "user blocker found no row".to_owned())?;
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CompletionTerminal {
+    Complete,
+    Fail,
+}
+
+impl CompletionTerminal {
+    async fn invoke(
+        self,
+        service: &AgentService,
+        context: &crate::team_access::principal::AuthContext,
+        ticket: &LoginTicket,
+        label: &str,
+    ) -> Result<(), AgentError> {
+        match self {
+            Self::Complete => service.complete(context, ticket, verified(label)).await,
+            Self::Fail => service.fail(context, ticket, "provider_unavailable").await,
+        }
+    }
+}
+
+async fn invoke_after_connection_lock_wait(
+    terminal: CompletionTerminal,
+    service: Arc<AgentService>,
+    service_clock: &Arc<TestClock>,
+    context: &crate::team_access::principal::AuthContext,
+    ticket: &LoginTicket,
+    db: &DatabaseConnection,
+    admin: &DatabaseConnection,
+    database_name: &str,
+    advance: Duration,
+) -> Result<Result<(), AgentError>, String> {
+    let blocker = db.begin().await.map_err(|error| error.to_string())?;
+    blocker
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM team_agent_connection WHERE id = $1 FOR UPDATE".to_owned(),
+            [ticket.connection_id.clone().into()],
+        ))
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "connection blocker found no row".to_owned())?;
+    let call = {
+        let service = service.clone();
+        let context = context.clone();
+        let ticket = ticket.clone();
+        tokio::spawn(async move {
+            terminal
+                .invoke(&service, &context, &ticket, "timing@example.test")
+                .await
+        })
+    };
+    wait_for_postgres_lock(admin, database_name, "team_agent_connection").await?;
+    service_clock.advance(advance);
+    blocker.commit().await.map_err(|error| error.to_string())?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), call)
+        .await
+        .map_err(|_| format!("{terminal:?} remained blocked after connection release"))?
+        .map_err(|error| error.to_string())
+}
+
+async fn postgres_completion_post_lock_clock_case(
+    terminal: CompletionTerminal,
+) -> Result<(), String> {
+    let (name, admin, fixture) = create_postgres_principal_fixture(Vec::new()).await?;
+    let db = fixture.db.clone();
+    let principals = fixture.service();
+    let context = resolve(&principals).await;
+    let service_clock = Arc::new(TestClock::new(fixed_now()));
+    let service = Arc::new(AgentService::new(
+        db.clone(),
+        principals.clone(),
+        service_clock.clone(),
+    ));
+    let result: Result<(), String> = async {
+        let expired = pending(
+            service
+                .begin(&context, Provider::Codex, "post-lock-expired")
+                .await
+                .map_err(|error| format!("begin expired control: {error:?}"))?,
+        );
+        let expired_result = invoke_after_connection_lock_wait(
+            terminal,
+            service.clone(),
+            &service_clock,
+            &context,
+            &expired,
+            &db,
+            &admin,
+            &name,
+            Duration::minutes(10),
+        )
+        .await?;
+        if expired_result != Err(AgentError::Conflict) {
+            return Err(format!(
+                "{terminal:?} accepted a ticket that expired behind its connection lock: \
+                 {expired_result:?}"
+            ));
+        }
+        let expired_connection = team_agent_connection::Entity::find_by_id(&expired.connection_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing expired-control connection".to_owned())?;
+        let expired_attempt = team_agent_attempt::Entity::find_by_id(&expired.attempt_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing expired-control attempt".to_owned())?;
+        let expired_operation = team_agent_operation::Entity::find_by_id(&expired.operation_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing expired-control operation".to_owned())?;
+        if expired_connection.state != "connecting"
+            || expired_connection.generation != expired.generation
+            || expired_connection.account_label.is_some()
+            || expired_connection.storage_handle.is_some()
+            || expired_connection.error_code.is_some()
+            || expired_attempt.state != "pending"
+            || expired_operation.state != "leased"
+            || expired_operation.lease_owner.as_deref() != Some(expired.lease_owner.as_str())
+            || expired_operation.lease_expires_at != Some(expired.expires_at)
+            || expired_operation.error_code.is_some()
+        {
+            return Err(format!(
+                "{terminal:?} mutated expired rows: connection={expired_connection:?}, \
+                 attempt={expired_attempt:?}, operation={expired_operation:?}"
+            ));
+        }
+
+        let live = pending(
+            service
+                .begin(&context, Provider::Claude, "post-lock-live")
+                .await
+                .map_err(|error| format!("begin live control: {error:?}"))?,
+        );
+        let live_result = invoke_after_connection_lock_wait(
+            terminal,
+            service.clone(),
+            &service_clock,
+            &context,
+            &live,
+            &db,
+            &admin,
+            &name,
+            Duration::minutes(9) + Duration::seconds(59),
+        )
+        .await?;
+        if live_result.is_err() {
+            return Err(format!(
+                "{terminal:?} rejected a still-live ticket after its connection lock: \
+                 {live_result:?}"
+            ));
+        }
+        let live_connection = team_agent_connection::Entity::find_by_id(&live.connection_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing live-control connection".to_owned())?;
+        let live_attempt = team_agent_attempt::Entity::find_by_id(&live.attempt_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing live-control attempt".to_owned())?;
+        let live_operation = team_agent_operation::Entity::find_by_id(&live.operation_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing live-control operation".to_owned())?;
+        let expected = match terminal {
+            CompletionTerminal::Complete => ("connected", "completed", "completed"),
+            CompletionTerminal::Fail => ("disconnecting", "failed", "abandoned"),
+        };
+        if (
+            live_connection.state.as_str(),
+            live_attempt.state.as_str(),
+            live_operation.state.as_str(),
+        ) != expected
+        {
+            return Err(format!(
+                "{terminal:?} did not finish the live control: connection={}, attempt={}, \
+                 operation={}",
+                live_connection.state, live_attempt.state, live_operation.state
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    drop(service);
+    drop(principals);
+    drop(fixture);
+    finish_postgres_test(&name, admin, db, result).await
+}
+
+/// Requires the local disposable PostgreSQL guard used by team_access tests.
+#[tokio::test]
+#[ignore = "requires local PostgreSQL"]
+async fn postgres_completion_samples_time_after_connection_locks() {
+    for terminal in [CompletionTerminal::Complete, CompletionTerminal::Fail] {
+        postgres_completion_post_lock_clock_case(terminal)
+            .await
+            .unwrap();
+    }
+}
+
+/// Requires the local disposable PostgreSQL guard used by team_access tests.
+#[tokio::test]
+#[ignore = "requires local PostgreSQL"]
+async fn postgres_completion_scopes_foreign_connection_before_locking() {
+    let (name, admin, fixture) = create_postgres_principal_fixture(Vec::new())
+        .await
+        .expect("PostgreSQL fixture");
+    let db = fixture.db.clone();
+    let principals = fixture.service();
+    let alice = resolve(&principals).await;
+    let bob = principals
+        .resolve(&cookie_headers(BOB_A_TOKEN), ProofRequirement::Cached)
+        .await
+        .expect("Bob principal");
+    let service = Arc::new(AgentService::new(
+        db.clone(),
+        principals.clone(),
+        fixture.clock.clone(),
+    ));
+    let ticket = pending(
+        service
+            .begin(&bob, Provider::Codex, "foreign-owner")
+            .await
+            .unwrap(),
+    );
+    let result: Result<(), String> = async {
+        let blocker = db.begin().await.map_err(|error| error.to_string())?;
+        blocker
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT id FROM team_agent_connection WHERE id = $1 FOR UPDATE".to_owned(),
+                [ticket.connection_id.clone().into()],
+            ))
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "foreign connection blocker found no row".to_owned())?;
+        let mut call = {
+            let service = service.clone();
+            let alice = alice.clone();
+            let ticket = ticket.clone();
+            tokio::spawn(async move {
+                service
+                    .complete(&alice, &ticket, verified("foreign@example.test"))
+                    .await
+            })
+        };
+        let prompt = tokio::time::timeout(std::time::Duration::from_secs(1), &mut call).await;
+        blocker.commit().await.map_err(|error| error.to_string())?;
+        let completion = match prompt {
+            Ok(result) => result.map_err(|error| error.to_string())?,
+            Err(_) => {
+                let eventual = tokio::time::timeout(std::time::Duration::from_secs(5), call)
+                    .await
+                    .map_err(|_| "foreign completion remained blocked after release".to_owned())?
+                    .map_err(|error| error.to_string())?;
+                return Err(format!(
+                    "foreign completion waited on another owner's connection row; \
+                     eventual result {eventual:?}"
+                ));
+            }
+        };
+        if completion != Err(AgentError::NotFound) {
+            return Err(format!(
+                "foreign completion returned non-opaque result {completion:?}"
+            ));
+        }
+        let connection = team_agent_connection::Entity::find_by_id(&ticket.connection_id)
+            .one(&db)
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "missing foreign connection".to_owned())?;
+        if connection.state != "connecting" || connection.storage_handle.is_some() {
+            return Err(format!("foreign connection mutated: {connection:?}"));
+        }
+        Ok(())
+    }
+    .await;
+    drop(service);
+    drop(principals);
+    drop(fixture);
+    finish_postgres_test(&name, admin, db, result)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

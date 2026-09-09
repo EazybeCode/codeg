@@ -28,9 +28,9 @@ impl AgentService {
         }
         let transaction =
             store::authorized_transaction(&self.db, &self.principals, context).await?;
-        let now = self.clock.now();
         let (connection, attempt, operation) =
             store::completion_rows(&transaction, context, ticket).await?;
+        let now = self.clock.now();
         validate_pending(context, ticket, &connection, &attempt, &operation, now)?;
 
         let mut connection = connection.into_active_model();
@@ -78,9 +78,9 @@ impl AgentService {
         }
         let transaction =
             store::authorized_transaction(&self.db, &self.principals, context).await?;
-        let now = self.clock.now();
         let (connection, attempt, operation) =
             store::completion_rows(&transaction, context, ticket).await?;
+        let now = self.clock.now();
         validate_pending(context, ticket, &connection, &attempt, &operation, now)?;
         let next_generation = connection
             .generation

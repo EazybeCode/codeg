@@ -207,9 +207,8 @@ pub(super) async fn completion_rows(
     team_agent_attempt::Model,
     team_agent_operation::Model,
 ), AgentError> {
-    let connection = connection_by_id(transaction, &ticket.connection_id)
+    let connection = completion_connection(transaction, context, &ticket.connection_id)
         .await?
-        .filter(|row| row.org_id == context.org_id && row.user_id == context.user_id)
         .ok_or(AgentError::NotFound)?;
     let attempt = completion_attempt(
         transaction,
@@ -217,12 +216,31 @@ pub(super) async fn completion_rows(
         &ticket.attempt_id,
         &context.session_id,
     )
-        .await?
+    .await?
         .ok_or(AgentError::NotFound)?;
     let operation = operation_by_id(transaction, &connection.id, &ticket.operation_id)
         .await?
         .ok_or(AgentError::NotFound)?;
     Ok((connection, attempt, operation))
+}
+
+async fn completion_connection(
+    transaction: &DatabaseTransaction,
+    context: &AuthContext,
+    connection_id: &str,
+) -> Result<Option<team_agent_connection::Model>, AgentError> {
+    let query = team_agent_connection::Entity::find_by_id(connection_id)
+        .filter(team_agent_connection::Column::OrgId.eq(context.org_id))
+        .filter(team_agent_connection::Column::UserId.eq(context.user_id));
+    let query = if transaction.get_database_backend() == DbBackend::Postgres {
+        query.lock(LockType::Update)
+    } else {
+        query
+    };
+    query
+        .one(transaction)
+        .await
+        .map_err(|_| AgentError::Unavailable)
 }
 
 async fn completion_attempt(
