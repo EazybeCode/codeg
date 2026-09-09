@@ -129,7 +129,12 @@ fn connection(
     }
 }
 
-fn attempt(id: &str, connection_id: &str, generation: i64, state: &str) -> team_agent_attempt::ActiveModel {
+fn attempt(
+    id: &str,
+    connection_id: &str,
+    generation: i64,
+    state: &str,
+) -> team_agent_attempt::ActiveModel {
     team_agent_attempt::ActiveModel {
         id: Set(id.into()),
         connection_id: Set(connection_id.into()),
@@ -142,7 +147,13 @@ fn attempt(id: &str, connection_id: &str, generation: i64, state: &str) -> team_
     }
 }
 
-fn operation(id: &str, connection_id: &str, kind: &str, request_key: &str, state: &str) -> team_agent_operation::ActiveModel {
+fn operation(
+    id: &str,
+    connection_id: &str,
+    kind: &str,
+    request_key: &str,
+    state: &str,
+) -> team_agent_operation::ActiveModel {
     let leased = state == "leased";
     team_agent_operation::ActiveModel {
         id: Set(id.into()),
@@ -170,19 +181,31 @@ fn named(error: impl ToString, expected: &str) {
     );
 }
 
-async fn reject_connection(db: &DatabaseConnection, row: team_agent_connection::ActiveModel, expected: &str) {
+async fn reject_connection(
+    db: &DatabaseConnection,
+    row: team_agent_connection::ActiveModel,
+    expected: &str,
+) {
     named(
         row.insert(db).await.expect_err("invalid connection must fail"),
         expected,
     );
 }
-async fn reject_attempt(db: &DatabaseConnection, row: team_agent_attempt::ActiveModel, expected: &str) {
+async fn reject_attempt(
+    db: &DatabaseConnection,
+    row: team_agent_attempt::ActiveModel,
+    expected: &str,
+) {
     named(
         row.insert(db).await.expect_err("invalid attempt must fail"),
         expected,
     );
 }
-async fn reject_operation(db: &DatabaseConnection, row: team_agent_operation::ActiveModel, expected: &str) {
+async fn reject_operation(
+    db: &DatabaseConnection,
+    row: team_agent_operation::ActiveModel,
+    expected: &str,
+) {
     named(
         row.insert(db).await.expect_err("invalid operation must fail"),
         expected,
@@ -365,9 +388,24 @@ async fn personal_agent_migration_preserves_legacy_identity_and_starts_empty() {
     let db = before_personal().await;
     let expected_org = seed_org(&db, 9101).await;
     let expected_user = seed_user(&db, 9201, expected_org.id).await;
-    PersonalAgentMigration.up(&SchemaManager::new(&db)).await.unwrap();
-    assert_eq!(org::Entity::find_by_id(expected_org.id).one(&db).await.unwrap(), Some(expected_org));
-    assert_eq!(user::Entity::find_by_id(expected_user.id).one(&db).await.unwrap(), Some(expected_user));
+    PersonalAgentMigration
+        .up(&SchemaManager::new(&db))
+        .await
+        .unwrap();
+    assert_eq!(
+        org::Entity::find_by_id(expected_org.id)
+            .one(&db)
+            .await
+            .unwrap(),
+        Some(expected_org)
+    );
+    assert_eq!(
+        user::Entity::find_by_id(expected_user.id)
+            .one(&db)
+            .await
+            .unwrap(),
+        Some(expected_user)
+    );
     assert_eq!(team_agent_connection::Entity::find().count(&db).await.unwrap(), 0);
     assert_eq!(team_agent_attempt::Entity::find().count(&db).await.unwrap(), 0);
     assert_eq!(team_agent_operation::Entity::find().count(&db).await.unwrap(), 0);
@@ -376,31 +414,77 @@ async fn personal_agent_migration_preserves_legacy_identity_and_starts_empty() {
 #[tokio::test]
 async fn personal_agent_migration_accepts_all_states_and_adds_named_indexes() {
     let db = crate::db::test_helpers::fresh_in_memory_db().await;
-    for (offset, state) in ["disconnected", "connecting", "connected", "reconnect_required", "disconnecting", "unavailable"].into_iter().enumerate() {
+    for (offset, state) in [
+        "disconnected",
+        "connecting",
+        "connected",
+        "reconnect_required",
+        "disconnecting",
+        "unavailable",
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let org_id = 9300 + offset as i32;
         let user_id = 9400 + offset as i32;
         seed_identity(&db.conn, org_id, user_id).await;
         let id = format!("10000000-0000-4000-8000-{:012}", offset + 10);
         let mut row = connection(&id, org_id, user_id, "claude", 1, state);
-        if state == "connecting" { row.account_label = Set(Some("Retained Account".into()));
-    row.checked_at = Set(Some(ts(4)));
-    row.error_code = Set(Some("interrupted".into()));
-    row.storage_handle = Set(Some("retained-handle".into())); }
+        if state == "connecting" {
+            row.account_label = Set(Some("Retained Account".into()));
+            row.checked_at = Set(Some(ts(4)));
+            row.error_code = Set(Some("interrupted".into()));
+            row.storage_handle = Set(Some("retained-handle".into()));
+        }
         row.insert(&db.conn).await.unwrap();
     }
-    for (offset, state) in ["pending", "completed", "canceled", "expired", "failed"].into_iter().enumerate() {
+    for (offset, state) in ["pending", "completed", "canceled", "expired", "failed"]
+        .into_iter()
+        .enumerate()
+    {
         let id = format!("20000000-0000-4000-8000-{:012}", offset + 10);
-        attempt(&id, "10000000-0000-4000-8000-000000000010", offset as i64 + 1, state).insert(&db.conn).await.unwrap();
+        attempt(
+            &id,
+            "10000000-0000-4000-8000-000000000010",
+            offset as i64 + 1,
+            state,
+        )
+        .insert(&db.conn)
+        .await
+        .unwrap();
     }
-    for (offset, (kind, state)) in [("connect", "queued"), ("cancel", "leased"), ("disconnect", "completed"), ("connect", "abandoned")].into_iter().enumerate() {
+    for (offset, (kind, state)) in [
+        ("connect", "queued"),
+        ("cancel", "leased"),
+        ("disconnect", "completed"),
+        ("connect", "abandoned"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let id = format!("30000000-0000-4000-8000-{:012}", offset + 10);
-        operation(&id, "10000000-0000-4000-8000-000000000010", kind, &format!("request-{offset}"), state).insert(&db.conn).await.unwrap();
+        operation(
+            &id,
+            "10000000-0000-4000-8000-000000000010",
+            kind,
+            &format!("request-{offset}"),
+            state,
+        )
+        .insert(&db.conn)
+        .await
+        .unwrap();
     }
     assert_eq!(team_agent_connection::Entity::find().count(&db.conn).await.unwrap(), 6);
     assert_eq!(team_agent_attempt::Entity::find().count(&db.conn).await.unwrap(), 5);
     assert_eq!(team_agent_operation::Entity::find().count(&db.conn).await.unwrap(), 4);
     let indexes = db.conn.query_all(Statement::from_string(DbBackend::Sqlite, "SELECT name FROM sqlite_master WHERE type = 'index'".to_owned())).await.unwrap().into_iter().map(|r| r.try_get::<String>("", "name").unwrap()).collect::<Vec<_>>();
-    for expected in ["idx_team_agent_connection_org_user_provider", "idx_team_agent_attempt_connection_generation", "idx_team_agent_attempt_state_expires_at", "idx_team_agent_operation_connection_kind_request_key", "idx_team_agent_operation_state_lease_expires_at"] {
+    for expected in [
+        "idx_team_agent_connection_org_user_provider",
+        "idx_team_agent_attempt_connection_generation",
+        "idx_team_agent_attempt_state_expires_at",
+        "idx_team_agent_operation_connection_kind_request_key",
+        "idx_team_agent_operation_state_lease_expires_at",
+    ] {
         assert!(indexes.iter().any(|name| name == expected), "missing {expected}");
     }
 }
@@ -411,7 +495,15 @@ async fn connection_constraints_enforce_ownership_bounds_shapes_and_atomic_updat
     seed_identity(&db.conn, 9501, 9601).await;
     seed_org(&db.conn, 9502).await;
     seed_user(&db.conn, 9602, 9501).await;
-    assert!(db.conn.execute(Statement::from_string(DbBackend::Sqlite, "INSERT INTO team_agent_connection (id, org_id, user_id, created_at, updated_at) VALUES ('10000000-0000-4000-8000-000000000099', 9501, 9601, '2026-09-09T12:00:03Z', '2026-09-09T12:00:05Z')".to_owned())).await.is_err());
+    assert!(
+        db.conn
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "INSERT INTO team_agent_connection (id, org_id, user_id, created_at, updated_at) VALUES ('10000000-0000-4000-8000-000000000099', 9501, 9601, '2026-09-09T12:00:03Z', '2026-09-09T12:00:05Z')".to_owned(),
+            ))
+            .await
+            .is_err()
+    );
     for (row, check) in [
         (connection("", 9501, 9601, "claude", 1, "disconnected"), "ck_team_agent_connection_id_length"),
         (connection(&"x".repeat(65), 9501, 9601, "claude", 1, "disconnected"), "ck_team_agent_connection_id_length"),
@@ -420,28 +512,46 @@ async fn connection_constraints_enforce_ownership_bounds_shapes_and_atomic_updat
         (connection(C1, 9501, 9601, "gemini", 1, "disconnected"), "ck_team_agent_connection_provider"),
         (connection(C1, 9501, 9601, "claude", 0, "disconnected"), "ck_team_agent_connection_generation_positive"),
         (connection(C1, 9501, 9601, "claude", 1, "pending"), "ck_team_agent_connection_state"),
-    ] { reject_connection(&db.conn, row, check).await; }
+    ] {
+        reject_connection(&db.conn, row, check).await;
+    }
     let mut row = connection(C1, 9501, 9601, "claude", 1, "connecting");
-    row.account_label=Set(Some(String::new()));
+    row.account_label = Set(Some(String::new()));
     reject_connection(&db.conn, row, "ck_team_agent_connection_account_label_length").await;
     let mut row = connection(C1, 9501, 9601, "claude", 1, "connecting");
-    row.account_label=Set(Some("a".repeat(161)));
+    row.account_label = Set(Some("a".repeat(161)));
     reject_connection(&db.conn, row, "ck_team_agent_connection_account_label_length").await;
     let mut row = connection(C1, 9501, 9601, "claude", 1, "connecting");
-    row.storage_handle=Set(Some(String::new()));
+    row.storage_handle = Set(Some(String::new()));
     reject_connection(&db.conn, row, "ck_team_agent_connection_storage_handle_length").await;
     let mut row = connection(C1, 9501, 9601, "claude", 1, "connecting");
-    row.storage_handle=Set(Some("h".repeat(65)));
+    row.storage_handle = Set(Some("h".repeat(65)));
     reject_connection(&db.conn, row, "ck_team_agent_connection_storage_handle_length").await;
     let mut row = connection(C1, 9501, 9601, "claude", 1, "connecting");
-    row.error_code=Set(Some("raw-error".into()));
+    row.error_code = Set(Some("raw-error".into()));
     reject_connection(&db.conn, row, "ck_team_agent_connection_error_code").await;
-    for field in 0..4 { let mut row=connection(C1, 9501, 9601, "claude", 1, "connected"); match field {0=>row.account_label=Set(None), 1=>row.checked_at=Set(None), 2=>row.storage_handle=Set(None), _=>row.error_code=Set(Some("interrupted".into()))};
-    reject_connection(&db.conn, row, "ck_team_agent_connection_state_shape").await; }
-    for field in 0..4 { let mut row=connection(C1, 9501, 9601, "claude", 1, "disconnected"); match field {0=>row.account_label=Set(Some("x".into())), 1=>row.checked_at=Set(Some(ts(4))), 2=>row.storage_handle=Set(Some("x".into())), _=>row.error_code=Set(Some("interrupted".into()))};
-    reject_connection(&db.conn, row, "ck_team_agent_connection_state_shape").await; }
-    let mut row=connection(C1, 9501, 9601, "claude", 1, "disconnected");
-    row.updated_at=Set(ts(2));
+    for field in 0..4 {
+        let mut row = connection(C1, 9501, 9601, "claude", 1, "connected");
+        match field {
+            0 => row.account_label = Set(None),
+            1 => row.checked_at = Set(None),
+            2 => row.storage_handle = Set(None),
+            _ => row.error_code = Set(Some("interrupted".into())),
+        };
+        reject_connection(&db.conn, row, "ck_team_agent_connection_state_shape").await;
+    }
+    for field in 0..4 {
+        let mut row = connection(C1, 9501, 9601, "claude", 1, "disconnected");
+        match field {
+            0 => row.account_label = Set(Some("x".into())),
+            1 => row.checked_at = Set(Some(ts(4))),
+            2 => row.storage_handle = Set(Some("x".into())),
+            _ => row.error_code = Set(Some("interrupted".into())),
+        };
+        reject_connection(&db.conn, row, "ck_team_agent_connection_state_shape").await;
+    }
+    let mut row = connection(C1, 9501, 9601, "claude", 1, "disconnected");
+    row.updated_at = Set(ts(2));
     reject_connection(&db.conn, row, "ck_team_agent_connection_updated_at_order").await;
     named(connection(C1, 9599, 9601, "claude", 1, "disconnected").insert(&db.conn).await.unwrap_err(), "FOREIGN KEY constraint failed");
     named(connection(C1, 9501, 9699, "claude", 1, "disconnected").insert(&db.conn).await.unwrap_err(), "FOREIGN KEY constraint failed");
@@ -449,7 +559,8 @@ async fn connection_constraints_enforce_ownership_bounds_shapes_and_atomic_updat
     assert!(connection(C2, 9501, 9601, "claude", 2, "connecting").insert(&db.conn).await.is_err());
     connection(C2, 9502, 9601, "claude", 1, "disconnected").insert(&db.conn).await.unwrap();
     connection(C3, 9501, 9602, "claude", 1, "disconnected").insert(&db.conn).await.unwrap();
-    let mut invalid=expected.clone().into_active_model(); invalid.state=Set("connected".into());
+    let mut invalid = expected.clone().into_active_model();
+    invalid.state = Set("connected".into());
     assert!(invalid.update(&db.conn).await.is_err());
     assert_eq!(team_agent_connection::Entity::find_by_id(C1).one(&db.conn).await.unwrap(), Some(expected));
 }
@@ -546,27 +657,55 @@ async fn length_constraints_accept_inclusive_minimum_and_maximum_values() {
 async fn attempt_constraints_enforce_binding_lifecycle_and_generation_uniqueness() {
     let db = crate::db::test_helpers::fresh_in_memory_db().await;
     seed_identity(&db.conn, 9701, 9801).await;
-    connection(C1, 9701, 9801, "claude", 1, "connecting").insert(&db.conn).await.unwrap();
-    assert!(db.conn.execute(Statement::from_string(DbBackend::Sqlite, format!("INSERT INTO team_agent_attempt (id, connection_id, created_at, expires_at, updated_at) VALUES ('{A1}', '{C1}', '2026-09-09T12:00:06Z', '2026-09-09T12:00:09Z', '2026-09-09T12:00:07Z')"))).await.is_err());
-    let mut cases=vec![
+    connection(C1, 9701, 9801, "claude", 1, "connecting")
+        .insert(&db.conn)
+        .await
+        .unwrap();
+    assert!(
+        db.conn
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                format!("INSERT INTO team_agent_attempt (id, connection_id, created_at, expires_at, updated_at) VALUES ('{A1}', '{C1}', '2026-09-09T12:00:06Z', '2026-09-09T12:00:09Z', '2026-09-09T12:00:07Z')"),
+            ))
+            .await
+            .is_err()
+    );
+    let mut cases = vec![
         (attempt("", C1, 1, "pending"), "ck_team_agent_attempt_id_length"),
         (attempt(&"i".repeat(65), C1, 1, "pending"), "ck_team_agent_attempt_id_length"),
         (attempt(A1, &"c".repeat(65), 1, "pending"), "ck_team_agent_attempt_connection_id_length"),
         (attempt(A1, C1, 0, "pending"), "ck_team_agent_attempt_generation_positive"),
         (attempt(A1, C1, 1, "running"), "ck_team_agent_attempt_state"),
     ];
-    let mut row=attempt(A1, C1, 1, "pending");
-    row.session_id=Set(String::new()); cases.push((row, "ck_team_agent_attempt_session_id_length"));
-    let mut row=attempt(A1, C1, 1, "pending");
-    row.session_id=Set("s".repeat(129)); cases.push((row, "ck_team_agent_attempt_session_id_length"));
-    let mut row=attempt(A1, C1, 1, "pending");
-    row.expires_at=Set(ts(6)); cases.push((row, "ck_team_agent_attempt_expires_at_order"));
-    let mut row=attempt(A1, C1, 1, "pending");
-    row.updated_at=Set(ts(5)); cases.push((row, "ck_team_agent_attempt_updated_at_order"));
-    for (row, check) in cases { reject_attempt(&db.conn, row, check).await; }
-    named(attempt(A1, C2, 1, "pending").insert(&db.conn).await.unwrap_err(), "FOREIGN KEY constraint failed");
+    let mut row = attempt(A1, C1, 1, "pending");
+    row.session_id = Set(String::new());
+    cases.push((row, "ck_team_agent_attempt_session_id_length"));
+    let mut row = attempt(A1, C1, 1, "pending");
+    row.session_id = Set("s".repeat(129));
+    cases.push((row, "ck_team_agent_attempt_session_id_length"));
+    let mut row = attempt(A1, C1, 1, "pending");
+    row.expires_at = Set(ts(6));
+    cases.push((row, "ck_team_agent_attempt_expires_at_order"));
+    let mut row = attempt(A1, C1, 1, "pending");
+    row.updated_at = Set(ts(5));
+    cases.push((row, "ck_team_agent_attempt_updated_at_order"));
+    for (row, check) in cases {
+        reject_attempt(&db.conn, row, check).await;
+    }
+    named(
+        attempt(A1, C2, 1, "pending")
+            .insert(&db.conn)
+            .await
+            .unwrap_err(),
+        "FOREIGN KEY constraint failed",
+    );
     attempt(A1, C1, 1, "pending").insert(&db.conn).await.unwrap();
-    assert!(attempt("20000000-0000-4000-8000-000000000002", C1, 1, "failed").insert(&db.conn).await.is_err());
+    assert!(
+        attempt("20000000-0000-4000-8000-000000000002", C1, 1, "failed")
+            .insert(&db.conn)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -574,9 +713,23 @@ async fn operation_constraints_enforce_recovery_shape_and_idempotency_scope() {
     let db = crate::db::test_helpers::fresh_in_memory_db().await;
     seed_identity(&db.conn, 9901, 9911).await;
     seed_identity(&db.conn, 9902, 9912).await;
-    connection(C1, 9901, 9911, "claude", 1, "connecting").insert(&db.conn).await.unwrap();
-    connection(C2, 9902, 9912, "claude", 1, "connecting").insert(&db.conn).await.unwrap();
-    assert!(db.conn.execute(Statement::from_string(DbBackend::Sqlite, format!("INSERT INTO team_agent_operation (id, connection_id, created_at, expires_at, updated_at) VALUES ('{O1}', '{C1}', '2026-09-09T12:00:06Z', '2026-09-09T12:00:09Z', '2026-09-09T12:00:07Z')"))).await.is_err());
+    connection(C1, 9901, 9911, "claude", 1, "connecting")
+        .insert(&db.conn)
+        .await
+        .unwrap();
+    connection(C2, 9902, 9912, "claude", 1, "connecting")
+        .insert(&db.conn)
+        .await
+        .unwrap();
+    assert!(
+        db.conn
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                format!("INSERT INTO team_agent_operation (id, connection_id, created_at, expires_at, updated_at) VALUES ('{O1}', '{C1}', '2026-09-09T12:00:06Z', '2026-09-09T12:00:09Z', '2026-09-09T12:00:07Z')"),
+            ))
+            .await
+            .is_err()
+    );
     for (row, check) in [
         (operation("", C1, "connect", "request", "queued"), "ck_team_agent_operation_id_length"),
         (operation(&"i".repeat(65), C1, "connect", "request", "queued"), "ck_team_agent_operation_id_length"),
@@ -585,16 +738,18 @@ async fn operation_constraints_enforce_recovery_shape_and_idempotency_scope() {
         (operation(O1, C1, "connect", "", "queued"), "ck_team_agent_operation_request_key_length"),
         (operation(O1, C1, "connect", &"r".repeat(65), "queued"), "ck_team_agent_operation_request_key_length"),
         (operation(O1, C1, "connect", "request", "running"), "ck_team_agent_operation_state"),
-    ] { reject_operation(&db.conn, row, check).await; }
-    let mut row=operation(O1, C1, "connect", "request", "queued");
-    row.target_attempt_id=Set(Some("t".repeat(65)));
+    ] {
+        reject_operation(&db.conn, row, check).await;
+    }
+    let mut row = operation(O1, C1, "connect", "request", "queued");
+    row.target_attempt_id = Set(Some("t".repeat(65)));
     reject_operation(&db.conn, row, "ck_team_agent_operation_target_attempt_id_length").await;
-    let mut row=operation(O1, C1, "connect", "request", "queued");
-    row.target_generation=Set(0);
+    let mut row = operation(O1, C1, "connect", "request", "queued");
+    row.target_generation = Set(0);
     reject_operation(&db.conn, row, "ck_team_agent_operation_target_generation_positive").await;
-    let mut row=operation(O1, C1, "connect", "request", "queued");
-    row.target_generation=Set(2);
-    row.result_generation=Set(1);
+    let mut row = operation(O1, C1, "connect", "request", "queued");
+    row.target_generation = Set(2);
+    row.result_generation = Set(1);
     reject_operation(&db.conn, row, "ck_team_agent_operation_result_generation").await;
     let mut row = operation(O1, C1, "connect", "request", "leased");
     row.lease_owner = Set(Some(String::new()));
@@ -607,45 +762,92 @@ async fn operation_constraints_enforce_recovery_shape_and_idempotency_scope() {
         "ck_team_agent_operation_lease_owner_length",
     )
     .await;
-    let mut row=operation(O1, C1, "connect", "request", "queued");
-    row.error_code=Set(Some("provider-response".into()));
+    let mut row = operation(O1, C1, "connect", "request", "queued");
+    row.error_code = Set(Some("provider-response".into()));
     reject_operation(&db.conn, row, "ck_team_agent_operation_error_code").await;
     for (owner, deadline) in [(None, None), (Some("worker".into()), None), (None, Some(ts(8)))] {
-        let mut row=operation(O1, C1, "connect", "request", "leased");
-    row.lease_owner=Set(owner);
-    row.lease_expires_at=Set(deadline);
-    reject_operation(&db.conn, row, "ck_team_agent_operation_lease_shape").await;
+        let mut row = operation(O1, C1, "connect", "request", "leased");
+        row.lease_owner = Set(owner);
+        row.lease_expires_at = Set(deadline);
+        reject_operation(&db.conn, row, "ck_team_agent_operation_lease_shape").await;
     }
-    for state in ["queued", "completed", "abandoned"] { let mut row=operation(O1, C1, "connect", "request", state);
-    row.lease_owner=Set(Some("worker".into()));
-    row.lease_expires_at=Set(Some(ts(8)));
-    reject_operation(&db.conn, row, "ck_team_agent_operation_lease_shape").await; }
-    for kind in ["connect", "cancel"] { let mut row=operation(O1, C1, kind, "request", "queued");
-    row.target_attempt_id=Set(None);
-    reject_operation(&db.conn, row, "ck_team_agent_operation_target_shape").await; }
-    let mut row=operation(O1, C1, "disconnect", "request", "queued");
-    row.target_attempt_id=Set(Some(A1.into()));
+    for state in ["queued", "completed", "abandoned"] {
+        let mut row = operation(O1, C1, "connect", "request", state);
+        row.lease_owner = Set(Some("worker".into()));
+        row.lease_expires_at = Set(Some(ts(8)));
+        reject_operation(&db.conn, row, "ck_team_agent_operation_lease_shape").await;
+    }
+    for kind in ["connect", "cancel"] {
+        let mut row = operation(O1, C1, kind, "request", "queued");
+        row.target_attempt_id = Set(None);
+        reject_operation(&db.conn, row, "ck_team_agent_operation_target_shape").await;
+    }
+    let mut row = operation(O1, C1, "disconnect", "request", "queued");
+    row.target_attempt_id = Set(Some(A1.into()));
     reject_operation(&db.conn, row, "ck_team_agent_operation_target_shape").await;
-    let mut row=operation(O1, C1, "connect", "request", "queued");
-    row.expires_at=Set(ts(6));
+    let mut row = operation(O1, C1, "connect", "request", "queued");
+    row.expires_at = Set(ts(6));
     reject_operation(&db.conn, row, "ck_team_agent_operation_expires_at_order").await;
-    let mut row=operation(O1, C1, "connect", "request", "queued");
-    row.updated_at=Set(ts(5));
+    let mut row = operation(O1, C1, "connect", "request", "queued");
+    row.updated_at = Set(ts(5));
     reject_operation(&db.conn, row, "ck_team_agent_operation_updated_at_order").await;
-    named(operation(O1, C3, "connect", "request", "queued").insert(&db.conn).await.unwrap_err(), "FOREIGN KEY constraint failed");
-    operation(O1, C1, "connect", "same-key", "queued").insert(&db.conn).await.expect("opaque target attempt is not a single-column FK");
-    assert!(operation("30000000-0000-4000-8000-000000000002", C1, "connect", "same-key", "completed").insert(&db.conn).await.is_err());
-    operation("30000000-0000-4000-8000-000000000003", C1, "cancel", "same-key", "completed").insert(&db.conn).await.unwrap();
-    operation("30000000-0000-4000-8000-000000000004", C2, "connect", "same-key", "completed").insert(&db.conn).await.unwrap();
+    named(
+        operation(O1, C3, "connect", "request", "queued")
+            .insert(&db.conn)
+            .await
+            .unwrap_err(),
+        "FOREIGN KEY constraint failed",
+    );
+    operation(O1, C1, "connect", "same-key", "queued")
+        .insert(&db.conn)
+        .await
+        .expect("opaque target attempt is not a single-column FK");
+    assert!(
+        operation(
+            "30000000-0000-4000-8000-000000000002",
+            C1,
+            "connect",
+            "same-key",
+            "completed",
+        )
+        .insert(&db.conn)
+        .await
+        .is_err()
+    );
+    operation(
+        "30000000-0000-4000-8000-000000000003",
+        C1,
+        "cancel",
+        "same-key",
+        "completed",
+    )
+    .insert(&db.conn)
+    .await
+    .unwrap();
+    operation(
+        "30000000-0000-4000-8000-000000000004",
+        C2,
+        "connect",
+        "same-key",
+        "completed",
+    )
+    .insert(&db.conn)
+    .await
+    .unwrap();
 }
 
 async fn personal_tables_exist(db: &DatabaseConnection) {
     let manager = SchemaManager::new(db);
-    for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] { assert!(manager.has_table(table).await.unwrap(), "missing {table}"); }
+    for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] {
+        assert!(manager.has_table(table).await.unwrap(), "missing {table}");
+    }
 }
 
 async fn down_refuses(db: &DatabaseConnection) {
-    let error = PersonalAgentMigration.down(&SchemaManager::new(db)).await.expect_err("populated rollback must fail");
+    let error = PersonalAgentMigration
+        .down(&SchemaManager::new(db))
+        .await
+        .expect_err("populated rollback must fail");
     assert_eq!(error.to_string(), "Custom Error: personal agent metadata migration cannot be reverted while rows exist");
     personal_tables_exist(db).await;
     assert_eq!(org::Entity::find().count(db).await.unwrap(), 1);
@@ -654,18 +856,48 @@ async fn down_refuses(db: &DatabaseConnection) {
 
 async fn orphan_children(db: &DatabaseConnection) {
     sqlite_fks(db, false).await;
-    db.execute(Statement::from_string(DbBackend::Sqlite, format!("DELETE FROM team_agent_connection WHERE id='{C1}'"))).await.unwrap();
+    db.execute(Statement::from_string(
+        DbBackend::Sqlite,
+        format!("DELETE FROM team_agent_connection WHERE id='{C1}'"),
+    ))
+    .await
+    .unwrap();
     sqlite_fks(db, true).await;
 }
 
 async fn assert_down_preflights(populated: &str) {
     let db = crate::db::test_helpers::fresh_in_memory_db().await;
     seed_identity(&db.conn, 9921, 9931).await;
-    connection(C1, 9921, 9931, "claude", 1, "connecting").insert(&db.conn).await.unwrap();
-    if populated == "attempt" { attempt(A1, C1, 1, "pending").insert(&db.conn).await.unwrap(); orphan_children(&db.conn).await; }
-    if populated == "operation" { operation(O1, C1, "disconnect", "guard", "queued").insert(&db.conn).await.unwrap(); orphan_children(&db.conn).await; }
+    connection(C1, 9921, 9931, "claude", 1, "connecting")
+        .insert(&db.conn)
+        .await
+        .unwrap();
+    if populated == "attempt" {
+        attempt(A1, C1, 1, "pending")
+            .insert(&db.conn)
+            .await
+            .unwrap();
+        orphan_children(&db.conn).await;
+    }
+    if populated == "operation" {
+        operation(O1, C1, "disconnect", "guard", "queued")
+            .insert(&db.conn)
+            .await
+            .unwrap();
+        orphan_children(&db.conn).await;
+    }
     down_refuses(&db.conn).await;
-    let count = db.conn.query_one(Statement::from_string(DbBackend::Sqlite, format!("SELECT COUNT(*) AS count FROM team_agent_{populated}"))).await.unwrap().unwrap().try_get::<i64>("", "count").unwrap();
+    let count = db
+        .conn
+        .query_one(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("SELECT COUNT(*) AS count FROM team_agent_{populated}"),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "count")
+        .unwrap();
     assert_eq!(count, 1, "historical {populated} row must remain");
 }
 
@@ -689,10 +921,22 @@ async fn rerun_retains_rows_and_empty_rollback_is_reversible_and_complete() {
     let db = crate::db::test_helpers::fresh_in_memory_db().await;
     let expected_org = seed_org(&db.conn, 9941).await;
     let expected_user = seed_user(&db.conn, 9951, expected_org.id).await;
-    let c = connection(C1, 9941, 9951, "codex", 2, "connecting").insert(&db.conn).await.unwrap();
-    let a = attempt(A1, C1, 2, "pending").insert(&db.conn).await.unwrap();
-    let o = operation(O1, C1, "connect", "rerun", "queued").insert(&db.conn).await.unwrap();
-    PersonalAgentMigration.up(&SchemaManager::new(&db.conn)).await.unwrap();
+    let c = connection(C1, 9941, 9951, "codex", 2, "connecting")
+        .insert(&db.conn)
+        .await
+        .unwrap();
+    let a = attempt(A1, C1, 2, "pending")
+        .insert(&db.conn)
+        .await
+        .unwrap();
+    let o = operation(O1, C1, "connect", "rerun", "queued")
+        .insert(&db.conn)
+        .await
+        .unwrap();
+    PersonalAgentMigration
+        .up(&SchemaManager::new(&db.conn))
+        .await
+        .unwrap();
     assert_eq!(team_agent_connection::Entity::find_by_id(C1).one(&db.conn).await.unwrap(), Some(c));
     assert_eq!(team_agent_attempt::Entity::find_by_id(A1).one(&db.conn).await.unwrap(), Some(a));
     assert_eq!(team_agent_operation::Entity::find_by_id(O1).one(&db.conn).await.unwrap(), Some(o));
@@ -701,7 +945,9 @@ async fn rerun_retains_rows_and_empty_rollback_is_reversible_and_complete() {
     team_agent_connection::Entity::delete_many().exec(&db.conn).await.unwrap();
     let manager = SchemaManager::new(&db.conn);
     PersonalAgentMigration.down(&manager).await.unwrap();
-    for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] { assert!(!manager.has_table(table).await.unwrap()); }
+    for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] {
+        assert!(!manager.has_table(table).await.unwrap());
+    }
     assert!(manager.has_table("orgs").await.unwrap());
     assert!(manager.has_table("users").await.unwrap());
     assert_eq!(
@@ -721,7 +967,9 @@ async fn rerun_retains_rows_and_empty_rollback_is_reversible_and_complete() {
     PersonalAgentMigration.up(&manager).await.unwrap();
     personal_tables_exist(&db.conn).await;
     PersonalAgentMigration.down(&manager).await.unwrap();
-    for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] { assert!(!manager.has_table(table).await.unwrap()); }
+    for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] {
+        assert!(!manager.has_table(table).await.unwrap());
+    }
     assert!(manager.has_table("orgs").await.unwrap());
     assert!(manager.has_table("users").await.unwrap());
     assert_eq!(
@@ -742,7 +990,17 @@ async fn rerun_retains_rows_and_empty_rollback_is_reversible_and_complete() {
 
 fn validate_database_target(expected: &str, candidate: &str) -> TestResult<()> {
     let suffix = candidate.strip_prefix(DATABASE_PREFIX).unwrap_or_default();
-    (candidate==expected && suffix.len()==32 && suffix.bytes().all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))).then_some(()).ok_or_else(||format!("refusing database target {candidate}; expected exact generated name {expected}"))
+    (candidate == expected
+        && suffix.len() == 32
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')))
+    .then_some(())
+    .ok_or_else(|| {
+        format!(
+            "refusing database target {candidate}; expected exact generated name {expected}"
+        )
+    })
 }
 
 async fn connect(url: &str, max_connections: u32) -> TestResult<DatabaseConnection> {
@@ -751,12 +1009,21 @@ async fn connect(url: &str, max_connections: u32) -> TestResult<DatabaseConnecti
         .max_connections(max_connections)
         .min_connections(1)
         .sqlx_logging(false);
-    Database::connect(options).await.map_err(|e|format!("connect to {url}: {e}"))
+    Database::connect(options)
+        .await
+        .map_err(|e| format!("connect to {url}: {e}"))
 }
 
 async fn pg_reject(db: &DatabaseConnection, sql: String, expected: &str) -> TestResult<()> {
-    let error = db.execute(Statement::from_string(DbBackend::Postgres, sql)).await.expect_err("Postgres must reject invalid personal agent metadata");
-    if !error.to_string().contains(expected) { return Err(format!("Postgres returned wrong constraint for {expected}: {error}")); }
+    let error = db
+        .execute(Statement::from_string(DbBackend::Postgres, sql))
+        .await
+        .expect_err("Postgres must reject invalid personal agent metadata");
+    if !error.to_string().contains(expected) {
+        return Err(format!(
+            "Postgres returned wrong constraint for {expected}: {error}"
+        ));
+    }
     Ok(())
 }
 
@@ -764,7 +1031,15 @@ async fn pg_reject(db: &DatabaseConnection, sql: String, expected: &str) -> Test
 fn personal_agent_database_cleanup_guard_requires_exact_generated_hex_name() {
     let expected = "workos_personal_agents_test_0123456789abcdef0123456789abcdef";
     assert!(validate_database_target(expected, expected).is_ok());
-    for rejected in ["workos_personal_agents_test_0123456789abcdef0123456789abcdee", "workos_personal_agents_test_0123456789abcdef0123456789abcdeG", "workos_personal_agents_test_0123456789abcdef", "workos_team_credentials_test_0123456789abcdef0123456789abcdef", "postgres"] { assert!(validate_database_target(expected, rejected).is_err()); }
+    for rejected in [
+        "workos_personal_agents_test_0123456789abcdef0123456789abcdee",
+        "workos_personal_agents_test_0123456789abcdef0123456789abcdeG",
+        "workos_personal_agents_test_0123456789abcdef",
+        "workos_team_credentials_test_0123456789abcdef0123456789abcdef",
+        "postgres",
+    ] {
+        assert!(validate_database_target(expected, rejected).is_err());
+    }
 }
 
 #[tokio::test]
@@ -775,7 +1050,13 @@ async fn personal_agent_migration_postgres_constraints_rerun_and_empty_rollback(
     let admin = connect(ADMIN_URL, 1).await.expect("connect explicit local Postgres admin database");
     admin.execute(Statement::from_string(DbBackend::Postgres, format!("CREATE DATABASE \"{generated}\""))).await.expect("create generated personal-agent test database");
     let url = format!("postgres://air1@localhost:5432/{generated}");
-    let db = match connect(&url, 2).await { Ok(db)=>db, Err(error)=>{admin.close().await.unwrap();panic!("{error}; preserved database {generated}")} };
+    let db = match connect(&url, 2).await {
+        Ok(db) => db,
+        Err(error) => {
+            admin.close().await.unwrap();
+            panic!("{error}; preserved database {generated}");
+        }
+    };
     let outcome: TestResult<()> = async {
         Migrator::up(&db, None).await.map_err(|e|format!("run migrations: {e}"))?;
         seed_identity(&db, 9961, 9971).await;
@@ -783,14 +1064,18 @@ async fn personal_agent_migration_postgres_constraints_rerun_and_empty_rollback(
             ("INSERT INTO team_agent_connection (id, org_id, user_id, provider, generation, state, account_label, checked_at, error_code, storage_handle, created_at, updated_at) VALUES ('', 9961, 9971, 'claude', 1, 'disconnected', NULL, NULL, NULL, NULL, NOW(), NOW())".to_owned(), "ck_team_agent_connection_id_length"),
             ("INSERT INTO team_agent_connection (id, org_id, user_id, provider, generation, state, account_label, checked_at, error_code, storage_handle, created_at, updated_at) VALUES ('10000000-0000-4000-8000-000000000091', 9961, 9971, 'gemini', 1, 'disconnected', NULL, NULL, NULL, NULL, NOW(), NOW())".to_owned(), "ck_team_agent_connection_provider"),
             ("INSERT INTO team_agent_connection (id, org_id, user_id, provider, generation, state, account_label, checked_at, error_code, storage_handle, created_at, updated_at) VALUES ('10000000-0000-4000-8000-000000000092', 9961, 9971, 'claude', 1, 'connected', NULL, NULL, NULL, NULL, NOW(), NOW())".to_owned(), "ck_team_agent_connection_state_shape"),
-        ] { pg_reject(&db, sql, check).await?; }
+        ] {
+            pg_reject(&db, sql, check).await?;
+        }
         connection(C1, 9961, 9971, "claude", 1, "connecting").insert(&db).await.map_err(|e|e.to_string())?;
         for (sql, check) in [
             (format!("INSERT INTO team_agent_attempt (id, connection_id, generation, session_id, state, created_at, expires_at, updated_at) VALUES ('{A1}', '{C1}', 1, '{S1}', 'pending', NOW(), NOW(), NOW())"), "ck_team_agent_attempt_expires_at_order"),
             (format!("INSERT INTO team_agent_operation (id, connection_id, kind, request_key, target_attempt_id, target_generation, result_generation, state, lease_owner, lease_expires_at, error_code, created_at, expires_at, updated_at) VALUES ('{O1}', '{C1}', 'connect', 'request-1', '{A1}', 2, 1, 'queued', NULL, NULL, NULL, NOW(), NOW()+interval '1 minute', NOW())"), "ck_team_agent_operation_result_generation"),
             (format!("INSERT INTO team_agent_operation (id, connection_id, kind, request_key, target_attempt_id, target_generation, result_generation, state, lease_owner, lease_expires_at, error_code, created_at, expires_at, updated_at) VALUES ('30000000-0000-4000-8000-000000000092', '{C1}', 'disconnect', 'request-2', '{A1}', 1, 1, 'queued', NULL, NULL, NULL, NOW(), NOW()+interval '1 minute', NOW())"), "ck_team_agent_operation_target_shape"),
             (format!("INSERT INTO team_agent_operation (id, connection_id, kind, request_key, target_attempt_id, target_generation, result_generation, state, lease_owner, lease_expires_at, error_code, created_at, expires_at, updated_at) VALUES ('30000000-0000-4000-8000-000000000093', '{C1}', 'connect', 'request-3', '{A1}', 1, 1, 'leased', NULL, NULL, NULL, NOW(), NOW()+interval '1 minute', NOW())"), "ck_team_agent_operation_lease_shape"),
-        ] { pg_reject(&db, sql, check).await?; }
+        ] {
+            pg_reject(&db, sql, check).await?;
+        }
         attempt(A1, C1, 1, "pending").insert(&db).await.map_err(|e|e.to_string())?;
         operation(O1, C1, "connect", "postgres-rerun", "queued").insert(&db).await.map_err(|e|e.to_string())?;
         PersonalAgentMigration.up(&SchemaManager::new(&db)).await.map_err(|e|format!("rerun migration: {e}"))?;
@@ -800,7 +1085,15 @@ async fn personal_agent_migration_postgres_constraints_rerun_and_empty_rollback(
         team_agent_attempt::Entity::delete_many().exec(&db).await.map_err(|e|e.to_string())?;
         team_agent_connection::Entity::delete_many().exec(&db).await.map_err(|e|e.to_string())?;
         PersonalAgentMigration.down(&SchemaManager::new(&db)).await.map_err(|e|format!("empty rollback: {e}"))?;
-        for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] { if SchemaManager::new(&db).has_table(table).await.map_err(|e|e.to_string())? { return Err(format!("empty Postgres rollback retained {table}")); } }
+        for table in ["team_agent_connection", "team_agent_attempt", "team_agent_operation"] {
+            if SchemaManager::new(&db)
+                .has_table(table)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                return Err(format!("empty Postgres rollback retained {table}"));
+            }
+        }
 
         PersonalAgentMigration
             .up(&SchemaManager::new(&db))
@@ -864,8 +1157,11 @@ async fn personal_agent_migration_postgres_constraints_rerun_and_empty_rollback(
         }
         Ok(())
     }.await;
-    if let Err(error) = outcome { db.close().await.unwrap();
-    admin.close().await.unwrap(); panic!("{error}; preserved database {generated}"); }
+    if let Err(error) = outcome {
+        db.close().await.unwrap();
+        admin.close().await.unwrap();
+        panic!("{error}; preserved database {generated}");
+    }
     let connected = db.query_one(Statement::from_string(DbBackend::Postgres, "SELECT current_database() AS database_name".to_owned())).await.unwrap().unwrap().try_get::<String>("", "database_name").unwrap();
     validate_database_target(&generated, &connected).expect("cleanup target must equal connected generated database");
     db.close().await.unwrap();
