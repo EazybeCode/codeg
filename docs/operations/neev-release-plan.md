@@ -16,7 +16,10 @@ Use separate routes/resources for the public website at `https://neev.so` and au
 
 - Accepted authentication library work: `76b28dfe`; accepted team startup configuration and isolated database initialization: `ae82ba38`.
 - The isolated team HTTP route task is accepted at `4c290570` after its scoped fix re-review. Fresh controller verification passed 188 targeted Rust tests (35 team-server, 138 team-access, 11 credential-migration and 4 legacy OAuth-state controls), including disposable PostgreSQL tests; the standalone binary target also passed `cargo check`. These are not an end-to-end product acceptance result or a full-project suite.
-- Browser onboarding is accepted at `23675b01` after fixing the independently identified response-body timeout/cancellation gap and passing scoped re-review. Fresh controller verification passed 184 UI tests, full TypeScript, scoped lint, diff checks and a 34-page static export at that commit. Actual browser-to-server acceptance remains the next task; these checks do not certify a working team workspace. The following workspace-access conversion has not started implementation.
+- Browser onboarding is accepted at `23675b01` after fixing the independently identified response-body timeout/cancellation gap and passing scoped re-review. Fresh controller verification passed 184 UI tests, full TypeScript, scoped lint, diff checks and a 34-page static export at that commit. The subsequent actual browser-to-server evidence is recorded below; neither result certifies a working team workspace. The following workspace-access conversion has not started implementation.
+- Task4 actual Chromium testing found and fixed a production integration defect: exported Next navigation requests for `/workspace.txt` and `/login.txt` returned404 because the team static manifest omitted their payloads. Commit `391c872d` adds exactly four allowed payload paths and focused allow/deny regressions. Earlier fixture/selector/diagnostic failures are recorded separately from this real product failure.
+- Owner disk cleanup resolved the compilation pause. Controller verification passed 189 targeted Rust tests, 184 UI tests, scoped lint, a 34-page static export/TypeScript, the standalone binary build and eight startup controls. Task4 driver fix `6f8a453c` closed all four independent review findings. Final whole-plan review found no blocker; final fix `b7a2f180` closed its two minor findings and passed scoped re-review. Fresh final-fix verification passed 37 server tests, six affected UI tests, scoped lint and actual desktop/mobile browser journeys. The earlier standalone/export checks were not rebuilt after the two-icon route fix. All four tasks and final review are accepted for continued development, not rollout. See [acceptance evidence](team-http-acceptance.md). No deployment occurred; real provider consent, protected workspace functionality and agent execution are not certified by these tests.
+- The [current-organization settings implementation plan](../superpowers/plans/2026-09-09-team-organization-settings.md) is prepared for the next conversion slice: verified admin editing, member read-only access and session-scoped form state. Its HTTP/browser prerequisite is accepted; settings implementation has not started. Preparing the plan does not implement settings or replace the pending hierarchy/chat-privacy work.
 - The current hosted pilot is private. Runtime execution is disabled; installed gVisor infrastructure has not yet been connected to application jobs.
 - Encrypted off-server backups and one isolated restore have been verified. The September 9 recurring backup succeeded. Monitoring and independent recovery-secret custody still need completion.
 - September 9 read-only host check: approximately 6.7 GiB available RAM, 50 GiB free disk, and no active application CPU load at sampling. This supports considering isolated staging on the existing host; it is not a concurrency/load-test result or a guarantee of agent-job capacity. No staging resources were created by this check.
@@ -94,6 +97,38 @@ Before opening admission, verify the exact team capability response, trusted TLS
 
 ## Personal agent connection acceptance
 
+Owner decision (September 9): subscription-account sign-in is required for the
+first pilot, with a Conductor-like experience. An API-key-only launch is not an
+accepted substitute. Users sign in to Neev with GitHub, then separately connect
+their own agent subscription through the provider's official client flow. This
+choice is an architectural requirement, not evidence of implementation, provider
+approval, commercial-terms acceptance or permission to reuse host credentials.
+
+Proposed ownership model, awaiting owner confirmation: each member connects a
+personal provider account within the selected organization; each submitted prompt
+uses that person's connection. Organization-wide conversations share authorized
+work and output, not access to another member's credentials or subscription.
+The onboarding and chat UI should show connect/connecting/connected/reconnect
+states. A shared company subscription is not implicitly authorized by the request
+for Conductor-like sign-in. This proposal is not an approved runner specification.
+
+Read-only compatibility finding: the existing Claude registry installs
+`@agentclientprotocol/claude-agent-acp@0.74.0` (`acp/registry.rs`), and the adjacent
+dependency notes identify its Agent SDK dependency. Do not assume that this legacy
+adapter is equivalent to the separately documented unmodified hosted Claude Code
+binary path for subscription authentication. The runner design must verify the
+actual execution/authentication mechanism and applicable conditions before reuse;
+the adapter has not been removed, modified or enabled in team mode by this finding.
+
+Candidate Codex seam verified in official documentation: the unmodified Codex
+app-server exposes managed ChatGPT login, including `chatgptDeviceCode`, completion,
+cancel, logout and account/rate-limit status. In managed mode Codex owns credential
+persistence/refresh; Neev can present the verification link/code without inventing
+its own ChatGPT OAuth client. Prefer that documented seam over scraping terminal
+output or importing raw auth files, subject to the isolated-runner design and real
+account acceptance. This is a design candidate, not a deployed connection.
+[Codex app-server authentication](https://learn.chatgpt.com/docs/app-server#auth-endpoints).
+
 Provider authentication and hosted execution are separate release gates. Never reuse the host operator's login across users or organizations. Confirm the supported integration and commercial conditions before presenting a connection method as available; successful local CLI login alone does not establish that a public hosted service is permitted or isolated.
 
 OpenAI documents API-key authentication for programmatic CLI/CI use and a headless device-authentication flow where enabled. Cached CLI credentials are sensitive; they must not enter browser storage, logs, repository files or another user's job. Its security guidance warns against exposing Codex execution in untrusted/public environments. The runner design must explicitly address that deployment boundary before enabling it, rather than treating device-flow support as SaaS approval. [Codex authentication and security](https://learn.chatgpt.com/docs/auth).
@@ -109,6 +144,7 @@ Keep unsupported or unverified agents visibly unavailable with an explanation, n
 - Founder account selected and its immutable GitHub ID verified; apply only through the protected founder allowlist after implementation. GitHub org-admin status is not founder authority, and no live founder access has been enabled yet.
 - Written private-feedback design approval if not yet supplied; existing approval establishes private-to-submitter visibility but not a configured founder role.
 - Each participant's own provider consent/credentials, entered through the protected onboarding flow rather than shared in chat.
+- First-pilot provider authentication choice is resolved: subscription-account sign-in is required, not an API-key-only fallback. The written isolated-runner/authentication design, supported hosted flows, applicable commercial conditions and real-user acceptance still require completion; no terms have been accepted on the owner's behalf.
 - Alert destination and independent approved custody of recovery secrets.
 - Interactive publication step and final pilot sign-off.
 
