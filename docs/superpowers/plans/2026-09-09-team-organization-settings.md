@@ -200,3 +200,18 @@ Coverage: current-org settings authority/branding/return navigation are covered 
 Interface check: Task1 produces the sole GET/PATCH camelCase DTO; Task2 consumes those exact fields and fixed paths; Task3 exercises the same real router and export. Shared pure normalization retains legacy controls without exposing legacy authority. The frontend draft controller sits above the conditional shell and does not own a competing auth lifecycle. Recheck the accepted browser fixture's final helper filenames before Task3 dispatch.
 
 Context: [org-memory: wiki/engineering/workos.md]. The older operator-mode memory does not authorize mounting legacy settings in the team app.
+
+## Source preflight, September 10
+
+Read-only checks while the independent lifecycle work was under review:
+
+| Shared surface | Producer/consumer check | Result |
+| --- | --- | --- |
+| Task 1 validation → legacy/team handlers | Existing `web/handlers/organization_settings.rs` owns trim/name rules and bounded decode/MIME/PNG normalization | Extract only pure validation; legacy identity lookup is not reusable authority. Existing tests match fixed error variants, not detailed image-error strings. |
+| Task 1 router → request limits | `handlers::bounded_auth` owns concurrency, timeout, no-store and static route/status logging; individual handlers own body limits | Reuse the shared wrapper and existing `cookies` checks, with the explicitly specified 2 MiB settings body bound, not the onboarding/logout 16 KiB bound. |
+| Task 1 branding → Task 2 refresh | `SessionDto::load` projects stored org branding; onboarding bounds remote avatar metadata only | Preserve stored uploaded branding and the existing invalidation-only refresh. Do not replace a normalized logo with GitHub metadata on refresh. |
+| Task 2 controller → shell/layout | `TeamSignedInShell` activates authentication and conditionally renders identity/unavailable content | Keep draft controller above the conditional child boundary without a second authentication lifecycle. |
+| Task 3 browser → Task 1/2 | Existing fixture and driver cover the actual team router plus static export | Extend those journeys; no second app or inserted session cookies. |
+
+This preflight is preparation, not implementation or settings acceptance. The
+lifecycle worker retains its source/index/Cargo ownership until released.

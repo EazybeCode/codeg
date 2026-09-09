@@ -69,6 +69,16 @@ legacy mounts or archives needs a separately reviewed backup-configuration/test
 change and owner-scoped data handling. Existing backup archives are preserved.
 Restic encryption does not establish encryption at rest for a mounted live home.
 
+Read-only host inventory at the lifecycle Task 2 checkpoint confirmed that the
+current application still has three writable Docker volumes mounted at `/data`,
+`/root/.claude` and `/root/.codex`. A field-limited projection of the installed
+transport configuration confirmed four archive selectors under the dedicated
+Coolify database/volume backup directories: PostgreSQL, app data and both legacy
+provider volumes. No environment, credential contents or archive contents were
+printed; no backup or service was triggered. This corroborates the compatibility
+constraint above, but does not prove a future credential-volume exclusion or
+inventory every native backup job. Synthetic effective-scope testing remains open.
+
 ## Evidence required before enabling a provider
 
 | Gate | Required evidence |

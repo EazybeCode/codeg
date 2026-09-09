@@ -29,6 +29,15 @@ Use separate routes/resources for the public website at `https://neev.so` and au
   to each HTTPS origin failed to connect to port 443 (curl error 7). This is not a
   completed TLS or browser acceptance check and does not establish the server-side
   cause. No proxy, firewall, DNS or deployment configuration was changed.
+- Follow-up read-only SSH check using the existing pinned host-key file found
+  no listener on port 80 or 443. Docker reports the application healthy with only
+  its internal `3080/tcp`, PostgreSQL healthy with only internal `5432/tcp`, and
+  `coolify-proxy` stopped (exit 0). This explains the absent public endpoint at
+  this checkpoint; it does not prove why the proxy was stopped or certify the
+  eventual route/TLS configuration. No container was started or reconfigured.
+  An initial SSH invocation without the dedicated known-hosts path correctly
+  failed strict host verification; the retry used the existing pin without
+  changing trust settings or accepting a new key.
 
 ## Delivery sequence and exit gates
 
@@ -141,7 +150,24 @@ Lifecycle Task 1 is accepted at `7d4a4fb9`: member/org/session-scoped connection
 metadata, bounded login intents, retries, quotas, cancel and disconnect. Independent
 review found no critical or important issue; a fresh controller run passed all 13
 SQLite tests in 1.28s. Task 2 completion, cleanup, logout/restart recovery and
-PostgreSQL races remain pending. No personal-provider route or runtime was enabled.
+PostgreSQL races are now accepted through `38811933` after a scoped fix/re-review.
+The fixes close a wrong-session error distinction and strengthen race and failed-
+fixture evidence. Fresh controller verification passed 236 distinct backend
+checks, including the amended 34 agent tests and existing HTTP/logout suite.
+Final combined lifecycle review remains pending. No personal-provider route or
+runtime was enabled.
+Detailed evidence and execution decisions are in the
+[lifecycle verification record](personal-agent-lifecycle-acceptance.md).
+
+Fresh synthetic browser characterization at that same library-test source passed
+again with the unchanged static export: desktop/mobile identity and organization
+display, settings return, stale-request cancellation and negative route controls.
+All 11 awaited JSON projections passed; canary traffic and unexpected remote
+lookups were zero. Root inspected the JSON and desktop/mobile screenshots in
+`neev-auth-smoke.CkR58u`; browser/fixture processes and owned synthetic runtime
+were released. The images still show the intentionally unavailable migration
+workspace, and all GitHub evidence is invented loopback traffic. This does not
+certify real consent, provider login, workspace functionality or hosted readiness.
 
 Read-only compatibility finding: the existing Claude registry installs
 `@agentclientprotocol/claude-agent-acp@0.74.0` (`acp/registry.rs`), and the adjacent
