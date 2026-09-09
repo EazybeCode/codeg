@@ -1,8 +1,8 @@
-# Neev — neev.so invite-only release plan
+# Neev — website and application release plan
 
 Date: 2026-09-09
 
-Status: implementation in progress; not approved for user rollout. The owner has selected Neev and neev.so and updated Namecheap DNS. Both authoritative nameservers now return the intended apex A and www CNAME; HTTPS and application cutover remain pending. This plan is a delivery sequence, not evidence that the listed features already work.
+Status: implementation in progress; not approved for user rollout. The owner has selected Neev, with neev.so for the website and app.neev.so for the application. Website apex/www and application DNS are verified; HTTPS and application cutover remain pending. This plan is a delivery sequence, not evidence that the listed features already work.
 
 ## Release outcome
 
@@ -10,11 +10,13 @@ The owner's team and explicitly admitted pilot organizations can sign in with Gi
 
 Visible product branding becomes Neev. Keep existing database/storage keys, API paths, environment variable names, GitHub App identity, repository and branch names unchanged. Do not overwrite organization-specific names/logos with the product brand. The earlier discovery of similarly named agent products has been disclosed; selecting this domain is not a trademark clearance.
 
+Use separate routes/resources for the public website at `https://neev.so` and authenticated workspace at `https://app.neev.so`. The website's sign-in link goes to `https://app.neev.so/login`; it does not handle session cookies or call protected team APIs. Keep application cookies host-only, with no `.neev.so` Domain attribute and no permissive cross-origin exception for the website. Public website content/implementation is separate from the current application onboarding task and is not yet built or approved for publication. `www.neev.so` redirects to the website, not the workspace.
+
 ## Current checkpoint
 
 - Accepted authentication library work: `76b28dfe`; accepted team startup configuration and isolated database initialization: `ae82ba38`.
 - The isolated team HTTP route task is accepted at `4c290570` after its scoped fix re-review. Fresh controller verification passed 188 targeted Rust tests (35 team-server, 138 team-access, 11 credential-migration and 4 legacy OAuth-state controls), including disposable PostgreSQL tests; the standalone binary target also passed `cargo check`. These are not an end-to-end product acceptance result or a full-project suite.
-- Browser onboarding and the following workspace-access conversion are not accepted yet.
+- Browser onboarding is accepted at `23675b01` after fixing the independently identified response-body timeout/cancellation gap and passing scoped re-review. Fresh controller verification passed 184 UI tests, full TypeScript, scoped lint, diff checks and a 34-page static export at that commit. Actual browser-to-server acceptance remains the next task; these checks do not certify a working team workspace. The following workspace-access conversion has not started implementation.
 - The current hosted pilot is private. Runtime execution is disabled; installed gVisor infrastructure has not yet been connected to application jobs.
 - Encrypted off-server backups and one isolated restore have been verified. The September 9 recurring backup succeeded. Monitoring and independent recovery-secret custody still need completion.
 - September 9 read-only host check: approximately 6.7 GiB available RAM, 50 GiB free disk, and no active application CPU load at sampling. This supports considering isolated staging on the existing host; it is not a concurrency/load-test result or a guarantee of agent-job capacity. No staging resources were created by this check.
@@ -61,7 +63,7 @@ Use synthetic local fixtures first. Real hosted consent is a separate gate; fake
 
 Rollback must retain private/admission restrictions and preserve written tenant data. Do not automatically downgrade to a legacy shared-token image after team onboarding. Prefer a reviewed forward fix; use an isolated recovery rehearsal to establish whether a particular rollback is safe.
 
-### neev.so cutover configuration
+### neev.so website / app.neev.so application cutover
 
 Application cutover prepared September 9; not applied. DNS history: an initial lookup returned NXDOMAIN. After the owner opened Namecheap and authorized setup, a fresh read-only lookup returned `dns1.registrar-servers.com` / `dns2.registrar-servers.com`, apex A `162.255.119.6`, and `www` CNAME `parkingpage.namecheap.com`. Existing MX records point to Namecheap forwarding hosts. These observations superseded the earlier DNS result; the owner's subsequent update is verified below.
 
@@ -69,16 +71,18 @@ Set the apex A record to `5.78.239.36` and `www` CNAME to `neev.so`, TTL Automat
 
 Owner subsequently reported the DNS update complete. Fresh queries to both `dns1.registrar-servers.com` and `dns2.registrar-servers.com` returned apex A `5.78.239.36` and `www` CNAME `neev.so`; the previously observed five forwarding MX records are unchanged. Authoritative DNS is verified, not application availability or worldwide cache convergence. No HTTPS/proxy/GitHub callback change was performed at this checkpoint.
 
+The owner then clarified the website/application split and added A host `app` → `5.78.239.36`, TTL Automatic. Following a brief no-answer propagation interval, both authoritative nameservers and the local resolver returned `app.neev.so` A `5.78.239.36`. This additional record is verified. The application must use the subdomain origin below, not the previously planned apex origin.
+
 No wildcard or per-organization domain is needed for this pilot. Coolify documents A records pointing at the application host, not its hosted control plane. [Coolify DNS configuration](https://coolify.io/docs/knowledge-base/dns-configuration).
 
-Configure the application route for `https://neev.so`, targeting the candidate's internal port 3080. Configure `www` only as a separately TLS-verified redirect to that canonical origin, not an alternate authenticated application origin. Coolify requests and renews certificates for HTTPS domains, but can serve a self-signed fallback on issuance failure: verify a publicly trusted certificate before any real sign-in. Keep PostgreSQL and the application container port off the public host interface; only the intended reverse-proxy route is exposed. [Coolify domains and HTTPS](https://coolify.io/docs/knowledge-base/domains).
+Configure the application route for `https://app.neev.so`, targeting the candidate's internal port 3080. Configure the website as a separate resource at `https://neev.so`, with `www` as a separately TLS-verified redirect to the website. Never map either website hostname to the legacy operator app. Coolify requests and renews certificates for HTTPS domains, but can serve a self-signed fallback on issuance failure: verify a publicly trusted certificate before any real sign-in. Keep PostgreSQL and the application container port off the public host interface; only the intended reverse-proxy route is exposed. [Coolify domains and HTTPS](https://coolify.io/docs/knowledge-base/domains).
 
 | Setting | Candidate value / check |
 | --- | --- |
 | `WORKOS_SERVER_MODE` | `team` |
 | Container command | `codeg-server --team`; explicitly override the current Dockerfile's `--supervise` command. Team configuration deliberately rejects the legacy supervisor flag. |
-| `WORKOS_APP_ORIGIN` | `https://neev.so` |
-| `GITHUB_CALLBACK_URL` | `https://neev.so/auth/github/callback` |
+| `WORKOS_APP_ORIGIN` | `https://app.neev.so` |
+| `GITHUB_CALLBACK_URL` | `https://app.neev.so/auth/github/callback` |
 | `WORKOS_ALLOW_LOOPBACK_PREVIEW` | `false` for the HTTPS deployment |
 | `CODEG_HOST`, `CODEG_PORT`, `CODEG_STATIC_DIR` | `0.0.0.0`, `3080`, `/app/web` inside the candidate container, behind its proxy |
 | GitHub client credentials, `WORKOS_ENC_KEY`, `DATABASE_URL` | Existing protected configuration assigned to the correct isolated environment; never paste secrets into the plan, frontend or build logs. Do not accidentally rotate the encryption key protecting retained data. |
@@ -100,9 +104,9 @@ Keep unsupported or unverified agents visibly unavailable with an explanation, n
 
 ## Owner inputs before opening access
 
-- Namecheap DNS is owner-configured and authoritative records are verified. Candidate routing and trusted HTTPS still require acceptance; no domain purchase or registrar change was performed by the agent.
+- Website and app Namecheap DNS are owner-configured and verified. Candidate routing and trusted HTTPS still require acceptance; no domain purchase or registrar change was performed by the agent.
 - GitHub organizations to admit to the pilot and a second participant for real consent/collaboration acceptance.
-- Explicit verified founder identities for the private feedback inbox; GitHub org-admin status is not founder authority.
+- Founder account selected and its immutable GitHub ID verified; apply only through the protected founder allowlist after implementation. GitHub org-admin status is not founder authority, and no live founder access has been enabled yet.
 - Written private-feedback design approval if not yet supplied; existing approval establishes private-to-submitter visibility but not a configured founder role.
 - Each participant's own provider consent/credentials, entered through the protected onboarding flow rather than shared in chat.
 - Alert destination and independent approved custody of recovery secrets.

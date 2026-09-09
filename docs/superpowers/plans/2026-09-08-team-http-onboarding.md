@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-08-team-access-and-chat-visibility-design.md`
 
+Execution checkpoint (2026-09-09): Tasks1–2 accepted through `4c290570`; Task3 accepted through `23675b01` after scoped timeout/cancellation fix review and fresh controller184UItests/TypeScript/lint/34pageexport. Task4 actual browser acceptance and final whole-plan review remain pending. The task steps below preserve the implementation recipe; acceptance is scoped, not a public-release claim.
+
 ## Global Constraints
 
 - Team mode is an explicit server configuration, validated at startup. The cloud team deployment cannot fall back to the legacy router because authentication configuration is missing.
@@ -191,7 +193,11 @@ Use unit fixture clock for limiter, no60second sleeps. Startup tests exercise in
 
 File-ownership refinement: create `src/components/team/team-local-providers.tsx` with a focused test for local-only locale/theme setup, and `src/components/team/team-login.tsx` with a focused test for the GitHub sign-in/fixed callback-reason view. Keep the capability decision in team-mode-boundary, session lifecycle in team-auth-provider and organization selection in team-onboarding; do not combine these distinct concerns into one oversized component. These files implement the already-required boundaries below and do not introduce new APIs or features.
 
-Owner branding update: visible product name is **Neev**, intended release domain **neev.so**. Use Neev in the root browser title/description and new team onboarding/shell copy. Task3 also owns the existing AppBootLoading wordmark in `src/components/layout/app-boot-loading.tsx` and its focused render test. Keep organization-specific names/logos intact. Do not rename internal workos/codeg keys, API paths, GitHub App links, repository/branch names, native package IDs or existing integration configuration. No new logo asset or marketing site is required. The browser acceptance driver must check the rendered product title; the domain is configuration, not a hardcoded request base.
+Test-file ownership refinement: `src/components/appearance-provider.test.tsx` may add the required positive control proving the existing full operator/native provider restores stored custom CSS after mounting. No production AppearanceProvider behavior change is included; this complements the pre-hydration denial tests below.
+
+Root-entry ruling: also modify `src/app/page.tsx` and create its focused `src/app/page.test.tsx`. Although normal team GET `/` is a fixed server303, the exported root page currently reads codeg_token and POSTs `/api/health`. Apply the same pre-hook native/operator/team split so client-side root navigation cannot run that legacy work. The team entry only redirects to `/workspace`; unknown mode mounts no legacy effect. Preserve explicit operator/native behavior in a separate component. Test positive operator/native controls and absence of token reads/legacy HTTP in team/unknown. No new server route or authentication policy is introduced.
+
+Owner branding update: visible product name is **Neev**. The website is **neev.so** and the application is **app.neev.so**. Use Neev in the root browser title/description and new team onboarding/shell copy. Task3 also owns the existing AppBootLoading wordmark in `src/components/layout/app-boot-loading.tsx` and its focused render test. Keep organization-specific names/logos intact. Do not rename internal workos/codeg keys, API paths, GitHub App links, repository/branch names, native package IDs or existing integration configuration. No new logo asset or marketing site is required in this application task. The browser acceptance driver must check the rendered product title; the application origin is configuration, not a hardcoded request base. Application cookies remain host-only and the website gets no protected API/CORS exception.
 
 **Interfaces:** team-client exports safe typed `loadCapabilities`, `loadPendingChoices`, `selectOrganization(githubOrgId: string, csrf: string)`, `loadTeamSession`, `logoutTeamSession(csrf: string)` using exact Task2 contracts. Keep GitHub IDs as validated decimal strings end-to-end in browser state/requests; never Number/parseInt them. No generic arbitrary command/URL or operator-token API. Requests credentials:same-origin,cache:no-store, static errors, AbortController timeout65seconds (server handler budget60seconds); mutations send explicit CSRF. Capability response validated version/mode; unknown/missing/malformed/failed response remains a retry/error screen, never operator fallback.
 
@@ -236,6 +242,8 @@ expect(legacyTransport.call).not.toHaveBeenCalled();
 ### Task 4: Verify the real browser-to-team route boundary
 
 **Files:** Create `src-tauri/src/team_server/browser_fixture.rs` (cfg(test)-only), `scripts/tests/team-auth-e2e.cjs`; modify test_server.rs only for reusable fake provider endpoints and module registration. No production provider origin override.
+
+Browser acceptance carried from Task3: assert the rendered Neev title and fixed root-to-workspace navigation; seed stored arbitrary CSS containing a remote URL and old operator/remote configuration, then prove no custom-CSS request or legacy HTTP/WebSocket connection occurs. Exercise denied consent and unavailable-provider retry, zero-choice fixed GitHub App installation/retry/restart controls, explicit single/multiple-org choice, person/org branding, settings return, stale prior-scope responses and focus/visibility refresh. Keep login/onboarding free of prior-cookie workspace content. These are actual browser/network checks, not jsdom assertions. Website/app origins stay configuration; do not implement the public website in this fixture task.
 
 The accepted OAuth and membership test constructors in `team_access/oauth.rs` and `team_access/github.rs` are pub(super). Permit only changing those cfg(test)-only constructor visibilities to pub(crate) for this sibling fixture's real local HTTP adapters; do not add a production environment URL override or duplicate the adapters. Their existing loopback-origin validation remains enforced.
 
