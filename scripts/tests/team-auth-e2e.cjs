@@ -165,6 +165,17 @@ async function status(origin) {
   return response.json()
 }
 
+function waitForConsoleHttpError(page, location, statusCode, reason) {
+  return page.waitForEvent(
+    "console",
+    (entry) =>
+      entry.type() === "error" &&
+      safePath(entry.location().url) === location &&
+      entry.text() ===
+        `Failed to load resource: the server responded with a status of ${statusCode} (${reason})`
+  )
+}
+
 async function poll(predicate, label, attempts = 100) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const value = await predicate()
@@ -791,23 +802,44 @@ async function run() {
       headers: { ...headers, "Content-Type": "application/json" },
       body: "{}",
     })
-    const legacyOrganizationRead = await fetch("/auth/organization", {
-      headers,
+    return [session.status, health.status, settings.status]
+  })
+  assert.deepEqual(denials, [401, 404, 404])
+  negativePage.setPhase("legacy-organization-get")
+  const legacyGetConsole = waitForConsoleHttpError(
+    negativePage.page,
+    `${appOrigin}/auth/organization`,
+    404,
+    "Not Found"
+  )
+  const legacyOrganizationRead = await negativePage.page.evaluate(async () => {
+    const response = await fetch("/auth/organization", {
+      headers: { Authorization: "Bearer operator-canary-secret" },
     })
-    const legacyOrganizationWrite = await fetch("/auth/organization", {
+    return response.status
+  })
+  assert.equal(legacyOrganizationRead, 404)
+  await legacyGetConsole
+  negativePage.setPhase("legacy-organization-patch")
+  const legacyPatchConsole = waitForConsoleHttpError(
+    negativePage.page,
+    `${appOrigin}/auth/organization`,
+    404,
+    "Not Found"
+  )
+  const legacyOrganizationWrite = await negativePage.page.evaluate(async () => {
+    const response = await fetch("/auth/organization", {
       method: "PATCH",
-      headers: { ...headers, "Content-Type": "application/json" },
+      headers: {
+        Authorization: "Bearer operator-canary-secret",
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({ name: "Legacy forged", logo: { action: "keep" } }),
     })
-    return [
-      session.status,
-      health.status,
-      settings.status,
-      legacyOrganizationRead.status,
-      legacyOrganizationWrite.status,
-    ]
+    return response.status
   })
-  assert.deepEqual(denials, [401, 404, 404, 404, 404])
+  assert.equal(legacyOrganizationWrite, 404)
+  await legacyPatchConsole
   await assertLegacyWebSocketAbsent(appOrigin)
 
   const alice = await newTrackedContext(
@@ -1015,6 +1047,79 @@ async function run() {
   )
   await workspaceLogo.waitFor()
   await workspaceLogo.evaluate((image) => image.decode())
+
+  const bobBranding = await newTrackedContext(
+    "bob-branding-a",
+    appOrigin,
+    canaryOrigin,
+    { width: 1440, height: 960 }
+  )
+  const bobBrandingPage = trackPage(
+    bobBranding,
+    await bobBranding.context.newPage(),
+    "primary"
+  )
+  bobBrandingPage.setPhase("uploaded-logo")
+  const bobBrandingChoices = await reachOnboarding(
+    bobBrandingPage,
+    appOrigin,
+    "Continue as Bob Birch"
+  )
+  assert.equal(bobBrandingChoices.organizations.length, 1)
+  await selectOrganization(bobBrandingPage, appOrigin, "atlas-labs")
+  const bobUploadedSession = await sessionJson(
+    bobBrandingPage.page,
+    appOrigin,
+    "bob-branding-a:uploaded-logo"
+  )
+  assert.equal(bobUploadedSession.role, "member")
+  assert.equal(bobUploadedSession.organization.name, "Atlas Team")
+  assert.equal(bobUploadedSession.organization.avatarUrl, savedAtlas.avatarUrl)
+  await bobBrandingPage.page.getByText("Atlas Team", { exact: true }).waitFor()
+  let bobUploadedLogo = bobBrandingPage.page.locator(
+    `img[src="${savedAtlas.avatarUrl}"]`
+  )
+  await bobUploadedLogo.waitFor()
+  await bobUploadedLogo.evaluate((image) => image.decode())
+  bobBrandingPage.setPhase("uploaded-logo-focus-refresh")
+  const bobUploadedRefresh = bobBrandingPage.page.waitForResponse(
+    (response) =>
+      response.request().method() === "GET" &&
+      response.url() === `${appOrigin}/api/team/session`
+  )
+  await bobBrandingPage.page.evaluate(() =>
+    window.dispatchEvent(new Event("focus"))
+  )
+  const bobUploadedRefreshResponse = await bobUploadedRefresh
+  assert.equal(bobUploadedRefreshResponse.status(), 200)
+  const bobUploadedRefreshSession = await bobUploadedRefreshResponse.json()
+  await validateTeamProjection(
+    bobBranding.context,
+    appOrigin,
+    bobUploadedRefreshSession,
+    "session",
+    "bob-branding-a:uploaded-logo-focus-refresh"
+  )
+  assert.equal(bobUploadedRefreshSession.organization.name, "Atlas Team")
+  assert.equal(
+    bobUploadedRefreshSession.organization.avatarUrl,
+    savedAtlas.avatarUrl
+  )
+  await bobBrandingPage.page.reload()
+  await bobBrandingPage.page.getByText("Atlas Team", { exact: true }).waitFor()
+  bobUploadedLogo = bobBrandingPage.page.locator(
+    `img[src="${savedAtlas.avatarUrl}"]`
+  )
+  await bobUploadedLogo.waitFor()
+  await bobUploadedLogo.evaluate((image) => image.decode())
+  await screenshot(
+    bobBrandingPage.page,
+    "bob-member-uploaded-branding-desktop-1440.png"
+  )
+  await bobBrandingPage.page.waitForLoadState("networkidle", {
+    timeout: 5_000,
+  })
+  await bobBrandingPage.page.close({ runBeforeUnload: true })
 
   const aliceSettingsRace = await newTrackedContext(
     "alice-settings-race",
@@ -1250,23 +1355,25 @@ async function run() {
       '<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>'
     ),
   })
-  await alicePage.page
+  const fileError = alicePage.page
     .getByRole("alert")
     .getByText("Choose a PNG, JPEG, or WebP image no larger than 1 MB.", {
       exact: true,
     })
-    .waitFor()
+  await fileError.waitFor()
+  await logoUpload.setInputFiles({
+    name: "clear-svg-error.png",
+    mimeType: "image/png",
+    buffer: uploadedLogo,
+  })
+  await fileError.waitFor({ state: "detached" })
+  await uploadedPreview.waitFor()
   await logoUpload.setInputFiles({
     name: "oversized.png",
     mimeType: "image/png",
     buffer: Buffer.alloc(1024 * 1024 + 1, 0x41),
   })
-  await alicePage.page
-    .getByRole("alert")
-    .getByText("Choose a PNG, JPEG, or WebP image no larger than 1 MB.", {
-      exact: true,
-    })
-    .waitFor()
+  await fileError.waitFor()
   assert.equal(settingsPatchCount(), beforeClientRejections)
 
   await logoUpload.setInputFiles({
@@ -1976,7 +2083,7 @@ async function run() {
       session: teamProjectionChecks.filter((check) => check.kind === "session")
         .length,
     },
-    { onboarding: 8, session: 11 },
+    { onboarding: 9, session: 13 },
     "every explicitly awaited successful onboarding/session projection must be checked"
   )
   assert.deepEqual(
@@ -2013,6 +2120,7 @@ async function run() {
     "alice-settings-race:primary:sign-in-org-a",
     "alice-settings-race:primary:relogin-org-b",
     "alice-independent-b:primary:sign-in",
+    "bob-branding-a:primary:uploaded-logo",
     "bob-a:primary:single-choice",
     "carol-b:primary:zero-choice",
   ])
@@ -2083,9 +2191,11 @@ async function run() {
       entry.status === 404 &&
       entry.phase === "negative:boundary:root-redirect") ||
     (entry.path === `${appOrigin}/auth/organization` &&
-      (entry.method === "GET" || entry.method === "PATCH") &&
       entry.status === 404 &&
-      entry.phase === "negative:boundary:root-redirect") ||
+      ((entry.method === "GET" &&
+        entry.phase === "negative:boundary:legacy-organization-get") ||
+        (entry.method === "PATCH" &&
+          entry.phase === "negative:boundary:legacy-organization-patch"))) ||
     (entry.path === `${appOrigin}/api/team/organization` &&
       entry.method === "PATCH" &&
       ((entry.status === 400 &&
@@ -2106,6 +2216,28 @@ async function run() {
   )
   assert.deepEqual(unexpectedHttpErrors, [])
   assert.deepEqual(
+    expectedHttpErrors
+      .filter((entry) => entry.path === `${appOrigin}/auth/organization`)
+      .map(({ phase, method, status: statusCode }) => ({
+        phase,
+        method,
+        status: statusCode,
+      })),
+    [
+      {
+        phase: "negative:boundary:legacy-organization-get",
+        method: "GET",
+        status: 404,
+      },
+      {
+        phase: "negative:boundary:legacy-organization-patch",
+        method: "PATCH",
+        status: 404,
+      },
+    ],
+    "legacy organization HTTP probes must occur exactly once per method"
+  )
+  assert.deepEqual(
     allDiagnostics.flatMap((diagnostics) => diagnostics.pageErrors),
     []
   )
@@ -2113,8 +2245,8 @@ async function run() {
     ["negative:boundary:root-redirect", "/api/team/session", 401],
     ["negative:boundary:root-redirect", "/api/health", 404],
     ["negative:boundary:root-redirect", "/api/get_settings", 404],
-    ["negative:boundary:root-redirect", "/auth/organization", 404, "GET"],
-    ["negative:boundary:root-redirect", "/auth/organization", 404, "PATCH"],
+    ["negative:boundary:legacy-organization-get", "/auth/organization", 404],
+    ["negative:boundary:legacy-organization-patch", "/auth/organization", 404],
     [
       "alice-switch:primary:alice-multiple-choice",
       "/api/team/onboarding/select",
@@ -2158,6 +2290,24 @@ async function run() {
     diagnostics.consoleDiagnostics.filter(expectedConsoleDiagnostic)
   )
   assert.deepEqual(
+    expectedConsoleDiagnostics
+      .filter((entry) => entry.location === `${appOrigin}/auth/organization`)
+      .map(({ phase, text: message }) => ({ phase, message })),
+    [
+      {
+        phase: "negative:boundary:legacy-organization-get",
+        message:
+          "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      },
+      {
+        phase: "negative:boundary:legacy-organization-patch",
+        message:
+          "Failed to load resource: the server responded with a status of 404 (Not Found)",
+      },
+    ],
+    "legacy organization console diagnostics must occur exactly once per probe phase"
+  )
+  assert.deepEqual(
     allDiagnostics.flatMap((diagnostics) =>
       diagnostics.consoleDiagnostics.filter(
         (entry) => !expectedConsoleDiagnostic(entry)
@@ -2192,6 +2342,7 @@ async function run() {
       "alice-switch-a-to-b",
       "alice-settings-race-a-to-b",
       "alice-independent-b",
+      "bob-branding-a-uploaded-logo",
       "bob-a",
       "carol-b",
     ],
