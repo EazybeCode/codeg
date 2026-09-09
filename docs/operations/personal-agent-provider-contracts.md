@@ -3,6 +3,14 @@
 Checked September9,2026. Read-only documentation research, not a tested client
 profile, provider-terms acceptance or enabled integration. No login was started.
 
+Owner update, September9: after being asked to review the applicable Claude hosted
+Code conditions and Commercial Terms, the owner replied “accepted tnc”. This is
+recorded as the owner's confirmation for that Claude hosting gate, not acceptance
+performed by the agent, provider endorsement or approval of Neev's implementation.
+Encrypted custody, verified unmodified clients and real-user isolation acceptance
+remain required before enabling sign-in. Each participant must authenticate through
+the provider's own flow; this confirmation does not connect any account.
+
 ## Codex
 
 The official app-server defaults to stdio. Initialize with truthful Neev client

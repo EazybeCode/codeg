@@ -201,7 +201,10 @@ listed source/test files; exclude root-owned plan/spec/status documents.
 **Files:** modify `src-tauri/src/db/migration/m20260907_000001_workspace_catalog.rs`
 only its `down` row-presence guard; extend
 `src-tauri/src/db/migration/personal_agent_connections_tests.rs` with full-chain
-rollback and historical guard regressions. No other migration/runtime changes.
+rollback and historical guard regressions. Also modify
+`src-tauri/src/db/migration/m20260211_000001_init.rs` only to add
+`if_exists()` to the `FolderOpenedConversation::Table` drop in down,
+under the evidence-backed scope ruling below. No other migration/runtime changes.
 
 **Interfaces:** consume registered Migrator and named catalog `Migration`, plus
 the guarded PostgreSQL fixture already in the test module. Keep its exact-name
@@ -264,17 +267,39 @@ personal tables. Keep the generated/connected database-name equality and hex-pre
 guard before DROP; preserve any failure database. Do not duplicate the whole
 PostgreSQL setup/cleanup block or touch a configured application database.
 
-- [ ] **Step 4: Run and commit the focused fix.** Run all
+- [ ] **Step 4: Fix the separately reproduced initial-down assumption.**
+The first covering GREEN attempt exposed a second historical defect on both
+engines: opened-tabs up drops folder_opened_conversation and its down does not
+restore it, but initial down still requires that table. Controller independently
+verified both migrations and authorized this one-line scope extension:
+
+```rust
+Table::drop()
+    .table(FolderOpenedConversation::Table)
+    .if_exists()
+    .to_owned()
+```
+
+Change no other initial down drop, no up, and no opened-tabs migration behavior.
+Retain the exact existing full-chain failures as RED evidence; another full RED
+relink is unnecessary. Add a focused actual SQLite test: named initial up, create
+an unrelated sentinel row, remove only the fixture's legacy opened-conversation
+table to model the historical state, then named initial down succeeds and removes
+its other tables while preserving the sentinel. Full-chain up/down/up on both
+engines remains mandatory. This guarantees empty-chain behavior, not safe populated
+legacy downgrade or restoration of previously discarded UI state.
+
+- [ ] **Step 5: Run and commit the focused fix.** Run all
 `personal_agent_connections_tests` with `--include-ignored --test-threads=1` plus
 `git diff --check`. Verify normal readable Rust formatting manually if rustfmt is
 unavailable; no toolchain/dependency install. Record RED/GREEN exact commands and
-results. Commit only the two listed files and release Cargo/index ownership.
+results. Commit only the three listed files and release Cargo/index ownership.
 
 ## Plan self-review
 
 Storage/ownership/lifecycle metadata and historical migration safety map to Task1.
-Task2 fixes the single historical-model guard identified by the failing full-chain
-test and restores full empty-chain coverage. It shares only the regression test
+Task2 fixes the historical-model guard and the separately reproduced initial-down
+missing-table assumption, restoring full empty-chain coverage. It shares only the regression test
 module with Task1; implementation is sequential. Service authorization, provider protocols/custody, HTTP/UI and real deployment are
 explicit subsequent plans in the coverage sequence, not claimed by this task.
 All entities, columns, state spellings, indexes and verification commands consumed

@@ -19,7 +19,7 @@
 - Each start/cancel/disconnect changes a monotonic generation.
 - Reuse the accepted team principal/transaction guard and its lock ordering. Do not hold database locks while contacting providers or starting containers.
 - Foreign or nonexistent opaque resources return the same 404; attempt/code access additionally requires the exact initiating session.
-- This module supplies internal lifecycle operations only: no HTTP/provider/process/legacy dispatcher, no enabled runtime, no network/cloud/GitHub access, no push or deployment.
+- This module supplies internal lifecycle operations only: no new agent HTTP routes, provider processes or legacy dispatcher. Task2 adds only the explicitly specified existing logout invalidation hook. No enabled runtime, network/cloud/GitHub access, push or deployment.
 - One Cargo process, `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1`; stop owned compilation before free disk approaches 2 GiB. Root owns docs; implementers own only task source/tests.
 
 ## File and interface map
@@ -96,6 +96,11 @@ Run `cargo test --lib --no-default-features team_access::agents::tests -- --test
 - [ ] **Step 2: Implement locked authority and bounded projections.** Start a transaction; read the user's immutable GitHub identity from the database and call `core::lock_user_identity`, then lock the selected org row (PostgreSQL `FOR UPDATE`; SQLite already holds the user no-op write lock). Call `principals.recheck_in_transaction` to lock/recheck membership then exact session, and only then lock/select the scoped connection. Always recheck again immediately before commit after row work. Reject database/decode/overflow errors with fixed errors, never format SQL/provider text into them. Scope every connection lookup by both context user_id and org_id; role never grants access to another member's connection.
 
 `list` returns exactly Claude and Codex in that order, using virtual disconnected rows for providers never started; it does not create database rows. It exposes no connection ID, handle, session, operation, lease or other member label. Unknown/malformed stored values fail closed. For states other than connected, return no account_label/checked_at. `attempt` joins to the scoped provider connection and requires the exact initiating session. It returns only state/expiry, not a login code, and treats a foreign or absent attempt identically. No provider status check is claimed by this metadata-only method; later orchestration must perform the bounded official check before displaying an authenticated status.
+
+Sample the service clock for lease, attempt, quota and mutation timestamps after
+acquiring the required ownership/session/connection locks. A timestamp captured
+before waiting for a lock must not authorize an attempt or lease that has since
+expired. Keep the existing final principal recheck before commit as well.
 
 - [ ] **Step 3: Implement serialized, idempotent begin.** Request keys are 1..64 ASCII bytes, characters `[A-Za-z0-9_-]`; all resource/lease IDs are server-generated UUID v4 simple hex. First lookup the scoped connection/provider and any operation `(connection,connect,key)`. An identical live leased attempt from the same exact session replays Pending with the original internal ticket without a new generation or quota debit. A completed operation with a completed attempt from that same session and an unchanged current result generation replays Settled with the own connection projection; do not require the old login lease or attempt expiry to remain live after successful completion, and do not return a new login ticket. A reused key bound to another session, an expired/invalidated pending ticket, changed generation, or incompatible input returns Conflict; never start fresh work under an old key.
 
