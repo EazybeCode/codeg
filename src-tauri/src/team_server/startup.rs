@@ -1,4 +1,4 @@
-use std::{fmt, process::ExitCode, sync::Arc, time::Duration};
+use std::{fmt, future::Future, process::ExitCode, sync::Arc, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 
@@ -124,10 +124,86 @@ async fn cleanup_loop(service: Arc<OnboardingService>, cancellation: Cancellatio
         tokio::select! {
             _ = cancellation.cancelled() => return,
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                if service.cleanup_expired().await.is_err() {
-                    tracing::warn!(outcome = "unavailable", "team authentication cleanup failed");
+                match cleanup_or_cancel(&cancellation, service.cleanup_expired()).await {
+                    None => return,
+                    Some(Ok(())) => {}
+                    Some(Err(_)) => {
+                        tracing::warn!(outcome = "unavailable", "team authentication cleanup failed");
+                    }
                 }
             }
         }
+    }
+}
+
+async fn cleanup_or_cancel<F, E>(
+    cancellation: &CancellationToken,
+    cleanup: F,
+) -> Option<Result<(), E>>
+where
+    F: Future<Output = Result<(), E>>,
+{
+    tokio::select! {
+        _ = cancellation.cancelled() => None,
+        result = cleanup => Some(result),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        future::pending,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    use tokio::sync::oneshot;
+
+    use super::cleanup_or_cancel;
+    use tokio_util::sync::CancellationToken;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_an_in_progress_cleanup_promptly() {
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let cleanup_dropped = dropped.clone();
+        let (started_tx, started_rx) = oneshot::channel();
+        let cleanup = async move {
+            let _drop_flag = DropFlag(cleanup_dropped);
+            let _ = started_tx.send(());
+            pending::<Result<(), ()>>().await
+        };
+        let mut task = tokio::spawn(async move {
+            cleanup_or_cancel(&task_cancellation, cleanup).await
+        });
+
+        started_rx.await.expect("cleanup future started");
+        cancellation.cancel();
+        let outcome = tokio::time::timeout(Duration::from_millis(250), &mut task).await;
+        let outcome = match outcome {
+            Ok(outcome) => outcome.expect("cleanup task joined"),
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                panic!("cancellation did not stop the in-progress cleanup");
+            }
+        };
+        assert!(outcome.is_none(), "cleanup completed instead of cancelling");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "cancelled cleanup future remained alive"
+        );
     }
 }

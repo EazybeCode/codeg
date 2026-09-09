@@ -24,4 +24,7 @@ mod database_tests;
 mod http_tests;
 
 #[cfg(test)]
+mod http_onboarding_tests;
+
+#[cfg(test)]
 mod test_server;

@@ -10,7 +10,10 @@ use sea_orm::{
 };
 use axum_test::TestServer;
 
-use super::{router::build_router, test_server::team_state};
+use super::{
+    router::build_router,
+    test_server::{cookie_value, query_value, set_cookies, team_state},
+};
 use crate::team_access::{
     github::{GithubIdentity, GithubMembershipEvidence, GithubOrganizationChoice},
     session::TeamRole,
@@ -476,17 +479,6 @@ async fn onboarding_bootstrap_selection_session_and_local_logout_are_browser_bou
     assert!(login_page.text().contains("Eazybe WorkOS"));
 }
 
-fn query_value(url: &str, name: &str) -> String {
-    url.split_once('?')
-        .and_then(|(_, query)| {
-            query.split('&').find_map(|pair| {
-                let (key, value) = pair.split_once('=')?;
-                (key == name).then(|| value.to_owned())
-            })
-        })
-        .expect("query value")
-}
-
 #[tokio::test]
 async fn unsupported_methods_and_unknown_protected_paths_are_not_found() {
     let fixture = team_state(Vec::new(), Vec::new(), Vec::new(), Vec::new()).await;
@@ -512,27 +504,6 @@ async fn unsupported_methods_and_unknown_protected_paths_are_not_found() {
         0,
         "unsupported HEAD must not persist an OAuth attempt"
     );
-}
-
-fn set_cookies(response: &axum_test::TestResponse) -> Vec<String> {
-    response
-        .headers()
-        .get_all(header::SET_COOKIE)
-        .iter()
-        .map(|value| value.to_str().expect("ASCII cookie").to_owned())
-        .collect()
-}
-
-fn cookie_value(response: &axum_test::TestResponse, name: &str) -> String {
-    set_cookies(response)
-        .into_iter()
-        .find_map(|cookie| {
-            cookie
-                .strip_prefix(&format!("{name}="))
-                .and_then(|value| value.split(';').next())
-                .map(str::to_owned)
-        })
-        .expect("named response cookie")
 }
 
 const LOGOUT_CSRF: &str =
