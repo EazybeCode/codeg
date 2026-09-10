@@ -200,7 +200,7 @@ fn response_cookies(response: &axum_test::TestResponse) -> String {
 }
 
 #[tokio::test]
-async fn google_http_login_claims_once_and_redirects_without_leaking_provider_query() {
+async fn google_http_callback_accepts_metadata_claims_once_and_does_not_leak_query() {
     let (_token, jwks) = test_support::valid_google_token("unused", "google-client", 1_700_000_000);
     let issuer = MockIssuer::start(jwks).await;
     let database = test_support::database().await;
@@ -256,7 +256,7 @@ async fn google_http_login_claims_once_and_redirects_without_leaking_provider_qu
 
     let callback = server
         .get(&format!(
-            "/auth/google/callback?state={}&code=provider-code&scope=openid%20email%20profile&authuser=0&hd=example.test&prompt=consent",
+            "/auth/google/callback?state={}&code=provider-code&scope=openid%20email%20profile&authuser=0&hd=example.test&prompt=consent&future_google_extension=opaque-value",
             urlencoding::encode(&callback_state)
         ))
         .add_header(axum::http::header::COOKIE, &cookies)
@@ -273,6 +273,11 @@ async fn google_http_login_claims_once_and_redirects_without_leaking_provider_qu
     );
     assert_eq!(callback.header("referrer-policy"), "no-referrer");
     assert!(!format!("{:?}", callback.headers()).contains("provider-code"));
+    server
+        .get("/auth/google/callback?state=malformed&code=provider-code&future_google_extension=opaque-value")
+        .add_header(axum::http::header::COOKIE, &cookies)
+        .await
+        .assert_status_unauthorized();
     server
         .get(&format!(
             "/auth/google/callback?state={}&code=provider-code",

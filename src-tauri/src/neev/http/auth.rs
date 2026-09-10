@@ -266,28 +266,39 @@ fn callback_query(raw: Option<&str>) -> Result<(String, oauth::CallbackResult), 
     let mut denied = None;
     let mut error_description = None;
     let mut error_uri = None;
-    let mut scope = None;
-    let mut authuser = None;
-    let mut hosted_domain = None;
-    let mut prompt = None;
     for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
         match key.as_ref() {
-            "state" if state.is_none() && value.len() <= 96 => state = Some(value.into_owned()),
-            "code" if code.is_none() && value.len() <= 2048 => code = Some(value.into_owned()),
-            "error" if denied.is_none() && !value.is_empty() && value.len() <= 128 => {
-                denied = Some(())
+            "state" => {
+                if state.is_some() || value.len() > 96 {
+                    return Err(ApiError::Invalid);
+                }
+                state = Some(value.into_owned());
             }
-            "error_description" if error_description.is_none() && value.len() <= 512 => {
+            "code" => {
+                if code.is_some() || value.len() > 2048 {
+                    return Err(ApiError::Invalid);
+                }
+                code = Some(value.into_owned());
+            }
+            "error" => {
+                if denied.is_some() || value.is_empty() || value.len() > 128 {
+                    return Err(ApiError::Invalid);
+                }
+                denied = Some(());
+            }
+            "error_description" => {
+                if error_description.is_some() || value.len() > 512 {
+                    return Err(ApiError::Invalid);
+                }
                 error_description = Some(())
             }
-            "error_uri" if error_uri.is_none() && value.len() <= 2048 => error_uri = Some(()),
-            "scope" if scope.is_none() && bounded_metadata(&value, 1024) => scope = Some(()),
-            "authuser" if authuser.is_none() && bounded_metadata(&value, 32) => authuser = Some(()),
-            "hd" if hosted_domain.is_none() && bounded_metadata(&value, 255) => {
-                hosted_domain = Some(())
+            "error_uri" => {
+                if error_uri.is_some() || value.len() > 2048 {
+                    return Err(ApiError::Invalid);
+                }
+                error_uri = Some(());
             }
-            "prompt" if prompt.is_none() && bounded_metadata(&value, 128) => prompt = Some(()),
-            _ => return Err(ApiError::Invalid),
+            _ => {}
         }
     }
     let state = state.ok_or(ApiError::Invalid)?;
@@ -300,21 +311,24 @@ fn callback_query(raw: Option<&str>) -> Result<(String, oauth::CallbackResult), 
     }
 }
 
-fn bounded_metadata(value: &str, limit: usize) -> bool {
-    !value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn provider_denial_metadata_is_bounded_but_does_not_prevent_state_claim() {
+    fn callback_metadata_is_ignored_but_core_parameters_remain_unambiguous() {
         let parsed = callback_query(Some(
-            "state=n1.oauth.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&error=access_denied&error_description=cancelled&error_uri=https%3A%2F%2Faccounts.google.com%2Fhelp",
+            "state=n1.oauth.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&error=access_denied&error_description=cancelled&error_uri=https%3A%2F%2Faccounts.google.com%2Fhelp&future_google_extension=opaque-value",
         ));
         assert!(matches!(parsed, Ok((_, oauth::CallbackResult::Denied))));
         assert!(callback_query(Some("state=one&state=two&error=access_denied")).is_err());
-        assert!(callback_query(Some("state=one&error=access_denied&unexpected=value")).is_err());
+        assert!(callback_query(Some("state=one&code=first&code=second")).is_err());
+        assert!(callback_query(Some("state=one&error=first&error=second")).is_err());
+        assert!(callback_query(Some("state=one&code=code&error=access_denied")).is_err());
+        assert!(callback_query(Some(&format!(
+            "state=one&code=code&unused={}",
+            "a".repeat(4096)
+        )))
+        .is_err());
     }
 }
