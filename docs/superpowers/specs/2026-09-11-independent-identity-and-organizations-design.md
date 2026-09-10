@@ -2,7 +2,8 @@
 
 Date: 2026-09-11. Status: Google sign-in, email magic links and optional GitHub
 approved in conversation. Owner explicitly chose a fresh start without existing
-GitHub-organization compatibility. This written design awaits owner review.
+GitHub-organization compatibility. Owner approved this written design on September11
+("sagar.007007@gmail.com is fine / approced design").
 Not implemented.
 
 ## Outcome and delivery boundaries
@@ -207,10 +208,12 @@ is100/day. Keep the application budget below that ceiling and show a safe retry
 state if exhausted; do not silently upgrade billing. Prefer a dedicated sending
 subdomain under neev.so, verified using the service's exact DNS values, preserving
 apex website, app and existing mail records. DNS sending authorization needs explicit
-confirmation when the exact records are available. Google is currently waiting for
-owner account verification; Resend signup is waiting for owner terms acceptance.
-No account, client credential, sending-domain authorization or paid resource has
-been created by this preparation.
+confirmation when the exact records are available. Google project neev-508219 and
+the Resend sending domain mail.neev.so have now been created. Owner approved the
+Google support/contact email and three scoped mail DNS records; those records are
+saved and resolve authoritatively. Resend verification remains partially complete.
+Google's User Data Policy awaits owner acceptance. No OAuth client, mail API key,
+paid resource or application deployment has been created by this preparation.
 
 Keep runtime disabled until the existing isolated-agent and durable-job gates pass.
 This design does not claim the remaining website, feedback, notifications or wiki
