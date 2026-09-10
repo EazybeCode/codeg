@@ -2,6 +2,17 @@
 
 Current decision: **not ready for public signup**. The private hosted pilot and infrastructure are not equivalent to accepted multi-tenant application behavior. Keep catalog agent execution disabled until its integration and acceptance gates pass.
 
+Owner decision September10: signup should be open to anyone with GitHub, without
+an organization allowlist. This supersedes earlier invite-only rollout wording,
+not verified membership, private-chat permissions, isolation or abuse-control gates.
+
+September10 installation preflight: the existing onboarding UI already links to
+the EazyWorkOS installation flow when no organization is available. The GitHub App
+settings currently require renewed owner verification before its public-install
+eligibility can be confirmed. A public landing page alone is insufficient evidence:
+private GitHub Apps also have limited landing pages. No visibility or permission
+setting has been changed. [GitHub App visibility](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private).
+
 ## Delivery order
 
 | Gate | Current evidence / remaining work |
@@ -38,4 +49,6 @@ Current decision: **not ready for public signup**. The private hosted pilot and 
 - Owner selected Neev: neev.so for the website, app.neev.so for the application. Namecheap website apex/www and app A records are verified. The existing GitHub App homepage and added application callback were saved with exact owner approval on September10; existing local callbacks, permissions and secrets were preserved. Live app-origin/callback configuration matches, but public HTTPS and real OAuth acceptance remain pending. The owner also needs to retain recovery secrets in an approved independent vault, provide a notification destination and participate in real second-user/provider acceptance. Direct publication is authorized and completed for the private checkpoint; it is not a remaining interactive gate. The staged rollout is recorded in [neev-release-plan.md](neev-release-plan.md).
 - The earlier Task4 disk pause is resolved by owner cleanup. Post-fix library and standalone binary compilation both completed; latest sample17GiB free. Only previously authorized regenerable outputs were removed during the earlier pause, not personal/project source or GitHub data. Keep builds serial and monitor remaining space; no further cleanup is currently needed.
 
-An invite-only external beta can follow successful tenant/runtime/operational acceptance. Unrestricted public signup should not precede those tests or abuse controls. No launch date or completion percentage is asserted by this checklist.
+Open GitHub signup can follow successful tenant/runtime/operational acceptance and
+public abuse controls; do not add an organization allowlist. No launch date or
+completion percentage is asserted by this checklist.
