@@ -21,7 +21,7 @@ RUN cargo build --release --bin codeg-server --no-default-features \
  && cargo build --release --bin codeg-mcp --no-default-features
 
 # Stage 3: Runtime
-FROM node:24-bookworm-slim
+FROM node:24-bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y \
     libsqlite3-0 \
     git \
@@ -58,6 +58,14 @@ ENV CODEG_RESTART_DELAY_MS=2000
 EXPOSE 3080
 VOLUME /data
 
-# Run under the built-in supervisor (PID 1) so an in-place upgrade can swap
-# the binary and have the worker relaunched without stopping the container.
+# Explicit team target: missing/invalid team configuration fails closed.
+# Runtime stays disabled until the separately reviewed job runner is ready.
+FROM runtime AS team
+ENV WORKOS_SERVER_MODE=team
+ENV WORKOS_ENABLE_CATALOG_RUNTIME=false
+STOPSIGNAL SIGINT
+CMD ["codeg-server", "--team"]
+
+# Preserve the existing default image for desktop/operator deployments.
+FROM runtime AS operator
 CMD ["codeg-server", "--supervise"]
