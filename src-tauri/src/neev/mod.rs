@@ -1,11 +1,18 @@
 //! Native Neev identity and tenancy. No legacy router or database fallback.
 pub(crate) mod auth;
 pub(crate) mod clock;
+pub(crate) mod config;
 pub(crate) mod db;
 pub(crate) mod error;
+pub(crate) mod http;
+mod startup;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod types;
+
+pub fn run_server() -> std::process::ExitCode {
+    startup::run_server()
+}
 
 #[cfg(test)]
 mod contract_tests {
@@ -107,5 +114,25 @@ mod contract_tests {
         let _ = Role::Member;
         let _ = NodeKind::Folder;
         let _ = NodeKind::WorkingDirectory;
+    }
+}
+
+#[cfg(test)]
+mod task2_boundary_tests {
+    use super::test_support;
+
+    #[tokio::test]
+    async fn legacy_cookie_cannot_authenticate_native_routes() {
+        let server = test_support::http_server().await;
+        server
+            .get("/api/neev/session")
+            .add_header("cookie", "workos_team_session=old; workos_session=old")
+            .await
+            .assert_status_unauthorized();
+        server.get("/api/settings").await.assert_status_not_found();
+        server
+            .get("/api/team/session")
+            .await
+            .assert_status_not_found();
     }
 }

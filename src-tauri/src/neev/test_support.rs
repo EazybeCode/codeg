@@ -1,5 +1,23 @@
 use super::types::{Provider, VerifiedIdentity};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement, Value};
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc,
+};
+
+pub(super) struct TestClock(pub(super) AtomicI64);
+
+impl TestClock {
+    pub(super) fn new(now: i64) -> Self {
+        Self(AtomicI64::new(now))
+    }
+}
+
+impl super::clock::Clock for TestClock {
+    fn now_unix(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 fn isolated_postgres_database_name(raw: &str) -> Option<String> {
     let parsed = url::Url::parse(raw).ok()?;
@@ -64,6 +82,58 @@ pub(super) async fn native_account(db: &DatabaseConnection, subject: &str, email
     )
     .await
     .unwrap()
+}
+
+pub(super) async fn organization(db: &DatabaseConnection, user: i32, role: &str) -> (i32, i32) {
+    let row = db.query_one(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO neev_organizations(owner_user_id,name,revision,disabled,created_at) VALUES($1,'Test org',1,false,1000) RETURNING id",
+        vec![user.into()],
+    )).await.unwrap().unwrap();
+    let org: i32 = row.try_get("", "id").unwrap();
+    let row = db.query_one(Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO neev_memberships(org_id,user_id,role,revision,active) VALUES($1,$2,$3,1,true) RETURNING id",
+        vec![org.into(), user.into(), role.into()],
+    )).await.unwrap().unwrap();
+    let member: i32 = row.try_get("", "id").unwrap();
+    (org, member)
+}
+
+pub(super) fn preview_config() -> super::config::Config {
+    let origin = url::Url::parse("http://127.0.0.1:3100/").unwrap();
+    super::config::Config {
+        origin: origin.clone(),
+        origin_header: "http://127.0.0.1:3100".into(),
+        google_callback: origin.join("auth/google/callback").unwrap(),
+        github_callback: origin.join("auth/github/callback").unwrap(),
+        database_url: "postgresql:///unused_test_database".into(),
+        encryption_key: [7; 32],
+        bind: "127.0.0.1:0".parse().unwrap(),
+        static_root: std::env::current_dir().unwrap(),
+        preview: true,
+        providers: super::config::ProviderConfig {
+            google: None,
+            github: None,
+            email: None,
+        },
+    }
+}
+
+pub(super) async fn http_fixture() -> (axum_test::TestServer, DatabaseConnection, Arc<TestClock>) {
+    let database = database().await;
+    let clock = Arc::new(TestClock::new(1000));
+    let state = Arc::new(super::startup::ServerState::new(
+        database.clone(),
+        preview_config(),
+        clock.clone(),
+    ));
+    let server = axum_test::TestServer::new(super::http::router(state)).unwrap();
+    (server, database, clock)
+}
+
+pub(super) async fn http_server() -> axum_test::TestServer {
+    http_fixture().await.0
 }
 pub(super) async fn session(
     db: &DatabaseConnection,

@@ -32,6 +32,7 @@ pub(crate) enum SignInIntent {
     },
 }
 
+#[derive(Clone)]
 pub(crate) struct IdentityContext {
     pub(crate) user_id: UserId,
     pub(crate) session_id: String,
@@ -39,6 +40,7 @@ pub(crate) struct IdentityContext {
     pub(crate) authenticated_at: i64,
 }
 
+#[derive(Clone)]
 pub(crate) struct OrgContext {
     pub(crate) identity: IdentityContext,
     pub(crate) org_id: OrgId,

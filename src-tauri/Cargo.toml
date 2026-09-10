@@ -52,6 +52,11 @@ name = "codeg-mcp"
 path = "src/bin/codeg_mcp.rs"
 required-features = []
 
+[[bin]]
+name = "neev-server"
+path = "src/bin/neev_server.rs"
+required-features = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
 
@@ -94,6 +99,7 @@ zip = "2"
 regex = "1"
 portable-pty = "0.8"
 urlencoding = "2"
+url = "2"
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs", version = "0.0.0", optional = true }
 sea-orm = { version = "1.1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls", "macros"] }
 sea-orm-migration = { version = "1.1", features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }
@@ -166,7 +172,6 @@ temp-env = { version = "0.3", features = ["async_closure"] }
 tokio = { version = "1", features = ["test-util", "macros", "rt", "sync", "time"] }
 insta = { version = "1", features = ["json", "redactions"] }
 axum-test = { version = "17", features = ["ws"] }
-url = "2"
 
 [patch.crates-io]
 sacp-tokio = { path = "vendor/sacp-tokio" }
