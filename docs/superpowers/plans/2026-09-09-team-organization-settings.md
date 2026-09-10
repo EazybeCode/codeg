@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-08-team-access-and-chat-visibility-design.md`, particularly sections1–2 and5; owner-approved organization name/logo editing.
 
-Status: prepared during HTTP/browser acceptance. Do not execute before that plan's final review and fresh verification pass. This is the current-org settings part of the following workspace conversion, not a replacement for catalog/chat privacy or cloud execution.
+Status: all three tasks and the final review/fix wave accepted through `63a51bbf` on September 10. See [acceptance evidence](../../operations/team-organization-settings-acceptance.md). The task checklists below retain the original implementation instructions; the acceptance record is the outcome. This is current-org settings only, not a replacement for catalog/chat privacy or cloud execution, and not a deployment approval.
 
 ## Global Constraints
 

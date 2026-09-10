@@ -49,6 +49,23 @@ real-user acceptance. A broad banner regex is not an authentication check.
 
 ## Remaining profile gates
 
+September10 follow-up, documentation only: the official app-server reference
+provides `codex app-server generate-json-schema --out ./schemas`; its generated
+schema matches the exact CLI version. Use this during isolated profile acceptance
+instead of inferring a versioned account shape from prose. This command has not
+been run against an approved Linux client here.
+[Version-specific app-server schemas](https://learn.chatgpt.com/docs/app-server#message-schema).
+
+The current authentication documentation says device-code login must be enabled
+in the person's security settings or their ChatGPT workspace permissions. Account
+onboarding must explain this prerequisite when unavailable; never switch silently
+to an API key or import the operator's auth cache. It also documents explicit
+file/keyring/auto/ephemeral storage choices. Avoid auto fallback: the accepted
+client profile must deliberately choose storage compatible with the encrypted
+per-person/org volume and restart requirements. No setting was changed, account
+connected, cache copied or provider client invoked by this research.
+[Headless authentication and credential storage](https://learn.chatgpt.com/docs/auth).
+
 Both providers still need pinned Linux client versions/image digests, exact output
 schemas, timeout/cancellation behavior, controlled environment/config, encrypted
 private storage and enforced provider-only egress tested with actual containers.
