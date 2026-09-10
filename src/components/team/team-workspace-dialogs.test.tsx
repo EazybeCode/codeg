@@ -18,6 +18,13 @@ const project = {
   repositoryDefault: null,
   revision: "3",
 }
+const folder = {
+  ...project,
+  id: 3,
+  parentId: 1,
+  kind: "folder" as const,
+  name: "Planning",
+}
 const repository = {
   id: 2,
   githubRepositoryId: "8080",
@@ -116,6 +123,86 @@ describe("Team workspace dialogs", () => {
     expect(screen.getByText(/existing chats keep/i)).toBeVisible()
   })
 
+  it("creates plain folders without repository controls or verification", async () => {
+    const connectRepository = vi.fn()
+    const createNode = vi.fn().mockResolvedValue(folder)
+    const user = userEvent.setup()
+    show(
+      <TeamNodeDialog
+        mode="create"
+        kind="folder"
+        parentId={1}
+        node={null}
+        path="Atlas"
+        connectRepository={connectRepository}
+        createNode={createNode}
+        updateNode={vi.fn()}
+        onClose={vi.fn()}
+      />
+    )
+
+    expect(screen.queryByLabelText(/^repository$/i)).toBeNull()
+    expect(screen.queryByRole("checkbox")).toBeNull()
+    await user.type(screen.getByLabelText(/folder name/i), "Planning")
+    await user.click(screen.getByRole("button", { name: /create folder/i }))
+
+    expect(connectRepository).not.toHaveBeenCalled()
+    expect(createNode).toHaveBeenCalledWith({
+      parentId: 1,
+      kind: "folder",
+      name: "Planning",
+      repositoryDefault: null,
+    })
+  })
+
+  it("edits plain folders without repository controls or verification", async () => {
+    const connectRepository = vi.fn()
+    const updateNode = vi.fn().mockResolvedValue({
+      ...folder,
+      name: "Planning renamed",
+      revision: "4",
+    })
+    const user = userEvent.setup()
+    show(
+      <TeamNodeDialog
+        mode="edit"
+        kind="folder"
+        parentId={1}
+        node={{
+          ...folder,
+          repositoryDefault: {
+            repositoryId: repository.id,
+            startingBranch: "main",
+          },
+        }}
+        repository={repository}
+        path="Atlas"
+        connectRepository={connectRepository}
+        createNode={vi.fn()}
+        updateNode={updateNode}
+        onClose={vi.fn()}
+      />
+    )
+
+    expect(screen.queryByLabelText(/^repository$/i)).toBeNull()
+    expect(screen.queryByRole("checkbox")).toBeNull()
+    const name = screen.getByLabelText(/folder name/i)
+    await user.clear(name)
+    await user.type(name, "Planning renamed")
+    await user.click(screen.getByRole("button", { name: /save details/i }))
+
+    expect(connectRepository).not.toHaveBeenCalled()
+    expect(updateNode).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 3 }),
+      {
+        expectedRevision: "3",
+        parentId: 1,
+        name: "Planning renamed",
+        repositoryDefault: null,
+      }
+    )
+  })
+
   it("closes after a successful edit persists", async () => {
     const updateNode = vi
       .fn()
@@ -153,6 +240,7 @@ describe("Team workspace dialogs", () => {
       <TeamChatDialog
         node={project}
         path="Atlas"
+        organization="Atlas Operations"
         inheritedRepository={repository}
         inheritedBranch="main"
         createChat={createChat}
@@ -160,7 +248,20 @@ describe("Team workspace dialogs", () => {
         onClose={vi.fn()}
       />
     )
-    expect(screen.getByText(/private to you/i)).toBeVisible()
+    expect(
+      screen.getByText(
+        "Private is the default. Your selected audience applies when you create this chat.",
+        { exact: true }
+      )
+    ).toBeVisible()
+    expect(
+      screen.getByRole("radio", { name: /^Private to you$/ })
+    ).toBeChecked()
+    expect(
+      screen.getByRole("radio", {
+        name: /^Everyone in Atlas Operations$/,
+      })
+    ).not.toBeChecked()
     expect(screen.getByText(/nearest repository default/i)).toHaveTextContent(
       /atlas\/repo.*main/i
     )
@@ -176,18 +277,66 @@ describe("Team workspace dialogs", () => {
     )
   })
 
-  it("discloses transcript sharing separately from GitHub access and keeps a failed choice", async () => {
-    const share = vi.fn().mockRejectedValue(new Error("failed"))
+  it("creates for the selected exact organization with sharing disclosures", async () => {
+    const created = { ...chat, visibility: "organization" as const }
+    const createChat = vi.fn().mockResolvedValue(created)
     const user = userEvent.setup()
-    show(<TeamShareDialog chat={chat} shareChat={share} onClose={vi.fn()} />)
+    show(
+      <TeamChatDialog
+        node={project}
+        path="Atlas"
+        organization="Atlas Operations"
+        inheritedRepository={repository}
+        inheritedBranch="main"
+        createChat={createChat}
+        connectRepository={vi.fn()}
+        onClose={vi.fn()}
+      />
+    )
+
+    await user.click(
+      screen.getByRole("radio", {
+        name: /^Everyone in Atlas Operations$/,
+      })
+    )
     expect(screen.getByText(/entire conversation history/i)).toBeVisible()
     expect(
       screen.getByText(/github repository access is checked separately/i)
     ).toBeVisible()
-    await user.click(screen.getByRole("radio", { name: /organization/i }))
+    await user.click(screen.getByRole("button", { name: /create chat/i }))
+
+    expect(createChat).toHaveBeenCalledWith(
+      expect.objectContaining({ visibility: "organization" })
+    )
+  })
+
+  it("discloses transcript sharing separately from GitHub access and keeps a failed choice", async () => {
+    const share = vi.fn().mockRejectedValue(new Error("failed"))
+    const user = userEvent.setup()
+    show(
+      <TeamShareDialog
+        chat={chat}
+        organization="Atlas Operations"
+        shareChat={share}
+        onClose={vi.fn()}
+      />
+    )
+    expect(screen.getByText(/entire conversation history/i)).toBeVisible()
+    expect(
+      screen.getByText(/github repository access is checked separately/i)
+    ).toBeVisible()
+    await user.click(
+      screen.getByRole("radio", {
+        name: /^Everyone in Atlas Operations$/,
+      })
+    )
     await user.click(screen.getByRole("button", { name: /^share$/i }))
     expect(share).toHaveBeenCalledWith(chat, "organization")
     expect(await screen.findByRole("alert")).toBeVisible()
-    expect(screen.getByRole("radio", { name: /organization/i })).toBeChecked()
+    expect(
+      screen.getByRole("radio", {
+        name: /^Everyone in Atlas Operations$/,
+      })
+    ).toBeChecked()
   })
 })

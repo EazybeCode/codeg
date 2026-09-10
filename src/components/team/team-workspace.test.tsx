@@ -123,6 +123,7 @@ describe("TeamWorkspace", () => {
     }
     const view = show()
     expect(screen.getByRole("heading", { name: "Shared plan" })).toBeVisible()
+    expect(screen.getByText("Everyone in Atlas Operations")).toBeVisible()
     expect(screen.getByText("atlas/repo")).toBeVisible()
     expect(screen.getByText("main")).toBeVisible()
     expect(screen.getByText(/runtime is disabled/i)).toBeVisible()
@@ -157,6 +158,11 @@ describe("TeamWorkspace", () => {
 
     expect(screen.getByRole("dialog")).toBeVisible()
     expect(screen.getByRole("heading", { name: /^share$/i })).toBeVisible()
+    expect(
+      screen.getByRole("radio", {
+        name: /^Everyone in Atlas Operations$/,
+      })
+    ).toBeChecked()
   })
 
   it("provides a labeled mobile navigation toggle", async () => {

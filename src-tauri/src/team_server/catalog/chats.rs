@@ -453,9 +453,7 @@ pub(in crate::team_server) async fn change_visibility(
     if Visibility::parse(&row.visibility).is_none() {
         return Err(ApiError::Unavailable);
     }
-    if input.visibility == Visibility::Organization
-        && !can_share(state, &transaction, context, &row).await?
-    {
+    if !can_share(state, &transaction, context, &row).await? {
         return Err(ApiError::Conflict);
     }
     let next = row.access_revision.checked_add(1).ok_or(ApiError::Conflict)?;

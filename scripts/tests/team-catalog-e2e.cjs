@@ -189,7 +189,19 @@ async function createNestedCatalog(page) {
   await openActions(page, "Web app")
   await page.getByRole("menuitem", { name: "New chat", exact: true }).click()
   await page
-    .getByText("New chats are private to you unless you share them later.", {
+    .getByText(
+      "Private is the default. Your selected audience applies when you create this chat.",
+      { exact: true }
+    )
+    .waitFor()
+  assert.equal(
+    await page
+      .getByRole("radio", { name: "Private to you", exact: true })
+      .isChecked(),
+    true
+  )
+  await page
+    .getByText("Nearest repository default: atlas/repo · main", {
       exact: true,
     })
     .waitFor()
@@ -261,7 +273,12 @@ async function run() {
   })
 
   await alice.getByRole("button", { name: "Share", exact: true }).click()
-  await alice.getByRole("radio", { name: "Organization", exact: true }).check()
+  await alice
+    .getByRole("radio", {
+      name: "Everyone in Atlas Operations",
+      exact: true,
+    })
+    .check()
   await alice.getByRole("button", { name: "Share", exact: true }).last().click()
   await reloadCatalog(bob)
   await expandCatalogTree(bob)
@@ -272,7 +289,7 @@ async function run() {
     .waitFor()
   await bob
     .locator("section")
-    .getByText("Organization", { exact: true })
+    .getByText("Everyone in Atlas Operations", { exact: true })
     .waitFor()
   assert.equal(
     await bob.getByRole("button", { name: "Share", exact: true }).count(),

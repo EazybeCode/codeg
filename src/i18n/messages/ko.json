@@ -1727,8 +1727,8 @@
     "name_project": "프로젝트 이름", "name_folder": "폴더 이름", "name_working_directory": "작업 디렉터리 이름",
     "create_project": "프로젝트 만들기", "create_folder": "폴더 만들기", "create_working_directory": "작업 디렉터리 만들기", "create_chat": "채팅 만들기", "chatTitle": "채팅 제목",
     "repository": "저장소", "startingBranch": "시작 브랜치", "repositoryHint": "owner/repository와 브랜치를 입력하세요. 저장 전에 GitHub 접근 권한을 확인합니다.", "associateRepository": "저장소 연결", "nearestDefault": "가장 가까운 기본 저장소", "overrideRepository": "다른 저장소 또는 브랜치 사용",
-    "privateBeforeCreate": "새 채팅은 나중에 공유하기 전까지 본인에게만 공개됩니다.", "editSnapshotHint": "기존 채팅은 저장된 저장소와 시작 브랜치 스냅샷을 유지합니다.", "saveDetails": "세부 정보 저장",
-    "share": "공유", "audience": "대화 공개 범위", "visibility_private": "나만", "visibility_organization": "조직", "shareHistoryDisclosure": "공유하면 조직에서 전체 대화 기록에 접근할 수 있습니다.", "githubAudienceDisclosure": "GitHub 저장소 접근 권한은 사용자마다 별도로 확인됩니다.",
+    "privateBeforeCreate": "기본값은 나만입니다. 선택한 공개 범위로 이 채팅이 생성됩니다.", "editSnapshotHint": "기존 채팅은 저장된 저장소와 시작 브랜치 스냅샷을 유지합니다.", "saveDetails": "세부 정보 저장",
+    "share": "공유", "audience": "대화 공개 범위", "visibility_private": "나만", "visibility_organization": "조직", "visibility_organization_named": "{organization}의 모든 사용자", "shareHistoryDisclosure": "공유하면 조직에서 전체 대화 기록에 접근할 수 있습니다.", "githubAudienceDisclosure": "GitHub 저장소 접근 권한은 사용자마다 별도로 확인됩니다.",
     "loading": "워크스페이스 불러오는 중…", "loadingMore": "더 불러오는 중…", "loadMore": "채팅 더 불러오기", "loadError": "워크스페이스를 불러오지 못했습니다. 다른 세션의 콘텐츠는 표시되지 않습니다.", "mutationError": "변경 사항을 저장하지 못했습니다. 입력값은 유지됩니다. 다시 시도하세요.",
     "retry": "다시 시도", "cancel": "취소", "creating": "만드는 중…", "saving": "저장 중…", "empty": "프로젝트를 만든 뒤 폴더, 작업 디렉터리, 저장소 기반 채팅을 추가하세요.", "nodeEmpty": "여기에 폴더, 작업 디렉터리 또는 비공개 채팅을 추가하세요.", "untitledChat": "제목 없는 채팅", "welcome": "{organization} 워크스페이스", "welcomeHint": "프로젝트와 중첩 폴더로 팀 작업을 정리하세요. 채팅은 작성자가 공유할 때까지 비공개입니다.",
     "runtimeDisabledTitle": "채팅 런타임이 비활성화되었습니다", "runtimeDisabledDescription": "이 카탈로그는 채팅 메타데이터만 저장합니다. 메시지 전송과 에이전트 실행은 별도 작업 통합 후 제공됩니다.", "expand": "{name} 펼치기", "collapse": "{name} 접기", "actions": "{name} 작업", "settings": "설정", "signOut": "로그아웃", "logoutFailed": "로그아웃을 확인하지 못했습니다."

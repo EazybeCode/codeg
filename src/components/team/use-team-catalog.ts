@@ -37,6 +37,7 @@ type CatalogState = {
   nodes: TeamCatalogNode[]
   repositories: TeamCatalogRepository[]
   chats: TeamCatalogChat[]
+  chatPageCursor: number | null
   selectedChat: TeamCatalogChat | null
   loading: boolean
   loadingMoreChats: boolean
@@ -49,6 +50,7 @@ const EMPTY_STATE: CatalogState = {
   nodes: [],
   repositories: [],
   chats: [],
+  chatPageCursor: null,
   selectedChat: null,
   loading: false,
   loadingMoreChats: false,
@@ -101,6 +103,7 @@ export function useTeamCatalog() {
   const controllerRef = useRef<AbortController | null>(null)
   const listSequenceRef = useRef(0)
   const detailSequenceRef = useRef(0)
+  const repositorySequenceRef = useRef(0)
   const removedChatIdsRef = useRef(new Map<number, number>())
   const selectionRef = useRef<Selection>({
     scope: null,
@@ -217,6 +220,7 @@ export function useTeamCatalog() {
     if (!controller || controller.signal.aborted) return
     const epoch = epochRef.current
     const sequence = ++listSequenceRef.current
+    const repositorySequence = repositorySequenceRef.current
     const selected =
       selection.scope === scope
         ? selection
@@ -285,8 +289,24 @@ export function useTeamCatalog() {
         ? {
             ...old,
             nodes: nodesResult.value,
-            repositories: repositoriesResult.value,
+            repositories:
+              repositorySequenceRef.current === repositorySequence
+                ? repositoriesResult.value
+                : (() => {
+                    const merged = new Map(
+                      repositoriesResult.value.map((repository) => [
+                        repository.id,
+                        repository,
+                      ])
+                    )
+                    old.repositories.forEach((repository) =>
+                      merged.set(repository.id, repository)
+                    )
+                    return [...merged.values()]
+                  })(),
             chats,
+            chatPageCursor:
+              chatsResult.value[chatsResult.value.length - 1]?.id ?? null,
             selectedChat:
               old.selectedChat?.id === selectedChatId &&
               !removedChatIdsRef.current.has(old.selectedChat.id)
@@ -407,7 +427,7 @@ export function useTeamCatalog() {
   const loadMoreChats = useCallback(async () => {
     if (!scope || !csrf || !current.hasMoreChats || current.loadingMoreChats)
       return
-    const afterId = current.chats[current.chats.length - 1]?.id
+    const afterId = current.chatPageCursor
     const controller = controllerRef.current
     if (!afterId || !controller) return
     const epoch = epochRef.current
@@ -430,6 +450,7 @@ export function useTeamCatalog() {
         return {
           ...old,
           chats: [...merged.values()].sort((a, b) => a.id - b.id),
+          chatPageCursor: page[page.length - 1]?.id ?? old.chatPageCursor,
           loadingMoreChats: false,
           hasMoreChats: page.length === CHAT_PAGE_SIZE,
         }
@@ -509,11 +530,22 @@ export function useTeamCatalog() {
   )
 
   const connectRepositoryMutation = useCallback(
-    (fullName: string, startingBranch: string) =>
-      runMutation((token, signal) =>
+    async (fullName: string, startingBranch: string) => {
+      const repository = await runMutation((token, signal) =>
         connectTeamRepository({ fullName, startingBranch }, token, signal)
-      ),
-    [runMutation]
+      )
+      repositorySequenceRef.current += 1
+      setState((old) => {
+        if (old.scope !== scope) return old
+        const repositories = new Map(
+          old.repositories.map((item) => [item.id, item])
+        )
+        repositories.set(repository.id, repository)
+        return { ...old, repositories: [...repositories.values()] }
+      })
+      return repository
+    },
+    [runMutation, scope]
   )
 
   const createChatMutation = useCallback(
@@ -523,11 +555,16 @@ export function useTeamCatalog() {
       )
       detailSequenceRef.current += 1
       selectionRef.current = { scope, nodeId: chat.nodeId, chatId: chat.id }
-      setState((old) =>
-        old.scope === scope
-          ? { ...old, chats: [...old.chats, chat], selectedChat: chat }
-          : old
-      )
+      setState((old) => {
+        if (old.scope !== scope) return old
+        const chats = new Map(old.chats.map((item) => [item.id, item]))
+        chats.set(chat.id, chat)
+        return {
+          ...old,
+          chats: [...chats.values()].sort((a, b) => a.id - b.id),
+          selectedChat: chat,
+        }
+      })
       setSelection({ scope, nodeId: chat.nodeId, chatId: chat.id })
       return chat
     },

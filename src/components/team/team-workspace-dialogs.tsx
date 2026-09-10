@@ -109,7 +109,8 @@ export function TeamNodeDialog({
   const t = useTranslations("TeamWorkspace")
   const [name, setName] = useState(node?.name ?? "")
   const [useRepository, setUseRepository] = useState(
-    kind === "working_directory" || Boolean(node?.repositoryDefault)
+    kind === "working_directory" ||
+      (kind === "project" && Boolean(node?.repositoryDefault))
   )
   const [fullName, setFullName] = useState(repository?.fullName ?? "")
   const [branch, setBranch] = useState(
@@ -124,7 +125,8 @@ export function TeamNodeDialog({
     },
     []
   )
-  const needsRepository = kind === "working_directory" || useRepository
+  const needsRepository =
+    kind === "working_directory" || (kind === "project" && useRepository)
   const valid =
     Boolean(name.trim()) &&
     (!needsRepository || Boolean(fullName.trim() && branch.trim()))
@@ -188,7 +190,7 @@ export function TeamNodeDialog({
               onChange={(event) => setName(event.target.value)}
             />
           </div>
-          {kind !== "working_directory" ? (
+          {kind === "project" ? (
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -240,6 +242,7 @@ export function TeamNodeDialog({
 export function TeamChatDialog({
   node,
   path,
+  organization,
   inheritedRepository,
   inheritedBranch,
   createChat,
@@ -248,6 +251,7 @@ export function TeamChatDialog({
 }: {
   node: TeamCatalogNode
   path: string
+  organization: string
   inheritedRepository: TeamCatalogRepository | null
   inheritedBranch?: string | null
   createChat: (input: CreateTeamChatInput) => Promise<TeamCatalogChat>
@@ -261,6 +265,7 @@ export function TeamChatDialog({
   const hasInherited = Boolean(inheritedRepository && inheritedBranch)
   const [override, setOverride] = useState(false)
   const [title, setTitle] = useState("")
+  const [visibility, setVisibility] = useState<TeamChatVisibility>("private")
   const [fullName, setFullName] = useState("")
   const [branch, setBranch] = useState("")
   const [busy, setBusy] = useState(false)
@@ -286,7 +291,7 @@ export function TeamChatDialog({
           : null,
         title: title.trim() || null,
         requestId: requestId.current,
-        visibility: "private",
+        visibility,
       })
       onClose()
     } catch {
@@ -320,6 +325,32 @@ export function TeamChatDialog({
           <p className="rounded-xl bg-muted/50 p-3 text-sm">
             {t("privateBeforeCreate")}
           </p>
+          <fieldset className="space-y-2">
+            <legend className="text-sm font-medium">{t("audience")}</legend>
+            {(["private", "organization"] as const).map((choice) => (
+              <label key={choice} className="flex items-center gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="team-chat-create-visibility"
+                  value={choice}
+                  checked={visibility === choice}
+                  disabled={busy}
+                  onChange={() => setVisibility(choice)}
+                />
+                {choice === "organization"
+                  ? t("visibility_organization_named", { organization })
+                  : t("visibility_private")}
+              </label>
+            ))}
+          </fieldset>
+          {visibility === "organization" ? (
+            <div className="space-y-2 rounded-xl border p-3">
+              <p className="text-sm">{t("shareHistoryDisclosure")}</p>
+              <p className="text-sm text-muted-foreground">
+                {t("githubAudienceDisclosure")}
+              </p>
+            </div>
+          ) : null}
           {hasInherited ? (
             <div className="space-y-2 rounded-xl border p-3 text-sm">
               <p>
@@ -368,10 +399,12 @@ export function TeamChatDialog({
 
 export function TeamShareDialog({
   chat,
+  organization,
   shareChat,
   onClose,
 }: {
   chat: TeamCatalogChat
+  organization: string
   shareChat: (
     chat: TeamCatalogChat,
     visibility: TeamChatVisibility
@@ -423,7 +456,9 @@ export function TeamShareDialog({
                   disabled={busy}
                   onChange={() => setVisibility(choice)}
                 />
-                {t(`visibility_${choice}`)}
+                {choice === "organization"
+                  ? t("visibility_organization_named", { organization })
+                  : t("visibility_private")}
               </label>
             ))}
           </fieldset>

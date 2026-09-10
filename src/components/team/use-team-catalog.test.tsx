@@ -300,6 +300,124 @@ describe("useTeamCatalog", () => {
     expect(result.current.chats).toEqual([refreshed])
   })
 
+  it("keeps the server page cursor after a high-id creation so load more does not skip rows", async () => {
+    const page = Array.from({ length: 200 }, (_, index) => ({
+      ...visibleChat,
+      id: index + 1,
+      title: `Chat ${index + 1}`,
+    }))
+    const created = { ...visibleChat, id: 1_000, title: "Created now" }
+    client.listTeamChats
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce([{ ...visibleChat, id: 201 }])
+    client.createTeamChat.mockResolvedValueOnce(created)
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() => expect(result.current.chats).toHaveLength(200))
+
+    await act(async () => {
+      await result.current.createChat({
+        nodeId: 1,
+        repositoryOverride: null,
+        title: "Created now",
+        requestId: "123e4567-e89b-12d3-a456-426614174201",
+        visibility: "private",
+      })
+    })
+    await act(async () => result.current.loadMoreChats())
+
+    expect(client.listTeamChats).toHaveBeenLastCalledWith(
+      { afterId: 200 },
+      expect.any(AbortSignal)
+    )
+    expect(result.current.chats.map((chat) => chat.id)).toEqual([
+      ...Array.from({ length: 201 }, (_, index) => index + 1),
+      1_000,
+    ])
+  })
+
+  it("reconciles a discovered committed creation with its idempotent retry", async () => {
+    const created = { ...visibleChat, id: 10, title: "Committed chat" }
+    client.createTeamChat
+      .mockRejectedValueOnce(new TeamClientError("request_failed", 500))
+      .mockResolvedValueOnce(created)
+    client.listTeamChats
+      .mockResolvedValueOnce([visibleChat])
+      .mockResolvedValueOnce([visibleChat, created])
+    const input = {
+      nodeId: 1,
+      repositoryOverride: null,
+      title: "Committed chat",
+      requestId: "123e4567-e89b-12d3-a456-426614174202",
+      visibility: "private" as const,
+    }
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() => expect(result.current.chats).toEqual([visibleChat]))
+
+    await act(async () => {
+      await expect(result.current.createChat(input)).rejects.toMatchObject({
+        kind: "request_failed",
+      })
+    })
+    await act(async () => result.current.refresh())
+    await act(async () => result.current.createChat(input))
+
+    expect(result.current.chats.filter((chat) => chat.id === 10)).toEqual([
+      created,
+    ])
+  })
+
+  it("upserts a connected repository before the next catalog poll", async () => {
+    const connected = {
+      id: 3,
+      githubRepositoryId: "9090",
+      fullName: "atlas/new-repo",
+    }
+    client.connectTeamRepository.mockResolvedValueOnce(connected)
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() =>
+      expect(result.current.repositories).toEqual([repository])
+    )
+    const listCalls = client.listTeamRepositories.mock.calls.length
+
+    await act(async () => {
+      await result.current.connectRepository("atlas/new-repo", "main")
+    })
+
+    expect(result.current.repositories).toEqual([repository, connected])
+    expect(client.listTeamRepositories).toHaveBeenCalledTimes(listCalls)
+  })
+
+  it("does not let a refresh started before repository connection erase the upsert", async () => {
+    const olderRepositories = deferred<(typeof repository)[]>()
+    const connected = {
+      id: 3,
+      githubRepositoryId: "9090",
+      fullName: "atlas/new-repo",
+    }
+    client.connectTeamRepository.mockResolvedValueOnce(connected)
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() =>
+      expect(result.current.repositories).toEqual([repository])
+    )
+    client.listTeamRepositories.mockReturnValueOnce(olderRepositories.promise)
+
+    let pendingRefresh!: Promise<void>
+    act(() => {
+      pendingRefresh = result.current.refresh()
+    })
+    await waitFor(() =>
+      expect(client.listTeamRepositories).toHaveBeenCalledTimes(2)
+    )
+    await act(async () => {
+      await result.current.connectRepository("atlas/new-repo", "main")
+    })
+    expect(result.current.repositories).toEqual([repository, connected])
+
+    await act(async () => olderRepositories.resolve([repository]))
+    await pendingRefresh
+    expect(result.current.repositories).toEqual([repository, connected])
+  })
+
   it("refreshes the node revision after a conflict so a retained edit can retry", async () => {
     client.updateTeamNode.mockRejectedValueOnce(
       new TeamClientError("conflict", 409)

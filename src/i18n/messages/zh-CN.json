@@ -1727,8 +1727,8 @@
     "name_project": "项目名称", "name_folder": "文件夹名称", "name_working_directory": "工作目录名称",
     "create_project": "创建项目", "create_folder": "创建文件夹", "create_working_directory": "创建工作目录", "create_chat": "创建对话", "chatTitle": "对话标题",
     "repository": "代码仓库", "startingBranch": "起始分支", "repositoryHint": "输入 owner/repository 和分支。保存前会验证 GitHub 访问权限。", "associateRepository": "关联代码仓库", "nearestDefault": "最近的默认仓库", "overrideRepository": "使用其他仓库或分支",
-    "privateBeforeCreate": "新对话默认仅自己可见，之后可由你共享。", "editSnapshotHint": "现有对话会保留已保存的仓库和起始分支快照。", "saveDetails": "保存详情",
-    "share": "共享", "audience": "对话可见范围", "visibility_private": "仅自己", "visibility_organization": "组织", "shareHistoryDisclosure": "共享后，你的组织可访问完整对话历史。", "githubAudienceDisclosure": "每个人的 GitHub 仓库访问权限会单独验证。",
+    "privateBeforeCreate": "默认仅自己可见。创建此对话时会应用你选择的可见范围。", "editSnapshotHint": "现有对话会保留已保存的仓库和起始分支快照。", "saveDetails": "保存详情",
+    "share": "共享", "audience": "对话可见范围", "visibility_private": "仅自己", "visibility_organization": "组织", "visibility_organization_named": "{organization} 中的所有人", "shareHistoryDisclosure": "共享后，你的组织可访问完整对话历史。", "githubAudienceDisclosure": "每个人的 GitHub 仓库访问权限会单独验证。",
     "loading": "正在加载工作区…", "loadingMore": "正在加载更多…", "loadMore": "加载更多对话", "loadError": "无法加载工作区。不会显示其他会话的内容。", "mutationError": "更改未保存。输入内容已保留，请重试。",
     "retry": "重试", "cancel": "取消", "creating": "正在创建…", "saving": "正在保存…", "empty": "先创建项目，再添加文件夹、工作目录和基于仓库的对话。", "nodeEmpty": "在这里添加文件夹、工作目录或私密对话。", "untitledChat": "无标题对话", "welcome": "{organization} 工作区", "welcomeHint": "使用项目和嵌套文件夹组织团队工作。对话在创建者共享前保持私密。",
     "runtimeDisabledTitle": "对话运行时已禁用", "runtimeDisabledDescription": "此目录只保存对话元数据。消息发送和代理运行将在独立任务集成完成后开放。", "expand": "展开 {name}", "collapse": "收起 {name}", "actions": "{name} 的操作", "settings": "设置", "signOut": "退出登录", "logoutFailed": "无法确认退出登录。"

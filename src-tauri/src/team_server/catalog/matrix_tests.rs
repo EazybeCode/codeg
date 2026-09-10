@@ -562,6 +562,130 @@ async fn sharing_rejects_execution_states_rows_active_writers_and_revision_overf
     ));
 }
 
+#[tokio::test]
+async fn making_an_organization_chat_private_rejects_execution_rows_and_active_writers() {
+    let state = state().await;
+    let alice = principal(&state, ALICE_A_TOKEN).await;
+    let access = MatrixAccess::default();
+    let (_, project) = repository_and_project(&state, &alice, &access).await;
+    let private = private_chat(
+        &state,
+        &alice,
+        &access,
+        project.id,
+        "123e4567-e89b-12d3-a456-426614174114",
+    )
+    .await;
+    let shared = change_visibility(
+        &state,
+        &alice,
+        private.id,
+        ChangeVisibilityInput {
+            expected_revision: "0".into(),
+            visibility: Visibility::Organization,
+        },
+    )
+    .await
+    .unwrap_or_else(|_| panic!("share idle chat"));
+    let now = state.clock.now();
+    workspace_chat_execution::ActiveModel {
+        draft_id: Set(shared.id),
+        org_id: Set(alice.org_id),
+        agent_type: Set("codex".into()),
+        state: Set("ready".into()),
+        allocation_id: Set("matrix-private-allocation".into()),
+        starting_commit: Set("a".repeat(40)),
+        branch_name: Set("workos/matrix-private".into()),
+        worktree_relpath: Set("orgs/matrix/private-worktree".into()),
+        legacy_folder_id: Set(None),
+        legacy_conversation_id: Set(None),
+        revision: Set(0),
+        started_at: Set(now),
+        updated_at: Set(now),
+        last_error_code: Set(None),
+        provisioning_owner_token: Set(None),
+        provisioning_lease_expires_at: Set(None),
+    }
+    .insert(&state.db)
+    .await
+    .unwrap();
+    assert!(matches!(
+        change_visibility(
+            &state,
+            &alice,
+            shared.id,
+            ChangeVisibilityInput {
+                expected_revision: "1".into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .await,
+        Err(ApiError::Conflict)
+    ));
+    workspace_chat_execution::Entity::delete_by_id(shared.id)
+        .exec(&state.db)
+        .await
+        .unwrap();
+    state
+        .db
+        .execute(Statement::from_string(
+            state.db.get_database_backend(),
+            "PRAGMA foreign_keys=OFF",
+        ))
+        .await
+        .unwrap();
+    workspace_writer_lease::ActiveModel {
+        draft_id: Set(shared.id),
+        org_id: Set(alice.org_id),
+        creator_user_id: Set(alice.user_id),
+        owner_token: Set("matrix-private-writer".into()),
+        connection_id: Set(None),
+        expires_at: Set(now + Duration::minutes(5)),
+        updated_at: Set(now),
+    }
+    .insert(&state.db)
+    .await
+    .unwrap();
+    state
+        .db
+        .execute(Statement::from_string(
+            state.db.get_database_backend(),
+            "PRAGMA foreign_keys=ON",
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        change_visibility(
+            &state,
+            &alice,
+            shared.id,
+            ChangeVisibilityInput {
+                expected_revision: "1".into(),
+                visibility: Visibility::Private,
+            },
+        )
+        .await,
+        Err(ApiError::Conflict)
+    ));
+    workspace_writer_lease::Entity::delete_by_id(shared.id)
+        .exec(&state.db)
+        .await
+        .unwrap();
+    let private_again = change_visibility(
+        &state,
+        &alice,
+        shared.id,
+        ChangeVisibilityInput {
+            expected_revision: "1".into(),
+            visibility: Visibility::Private,
+        },
+    )
+    .await
+    .unwrap_or_else(|_| panic!("make idle chat private"));
+    assert_eq!(private_again.visibility, Visibility::Private);
+    assert_eq!(private_again.access_revision, "2");
+}
+
 struct ExpiringAccess {
     clock: Arc<TestClock>,
 }

@@ -45,6 +45,7 @@ export function TeamWorkspace({
 }) {
   const t = useTranslations("TeamWorkspace")
   const catalog = useTeamCatalog()
+  const organization = session.organization.name ?? session.organization.login
   const [mobileOpen, setMobileOpen] = useState(false)
   const [dialog, setDialog] = useState<DialogState | null>(null)
   const restoreFocus = useRef<HTMLElement | null>(null)
@@ -106,7 +107,7 @@ export function TeamWorkspace({
         <IdentityLine
           icon={<Building2 aria-hidden className="size-4" />}
           label={t("organizationLabel")}
-          name={session.organization.name ?? session.organization.login}
+          name={organization}
           login={session.organization.login}
           image={session.organization.avatarUrl}
         />
@@ -210,7 +211,7 @@ export function TeamWorkspace({
         .pathFor(dialogParent)
         .map((node) => node.name)
         .join(" / ")
-    : (session.organization.name ?? session.organization.login)
+    : organization
   const editRepository = dialogNode?.repositoryDefault
     ? (catalog.repositories.find(
         (repository) =>
@@ -284,7 +285,9 @@ export function TeamWorkspace({
               </div>
               <div className="flex items-center gap-2">
                 <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">
-                  {t(`visibility_${selectedChat.visibility}`)}
+                  {selectedChat.visibility === "organization"
+                    ? t("visibility_organization_named", { organization })
+                    : t("visibility_private")}
                 </span>
                 {selectedChat.canShare ? (
                   <Button
@@ -342,8 +345,7 @@ export function TeamWorkspace({
             <Layers3 aria-hidden className="size-9 text-muted-foreground" />
             <h1 className="mt-5 text-2xl font-semibold tracking-tight">
               {t("welcome", {
-                organization:
-                  session.organization.name ?? session.organization.login,
+                organization: organization,
               })}
             </h1>
             <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
@@ -387,6 +389,7 @@ export function TeamWorkspace({
             .pathFor(dialogChatNode.id)
             .map((node) => node.name)
             .join(" / ")}
+          organization={organization}
           inheritedRepository={inheritedRepository}
           inheritedBranch={
             inheritedNode?.repositoryDefault?.startingBranch ?? null
@@ -399,6 +402,7 @@ export function TeamWorkspace({
       {dialog?.type === "share" && shareChat?.canShare ? (
         <TeamShareDialog
           chat={shareChat}
+          organization={organization}
           shareChat={catalog.shareChat}
           onClose={closeDialog}
         />
