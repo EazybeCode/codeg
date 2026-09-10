@@ -114,9 +114,12 @@ impl Config {
             "NEEV_ENC_KEY",
             ConfigError::EncryptionKey,
         )?)?;
-        let bind = required(values, "NEEV_BIND", ConfigError::Bind)?
+        let bind: SocketAddr = required(values, "NEEV_BIND", ConfigError::Bind)?
             .parse()
             .map_err(|_| ConfigError::Bind)?;
+        if preview && !bind.ip().is_loopback() {
+            return Err(ConfigError::Bind);
+        }
         let static_root = PathBuf::from(required(
             values,
             "NEEV_STATIC_ROOT",
@@ -298,6 +301,15 @@ mod tests {
         );
         preview.insert("NEEV_ALLOW_LOOPBACK_PREVIEW".into(), "true".into());
         assert!(Config::from_values(&preview).is_ok());
+
+        for bind in ["0.0.0.0:3100", "192.168.1.25:3100", "[::]:3100"] {
+            preview.insert("NEEV_BIND".into(), bind.into());
+            assert_eq!(
+                Config::from_values(&preview).err(),
+                Some(ConfigError::Bind),
+                "preview accepted non-loopback bind {bind}"
+            );
+        }
     }
 
     #[test]

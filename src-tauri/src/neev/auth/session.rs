@@ -80,13 +80,46 @@ pub(crate) async fn organization(
     token: &str,
     now: i64,
 ) -> Result<OrgContext, AuthError> {
-    let identity = identity(database, token, now).await?;
+    organization_after_lookup(database, token, now, || async {}).await
+}
+
+async fn organization_after_lookup<F, Future>(
+    database: &DatabaseConnection,
+    token: &str,
+    now: i64,
+    after_lookup: F,
+) -> Result<OrgContext, AuthError>
+where
+    F: FnOnce() -> Future,
+    Future: std::future::Future<Output = ()>,
+{
+    let token_hash =
+        secrets::digest(TokenPurpose::Session, token).map_err(|_| AuthError::Unauthorized)?;
+    let tx = db::begin(database).await?;
     let row = db::one(
-        database,
-        "SELECT s.org_id,s.member_id,s.member_revision,s.org_revision,o.revision AS current_org_revision,o.disabled,m.revision AS current_member_revision,m.active,m.role FROM neev_sessions s JOIN neev_organizations o ON o.id=s.org_id JOIN neev_memberships m ON m.id=s.member_id AND m.org_id=s.org_id AND m.user_id=s.user_id WHERE s.id=$1",
-        vec![identity.session_id.clone().into()],
-    ).await?.ok_or(AuthError::Forbidden)?;
-    scoped_context(identity, &row)
+        &tx,
+        "SELECT s.id,s.user_id,s.account_revision,s.org_id,s.member_id,s.member_revision,s.org_revision,s.authenticated_at,s.expires_at,s.revoked_at,m.role FROM neev_sessions s LEFT JOIN neev_memberships m ON m.id=s.member_id AND m.org_id=s.org_id AND m.user_id=s.user_id WHERE s.token_hash=$1",
+        vec![token_hash.into()],
+    ).await?.ok_or(AuthError::Unauthorized)?;
+    let session = Session::from_query_result(&row, "").map_err(database_error)?;
+    let role_name: Option<String> = row.try_get("", "role").map_err(database_error)?;
+    let context = OrgContext {
+        identity: IdentityContext {
+            user_id: session.user_id,
+            session_id: session.id,
+            auth_revision: session.account_revision,
+            authenticated_at: session.authenticated_at,
+        },
+        org_id: session.org_id.ok_or(AuthError::Forbidden)?,
+        member_id: session.member_id.ok_or(AuthError::Forbidden)?,
+        member_revision: session.member_revision.ok_or(AuthError::Forbidden)?,
+        org_revision: session.org_revision.ok_or(AuthError::Forbidden)?,
+        role: role(&role_name.ok_or(AuthError::Forbidden)?)?,
+    };
+    after_lookup().await;
+    recheck(&tx, &context, now).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(context)
 }
 
 pub(crate) async fn select_organization(
@@ -230,41 +263,6 @@ pub(crate) async fn recheck(
         return Err(AuthError::Forbidden);
     }
     Ok(())
-}
-
-fn scoped_context(
-    identity: IdentityContext,
-    row: &sea_orm::QueryResult,
-) -> Result<OrgContext, AuthError> {
-    let org_id: Option<i32> = row.try_get("", "org_id").map_err(database_error)?;
-    let member_id: Option<i32> = row.try_get("", "member_id").map_err(database_error)?;
-    let member_revision: Option<i64> =
-        row.try_get("", "member_revision").map_err(database_error)?;
-    let org_revision: Option<i64> = row.try_get("", "org_revision").map_err(database_error)?;
-    let current_org_revision: i64 = row
-        .try_get("", "current_org_revision")
-        .map_err(database_error)?;
-    let current_member_revision: i64 = row
-        .try_get("", "current_member_revision")
-        .map_err(database_error)?;
-    let disabled: bool = row.try_get("", "disabled").map_err(database_error)?;
-    let active: bool = row.try_get("", "active").map_err(database_error)?;
-    let role_name: String = row.try_get("", "role").map_err(database_error)?;
-    if disabled
-        || !active
-        || org_revision != Some(current_org_revision)
-        || member_revision != Some(current_member_revision)
-    {
-        return Err(AuthError::Forbidden);
-    }
-    Ok(OrgContext {
-        identity,
-        org_id: org_id.ok_or(AuthError::Forbidden)?,
-        member_id: member_id.ok_or(AuthError::Forbidden)?,
-        member_revision: member_revision.ok_or(AuthError::Forbidden)?,
-        org_revision: org_revision.ok_or(AuthError::Forbidden)?,
-        role: role(&role_name)?,
-    })
 }
 
 fn validate_session(
@@ -476,6 +474,49 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires explicitly isolated NEEV_TEST_DATABASE_URL"]
+    async fn postgres_organization_rechecks_revoke_or_disable_after_lookup() {
+        for disable_account in [false, true] {
+            let (database, admin, schema) = h::postgres_database().await;
+            let user = h::native_account(&database, "owner", "support@neev.so").await;
+            let (org, _) = h::organization(&database, user, "admin").await;
+            let issued = issue_identity(&database, user, 1000).await.unwrap();
+            let identity_context = identity(&database, &issued.session, 1001).await.unwrap();
+            let scoped = select_organization(&database, &identity_context, org, 1002)
+                .await
+                .unwrap();
+            let scoped_identity = identity(&database, &scoped.session, 1003).await.unwrap();
+            let looked_up = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let task_database = database.clone();
+            let task_token = scoped.session.clone();
+            let task_looked_up = looked_up.clone();
+            let task_resume = resume.clone();
+            let task = tokio::spawn(async move {
+                organization_after_lookup(&task_database, &task_token, 1004, move || async move {
+                    task_looked_up.wait().await;
+                    task_resume.wait().await;
+                })
+                .await
+            });
+            looked_up.wait().await;
+            if disable_account {
+                h::execute(
+                    &database,
+                    "UPDATE neev_accounts SET disabled=true WHERE id=$1",
+                    vec![user.into()],
+                )
+                .await;
+            } else {
+                revoke(&database, &scoped_identity, 1004).await.unwrap();
+            }
+            resume.wait().await;
+            assert_eq!(task.await.unwrap().err(), Some(AuthError::Unauthorized));
+            h::cleanup_postgres(database, admin, schema).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicitly isolated NEEV_TEST_DATABASE_URL"]
     async fn postgres_logout_waits_for_in_flight_final_recheck() {
         let (database, admin, schema) = h::postgres_database().await;
         let user = h::native_account(&database, "owner", "support@neev.so").await;
@@ -494,11 +535,7 @@ mod tests {
         let revoke_context = context.identity.clone();
         let task =
             tokio::spawn(async move { revoke(&other_database, &revoke_context, 1004).await });
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        assert!(
-            !task.is_finished(),
-            "logout bypassed the final-recheck locks"
-        );
+        h::wait_for_postgres_lock(&admin, "%neev_accounts%FOR UPDATE%").await;
         tx.commit().await.unwrap();
         assert_eq!(task.await.unwrap(), Ok(()));
         assert_eq!(
