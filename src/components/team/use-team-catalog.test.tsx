@@ -72,7 +72,7 @@ function setAuth(scope = "scope-a", userId = 11) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks()
+  vi.resetAllMocks()
   window.history.replaceState({}, "", "/workspace")
   setAuth()
   client.listTeamNodes.mockResolvedValue([project])
@@ -134,6 +134,83 @@ describe("useTeamCatalog", () => {
     expect(result.current.chats).toEqual([])
   })
 
+  it("prioritizes a parallel 401 over an earlier non-authentication failure", async () => {
+    const refreshAuth = auth.value.refresh as ReturnType<typeof vi.fn>
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() => expect(result.current.nodes).toEqual([project]))
+    client.listTeamNodes.mockRejectedValueOnce(
+      new TeamClientError("request_failed", 500)
+    )
+    client.listTeamRepositories.mockRejectedValueOnce(
+      new TeamClientError("unauthorized", 401)
+    )
+    client.listTeamChats.mockResolvedValueOnce([visibleChat])
+
+    await act(async () => result.current.refresh())
+
+    await waitFor(() => expect(refreshAuth).toHaveBeenCalledOnce())
+    expect(result.current.nodes).toEqual([])
+    expect(result.current.chats).toEqual([])
+  })
+
+  it("clears loaded chat detail when a node is selected", async () => {
+    window.history.replaceState({}, "", "/workspace?node=1&chat=9")
+    client.loadTeamChat.mockResolvedValueOnce(visibleChat)
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() =>
+      expect(result.current.selectedChat).toEqual(visibleChat)
+    )
+
+    act(() => result.current.selectNode(1))
+
+    expect(result.current.selectedNodeId).toBe(1)
+    expect(result.current.selectedChatId).toBeNull()
+    expect(result.current.selectedChat).toBeNull()
+  })
+
+  it("ignores a delayed chat detail success after later node navigation", async () => {
+    const detail = deferred<typeof visibleChat>()
+    client.loadTeamChat.mockReturnValueOnce(detail.promise)
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() => expect(result.current.chats).toEqual([visibleChat]))
+
+    act(() => result.current.selectChat(9))
+    expect(result.current.selectedChatId).toBe(9)
+    act(() => result.current.selectNode(1))
+    await act(async () => detail.resolve(visibleChat))
+
+    expect(result.current.selectedNodeId).toBe(1)
+    expect(result.current.selectedChatId).toBeNull()
+    expect(result.current.selectedChat).toBeNull()
+  })
+
+  it("loads history chat selections and ignores a delayed 404 after later node navigation", async () => {
+    const detail = deferred<typeof visibleChat>()
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() => expect(result.current.chats).toEqual([visibleChat]))
+    client.loadTeamChat.mockReturnValueOnce(detail.promise)
+
+    window.history.pushState({}, "", "/workspace?node=1&chat=9")
+    act(() => window.dispatchEvent(new PopStateEvent("popstate")))
+    await waitFor(() =>
+      expect(client.loadTeamChat).toHaveBeenCalledWith(
+        9,
+        expect.any(AbortSignal)
+      )
+    )
+    window.history.pushState({}, "", "/workspace?node=1")
+    act(() => window.dispatchEvent(new PopStateEvent("popstate")))
+    await act(async () =>
+      detail.reject(new TeamClientError("request_failed", 404))
+    )
+
+    expect(result.current.selectedNodeId).toBe(1)
+    expect(result.current.selectedChatId).toBeNull()
+    expect(result.current.selectedChat).toBeNull()
+    expect(result.current.chats).toEqual([visibleChat])
+    expect(result.current.error).toBeNull()
+  })
+
   it("does not reinsert a revoked selected chat from an older delayed list", async () => {
     window.history.replaceState({}, "", "/workspace?chat=9")
     const list = deferred<(typeof visibleChat)[]>()
@@ -152,6 +229,27 @@ describe("useTeamCatalog", () => {
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.selectedChat).toBeNull()
     expect(result.current.chats).toEqual([])
+  })
+
+  it("restores a reshared chat from a newer list while rejecting the pre-404 list", async () => {
+    window.history.replaceState({}, "", "/workspace?chat=9")
+    const olderList = deferred<(typeof visibleChat)[]>()
+    const detail = deferred<typeof visibleChat>()
+    client.listTeamChats
+      .mockReturnValueOnce(olderList.promise)
+      .mockResolvedValueOnce([visibleChat])
+    client.loadTeamChat.mockReturnValueOnce(detail.promise)
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() => expect(result.current.selectedChatId).toBe(9))
+    await act(async () =>
+      detail.reject(new TeamClientError("request_failed", 404))
+    )
+    await waitFor(() => expect(result.current.selectedChatId).toBeNull())
+
+    await act(async () => result.current.refresh())
+    expect(result.current.chats).toEqual([visibleChat])
+    await act(async () => olderList.resolve([visibleChat]))
+    expect(result.current.chats).toEqual([visibleChat])
   })
 
   it("loads another page only after 200 visible rows using the last visible id", async () => {
@@ -173,6 +271,33 @@ describe("useTeamCatalog", () => {
     )
     expect(result.current.chats).toHaveLength(201)
     expect(result.current.hasMoreChats).toBe(false)
+  })
+
+  it("does not merge a stale load-more page after refresh replaces the list", async () => {
+    const page = Array.from({ length: 200 }, (_, index) => ({
+      ...visibleChat,
+      id: index + 1,
+      title: `Chat ${index + 1}`,
+    }))
+    const stalePage = deferred<(typeof visibleChat)[]>()
+    const refreshed = { ...visibleChat, id: 1, title: "Refreshed page one" }
+    client.listTeamChats
+      .mockResolvedValueOnce(page)
+      .mockReturnValueOnce(stalePage.promise)
+      .mockResolvedValueOnce([refreshed])
+    const { result } = renderHook(() => useTeamCatalog())
+    await waitFor(() => expect(result.current.chats).toHaveLength(200))
+    let pending!: Promise<void>
+    act(() => {
+      pending = result.current.loadMoreChats()
+    })
+    await waitFor(() => expect(client.listTeamChats).toHaveBeenCalledTimes(2))
+
+    await act(async () => result.current.refresh())
+    expect(result.current.chats).toEqual([refreshed])
+    await act(async () => stalePage.resolve([{ ...visibleChat, id: 201 }]))
+    await pending
+    expect(result.current.chats).toEqual([refreshed])
   })
 
   it("refreshes the node revision after a conflict so a retained edit can retry", async () => {

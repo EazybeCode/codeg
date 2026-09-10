@@ -136,6 +136,19 @@ async function openMobileNavigation(page) {
     .click()
 }
 
+async function expandCatalogTree(page) {
+  await page.getByRole("button", { name: "Expand Launch", exact: true }).click()
+  await page
+    .getByRole("button", { name: "Expand Planning", exact: true })
+    .click()
+  await page
+    .getByRole("button", { name: "Expand Web app", exact: true })
+    .click()
+  await page
+    .getByRole("button", { name: "Collapse Web app", exact: true })
+    .waitFor()
+}
+
 async function createProject(page) {
   await page
     .getByRole("button", { name: "New project", exact: true })
@@ -237,6 +250,7 @@ async function run() {
   await signIn(bob, appOrigin, "Continue as Bob Birch", "atlas-labs")
   await openMobileNavigation(bob)
   await bob.getByText("Launch", { exact: true }).first().waitFor()
+  await expandCatalogTree(bob)
   assert.equal(
     await bob.getByText("Private launch plan", { exact: true }).count(),
     0
@@ -250,15 +264,16 @@ async function run() {
   await alice.getByRole("radio", { name: "Organization", exact: true }).check()
   await alice.getByRole("button", { name: "Share", exact: true }).last().click()
   await reloadCatalog(bob)
-  await openActions(bob, "Launch")
-  await bob.keyboard.press("Escape")
-  await bob.getByRole("button", { name: "Expand Launch", exact: true }).click()
-  await bob
-    .getByRole("button", { name: "Expand Planning", exact: true })
-    .click()
-  await bob.getByRole("button", { name: "Expand Web app", exact: true }).click()
+  await expandCatalogTree(bob)
   await bob.getByText("Private launch plan", { exact: true }).waitFor()
   await bob.getByText("Private launch plan", { exact: true }).click()
+  await bob
+    .getByRole("heading", { name: "Private launch plan", exact: true })
+    .waitFor()
+  await bob
+    .locator("section")
+    .getByText("Organization", { exact: true })
+    .waitFor()
   assert.equal(
     await bob.getByRole("button", { name: "Share", exact: true }).count(),
     0
@@ -282,6 +297,7 @@ async function run() {
   await bob.goto(`${appOrigin}/workspace`)
   await openMobileNavigation(bob)
   await bob.getByText("Launch", { exact: true }).first().waitFor()
+  await expandCatalogTree(bob)
   assert.equal(
     await bob.getByText("Private launch plan", { exact: true }).count(),
     0

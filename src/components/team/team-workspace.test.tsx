@@ -141,6 +141,24 @@ describe("TeamWorkspace", () => {
     expect(screen.getByRole("button", { name: /^share$/i })).toBeVisible()
   })
 
+  it("opens Share from an authoritative deep-linked detail outside page one", async () => {
+    catalog.value = {
+      ...catalog.value,
+      nodes: [project],
+      chats: [],
+      selectedNodeId: 1,
+      selectedChatId: 9,
+      selectedChat: { ...chat, canShare: true },
+      pathFor: vi.fn(() => [project]),
+    }
+    show()
+
+    await userEvent.click(screen.getByRole("button", { name: /^share$/i }))
+
+    expect(screen.getByRole("dialog")).toBeVisible()
+    expect(screen.getByRole("heading", { name: /^share$/i })).toBeVisible()
+  })
+
   it("provides a labeled mobile navigation toggle", async () => {
     show(375)
     const toggle = screen.getByRole("button", {

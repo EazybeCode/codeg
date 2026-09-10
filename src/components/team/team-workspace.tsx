@@ -52,7 +52,10 @@ export function TeamWorkspace({
   const selectedNode = catalog.nodes.find(
     (node) => node.id === catalog.selectedNodeId
   )
-  const selectedChat = catalog.selectedChat
+  const selectedChat =
+    catalog.selectedChat?.id === catalog.selectedChatId
+      ? catalog.selectedChat
+      : null
   const path = selectedNode ? catalog.pathFor(selectedNode.id) : []
 
   function openDialog(next: DialogState) {
@@ -230,8 +233,8 @@ export function TeamWorkspace({
       ) ?? null)
     : null
   const shareChat =
-    dialog?.type === "share"
-      ? (catalog.chats.find((chat) => chat.id === dialog.chatId) ?? null)
+    dialog?.type === "share" && selectedChat?.id === dialog.chatId
+      ? selectedChat
       : null
 
   return (

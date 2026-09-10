@@ -101,7 +101,12 @@ export function useTeamCatalog() {
   const controllerRef = useRef<AbortController | null>(null)
   const listSequenceRef = useRef(0)
   const detailSequenceRef = useRef(0)
-  const removedChatIdsRef = useRef(new Set<number>())
+  const removedChatIdsRef = useRef(new Map<number, number>())
+  const selectionRef = useRef<Selection>({
+    scope: null,
+    nodeId: null,
+    chatId: null,
+  })
   const [state, setState] = useState<CatalogState>(EMPTY_STATE)
   const [selection, setSelection] = useState<Selection>({
     scope: null,
@@ -119,6 +124,7 @@ export function useTeamCatalog() {
     listSequenceRef.current += 1
     detailSequenceRef.current += 1
     removedChatIdsRef.current.clear()
+    selectionRef.current = { scope: null, nodeId: null, chatId: null }
     setState(EMPTY_STATE)
     setSelection({ scope: null, nodeId: null, chatId: null })
     setExpandedState({ scope: null, ids: new Set() })
@@ -156,6 +162,11 @@ export function useTeamCatalog() {
         const chat = await loadTeamChat(chatId, controller.signal)
         if (!isCurrent(expectedScope, epoch, controller)) return
         if (detailSequenceRef.current !== sequence) return
+        if (
+          selectionRef.current.scope !== expectedScope ||
+          selectionRef.current.chatId !== chatId
+        )
+          return
         removedChatIdsRef.current.delete(chatId)
         setState((old) =>
           old.scope === expectedScope ? { ...old, selectedChat: chat } : old
@@ -164,8 +175,18 @@ export function useTeamCatalog() {
         if (!isCurrent(expectedScope, epoch, controller) || isAborted(error))
           return
         if (recoverUnauthorized(error)) return
+        if (detailSequenceRef.current !== sequence) return
+        if (
+          selectionRef.current.scope !== expectedScope ||
+          selectionRef.current.chatId !== chatId
+        )
+          return
         if (isNotFound(error)) {
-          removedChatIdsRef.current.add(chatId)
+          removedChatIdsRef.current.set(chatId, listSequenceRef.current)
+          selectionRef.current = {
+            ...selectionRef.current,
+            chatId: null,
+          }
           setState((old) =>
             old.scope === expectedScope
               ? {
@@ -225,27 +246,40 @@ export function useTeamCatalog() {
       sequence !== listSequenceRef.current
     )
       return
-    if (
-      nodesResult.status === "rejected" ||
-      repositoriesResult.status === "rejected" ||
-      chatsResult.status === "rejected"
-    ) {
-      const failure = [nodesResult, repositoriesResult, chatsResult].find(
+    const failures = [nodesResult, repositoriesResult, chatsResult]
+      .filter(
         (result): result is PromiseRejectedResult =>
           result.status === "rejected"
-      )!
-      if (isAborted(failure.reason) || recoverUnauthorized(failure.reason))
+      )
+      .map((result) => result.reason)
+    if (failures.length > 0) {
+      const unauthorized = failures.find(isUnauthorized)
+      if (unauthorized) {
+        recoverUnauthorized(unauthorized)
         return
+      }
+      const failure = failures[0]
+      if (isAborted(failure)) return
       setState((old) =>
-        old.scope === scope
-          ? { ...old, loading: false, error: failure.reason }
-          : old
+        old.scope === scope ? { ...old, loading: false, error: failure } : old
       )
       return
     }
-    const chats = chatsResult.value.filter(
-      (chat) => !removedChatIdsRef.current.has(chat.id)
+    if (
+      nodesResult.status !== "fulfilled" ||
+      repositoriesResult.status !== "fulfilled" ||
+      chatsResult.status !== "fulfilled"
     )
+      return
+    const chats = chatsResult.value.filter((chat) => {
+      const removedAt = removedChatIdsRef.current.get(chat.id)
+      return removedAt === undefined || removedAt < sequence
+    })
+    for (const [chatId, removedAt] of removedChatIdsRef.current) {
+      if (removedAt < sequence) removedChatIdsRef.current.delete(chatId)
+    }
+    const selectedChatId =
+      selectionRef.current.scope === scope ? selectionRef.current.chatId : null
     setState((old) =>
       old.scope === scope
         ? {
@@ -254,7 +288,7 @@ export function useTeamCatalog() {
             repositories: repositoriesResult.value,
             chats,
             selectedChat:
-              old.selectedChat &&
+              old.selectedChat?.id === selectedChatId &&
               !removedChatIdsRef.current.has(old.selectedChat.id)
                 ? old.selectedChat
                 : null,
@@ -285,6 +319,7 @@ export function useTeamCatalog() {
     const controller = new AbortController()
     controllerRef.current = controller
     const parsed = parseTeamCatalogSelection(window.location.search)
+    selectionRef.current = { scope, ...parsed }
     setSelection({ scope, ...parsed })
     setExpandedState({ scope, ids: new Set() })
     setState({ ...EMPTY_STATE, scope, loading: true })
@@ -329,14 +364,29 @@ export function useTeamCatalog() {
   useEffect(() => {
     if (!scope) return
     const sync = () => {
-      setSelection({
+      const next = {
         scope,
         ...parseTeamCatalogSelection(window.location.search),
-      })
+      }
+      detailSequenceRef.current += 1
+      selectionRef.current = next
+      setSelection(next)
+      setState((old) =>
+        old.scope === scope ? { ...old, selectedChat: null } : old
+      )
+      const controller = controllerRef.current
+      if (next.chatId != null && controller) {
+        void refreshSelectedChat(
+          next.chatId,
+          scope,
+          epochRef.current,
+          controller
+        )
+      }
     }
     window.addEventListener("popstate", sync)
     return () => window.removeEventListener("popstate", sync)
-  }, [scope])
+  }, [refreshSelectedChat, scope])
 
   const current = state.scope === scope && scope ? state : EMPTY_STATE
   const currentSelection = useMemo(
@@ -361,15 +411,18 @@ export function useTeamCatalog() {
     const controller = controllerRef.current
     if (!afterId || !controller) return
     const epoch = epochRef.current
+    const listSequence = listSequenceRef.current
     setState((old) =>
       old.scope === scope ? { ...old, loadingMoreChats: true } : old
     )
     try {
       const page = await listTeamChats({ afterId }, controller.signal)
       if (!isCurrent(scope, epoch, controller)) return
-      const allowed = page.filter(
-        (chat) => !removedChatIdsRef.current.has(chat.id)
-      )
+      if (listSequenceRef.current !== listSequence) return
+      const allowed = page.filter((chat) => {
+        const removedAt = removedChatIdsRef.current.get(chat.id)
+        return removedAt === undefined || removedAt < listSequence
+      })
       setState((old) => {
         if (old.scope !== scope) return old
         const merged = new Map(old.chats.map((chat) => [chat.id, chat]))
@@ -384,6 +437,7 @@ export function useTeamCatalog() {
     } catch (error) {
       if (!isCurrent(scope, epoch, controller) || isAborted(error)) return
       if (recoverUnauthorized(error)) return
+      if (listSequenceRef.current !== listSequence) return
       setState((old) =>
         old.scope === scope ? { ...old, loadingMoreChats: false, error } : old
       )
@@ -414,8 +468,12 @@ export function useTeamCatalog() {
       const node = await runMutation((token, signal) =>
         createTeamNode(input, token, signal)
       )
+      detailSequenceRef.current += 1
+      selectionRef.current = { scope, nodeId: node.id, chatId: null }
       setState((old) =>
-        old.scope === scope ? { ...old, nodes: [...old.nodes, node] } : old
+        old.scope === scope
+          ? { ...old, nodes: [...old.nodes, node], selectedChat: null }
+          : old
       )
       setSelection({ scope, nodeId: node.id, chatId: null })
       return node
@@ -463,6 +521,8 @@ export function useTeamCatalog() {
       const chat = await runMutation((token, signal) =>
         createTeamChat(input, token, signal)
       )
+      detailSequenceRef.current += 1
+      selectionRef.current = { scope, nodeId: chat.nodeId, chatId: chat.id }
       setState((old) =>
         old.scope === scope
           ? { ...old, chats: [...old.chats, chat], selectedChat: chat }
@@ -507,7 +567,13 @@ export function useTeamCatalog() {
     (nodeId: number) => {
       if (!scope) return
       window.history.pushState({}, "", `/workspace?node=${nodeId}`)
-      setSelection({ scope, nodeId, chatId: null })
+      const next = { scope, nodeId, chatId: null }
+      detailSequenceRef.current += 1
+      selectionRef.current = next
+      setSelection(next)
+      setState((old) =>
+        old.scope === scope ? { ...old, selectedChat: null } : old
+      )
     },
     [scope]
   )
@@ -521,7 +587,13 @@ export function useTeamCatalog() {
         ? `/workspace?node=${nodeId}&chat=${chatId}`
         : `/workspace?chat=${chatId}`
       window.history.pushState({}, "", query)
-      setSelection({ scope, nodeId, chatId })
+      const next = { scope, nodeId, chatId }
+      detailSequenceRef.current += 1
+      selectionRef.current = next
+      setSelection(next)
+      setState((old) =>
+        old.scope === scope ? { ...old, selectedChat: null } : old
+      )
       const controller = controllerRef.current
       if (controller)
         void refreshSelectedChat(chatId, scope, epochRef.current, controller)
