@@ -19,11 +19,13 @@ pub(crate) struct TeamState {
     pub(super) vault: Arc<SecretVault>,
     pub(super) oauth: Arc<GithubOAuthClient>,
     pub(super) onboarding: Arc<OnboardingService>,
-    #[allow(dead_code)]
     pub(super) credentials: Arc<CredentialService>,
     pub(super) principals: Arc<PrincipalService>,
     pub(super) clock: Arc<dyn TeamClock>,
-    pub(super) limiter: AuthLimiter,
+    pub(super) auth_limiter: AuthLimiter,
+    pub(super) catalog_limiter: AuthLimiter,
+    #[cfg(test)]
+    pub(super) catalog_repository_origin: Option<String>,
 }
 
 impl TeamState {
@@ -38,6 +40,7 @@ impl TeamState {
         principals: Arc<PrincipalService>,
         clock: Arc<dyn TeamClock>,
     ) -> Self {
+        let (auth_limiter, catalog_limiter) = AuthLimiter::pair();
         Self {
             db,
             config,
@@ -47,7 +50,16 @@ impl TeamState {
             credentials,
             principals,
             clock,
-            limiter: AuthLimiter::new(),
+            auth_limiter,
+            catalog_limiter,
+            #[cfg(test)]
+            catalog_repository_origin: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_catalog_repository_origin_for_test(mut self, origin: &str) -> Self {
+        self.catalog_repository_origin = Some(origin.to_owned());
+        self
     }
 }

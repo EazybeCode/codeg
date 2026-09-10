@@ -48,6 +48,45 @@ pub(crate) fn build_router(state: Arc<TeamState>) -> Router {
             handlers::bounded_auth,
         ));
 
+    let catalog = Router::new()
+        .route(
+            "/api/team/catalog/nodes",
+            on(MethodFilter::GET, handlers::catalog::list_nodes)
+                .on(MethodFilter::POST, handlers::catalog::create_node)
+                .on(MethodFilter::HEAD, handlers::method_not_allowed),
+        )
+        .route(
+            "/api/team/catalog/nodes/{id}",
+            on(MethodFilter::PATCH, handlers::catalog::update_node)
+                .on(MethodFilter::HEAD, handlers::method_not_allowed),
+        )
+        .route(
+            "/api/team/catalog/repositories",
+            on(MethodFilter::GET, handlers::catalog::list_repositories)
+                .on(MethodFilter::POST, handlers::catalog::connect_repository)
+                .on(MethodFilter::HEAD, handlers::method_not_allowed),
+        )
+        .route(
+            "/api/team/chats",
+            on(MethodFilter::GET, handlers::catalog::list_chats)
+                .on(MethodFilter::POST, handlers::catalog::create_chat)
+                .on(MethodFilter::HEAD, handlers::method_not_allowed),
+        )
+        .route(
+            "/api/team/chats/{id}",
+            on(MethodFilter::GET, handlers::catalog::read_chat)
+                .on(MethodFilter::HEAD, handlers::method_not_allowed),
+        )
+        .route(
+            "/api/team/chats/{id}/visibility",
+            on(MethodFilter::PATCH, handlers::catalog::change_visibility)
+                .on(MethodFilter::HEAD, handlers::method_not_allowed),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::bounded_catalog,
+        ));
+
     Router::new()
         .route(
             "/",
@@ -63,6 +102,7 @@ pub(crate) fn build_router(state: Arc<TeamState>) -> Router {
             on(MethodFilter::GET, health).on(MethodFilter::HEAD, handlers::method_not_allowed),
         )
         .merge(authentication)
+        .merge(catalog)
         .merge(static_files::router(&state.config.static_root))
         .fallback(handlers::not_found)
         .with_state(state)

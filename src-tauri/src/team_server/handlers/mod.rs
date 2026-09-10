@@ -15,6 +15,7 @@ pub(super) mod oauth;
 pub(super) mod onboarding;
 pub(super) mod organization;
 pub(super) mod session;
+pub(super) mod catalog;
 
 const REFERRER_POLICY: HeaderName = HeaderName::from_static("referrer-policy");
 
@@ -120,13 +121,29 @@ pub(super) async fn bounded_auth(
     request: Request,
     next: Next,
 ) -> Response {
+    bounded(&state.auth_limiter, request, next).await
+}
+
+pub(super) async fn bounded_catalog(
+    State(state): State<Arc<TeamState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    bounded(&state.catalog_limiter, request, next).await
+}
+
+async fn bounded(
+    limiter: &super::limiter::AuthLimiter,
+    request: Request,
+    next: Next,
+) -> Response {
     let route = request
         .extensions()
         .get::<MatchedPath>()
         .map(MatchedPath::as_str)
         .unwrap_or("unmatched")
         .to_owned();
-    let permit = match state.limiter.try_acquire() {
+    let permit = match limiter.try_acquire() {
         Ok(permit) => permit,
         Err(LimitError::RateLimited) => return ApiError::RateLimited.into_response(),
         Err(LimitError::Unavailable) => return ApiError::Unavailable.into_response(),

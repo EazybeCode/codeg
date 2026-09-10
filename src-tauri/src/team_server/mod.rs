@@ -31,6 +31,9 @@ mod http_onboarding_tests;
 mod http_organization_tests;
 
 #[cfg(test)]
+mod http_catalog_tests;
+
+#[cfg(test)]
 mod organization_settings_tests;
 
 #[cfg(test)]

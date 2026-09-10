@@ -21,7 +21,6 @@ use crate::{
     workspace_catalog::{validate_branch, validate_repository_full_name},
 };
 
-#[allow(dead_code)]
 const GITHUB_API_ORIGIN: &str = "https://api.github.com";
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const CATALOG_CAP: u64 = 1000;
@@ -51,7 +50,6 @@ pub(in crate::team_server) struct GithubTeamRepositoryAccess {
 }
 
 impl GithubTeamRepositoryAccess {
-    #[allow(dead_code)]
     pub(in crate::team_server) fn new(state: &TeamState) -> Result<Self, ApiError> {
         Self::with_origin(state, GITHUB_API_ORIGIN)
     }
