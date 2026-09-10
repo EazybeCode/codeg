@@ -621,6 +621,69 @@ async fn http_catalog_strict_ids_and_queries_reject_ambiguity_with_not_found_con
 }
 
 #[tokio::test]
+async fn http_catalog_raw_path_ids_reject_percent_encoded_aliases_before_resource_lookup() {
+    let fixture = fixture().await;
+
+    fixture
+        .server
+        .get("/api/team/chats/1")
+        .add_header(header::COOKIE, &fixture.alice_a.cookies)
+        .await
+        .assert_status_not_found();
+    write_json(
+        &fixture.server,
+        Method::PATCH,
+        "/api/team/catalog/nodes/1",
+        Some(&fixture.alice_a),
+        &serde_json::json!({
+            "expectedRevision":"0","parentId":null,"name":"Canonical missing node",
+            "repositoryDefault":null
+        }),
+    )
+    .await
+    .assert_status_not_found();
+    write_json(
+        &fixture.server,
+        Method::PATCH,
+        "/api/team/chats/1/visibility",
+        Some(&fixture.alice_a),
+        &serde_json::json!({"expectedRevision":"0","visibility":"private"}),
+    )
+    .await
+    .assert_status_not_found();
+
+    for encoded in ["%31", "%30%31", "%2B1"] {
+        fixture
+            .server
+            .get(&format!("/api/team/chats/{encoded}"))
+            .add_header(header::COOKIE, &fixture.alice_a.cookies)
+            .await
+            .assert_status_bad_request();
+        write_json(
+            &fixture.server,
+            Method::PATCH,
+            &format!("/api/team/catalog/nodes/{encoded}"),
+            Some(&fixture.alice_a),
+            &serde_json::json!({
+                "expectedRevision":"0","parentId":null,"name":"Encoded missing node",
+                "repositoryDefault":null
+            }),
+        )
+        .await
+        .assert_status_bad_request();
+        write_json(
+            &fixture.server,
+            Method::PATCH,
+            &format!("/api/team/chats/{encoded}/visibility"),
+            Some(&fixture.alice_a),
+            &serde_json::json!({"expectedRevision":"0","visibility":"private"}),
+        )
+        .await
+        .assert_status_bad_request();
+    }
+}
+
+#[tokio::test]
 async fn http_catalog_real_router_shares_only_explicit_audience_across_two_organizations() {
     let fixture = fixture().await;
 

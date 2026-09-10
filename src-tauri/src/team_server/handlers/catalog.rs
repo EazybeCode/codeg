@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     body::to_bytes,
-    extract::{Path, RawQuery, Request, State},
+    extract::{RawQuery, Request, State},
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
@@ -60,7 +60,6 @@ pub(in crate::team_server) async fn create_node(
 }
 
 pub(in crate::team_server) async fn update_node(
-    Path(id): Path<String>,
     State(state): State<Arc<TeamState>>,
     request: Request,
 ) -> Response {
@@ -68,7 +67,7 @@ pub(in crate::team_server) async fn update_node(
         Ok(context) => context,
         Err(error) => return error.into_response(),
     };
-    let id = match parse_id(&id) {
+    let id = match parse_path_id(request.uri().path(), "/api/team/catalog/nodes/", "") {
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
@@ -164,7 +163,6 @@ pub(in crate::team_server) async fn create_chat(
 }
 
 pub(in crate::team_server) async fn read_chat(
-    Path(id): Path<String>,
     State(state): State<Arc<TeamState>>,
     request: Request,
 ) -> Response {
@@ -172,7 +170,7 @@ pub(in crate::team_server) async fn read_chat(
         Ok(context) => context,
         Err(error) => return error.into_response(),
     };
-    let id = match parse_id(&id) {
+    let id = match parse_path_id(request.uri().path(), "/api/team/chats/", "") {
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
@@ -183,7 +181,6 @@ pub(in crate::team_server) async fn read_chat(
 }
 
 pub(in crate::team_server) async fn change_visibility(
-    Path(id): Path<String>,
     State(state): State<Arc<TeamState>>,
     request: Request,
 ) -> Response {
@@ -191,7 +188,11 @@ pub(in crate::team_server) async fn change_visibility(
         Ok(context) => context,
         Err(error) => return error.into_response(),
     };
-    let id = match parse_id(&id) {
+    let id = match parse_path_id(
+        request.uri().path(),
+        "/api/team/chats/",
+        "/visibility",
+    ) {
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
@@ -262,6 +263,15 @@ fn parse_id(value: &str) -> Result<i32, ApiError> {
         .ok()
         .filter(|id| *id > 0)
         .ok_or(ApiError::InvalidRequest)
+}
+
+fn parse_path_id(path: &str, prefix: &str, suffix: &str) -> Result<i32, ApiError> {
+    let value = path
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(suffix))
+        .filter(|value| !value.contains('/'))
+        .ok_or(ApiError::InvalidRequest)?;
+    parse_id(value)
 }
 
 fn parse_chat_query(query: Option<&str>) -> Result<(Option<i32>, Option<i32>), ApiError> {
