@@ -24,3 +24,5 @@ pub(in crate::team_server) use types::{
 mod tests;
 #[cfg(test)]
 mod repository_tests;
+#[cfg(test)]
+mod matrix_tests;

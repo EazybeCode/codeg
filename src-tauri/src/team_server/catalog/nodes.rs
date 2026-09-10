@@ -64,14 +64,14 @@ fn validate_input_shape(
 fn row_default(row: &workspace_node::Model) -> Result<Option<RepositoryDefaultInput>, ApiError> {
     match (&row.repository_id, &row.starting_branch) {
         (Some(repository_id), Some(starting_branch)) if valid_positive_id(*repository_id) => {
-            validate_branch(starting_branch).map_err(|_| ApiError::Unavailable)?;
+            validate_branch(starting_branch).map_err(|_| ApiError::NotFound)?;
             Ok(Some(RepositoryDefaultInput {
                 repository_id: *repository_id,
                 starting_branch: starting_branch.clone(),
             }))
         }
         (None, None) => Ok(None),
-        _ => Err(ApiError::Unavailable),
+        _ => Err(ApiError::NotFound),
     }
 }
 
@@ -87,7 +87,7 @@ async fn require_valid_repository(
         .map_err(|_| ApiError::Unavailable)?
         .filter(|row| row.org_id == context.org_id)
         .ok_or(ApiError::NotFound)?;
-    validate_verified_names(&row)?;
+    validate_verified_names(&row).map_err(|_| ApiError::NotFound)?;
     Ok(row)
 }
 
@@ -114,9 +114,9 @@ pub(super) async fn load_valid_node(
             .map_err(|_| ApiError::Unavailable)?
             .filter(|row| row.org_id == context.org_id)
             .ok_or(ApiError::NotFound)?;
-        let kind = WorkspaceNodeKind::parse(&row.kind).ok_or(ApiError::Unavailable)?;
+        let kind = WorkspaceNodeKind::parse(&row.kind).ok_or(ApiError::NotFound)?;
         let default = row_default(&row)?;
-        validate_label(&row.name).map_err(|_| ApiError::Unavailable)?;
+        validate_label(&row.name).map_err(|_| ApiError::NotFound)?;
         validate_input_shape(kind, row.parent_id, &default).map_err(|_| ApiError::NotFound)?;
         if let Some(default) = &default {
             require_valid_repository(transaction, context, default.repository_id).await?;
@@ -179,8 +179,10 @@ pub(in crate::team_server) async fn list_nodes(
         .map_err(|_| ApiError::Unavailable)?;
     let mut result = Vec::new();
     for admitted in admissions {
-        if let Ok(valid) = load_valid_node(&transaction, context, admitted.resource_id).await {
-            result.push(project(valid.row)?);
+        match load_valid_node(&transaction, context, admitted.resource_id).await {
+            Ok(valid) => result.push(project(valid.row)?),
+            Err(ApiError::NotFound) => {}
+            Err(error) => return Err(error),
         }
     }
     commit_rechecked(state, context, transaction).await?;

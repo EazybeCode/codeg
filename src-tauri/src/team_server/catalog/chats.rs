@@ -217,8 +217,10 @@ async fn project_valid(
     {
         return Ok(None);
     }
-    if load_valid_node(transaction, context, row.node_id).await.is_err() {
-        return Ok(None);
+    match load_valid_node(transaction, context, row.node_id).await {
+        Ok(_) => {}
+        Err(ApiError::NotFound) => return Ok(None),
+        Err(error) => return Err(error),
     }
     let repository = match require_repository(transaction, context, row.repository_id).await {
         Ok(repository) => repository,
