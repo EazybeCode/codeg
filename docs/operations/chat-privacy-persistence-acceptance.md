@@ -2,7 +2,7 @@
 
 Date: September 10, 2026.
 
-Status: storage Task1 accepted through `a7a3d505`; fingerprint Task2 independently accepted at `82f252c8`. Final combined integration review remains pending. This record does not certify shared/private team routes, a working team workspace, agent execution or public rollout.
+Status: storage Task1 accepted through `a7a3d505`; fingerprint Task2 independently accepted at `82f252c8`. Final combined integration review accepted the private checkpoint at `42536219`, with no Critical or Important finding. This record does not certify shared/private team routes, a working team workspace, agent execution or public rollout.
 
 ## Accepted storage change
 
@@ -43,5 +43,7 @@ Root fresh verification at `82f252c8` passed337 selected backend tests,0failed/0
 The later team catalog must prove tenant/creator mapping, quarantine uncertain legacy rows, use session-derived authority and independent repository permissions, and apply one private/org predicate to lists, direct reads and counts. Creator-only Share requires expected revisions and active-writer rejection. Files/events/search/wiki/jobs require the same scope and remain disabled until separately accepted.
 
 No private transcript or generated artifact is automatically published to GitHub or the organization wiki by this change. No GitHub content, live database, deployment or runtime was changed by either storage commit. The earlier reviewed application checkpoint was published and rehearsed separately; see [release rehearsal](neev-release-rehearsal-2026-09-10.md).
+
+The subsequent exact `team` image at `42536219` passed an isolated rehearsal against a fresh live-database backup: migration count50→54, preserved scalar user/org/catalog counts,11 HTTP checks, clean SIGINT shutdown and the same checks after restart. That real backup contained no catalog rows; populated-row preservation is covered by the synthetic SQLite/PostgreSQL tests above, not inferred from the empty hosted catalog. The two staged-variant warnings remain deferred without suppression. Private Coolify deployment subsequently completed and passed all11 live HTTP checks; see the separate [live evidence and remaining restrictions](neev-private-deployment-2026-09-10.md).
 
 Context: [org-memory: wiki/engineering/workos.md]. Current source and the approved team-visibility design govern the migration; the older operator model does not authorize team access.

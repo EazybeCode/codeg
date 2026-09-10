@@ -1,7 +1,10 @@
 # Neev publication and isolated Linux rehearsal
 
-September10,2026. Reviewed source is published and its isolated host rehearsal
-passed. **The live application has not been upgraded or opened to teams.**
+September10,2026. Historical record for `0a719d71`: reviewed source was published
+and its isolated host rehearsal passed. The live application had not been
+upgraded at that checkpoint. See the subsequent
+[42536219 private deployment record](neev-private-deployment-2026-09-10.md) for
+current deployment evidence; neither record authorizes opening the app to teams.
 
 ## Publication
 
