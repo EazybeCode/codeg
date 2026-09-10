@@ -65,6 +65,10 @@ async fn capabilities_are_native_disabled_and_old_routes_do_not_exist() {
         .post("/api/acp_connect")
         .await
         .assert_status_not_found();
+    server
+        .post("/api/neev/email/login")
+        .await
+        .assert_status_not_found();
     let callback = server.get("/auth/google/callback?code=ignored").await;
     callback.assert_status_bad_request();
     assert!(callback
@@ -76,11 +80,18 @@ async fn capabilities_are_native_disabled_and_old_routes_do_not_exist() {
 #[tokio::test]
 async fn allowlisted_confirmation_is_no_store_without_a_spa_fallback() {
     let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("neev-auth")).unwrap();
     std::fs::write(
-        directory.path().join("email-confirm.html"),
+        directory.path().join("neev-auth/confirm.html"),
         b"confirm safely",
     )
     .unwrap();
+    std::fs::write(
+        directory.path().join("neev-auth/confirm.js"),
+        b"history.replaceState(null, '', location.pathname)",
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("neev-auth/confirm.css"), b"body{}").unwrap();
     let database = h::database().await;
     let clock = std::sync::Arc::new(h::TestClock::new(1000));
     let mut config = h::preview_config();
@@ -94,6 +105,20 @@ async fn allowlisted_confirmation_is_no_store_without_a_spa_fallback() {
     assert_eq!(response.text(), "confirm safely");
     assert_eq!(response.header(header::CACHE_CONTROL), "no-store");
     assert_eq!(response.header("referrer-policy"), "no-referrer");
+    assert_eq!(
+        response.header("content-security-policy"),
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'"
+    );
+    let script = server.get("/neev-auth/confirm.js").await;
+    script.assert_status_ok();
+    assert_eq!(
+        script.header(header::CONTENT_TYPE),
+        "text/javascript; charset=utf-8"
+    );
+    server
+        .get("/neev-auth/confirm.css")
+        .await
+        .assert_status_ok();
     server
         .get("/not-allowlisted")
         .await

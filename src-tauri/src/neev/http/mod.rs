@@ -19,7 +19,7 @@ mod tests;
 
 const REFERRER_POLICY: HeaderName = HeaderName::from_static("referrer-policy");
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum ApiError {
     Invalid,
     Unauthorized,
@@ -77,7 +77,8 @@ struct Providers {
 }
 
 pub(crate) fn router(state: Arc<ServerState>) -> Router {
-    Router::new()
+    let email_available = state.magic.is_some();
+    let mut router = Router::new()
         .route("/healthz", get(health))
         .route("/api/workos/capabilities", get(capabilities))
         .route("/api/neev/preauth", get(auth::preauth))
@@ -92,8 +93,15 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/workspace", get(static_files::page))
         .route("/settings", get(static_files::page))
         .route("/auth/email/confirm", get(static_files::page))
-        .fallback(not_found)
-        .with_state(state)
+        .route("/neev-auth/confirm.js", get(static_files::asset))
+        .route("/neev-auth/confirm.css", get(static_files::asset));
+    if email_available {
+        router = router
+            .route("/api/neev/email/login", post(auth::email_login))
+            .route("/api/neev/email/link", post(auth::email_link))
+            .route("/api/neev/email/confirm", post(auth::email_confirm));
+    }
+    router.fallback(not_found).with_state(state)
 }
 
 async fn health() -> Response {
@@ -107,7 +115,7 @@ async fn capabilities(State(state): State<Arc<ServerState>>) -> Response {
         runtime_enabled: false,
         providers: Providers {
             google: state.oauth.google_available(),
-            email: false,
+            email: state.magic.is_some(),
             github: github::available(),
         },
     })

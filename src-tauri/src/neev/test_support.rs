@@ -1,4 +1,9 @@
-use super::types::{Provider, VerifiedIdentity};
+use super::{
+    error::AuthError,
+    mail::{MailMessage, MailSender},
+    types::{Provider, VerifiedIdentity},
+};
+use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use openidconnect::{
     core::{
@@ -9,10 +14,14 @@ use openidconnect::{
     SubjectIdentifier,
 };
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement, Value};
-use std::sync::{
-    atomic::{AtomicI64, Ordering},
-    Arc,
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, AtomicI64, Ordering},
+        Arc,
+    },
 };
+use tokio::sync::Mutex;
 
 pub(super) struct TestClock(pub(super) AtomicI64);
 
@@ -25,6 +34,253 @@ impl TestClock {
 impl super::clock::Clock for TestClock {
     fn now_unix(&self) -> i64 {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+pub(super) struct MailCapture {
+    messages: Mutex<Vec<MailMessage>>,
+    fail: AtomicBool,
+}
+
+impl MailCapture {
+    pub(super) fn new() -> Self {
+        Self {
+            messages: Mutex::new(Vec::new()),
+            fail: AtomicBool::new(false),
+        }
+    }
+
+    pub(super) fn fail(&self, fail: bool) {
+        self.fail.store(fail, Ordering::SeqCst);
+    }
+
+    pub(super) async fn len(&self) -> usize {
+        self.messages.lock().await.len()
+    }
+
+    pub(super) async fn recipient(&self, index: usize) -> String {
+        self.messages.lock().await[index].recipient.clone()
+    }
+
+    pub(super) async fn text(&self, index: usize) -> String {
+        self.messages.lock().await[index].text.clone()
+    }
+
+    pub(super) async fn latest_fragment(&self) -> String {
+        self.messages
+            .lock()
+            .await
+            .last()
+            .and_then(|message| message.text.split("#token=").nth(1))
+            .and_then(|tail| tail.split_whitespace().next())
+            .expect("captured magic fragment")
+            .to_owned()
+    }
+}
+
+#[async_trait]
+impl MailSender for MailCapture {
+    async fn send(&self, message: MailMessage) -> Result<(), AuthError> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(AuthError::Unavailable);
+        }
+        self.messages.lock().await.push(message);
+        Ok(())
+    }
+}
+
+struct Browser {
+    client: reqwest::Client,
+    cookies: BTreeMap<String, String>,
+}
+
+impl Browser {
+    fn new() -> Self {
+        Self {
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            cookies: BTreeMap::new(),
+        }
+    }
+
+    async fn send(&mut self, mut request: reqwest::RequestBuilder) -> reqwest::Response {
+        if !self.cookies.is_empty() {
+            let value = self
+                .cookies
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            request = request.header(reqwest::header::COOKIE, value);
+        }
+        let response = request.send().await.unwrap();
+        for value in response.headers().get_all(reqwest::header::SET_COOKIE) {
+            let value = value.to_str().unwrap();
+            let pair = value.split(';').next().unwrap();
+            let (name, value) = pair.split_once('=').unwrap();
+            if value.is_empty() {
+                self.cookies.remove(name);
+            } else {
+                self.cookies.insert(name.to_owned(), value.to_owned());
+            }
+        }
+        response
+    }
+}
+
+pub(super) struct HarnessResponse(reqwest::StatusCode);
+
+impl HarnessResponse {
+    pub(super) fn assert_status_ok(self) {
+        assert_eq!(self.0, reqwest::StatusCode::OK);
+    }
+
+    pub(super) fn assert_status_unauthorized(self) {
+        assert_eq!(self.0, reqwest::StatusCode::UNAUTHORIZED);
+    }
+}
+
+pub(super) struct HarnessJsonResponse {
+    pub(super) status: reqwest::StatusCode,
+    pub(super) body: serde_json::Value,
+}
+
+pub(super) struct MagicHarness {
+    base: String,
+    origin: String,
+    first: Browser,
+    other: Browser,
+    pub(super) capture: Arc<MailCapture>,
+    pub(super) database: DatabaseConnection,
+    _static_root: tempfile::TempDir,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl MagicHarness {
+    pub(super) async fn new() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base = format!("http://{address}");
+        let database = database().await;
+        let clock = Arc::new(TestClock::new(1_700_000_000));
+        let capture = Arc::new(MailCapture::new());
+        let mail = super::mail::Service::new(database.clone(), capture.clone());
+        let service = super::auth::magic::Service::new(
+            database.clone(),
+            [61; 32],
+            url::Url::parse(&format!("{base}/")).unwrap(),
+            clock.clone(),
+            mail,
+        );
+        let static_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(static_root.path().join("neev-auth")).unwrap();
+        std::fs::write(
+            static_root.path().join("neev-auth/confirm.html"),
+            "scanner-safe confirmation",
+        )
+        .unwrap();
+        std::fs::write(static_root.path().join("neev-auth/confirm.js"), "").unwrap();
+        std::fs::write(static_root.path().join("neev-auth/confirm.css"), "").unwrap();
+        let mut config = preview_config();
+        config.origin = url::Url::parse(&format!("{base}/")).unwrap();
+        config.origin_header = base.clone();
+        config.static_root = static_root.path().to_owned();
+        let state = Arc::new(
+            super::startup::ServerState::with_magic(database.clone(), config, clock, service)
+                .unwrap(),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                super::http::router(state)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        Self {
+            base,
+            origin: format!("http://{address}"),
+            first: Browser::new(),
+            other: Browser::new(),
+            capture,
+            database,
+            _static_root: static_root,
+            server,
+        }
+    }
+
+    async fn bootstrap(base: &str, browser: &mut Browser) -> String {
+        let response = browser
+            .send(browser.client.get(format!("{base}/api/neev/preauth")))
+            .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        response.json::<serde_json::Value>().await.unwrap()["csrf"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    pub(super) async fn request(&mut self, email: &str) -> String {
+        let response = self.request_response(email).await;
+        assert_eq!(response.status, reqwest::StatusCode::ACCEPTED);
+        assert_eq!(response.body["status"], "accepted");
+        self.capture.latest_fragment().await
+    }
+
+    pub(super) async fn request_response(&mut self, email: &str) -> HarnessJsonResponse {
+        let csrf = Self::bootstrap(&self.base, &mut self.first).await;
+        let request = self
+            .first
+            .client
+            .post(format!("{}/api/neev/email/login", self.base))
+            .header(reqwest::header::ORIGIN, &self.origin)
+            .header("x-neev-csrf", csrf)
+            .json(&serde_json::json!({"email":email}));
+        let response = self.first.send(request).await;
+        let status = response.status();
+        let body = response.json().await.unwrap();
+        HarnessJsonResponse { status, body }
+    }
+
+    pub(super) async fn get_confirmation(&mut self) -> HarnessResponse {
+        let request = self
+            .first
+            .client
+            .get(format!("{}/auth/email/confirm", self.base));
+        HarnessResponse(self.first.send(request).await.status())
+    }
+
+    pub(super) async fn confirm_from_other_browser(&mut self, token: &str) -> HarnessResponse {
+        let csrf = Self::bootstrap(&self.base, &mut self.other).await;
+        let request = self
+            .other
+            .client
+            .post(format!("{}/api/neev/email/confirm", self.base))
+            .header(reqwest::header::ORIGIN, &self.origin)
+            .header("x-neev-csrf", csrf)
+            .json(&serde_json::json!({"token":token}));
+        HarnessResponse(self.other.send(request).await.status())
+    }
+
+    pub(super) async fn confirm(&mut self, token: &str) -> HarnessResponse {
+        let csrf = Self::bootstrap(&self.base, &mut self.first).await;
+        let request = self
+            .first
+            .client
+            .post(format!("{}/api/neev/email/confirm", self.base))
+            .header(reqwest::header::ORIGIN, &self.origin)
+            .header("x-neev-csrf", csrf)
+            .json(&serde_json::json!({"token":token}));
+        HarnessResponse(self.first.send(request).await.status())
+    }
+}
+
+impl Drop for MagicHarness {
+    fn drop(&mut self) {
+        self.server.abort();
     }
 }
 
@@ -254,6 +510,7 @@ pub(super) fn preview_config() -> super::config::Config {
         database_url: "postgresql:///unused_test_database".into(),
         encryption_key: [7; 32],
         bind: "127.0.0.1:0".parse().unwrap(),
+        trusted_proxy_ips: Vec::new(),
         static_root: std::env::current_dir().unwrap(),
         preview: true,
         providers: super::config::ProviderConfig {

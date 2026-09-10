@@ -11,29 +11,46 @@ use sea_orm::{
 
 pub(crate) async fn resolve(
     db: &DatabaseConnection,
+    proof: VerifiedIdentity,
+    intent: SignInIntent,
+    now: i64,
+) -> Result<UserId, AuthError> {
+    let tx = db::begin(db).await?;
+    let user_id = resolve_in_transaction(&tx, proof, intent, now).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(user_id)
+}
+
+pub(super) async fn resolve_in_transaction(
+    tx: &DatabaseTransaction,
     mut proof: VerifiedIdentity,
     intent: SignInIntent,
     now: i64,
 ) -> Result<UserId, AuthError> {
     validate(&mut proof, now)?;
-    let tx = db::begin(db).await?;
+    let subject_owner = subject_owner(tx, &proof).await?;
+    let email_owner = match &proof.verified_email {
+        Some(email) => email_owner(tx, email).await?,
+        None => None,
+    };
     let user_id = match intent {
         SignInIntent::Login => {
-            if let Some(user_id) = subject_owner(&tx, &proof).await? {
-                lock_account(&tx, user_id).await?;
+            if let Some(user_id) = subject_owner {
+                lock_account(tx, user_id).await?;
+                if email_owner.is_some_and(|owner| owner != user_id) {
+                    return Err(AuthError::Conflict);
+                }
                 user_id
             } else {
                 // Do not create an orphan account when another identity owns email.
-                if let Some(email) = &proof.verified_email {
-                    if email_owner(&tx, email).await?.is_some() {
-                        return Err(AuthError::Conflict);
-                    }
+                if email_owner.is_some() {
+                    return Err(AuthError::Conflict);
                 }
-                let row = db::one(&tx,
+                let row = db::one(tx,
                     "INSERT INTO neev_accounts(display_name,avatar_url,auth_revision,disabled,created_at) VALUES($1,$2,1,false,$3) RETURNING id",
                     vec![proof.display_name.clone().into(), proof.avatar_url.clone().into(), now.into()]).await?.ok_or(AuthError::Unavailable)?;
                 let id = row.try_get::<i32>("", "id").map_err(database_error)?;
-                add_subject(&tx, &proof, id, now).await?;
+                add_subject(tx, &proof, id, now).await?;
                 id
             }
         }
@@ -42,25 +59,29 @@ pub(crate) async fn resolve(
             session_id,
             auth_revision,
         } => {
-            super::session::recheck_link(&tx, user_id, &session_id, auth_revision, now).await?;
-            match subject_owner(&tx, &proof).await? {
+            super::session::recheck_link(tx, user_id, &session_id, auth_revision, now).await?;
+            match subject_owner {
                 Some(other) if other != user_id => return Err(AuthError::Conflict),
                 Some(_) => {}
-                None => add_subject(&tx, &proof, user_id, now).await?,
+                None => {
+                    if email_owner.is_some_and(|owner| owner != user_id) {
+                        return Err(AuthError::Conflict);
+                    }
+                    add_subject(tx, &proof, user_id, now).await?
+                }
             }
             user_id
         }
     };
     if let Some(email) = &proof.verified_email {
-        match email_owner(&tx, email).await? {
+        match email_owner {
             Some(other) if other != user_id => return Err(AuthError::Conflict),
             Some(_) => {}
             None => {
-                db::execute(&tx, "INSERT INTO neev_verified_emails(user_id,canonical_email,verified_at) VALUES($1,$2,$3)", vec![user_id.into(),email.clone().into(),now.into()]).await?;
+                db::execute(tx, "INSERT INTO neev_verified_emails(user_id,canonical_email,verified_at) VALUES($1,$2,$3)", vec![user_id.into(),email.clone().into(),now.into()]).await?;
             }
         }
     }
-    tx.commit().await.map_err(database_error)?;
     Ok(user_id)
 }
 

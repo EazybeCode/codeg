@@ -46,6 +46,7 @@ pub(crate) struct Config {
     pub(crate) database_url: String,
     pub(crate) encryption_key: [u8; 32],
     pub(crate) bind: SocketAddr,
+    pub(crate) trusted_proxy_ips: Vec<IpAddr>,
     pub(crate) static_root: PathBuf,
     pub(crate) preview: bool,
     pub(crate) providers: ProviderConfig,
@@ -53,11 +54,12 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 13] = [
+        const KEYS: [&str; 14] = [
             "NEEV_APP_ORIGIN",
             "NEEV_DATABASE_URL",
             "NEEV_ENC_KEY",
             "NEEV_BIND",
+            "NEEV_TRUSTED_PROXY_IPS",
             "NEEV_STATIC_ROOT",
             "NEEV_ALLOW_LOOPBACK_PREVIEW",
             "NEEV_GOOGLE_CLIENT_ID",
@@ -120,6 +122,7 @@ impl Config {
         if preview && !bind.ip().is_loopback() {
             return Err(ConfigError::Bind);
         }
+        let trusted_proxy_ips = trusted_proxy_ips(values.get("NEEV_TRUSTED_PROXY_IPS"))?;
         let static_root = PathBuf::from(required(
             values,
             "NEEV_STATIC_ROOT",
@@ -142,10 +145,40 @@ impl Config {
             database_url,
             encryption_key,
             bind,
+            trusted_proxy_ips,
             static_root,
             preview,
             providers,
         })
+    }
+}
+
+fn trusted_proxy_ips(value: Option<&String>) -> Result<Vec<IpAddr>, ConfigError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(ConfigError::Provider);
+    }
+    let mut parsed = Vec::new();
+    for item in value.split(',') {
+        let item = item.trim();
+        let address = normalize_ip(item.parse::<IpAddr>().map_err(|_| ConfigError::Provider)?);
+        if parsed.contains(&address) {
+            return Err(ConfigError::Provider);
+        }
+        parsed.push(address);
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn normalize_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(address)),
+        address => address,
     }
 }
 
@@ -367,5 +400,31 @@ mod tests {
         let email = config.providers.email.as_ref().unwrap();
         assert_eq!(email.api_key, "resend-key");
         assert_eq!(email.from, "verification@neev.so");
+    }
+
+    #[test]
+    fn trusted_proxy_addresses_are_exact_ips_or_startup_fails() {
+        let mut configured = values();
+        configured.insert(
+            "NEEV_TRUSTED_PROXY_IPS".into(),
+            "127.0.0.1,2001:db8::1".into(),
+        );
+        let parsed = Config::from_values(&configured).unwrap();
+        assert_eq!(
+            parsed.trusted_proxy_ips,
+            vec![
+                "127.0.0.1".parse::<IpAddr>().unwrap(),
+                "2001:db8::1".parse::<IpAddr>().unwrap(),
+            ]
+        );
+
+        for invalid in ["", "127.0.0.1,", "proxy.internal", "127.0.0.1,127.0.0.1"] {
+            configured.insert("NEEV_TRUSTED_PROXY_IPS".into(), invalid.into());
+            assert_eq!(
+                Config::from_values(&configured).err(),
+                Some(ConfigError::Provider),
+                "accepted {invalid:?}"
+            );
+        }
     }
 }

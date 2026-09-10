@@ -2,14 +2,15 @@ use std::sync::Arc;
 
 use axum::{
     body::{to_bytes, Body},
-    extract::{RawQuery, State},
+    extract::{ConnectInfo, RawQuery, State},
     http::{HeaderMap, Request, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
 
 use crate::neev::{
-    auth::{oauth, session},
+    auth::{magic, oauth, session},
     error::AuthError,
     startup::ServerState,
     types::{Provider, Role, SignInIntent},
@@ -44,6 +45,32 @@ struct PreauthDto {
 struct OAuthBeginDto {
     authorization_url: String,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmailRequest {
+    email: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfirmRequest {
+    token: String,
+}
+
+#[derive(Serialize)]
+struct AcceptedDto {
+    status: &'static str,
+    message: &'static str,
+}
+
+#[derive(Serialize)]
+struct ConfirmationDto {
+    next: &'static str,
+}
+
+const ACCEPTED_MESSAGE: &str =
+    "If delivery is available, your sign-in email may arrive shortly. Delivery can be delayed; retry later if needed.";
 
 pub(super) async fn preauth(
     State(state): State<Arc<ServerState>>,
@@ -235,6 +262,169 @@ pub(super) async fn google_callback(
     }
 }
 
+pub(super) async fn email_login(
+    State(state): State<Arc<ServerState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = state
+        .auth_limit
+        .try_acquire()
+        .map_err(|_| ApiError::Limited)?;
+    let (headers, input) =
+        json_request::<EmailRequest>(request, &state.config.origin_header).await?;
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let browser = cookies::required(&headers, names.browser)?;
+    let cookie_csrf = cookies::required(&headers, names.preauth_csrf)?;
+    if cookie_csrf != cookies::csrf_header(&headers)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let source = source_ip(&headers, peer, &state.config.trusted_proxy_ips)?;
+    let service = state.magic.as_ref().ok_or(ApiError::Unavailable)?;
+    let outcome = magic::request(service, &input.email, browser, source, SignInIntent::Login).await;
+    record_mail_request(outcome);
+    let mut response = private_json(AcceptedDto {
+        status: "accepted",
+        message: ACCEPTED_MESSAGE,
+    });
+    *response.status_mut() = StatusCode::ACCEPTED;
+    cookies::refresh_preauth(response.headers_mut(), names, browser, cookie_csrf);
+    Ok(response)
+}
+
+pub(super) async fn email_link(
+    State(state): State<Arc<ServerState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = state
+        .auth_limit
+        .try_acquire()
+        .map_err(|_| ApiError::Limited)?;
+    let (headers, input) =
+        json_request::<EmailRequest>(request, &state.config.origin_header).await?;
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let browser = cookies::required(&headers, names.browser)?;
+    let token = cookies::required(&headers, names.session)?;
+    let cookie_csrf = cookies::required(&headers, names.csrf)?;
+    if cookie_csrf != cookies::csrf_header(&headers)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let now = state.clock.now_unix();
+    let identity = session::identity(&state.database, token, now).await?;
+    session::validate_csrf(&state.database, &identity, cookie_csrf, now).await?;
+    let source = source_ip(&headers, peer, &state.config.trusted_proxy_ips)?;
+    let service = state.magic.as_ref().ok_or(ApiError::Unavailable)?;
+    let outcome = magic::request(
+        service,
+        &input.email,
+        browser,
+        source,
+        SignInIntent::Link {
+            user_id: identity.user_id,
+            session_id: identity.session_id,
+            auth_revision: identity.auth_revision,
+        },
+    )
+    .await;
+    record_mail_request(outcome);
+    let mut response = private_json(AcceptedDto {
+        status: "accepted",
+        message: ACCEPTED_MESSAGE,
+    });
+    *response.status_mut() = StatusCode::ACCEPTED;
+    cookies::refresh_browser(response.headers_mut(), names, browser);
+    Ok(response)
+}
+
+pub(super) async fn email_confirm(
+    State(state): State<Arc<ServerState>>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = state
+        .auth_limit
+        .try_acquire()
+        .map_err(|_| ApiError::Limited)?;
+    let (headers, input) =
+        json_request::<ConfirmRequest>(request, &state.config.origin_header).await?;
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let browser = cookies::required(&headers, names.browser)?;
+    let cookie_csrf = cookies::required(&headers, names.preauth_csrf)?;
+    if cookie_csrf != cookies::csrf_header(&headers)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let service = state.magic.as_ref().ok_or(ApiError::Unavailable)?;
+    match magic::confirm(service, &input.token, browser).await? {
+        magic::Completion::LoggedIn(secrets) => {
+            let mut response = private_json(ConfirmationDto {
+                next: "/onboarding",
+            });
+            cookies::set_session(
+                response.headers_mut(),
+                names,
+                &secrets.session,
+                &secrets.csrf,
+                secrets.expires_at.saturating_sub(state.clock.now_unix()),
+            );
+            Ok(response)
+        }
+        magic::Completion::Linked => Ok(private_json(ConfirmationDto { next: "/settings" })),
+    }
+}
+
+fn source_ip(
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    trusted_proxies: &[IpAddr],
+) -> Result<IpAddr, ApiError> {
+    let mut forwarded = headers.get_all("x-forwarded-for").iter();
+    let first = forwarded.next();
+    let peer_ip = crate::neev::config::normalize_ip(peer.ip());
+    if !trusted_proxies.contains(&peer_ip) {
+        return if first.is_none() {
+            Ok(peer_ip)
+        } else {
+            Err(ApiError::Forbidden)
+        };
+    }
+    let value = first
+        .filter(|_| forwarded.next().is_none())
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.contains(','))
+        .ok_or(ApiError::Forbidden)?;
+    value
+        .parse()
+        .map(crate::neev::config::normalize_ip)
+        .map_err(|_| ApiError::Forbidden)
+}
+
+fn record_mail_request(result: Result<(), AuthError>) {
+    let reason = match result {
+        Ok(()) => "submitted",
+        Err(AuthError::Limited) => "limited",
+        Err(AuthError::Invalid) => "invalid",
+        Err(_) => "unavailable",
+    };
+    tracing::info!(reason, "Neev email request handled");
+}
+
+async fn json_request<T: DeserializeOwned>(
+    request: Request<Body>,
+    expected_origin: &str,
+) -> Result<(HeaderMap, T), ApiError> {
+    let (parts, body) = request.into_parts();
+    if !cookies::exact_origin(&parts.headers, expected_origin) {
+        return Err(ApiError::Forbidden);
+    }
+    if !cookies::is_json(&parts.headers) {
+        return Err(ApiError::Invalid);
+    }
+    let body = to_bytes(body, 1024).await.map_err(|_| ApiError::Invalid)?;
+    let input = serde_json::from_slice(&body).map_err(|_| ApiError::Invalid)?;
+    Ok((parts.headers, input))
+}
+
 async fn empty_json_request(
     request: Request<Body>,
     expected_origin: &str,
@@ -330,5 +520,32 @@ mod tests {
             "a".repeat(4096)
         )))
         .is_err());
+    }
+
+    #[test]
+    fn forwarded_ip_is_accepted_only_from_an_exact_trusted_peer() {
+        use axum::http::HeaderValue;
+        use std::net::SocketAddr;
+
+        let direct: SocketAddr = "127.0.0.1:40100".parse().unwrap();
+        let trusted = vec![direct.ip()];
+        let empty = HeaderMap::new();
+        assert_eq!(source_ip(&empty, direct, &[]).unwrap(), direct.ip());
+        assert!(source_ip(&empty, direct, &trusted).is_err());
+
+        let mut forwarded = HeaderMap::new();
+        forwarded.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.44"));
+        assert!(source_ip(&forwarded, direct, &[]).is_err());
+        assert_eq!(
+            source_ip(&forwarded, direct, &trusted).unwrap(),
+            "203.0.113.44".parse::<IpAddr>().unwrap()
+        );
+        forwarded.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.44, 198.51.100.2"),
+        );
+        assert!(source_ip(&forwarded, direct, &trusted).is_err());
+        forwarded.append("x-forwarded-for", HeaderValue::from_static("198.51.100.2"));
+        assert!(source_ip(&forwarded, direct, &trusted).is_err());
     }
 }

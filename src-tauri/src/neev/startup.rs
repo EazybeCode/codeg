@@ -4,10 +4,11 @@ use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use tokio::sync::Semaphore;
 
 use super::{
-    auth::oauth,
+    auth::{magic, oauth},
     clock::{Clock, SystemClock},
     config::Config,
     db, http,
+    mail::{self, resend::Resend},
 };
 
 pub(crate) struct ServerState {
@@ -16,6 +17,7 @@ pub(crate) struct ServerState {
     pub(crate) clock: Arc<dyn Clock + Send + Sync>,
     pub(crate) auth_limit: Arc<Semaphore>,
     pub(crate) oauth: oauth::Service,
+    pub(crate) magic: Option<magic::Service>,
 }
 
 impl ServerState {
@@ -25,12 +27,32 @@ impl ServerState {
         clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<Self, super::error::AuthError> {
         let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
+        let magic = config
+            .providers
+            .email
+            .as_ref()
+            .map(|provider| {
+                let sender = Arc::new(Resend::new(
+                    provider.api_key.clone(),
+                    provider.from.clone(),
+                )?);
+                let mail = mail::Service::new(database.clone(), sender);
+                Ok::<_, super::error::AuthError>(magic::Service::new(
+                    database.clone(),
+                    config.encryption_key,
+                    config.origin.clone(),
+                    clock.clone(),
+                    mail,
+                ))
+            })
+            .transpose()?;
         Ok(Self {
             database,
             config,
             clock,
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
+            magic,
         })
     }
 
@@ -47,7 +69,26 @@ impl ServerState {
             clock,
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
+            magic: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_magic(
+        database: DatabaseConnection,
+        config: Config,
+        clock: Arc<dyn Clock + Send + Sync>,
+        magic: magic::Service,
+    ) -> Result<Self, super::error::AuthError> {
+        let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
+        Ok(Self {
+            database,
+            config,
+            clock,
+            auth_limit: Arc::new(Semaphore::new(32)),
+            oauth,
+            magic: Some(magic),
+        })
     }
 }
 
@@ -78,7 +119,10 @@ async fn serve() -> Result<(), ()> {
     let state =
         Arc::new(ServerState::new(database, config, Arc::new(SystemClock)).map_err(|_| ())?);
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;
-    axum::serve(listener, http::router(state))
-        .await
-        .map_err(|_| ())
+    axum::serve(
+        listener,
+        http::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .map_err(|_| ())
 }
