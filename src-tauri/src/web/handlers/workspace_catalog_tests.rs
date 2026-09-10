@@ -523,6 +523,10 @@ async fn draft_lists_exclude_another_member_and_reject_cross_org_nodes() {
             request_id: Set(format!("request-{id}")),
             request_fingerprint: Set(format!("fingerprint-{id}")),
             execution_state: Set("unprovisioned".into()),
+            visibility: Set("private".into()),
+            access_revision: Set(0),
+            creation_visibility: Set("private".into()),
+            creation_fingerprint_version: Set(1),
             created_at: Set(now),
             updated_at: Set(now),
         }

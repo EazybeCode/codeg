@@ -267,6 +267,10 @@ pub async fn create_draft(
         request_id: Set(input.request_id),
         request_fingerprint: Set(input.request_fingerprint),
         execution_state: Set("unprovisioned".into()),
+        visibility: Set("private".into()),
+        access_revision: Set(0),
+        creation_visibility: Set("private".into()),
+        creation_fingerprint_version: Set(1),
         created_at: Set(now),
         updated_at: Set(now),
     }

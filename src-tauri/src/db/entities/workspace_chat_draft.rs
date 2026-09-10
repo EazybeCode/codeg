@@ -23,6 +23,12 @@ pub struct Model {
     pub request_fingerprint: String,
     #[sea_orm(column_type = "Text")]
     pub execution_state: String,
+    #[sea_orm(column_type = "Text")]
+    pub visibility: String,
+    pub access_revision: i64,
+    #[sea_orm(column_type = "Text")]
+    pub creation_visibility: String,
+    pub creation_fingerprint_version: i32,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
