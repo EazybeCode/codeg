@@ -32,6 +32,7 @@ pub mod keyring_store;
 pub mod logging;
 pub mod models;
 mod network;
+pub mod neev;
 mod organization_branding;
 pub mod office_watch;
 pub mod parsers;
