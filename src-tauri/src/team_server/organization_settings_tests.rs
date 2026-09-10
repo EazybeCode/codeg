@@ -119,9 +119,19 @@ fn organization_settings_patch_shape_rejects_unknown_authority_and_logo_fields()
         serde_json::json!({"name":"Atlas","logo":{"action":"keep"},"actor":301}),
         serde_json::json!({"name":"Atlas","logo":{"action":"keep"},"role":"admin"}),
         serde_json::json!({"name":"Atlas","logo":{"action":"keep","data":"ignored"}}),
+        serde_json::json!({"name":"Atlas","logo":{"action":"keep","data":null}}),
+        serde_json::json!({"name":"Atlas","logo":{"action":"remove","data":null}}),
         serde_json::json!({"name":"Atlas","logo":{"action":"upload"}}),
     ] {
         assert!(serde_json::from_value::<OrganizationPatchInput>(body).is_err());
+    }
+
+    for body in [
+        serde_json::json!({"name":"Atlas","logo":{"action":"keep"}}),
+        serde_json::json!({"name":"Atlas","logo":{"action":"remove"}}),
+        serde_json::json!({"name":"Atlas","logo":{"action":"upload","data":"data:image/png;base64,invented"}}),
+    ] {
+        assert!(serde_json::from_value::<OrganizationPatchInput>(body).is_ok());
     }
 }
 

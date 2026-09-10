@@ -50,7 +50,15 @@ enum OrganizationLogoAction {
 #[serde(deny_unknown_fields)]
 struct OrganizationLogoWire {
     action: OrganizationLogoAction,
+    #[serde(default, deserialize_with = "deserialize_organization_logo_data")]
     data: Option<String>,
+}
+
+fn deserialize_organization_logo_data<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 impl<'de> Deserialize<'de> for OrganizationLogoInput {
