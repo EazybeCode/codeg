@@ -1,8 +1,9 @@
 # Team catalog acceptance — September 10, 2026
 
-Status: persistence/service accepted through `36fbd3ae`, protected HTTP through
-`7de2329d`, and browser workspace through review fix `01116f90`. All three task
-gates pass; combined review and final aggregate are pending. This record is not permission to
+Status: all three tasks and the combined final fix/re-review are accepted through
+`8de6c9b2`. Final controller frontend verification passed 6,216 tests in 449 files;
+the fresh Rust team-server aggregate passed 77 tests with six guarded ignores.
+This record is not permission to
 open signup or evidence of working prompts, personal agents, or public HTTPS.
 
 ## Accepted service boundary
@@ -120,13 +121,49 @@ the wrapper workspace's `.superpowers/sdd/2026-09-10-team-catalog/artifacts/task
 not the source tree's similarly named directory. The earlier fix1 capture was
 premature and is retained as intermediate evidence, not the final proof.
 
+## Combined final review and verification
+
+The whole-branch review of `5607f93e..95b6d49e` found five Important defects:
+the busy guard applied only to sharing, creation lacked a named audience choice,
+plain folders offered unsupported repository ownership, connected repositories
+were absent from immediate client state, and chat creation corrupted pagination
+and idempotent retry reconciliation. The single final wave `8de6c9b2` fixes all
+five, including a reproduced delayed-refresh race that could erase a repository
+upsert. The scoped re-review marked all five and the stale-checklist minor
+addressed, with no new Critical/Important breakage.
+
+- Frontend regressions: initial 10 failed/19 passed; final affected 87/87 passed.
+- Backend reverse-audience regression: failed before the fix; final catalog
+  16 passed/one guarded PostgreSQL ignore, plus adjacent HTTP 9 and fingerprint 6.
+- TypeScript, scoped lint/formatting, ten-locale parity, and 34-page export passed.
+- Exact final synthetic browser journey passed with zero console errors. Root
+  inspected the JSON, expanded-tree absence assertions, immediate inheritance,
+  named-org shared detail, restored privacy and settings-return screenshots.
+- Root fresh emitted-binary command `src-tauri/target/debug/deps/codeg_lib-732148cb61475fb4
+  team_server --test-threads=1` passed 77 tests, six guarded ignores, in 35.45s.
+- Root final `PATH=/opt/homebrew/opt/node@22/bin:$PATH ./node_modules/.bin/vitest run`
+  passed all 6,216 tests across 449 files in 185.53s, exit0, on unchanged final code.
+
+The preceding aggregate used ambient Node18 instead of established Node22 and
+failed four assertions in two unchanged settings files (6,212 passed). Both files
+subsequently passed all 13 tests under both versions, so a Node-version cause was
+not proven. The initial failure and focused controls are retained, not hidden by
+the final green run. Intermittent full-suite settings behavior remains a maintenance
+investigation; no test was skipped, suppressed or altered to obtain green.
+
+Client `executionState` remains restricted to `unprovisioned` while runtime is off;
+reviewed job integration must define its broader validated state contract.
+Full worker commands, failed attempts and fixture details are preserved in
+[the final fix report](team-catalog-final-fix-report.md). Synthetic browser and
+local service evidence do not certify real hosted GitHub/provider or job flows.
+
 ## Decisions and costs
 
 - Quarantine unproven legacy resources rather than automatic admission. Cost:
   existing data requires explicit future admission/repair; no data is deleted.
 - Bound organization nodes/repositories and per-creator chats at 1000, rejecting
   additional creation. Cost: larger organizations need later quota changes.
-- Block sharing for any existing execution row, active writer, or non-draft
+- Block all audience changes for any existing execution row, active writer, or non-draft
   state until reviewed job integration defines safe terminal states. Cost:
   conservative sharing restrictions for executed chats.
 - Page chat lists at 200 visible admitted rows, using the last visible ID. Cost:
@@ -149,12 +186,14 @@ allowlist. This supersedes earlier invite-only enrollment plans. Verified GitHub
 organization membership, private-chat authorization and tenant isolation remain
 mandatory; public signup does not grant access to arbitrary organizations.
 
-The Notion-style catalog workspace task and corrected synthetic collaboration
-journey are accepted; combined review remains pending. Public domains remain unrouted, with the private
+The Notion-style catalog workspace, corrected synthetic collaboration journey,
+combined review and final aggregate are accepted. Public domains remain unrouted, with the private
 deployment pinned to `42536219` and runtime disabled. Personal provider supervision,
 encrypted credential custody, isolated durable jobs, files/events, notifications,
 private founder feedback and real hosted two-user/provider acceptance are separate
-remaining gates. No GitHub content or legacy data was deleted by this work.
+remaining gates. Authenticated GitHub App settings now positively confirm public
+installation eligibility and the exact app.neev.so callback; no setting change
+was required. No GitHub content or legacy data was deleted by this work.
 
 Context: [org-memory: wiki/engineering/workos.md]. Its legacy operator-mode notes
 are historical context, not the new team authorization contract.

@@ -14,6 +14,20 @@ Use separate routes/resources for the public website at `https://neev.so` and au
 
 ## Current checkpoint
 
+- Latest catalog checkpoint: `8de6c9b2` closes all five combined-review findings;
+  scoped re-review found no new blocker. Controller verification passed all6,216
+  frontend tests/449files and77 Rust team-server tests with6 guarded ignores;
+  TypeScript/lint/export and the synthetic desktop/mobile browser journey pass.
+  Earlier intermittent settings-test failures are retained in the
+  [acceptance record](team-catalog-acceptance.md), not erased by the final green.
+  This supersedes older combined-review-pending wording below. The code is not
+  deployed: hosted app remains pinned to42536219 with runtime off, no domain route
+  and automatic deployment disabled. Publishing source is not production cutover.
+- Owner sign-in allowed authenticated GitHub App verification: EazyWorkOS is
+  already public and installed on other accounts; homepage and exact app.neev.so
+  callback are correct, with no wildcard matching. No setting or permission was
+  changed. Real external-user/provider acceptance still remains.
+
 - Accepted authentication library work: `76b28dfe`; accepted team startup configuration and isolated database initialization: `ae82ba38`.
 - The isolated team HTTP route task is accepted at `4c290570` after its scoped fix re-review. Fresh controller verification passed 188 targeted Rust tests (35 team-server, 138 team-access, 11 credential-migration and 4 legacy OAuth-state controls), including disposable PostgreSQL tests; the standalone binary target also passed `cargo check`. These are not an end-to-end product acceptance result or a full-project suite.
 - Browser onboarding is accepted at `23675b01` after fixing the independently identified response-body timeout/cancellation gap and passing scoped re-review. Fresh controller verification passed 184 UI tests, full TypeScript, scoped lint, diff checks and a 34-page static export at that commit. The subsequent actual browser-to-server evidence is recorded below; neither result certifies a working team workspace. Workspace catalog authority/HTTP are accepted through `7de2329d`; the browser workspace task and its five review fixes are accepted through `01116f90`, with combined review pending. See [catalog evidence](team-catalog-acceptance.md).

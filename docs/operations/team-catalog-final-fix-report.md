@@ -1,5 +1,8 @@
 # Team catalog combined final-fix report
 
+Preserved from the completed plan's scratch workspace after scoped re-review.
+Controller aggregate results and acceptance are in `team-catalog-acceptance.md`.
+
 Status: **DONE_WITH_CONCERNS**
 
 Base: `95b6d49ef144dad653feb3b72d42cceb25b00b2a`

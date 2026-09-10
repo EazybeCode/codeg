@@ -6,12 +6,14 @@ Owner decision September10: signup should be open to anyone with GitHub, without
 an organization allowlist. This supersedes earlier invite-only rollout wording,
 not verified membership, private-chat permissions, isolation or abuse-control gates.
 
-September10 installation preflight: the existing onboarding UI already links to
-the EazyWorkOS installation flow when no organization is available. The GitHub App
-settings currently require renewed owner verification before its public-install
-eligibility can be confirmed. A public landing page alone is insufficient evidence:
-private GitHub Apps also have limited landing pages. No visibility or permission
-setting has been changed. [GitHub App visibility](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private).
+September10 installation preflight is resolved: after the owner signed in,
+authenticated Advanced settings explicitly showed that EazyWorkOS is public and
+cannot be made private because it is already installed on other accounts. General
+settings showed homepage `https://neev.so` and exact callback
+`https://app.neev.so/auth/github/callback`, with wildcard matching disabled. No
+visibility, permission, installation, callback or secret was changed. The existing
+onboarding UI links to installation when no organization is available. This verifies
+installation eligibility, not a real external-user onboarding or provider run.
 
 ## Delivery order
 
@@ -47,6 +49,7 @@ setting has been changed. [GitHub App visibility](https://docs.github.com/en/app
 - No mandatory Google sign-in, billing, public feedback board, Slack/email feedback integration or automatic upstream production updates for the first release.
 - Owner selected the founder account and its immutable GitHub ID was verified. The protected allowlist still needs to be applied/tested with the feedback implementation; organization-admin status grants no founder access.
 - Owner selected Neev: neev.so for the website, app.neev.so for the application. Namecheap website apex/www and app A records are verified. The existing GitHub App homepage and added application callback were saved with exact owner approval on September10; existing local callbacks, permissions and secrets were preserved. Live app-origin/callback configuration matches, but public HTTPS and real OAuth acceptance remain pending. The owner also needs to retain recovery secrets in an approved independent vault, provide a notification destination and participate in real second-user/provider acceptance. Direct publication is authorized and completed for the private checkpoint; it is not a remaining interactive gate. The staged rollout is recorded in [neev-release-plan.md](neev-release-plan.md).
+- Follow-up authenticated GitHub App review confirmed public installation eligibility and the exact saved website/application callback. No additional GitHub setting change is required for this eligibility gate; it does not replace real external-account consent testing.
 - The earlier Task4 disk pause is resolved by owner cleanup. Post-fix library and standalone binary compilation both completed; latest sample17GiB free. Only previously authorized regenerable outputs were removed during the earlier pause, not personal/project source or GitHub data. Keep builds serial and monitor remaining space; no further cleanup is currently needed.
 
 Open GitHub signup can follow successful tenant/runtime/operational acceptance and
