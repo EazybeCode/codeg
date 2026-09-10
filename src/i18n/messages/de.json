@@ -1720,6 +1720,19 @@
     "selectionUnavailable": "Neev konnte diese Auswahl nicht bestätigen. Ihre Auswahl bleibt erhalten; versuchen Sie es erneut.",
     "selectionInvalid": "Diese Organisation ist nicht mehr verfügbar. Versuchen Sie es erneut oder starten Sie die Anmeldung neu."
   },
+  "TeamWorkspace": {
+    "workspaceNavigation": "Arbeitsbereichsnavigation", "openNavigation": "Arbeitsbereichsnavigation öffnen", "closeNavigation": "Arbeitsbereichsnavigation schließen",
+    "personLabel": "Angemeldet als", "organizationLabel": "Organisation", "projects": "Projekte",
+    "new_project": "Neues Projekt", "new_folder": "Neuer Ordner", "new_working_directory": "Neues Arbeitsverzeichnis", "new_chat": "Neuer Chat", "editDetails": "Details bearbeiten",
+    "name_project": "Projektname", "name_folder": "Ordnername", "name_working_directory": "Name des Arbeitsverzeichnisses",
+    "create_project": "Projekt erstellen", "create_folder": "Ordner erstellen", "create_working_directory": "Arbeitsverzeichnis erstellen", "create_chat": "Chat erstellen", "chatTitle": "Chat-Titel",
+    "repository": "Repository", "startingBranch": "Start-Branch", "repositoryHint": "owner/repository und einen Branch eingeben. Der GitHub-Zugriff wird vor dem Speichern geprüft.", "associateRepository": "Repository verknüpfen", "nearestDefault": "Nächste Repository-Vorgabe", "overrideRepository": "Anderes Repository oder anderen Branch verwenden",
+    "privateBeforeCreate": "Neue Chats sind privat, bis du sie später teilst.", "editSnapshotHint": "Bestehende Chats behalten ihren gespeicherten Repository- und Branch-Stand.", "saveDetails": "Details speichern",
+    "share": "Teilen", "audience": "Chat-Zielgruppe", "visibility_private": "Nur für dich", "visibility_organization": "Organisation", "shareHistoryDisclosure": "Beim Teilen erhält deine Organisation Zugriff auf den gesamten Chatverlauf.", "githubAudienceDisclosure": "Der GitHub-Repository-Zugriff wird für jede Person separat geprüft.",
+    "loading": "Arbeitsbereich wird geladen…", "loadingMore": "Weitere werden geladen…", "loadMore": "Weitere Chats laden", "loadError": "Der Arbeitsbereich konnte nicht geladen werden. Inhalte anderer Sitzungen werden nicht angezeigt.", "mutationError": "Die Änderung wurde nicht gespeichert. Deine Eingaben bleiben erhalten; versuche es erneut.",
+    "retry": "Erneut versuchen", "cancel": "Abbrechen", "creating": "Wird erstellt…", "saving": "Wird gespeichert…", "empty": "Beginne mit einem Projekt und füge Ordner, Arbeitsverzeichnisse und Repository-Chats hinzu.", "nodeEmpty": "Füge hier einen Ordner, ein Arbeitsverzeichnis oder einen privaten Chat hinzu.", "untitledChat": "Unbenannter Chat", "welcome": "Arbeitsbereich {organization}", "welcomeHint": "Organisiere Teamarbeit in Projekten und verschachtelten Ordnern. Chats bleiben privat, bis ihr Ersteller sie teilt.",
+    "runtimeDisabledTitle": "Chat-Laufzeit ist deaktiviert", "runtimeDisabledDescription": "Dieser Katalog speichert nur Chat-Metadaten. Nachrichten und Agenten folgen mit der separaten Job-Integration.", "expand": "{name} erweitern", "collapse": "{name} reduzieren", "actions": "Aktionen für {name}", "settings": "Einstellungen", "signOut": "Abmelden", "logoutFailed": "Die Abmeldung konnte nicht bestätigt werden."
+  },
   "TeamShell": {
     "personLabel": "Angemeldet als",
     "organizationLabel": "Organisation",

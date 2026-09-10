@@ -1720,6 +1720,19 @@
     "selectionUnavailable": "Neev 無法確認該選擇。你的選擇仍然保留，請重試。",
     "selectionInvalid": "該組織已無法使用。請重試或重新開始登入。"
   },
+  "TeamWorkspace": {
+    "workspaceNavigation": "工作區導覽", "openNavigation": "開啟工作區導覽", "closeNavigation": "關閉工作區導覽",
+    "personLabel": "登入身分", "organizationLabel": "組織", "projects": "專案",
+    "new_project": "新增專案", "new_folder": "新增資料夾", "new_working_directory": "新增工作目錄", "new_chat": "新增對話", "editDetails": "編輯詳細資料",
+    "name_project": "專案名稱", "name_folder": "資料夾名稱", "name_working_directory": "工作目錄名稱",
+    "create_project": "建立專案", "create_folder": "建立資料夾", "create_working_directory": "建立工作目錄", "create_chat": "建立對話", "chatTitle": "對話標題",
+    "repository": "程式碼儲存庫", "startingBranch": "起始分支", "repositoryHint": "輸入 owner/repository 和分支。儲存前會驗證 GitHub 存取權限。", "associateRepository": "關聯程式碼儲存庫", "nearestDefault": "最近的預設儲存庫", "overrideRepository": "使用其他儲存庫或分支",
+    "privateBeforeCreate": "新對話預設僅自己可見，之後可由你分享。", "editSnapshotHint": "現有對話會保留已儲存的儲存庫和起始分支快照。", "saveDetails": "儲存詳細資料",
+    "share": "分享", "audience": "對話可見範圍", "visibility_private": "僅自己", "visibility_organization": "組織", "shareHistoryDisclosure": "分享後，你的組織可存取完整對話歷史。", "githubAudienceDisclosure": "每個人的 GitHub 儲存庫存取權限會分別驗證。",
+    "loading": "正在載入工作區…", "loadingMore": "正在載入更多…", "loadMore": "載入更多對話", "loadError": "無法載入工作區。不會顯示其他工作階段的內容。", "mutationError": "變更未儲存。輸入內容已保留，請重試。",
+    "retry": "重試", "cancel": "取消", "creating": "正在建立…", "saving": "正在儲存…", "empty": "先建立專案，再新增資料夾、工作目錄和以儲存庫為基礎的對話。", "nodeEmpty": "在這裡新增資料夾、工作目錄或私人對話。", "untitledChat": "無標題對話", "welcome": "{organization} 工作區", "welcomeHint": "使用專案和巢狀資料夾組織團隊工作。對話在建立者分享前保持私人。",
+    "runtimeDisabledTitle": "對話執行環境已停用", "runtimeDisabledDescription": "此目錄只儲存對話中繼資料。訊息傳送和代理執行將在獨立工作整合完成後開放。", "expand": "展開 {name}", "collapse": "收合 {name}", "actions": "{name} 的操作", "settings": "設定", "signOut": "登出", "logoutFailed": "無法確認登出。"
+  },
   "TeamShell": {
     "personLabel": "登入身分",
     "organizationLabel": "組織",

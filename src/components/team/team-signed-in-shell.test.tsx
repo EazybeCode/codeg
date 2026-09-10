@@ -7,6 +7,9 @@ const auth = vi.hoisted(() => ({
   value: {} as Record<string, unknown>,
 }))
 vi.mock("./team-auth-provider", () => ({ useTeamAuth: () => auth.value }))
+vi.mock("./team-workspace", () => ({
+  TeamWorkspace: () => <p>team catalog workspace</p>,
+}))
 
 import { TeamSignedInShell } from "./team-signed-in-shell"
 
@@ -48,24 +51,14 @@ beforeEach(() => {
 })
 
 describe("TeamSignedInShell", () => {
-  it("shows selected person and distinct organization branding without legacy workspace data", () => {
+  it("mounts the team catalog workspace by default without legacy workspace data", () => {
     showShell()
-    expect(screen.getByText("Person Name")).toBeVisible()
-    expect(screen.getByText("@person-login")).toBeVisible()
-    expect(screen.getByText("Organization Display")).toBeVisible()
-    expect(screen.getByText("@org-login")).toBeVisible()
-    expect(
-      screen.getByText(/workspace routes are not enabled yet/i)
-    ).toBeVisible()
-    expect(screen.getByRole("button", { name: /sign out/i })).toBeVisible()
-    expect(
-      screen.queryByRole("button", { name: /change organization/i })
-    ).toBeNull()
+    expect(screen.getByText("team catalog workspace")).toBeVisible()
   })
 
   it("keeps a fixed browser return to workspace", () => {
     window.history.replaceState({}, "", "/settings")
-    showShell()
+    showShell(<h1>Organization settings</h1>)
     expect(
       screen.getByRole("link", { name: /back to workspace/i })
     ).toHaveAttribute("href", "/workspace")
@@ -104,7 +97,7 @@ describe("TeamSignedInShell", () => {
       organization: { avatarUrl: string | null }
     }
     session.organization.avatarUrl = storedLogo
-    const { container } = showShell()
+    const { container } = showShell(<h1>Organization settings</h1>)
     expect(container.querySelector(`img[src="${storedLogo}"]`)).not.toBeNull()
   })
 })

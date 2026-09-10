@@ -400,6 +400,14 @@ impl BrowserProviderServer {
                 "/user/memberships/orgs/{login}",
                 get(provider_membership),
             )
+            .route(
+                "/repos/{owner}/{repository}",
+                get(provider_repository),
+            )
+            .route(
+                "/repos/{owner}/{repository}/branches/{branch}",
+                get(provider_repository_branch),
+            )
             .route("/fixture/zero-next", post(provider_zero_next))
             .route("/fixture/fail-next-proof", post(provider_fail_next_proof))
             .route("/fixture/advance-clock", post(provider_advance_clock))
@@ -674,6 +682,34 @@ async fn provider_membership(
         return StatusCode::NOT_FOUND.into_response();
     };
     Json(membership_json(persona, org_id, canonical, role)).into_response()
+}
+
+async fn provider_repository(
+    State(state): State<Arc<BrowserProviderState>>,
+    Path((owner, repository)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if authenticated_persona(&state, &headers).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if owner != "atlas" || repository != "repo" {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    Json(json!({"id": 8080, "full_name": "atlas/repo"})).into_response()
+}
+
+async fn provider_repository_branch(
+    State(state): State<Arc<BrowserProviderState>>,
+    Path((owner, repository, branch)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if authenticated_persona(&state, &headers).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if owner != "atlas" || repository != "repo" || branch != "main" {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    Json(json!({"name": "main"})).into_response()
 }
 
 fn authenticated_persona(

@@ -138,16 +138,19 @@ async fn team_browser_fixture_server() {
         membership,
         Arc::clone(&team_clock),
     ));
-    let state = Arc::new(TeamState::new(
-        db,
-        config,
-        vault,
-        authorization,
-        onboarding,
-        credentials,
-        principals,
-        team_clock,
-    ));
+    let state = Arc::new(
+        TeamState::new(
+            db,
+            config,
+            vault,
+            authorization,
+            onboarding,
+            credentials,
+            principals,
+            team_clock,
+        )
+        .with_catalog_repository_origin_for_test(provider.origin()),
+    );
     let session_delay = provider.session_delay();
     let settings_delay = provider.settings_delay();
     let app = build_router(state)

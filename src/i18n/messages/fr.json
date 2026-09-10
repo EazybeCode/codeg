@@ -1720,6 +1720,19 @@
     "selectionUnavailable": "Neev n'a pas pu confirmer ce choix. Votre sélection est conservée ; réessayez.",
     "selectionInvalid": "Cette organisation n'est plus disponible. Réessayez ou recommencez la connexion."
   },
+  "TeamWorkspace": {
+    "workspaceNavigation": "Navigation de l’espace", "openNavigation": "Ouvrir la navigation de l’espace", "closeNavigation": "Fermer la navigation de l’espace",
+    "personLabel": "Connecté en tant que", "organizationLabel": "Organisation", "projects": "Projets",
+    "new_project": "Nouveau projet", "new_folder": "Nouveau dossier", "new_working_directory": "Nouveau répertoire de travail", "new_chat": "Nouveau chat", "editDetails": "Modifier les détails",
+    "name_project": "Nom du projet", "name_folder": "Nom du dossier", "name_working_directory": "Nom du répertoire de travail",
+    "create_project": "Créer le projet", "create_folder": "Créer le dossier", "create_working_directory": "Créer le répertoire", "create_chat": "Créer le chat", "chatTitle": "Titre du chat",
+    "repository": "Dépôt", "startingBranch": "Branche de départ", "repositoryHint": "Saisissez owner/repository et une branche. L’accès GitHub est vérifié avant l’enregistrement.", "associateRepository": "Associer un dépôt", "nearestDefault": "Dépôt par défaut le plus proche", "overrideRepository": "Utiliser un autre dépôt ou une autre branche",
+    "privateBeforeCreate": "Les nouveaux chats restent privés jusqu’à ce que vous les partagiez.", "editSnapshotHint": "Les chats existants conservent leur dépôt et leur branche enregistrés.", "saveDetails": "Enregistrer les détails",
+    "share": "Partager", "audience": "Audience de la conversation", "visibility_private": "Privé pour vous", "visibility_organization": "Organisation", "shareHistoryDisclosure": "Le partage donne à votre organisation accès à tout l’historique de la conversation.", "githubAudienceDisclosure": "L’accès au dépôt GitHub est vérifié séparément pour chaque personne.",
+    "loading": "Chargement de l’espace…", "loadingMore": "Chargement…", "loadMore": "Charger plus de chats", "loadError": "Impossible de charger l’espace. Aucun contenu d’une autre session n’est affiché.", "mutationError": "La modification n’a pas été enregistrée. Vos saisies sont conservées ; réessayez.",
+    "retry": "Réessayer", "cancel": "Annuler", "creating": "Création…", "saving": "Enregistrement…", "empty": "Commencez par un projet, puis ajoutez des dossiers, répertoires de travail et chats liés à un dépôt.", "nodeEmpty": "Ajoutez ici un dossier, un répertoire de travail ou un chat privé.", "untitledChat": "Chat sans titre", "welcome": "Espace {organization}", "welcomeHint": "Organisez le travail en projets et dossiers imbriqués. Les chats restent privés jusqu’à leur partage par leur créateur.",
+    "runtimeDisabledTitle": "L’exécution du chat est désactivée", "runtimeDisabledDescription": "Ce catalogue ne stocke que les métadonnées. Les messages et agents seront disponibles après l’intégration séparée des tâches.", "expand": "Développer {name}", "collapse": "Réduire {name}", "actions": "Actions pour {name}", "settings": "Paramètres", "signOut": "Se déconnecter", "logoutFailed": "La déconnexion n’a pas pu être confirmée."
+  },
   "TeamShell": {
     "personLabel": "Connecté en tant que",
     "organizationLabel": "Organisation",

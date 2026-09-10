@@ -1720,6 +1720,19 @@
     "selectionUnavailable": "Neev はこの選択を確認できませんでした。選択は保持されています。再試行してください。",
     "selectionInvalid": "その組織は利用できなくなりました。再試行するか、サインインをやり直してください。"
   },
+  "TeamWorkspace": {
+    "workspaceNavigation": "ワークスペースナビゲーション", "openNavigation": "ワークスペースナビゲーションを開く", "closeNavigation": "ワークスペースナビゲーションを閉じる",
+    "personLabel": "ログイン中", "organizationLabel": "組織", "projects": "プロジェクト",
+    "new_project": "新しいプロジェクト", "new_folder": "新しいフォルダー", "new_working_directory": "新しい作業ディレクトリ", "new_chat": "新しいチャット", "editDetails": "詳細を編集",
+    "name_project": "プロジェクト名", "name_folder": "フォルダー名", "name_working_directory": "作業ディレクトリ名",
+    "create_project": "プロジェクトを作成", "create_folder": "フォルダーを作成", "create_working_directory": "作業ディレクトリを作成", "create_chat": "チャットを作成", "chatTitle": "チャットのタイトル",
+    "repository": "リポジトリ", "startingBranch": "開始ブランチ", "repositoryHint": "owner/repository とブランチを入力してください。保存前に GitHub アクセスを確認します。", "associateRepository": "リポジトリを関連付ける", "nearestDefault": "最も近い既定のリポジトリ", "overrideRepository": "別のリポジトリまたはブランチを使用",
+    "privateBeforeCreate": "新しいチャットは、後で共有するまで自分だけに公開されます。", "editSnapshotHint": "既存のチャットは保存済みのリポジトリと開始ブランチを維持します。", "saveDetails": "詳細を保存",
+    "share": "共有", "audience": "会話の公開範囲", "visibility_private": "自分のみ", "visibility_organization": "組織", "shareHistoryDisclosure": "共有すると、組織は会話履歴全体にアクセスできます。", "githubAudienceDisclosure": "GitHub リポジトリへのアクセスはユーザーごとに個別に確認されます。",
+    "loading": "ワークスペースを読み込み中…", "loadingMore": "さらに読み込み中…", "loadMore": "チャットをさらに読み込む", "loadError": "ワークスペースを読み込めませんでした。別のセッションの内容は表示されません。", "mutationError": "変更は保存されませんでした。入力内容は保持されています。もう一度お試しください。",
+    "retry": "再試行", "cancel": "キャンセル", "creating": "作成中…", "saving": "保存中…", "empty": "プロジェクトを作成し、フォルダー、作業ディレクトリ、リポジトリ連携チャットを追加してください。", "nodeEmpty": "ここにフォルダー、作業ディレクトリ、または非公開チャットを追加します。", "untitledChat": "無題のチャット", "welcome": "{organization} ワークスペース", "welcomeHint": "プロジェクトと入れ子のフォルダーでチーム作業を整理します。チャットは作成者が共有するまで非公開です。",
+    "runtimeDisabledTitle": "チャットランタイムは無効です", "runtimeDisabledDescription": "このカタログはチャットのメタデータのみを保存します。メッセージ送信とエージェント実行は別のジョブ統合後に利用できます。", "expand": "{name} を展開", "collapse": "{name} を折りたたむ", "actions": "{name} の操作", "settings": "設定", "signOut": "サインアウト", "logoutFailed": "サインアウトを確認できませんでした。"
+  },
   "TeamShell": {
     "personLabel": "サインイン中",
     "organizationLabel": "組織",

@@ -1720,6 +1720,19 @@
     "selectionUnavailable": "O Neev não conseguiu confirmar essa escolha. Sua seleção foi mantida; tente novamente.",
     "selectionInvalid": "Essa organização não está mais disponível. Tente novamente ou reinicie o login."
   },
+  "TeamWorkspace": {
+    "workspaceNavigation": "Navegação do espaço", "openNavigation": "Abrir navegação do espaço", "closeNavigation": "Fechar navegação do espaço",
+    "personLabel": "Conectado como", "organizationLabel": "Organização", "projects": "Projetos",
+    "new_project": "Novo projeto", "new_folder": "Nova pasta", "new_working_directory": "Novo diretório de trabalho", "new_chat": "Novo chat", "editDetails": "Editar detalhes",
+    "name_project": "Nome do projeto", "name_folder": "Nome da pasta", "name_working_directory": "Nome do diretório de trabalho",
+    "create_project": "Criar projeto", "create_folder": "Criar pasta", "create_working_directory": "Criar diretório", "create_chat": "Criar chat", "chatTitle": "Título do chat",
+    "repository": "Repositório", "startingBranch": "Branch inicial", "repositoryHint": "Informe owner/repository e uma branch. O acesso ao GitHub é verificado antes de salvar.", "associateRepository": "Associar um repositório", "nearestDefault": "Repositório padrão mais próximo", "overrideRepository": "Usar outro repositório ou branch",
+    "privateBeforeCreate": "Novos chats são privados até você compartilhá-los.", "editSnapshotHint": "Chats existentes mantêm o repositório e a branch inicial salvos.", "saveDetails": "Salvar detalhes",
+    "share": "Compartilhar", "audience": "Público da conversa", "visibility_private": "Privado para você", "visibility_organization": "Organização", "shareHistoryDisclosure": "Compartilhar dá à organização acesso a todo o histórico da conversa.", "githubAudienceDisclosure": "O acesso ao repositório do GitHub é verificado separadamente para cada pessoa.",
+    "loading": "Carregando espaço…", "loadingMore": "Carregando mais…", "loadMore": "Carregar mais chats", "loadError": "Não foi possível carregar o espaço. Nenhum conteúdo de outra sessão é exibido.", "mutationError": "A alteração não foi salva. Seus valores continuam aqui; tente novamente.",
+    "retry": "Tentar novamente", "cancel": "Cancelar", "creating": "Criando…", "saving": "Salvando…", "empty": "Comece com um projeto e adicione pastas, diretórios e chats vinculados a repositórios.", "nodeEmpty": "Adicione aqui uma pasta, diretório de trabalho ou chat privado.", "untitledChat": "Chat sem título", "welcome": "Espaço de {organization}", "welcomeHint": "Organize o trabalho em projetos e pastas aninhadas. Chats continuam privados até o criador compartilhar.",
+    "runtimeDisabledTitle": "A execução do chat está desativada", "runtimeDisabledDescription": "Este catálogo armazena apenas metadados. Mensagens e agentes virão após a integração separada de jobs.", "expand": "Expandir {name}", "collapse": "Recolher {name}", "actions": "Ações para {name}", "settings": "Configurações", "signOut": "Sair", "logoutFailed": "Não foi possível confirmar a saída."
+  },
   "TeamShell": {
     "personLabel": "Conectado como",
     "organizationLabel": "Organização",

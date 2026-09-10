@@ -1720,6 +1720,19 @@
     "selectionUnavailable": "Neev no pudo confirmar esa opción. Tu selección se conserva; inténtalo de nuevo.",
     "selectionInvalid": "Esa organización ya no está disponible. Reintenta o reinicia el inicio de sesión."
   },
+  "TeamWorkspace": {
+    "workspaceNavigation": "Navegación del espacio", "openNavigation": "Abrir navegación del espacio", "closeNavigation": "Cerrar navegación del espacio",
+    "personLabel": "Sesión iniciada como", "organizationLabel": "Organización", "projects": "Proyectos",
+    "new_project": "Nuevo proyecto", "new_folder": "Nueva carpeta", "new_working_directory": "Nuevo directorio de trabajo", "new_chat": "Nuevo chat", "editDetails": "Editar detalles",
+    "name_project": "Nombre del proyecto", "name_folder": "Nombre de la carpeta", "name_working_directory": "Nombre del directorio de trabajo",
+    "create_project": "Crear proyecto", "create_folder": "Crear carpeta", "create_working_directory": "Crear directorio de trabajo", "create_chat": "Crear chat", "chatTitle": "Título del chat",
+    "repository": "Repositorio", "startingBranch": "Rama inicial", "repositoryHint": "Introduce owner/repository y una rama. El acceso a GitHub se verifica antes de guardar.", "associateRepository": "Asociar un repositorio", "nearestDefault": "Repositorio predeterminado más cercano", "overrideRepository": "Usar otro repositorio o rama",
+    "privateBeforeCreate": "Los chats nuevos son privados hasta que decidas compartirlos.", "editSnapshotHint": "Los chats existentes conservan su repositorio y rama inicial guardados.", "saveDetails": "Guardar detalles",
+    "share": "Compartir", "audience": "Audiencia de la conversación", "visibility_private": "Privado para ti", "visibility_organization": "Organización", "shareHistoryDisclosure": "Al compartir, tu organización accede a todo el historial de la conversación.", "githubAudienceDisclosure": "El acceso al repositorio de GitHub se comprueba por separado para cada persona.",
+    "loading": "Cargando espacio…", "loadingMore": "Cargando más…", "loadMore": "Cargar más chats", "loadError": "No se pudo cargar el espacio. No se muestra contenido de otra sesión.", "mutationError": "No se guardó el cambio. Tus datos siguen aquí; inténtalo de nuevo.",
+    "retry": "Reintentar", "cancel": "Cancelar", "creating": "Creando…", "saving": "Guardando…", "empty": "Empieza con un proyecto y añade carpetas, directorios de trabajo y chats con repositorio.", "nodeEmpty": "Añade aquí una carpeta, un directorio de trabajo o un chat privado.", "untitledChat": "Chat sin título", "welcome": "Espacio de {organization}", "welcomeHint": "Organiza el trabajo del equipo en proyectos y carpetas anidadas. Los chats siguen privados hasta que su creador los comparte.",
+    "runtimeDisabledTitle": "El runtime del chat está desactivado", "runtimeDisabledDescription": "Este catálogo solo guarda metadatos del chat. Los mensajes y agentes estarán disponibles tras integrar los trabajos.", "expand": "Expandir {name}", "collapse": "Contraer {name}", "actions": "Acciones de {name}", "settings": "Configuración", "signOut": "Cerrar sesión", "logoutFailed": "No se pudo confirmar el cierre de sesión."
+  },
   "TeamShell": {
     "personLabel": "Sesión iniciada como",
     "organizationLabel": "Organización",
