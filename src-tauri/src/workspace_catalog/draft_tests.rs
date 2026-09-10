@@ -420,6 +420,11 @@ async fn catalog_draft_retry_keeps_original_snapshot_after_default_and_parent_ch
     let first = create_draft(&db.conn, &scope, &access, input.clone())
         .await
         .unwrap();
+    let persisted_before_retry = workspace_chat_draft::Entity::find_by_id(first.id)
+        .one(&db.conn)
+        .await
+        .unwrap()
+        .unwrap();
 
     update_node(
         &db.conn,
@@ -452,9 +457,19 @@ async fn catalog_draft_retry_keeps_original_snapshot_after_default_and_parent_ch
     .unwrap();
 
     let retried = create_draft(&db.conn, &scope, &access, input).await.unwrap();
+    let persisted_after_retry = workspace_chat_draft::Entity::find_by_id(first.id)
+        .one(&db.conn)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(retried, first);
     assert_eq!(retried.repository_id, original.id);
     assert_eq!(retried.starting_branch, "main");
+    assert_eq!(
+        persisted_after_retry.request_fingerprint,
+        persisted_before_retry.request_fingerprint
+    );
+    assert_eq!(persisted_after_retry.request_id, persisted_before_retry.request_id);
     let calls = access.calls.lock().unwrap();
     assert_eq!(calls.last().unwrap().1, "acme/original");
     assert_eq!(calls.last().unwrap().2, "main");
@@ -549,6 +564,13 @@ async fn catalog_draft_equal_concurrent_retries_create_one_row_and_conflicts_rej
     let left = left.unwrap();
     let right = right.unwrap();
     assert_eq!(left, right);
+    let persisted_before_conflict = workspace_chat_draft::Entity::find_by_id(left.id)
+        .one(&db.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted_before_conflict.creation_fingerprint_version, 1);
+    assert_eq!(persisted_before_conflict.creation_visibility, "private");
     assert_eq!(
         workspace_chat_draft::Entity::find()
             .count(&db.conn)
@@ -569,6 +591,22 @@ async fn catalog_draft_equal_concurrent_retries_create_one_row_and_conflicts_rej
         )
         .await,
         Err(CatalogError::Conflict)
+    );
+    let persisted_after_conflict = workspace_chat_draft::Entity::find_by_id(left.id)
+        .one(&db.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted_after_conflict.request_fingerprint,
+        persisted_before_conflict.request_fingerprint
+    );
+    assert_eq!(
+        workspace_chat_draft::Entity::find()
+            .count(&db.conn)
+            .await
+            .unwrap(),
+        1
     );
 }
 

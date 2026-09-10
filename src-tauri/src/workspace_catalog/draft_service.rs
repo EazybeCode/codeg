@@ -3,12 +3,12 @@ use sea_orm::{
     ActiveModelTrait, ActiveValue::NotSet, ColumnTrait, ConnectionTrait, DatabaseConnection,
     EntityTrait, QueryFilter, QueryOrder, Set,
 };
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::db::entities::{workspace_chat_draft, workspace_node, workspace_repository};
 
 use super::repository_access::validate_repository_full_name;
+use super::request_fingerprint::{fingerprint, CreationAudience, FingerprintVersion};
 use super::service::{begin_scoped_write, to_workspace_node, verify_repository, verify_scope};
 use super::{
     resolve_default, validate_branch, CatalogError, CreateDraftInput, RepositoryAccess,
@@ -42,11 +42,14 @@ fn normalize_input(input: CreateDraftInput) -> Result<NormalizedDraftInput, Cata
     if let Some(repository_override) = &input.repository_override {
         validate_branch(&repository_override.starting_branch)?;
     }
-    let request_fingerprint = request_fingerprint(
+    let request_fingerprint = fingerprint(
+        FingerprintVersion::LegacyV1,
         input.node_id,
         title.as_deref(),
         input.repository_override.as_ref(),
-    );
+        CreationAudience::Private,
+    )
+    .map_err(|_| CatalogError::Conflict)?;
     Ok(NormalizedDraftInput {
         node_id: input.node_id,
         repository_override: input.repository_override,
@@ -54,36 +57,6 @@ fn normalize_input(input: CreateDraftInput) -> Result<NormalizedDraftInput, Cata
         request_id,
         request_fingerprint,
     })
-}
-
-fn request_fingerprint(
-    node_id: i32,
-    title: Option<&str>,
-    repository_override: Option<&RepositoryDefault>,
-) -> String {
-    fn add_bytes(hasher: &mut Sha256, bytes: &[u8]) {
-        hasher.update((bytes.len() as u64).to_be_bytes());
-        hasher.update(bytes);
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(node_id.to_be_bytes());
-    match title {
-        Some(title) => {
-            hasher.update([1]);
-            add_bytes(&mut hasher, title.as_bytes());
-        }
-        None => hasher.update([0]),
-    }
-    match repository_override {
-        Some(repository_override) => {
-            hasher.update([1]);
-            hasher.update(repository_override.repository_id.to_be_bytes());
-            add_bytes(&mut hasher, repository_override.starting_branch.as_bytes());
-        }
-        None => hasher.update([0]),
-    }
-    format!("{:x}", hasher.finalize())
 }
 
 pub(crate) fn to_workspace_chat_draft(model: workspace_chat_draft::Model) -> WorkspaceChatDraft {
