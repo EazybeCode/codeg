@@ -54,6 +54,9 @@ pub(crate) mod m20260908_000001_team_access;
 pub(crate) mod m20260908_000002_team_credentials;
 pub(crate) mod m20260909_000001_personal_agent_connections;
 pub(crate) mod m20260910_000001_chat_privacy;
+pub(crate) mod m20260910_000002_team_catalog_admission;
+#[cfg(test)]
+mod team_catalog_tests;
 pub struct Migrator;
 
 #[cfg(test)]
@@ -126,6 +129,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260908_000002_team_credentials::Migration),
             Box::new(m20260909_000001_personal_agent_connections::Migration),
             Box::new(m20260910_000001_chat_privacy::Migration),
+            Box::new(m20260910_000002_team_catalog_admission::Migration),
         ]
     }
 }

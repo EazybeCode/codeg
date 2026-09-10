@@ -25,6 +25,7 @@ pub mod team_github_credential;
 pub mod team_agent_connection;
 pub mod team_agent_attempt;
 pub mod team_agent_operation;
+pub mod team_catalog_admission;
 pub mod opened_tab;
 pub mod prelude;
 pub mod quick_message;

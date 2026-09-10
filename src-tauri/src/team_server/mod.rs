@@ -41,3 +41,5 @@ mod test_server;
 
 #[cfg(test)]
 mod browser_fixture;
+
+mod catalog;

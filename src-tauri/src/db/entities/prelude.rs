@@ -22,6 +22,7 @@ pub use super::session::Entity as Session;
 pub use super::team_github_credential::Entity as TeamGithubCredential;
 pub use super::team_oauth_attempt::Entity as TeamOauthAttempt;
 pub use super::team_pending_onboarding::Entity as TeamPendingOnboarding;
+pub use super::team_catalog_admission::Entity as TeamCatalogAdmission;
 pub use super::user::Entity as User;
 pub use super::quick_message::Entity as QuickMessage;
 pub use super::token_usage_sync::Entity as TokenUsageSync;

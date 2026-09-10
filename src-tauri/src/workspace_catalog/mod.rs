@@ -1,5 +1,5 @@
 mod draft_service;
-mod request_fingerprint;
+pub(crate) mod request_fingerprint;
 mod resolve;
 mod repository_access;
 mod service;
