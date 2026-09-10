@@ -7,7 +7,10 @@ use crate::neev::{
 use sea_orm::{ConnectionTrait, QueryResult, Statement};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 #[derive(Default)]
@@ -17,6 +20,8 @@ struct MockIssuerState {
     token_response: Mutex<serde_json::Value>,
     paths: Mutex<Vec<String>>,
     token_forms: Mutex<Vec<HashMap<String, String>>>,
+    fail_discovery: AtomicBool,
+    token_barriers: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
 }
 
 struct MockIssuer {
@@ -41,6 +46,9 @@ impl MockIssuer {
                 .lock()
                 .unwrap()
                 .push("/.well-known/openid-configuration".into());
+            if state.fail_discovery.load(Ordering::SeqCst) {
+                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
             let base = state.base_url.lock().unwrap().clone();
             Json(serde_json::json!({
                 "issuer":"https://accounts.google.com",
@@ -51,6 +59,7 @@ impl MockIssuer {
                 "id_token_signing_alg_values_supported":["RS256"],
                 "code_challenge_methods_supported":["S256"]
             }))
+            .into_response()
         }
         async fn jwks_handler(State(state): State<Arc<MockIssuerState>>) -> impl IntoResponse {
             state.paths.lock().unwrap().push("/jwks".into());
@@ -62,6 +71,11 @@ impl MockIssuer {
         ) -> impl IntoResponse {
             state.paths.lock().unwrap().push("/token".into());
             state.token_forms.lock().unwrap().push(form);
+            let barriers = state.token_barriers.lock().unwrap().clone();
+            if let Some((entered, release)) = barriers {
+                entered.wait().await;
+                release.wait().await;
+            }
             Json(state.token_response.lock().unwrap().clone())
         }
         async fn unexpected(
@@ -131,10 +145,7 @@ async fn google_protocol_uses_discovery_pkce_minimal_scopes_and_no_roster_calls(
         &issuer.base_url,
     )
     .unwrap();
-    let prepared = google
-        .authorization("n1.oauth.test-state", 1_700_000_000)
-        .await
-        .unwrap();
+    let prepared = google.authorization("n1.oauth.test-state").unwrap();
     let authorization = url::Url::parse(&prepared.url).unwrap();
     let query: HashMap<_, _> = authorization.query_pairs().into_owned().collect();
     assert_eq!(authorization.path(), "/authorize");
@@ -245,7 +256,7 @@ async fn google_http_login_claims_once_and_redirects_without_leaking_provider_qu
 
     let callback = server
         .get(&format!(
-            "/auth/google/callback?state={}&code=provider-code",
+            "/auth/google/callback?state={}&code=provider-code&scope=openid%20email%20profile&authuser=0&hd=example.test&prompt=consent",
             urlencoding::encode(&callback_state)
         ))
         .add_header(axum::http::header::COOKIE, &cookies)
@@ -270,6 +281,33 @@ async fn google_http_login_claims_once_and_redirects_without_leaking_provider_qu
         .add_header(axum::http::header::COOKIE, &cookies)
         .await
         .assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn oauth_begin_reserves_browser_quota_without_provider_traffic() {
+    let database = test_support::database().await;
+    let browser = secrets::random_token(secrets::TokenPurpose::Browser).unwrap();
+    let (service, issuer) = oauth_service_fixture(database.clone(), 1_700_000_000).await;
+    issuer.state.fail_discovery.store(true, Ordering::SeqCst);
+
+    for _ in 0..5 {
+        service
+            .begin(Provider::Google, SignInIntent::Login, &browser)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        service
+            .begin(Provider::Google, SignInIntent::Login, &browser)
+            .await
+            .err(),
+        Some(AuthError::Limited)
+    );
+    assert!(issuer.state.paths.lock().unwrap().is_empty());
+    assert_eq!(
+        test_support::count(&database, "neev_oauth_attempts").await,
+        5
+    );
 }
 
 #[tokio::test]
@@ -567,72 +605,123 @@ async fn provider_denial_claims_state_and_matching_email_never_merges_accounts()
 }
 
 #[tokio::test]
-async fn oauth_link_denies_membership_changed_during_provider_exchange_gap() {
-    let database = test_support::database().await;
-    let user = test_support::native_account(&database, "existing-subject", "support@neev.so").await;
-    let (org, _) = test_support::organization(&database, user, "admin").await;
-    let identity_secrets = session::issue_identity(&database, user, 1_700_000_000)
-        .await
-        .unwrap();
-    let identity_context = session::identity(&database, &identity_secrets.session, 1_700_000_001)
-        .await
-        .unwrap();
-    let scoped = session::select_organization(&database, &identity_context, org, 1_700_000_002)
-        .await
-        .unwrap();
-    let context = session::identity(&database, &scoped.session, 1_700_000_003)
-        .await
-        .unwrap();
-    let browser = secrets::random_token(secrets::TokenPurpose::Browser).unwrap();
-    let (service, issuer) = oauth_service_fixture(database.clone(), 1_700_000_004).await;
-    let url = service
-        .begin(
-            Provider::Google,
-            SignInIntent::Link {
-                user_id: context.user_id,
-                session_id: context.session_id,
-                auth_revision: context.auth_revision,
-            },
-            &browser,
-        )
-        .await
-        .unwrap();
-    let values = authorization_values(&url);
-    let (token, _) =
-        test_support::valid_google_token(&values["nonce"], "google-client", 1_700_000_004);
-    *issuer.state.token_response.lock().unwrap() = serde_json::json!({
-        "access_token":"discard",
-        "token_type":"Bearer",
-        "id_token":token
-    });
-    test_support::execute(
-        &database,
-        "UPDATE neev_memberships SET active=false,revision=revision+1 WHERE org_id=$1 AND user_id=$2",
-        vec![org.into(), user.into()],
-    )
-    .await;
-    assert_eq!(
-        service
-            .complete(
+#[ignore = "requires explicit isolated PostgreSQL"]
+async fn postgres_oauth_link_rechecks_mutations_committed_while_token_exchange_waits() {
+    use sea_orm::{ConnectOptions, Database};
+    use std::time::Duration;
+
+    for mutation in ["membership", "session"] {
+        let (database, admin, schema) = test_support::postgres_database().await;
+        let user =
+            test_support::native_account(&database, "existing-subject", "support@neev.so").await;
+        let identity_secrets = session::issue_identity(&database, user, 1_700_000_000)
+            .await
+            .unwrap();
+        let identity_context =
+            session::identity(&database, &identity_secrets.session, 1_700_000_001)
+                .await
+                .unwrap();
+        let (context, update, values, expected) = if mutation == "membership" {
+            let (org, _) = test_support::organization(&database, user, "admin").await;
+            let scoped =
+                session::select_organization(&database, &identity_context, org, 1_700_000_002)
+                    .await
+                    .unwrap();
+            let context = session::identity(&database, &scoped.session, 1_700_000_003)
+                .await
+                .unwrap();
+            (
+                context,
+                "UPDATE neev_memberships SET active=false,revision=revision+1 WHERE org_id=$1 AND user_id=$2",
+                vec![org.into(), user.into()],
+                AuthError::Forbidden,
+            )
+        } else {
+            let session_id = identity_context.session_id.clone();
+            (
+                identity_context,
+                "UPDATE neev_sessions SET revoked_at=$1 WHERE id=$2",
+                vec![1_700_000_004_i64.into(), session_id.into()],
+                AuthError::Unauthorized,
+            )
+        };
+        let browser = secrets::random_token(secrets::TokenPurpose::Browser).unwrap();
+        let (service, issuer) = oauth_service_fixture(database.clone(), 1_700_000_004).await;
+        let url = service
+            .begin(
                 Provider::Google,
-                &values["state"],
-                oauth::CallbackResult::Code("code".into()),
+                SignInIntent::Link {
+                    user_id: context.user_id,
+                    session_id: context.session_id,
+                    auth_revision: context.auth_revision,
+                },
                 &browser,
             )
             .await
-            .err(),
-        Some(AuthError::Forbidden)
-    );
-    assert_eq!(test_support::count(&database, "neev_identities").await, 1);
-    assert!(
-        session::organization(&database, &scoped.session, 1_700_000_004)
+            .unwrap();
+        let authorization = authorization_values(&url);
+        let (token, _) = test_support::valid_google_token(
+            &authorization["nonce"],
+            "google-client",
+            1_700_000_004,
+        );
+        *issuer.state.token_response.lock().unwrap() = serde_json::json!({
+            "access_token":"discard",
+            "token_type":"Bearer",
+            "id_token":token
+        });
+        let entered = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        *issuer.state.token_barriers.lock().unwrap() = Some((entered.clone(), release.clone()));
+
+        let completing = {
+            let service = service.clone();
+            let state = authorization["state"].clone();
+            let browser = browser.clone();
+            tokio::spawn(async move {
+                service
+                    .complete(
+                        Provider::Google,
+                        &state,
+                        oauth::CallbackResult::Code("code".into()),
+                        &browser,
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(3), entered.wait())
             .await
-            .is_err()
-    );
+            .expect("token endpoint should become observably blocked");
+
+        let mut options = ConnectOptions::new(
+            std::env::var("NEEV_TEST_DATABASE_URL")
+                .expect("isolated NEEV_TEST_DATABASE_URL required"),
+        );
+        options
+            .max_connections(1)
+            .sqlx_logging(false)
+            .set_schema_search_path(&schema);
+        let writer = Database::connect(options).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let tx = crate::neev::db::begin(&writer).await.unwrap();
+            crate::neev::db::execute(&tx, update, values).await.unwrap();
+            tx.commit().await.unwrap();
+        })
+        .await
+        .expect("authorization mutation must commit while provider response is blocked");
+        release.wait().await;
+
+        assert_eq!(completing.await.unwrap().err(), Some(expected));
+        assert_eq!(test_support::count(&database, "neev_identities").await, 1);
+        writer.close().await.unwrap();
+        drop(service);
+        drop(issuer);
+        test_support::cleanup_postgres(database, admin, schema).await;
+    }
 }
 
 #[tokio::test]
-async fn oauth_link_preserves_session_and_rejects_revocation_during_network_gap() {
+async fn oauth_link_preserves_session_and_rejects_prior_revocation() {
     for revoke in [false, true] {
         let database = test_support::database().await;
         let user =

@@ -266,6 +266,10 @@ fn callback_query(raw: Option<&str>) -> Result<(String, oauth::CallbackResult), 
     let mut denied = None;
     let mut error_description = None;
     let mut error_uri = None;
+    let mut scope = None;
+    let mut authuser = None;
+    let mut hosted_domain = None;
+    let mut prompt = None;
     for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
         match key.as_ref() {
             "state" if state.is_none() && value.len() <= 96 => state = Some(value.into_owned()),
@@ -277,6 +281,12 @@ fn callback_query(raw: Option<&str>) -> Result<(String, oauth::CallbackResult), 
                 error_description = Some(())
             }
             "error_uri" if error_uri.is_none() && value.len() <= 2048 => error_uri = Some(()),
+            "scope" if scope.is_none() && bounded_metadata(&value, 1024) => scope = Some(()),
+            "authuser" if authuser.is_none() && bounded_metadata(&value, 32) => authuser = Some(()),
+            "hd" if hosted_domain.is_none() && bounded_metadata(&value, 255) => {
+                hosted_domain = Some(())
+            }
+            "prompt" if prompt.is_none() && bounded_metadata(&value, 128) => prompt = Some(()),
             _ => return Err(ApiError::Invalid),
         }
     }
@@ -288,6 +298,10 @@ fn callback_query(raw: Option<&str>) -> Result<(String, oauth::CallbackResult), 
         (None, Some(())) => Ok((state, oauth::CallbackResult::Denied)),
         _ => Err(ApiError::Invalid),
     }
+}
+
+fn bounded_metadata(value: &str, limit: usize) -> bool {
+    !value.is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
 }
 
 #[cfg(test)]

@@ -117,7 +117,7 @@ impl Service {
         let google = self.google.as_ref().ok_or(AuthError::Unavailable)?;
         let state = secrets::random_token(TokenPurpose::OAuth)?;
         let now = self.clock.now_unix();
-        let prepared = google.authorization(&state, now).await?;
+        let prepared = google.authorization(&state)?;
         insert_attempt(
             &self.database,
             &self.encryption_key,

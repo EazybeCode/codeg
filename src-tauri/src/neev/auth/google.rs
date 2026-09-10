@@ -127,12 +127,7 @@ impl Google {
         )
     }
 
-    pub(crate) async fn authorization(
-        &self,
-        state: &str,
-        now: i64,
-    ) -> Result<PreparedAuthorization, AuthError> {
-        self.provider(false, now).await?;
+    pub(crate) fn authorization(&self, state: &str) -> Result<PreparedAuthorization, AuthError> {
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
         let nonce = Nonce::new_random();
         let mut url =
