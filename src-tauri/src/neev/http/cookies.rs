@@ -112,6 +112,20 @@ pub(crate) fn clear_browser_state(headers: &mut HeaderMap, names: CookieNames) {
     }
 }
 
+pub(crate) fn refresh_preauth(
+    headers: &mut HeaderMap,
+    names: CookieNames,
+    browser: &str,
+    csrf: &str,
+) {
+    append(headers, names.browser, browser, 600, names.secure);
+    append(headers, names.preauth_csrf, csrf, 600, names.secure);
+}
+
+pub(crate) fn refresh_browser(headers: &mut HeaderMap, names: CookieNames, browser: &str) {
+    append(headers, names.browser, browser, 600, names.secure);
+}
+
 pub(crate) fn ensure_preauth(
     request: &HeaderMap,
     response: &mut HeaderMap,

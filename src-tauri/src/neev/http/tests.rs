@@ -66,7 +66,7 @@ async fn capabilities_are_native_disabled_and_old_routes_do_not_exist() {
         .await
         .assert_status_not_found();
     let callback = server.get("/auth/google/callback?code=ignored").await;
-    callback.assert_status_not_found();
+    callback.assert_status_bad_request();
     assert!(callback
         .headers()
         .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
@@ -85,9 +85,9 @@ async fn allowlisted_confirmation_is_no_store_without_a_spa_fallback() {
     let clock = std::sync::Arc::new(h::TestClock::new(1000));
     let mut config = h::preview_config();
     config.static_root = directory.path().to_owned();
-    let state = std::sync::Arc::new(crate::neev::startup::ServerState::new(
-        database, config, clock,
-    ));
+    let state = std::sync::Arc::new(
+        crate::neev::startup::ServerState::new(database, config, clock).unwrap(),
+    );
     let server = axum_test::TestServer::new(crate::neev::http::router(state)).unwrap();
     let response = server.get("/auth/email/confirm").await;
     response.assert_status_ok();

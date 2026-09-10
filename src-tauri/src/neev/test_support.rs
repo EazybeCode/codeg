@@ -1,4 +1,13 @@
 use super::types::{Provider, VerifiedIdentity};
+use chrono::{TimeZone, Utc};
+use openidconnect::{
+    core::{
+        CoreIdToken, CoreIdTokenClaims, CoreJsonWebKeySet, CoreJwsSigningAlgorithm,
+        CoreRsaPrivateSigningKey,
+    },
+    Audience, EndUserEmail, IssuerUrl, JsonWebKeyId, Nonce, PrivateSigningKey, StandardClaims,
+    SubjectIdentifier,
+};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement, Value};
 use std::sync::{
     atomic::{AtomicI64, Ordering},
@@ -51,6 +60,141 @@ pub(super) fn google(subject: &str, email: &str) -> VerifiedIdentity {
         display_name: "Test supporter".into(),
         avatar_url: None,
     }
+}
+
+const GOOGLE_TEST_RSA_KEY: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+MIIEpgIBAAKCAQEA3rfpPUJ+4mv7yjLZjLxihkVxtajKtPbYgDOlvRHsun5LwwBc
+3WbPrXkhO6Vk7ibDAJS0M93hoESyt3qkrDEu94+S6k6EEyUYNUyV7LtI2RSfjgtf
+P1jfGQkg0AqaOVxgzOaRieoejFRtDqu17tU+YrPqaPH9tqD9SxPBrdtCsflKUT+R
+BR/Hoh8I/b52bj/RTCNi90sE8X/FwfuuhE9+XlbT6A4lxZiArnKHBT//nEE9mx4I
+4GEkB3jdOBY9/gXT2T2kf9Lxo3KFcC9PbWLDmaQ7Db1P7wFRzDGtOwk0HZtKzBal
+wYXSMM0GFlAc73zH+cBcRmy7tKxJzJQIFNDhMwIDAQABAoIBAQCdcVNvm+dItt9b
+NBE4fSAFHWhh6/3Iacvo7RnYC6jWuVtjcYk0dm6Pilak7Knp9PrbGUQ+ejb67jWM
+oSVyGJ7EIPnRq0mQoyN24joGDOtVkk+swXtGs9OaxiotB6G4tQY1MzVlUlzgBPrH
+aTmGqbadXeRy5cbeaPZGMaQz/BEs7+Uvm6e+iWhG7iugzW6AUOTOr9KpDCiKPb1T
+7D49lPx3uumvm4FHQ6ZCzmU86VBYTbPN/+BkNuktLSbJIpLtJwnqV8ki9fWzrgL6
+tvsrUcbhp36SjovhK9xR6pKnpVVJuA4u2AaeUhjnUz/S/Eh+Ul4HfVr4AE7a/PqV
+DrOeys65AoGBAPA7s6mHCeQH09wGylsh137Zu8MAu6dk/UAOlRgkKtWJRI2sGPIb
+05uWtAGT6NvucP8Ky4J83uLKOw9OUroGlCmfKGYvvC7h2iBo9CqK46hr1R90jewl
+y15LNcJ5GJeeU4fFOQuE0AWhCzPIGKMgtdwuoaf2trkwbgTnVcaa6fTVAoGBAO1V
+7suz5kDJQ9+EQwi0tVgUdBKEXfIkyROlkRcUv9Tzd1TecJuaUGveFHe7VmRZKkB6
+MCzREKwHQlMXhotsGOCvoJOkXcX6ze3yCkrDAYAdTTsHO/a/vFEcQbhRXAJV4qt0
+ary+Qv2Mz6KKRPYdsLYbR3LDenL6vLi2wQGvT6HnAoGBAMU5fmpzft9CveApgwAG
+bJCr2MZjV6w58OAiGK1VJAVjSHC3FVPPHI7jzqxs7gOBYitAhYt/UM0IEiyitLAc
+ro7tJ5GdJvWmXhm1kJ9Mn1KqFLJaUhnJfYjQXjZmjJYNWa5hcE/QnafBaxz77Z4f
+QK6fagAnQCQRaoGEGpuOmvxxAoGBAIcoaudiufunIpoFrk8k6ikQ7NEmxIGDZWdk
+4G2uiVhylkCktKhIhwgG3s0YyKg5BxDVBN5g6Qeu0pyTRzHbC4fZPK8X6bc3j1K0
+hhvxVcdp6HN3OTTaGBpw5xRacPV7h6xwjeCS0X+nUw+TgpZObjYm7tdybydPl23x
+1ZRqDAV9AoGBALpdhBOIiZJOkDcY2i44V30LD1DwWgRpEhNyWkiK9/rvgyiGZqRO
+1JfBU8K9dfA5Rto9E5q9gosd2vQXmh3pAP/eD2etlZNOimT11rq6CrM9JIysUmTe
+Wv3mn3vHNuQ4BT5pzeeaaQawdujfHXV57pcc97az9wQ3hCfXU1oemYqo
+-----END RSA PRIVATE KEY-----"#;
+
+pub(super) fn signed_google_fixture(mutation: &str) -> super::auth::google::SignedGoogleFixture {
+    let now = 1_700_000_000;
+    let client_id = "google-client".to_owned();
+    let expected_nonce = "expected-nonce".to_owned();
+    let key = CoreRsaPrivateSigningKey::from_pem(
+        GOOGLE_TEST_RSA_KEY,
+        Some(JsonWebKeyId::new("test-key".to_owned())),
+    )
+    .unwrap();
+    let issuer = if mutation == "issuer" {
+        "https://attacker.example"
+    } else {
+        "https://accounts.google.com"
+    };
+    let audience = if mutation == "audience" {
+        "other-client"
+    } else {
+        &client_id
+    };
+    let nonce = if mutation == "nonce" {
+        "other-nonce"
+    } else {
+        &expected_nonce
+    };
+    let subject = if mutation == "subject" {
+        ""
+    } else {
+        "google-123"
+    };
+    let expiration = if mutation == "expiry" {
+        now - 1
+    } else {
+        now + 300
+    };
+    let claims = CoreIdTokenClaims::new(
+        IssuerUrl::new(issuer.to_owned()).unwrap(),
+        vec![Audience::new(audience.to_owned())],
+        Utc.timestamp_opt(expiration, 0).single().unwrap(),
+        Utc.timestamp_opt(now - 1, 0).single().unwrap(),
+        StandardClaims::new(SubjectIdentifier::new(subject.to_owned()))
+            .set_email(Some(EndUserEmail::new("support@neev.so".to_owned())))
+            .set_email_verified(Some(true)),
+        Default::default(),
+    )
+    .set_nonce(Some(Nonce::new(nonce.to_owned())));
+    let algorithm = if mutation == "algorithm" {
+        CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha384
+    } else {
+        CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256
+    };
+    let mut id_token = CoreIdToken::new(claims, &key, algorithm, None, None)
+        .unwrap()
+        .to_string();
+    if mutation == "signature" {
+        let signature_start = id_token.rfind('.').unwrap() + 1;
+        let replacement = if id_token.as_bytes()[signature_start] == b'A' {
+            "B"
+        } else {
+            "A"
+        };
+        id_token.replace_range(signature_start..signature_start + 1, replacement);
+    }
+    super::auth::google::SignedGoogleFixture {
+        jwks: CoreJsonWebKeySet::new(vec![key.as_verification_key()]),
+        id_token,
+        client_id,
+        nonce: expected_nonce,
+        now,
+    }
+}
+
+pub(super) fn valid_google_token(
+    nonce: &str,
+    client_id: &str,
+    now: i64,
+) -> (String, serde_json::Value) {
+    let key = CoreRsaPrivateSigningKey::from_pem(
+        GOOGLE_TEST_RSA_KEY,
+        Some(JsonWebKeyId::new("test-key".to_owned())),
+    )
+    .unwrap();
+    let claims = CoreIdTokenClaims::new(
+        IssuerUrl::new("https://accounts.google.com".to_owned()).unwrap(),
+        vec![Audience::new(client_id.to_owned())],
+        Utc.timestamp_opt(now + 300, 0).single().unwrap(),
+        Utc.timestamp_opt(now - 1, 0).single().unwrap(),
+        StandardClaims::new(SubjectIdentifier::new("google-123".to_owned()))
+            .set_email(Some(EndUserEmail::new("support@neev.so".to_owned())))
+            .set_email_verified(Some(true)),
+        Default::default(),
+    )
+    .set_nonce(Some(Nonce::new(nonce.to_owned())));
+    let token = CoreIdToken::new(
+        claims,
+        &key,
+        CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256,
+        None,
+        None,
+    )
+    .unwrap()
+    .to_string();
+    (
+        token,
+        serde_json::to_value(CoreJsonWebKeySet::new(vec![key.as_verification_key()])).unwrap(),
+    )
 }
 pub(super) async fn execute(db: &DatabaseConnection, sql: &str, values: Vec<Value>) {
     db.execute(Statement::from_sql_and_values(
@@ -123,11 +267,10 @@ pub(super) fn preview_config() -> super::config::Config {
 pub(super) async fn http_fixture() -> (axum_test::TestServer, DatabaseConnection, Arc<TestClock>) {
     let database = database().await;
     let clock = Arc::new(TestClock::new(1000));
-    let state = Arc::new(super::startup::ServerState::new(
-        database.clone(),
-        preview_config(),
-        clock.clone(),
-    ));
+    let state = Arc::new(
+        super::startup::ServerState::new(database.clone(), preview_config(), clock.clone())
+            .unwrap(),
+    );
     let server = axum_test::TestServer::new(super::http::router(state)).unwrap();
     (server, database, clock)
 }

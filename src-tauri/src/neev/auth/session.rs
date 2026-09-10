@@ -265,6 +265,61 @@ pub(crate) async fn recheck(
     Ok(())
 }
 
+pub(super) async fn recheck_link(
+    tx: &DatabaseTransaction,
+    user_id: UserId,
+    session_id: &str,
+    auth_revision: i64,
+    now: i64,
+) -> Result<(), AuthError> {
+    let candidate = db::one(
+        tx,
+        "SELECT id,user_id,account_revision,org_id,member_id,member_revision,org_revision,authenticated_at,expires_at,revoked_at FROM neev_sessions WHERE id=$1",
+        vec![session_id.into()],
+    )
+    .await?
+    .ok_or(AuthError::Unauthorized)?;
+    let candidate = Session::from_query_result(&candidate, "").map_err(database_error)?;
+
+    let account = lock_account(tx, user_id).await?;
+    if account.auth_revision != auth_revision {
+        return Err(AuthError::Unauthorized);
+    }
+    match (
+        candidate.org_id,
+        candidate.member_id,
+        candidate.member_revision,
+        candidate.org_revision,
+    ) {
+        (Some(org_id), Some(member_id), Some(member_revision), Some(org_revision)) => {
+            let organization = lock_organization(tx, org_id).await?;
+            let membership = lock_membership(tx, org_id, user_id).await?;
+            if organization.revision != org_revision
+                || membership.id != member_id
+                || membership.revision != member_revision
+            {
+                return Err(AuthError::Forbidden);
+            }
+        }
+        (None, None, None, None) => {}
+        _ => return Err(AuthError::Unauthorized),
+    }
+    let current = lock_session(tx, session_id).await?;
+    validate_session(&current, account.auth_revision, account.disabled, now)?;
+    if current.user_id != user_id
+        || current.account_revision != auth_revision
+        || current.authenticated_at > now
+        || now.saturating_sub(current.authenticated_at) >= 600
+        || current.org_id != candidate.org_id
+        || current.member_id != candidate.member_id
+        || current.member_revision != candidate.member_revision
+        || current.org_revision != candidate.org_revision
+    {
+        return Err(AuthError::Unauthorized);
+    }
+    Ok(())
+}
+
 fn validate_session(
     session: &Session,
     current_revision: i64,

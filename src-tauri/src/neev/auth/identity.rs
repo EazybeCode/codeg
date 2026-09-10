@@ -42,34 +42,7 @@ pub(crate) async fn resolve(
             session_id,
             auth_revision,
         } => {
-            let account = lock_account(&tx, user_id).await?;
-            if account.auth_revision != auth_revision {
-                return Err(AuthError::Unauthorized);
-            }
-            let lock = if tx.get_database_backend() == DbBackend::Postgres {
-                " FOR UPDATE"
-            } else {
-                ""
-            };
-            let row = db::one(&tx, &format!("SELECT user_id,account_revision,authenticated_at,expires_at,revoked_at FROM neev_sessions WHERE id=$1{lock}"), vec![session_id.into()]).await?.ok_or(AuthError::Unauthorized)?;
-            let session_user: i32 = row.try_get("", "user_id").map_err(database_error)?;
-            let session_revision: i64 = row
-                .try_get("", "account_revision")
-                .map_err(database_error)?;
-            let authenticated: i64 = row
-                .try_get("", "authenticated_at")
-                .map_err(database_error)?;
-            let expires: i64 = row.try_get("", "expires_at").map_err(database_error)?;
-            let revoked: Option<i64> = row.try_get("", "revoked_at").map_err(database_error)?;
-            if session_user != user_id
-                || session_revision != auth_revision
-                || revoked.is_some()
-                || expires <= now
-                || authenticated > now
-                || now - authenticated >= 600
-            {
-                return Err(AuthError::Unauthorized);
-            }
+            super::session::recheck_link(&tx, user_id, &session_id, auth_revision, now).await?;
             match subject_owner(&tx, &proof).await? {
                 Some(other) if other != user_id => return Err(AuthError::Conflict),
                 Some(_) => {}

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
+    extract::State,
     http::{header, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -8,7 +9,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::neev::{error::AuthError, startup::ServerState};
+use crate::neev::{auth::github, error::AuthError, startup::ServerState};
 
 mod auth;
 pub(crate) mod cookies;
@@ -82,6 +83,9 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/neev/preauth", get(auth::preauth))
         .route("/api/neev/session", get(auth::bootstrap))
         .route("/api/neev/logout", post(auth::logout))
+        .route("/api/neev/auth/google/login", post(auth::google_login))
+        .route("/api/neev/auth/google/link", post(auth::google_link))
+        .route("/auth/google/callback", get(auth::google_callback))
         .route("/", get(static_files::page))
         .route("/login", get(static_files::page))
         .route("/onboarding", get(static_files::page))
@@ -96,15 +100,15 @@ async fn health() -> Response {
     private_json(serde_json::json!({"status":"ok"}))
 }
 
-async fn capabilities() -> Response {
+async fn capabilities(State(state): State<Arc<ServerState>>) -> Response {
     private_json(Capabilities {
         version: 1,
         identity_mode: "native",
         runtime_enabled: false,
         providers: Providers {
-            google: false,
+            google: state.oauth.google_available(),
             email: false,
-            github: false,
+            github: github::available(),
         },
     })
 }

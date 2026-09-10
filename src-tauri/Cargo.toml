@@ -88,6 +88,7 @@ futures-lite = "2"
 # gzip/brotli: send Accept-Encoding and transparently decompress on the
 # remote-workspace proxy path, matching the server's CompressionLayer.
 reqwest = { version = "0.12", features = ["stream", "json", "multipart", "gzip", "brotli"] }
+openidconnect = { version = "=4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 flate2 = "1"
 bzip2 = "0.5"
 # DeepSeek Harness session logs (`~/.dsh/sessions/**/session.jsonl.zstd`) are a
