@@ -166,6 +166,7 @@ temp-env = { version = "0.3", features = ["async_closure"] }
 tokio = { version = "1", features = ["test-util", "macros", "rt", "sync", "time"] }
 insta = { version = "1", features = ["json", "redactions"] }
 axum-test = { version = "17", features = ["ws"] }
+url = "2"
 
 [patch.crates-io]
 sacp-tokio = { path = "vendor/sacp-tokio" }

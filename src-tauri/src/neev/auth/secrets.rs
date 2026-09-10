@@ -55,6 +55,19 @@ mod tests {
     use super::*;
     #[test]
     fn tokens_are_unique_hash_only_and_purpose_bound() {
+        let purposes = [
+            TokenPurpose::Session,
+            TokenPurpose::Csrf,
+            TokenPurpose::Browser,
+            TokenPurpose::OAuth,
+            TokenPurpose::Magic,
+            TokenPurpose::Invite,
+        ];
+        for purpose in purposes {
+            let token = random_token(purpose).unwrap();
+            assert_eq!(digest(purpose, &token).unwrap().len(), 64);
+        }
+
         let first = random_token(TokenPurpose::Magic).unwrap();
         let second = random_token(TokenPurpose::Magic).unwrap();
         assert_ne!(first, second);

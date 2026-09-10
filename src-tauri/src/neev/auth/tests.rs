@@ -185,6 +185,36 @@ async fn existing_foreign_identity_cannot_be_linked_or_email_transferred() {
 }
 
 #[tokio::test]
+async fn new_subject_cannot_claim_foreign_email_and_identity_insert_rolls_back() {
+    let db = h::database().await;
+    let owner = h::native_account(&db, "owner", "support@neev.so").await;
+    h::native_account(&db, "other", "other@example.test").await;
+    h::session(&db, owner, "session", 1000, 1).await;
+
+    let intent = SignInIntent::Link {
+        user_id: owner,
+        session_id: "session".into(),
+        auth_revision: 1,
+    };
+    assert_eq!(
+        identity::resolve(
+            &db,
+            h::google("brand-new-subject", "other@example.test"),
+            intent,
+            1001,
+        )
+        .await,
+        Err(AuthError::Conflict)
+    );
+    assert_eq!(h::count(&db, "neev_accounts").await, 2);
+    assert_eq!(
+        h::count(&db, "neev_identities").await,
+        2,
+        "the newly inserted identity must roll back with the failed link"
+    );
+}
+
+#[tokio::test]
 #[ignore = "requires explicitly isolated NEEV_TEST_DATABASE_URL"]
 async fn postgres_concurrent_email_collision_leaves_one_account_and_identity() {
     let (db, admin, schema) = h::postgres_database().await;

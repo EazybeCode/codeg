@@ -1,6 +1,19 @@
 use super::types::{Provider, VerifiedIdentity};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement, Value};
 
+fn isolated_postgres_database_name(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw).ok()?;
+    if !matches!(parsed.scheme(), "postgres" | "postgresql") || parsed.fragment().is_some() {
+        return None;
+    }
+    let encoded = parsed.path().strip_prefix('/')?;
+    if encoded.is_empty() || encoded.contains('/') {
+        return None;
+    }
+    let decoded = urlencoding::decode(encoded).ok()?.into_owned();
+    (decoded == "neev_identity_test").then_some(decoded)
+}
+
 pub(super) async fn empty_database() -> DatabaseConnection {
     let mut options = ConnectOptions::new("sqlite::memory:");
     options.max_connections(1).sqlx_logging(false);
@@ -66,8 +79,9 @@ pub(super) async fn session(
 pub(super) async fn postgres_database() -> (DatabaseConnection, DatabaseConnection, String) {
     let url =
         std::env::var("NEEV_TEST_DATABASE_URL").expect("isolated NEEV_TEST_DATABASE_URL required");
-    assert!(
-        url.contains("/neev_identity_test?"),
+    assert_eq!(
+        isolated_postgres_database_name(&url).as_deref(),
+        Some("neev_identity_test"),
         "refuse non-test PostgreSQL database"
     );
     let mut opts = ConnectOptions::new(url.clone());
@@ -97,4 +111,31 @@ pub(super) async fn cleanup_postgres(
     );
     execute(&admin, &format!("DROP SCHEMA {schema} CASCADE"), vec![]).await;
     admin.close().await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::isolated_postgres_database_name;
+
+    #[test]
+    fn postgres_guard_requires_the_exact_decoded_database_name() {
+        assert_eq!(
+            isolated_postgres_database_name(
+                "postgresql:///neev_identity_test?host=/tmp/neev-pg&user=air1"
+            ),
+            Some("neev_identity_test".into())
+        );
+        assert_eq!(
+            isolated_postgres_database_name(
+                "postgresql:///%6Eeev_identity_test?host=/tmp/neev-pg&user=air1"
+            ),
+            Some("neev_identity_test".into())
+        );
+        assert_eq!(
+            isolated_postgres_database_name(
+                "postgresql:///wrong_database?note=/neev_identity_test?host=/tmp/neev-pg"
+            ),
+            None
+        );
+    }
 }

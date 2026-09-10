@@ -3,6 +3,7 @@ use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, ExecResult, QueryResult,
     Statement, TransactionTrait, Value,
 };
+pub(crate) mod entities;
 mod migration;
 
 pub(crate) fn statement<C: ConnectionTrait>(db: &C, sql: &str, values: Vec<Value>) -> Statement {

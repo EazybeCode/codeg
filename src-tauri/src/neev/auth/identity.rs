@@ -1,19 +1,13 @@
 use super::email::canonical_email;
 use crate::neev::{
     db,
+    db::entities::Account,
     error::{database_error, AuthError},
     types::{Provider, SignInIntent, UserId, VerifiedIdentity},
 };
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
 };
-
-#[derive(FromQueryResult)]
-struct Account {
-    id: i32,
-    auth_revision: i64,
-    disabled: bool,
-}
 
 pub(crate) async fn resolve(
     db: &DatabaseConnection,
