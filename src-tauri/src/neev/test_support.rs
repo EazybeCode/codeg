@@ -17,7 +17,7 @@ use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Sta
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -40,6 +40,87 @@ impl super::clock::Clock for TestClock {
 pub(super) struct MailCapture {
     messages: Mutex<Vec<MailMessage>>,
     fail: AtomicBool,
+}
+
+pub(super) struct OAuthIssuerCounter {
+    base_url: String,
+    requests: Arc<AtomicUsize>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl OAuthIssuerCounter {
+    pub(super) async fn start() -> Self {
+        use axum::{
+            extract::State,
+            http::Uri,
+            response::IntoResponse,
+            routing::{get, post},
+            Json, Router,
+        };
+
+        #[derive(Clone)]
+        struct CounterState {
+            base_url: String,
+            requests: Arc<AtomicUsize>,
+        }
+
+        async fn discovery(State(state): State<CounterState>) -> impl IntoResponse {
+            state.requests.fetch_add(1, Ordering::SeqCst);
+            Json(serde_json::json!({
+                "issuer":"https://accounts.google.com",
+                "authorization_endpoint":format!("{}/authorize", state.base_url),
+                "token_endpoint":format!("{}/token", state.base_url),
+                "jwks_uri":format!("{}/jwks", state.base_url),
+                "response_types_supported":["code"],
+                "id_token_signing_alg_values_supported":["RS256"],
+                "code_challenge_methods_supported":["S256"]
+            }))
+        }
+
+        async fn response(State(state): State<CounterState>) -> impl IntoResponse {
+            state.requests.fetch_add(1, Ordering::SeqCst);
+            Json(serde_json::json!({"keys":[]}))
+        }
+
+        async fn unexpected(State(state): State<CounterState>, _uri: Uri) -> impl IntoResponse {
+            state.requests.fetch_add(1, Ordering::SeqCst);
+            axum::http::StatusCode::NOT_FOUND
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let state = CounterState {
+            base_url: base_url.clone(),
+            requests: requests.clone(),
+        };
+        let router = Router::new()
+            .route("/.well-known/openid-configuration", get(discovery))
+            .route("/jwks", get(response))
+            .route("/token", post(response))
+            .fallback(unexpected)
+            .with_state(state);
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        Self {
+            base_url,
+            requests,
+            server,
+        }
+    }
+
+    pub(super) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub(super) fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for OAuthIssuerCounter {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
 }
 
 pub(super) struct OrgHarness {
@@ -136,6 +217,22 @@ impl OrgHarness {
 
     pub(super) fn owner(&self) -> super::types::OrgContext {
         self.owner.clone()
+    }
+
+    pub(super) fn state(&self) -> &super::startup::ServerState {
+        &self.state
+    }
+
+    pub(super) fn owner_context(&self) -> &super::types::OrgContext {
+        &self.owner
+    }
+
+    pub(super) fn member_context(&self) -> &super::types::OrgContext {
+        &self.member
+    }
+
+    pub(super) fn other_org_context(&self) -> &super::types::OrgContext {
+        &self.other_org_owner
     }
 
     pub(super) fn member(&self) -> super::types::OrgContext {

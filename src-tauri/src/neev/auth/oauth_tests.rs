@@ -817,7 +817,12 @@ async fn unconfigured_google_is_explicitly_unavailable_and_github_stays_unmounte
             "version":1,
             "identityMode":"native",
             "runtimeEnabled":false,
-            "providers":{"google":false,"email":false,"github":false}
+            "providers":{"google":false,"email":false,"github":false},
+            "catalog":{
+                "nodeKinds":["project","folder"],
+                "repositoryDefaults":false,
+                "chats":false
+            }
         }));
 }
 

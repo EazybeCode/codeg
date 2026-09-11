@@ -1,0 +1,277 @@
+use std::collections::HashSet;
+
+use sea_orm::{ConnectionTrait, DatabaseTransaction, FromQueryResult};
+
+use crate::neev::{
+    auth::session,
+    db,
+    error::{database_error, AuthError},
+    startup::ServerState,
+    types::{Node, NodeId, NodeInput, NodeKind, OrgContext},
+};
+
+const PAGE_SIZE: usize = 200;
+const ORGANIZATION_NODE_LIMIT: i64 = 1000;
+
+#[derive(FromQueryResult)]
+struct NodeRow {
+    id: NodeId,
+    org_id: i32,
+    parent_id: Option<NodeId>,
+    kind: String,
+    name: String,
+    revision: i64,
+}
+
+pub(crate) async fn list(
+    state: &ServerState,
+    actor: &OrgContext,
+    after: Option<NodeId>,
+) -> Result<Vec<Node>, AuthError> {
+    Ok(list_page(state, actor, after).await?.0)
+}
+
+pub(crate) async fn list_page(
+    state: &ServerState,
+    actor: &OrgContext,
+    after: Option<NodeId>,
+) -> Result<(Vec<Node>, Option<NodeId>), AuthError> {
+    if after.is_some_and(|id| id <= 0) {
+        return Err(AuthError::Invalid);
+    }
+    let tx = db::begin(&state.database).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    if let Some(cursor) = after {
+        load_node(&tx, actor.org_id, cursor, false)
+            .await?
+            .ok_or(AuthError::Forbidden)?;
+    }
+    let rows = tx
+        .query_all(db::statement(
+            &tx,
+            "SELECT id,org_id,parent_id,kind,name,revision FROM neev_nodes WHERE org_id=$1 AND id>$2 ORDER BY id LIMIT $3",
+            vec![
+                actor.org_id.into(),
+                after.unwrap_or(0).into(),
+                i64::try_from(PAGE_SIZE + 1)
+                    .map_err(|_| AuthError::Unavailable)?
+                    .into(),
+            ],
+        ))
+        .await
+        .map_err(database_error)?;
+    let mut nodes = rows
+        .iter()
+        .map(|row| NodeRow::from_query_result(row, "").map_err(database_error))
+        .map(|row| row.and_then(node))
+        .collect::<Result<Vec<_>, _>>()?;
+    let next_after = if nodes.len() > PAGE_SIZE {
+        nodes.truncate(PAGE_SIZE);
+        nodes.last().map(|node| node.id)
+    } else {
+        None
+    };
+    tx.commit().await.map_err(database_error)?;
+    Ok((nodes, next_after))
+}
+
+pub(crate) async fn create(
+    state: &ServerState,
+    actor: &OrgContext,
+    input: NodeInput,
+) -> Result<Node, AuthError> {
+    let input = validate_input(input)?;
+    let tx = db::begin(&state.database).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    let count = db::one(
+        &tx,
+        "SELECT COUNT(*) AS n FROM neev_nodes WHERE org_id=$1",
+        vec![actor.org_id.into()],
+    )
+    .await?
+    .ok_or(AuthError::Unavailable)?
+    .try_get::<i64>("", "n")
+    .map_err(database_error)?;
+    if count >= ORGANIZATION_NODE_LIMIT {
+        return Err(AuthError::Limited);
+    }
+    if let Some(parent_id) = input.parent_id {
+        validate_ancestor_chain(&tx, actor.org_id, parent_id, None).await?;
+    }
+    let row = db::one(
+        &tx,
+        "INSERT INTO neev_nodes(org_id,parent_id,kind,name,revision,created_by) VALUES($1,$2,$3,$4,1,$5) RETURNING id,org_id,parent_id,kind,name,revision",
+        vec![
+            actor.org_id.into(),
+            input.parent_id.into(),
+            kind_name(input.kind).into(),
+            input.name.into(),
+            actor.identity.user_id.into(),
+        ],
+    )
+    .await?
+    .ok_or(AuthError::Unavailable)?;
+    let created = node(NodeRow::from_query_result(&row, "").map_err(database_error)?)?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(created)
+}
+
+pub(crate) async fn update(
+    state: &ServerState,
+    actor: &OrgContext,
+    node_id: NodeId,
+    expected_revision: i64,
+    input: NodeInput,
+) -> Result<Node, AuthError> {
+    if node_id <= 0 || expected_revision <= 0 {
+        return Err(AuthError::Invalid);
+    }
+    let input = validate_input(input)?;
+    let tx = db::begin(&state.database).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    let current = load_node(&tx, actor.org_id, node_id, true)
+        .await?
+        .ok_or(AuthError::Forbidden)?;
+    parse_kind(&current.kind)?;
+    if current.revision != expected_revision {
+        return Err(AuthError::Conflict);
+    }
+    if let Some(parent_id) = input.parent_id {
+        if parent_id == node_id {
+            return Err(AuthError::Invalid);
+        }
+        validate_ancestor_chain(&tx, actor.org_id, parent_id, Some(node_id)).await?;
+    }
+    let next_revision = current.revision.checked_add(1).ok_or(AuthError::Conflict)?;
+    let updated = db::execute(
+        &tx,
+        "UPDATE neev_nodes SET parent_id=$1,kind=$2,name=$3,revision=$4 WHERE id=$5 AND org_id=$6 AND revision=$7",
+        vec![
+            input.parent_id.into(),
+            kind_name(input.kind).into(),
+            input.name.into(),
+            next_revision.into(),
+            node_id.into(),
+            actor.org_id.into(),
+            expected_revision.into(),
+        ],
+    )
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(AuthError::Conflict);
+    }
+    let updated = load_node(&tx, actor.org_id, node_id, false)
+        .await?
+        .ok_or(AuthError::Unavailable)?;
+    let result = node(updated)?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(result)
+}
+
+pub(crate) async fn get(
+    state: &ServerState,
+    actor: &OrgContext,
+    node_id: NodeId,
+) -> Result<Option<Node>, AuthError> {
+    if node_id <= 0 {
+        return Ok(None);
+    }
+    let tx = db::begin(&state.database).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    let result = load_node(&tx, actor.org_id, node_id, false)
+        .await?
+        .map(node)
+        .transpose()?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(result)
+}
+
+fn validate_input(input: NodeInput) -> Result<NodeInput, AuthError> {
+    if input.parent_id.is_some_and(|id| id <= 0) {
+        return Err(AuthError::Invalid);
+    }
+    match (input.kind, input.parent_id) {
+        (NodeKind::WorkingDirectory, _) => return Err(AuthError::Unavailable),
+        (NodeKind::Project, Some(_)) | (NodeKind::Folder, None) => return Err(AuthError::Invalid),
+        (NodeKind::Project, None) | (NodeKind::Folder, Some(_)) => {}
+    }
+    let name = input.name.trim();
+    if !(1..=100).contains(&name.chars().count()) || name.chars().any(char::is_control) {
+        return Err(AuthError::Invalid);
+    }
+    Ok(NodeInput {
+        parent_id: input.parent_id,
+        kind: input.kind,
+        name: name.to_owned(),
+    })
+}
+
+async fn validate_ancestor_chain(
+    tx: &DatabaseTransaction,
+    org_id: i32,
+    parent_id: NodeId,
+    moving_node: Option<NodeId>,
+) -> Result<(), AuthError> {
+    let mut cursor = Some(parent_id);
+    let mut seen = HashSet::new();
+    while let Some(id) = cursor {
+        if moving_node == Some(id) || !seen.insert(id) {
+            return Err(AuthError::Invalid);
+        }
+        let ancestor = load_node(tx, org_id, id, true)
+            .await?
+            .ok_or(AuthError::Forbidden)?;
+        if ancestor.kind == "working_directory" {
+            return Err(AuthError::Unavailable);
+        }
+        cursor = ancestor.parent_id;
+    }
+    Ok(())
+}
+
+async fn load_node(
+    tx: &DatabaseTransaction,
+    org_id: i32,
+    node_id: NodeId,
+    locked: bool,
+) -> Result<Option<NodeRow>, AuthError> {
+    let row = db::one(
+        tx,
+        &format!(
+            "SELECT id,org_id,parent_id,kind,name,revision FROM neev_nodes WHERE id=$1 AND org_id=$2{}",
+            if locked { session::lock(tx) } else { "" }
+        ),
+        vec![node_id.into(), org_id.into()],
+    )
+    .await?;
+    row.map(|row| NodeRow::from_query_result(&row, "").map_err(database_error))
+        .transpose()
+}
+
+fn node(row: NodeRow) -> Result<Node, AuthError> {
+    Ok(Node {
+        id: row.id,
+        org_id: row.org_id,
+        parent_id: row.parent_id,
+        kind: parse_kind(&row.kind)?,
+        name: row.name,
+        revision: row.revision,
+    })
+}
+
+fn parse_kind(value: &str) -> Result<NodeKind, AuthError> {
+    match value {
+        "project" => Ok(NodeKind::Project),
+        "folder" => Ok(NodeKind::Folder),
+        "working_directory" => Err(AuthError::Unavailable),
+        _ => Err(AuthError::Unavailable),
+    }
+}
+
+fn kind_name(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Project => "project",
+        NodeKind::Folder => "folder",
+        NodeKind::WorkingDirectory => "working_directory",
+    }
+}

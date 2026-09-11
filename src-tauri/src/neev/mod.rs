@@ -1,5 +1,6 @@
 //! Native Neev identity and tenancy. No legacy router or database fallback.
 pub(crate) mod auth;
+pub(crate) mod catalog;
 pub(crate) mod clock;
 pub(crate) mod config;
 pub(crate) mod db;

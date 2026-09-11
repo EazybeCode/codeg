@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::neev::{auth::github, error::AuthError, startup::ServerState};
 
 mod auth;
+mod catalog;
 pub(crate) mod cookies;
 mod org;
 mod static_files;
@@ -68,6 +69,7 @@ struct Capabilities {
     identity_mode: &'static str,
     runtime_enabled: bool,
     providers: Providers,
+    catalog: CatalogCapabilities,
 }
 
 #[derive(Serialize)]
@@ -75,6 +77,14 @@ struct Providers {
     google: bool,
     email: bool,
     github: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogCapabilities {
+    node_kinds: [&'static str; 2],
+    repository_defaults: bool,
+    chats: bool,
 }
 
 pub(crate) fn router(state: Arc<ServerState>) -> Router {
@@ -85,6 +95,9 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/neev/preauth", get(auth::preauth))
         .route("/api/neev/session", get(auth::bootstrap))
         .route("/api/neev/auth/methods", get(auth::methods))
+        .route("/api/neev/nodes", get(catalog::list).post(catalog::create))
+        .route("/api/neev/nodes/{node_id}", patch(catalog::update))
+        .route("/api/neev/nodes/{node_id}/chats", get(catalog::chats))
         .route("/api/neev/organizations", get(org::list).post(org::create))
         .route("/api/neev/organizations/select", post(org::select))
         .route(
@@ -150,6 +163,11 @@ async fn capabilities(State(state): State<Arc<ServerState>>) -> Response {
             google: state.oauth.google_available(),
             email: state.magic.is_some(),
             github: github::available(),
+        },
+        catalog: CatalogCapabilities {
+            node_kinds: ["project", "folder"],
+            repository_defaults: false,
+            chats: false,
         },
     })
 }

@@ -2,7 +2,7 @@ use axum::{body::Bytes, http::header};
 use serde_json::json;
 
 use crate::neev::{
-    auth::{identity, session},
+    auth::{identity, oauth, secrets, session},
     test_support as h,
     types::{Provider, SignInIntent, VerifiedIdentity},
 };
@@ -47,6 +47,131 @@ async fn preauth_bootstrap_uses_distinct_cookies_and_preserves_browser_binding()
 }
 
 #[tokio::test]
+async fn hierarchy_http_does_not_call_the_configured_external_identity_boundary() {
+    let issuer = h::OAuthIssuerCounter::start().await;
+    let database = h::database().await;
+    let clock = std::sync::Arc::new(h::TestClock::new(1_700_000_000));
+    let config = h::preview_config();
+    let google = crate::neev::auth::google::Google::for_test(
+        "catalog-network-client".into(),
+        "catalog-network-secret".into(),
+        config.google_callback.clone(),
+        issuer.base_url(),
+    )
+    .unwrap();
+    let oauth = oauth::Service::with_google(
+        database.clone(),
+        config.encryption_key,
+        clock.clone(),
+        google,
+    );
+    let state = std::sync::Arc::new(crate::neev::startup::ServerState::with_oauth(
+        database.clone(),
+        config,
+        clock,
+        oauth,
+    ));
+
+    let browser = secrets::random_token(secrets::TokenPurpose::Browser).unwrap();
+    let authorization = state
+        .oauth
+        .begin(Provider::Google, SignInIntent::Login, &browser)
+        .await
+        .unwrap();
+    let oauth_state = url::Url::parse(&authorization)
+        .unwrap()
+        .query_pairs()
+        .find(|(name, _)| name == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    assert!(state
+        .oauth
+        .complete(
+            Provider::Google,
+            &oauth_state,
+            oauth::CallbackResult::Code("invalid-code".into()),
+            &browser,
+        )
+        .await
+        .is_err());
+    let connected_count = issuer.requests();
+    assert!(
+        connected_count > 0,
+        "the injected HTTP counter must observe a real OAuth request"
+    );
+
+    let owner = h::native_account(&database, "network-owner", "network-owner@example.test").await;
+    let (org_id, _) = h::organization(&database, owner, "admin").await;
+    let identity = session::issue_identity(&database, owner, 1_700_000_000)
+        .await
+        .unwrap();
+    let identity_context = session::identity(&database, &identity.session, 1_700_000_000)
+        .await
+        .unwrap();
+    let scoped = session::select_organization(&database, &identity_context, org_id, 1_700_000_000)
+        .await
+        .unwrap();
+    let names = CookieNames::for_preview(true);
+    let cookies = format!(
+        "{}={}; {}={}",
+        names.session, scoped.session, names.csrf, scoped.csrf
+    );
+    let server = axum_test::TestServer::new(crate::neev::http::router(state)).unwrap();
+    let root = catalog_mutation(
+        &server,
+        "/api/neev/nodes",
+        &cookies,
+        &scoped.csrf,
+        json!({"parentId":null,"kind":"project","name":"Offline"}),
+    )
+    .await;
+    root.assert_status(StatusCode::CREATED);
+    let root_id = root.json::<serde_json::Value>()["id"].as_i64().unwrap();
+    let folder = catalog_mutation(
+        &server,
+        "/api/neev/nodes",
+        &cookies,
+        &scoped.csrf,
+        json!({"parentId":root_id,"kind":"folder","name":"Nested"}),
+    )
+    .await;
+    folder.assert_status(StatusCode::CREATED);
+    let folder_id = folder.json::<serde_json::Value>()["id"].as_i64().unwrap();
+    server
+        .patch(&format!("/api/neev/nodes/{folder_id}"))
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &cookies)
+        .add_header("x-neev-csrf", &scoped.csrf)
+        .json(&json!({
+            "expectedRevision":"1","parentId":root_id,
+            "kind":"folder","name":"Renamed"
+        }))
+        .await
+        .assert_status_ok();
+    catalog_mutation(
+        &server,
+        "/api/neev/nodes",
+        &cookies,
+        &scoped.csrf,
+        json!({"parentId":root_id,"kind":"working_directory","name":"Unavailable"}),
+    )
+    .await
+    .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    server
+        .get("/api/neev/nodes")
+        .add_header(header::COOKIE, &cookies)
+        .await
+        .assert_status_ok();
+    server
+        .get(&format!("/api/neev/nodes/{root_id}/chats"))
+        .add_header(header::COOKIE, &cookies)
+        .await
+        .assert_status_ok();
+    assert_eq!(issuer.requests(), connected_count);
+}
+
+#[tokio::test]
 async fn capabilities_are_native_disabled_and_old_routes_do_not_exist() {
     let server = h::http_server().await;
     let capabilities = server.get("/api/workos/capabilities").await;
@@ -55,7 +180,12 @@ async fn capabilities_are_native_disabled_and_old_routes_do_not_exist() {
         "version": 1,
         "identityMode": "native",
         "runtimeEnabled": false,
-        "providers": {"google":false,"email":false,"github":false}
+        "providers": {"google":false,"email":false,"github":false},
+        "catalog": {
+            "nodeKinds":["project","folder"],
+            "repositoryDefaults":false,
+            "chats":false
+        }
     }));
     assert_eq!(capabilities.header(header::CACHE_CONTROL), "no-store");
     assert_eq!(capabilities.header("referrer-policy"), "no-referrer");
@@ -79,6 +209,190 @@ async fn capabilities_are_native_disabled_and_old_routes_do_not_exist() {
         .headers()
         .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
         .is_none());
+}
+
+#[tokio::test]
+async fn native_catalog_http_uses_strict_revisioned_dtos_and_honest_boundaries() {
+    let h = h::OrgHarness::new().await;
+    let server = axum_test::TestServer::new(crate::neev::http::router(h.state.clone())).unwrap();
+    let owner = h.owner_context();
+    let identity = session::issue_identity(&h.database, owner.identity.user_id, 1_700_000_000)
+        .await
+        .unwrap();
+    let identity_context = session::identity(&h.database, &identity.session, 1_700_000_000)
+        .await
+        .unwrap();
+    let scoped =
+        session::select_organization(&h.database, &identity_context, h.org_id(), 1_700_000_000)
+            .await
+            .unwrap();
+    let names = CookieNames::for_preview(true);
+    let cookies = format!(
+        "{}={}; {}={}",
+        names.session, scoped.session, names.csrf, scoped.csrf
+    );
+
+    let root = catalog_mutation(
+        &server,
+        "/api/neev/nodes",
+        &cookies,
+        &scoped.csrf,
+        json!({"parentId":null,"kind":"project","name":"Marketing"}),
+    )
+    .await;
+    root.assert_status(StatusCode::CREATED);
+    let root_body = root.json::<serde_json::Value>();
+    let root_id = root_body["id"].as_i64().unwrap();
+    assert_eq!(
+        root_body,
+        json!({
+            "id":root_id,"orgId":h.org_id(),"parentId":null,
+            "kind":"project","name":"Marketing","revision":"1"
+        })
+    );
+
+    let folder = catalog_mutation(
+        &server,
+        "/api/neev/nodes",
+        &cookies,
+        &scoped.csrf,
+        json!({"parentId":root_id,"kind":"folder","name":"Campaigns"}),
+    )
+    .await;
+    folder.assert_status(StatusCode::CREATED);
+    let folder_body = folder.json::<serde_json::Value>();
+    let folder_id = folder_body["id"].as_i64().unwrap();
+    assert_eq!(folder_body["revision"], "1");
+
+    let listed = server
+        .get("/api/neev/nodes")
+        .add_header(header::COOKIE, &cookies)
+        .await;
+    listed.assert_status_ok();
+    listed.assert_json(&json!({
+        "nodes":[root_body,folder_body],
+        "nextAfter":null
+    }));
+
+    let updated = server
+        .patch(&format!("/api/neev/nodes/{folder_id}"))
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &cookies)
+        .add_header("x-neev-csrf", &scoped.csrf)
+        .json(&json!({
+            "expectedRevision":"1","parentId":root_id,
+            "kind":"folder","name":"Launches"
+        }))
+        .await;
+    updated.assert_status_ok();
+    assert_eq!(updated.json::<serde_json::Value>()["revision"], "2");
+    server
+        .patch(&format!("/api/neev/nodes/{folder_id}"))
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &cookies)
+        .add_header("x-neev-csrf", &scoped.csrf)
+        .json(&json!({
+            "expectedRevision":"2","parentId":root_id,
+            "kind":"folder","name":"Repo","repositoryId":null
+        }))
+        .await
+        .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+
+    for invalid in [
+        json!({"expectedRevision":1,"parentId":root_id,"kind":"folder","name":"Bad"}),
+        json!({"expectedRevision":"01","parentId":root_id,"kind":"folder","name":"Bad"}),
+        json!({"expectedRevision":"2","parentId":root_id,"kind":"folder","name":"Bad","extra":true}),
+    ] {
+        server
+            .patch(&format!("/api/neev/nodes/{folder_id}"))
+            .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+            .add_header(header::COOKIE, &cookies)
+            .add_header("x-neev-csrf", &scoped.csrf)
+            .json(&invalid)
+            .await
+            .assert_status_bad_request();
+    }
+
+    for unsupported in [
+        json!({"parentId":root_id,"kind":"working_directory","name":"Checkout"}),
+        json!({"parentId":root_id,"kind":"folder","name":"Repo","repositoryId":null}),
+        json!({"parentId":root_id,"kind":"folder","name":"Repo","repositoryUrl":null,"defaultBranch":null}),
+    ] {
+        catalog_mutation(
+            &server,
+            "/api/neev/nodes",
+            &cookies,
+            &scoped.csrf,
+            unsupported,
+        )
+        .await
+        .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    server
+        .get(&format!("/api/neev/nodes/{folder_id}/chats"))
+        .add_header(header::COOKIE, &cookies)
+        .await
+        .assert_json(&json!({"supported":false,"chats":[]}));
+    server
+        .post(&format!("/api/neev/nodes/{folder_id}/chats"))
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &cookies)
+        .add_header("x-neev-csrf", &scoped.csrf)
+        .json(&json!({}))
+        .await
+        .assert_status(StatusCode::METHOD_NOT_ALLOWED);
+    server
+        .post("/api/neev/documents")
+        .await
+        .assert_status_not_found();
+    server
+        .post("/api/neev/prompts")
+        .await
+        .assert_status_not_found();
+
+    let foreign = crate::neev::catalog::nodes::create(
+        h.state(),
+        h.other_org_context(),
+        crate::neev::types::NodeInput {
+            parent_id: None,
+            kind: crate::neev::types::NodeKind::Project,
+            name: "Foreign".into(),
+        },
+    )
+    .await
+    .unwrap();
+    server
+        .get(&format!("/api/neev/nodes?after={}", foreign.id))
+        .add_header(header::COOKIE, &cookies)
+        .await
+        .assert_status_forbidden();
+    server
+        .get(&format!("/api/neev/nodes/{}/chats", foreign.id))
+        .add_header(header::COOKIE, &cookies)
+        .await
+        .assert_status_not_found();
+    server
+        .get("/api/neev/nodes/2147483647/chats")
+        .add_header(header::COOKIE, &cookies)
+        .await
+        .assert_status_not_found();
+}
+
+async fn catalog_mutation(
+    server: &axum_test::TestServer,
+    path: &str,
+    cookies: &str,
+    csrf: &str,
+    body: serde_json::Value,
+) -> axum_test::TestResponse {
+    server
+        .post(path)
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, cookies)
+        .add_header("x-neev-csrf", csrf)
+        .json(&body)
+        .await
 }
 
 #[tokio::test]
