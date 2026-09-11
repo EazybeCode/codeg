@@ -96,42 +96,21 @@ pub(crate) async fn validate_identity_locked(
     now: i64,
 ) -> Result<(), AuthError> {
     let current = lock_session(tx, &identity.session_id).await?;
-    validate_session(&current, account.auth_revision, account.disabled, now)?;
-    if account.id != identity.user_id
-        || account.auth_revision != identity.auth_revision
-        || current.user_id != identity.user_id
-        || current.account_revision != identity.auth_revision
-        || current.authenticated_at != identity.authenticated_at
-    {
-        return Err(AuthError::Unauthorized);
-    }
-    match (
-        scope,
-        current.org_id,
-        current.member_id,
-        current.member_revision,
-        current.org_revision,
-    ) {
-        (None, None, None, None, None) => Ok(()),
-        (
-            Some((organization, membership)),
-            Some(org_id),
-            Some(member_id),
-            Some(member_revision),
-            Some(org_revision),
-        ) if organization.id == org_id
-            && organization.revision == org_revision
-            && !organization.disabled
-            && membership.id == member_id
-            && membership.revision == member_revision
-            && membership.active
-            && role(&membership.role).is_ok() =>
-        {
-            Ok(())
-        }
-        (Some(_), Some(_), Some(_), Some(_), Some(_)) => Err(AuthError::Forbidden),
-        _ => Err(AuthError::Unauthorized),
-    }
+    validate_locked_identity(identity, account, &current, now)?;
+    validate_identity_scope(
+        &current,
+        scope.map(|(organization, membership)| ExpectedIdentityScope {
+            hint: IdentityScopeHint {
+                org_id: organization.id,
+                member_id: membership.id,
+                member_revision: membership.revision,
+                org_revision: organization.revision,
+            },
+            authoritative: !organization.disabled
+                && membership.active
+                && role(&membership.role).is_ok(),
+        }),
+    )
 }
 
 pub(crate) async fn validate_identity_session_locked(
@@ -142,7 +121,29 @@ pub(crate) async fn validate_identity_session_locked(
     now: i64,
 ) -> Result<(), AuthError> {
     let current = lock_session(tx, &identity.session_id).await?;
-    validate_session(&current, account.auth_revision, account.disabled, now)?;
+    validate_locked_identity(identity, account, &current, now)?;
+    validate_identity_scope(
+        &current,
+        scope.map(|hint| ExpectedIdentityScope {
+            hint,
+            authoritative: true,
+        }),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ExpectedIdentityScope {
+    hint: IdentityScopeHint,
+    authoritative: bool,
+}
+
+fn validate_locked_identity(
+    identity: &IdentityContext,
+    account: &Account,
+    current: &Session,
+    now: i64,
+) -> Result<(), AuthError> {
+    validate_session(current, account.auth_revision, account.disabled, now)?;
     if account.id != identity.user_id
         || account.auth_revision != identity.auth_revision
         || current.user_id != identity.user_id
@@ -151,28 +152,42 @@ pub(crate) async fn validate_identity_session_locked(
     {
         return Err(AuthError::Unauthorized);
     }
-    match (
-        scope,
+    Ok(())
+}
+
+fn validate_identity_scope(
+    current: &Session,
+    expected: Option<ExpectedIdentityScope>,
+) -> Result<(), AuthError> {
+    let actual = match (
         current.org_id,
         current.member_id,
         current.member_revision,
         current.org_revision,
     ) {
-        (None, None, None, None, None) => Ok(()),
-        (
-            Some(expected),
-            Some(org_id),
-            Some(member_id),
-            Some(member_revision),
-            Some(org_revision),
-        ) if expected.org_id == org_id
-            && expected.member_id == member_id
-            && expected.member_revision == member_revision
-            && expected.org_revision == org_revision =>
+        (None, None, None, None) => None,
+        (Some(org_id), Some(member_id), Some(member_revision), Some(org_revision)) => {
+            Some(IdentityScopeHint {
+                org_id,
+                member_id,
+                member_revision,
+                org_revision,
+            })
+        }
+        _ => return Err(AuthError::Unauthorized),
+    };
+    match (expected, actual) {
+        (None, None) => Ok(()),
+        (Some(expected), Some(actual))
+            if expected.authoritative
+                && expected.hint.org_id == actual.org_id
+                && expected.hint.member_id == actual.member_id
+                && expected.hint.member_revision == actual.member_revision
+                && expected.hint.org_revision == actual.org_revision =>
         {
             Ok(())
         }
-        (Some(_), Some(_), Some(_), Some(_), Some(_)) => Err(AuthError::Forbidden),
+        (Some(_), Some(_)) => Err(AuthError::Forbidden),
         _ => Err(AuthError::Unauthorized),
     }
 }
@@ -340,64 +355,51 @@ pub(crate) async fn methods(
     token: &str,
     now: i64,
 ) -> Result<Vec<String>, AuthError> {
-    let token_hash =
-        secrets::digest(TokenPurpose::Session, token).map_err(|_| AuthError::Unauthorized)?;
+    methods_after_authority(database, token, now, || async {}).await
+}
+
+async fn methods_after_authority<F, Future>(
+    database: &DatabaseConnection,
+    token: &str,
+    now: i64,
+    after_authority: F,
+) -> Result<Vec<String>, AuthError>
+where
+    F: FnOnce() -> Future,
+    Future: std::future::Future<Output = ()>,
+{
+    let identity = identity(database, token, now).await?;
+    let scope_hint = identity_scope_hint(database, &identity).await?;
     let tx = db::begin(database).await?;
-    let row = db::one(
-        &tx,
-        "SELECT s.id,s.user_id,s.account_revision,s.org_id,s.member_id,s.member_revision,s.org_revision,s.authenticated_at,s.expires_at,s.revoked_at,a.auth_revision AS current_account_revision,a.disabled AS account_disabled,o.revision AS current_org_revision,o.disabled AS org_disabled,m.id AS current_member_id,m.revision AS current_member_revision,m.active AS member_active,m.role AS member_role FROM neev_sessions s JOIN neev_accounts a ON a.id=s.user_id LEFT JOIN neev_organizations o ON o.id=s.org_id LEFT JOIN neev_memberships m ON m.id=s.member_id AND m.org_id=s.org_id AND m.user_id=s.user_id WHERE s.token_hash=$1",
-        vec![token_hash.into()],
-    )
-    .await?
-    .ok_or(AuthError::Unauthorized)?;
-    let session = Session::from_query_result(&row, "").map_err(database_error)?;
-    let revision: i64 = row
-        .try_get("", "current_account_revision")
-        .map_err(database_error)?;
-    let disabled: bool = row
-        .try_get("", "account_disabled")
-        .map_err(database_error)?;
-    validate_session(&session, revision, disabled, now)?;
-    match (
-        session.org_id,
-        session.member_id,
-        session.member_revision,
-        session.org_revision,
-    ) {
-        (None, None, None, None) => {}
-        (Some(_), Some(member_id), Some(member_revision), Some(org_revision)) => {
-            let current_org_revision: Option<i64> = row
-                .try_get("", "current_org_revision")
-                .map_err(database_error)?;
-            let org_disabled: Option<bool> =
-                row.try_get("", "org_disabled").map_err(database_error)?;
-            let current_member_id: Option<i32> = row
-                .try_get("", "current_member_id")
-                .map_err(database_error)?;
-            let current_member_revision: Option<i64> = row
-                .try_get("", "current_member_revision")
-                .map_err(database_error)?;
-            let member_active: Option<bool> =
-                row.try_get("", "member_active").map_err(database_error)?;
-            let member_role: Option<String> =
-                row.try_get("", "member_role").map_err(database_error)?;
-            if current_org_revision != Some(org_revision)
-                || org_disabled != Some(false)
-                || current_member_id != Some(member_id)
-                || current_member_revision != Some(member_revision)
-                || member_active != Some(true)
-            {
-                return Err(AuthError::Forbidden);
-            }
-            role(&member_role.ok_or(AuthError::Forbidden)?)?;
+    let account = lock_account(&tx, identity.user_id).await?;
+    let scope = if let Some(hint) = scope_hint {
+        let organization = lock_organization(&tx, hint.org_id).await?;
+        let membership = lock_membership(&tx, hint.org_id, identity.user_id).await?;
+        if organization.id != hint.org_id
+            || organization.revision != hint.org_revision
+            || membership.id != hint.member_id
+            || membership.revision != hint.member_revision
+        {
+            return Err(AuthError::Forbidden);
         }
-        _ => return Err(AuthError::Unauthorized),
-    }
+        Some((organization, membership))
+    } else {
+        None
+    };
+    validate_identity_locked(
+        &tx,
+        &identity,
+        &account,
+        scope.as_ref().map(|(org, member)| (org, member)),
+        now,
+    )
+    .await?;
+    after_authority().await;
     let rows = tx
         .query_all(db::statement(
             &tx,
             "SELECT DISTINCT provider FROM neev_identities WHERE user_id=$1 ORDER BY provider",
-            vec![session.user_id.into()],
+            vec![identity.user_id.into()],
         ))
         .await
         .map_err(database_error)?;
@@ -936,6 +938,70 @@ mod tests {
         assert_eq!(
             organization(&database, &scoped.session, 1005).await.err(),
             Some(AuthError::Unauthorized)
+        );
+        h::cleanup_postgres(database, admin, schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicitly isolated NEEV_TEST_DATABASE_URL"]
+    async fn postgres_methods_hold_authority_through_provider_snapshot() {
+        let (database, admin, schema) = h::postgres_database().await;
+        let user = h::native_account(&database, "methods-race", "methods-race@example.test").await;
+        let (org, _) = h::organization(&database, user, "admin").await;
+        let identity_session = issue_identity(&database, user, 1000).await.unwrap();
+        let identity_context = identity(&database, &identity_session.session, 1000)
+            .await
+            .unwrap();
+        let scoped = select_organization(&database, &identity_context, org, 1000)
+            .await
+            .unwrap();
+        let entered = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let task_database = database.clone();
+        let task_token = scoped.session.clone();
+        let task_entered = entered.clone();
+        let task_release = release.clone();
+        let methods_task = tokio::spawn(async move {
+            methods_after_authority(&task_database, &task_token, 1000, move || async move {
+                task_entered.wait().await;
+                task_release.wait().await;
+            })
+            .await
+        });
+        entered.wait().await;
+
+        let writer = database.clone();
+        let removal = tokio::spawn(async move {
+            let tx = db::begin(&writer).await.unwrap();
+            db::execute(
+                &tx,
+                "UPDATE neev_memberships SET active=false,revision=revision+1 WHERE org_id=$1 AND user_id=$2",
+                vec![org.into(), user.into()],
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        });
+        let mut removal = Box::pin(removal);
+        let removal_finished_before_release = tokio::select! {
+            result = &mut removal => {
+                result.unwrap();
+                true
+            }
+            _ = h::wait_for_postgres_lock(&admin, "%UPDATE neev_memberships SET active=false%") => false,
+        };
+        release.wait().await;
+        assert_eq!(methods_task.await.unwrap().unwrap(), vec!["google"]);
+        if !removal_finished_before_release {
+            removal.await.unwrap();
+        }
+        assert!(
+            !removal_finished_before_release,
+            "authority removal committed while methods was paused before its provider read"
+        );
+        assert_eq!(
+            methods(&database, &scoped.session, 1000).await.err(),
+            Some(AuthError::Forbidden)
         );
         h::cleanup_postgres(database, admin, schema).await;
     }

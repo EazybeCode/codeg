@@ -391,7 +391,6 @@ async fn invitation_http_never_returns_raw_token_and_requires_post_csrf_preview(
         .add_header("x-neev-csrf", &scoped.csrf)
         .json(&json!({
             "email":"invitee@example.test",
-            "role":"member",
             "requestId":uuid::Uuid::new_v4().to_string()
         }))
         .await;
@@ -399,6 +398,19 @@ async fn invitation_http_never_returns_raw_token_and_requires_post_csrf_preview(
     let sent_text = sent.text();
     assert!(sent_text.contains("invitationId"));
     assert!(!sent_text.contains("n1.invite."));
+    server
+        .post("/api/neev/organization/invitations")
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &owner_cookies)
+        .add_header("x-neev-csrf", &scoped.csrf)
+        .json(&json!({
+            "email":"invitee@example.test",
+            "role":"owner",
+            "requestId":uuid::Uuid::new_v4().to_string()
+        }))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(h.capture.len().await, 1);
     let token = h.capture.latest_fragment().await;
 
     let invitee_user = h.invitee().user_id;

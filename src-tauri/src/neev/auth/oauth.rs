@@ -58,6 +58,8 @@ pub(crate) struct Service {
     encryption_key: [u8; 32],
     clock: Arc<dyn Clock + Send + Sync>,
     google: Option<Google>,
+    #[cfg(test)]
+    admission_pause: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
 }
 
 impl Service {
@@ -83,6 +85,8 @@ impl Service {
             encryption_key: config.encryption_key,
             clock,
             google,
+            #[cfg(test)]
+            admission_pause: None,
         })
     }
 
@@ -98,7 +102,18 @@ impl Service {
             encryption_key,
             clock,
             google: Some(google),
+            admission_pause: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_admission_pause(
+        mut self,
+        entered: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        self.admission_pause = Some((entered, release));
+        self
     }
 
     pub(crate) fn google_available(&self) -> bool {
@@ -118,6 +133,29 @@ impl Service {
         let state = secrets::random_token(TokenPurpose::OAuth)?;
         let now = self.clock.now_unix();
         let prepared = google.authorization(&state)?;
+        #[cfg(test)]
+        insert_attempt_after_guard(
+            &self.database,
+            &self.encryption_key,
+            provider,
+            intent,
+            browser_secret,
+            &state,
+            &prepared.pkce_verifier,
+            &prepared.nonce,
+            now,
+            {
+                let pause = self.admission_pause.clone();
+                move || async move {
+                    if let Some((entered, release)) = pause {
+                        entered.wait().await;
+                        release.wait().await;
+                    }
+                }
+            },
+        )
+        .await?;
+        #[cfg(not(test))]
         insert_attempt(
             &self.database,
             &self.encryption_key,
@@ -222,6 +260,37 @@ async fn insert_attempt(
     nonce: &str,
     now: i64,
 ) -> Result<(), AuthError> {
+    insert_attempt_after_guard(
+        database,
+        encryption_key,
+        provider,
+        intent,
+        browser_secret,
+        state,
+        pkce_verifier,
+        nonce,
+        now,
+        || async {},
+    )
+    .await
+}
+
+async fn insert_attempt_after_guard<F, Future>(
+    database: &DatabaseConnection,
+    encryption_key: &[u8; 32],
+    provider: Provider,
+    intent: SignInIntent,
+    browser_secret: &str,
+    state: &str,
+    pkce_verifier: &str,
+    nonce: &str,
+    now: i64,
+    after_guard: F,
+) -> Result<(), AuthError>
+where
+    F: FnOnce() -> Future,
+    Future: std::future::Future<Output = ()>,
+{
     if provider == Provider::Email
         || now < 0
         || pkce_verifier.is_empty()
@@ -256,6 +325,7 @@ async fn insert_attempt(
 
     let tx = db::begin(database).await?;
     db::lock_admission_guard(&tx).await?;
+    after_guard().await;
     db::execute(
         &tx,
         "DELETE FROM neev_oauth_attempts WHERE state_hash IN (SELECT state_hash FROM neev_oauth_attempts WHERE expires_at<=$1 ORDER BY expires_at LIMIT $2)",

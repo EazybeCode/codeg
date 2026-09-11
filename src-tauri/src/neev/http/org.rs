@@ -45,6 +45,12 @@ enum RoleInputValue {
     Member,
 }
 
+impl Default for RoleInputValue {
+    fn default() -> Self {
+        Self::Member
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BrandingInput {
@@ -73,6 +79,7 @@ enum LogoAction {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SendInvitationInput {
     email: String,
+    #[serde(default)]
     role: RoleInputValue,
     request_id: String,
 }

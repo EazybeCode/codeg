@@ -2,12 +2,13 @@ use sea_orm::{ConnectionTrait, Statement};
 use std::sync::Arc;
 
 use crate::neev::{
-    auth::session,
+    auth::{oauth, secrets, session},
+    config::ProviderPair,
     db,
     error::AuthError,
     org::{self, invites, BrandingLogo},
     test_support::{self, OrgHarness},
-    types::Role,
+    types::{Provider, Role, SignInIntent},
 };
 
 #[tokio::test]
@@ -434,15 +435,36 @@ async fn postgres_admission_guard_precedes_task5_account_and_session_locks() {
     let (database, admin, schema) = test_support::postgres_database().await;
     let user = test_support::native_account(&database, "guard-user", "guard@example.test").await;
     let identity = test_support::identity_context(&database, user, 1_700_000_000).await;
-    let clock = std::sync::Arc::new(test_support::TestClock::new(1_700_000_000));
+    let clock = Arc::new(test_support::TestClock::new(1_700_000_000));
     let state = crate::neev::startup::ServerState::new(
         database.clone(),
         test_support::preview_config(),
-        clock,
+        clock.clone(),
     )
     .unwrap();
-    let oauth_admission = db::begin(&database).await.unwrap();
-    db::lock_admission_guard(&oauth_admission).await.unwrap();
+    let entered = Arc::new(tokio::sync::Barrier::new(2));
+    let release = Arc::new(tokio::sync::Barrier::new(2));
+    let mut oauth_config = test_support::preview_config();
+    oauth_config.providers.google = Some(ProviderPair {
+        id: "guard-google-client".into(),
+        secret: "guard-google-secret".into(),
+    });
+    let oauth = Arc::new(
+        oauth::Service::new(database.clone(), &oauth_config, clock)
+            .unwrap()
+            .with_admission_pause(entered.clone(), release.clone()),
+    );
+    let browser = secrets::random_token(secrets::TokenPurpose::Browser).unwrap();
+    let link_intent = SignInIntent::Link {
+        user_id: identity.user_id,
+        session_id: identity.session_id.clone(),
+        auth_revision: identity.auth_revision,
+    };
+    let oauth_task =
+        tokio::spawn(async move { oauth.begin(Provider::Google, link_intent, &browser).await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered.wait())
+        .await
+        .expect("actual OAuth admission should pause after acquiring the guard");
     let identity_for_create = identity.clone();
     let create = tokio::spawn(async move {
         org::create(
@@ -458,26 +480,29 @@ async fn postgres_admission_guard_precedes_task5_account_and_session_locks() {
         "%SELECT version FROM neev_schema_version WHERE id=1 FOR UPDATE%",
     )
     .await;
-    oauth_admission
-        .query_one(Statement::from_sql_and_values(
-            oauth_admission.get_database_backend(),
-            "SELECT id FROM neev_accounts WHERE id=$1 FOR UPDATE",
-            vec![user.into()],
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    oauth_admission
-        .query_one(Statement::from_sql_and_values(
-            oauth_admission.get_database_backend(),
-            "SELECT id FROM neev_sessions WHERE id=$1 FOR UPDATE",
-            vec![identity.session_id.clone().into()],
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    oauth_admission.commit().await.unwrap();
-    assert!(create.await.unwrap().is_ok());
+    release.wait().await;
+    let authorization_url = oauth_task.await.unwrap().unwrap();
+    assert!(authorization_url.contains("response_type=code"));
+    let created = create.await.unwrap().unwrap();
+    assert!(created.id > 0);
+    let attempt = db::one(
+        &database,
+        "SELECT intent,link_user_id,link_session_id,consumed_at FROM neev_oauth_attempts",
+        vec![],
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(attempt.try_get::<String>("", "intent").unwrap(), "link");
+    assert_eq!(attempt.try_get::<i32>("", "link_user_id").unwrap(), user);
+    assert_eq!(
+        attempt.try_get::<String>("", "link_session_id").unwrap(),
+        identity.session_id
+    );
+    assert_eq!(
+        attempt.try_get::<Option<i64>>("", "consumed_at").unwrap(),
+        None
+    );
     let quota = db::one(
         &database,
         "SELECT used FROM neev_quota_buckets WHERE kind='organization_creation_day'",
