@@ -1,10 +1,11 @@
 # Neev native chats and document history
 
-Date: 2026-09-11. Proposed detailed design; not implemented.
+Date: 2026-09-11. Written design approved by the owner; implementation in progress.
 The owner approved the scope in conversation: native chats and Markdown documents
 inside existing folders, private by default, explicit organization sharing,
 immutable revisions, compare/restore and conflict-safe saves without keystroke
-co-editing. This written contract requires owner review before implementation.
+co-editing. The owner approved this written contract and the three scoped Resend
+sender records with "yes and please complete everything" on September 11.
 
 ## Outcome and boundaries
 
