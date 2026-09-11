@@ -126,6 +126,58 @@ it("loads members past the first100 using the actual members-only page DTO", asy
   expect(mock.unknown).toEqual([])
 })
 
+it("loads the shifted final member after a first-page removal without discarding a branding draft", async () => {
+  let active = Array.from({ length: 101 }, (_, index) => ({
+    id: index + 1,
+    user: {
+      id: index + 1,
+      displayName: `Person ${index + 1}`,
+      avatarUrl: null,
+    },
+    role: index === 0 ? "admin" : "member",
+  }))
+  const offsets: number[] = []
+  const page = (offset: number) => () => {
+    offsets.push(offset)
+    return json({ members: active.slice(offset, offset + 100) })
+  }
+  const mock = mockNativeSession(orgSession, {
+    ...fixtures(),
+    "GET /api/neev/organization/members?limit=100&offset=0": page(0),
+    "GET /api/neev/organization/members?limit=100&offset=99": page(99),
+    "GET /api/neev/organization/members?limit=100&offset=100": page(100),
+    "DELETE /api/neev/organization/members/2": () => {
+      active = active.filter((member) => member.id !== 2)
+      return new Response(null, { status: 204 })
+    },
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  await screen.findByText("Person 100")
+  expect(screen.queryByText("Person 101")).toBeNull()
+  const name = screen.getByLabelText("Organization name")
+  await user.clear(name)
+  await user.type(name, "Unpublished draft")
+  await user.click(screen.getByRole("button", { name: "Remove Person 2" }))
+  await user.click(
+    within(await screen.findByRole("dialog")).getByRole("button", {
+      name: "Confirm removal",
+    })
+  )
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  expect(screen.queryByText("Person 2")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Load more" }))
+  expect(await screen.findByText("Person 101")).toBeVisible()
+  expect(offsets).toEqual([0, 99])
+  expect(screen.queryByRole("button", { name: "Load more" })).toBeNull()
+  expect(name).toHaveValue("Unpublished draft")
+  expect(mock.unknown).toEqual([])
+})
+
 it("requires explicit removal confirmation and surfaces a server permission denial", async () => {
   let attempts = 0
   const mock = mockNativeSession(orgSession, {

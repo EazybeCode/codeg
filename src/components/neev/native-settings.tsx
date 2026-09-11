@@ -38,7 +38,6 @@ function SettingsContent() {
     [methods, setMethods] = useState<NativeProvider[]>([])
   const [name, setName] = useState(""),
     [logo, setLogo] = useState<Logo>({ action: "keep" }),
-    [page, setPage] = useState(0),
     [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false),
@@ -187,11 +186,11 @@ function SettingsContent() {
     setNotice(t("memberUpdated"))
   }
   async function more() {
-    const next = page + 100
+    // Successful removals shift the server's active-membership offsets.
+    const next = members.length
     const people = await loadMembers(next, auth.signal)
     setMembers((old) => [...old, ...people])
-    setPage(next)
-    setHasMore(people.length === 100 && next < 100000)
+    setHasMore(people.length === 100 && next + people.length <= 100000)
   }
   const logoUrl =
     logo.action === "upload"
