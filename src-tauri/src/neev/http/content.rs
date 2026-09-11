@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{
+        rejection::{PathRejection, QueryRejection},
+        Path, Query, State,
+    },
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -154,19 +157,23 @@ struct ContentDto {
 
 pub(super) async fn list_chats(
     State(state): State<Arc<ServerState>>,
-    Path(node_id): Path<i32>,
-    Query(page): Query<ResourcePageInput>,
+    path: Result<Path<i32>, PathRejection>,
+    query: Result<Query<ResourcePageInput>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let node_id = safe_path(path)?;
+    let page = safe_query(query)?;
     list_resources(&state, node_id, ResourceKind::Chat, page, &headers).await
 }
 
 pub(super) async fn list_documents(
     State(state): State<Arc<ServerState>>,
-    Path(node_id): Path<i32>,
-    Query(page): Query<ResourcePageInput>,
+    path: Result<Path<i32>, PathRejection>,
+    query: Result<Query<ResourcePageInput>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let node_id = safe_path(path)?;
+    let page = safe_query(query)?;
     list_resources(&state, node_id, ResourceKind::Document, page, &headers).await
 }
 
@@ -194,17 +201,19 @@ async fn list_resources(
 
 pub(super) async fn create_chat(
     State(state): State<Arc<ServerState>>,
-    Path(node_id): Path<i32>,
+    path: Result<Path<i32>, PathRejection>,
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
+    let node_id = safe_path(path)?;
     create_resource(&state, node_id, ResourceKind::Chat, request).await
 }
 
 pub(super) async fn create_document(
     State(state): State<Arc<ServerState>>,
-    Path(node_id): Path<i32>,
+    path: Result<Path<i32>, PathRejection>,
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
+    let node_id = safe_path(path)?;
     create_resource(&state, node_id, ResourceKind::Document, request).await
 }
 
@@ -245,9 +254,10 @@ async fn create_resource(
 
 pub(super) async fn get_resource(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let actor = catalog::organization_get(&state, &headers).await?;
@@ -258,9 +268,10 @@ pub(super) async fn get_resource(
 
 pub(super) async fn update_resource(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let (input, actor) =
@@ -280,10 +291,12 @@ pub(super) async fn update_resource(
 
 pub(super) async fn list_messages(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
-    Query(page): Query<RevisionPageInput>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<RevisionPageInput>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let page = safe_query(query)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let actor = catalog::organization_get(&state, &headers).await?;
@@ -300,9 +313,10 @@ pub(super) async fn list_messages(
 
 pub(super) async fn append_message(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let (input, actor) =
@@ -324,10 +338,12 @@ pub(super) async fn append_message(
 
 pub(super) async fn list_revisions(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
-    Query(page): Query<RevisionPageInput>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<RevisionPageInput>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let page = safe_query(query)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let actor = catalog::organization_get(&state, &headers).await?;
@@ -344,9 +360,10 @@ pub(super) async fn list_revisions(
 
 pub(super) async fn save_revision(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let (input, actor) =
@@ -374,10 +391,12 @@ pub(super) async fn save_revision(
 
 pub(super) async fn get_document_content(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
-    Query(input): Query<RevisionInput>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<RevisionInput>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let input = safe_query(query)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let actor = catalog::organization_get(&state, &headers).await?;
@@ -398,10 +417,12 @@ pub(super) async fn get_document_content(
 
 pub(super) async fn download_document(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
-    Query(input): Query<RevisionInput>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<RevisionInput>, QueryRejection>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let input = safe_query(query)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let actor = catalog::organization_get(&state, &headers).await?;
@@ -433,9 +454,10 @@ pub(super) async fn download_document(
 
 pub(super) async fn restore_revision(
     State(state): State<Arc<ServerState>>,
-    Path(id): Path<String>,
+    path: Result<Path<String>, PathRejection>,
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let (input, actor) =
@@ -600,6 +622,18 @@ fn document_read_error(error: ContentError) -> ApiError {
         ContentError::Invalid | ContentError::Storage => ApiError::StorageUnavailable,
         error => error.into(),
     }
+}
+
+fn safe_path<T>(value: Result<Path<T>, PathRejection>) -> Result<T, ApiError> {
+    value
+        .map(|Path(value)| value)
+        .map_err(|_| ApiError::Invalid)
+}
+
+fn safe_query<T>(value: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
+    value
+        .map(|Query(value)| value)
+        .map_err(|_| ApiError::Invalid)
 }
 
 fn present_optional<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>

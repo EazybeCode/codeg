@@ -18,6 +18,13 @@ use crate::neev::{
 
 use super::cookies::CookieNames;
 
+fn assert_safe_invalid(response: axum_test::TestResponse) {
+    response.assert_status_bad_request();
+    response.assert_json(&json!({"code":"invalid"}));
+    assert_eq!(response.header(header::CACHE_CONTROL), "no-store");
+    assert_eq!(response.header("referrer-policy"), "no-referrer");
+}
+
 struct Harness {
     server: axum_test::TestServer,
     cookies: String,
@@ -125,6 +132,56 @@ impl Harness {
             .await;
         response.assert_status(StatusCode::CREATED);
         response.json()
+    }
+}
+
+#[tokio::test]
+async fn malformed_content_extractors_use_only_private_json_errors() {
+    let h = Harness::new().await;
+
+    for path in [
+        "/api/neev/nodes/not-an-id/chats",
+        "/api/neev/nodes/not-an-id/documents",
+        "/api/neev/resources/%FF",
+        "/api/neev/chats/%FF/messages",
+        "/api/neev/documents/%FF/revisions",
+        "/api/neev/documents/%FF/content",
+        "/api/neev/documents/%FF/download",
+    ] {
+        assert_safe_invalid(h.server.get(path).await);
+    }
+
+    for path in [
+        "/api/neev/nodes/not-an-id/chats",
+        "/api/neev/nodes/not-an-id/documents",
+        "/api/neev/chats/%FF/messages",
+        "/api/neev/documents/%FF/revisions",
+        "/api/neev/documents/%FF/restore",
+    ] {
+        assert_safe_invalid(h.server.post(path).await);
+    }
+    assert_safe_invalid(h.server.patch("/api/neev/resources/%FF").await);
+
+    for path in [
+        "/api/neev/nodes/1/chats?archived=submitted-secret",
+        "/api/neev/nodes/1/documents?archived=submitted-secret",
+        "/api/neev/chats/00000000-0000-4000-8000-000000000000/messages?after=1&after=2",
+        "/api/neev/documents/00000000-0000-4000-8000-000000000000/revisions?after=1&after=2",
+        "/api/neev/documents/00000000-0000-4000-8000-000000000000/content?revision=1&revision=2",
+        "/api/neev/documents/00000000-0000-4000-8000-000000000000/download?revision=1&revision=2",
+    ] {
+        assert_safe_invalid(h.server.get(path).await);
+    }
+
+    for path in [
+        "/api/neev/nodes/1/chats?submittedSecret=value",
+        "/api/neev/nodes/1/documents?submittedSecret=value",
+        "/api/neev/chats/00000000-0000-4000-8000-000000000000/messages?submittedSecret=value",
+        "/api/neev/documents/00000000-0000-4000-8000-000000000000/revisions?submittedSecret=value",
+        "/api/neev/documents/00000000-0000-4000-8000-000000000000/content?submittedSecret=value",
+        "/api/neev/documents/00000000-0000-4000-8000-000000000000/download?submittedSecret=value",
+    ] {
+        assert_safe_invalid(h.server.get(path).await);
     }
 }
 
@@ -452,7 +509,7 @@ async fn content_body_collection_reuses_the_thirty_second_deadline() {
         .unwrap();
     let pending = tokio::spawn(super::content::create_chat(
         State(state.clone()),
-        Path(1),
+        Ok(Path(1)),
         request,
     ));
     while state.auth_limit.available_permits() != 0 {
@@ -461,7 +518,7 @@ async fn content_body_collection_reuses_the_thirty_second_deadline() {
     assert!(matches!(
         super::content::create_chat(
             State(state.clone()),
-            Path(1),
+            Ok(Path(1)),
             Request::builder()
                 .method("POST")
                 .uri("/api/neev/nodes/1/chats")
