@@ -4,8 +4,9 @@ Date: 2026-09-11. Status: Google sign-in, email magic links and optional GitHub
 approved in conversation. Owner explicitly chose a fresh start without existing
 GitHub-organization compatibility. Owner approved this written design on September11
 ("sagar.007007@gmail.com is fine / approced design").
-Subproject-one implementation and local synthetic evidence are complete enough
-for final whole-branch review; approval remains pending. This does not establish
+Subproject-one implementation and local synthetic evidence passed whole-milestone
+review and the scoped final-fix review through `abb69509`. Nonblocking review
+items remain disclosed in the acceptance record. This does not establish
 real-provider/mail readiness, hosted deployment acceptance or subproject-two
 completion. See the [local acceptance evidence](../../operations/neev-native-identity-acceptance.md)
 for current results, fixture limitations and remaining release gates.

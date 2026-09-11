@@ -6,14 +6,17 @@ native membership. Keep `runtimeEnabled:false`.
 
 ## Stage 1 local review gate
 
-- [ ] Reviewed identity, session, linking and native organization code.
+- [x] Reviewed identity, session, linking and native organization code; four final
+      Important findings fixed and independently re-reviewed through `abb69509`.
 - [x] Fresh SQLite/PostgreSQL constraints, races and final-write authority tests.
-- [ ] Actual native HTTP Google fixture begin/callback/session and email scanner/
-      explicit-confirm paths; actual browser hierarchy, invitation, denial,
+- [x] Actual native HTTP Google fixture begin/callback/session, tenant denial and
+      email scanner/explicit-confirm paths; actual browser hierarchy, invitation,
       conflict, stale-tab/logout, Settings return, keyboard and 375px checks.
-- [x] Current full native/frontend suites, TypeScript, touched-file lint/format,
-      static export and `neev-server` build; exact warnings/failures retained.
-- [ ] Exact diff and secret findings reviewed; environment contract recorded in
+- [x] Recorded full native/frontend suites and earlier export/`neev-server` build;
+      final fixes additionally passed native 125/125, Settings 9/9, TypeScript and
+      touched-file lint/format. Export, production binary and full frontend suite
+      were not rebuilt/rerun after the final fixes; warnings/failures are retained.
+- [x] Exact diff and secret findings reviewed; environment contract recorded in
       [native acceptance](neev-native-identity-acceptance.md).
 - [ ] Reviewed passing source publication to Workos through current interactive
       `ship` gate. Never source codeg direct push; no automatic deployment.

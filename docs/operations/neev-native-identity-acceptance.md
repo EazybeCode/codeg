@@ -4,6 +4,25 @@ September 11, 2026. Local synthetic acceptance is separate from real providers,
 hosted deployment and public product readiness. Runtime remains false. This
 milestone does not implement chats, document revisions or agent jobs.
 
+## Local review outcome
+
+The whole-milestone review and scoped fix review are complete. All four Important
+findings were addressed in `2e73505c`, with verification recorded in `abb69509`:
+bounded request-body reads, Unicode-safe invitation subjects, mail-disabled
+invitation guards, and non-serializable OAuth exchange secrets. The scoped reviewer
+found no new breakage. A controller rerun passed 125 native tests, including the
+guarded PostgreSQL cases, with zero failures or ignored tests. The exact fix-range
+secret scan found no leaks; the earlier whole-range synthetic RSA classification
+still applies.
+
+Nonblocking review items remain explicit: fixture request timeouts, malformed
+repository-field error classification, unused list wrappers, JWKS refresh and
+confirmation-recovery test coverage, English-only standalone confirmation pages,
+the broader manifest hmac pin, the IPv6 fixture CSP limitation, and baseline
+warnings. This is local milestone acceptance, not public release approval. No
+fresh production binary, static export, real-provider test or deployment is
+implied by the fix verification.
+
 ## Reproducible local gate
 
 Use Node 22.23.2, prepending `/opt/homebrew/opt/node@22/bin` to PATH for all child
@@ -200,19 +219,19 @@ possible browser traffic.
 
 ## Fresh deployment contract
 
-| Configuration/resource | Native candidate requirement |
-| --- | --- |
-| `NEEV_APP_ORIGIN` | `https://app.neev.so`; exact Google `/auth/google/callback`, optional GitHub `/auth/github/callback` |
-| `NEEV_DATABASE_URL` | New explicit PostgreSQL database; reject old markers instead of migrating |
-| Native storage | Separate fresh prefix/volume; no old operator/repository/credential mounts |
-| `NEEV_ENC_KEY` | Fresh 32-byte secret as 64 lowercase hex characters, separate recovery custody |
-| `NEEV_BIND` | Reviewed private listener; no public publication before route review |
-| `NEEV_TRUSTED_PROXY_IPS` | Exact normalized peer IPs; actual hop and spoofed X-Forwarded-For denial, no broad subnet trust |
-| `NEEV_STATIC_ROOT` | Absolute matching reviewed export directory |
-| `NEEV_ALLOW_LOOPBACK_PREVIEW` | Unset/false on deployment; fixture uses existing local preview support |
-| Google client | Owner-approved paired `NEEV_GOOGLE_CLIENT_ID`/`NEEV_GOOGLE_CLIENT_SECRET`, basic scopes only |
-| Mail | Approved send-only `NEEV_RESEND_API_KEY`, `NEEV_MAIL_FROM=verification@neev.so`, apex all records verified |
-| `NEEV_RUNTIME_ENABLED` | Unset/false until isolated-agent/durable-job gates pass |
+| Configuration/resource        | Native candidate requirement                                                                               |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `NEEV_APP_ORIGIN`             | `https://app.neev.so`; exact Google `/auth/google/callback`, optional GitHub `/auth/github/callback`       |
+| `NEEV_DATABASE_URL`           | New explicit PostgreSQL database; reject old markers instead of migrating                                  |
+| Native storage                | Separate fresh prefix/volume; no old operator/repository/credential mounts                                 |
+| `NEEV_ENC_KEY`                | Fresh 32-byte secret as 64 lowercase hex characters, separate recovery custody                             |
+| `NEEV_BIND`                   | Reviewed private listener; no public publication before route review                                       |
+| `NEEV_TRUSTED_PROXY_IPS`      | Exact normalized peer IPs; actual hop and spoofed X-Forwarded-For denial, no broad subnet trust            |
+| `NEEV_STATIC_ROOT`            | Absolute matching reviewed export directory                                                                |
+| `NEEV_ALLOW_LOOPBACK_PREVIEW` | Unset/false on deployment; fixture uses existing local preview support                                     |
+| Google client                 | Owner-approved paired `NEEV_GOOGLE_CLIENT_ID`/`NEEV_GOOGLE_CLIENT_SECRET`, basic scopes only               |
+| Mail                          | Approved send-only `NEEV_RESEND_API_KEY`, `NEEV_MAIL_FROM=verification@neev.so`, apex all records verified |
+| `NEEV_RUNTIME_ENABLED`        | Unset/false until isolated-agent/durable-job gates pass                                                    |
 
 Never reuse old keys/cookies/databases/storage. No legacy migration/drop is
 authorized. Prove fresh initialization and old marker/credential refusal, new
