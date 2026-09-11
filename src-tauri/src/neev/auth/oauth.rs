@@ -5,7 +5,7 @@ use aes_gcm::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::{rngs::OsRng, RngCore};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend};
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeMap, Deserialize, Serializer as _};
 use std::sync::Arc;
 
 use crate::neev::{
@@ -31,11 +31,22 @@ const GLOBAL_LIMIT: i64 = 60;
 const ACTIVE_LIMIT: i64 = 1000;
 const CLEANUP_LIMIT: i64 = 100;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct ExchangeSecrets {
     pkce_verifier: String,
     nonce: String,
 }
+
+#[cfg(test)]
+const _: fn() = || {
+    trait AmbiguousIfSerialize<A> {
+        fn some_item() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSerialize<()> for T {}
+    struct Invalid;
+    impl<T: ?Sized + serde::Serialize> AmbiguousIfSerialize<Invalid> for T {}
+    let _ = <ExchangeSecrets as AmbiguousIfSerialize<_>>::some_item;
+};
 
 pub(crate) struct ClaimedAttempt {
     pub(crate) intent: SignInIntent,
@@ -517,7 +528,7 @@ fn encrypt(key: &[u8; 32], aad: &[u8], value: &ExchangeSecrets) -> Result<String
     OsRng
         .try_fill_bytes(&mut nonce)
         .map_err(|_| AuthError::Unavailable)?;
-    let plaintext = serde_json::to_vec(value).map_err(|_| AuthError::Unavailable)?;
+    let plaintext = encode_exchange_secrets(value)?;
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce),
@@ -530,6 +541,22 @@ fn encrypt(key: &[u8; 32], aad: &[u8], value: &ExchangeSecrets) -> Result<String
     let mut output = nonce.to_vec();
     output.extend(ciphertext);
     Ok(URL_SAFE_NO_PAD.encode(output))
+}
+
+fn encode_exchange_secrets(value: &ExchangeSecrets) -> Result<Vec<u8>, AuthError> {
+    let mut plaintext = Vec::new();
+    let mut serializer = serde_json::Serializer::new(&mut plaintext);
+    let mut fields = serializer
+        .serialize_map(Some(2))
+        .map_err(|_| AuthError::Unavailable)?;
+    fields
+        .serialize_entry("pkce_verifier", &value.pkce_verifier)
+        .map_err(|_| AuthError::Unavailable)?;
+    fields
+        .serialize_entry("nonce", &value.nonce)
+        .map_err(|_| AuthError::Unavailable)?;
+    fields.end().map_err(|_| AuthError::Unavailable)?;
+    Ok(plaintext)
 }
 
 fn decrypt(key: &[u8; 32], aad: &[u8], value: &str) -> Result<ExchangeSecrets, AuthError> {
@@ -548,4 +575,32 @@ fn decrypt(key: &[u8; 32], aad: &[u8], value: &str) -> Result<ExchangeSecrets, A
         )
         .map_err(|_| AuthError::Unauthorized)?;
     serde_json::from_slice(&plaintext).map_err(|_| AuthError::Unauthorized)
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    #[test]
+    fn exchange_secret_encoding_roundtrips_and_rejects_tampering() {
+        let secrets = ExchangeSecrets {
+            pkce_verifier: "synthetic-pkce".into(),
+            nonce: "synthetic-nonce".into(),
+        };
+        let encoded = encrypt(&[91; 32], b"synthetic-aad", &secrets).unwrap();
+        let decoded = decrypt(&[91; 32], b"synthetic-aad", &encoded).unwrap();
+        assert_eq!(decoded.pkce_verifier, "synthetic-pkce");
+        assert_eq!(decoded.nonce, "synthetic-nonce");
+
+        let mut tampered = URL_SAFE_NO_PAD.decode(&encoded).unwrap();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            decrypt(
+                &[91; 32],
+                b"synthetic-aad",
+                &URL_SAFE_NO_PAD.encode(tampered)
+            ),
+            Err(AuthError::Unauthorized)
+        ));
+    }
 }

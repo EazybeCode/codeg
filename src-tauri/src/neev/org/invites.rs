@@ -67,6 +67,7 @@ pub(crate) async fn send(
     if role == Role::Admin && organization.owner_user_id != actor.identity.user_id {
         return Err(AuthError::Forbidden);
     }
+    let mail = state.mail.as_ref().ok_or(AuthError::Unavailable)?;
     if let Some(row) = db::one(
         &tx,
         "SELECT body_hash,resource_id FROM neev_requests WHERE user_id=$1 AND action='invitation.send' AND request_id=$2",
@@ -121,7 +122,6 @@ pub(crate) async fn send(
     .await?;
     tx.commit().await.map_err(database_error)?;
 
-    let mail = state.mail.as_ref().ok_or(AuthError::Unavailable)?;
     let mut link = state
         .config
         .origin
@@ -130,7 +130,7 @@ pub(crate) async fn send(
     link.set_fragment(Some(&format!("token={token}")));
     mail.send(MailMessage {
         recipient,
-        subject: format!("Join {} on Neev", organization.name),
+        subject: "You're invited to Neev".into(),
         text: format!(
             "You were invited to join {} on Neev. Sign in with this exact recipient address, then confirm the organization:\n\n{}\n\nThis invitation expires in 7 days.",
             organization.name,

@@ -5,6 +5,7 @@ import { NativeSettings } from "./native-settings"
 import {
   json,
   mockNativeSession,
+  nativeCapabilities,
   NativeTestRoot,
   orgSession,
 } from "./test-helpers"
@@ -51,6 +52,41 @@ it("protects the owner, exposes only own sign-in methods, and keeps back navigat
   expect(screen.getByRole("button", { name: "Remove Maya" })).toBeEnabled()
   expect(screen.getByText("Owner")).toBeVisible()
   expect(mock.unknown).toEqual([])
+})
+
+it("disables invitations when the native email provider is unavailable", async () => {
+  const mock = mockNativeSession(orgSession, {
+    ...fixtures(),
+    "GET /api/workos/capabilities": () =>
+      json({
+        ...nativeCapabilities,
+        providers: { ...nativeCapabilities.providers, email: false },
+      }),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  await user.type(
+    await screen.findByLabelText("Invite by email"),
+    "invitee@example.test"
+  )
+  expect(screen.getByRole("button", { name: "Invite member" })).toBeDisabled()
+  expect(
+    screen.getByText(
+      "Email invitations are unavailable until an email provider is configured."
+    )
+  ).toBeVisible()
+  expect(mock.unknown).toEqual([])
+  expect(
+    mock.fetcher.mock.calls.some(
+      ([path, init]) =>
+        path === "/api/neev/organization/invitations" &&
+        (init as RequestInit | undefined)?.method === "POST"
+    )
+  ).toBe(false)
 })
 
 it("hides owner-only role grants from a nonowner admin and protects administrator peers", async () => {

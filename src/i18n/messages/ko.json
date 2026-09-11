@@ -79,6 +79,7 @@
     "inviteEmail": "이메일로 초대",
     "inviteRole": "초대 역할",
     "inviteMember": "멤버 초대",
+    "invitationEmailUnavailable": "이메일 제공업체를 구성해야 이메일 초대를 보낼 수 있습니다.",
     "invitationCreated": "초대를 만들었습니다. 받는 사람은 로그인하고 이메일에 명시된 조직을 확인해야 합니다. 전달은 보장되지 않습니다.",
     "invitationRevoked": "초대가 취소되었습니다.",
     "invitationsThisVisit": "이번 방문 중 만든 초대입니다. 여기서 취소할 수 있습니다.",

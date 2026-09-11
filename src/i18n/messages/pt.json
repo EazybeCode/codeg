@@ -79,6 +79,7 @@
     "inviteEmail": "Convidar por e-mail",
     "inviteRole": "Função do convite",
     "inviteMember": "Convidar membro",
+    "invitationEmailUnavailable": "Os convites por e-mail só ficam disponíveis após configurar um provedor de e-mail.",
     "invitationCreated": "Convite criado. O destinatário deve entrar e confirmar a organização indicada no e-mail. A entrega não é garantida.",
     "invitationRevoked": "Convite revogado.",
     "invitationsThisVisit": "Convites criados nesta visita. Você pode revogá-los aqui.",

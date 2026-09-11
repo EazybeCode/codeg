@@ -26,6 +26,21 @@ Run touched-file ESLint/Prettier/Rustfmt. Record the actual emitted Rust test
 binary/counts and run explicit native filters. Only the exact long-running browser
 driver is excluded above; every other guarded PG test runs.
 
+## Final-fix verification
+
+The September 11 final-fix source-linked native gate passed 125/125 tests, with
+0 failures, 0 ignored and 3,781 filtered in 5.49s. It included the ignored
+PostgreSQL cases and skipped only the exact interactive browser acceptance driver.
+The four new regressions cover pending-body permit recovery, Unicode invitation
+delivery through the loopback Resend adapter, mail-disabled first/retry
+bookkeeping, and the OAuth exchange-secret serialization/encryption contract.
+
+The scoped native Settings suite passed 9/9. TypeScript, touched-file ESLint, and
+touched-file Prettier also passed. This fix wave did not rerun the full frontend
+suite, static export, production binary, or browser acceptance; those results
+below are historical evidence from before these fixes. Runtime remains disabled.
+This evidence is not final-review approval or deployment authorization.
+
 ## Owned synthetic browser fixture
 
 ```sh
@@ -93,10 +108,10 @@ distinguish extension errors. Zero GitHub calls requires connected network/servi
 observations, not an unused counter or arbitrary-socket claim. Execution results
 are recorded after the integrated gate.
 
-## Consolidated local evidence awaiting final review
+## Historical consolidated local evidence before the final-fix wave
 
-Current emitted-binary native gate: 121 passed, 0 failed, 0 ignored; 3,781 filtered,
-5.53s, exit0, with only the exact interactive driver excluded. The controller ran
+The earlier emitted-binary native gate passed 121 tests, with 0 failures, 0 ignored;
+3,781 filtered, 5.53s, exit0, with only the exact interactive driver excluded. The controller ran
 the guarded PostgreSQL native filter after the fixture fixes; this includes
 constraints, concurrent proof consumption, inviter removal and final-write checks.
 Historically the initial full native gate passed119 and the focused fixture filter
@@ -104,7 +119,7 @@ passed2/2. After fixture
 fixes through `5b6ab8bc`, the focused filter passed4/4, 0 failed, 0 ignored: actual
 HTTP identity/hierarchy/invitation/magic-link roundtrip with chooser-policy checks,
 production-router launcher absence, server-panic cleanup, and unrelated/native
-cookie handling. The current 121-test full native run includes those added
+cookie handling. That historical 121-test full native run includes those added
 regressions. It does not imply a new frontend or production-binary build. HTTP
 results are not browser layout or CSP-enforcement evidence.
 

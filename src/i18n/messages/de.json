@@ -79,6 +79,7 @@
     "inviteEmail": "Per E-Mail einladen",
     "inviteRole": "Einladungsrolle",
     "inviteMember": "Mitglied einladen",
+    "invitationEmailUnavailable": "E-Mail-Einladungen sind erst verfügbar, wenn ein E-Mail-Anbieter konfiguriert ist.",
     "invitationCreated": "Einladung erstellt. Die empfangende Person muss sich anmelden und die genannte Organisation in der E-Mail bestätigen. Die Zustellung ist nicht garantiert.",
     "invitationRevoked": "Einladung widerrufen.",
     "invitationsThisVisit": "Während dieses Besuchs erstellte Einladungen. Sie können sie hier widerrufen.",

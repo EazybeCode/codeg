@@ -79,6 +79,7 @@
     "inviteEmail": "透過電子郵件邀請",
     "inviteRole": "邀請角色",
     "inviteMember": "邀請成員",
+    "invitationEmailUnavailable": "設定電子郵件服務供應商後，才能傳送電子郵件邀請。",
     "invitationCreated": "邀請已建立。收件人必須登入並確認郵件中指定的組織。不保證郵件送達。",
     "invitationRevoked": "邀請已撤銷。",
     "invitationsThisVisit": "本次瀏覽期間建立的邀請，可在此撤銷。",

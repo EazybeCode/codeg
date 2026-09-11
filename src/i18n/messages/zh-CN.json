@@ -79,6 +79,7 @@
     "inviteEmail": "通过邮箱邀请",
     "inviteRole": "邀请角色",
     "inviteMember": "邀请成员",
+    "invitationEmailUnavailable": "配置电子邮件服务提供商后，才能发送电子邮件邀请。",
     "invitationCreated": "邀请已创建。收件人必须登录并确认邮件中指定的组织。不保证邮件送达。",
     "invitationRevoked": "邀请已撤销。",
     "invitationsThisVisit": "本次访问期间创建的邀请，可在此撤销。",

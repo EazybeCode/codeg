@@ -6,10 +6,111 @@ use crate::neev::{
     config::ProviderPair,
     db,
     error::AuthError,
+    mail::{resend::Resend, Service as MailService},
     org::{self, invites, BrandingLogo},
     test_support::{self, OrgHarness},
     types::{Provider, Role, SignInIntent},
 };
+
+#[tokio::test]
+async fn unicode_organization_invitation_uses_bounded_subject_through_resend() {
+    use axum::{extract::State, routing::post, Json, Router};
+    use tokio::sync::Mutex;
+
+    type Captured = Arc<Mutex<Option<serde_json::Value>>>;
+    async fn capture(
+        State(captured): State<Captured>,
+        Json(body): Json<serde_json::Value>,
+    ) -> axum::http::StatusCode {
+        *captured.lock().await = Some(body);
+        axum::http::StatusCode::ACCEPTED
+    }
+
+    let captured: Captured = Arc::new(Mutex::new(None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/emails", post(capture))
+        .with_state(captured.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let database = test_support::database().await;
+    let owner =
+        test_support::native_account(&database, "unicode-owner", "owner@example.test").await;
+    let (org_id, _) = test_support::organization(&database, owner, "admin").await;
+    let organization_name = "界".repeat(100);
+    test_support::execute(
+        &database,
+        "UPDATE neev_organizations SET name=$1 WHERE id=$2",
+        vec![organization_name.clone().into(), org_id.into()],
+    )
+    .await;
+    let actor = test_support::scoped_context(&database, owner, org_id, 1_700_000_000).await;
+    let sender = Resend::for_test(
+        "test-send-only-key".into(),
+        "verification@neev.so".into(),
+        url::Url::parse(&format!("http://{address}/emails")).unwrap(),
+    )
+    .unwrap();
+    let mail = MailService::new(database.clone(), Arc::new(sender));
+    let state = crate::neev::startup::ServerState::with_mail(
+        database,
+        test_support::preview_config(),
+        Arc::new(test_support::TestClock::new(1_700_000_000)),
+        mail,
+    )
+    .unwrap();
+
+    let result = invites::send(
+        &state,
+        &actor,
+        "invitee@example.test",
+        Role::Member,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await;
+    server.abort();
+    result.unwrap();
+    let body = captured.lock().await.take().unwrap();
+    assert_eq!(body["subject"], "You're invited to Neev");
+    assert_eq!(body["to"], "invitee@example.test");
+    assert!(body["text"].as_str().unwrap().contains(&organization_name));
+}
+
+#[tokio::test]
+async fn mail_disabled_invitation_and_same_id_retry_leave_no_durable_bookkeeping() {
+    let database = test_support::database().await;
+    let owner =
+        test_support::native_account(&database, "disabled-mail-owner", "owner@example.test").await;
+    let (org_id, _) = test_support::organization(&database, owner, "admin").await;
+    let actor = test_support::scoped_context(&database, owner, org_id, 1_700_000_000).await;
+    let state = crate::neev::startup::ServerState::new(
+        database.clone(),
+        test_support::preview_config(),
+        Arc::new(test_support::TestClock::new(1_700_000_000)),
+    )
+    .unwrap();
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    for _ in 0..2 {
+        assert_eq!(
+            invites::send(
+                &state,
+                &actor,
+                "invitee@example.test",
+                Role::Member,
+                &request_id,
+            )
+            .await,
+            Err(AuthError::Unavailable)
+        );
+        assert_eq!(test_support::count(&database, "neev_invitations").await, 0);
+        assert_eq!(test_support::count(&database, "neev_requests").await, 0);
+        assert_eq!(
+            test_support::count(&database, "neev_quota_buckets").await,
+            0
+        );
+    }
+}
 
 #[tokio::test]
 async fn invite_acceptance_requires_exact_verified_recipient_and_current_inviter() {

@@ -28,6 +28,7 @@ pub(super) enum ApiError {
     Forbidden,
     Conflict,
     Limited,
+    RequestTimeout,
     Unavailable,
     NotFound,
 }
@@ -53,6 +54,7 @@ impl IntoResponse for ApiError {
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Self::Conflict => (StatusCode::CONFLICT, "conflict"),
             Self::Limited => (StatusCode::TOO_MANY_REQUESTS, "limited"),
+            Self::RequestTimeout => (StatusCode::REQUEST_TIMEOUT, "request_timeout"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
         };

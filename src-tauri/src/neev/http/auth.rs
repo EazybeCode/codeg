@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     body::{to_bytes, Body},
@@ -7,7 +11,6 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
 
 use crate::neev::{
     auth::{magic, oauth, session},
@@ -85,6 +88,11 @@ struct ConfirmationDto {
 
 const ACCEPTED_MESSAGE: &str =
     "If delivery is available, your sign-in email may arrive shortly. Delivery can be delayed; retry later if needed.";
+// Even the largest native JSON request (a <=1.5 MiB branding payload) must
+// finish uploading promptly enough that slow clients cannot retain all 32
+// shared request permits. This deadline covers body collection only; database,
+// OAuth and mail work retain their existing cancellation boundaries.
+const BODY_READ_DEADLINE: Duration = Duration::from_secs(30);
 
 pub(super) async fn preauth(
     State(state): State<Arc<ServerState>>,
@@ -179,7 +187,7 @@ pub(super) async fn logout(
     if !cookies::is_json(&parts.headers) {
         return Err(ApiError::Invalid);
     }
-    let body = to_bytes(body, 1024).await.map_err(|_| ApiError::Invalid)?;
+    let body = read_body(body, 1024).await?;
     if serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|value| value.as_object().cloned())
@@ -517,7 +525,7 @@ pub(super) async fn json_request_limited<T: DeserializeOwned>(
     if !cookies::is_json(&parts.headers) {
         return Err(ApiError::Invalid);
     }
-    let body = to_bytes(body, limit).await.map_err(|_| ApiError::Invalid)?;
+    let body = read_body(body, limit).await?;
     let input = serde_json::from_slice(&body).map_err(|_| ApiError::Invalid)?;
     Ok((parts.headers, input))
 }
@@ -533,7 +541,7 @@ async fn empty_json_request(
     if !cookies::is_json(&parts.headers) {
         return Err(ApiError::Invalid);
     }
-    let body = to_bytes(body, 1024).await.map_err(|_| ApiError::Invalid)?;
+    let body = read_body(body, 1024).await?;
     if serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|value| value.as_object().cloned())
@@ -542,6 +550,13 @@ async fn empty_json_request(
         return Err(ApiError::Invalid);
     }
     Ok(parts.headers)
+}
+
+async fn read_body(body: Body, limit: usize) -> Result<axum::body::Bytes, ApiError> {
+    tokio::time::timeout(BODY_READ_DEADLINE, to_bytes(body, limit))
+        .await
+        .map_err(|_| ApiError::RequestTimeout)?
+        .map_err(|_| ApiError::Invalid)
 }
 
 fn callback_query(raw: Option<&str>) -> Result<(String, oauth::CallbackResult), ApiError> {

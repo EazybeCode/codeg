@@ -79,6 +79,7 @@
     "inviteEmail": "Inviter par e-mail",
     "inviteRole": "Rôle de l’invitation",
     "inviteMember": "Inviter un membre",
+    "invitationEmailUnavailable": "Les invitations par e-mail ne sont disponibles qu’après la configuration d’un fournisseur de messagerie.",
     "invitationCreated": "Invitation créée. Le destinataire doit se connecter et confirmer l’organisation indiquée dans l’e-mail. La livraison n’est pas garantie.",
     "invitationRevoked": "Invitation révoquée.",
     "invitationsThisVisit": "Invitations créées pendant cette visite. Vous pouvez les révoquer ici.",

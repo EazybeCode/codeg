@@ -79,6 +79,7 @@
     "inviteEmail": "Invite by email",
     "inviteRole": "Invitation role",
     "inviteMember": "Invite member",
+    "invitationEmailUnavailable": "Email invitations are unavailable until an email provider is configured.",
     "invitationCreated": "Invitation created. The recipient must sign in and confirm the named organization from their email. Delivery is not guaranteed.",
     "invitationRevoked": "Invitation revoked.",
     "invitationsThisVisit": "Invitations created during this visit. You can revoke them here.",

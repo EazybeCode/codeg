@@ -78,7 +78,8 @@ function SettingsContent() {
     return () => controller.abort()
   }, [handleError, organizationId])
   const admin = auth.session?.role === "admin",
-    owner = org?.ownerUserId === auth.session?.user.id
+    owner = org?.ownerUserId === auth.session?.user.id,
+    emailAvailable = auth.capabilities?.providers.email === true
   async function action(work: () => Promise<void>) {
     if (busy) return
     setBusy(true)
@@ -133,7 +134,7 @@ function SettingsContent() {
     reader.readAsDataURL(file)
   }
   async function sendInvite() {
-    if (!auth.session) return
+    if (!auth.session || !emailAvailable) return
     const digest = `${inviteRole}:${email.trim()}`
     if (receipt.current?.digest !== digest)
       receipt.current = { digest, id: crypto.randomUUID() }
@@ -389,7 +390,7 @@ function SettingsContent() {
                     maxLength={254}
                     autoComplete="off"
                     value={email}
-                    disabled={busy}
+                    disabled={busy || !emailAvailable}
                     onChange={(event) => setEmail(event.target.value)}
                     className="h-10 w-full min-w-0 rounded-lg border bg-background px-3 text-base md:text-sm"
                   />
@@ -399,7 +400,7 @@ function SettingsContent() {
                     <span className="text-sm">{t("inviteRole")}</span>
                     <select
                       value={inviteRole}
-                      disabled={busy}
+                      disabled={busy || !emailAvailable}
                       onChange={(event) =>
                         setInviteRole(event.target.value as NativeRole)
                       }
@@ -410,7 +411,15 @@ function SettingsContent() {
                     </select>
                   </label>
                 )}
-                <Button disabled={busy || !email.trim()} type="submit">
+                {!emailAvailable && (
+                  <p className="text-sm text-muted-foreground">
+                    {t("invitationEmailUnavailable")}
+                  </p>
+                )}
+                <Button
+                  disabled={busy || !emailAvailable || !email.trim()}
+                  type="submit"
+                >
                   {t("inviteMember")}
                 </Button>
               </form>

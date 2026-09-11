@@ -1,4 +1,9 @@
-use axum::{body::Bytes, http::header};
+use axum::{
+    body::{to_bytes, Body, Bytes},
+    extract::State,
+    http::{header, Request},
+    response::IntoResponse,
+};
 use serde_json::json;
 
 use crate::neev::{
@@ -8,6 +13,73 @@ use crate::neev::{
 };
 
 use super::cookies::CookieNames;
+
+#[tokio::test]
+async fn pending_json_body_times_out_and_releases_native_request_capacity() {
+    let database = h::database().await;
+    let mut state = crate::neev::startup::ServerState::new(
+        database,
+        h::preview_config(),
+        std::sync::Arc::new(h::TestClock::new(1_700_000_000)),
+    )
+    .unwrap();
+    state.auth_limit = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let state = std::sync::Arc::new(state);
+    tokio::time::pause();
+    let pending_body =
+        Body::from_stream(futures::stream::pending::<Result<Bytes, std::io::Error>>());
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/neev/auth/google/login")
+        .header(header::ORIGIN, "http://127.0.0.1:3100")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(pending_body)
+        .unwrap();
+    let pending = tokio::spawn(super::auth::google_login(State(state.clone()), request));
+    while state.auth_limit.available_permits() != 0 {
+        tokio::task::yield_now().await;
+    }
+
+    let while_pending = super::auth::google_login(
+        State(state.clone()),
+        Request::builder()
+            .method("POST")
+            .uri("/api/neev/auth/google/login")
+            .header(header::ORIGIN, "http://127.0.0.1:3100")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert!(matches!(while_pending, Err(super::ApiError::Limited)));
+
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        pending.is_finished(),
+        "pending body retained its request permit"
+    );
+    let response = pending.await.unwrap().unwrap_err().into_response();
+    assert_eq!(response.status(), axum::http::StatusCode::REQUEST_TIMEOUT);
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"code":"request_timeout"})
+    );
+
+    let recovered = super::auth::google_login(
+        State(state),
+        Request::builder()
+            .method("POST")
+            .uri("/api/neev/auth/google/login")
+            .header(header::ORIGIN, "http://127.0.0.1:3100")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap(),
+    )
+    .await;
+    assert!(matches!(recovered, Err(super::ApiError::Unauthorized)));
+}
 
 #[tokio::test]
 async fn google_callback_browser_errors_use_only_fixed_private_recovery_redirects() {

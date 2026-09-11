@@ -79,6 +79,7 @@
     "inviteEmail": "メールで招待",
     "inviteRole": "招待する役割",
     "inviteMember": "メンバーを招待",
+    "invitationEmailUnavailable": "メールプロバイダーが設定されるまで、メール招待は利用できません。",
     "invitationCreated": "招待を作成しました。受信者はログインし、メールに記載された組織を確認する必要があります。配信は保証されません。",
     "invitationRevoked": "招待を取り消しました。",
     "invitationsThisVisit": "今回のアクセス中に作成した招待です。ここで取り消せます。",
