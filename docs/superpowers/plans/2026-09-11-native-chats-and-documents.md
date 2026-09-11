@@ -31,6 +31,7 @@
 - Work only in existing `.context/workos-src`, branch unchanged. Preserve untracked `.context/`. Source origin codeg must never receive a push; publication only reviewed Workos flow with interactive ship. No external writes by implementers.
 - Rust commands MUST include `--no-default-features`, existing target, `CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1`. Stop/report before <3GiB free; no guessed cleanup. Native test PG URL must be exact `postgresql:///neev_identity_test?host=/tmp/neev-pg.aTlLNW&port=55439&user=air1`; owned UUID schemas only. Do not invoke default desktop features.
 - Tests first with observed behavioral RED, then minimal implementation. Build focused tests while iterating and run full native suite once per backend task before commit. Reviewers do not duplicate suite runs. Main controls browser exclusively.
+- Full native suite means the `neev::` test filter, with `--include-ignored --skip neev::browser_fixture::browser_acceptance_driver --test-threads=1`; never the entire legacy library suite. Preserve the guarded PostgreSQL URL. Use `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0` consistently on rebuilt native test commands. Format only explicit task files with `rustfmt --config skip_children=true`, never whole-crate `cargo fmt`.
 
 ## File responsibility map
 
