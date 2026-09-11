@@ -45,7 +45,8 @@ cookies. Verify actual browser host/cookie behavior. Two hosts in one profile ar
 synthetic participants, not two real users or independent browsers. Same-origin
 tabs cover BroadcastChannel/stale-session behavior.
 
-For synthetic Google, open `/__synthetic/google` on the chosen native app host.
+For synthetic Google browser checks, open `/__synthetic/google` on the IPv4 native
+app host; use captured email confirmation for the isolated IPv6 participant.
 This explicitly labelled test-only launcher calls real preauth and login/link
 endpoints, uses the current session's CSRF for linking, and permits only the exact
 owned issuer `/authorize` URL before navigation. The normal production Google
@@ -54,6 +55,15 @@ that button's redirect behavior is covered by component tests, not certified by
 this synthetic browser launcher. After callback, the real onboarding/workspace
 UI is used. Production router and emitted binary must return404 for both launcher
 page and script. No production client allowlist or runtime flag is changed.
+
+Known fixture limitation: Chrome completed the IPv4 chooser/callback flow, but
+the IPv6 chooser return remained blocked despite its exact-origin CSP header.
+Literal IPv6 is not supported by the specified
+[CSP host-source matching](https://www.w3.org/TR/2026/WD-CSP3-20260309/#match-hosts).
+HTTP header equality is not proof of browser CSP matching. Dual-Google browser
+coverage is incomplete; the observed IPv4 result is not a cross-browser guarantee.
+Do not broaden CSP, change browser protections or add another origin to hide this
+limitation. Use the established email flow for participant two.
 
 The test issuer implements authorize, a labelled fixed-account chooser, one-use
 short-lived codes, PKCE, nonce-bound signed tokens, discovery and JWKS. Real
@@ -85,12 +95,16 @@ are recorded after the integrated gate.
 
 ## Local execution evidence and open browser gate
 
-Current native gate: 119 passed, 0 failed, 0 ignored; 3,781 filtered, with only the exact
+Initial full native gate: 119 passed, 0 failed, 0 ignored; 3,781 filtered, with only the exact
 interactive driver excluded from the native filter. This includes the isolated PG
 constraints, concurrent proof consumption, inviter removal and final-write checks.
-The emitted test binary's browser-fixture filter separately passed2/2, including
-actual HTTP identity/hierarchy/invitation/magic-link roundtrip and production-router
-launcher absence. These HTTP results are not browser layout evidence.
+The initial emitted browser-fixture filter separately passed2/2. After fixture
+fixes through `5b6ab8bc`, the focused filter passed4/4, 0 failed, 0 ignored: actual
+HTTP identity/hierarchy/invitation/magic-link roundtrip with chooser-policy checks,
+production-router launcher absence, server-panic cleanup, and unrelated/native
+cookie handling. Only the exact interactive driver was skipped. The 119-test full
+run predates those added regressions; it is not a new full-suite count. HTTP
+results are not browser layout or CSP-enforcement evidence.
 
 Frontend: 459 files / 6,279 tests passed with `--maxWorkers=2 --minWorkers=1` and no
 concurrent Rust compilation. The initial default-worker full run had 6,278 passes
@@ -107,20 +121,45 @@ returning404, old-cookie denial and safe callback recovery. The smoke removed it
 exact owned database and temporary assets. This is a local development binary,
 not a hosted image or deployment acceptance.
 
-Controller CUA observed actual captured-email request/explicit confirmation for
-two synthetic people on separate literal hosts, no automatic organization join,
-company creation, project→folder→subfolder, persisted company rename, Settings
-return, input/menu focus and authenticated Settings/workspace at 375px with no
-horizontal overflow. These are synthetic local accounts, not real delivery/users.
-The first fixture was then stopped normally; its listeners/pools/exact owned schema
-and synthetic account/catalog/mail state were removed. Evidence was retained.
+Controller CUA completed the following actual Chrome checks across recorded
+synthetic runs; these are not real provider/delivery/users or independent browsers:
 
-Still pending: Google launcher browser flow, invitation explicit acceptance,
-complete cross-org/linking/logout/stale-tab journeys, final keyboard checks and
-console/network summary. Logo upload was blocked by Chrome's file-upload permission;
-an extension popup subsequently blocked further CUA actions. No visual pass is
-inferred from backend or component tests. The owner must restore browser control
-before the remaining browser acceptance can be recorded.
+- On `5b6ab8bc`, IPv4 Google launcher → chooser → callback → onboarding as support
+  → Neev Google Acceptance → Marketing/Campaigns/Launch passed, including keyboard
+  Return, autofocus and hierarchical breadcrumbs.
+- Earlier captured-email request/scanner GET/explicit confirmation, organization
+  creation, persisted rename, Settings return and 375px Settings/workspace checks
+  passed with no horizontal overflow. On `e971582a`, native file-picker selection
+  → logo preview → save → reload visibly rendered the image; removal/save/reload
+  also passed. Earlier picker failures were controller interactions, not a proven
+  product defect; no logo code change was needed.
+- Recipient two used email/explicit confirmation on IPv6 and created Independent
+  Sales, without access to the first organization's catalog before admission.
+  Linking that recipient's existing email to support's Google account produced a
+  safe generic failure; reload retained support's Google identity only, with no
+  merge. The named invitation required explicit Join and retained the recipient's
+  current second organization. The owner saw Member; administrator → member role
+  changes persisted on reload.
+- Recipient sign-out cleared another same-origin participant-two tab. Email
+  sign-in again showed both organization choices; explicit selection of the first
+  organization displayed Marketing. This supplies actual stale-tab/logout and
+  explicit organization-selection evidence.
+
+The latest desktop screenshot was inspected. A new 375px override attempt returned
+success from the controller API but the actual DOM stayed1440px; it supplies no
+new responsive pass. The override was reset and duplicate tab closed. The earlier
+verified 375px results above remain historical, not a fresh check of the latest run.
+
+IPv6 Google return remains a disclosed fixture limitation, not a passing browser
+check. Final consolidated keyboard/accessibility and console/network audit,
+remaining browser-specific denial coverage and independent whole-branch review
+remain open. Extension `feature_flags` errors and
+safesearch iframe interference were observed; there is no pristine-console or
+complete browser-wide zero-GitHub network claim. Older completed fixtures were
+stopped normally with exact cleanup. The latest controller-owned run also stopped
+normally with exact schema/listener cleanup; its owned tabs were closed and the
+viewport reset. No active acceptance fixture remains.
+These results do not complete Task 8 or certify public readiness.
 
 The native hierarchy's connected outbound-boundary regression passed: its positive
 OAuth control observes real fixture requests, then native catalog operations add
