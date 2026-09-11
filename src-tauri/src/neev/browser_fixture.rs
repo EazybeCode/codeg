@@ -432,13 +432,19 @@ impl Fixture {
     }
     async fn shutdown(mut self) {
         let _ = self.stop.send(true);
+        let mut server_failed = false;
         for mut task in self.tasks.drain(..) {
-            if tokio::time::timeout(Duration::from_secs(15), &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
-                let _ = task.await;
+            match tokio::time::timeout(Duration::from_secs(15), &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => server_failed = true,
+                Err(_) => {
+                    task.abort();
+                    if let Err(error) = task.await {
+                        // Cancellation from our bounded fallback is expected; a
+                        // panic racing with abort must still fail acceptance.
+                        server_failed |= !error.is_cancelled();
+                    }
+                }
             }
         }
         test_support::cleanup_postgres(
@@ -447,6 +453,10 @@ impl Fixture {
             self.schema.clone(),
         )
         .await;
+        assert!(
+            !server_failed,
+            "synthetic fixture server task failed after cleanup"
+        );
     }
 }
 impl Drop for Fixture {
@@ -478,6 +488,64 @@ async fn browser_acceptance_driver() {
     tokio::select! { _ = stop => {}, _ = tokio::time::sleep(Duration::from_secs(2700)) => {} }
     fixture.shutdown().await;
     println!("Owned fixture listeners stopped and exact synthetic schema removed.");
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn shutdown_reports_panicked_server_after_exact_resource_cleanup() {
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+
+    let mut fixture = Fixture::start().await;
+    let database = fixture.database.clone();
+    let admin = fixture.admin.clone();
+    let schema = fixture.schema.clone();
+    let origins = fixture.origins.clone();
+    let observer = Database::connect(std::env::var("NEEV_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    fixture.tasks.insert(
+        0,
+        tokio::spawn(async {
+            panic!("synthetic-private-task-detail");
+        }),
+    );
+    let mut stop = fixture.stop.subscribe();
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    fixture.tasks.push(tokio::spawn(async move {
+        stop.changed().await.unwrap();
+        completed.send(()).unwrap();
+    }));
+
+    let result = tokio::spawn(fixture.shutdown()).await;
+    let row = observer
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*) AS remaining FROM pg_namespace WHERE nspname = $1",
+            vec![schema.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    observer.close().await.unwrap();
+    assert_eq!(row.try_get::<i64>("", "remaining").unwrap(), 0);
+    assert!(database.ping().await.is_err());
+    assert!(admin.ping().await.is_err());
+    completion.await.expect("later server task must finish");
+    for origin in origins {
+        let address = origin.strip_prefix("http://").unwrap();
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    }
+    let failure = result.expect_err("a panicked server must fail fixture shutdown");
+    let payload = failure.into_panic();
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .expect("sanitized shutdown failure");
+    assert_eq!(
+        message,
+        "synthetic fixture server task failed after cleanup"
+    );
 }
 
 #[tokio::test]
