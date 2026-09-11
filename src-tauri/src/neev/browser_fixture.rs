@@ -83,8 +83,26 @@ async fn authorize(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    // Host separation must prevent either native host's cookies reaching the issuer.
-    if headers.contains_key(header::COOKIE) {
+    // Native credentials must not reach this separate host. Unrelated localhost
+    // preferences can already exist in the user's browser and are harmless here.
+    let native_names = [
+        http::cookies::CookieNames::for_preview(true),
+        http::cookies::CookieNames::for_preview(false),
+    ];
+    if headers.get_all(header::COOKIE).iter().any(|raw| {
+        raw.as_bytes().split(|byte| *byte == b';').any(|part| {
+            let name = part
+                .split(|byte| *byte == b'=')
+                .next()
+                .unwrap_or_default()
+                .trim_ascii();
+            native_names.iter().any(|names| {
+                [names.session, names.csrf, names.browser, names.preauth_csrf]
+                    .iter()
+                    .any(|native| name == native.as_bytes())
+            })
+        })
+    }) {
         return StatusCode::BAD_REQUEST.into_response();
     }
     let Some(callback) = q.get("redirect_uri").filter(|v| s.callbacks.contains(v)) else {
@@ -488,6 +506,110 @@ async fn browser_acceptance_driver() {
     tokio::select! { _ = stop => {}, _ = tokio::time::sleep(Duration::from_secs(2700)) => {} }
     fixture.shutdown().await;
     println!("Owned fixture listeners stopped and exact synthetic schema removed.");
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn authorize_allows_unrelated_cookies_but_denies_native_credentials() {
+    let fixture = Fixture::start().await;
+    let origin = fixture.origins[0].clone();
+    let result = tokio::spawn(async move {
+        let mut participant = HttpParticipant::new(origin);
+        let preauth = participant
+            .request(reqwest::Method::GET, "/api/neev/preauth", None)
+            .await;
+        participant.csrf = preauth.json::<serde_json::Value>().await.unwrap()["csrf"]
+            .as_str()
+            .unwrap()
+            .into();
+        let begin = participant
+            .request(
+                reqwest::Method::POST,
+                "/api/neev/auth/google/login",
+                Some(serde_json::json!({})),
+            )
+            .await;
+        let authorization = begin.json::<serde_json::Value>().await.unwrap()["authorizationUrl"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for cookies in [
+            vec!["ext_name=unrelated; codeg.language_mode=system; codeg.locale=en"],
+            vec!["codeg.locale=en", "codeg.language_mode=system"],
+            vec!["neev_preview_session_preference=dark; preference=neev_preview_session"],
+        ] {
+            let mut headers = HeaderMap::new();
+            for cookie in cookies {
+                headers.append(header::COOKIE, cookie.parse().unwrap());
+            }
+            let response = participant
+                .client
+                .get(&authorization)
+                .headers(headers)
+                .send()
+                .await
+                .map_err(|_| "synthetic authorization request failed")
+                .unwrap();
+            assert_eq!(response.status(), 303);
+            let chooser = url::Url::parse(&authorization)
+                .unwrap()
+                .join(response.headers()["location"].to_str().unwrap())
+                .unwrap();
+            let response = participant
+                .client
+                .get(chooser)
+                .send()
+                .await
+                .map_err(|_| "synthetic chooser request failed")
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            assert!(response
+                .text()
+                .await
+                .unwrap()
+                .contains("Continue as support@neev.so"));
+        }
+        for name in [
+            "neev_preview_session",
+            "neev_preview_csrf",
+            "neev_preview_browser",
+            "neev_preview_preauth_csrf",
+            "__Host-neev_session",
+            "__Host-neev_csrf",
+            "__Host-neev_browser",
+            "__Host-neev_preauth_csrf",
+        ] {
+            for multiple_headers in [false, true] {
+                let mut headers = HeaderMap::new();
+                if multiple_headers {
+                    headers.append(header::COOKIE, "codeg.locale=en".parse().unwrap());
+                }
+                headers.append(
+                    header::COOKIE,
+                    format!("codeg.language_mode=system; {name}=synthetic; ext_name=unrelated")
+                        .parse()
+                        .unwrap(),
+                );
+                let response = participant
+                    .client
+                    .get(&authorization)
+                    .headers(headers)
+                    .send()
+                    .await
+                    .map_err(|_| "synthetic authorization request failed")
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    400,
+                    "native cookie must be denied: {name}"
+                );
+                assert!(response.headers().get(header::LOCATION).is_none());
+            }
+        }
+    })
+    .await;
+    fixture.shutdown().await;
+    result.unwrap();
 }
 
 #[tokio::test]
