@@ -6,6 +6,7 @@ import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { NativeClientError } from "@/lib/neev-client"
 import { useNativeAuth } from "./native-auth-provider"
+import { NativeSuspendedSurface } from "./native-suspended-surface"
 
 export function NativeError({ error }: { error: unknown }) {
   const t = useTranslations("Native")
@@ -76,11 +77,19 @@ export function NativeBoundary({
       </main>
     )
   return (
-    <div
-      key={auth.scopeKey ?? "signed-out"}
-      className="min-h-dvh bg-background text-foreground"
-    >
-      {children}
-    </div>
+    <>
+      {auth.status === "revalidating" && (
+        <main role="status" aria-busy="true">
+          {t("loading")}
+        </main>
+      )}
+      <NativeSuspendedSurface
+        key={auth.scopeKey ?? "signed-out"}
+        hidden={auth.status === "revalidating"}
+        className="min-h-dvh bg-background text-foreground"
+      >
+        {children}
+      </NativeSuspendedSurface>
+    </>
   )
 }

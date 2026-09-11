@@ -20,7 +20,12 @@ import {
 } from "@/lib/neev-client"
 
 const CHANNEL = "neev-native-auth"
-type Status = "loading" | "authenticated" | "unauthenticated" | "unavailable"
+type Status =
+  | "loading"
+  | "revalidating"
+  | "authenticated"
+  | "unauthenticated"
+  | "unavailable"
 interface NativeAuth {
   status: Status
   session: NativeSession | null
@@ -58,7 +63,9 @@ export function NativeAuthProvider({
   )
   const [logoutError, setLogoutError] = useState(false)
   const [generation, setGeneration] = useState(0)
+  const [signal, setSignal] = useState<AbortSignal>()
   const current = useRef(0),
+    verified = useRef<NativeSession | null>(null),
     request = useRef<AbortController | null>(null),
     recoveryCsrf = useRef<string | null>(null),
     mounted = useRef(false),
@@ -68,7 +75,9 @@ export function NativeAuthProvider({
     request.current?.abort()
     request.current = new AbortController()
     current.current += 1
+    setSignal(request.current.signal)
     setGeneration(current.current)
+    verified.current = null
     setSession(null)
     return { generation: current.current, controller: request.current }
   }, [])
@@ -87,6 +96,7 @@ export function NativeAuthProvider({
       if (next.controller.signal.aborted || next.generation !== current.current)
         return
       recoveryCsrf.current = value.csrf
+      verified.current = value
       setSession(value)
       setStatus("authenticated")
       setLogoutError(false)
@@ -102,6 +112,51 @@ export function NativeAuthProvider({
       } else setStatus("unavailable")
     }
   }, [clear])
+  const revalidateVisibility = useCallback(async () => {
+    if (!mounted.current || logoutPending.current) return
+    const previous = verified.current
+    if (!previous) return refresh()
+    request.current?.abort()
+    const controller = new AbortController()
+    request.current = controller
+    const epoch = ++current.current
+    setSignal(controller.signal)
+    setStatus("revalidating")
+    const isCurrent = () =>
+      !controller.signal.aborted && epoch === current.current
+    try {
+      const caps = await loadServerCapabilities(controller.signal)
+      if (!isCurrent()) return
+      if (caps.mode !== "native")
+        throw new NativeClientError("invalid_response")
+      const value = await loadNativeSession(controller.signal)
+      if (!isCurrent()) return
+      // CSRF is validated against the cookie session by bootstrap. Compare only
+      // in memory: it must never become a React key, DOM value, or stored draft key.
+      const sameSession =
+        value.user.id === previous.user.id &&
+        value.scope === previous.scope &&
+        value.organization?.id === previous.organization?.id &&
+        value.role === previous.role &&
+        value.csrf === previous.csrf
+      if (!sameSession) setGeneration(epoch)
+      verified.current = value
+      recoveryCsrf.current = value.csrf
+      setCapabilities(caps)
+      setSession(value)
+      setStatus("authenticated")
+    } catch (error) {
+      if (!isCurrent()) return
+      clear()
+      recoveryCsrf.current = null
+      setStatus(
+        error instanceof NativeClientError &&
+          (error.kind === "unauthorized" || error.kind === "forbidden")
+          ? "unauthenticated"
+          : "unavailable"
+      )
+    }
+  }, [clear, refresh])
   const changed = useCallback(async () => {
     notifyNativeAuthChanged(source.current)
     await refresh()
@@ -181,7 +236,7 @@ export function NativeAuthProvider({
       void refresh()
     }
     const visible = () => {
-      if (document.visibilityState === "visible") resume()
+      if (document.visibilityState === "visible") void revalidateVisibility()
     }
     const message = (event: MessageEvent) => {
       if (
@@ -203,11 +258,12 @@ export function NativeAuthProvider({
       current.current += 1
       request.current?.abort()
       recoveryCsrf.current = null
+      verified.current = null
       channel?.removeEventListener("message", message)
       channel?.close()
       document.removeEventListener("visibilitychange", visible)
     }
-  }, [refresh])
+  }, [refresh, revalidateVisibility])
   const scopeKey = session
     ? `${session.user.id}:${session.organization?.id ?? "identity"}:${generation}`
     : null
@@ -217,7 +273,7 @@ export function NativeAuthProvider({
       session,
       capabilities,
       scopeKey,
-      signal: request.current?.signal,
+      signal,
       logoutError,
       refresh,
       logout,
@@ -229,6 +285,7 @@ export function NativeAuthProvider({
       session,
       capabilities,
       scopeKey,
+      signal,
       logoutError,
       refresh,
       logout,

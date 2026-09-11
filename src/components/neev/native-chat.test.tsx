@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeChat } from "./native-chat"
@@ -283,3 +283,50 @@ it("cannot publish a late message page into a newly selected resource", async ()
   expect(screen.getByText("New scope message")).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
+
+it.each(["1", "9007199254740992"])(
+  "orders interleaved messages losslessly from sequence %s",
+  async (first) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+    const second = {
+      ...message,
+      id: "33333333-3333-4333-8333-333333333333",
+      sequence: String(BigInt(first) + 1n),
+      body: "Second",
+    }
+    const third = {
+      ...message,
+      id: "44444444-4444-4444-8444-444444444444",
+      sequence: String(BigInt(first) + 2n),
+      body: "Third",
+    }
+    const mock = mockNativeSession(undefined, {
+      [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+      [`GET ${path}`]: () =>
+        json({
+          items: [{ ...message, sequence: first, body: "First" }],
+          nextAfter: null,
+        }),
+      [`GET ${path}?after=${first}`]: () =>
+        json({ items: [second, third], nextAfter: null }),
+      [`POST ${path}`]: () => json(third, 201),
+    })
+    const user = userEvent.setup()
+    mount()
+    await user.type(
+      await screen.findByRole("textbox", { name: "Message" }),
+      "Third"
+    )
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    await screen.findByText("Third")
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(
+      within(screen.getByRole("list", { name: "Messages" }))
+        .getAllByRole("listitem")
+        .map((item) => item.querySelector("p")?.textContent)
+    ).toEqual(["First", "Second", "Third"])
+    expect(mock.unknown).toEqual([])
+  }
+)

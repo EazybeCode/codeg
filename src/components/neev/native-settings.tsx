@@ -5,12 +5,7 @@ import Link from "next/link"
 import { useTranslations } from "next-intl"
 import { ArrowLeft } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import {
   loadMembers,
   loadMethods,
@@ -25,6 +20,7 @@ import {
 } from "@/lib/neev-client"
 import { NativeBoundary, NativeError } from "./native-boundary"
 import { useNativeAuth } from "./native-auth-provider"
+import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeSignInMethods } from "./native-login"
 
 type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }

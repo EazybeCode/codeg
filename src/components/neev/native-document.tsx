@@ -3,12 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog"
+import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { NativeClientError } from "@/lib/neev-client"
 import {
   loadNativeResource,
@@ -25,6 +20,7 @@ import {
 } from "@/lib/neev-content-client"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNativeAuth } from "./native-auth-provider"
+import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeError } from "./native-boundary"
 import { NativeMarkdown } from "./native-markdown"
 
@@ -74,6 +70,8 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     }),
     draftRef = useRef(""),
     editGeneration = useRef(0),
+    historyPages = useRef(1),
+    historyRequest = useRef(0),
     dirty = useRef(false),
     sending = useRef(false),
     retry = useRef<SaveNativeDocumentInput | null>(null),
@@ -155,14 +153,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         throw new NativeClientError("invalid_response")
       setLatest(metadata)
       onChanged(metadata)
-      const page = await listNativeDocumentRevisions(
-        resource.id,
-        null,
-        scope.signal
-      )
-      if (!scope.isCurrent()) return
-      setRevisions(page.items)
-      setNextRevision(page.nextAfter)
+      if (!(await loadHistory())) return
       // Dirty or ambiguously committed drafts keep BOTH original preconditions.
       if (!dirty.current && !retry.current && !sending.current) {
         const body = await readBody(metadata)
@@ -183,6 +174,9 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     }
   }
   useEffect(() => {
+    sending.current = false
+    setSaving(false)
+    setBusy(false)
     void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope])
@@ -227,6 +221,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         authRevision: input.expectedAuthRevision,
       }
       setBody(input.markdown, metadata, revision.revision)
+      historyRequest.current += 1
       setLatest(metadata)
       onChanged(metadata)
       setRevisions((old) => [
@@ -237,8 +232,10 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     } catch (e) {
       fail(e)
     } finally {
-      sending.current = false
-      if (scope.isCurrent()) setSaving(false)
+      if (scope.isCurrent()) {
+        sending.current = false
+        setSaving(false)
+      }
     }
   }
   async function compare(revision?: string) {
@@ -313,6 +310,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         contentRevision: revision.revision,
       }
       setBody(comparison.markdown, metadata, revision.revision)
+      historyRequest.current += 1
       setLatest(metadata)
       onChanged(metadata)
       setRevisions((old) => [revision, ...old])
@@ -322,32 +320,50 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     } catch (e) {
       fail(e)
     } finally {
-      sending.current = false
-      if (scope.isCurrent()) setSaving(false)
+      if (scope.isCurrent()) {
+        sending.current = false
+        setSaving(false)
+      }
+    }
+  }
+  async function loadHistory(more = false) {
+    if (more) historyPages.current += 1
+    const pages = historyPages.current
+    const request = ++historyRequest.current
+    const current = () =>
+      scope.isCurrent() && request === historyRequest.current
+    try {
+      const refreshed: NativeRevision[] = []
+      let cursor: string | null = null
+      for (let index = 0; index < pages; index++) {
+        const page = await listNativeDocumentRevisions(
+          resource.id,
+          cursor,
+          scope.signal
+        )
+        if (!current()) return false
+        refreshed.push(...page.items)
+        cursor = page.nextAfter
+        if (!cursor) break
+      }
+      setRevisions([
+        ...new Map(refreshed.map((item) => [item.revision, item])).values(),
+      ])
+      setNextRevision(cursor)
+      return true
+    } catch (e) {
+      if (current()) {
+        fail(e)
+        if (scope.isCurrent()) setLoading(false)
+      } else if (scope.isCurrent()) auth.handleError(e)
+      return false
     }
   }
   async function moreHistory() {
     if (!nextRevision || busy) return
     setBusy(true)
-    try {
-      const page = await listNativeDocumentRevisions(
-        resource.id,
-        nextRevision,
-        scope.signal
-      )
-      if (scope.isCurrent()) {
-        setRevisions((old) => [
-          ...new Map(
-            [...old, ...page.items].map((item) => [item.revision, item])
-          ).values(),
-        ])
-        setNextRevision(page.nextAfter)
-      }
-    } catch (e) {
-      fail(e)
-    } finally {
-      if (scope.isCurrent()) setBusy(false)
-    }
+    await loadHistory(true)
+    if (scope.isCurrent()) setBusy(false)
   }
   if (revoked)
     return (

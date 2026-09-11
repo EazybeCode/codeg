@@ -56,10 +56,12 @@ function DialogContent({
   showCloseButton = true,
   ref,
   onPointerDownOutside,
+  portalContainer,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   closeButtonClassName?: string
   showCloseButton?: boolean
+  portalContainer?: HTMLElement
 }) {
   // Without this, closing a nested Select/DropdownMenu by clicking elsewhere in
   // the dialog closes the dialog too.
@@ -69,7 +71,7 @@ function DialogContent({
     onPointerDownOutside: guardOutsidePress,
   } = useNestedLayerDismissGuard<HTMLDivElement>(ref)
   return (
-    <DialogPortal>
+    <DialogPortal container={portalContainer}>
       <DialogOverlay />
       <div className="pointer-events-none fixed inset-0 z-50 grid place-items-center p-4">
         <DialogPrimitive.Content

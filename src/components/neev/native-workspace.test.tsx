@@ -1,9 +1,14 @@
-import { render, screen, within, waitFor } from "@testing-library/react"
+import { act, render, screen, within, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeBoundary } from "./native-boundary"
 import { NativeWorkspace } from "./native-workspace"
-import { json, mockNativeSession, NativeTestRoot } from "./test-helpers"
+import {
+  json,
+  mockNativeSession,
+  NativeTestRoot,
+  orgSession,
+} from "./test-helpers"
 const viewport = vi.hoisted(() => ({ mobile: false }))
 vi.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => viewport.mobile }))
 vi.mock("next/navigation", () => ({
@@ -12,6 +17,51 @@ vi.mock("next/navigation", () => ({
 afterEach(() => {
   vi.unstubAllGlobals()
   viewport.mobile = false
+})
+it("hides and disables an open workspace menu until visibility auth is revalidated", async () => {
+  let revalidating = false
+  let release!: (response: Response) => void
+  const pending = new Promise<Response>((resolve) => {
+    release = resolve
+  })
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/session": () => (revalidating ? pending : json(orgSession)),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 4,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Private planning",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+  })
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  const user = userEvent.setup()
+  await user.click(
+    await screen.findByRole("button", { name: "Actions for Private planning" })
+  )
+  const menu = screen.getByRole("menu")
+  expect(menu).toBeVisible()
+  revalidating = true
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")))
+  expect(menu).not.toBeVisible()
+  expect(menu.closest("[inert]")).not.toBeNull()
+  expect(screen.queryByRole("menuitem")).toBeNull()
+  expect(menu).not.toContainElement(document.activeElement as HTMLElement)
+  revalidating = false
+  await act(async () => release(json(orgSession)))
+  expect(await screen.findByRole("menu")).toBeVisible()
+  expect(mock.unknown).toEqual([])
 })
 it("shows the person and organization without GitHub or chat controls", async () => {
   const mock = mockNativeSession(undefined, {

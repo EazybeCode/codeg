@@ -17,14 +17,12 @@ import { Button } from "@/components/ui/button"
 import {
   Dialog,
   DialogClose,
-  DialogContent,
   DialogDescription,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
 import {
   DropdownMenu,
-  DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -38,6 +36,10 @@ import {
   type NativeNode,
 } from "@/lib/neev-client"
 import { useNativeAuth } from "./native-auth-provider"
+import {
+  NativeDialogContent as DialogContent,
+  NativeDropdownMenuContent as DropdownMenuContent,
+} from "./native-suspended-surface"
 import { NativeBoundary, NativeError } from "./native-boundary"
 import {
   NativeContent,

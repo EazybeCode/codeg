@@ -361,30 +361,40 @@ it("rejects a deferred body from a previous document after the new document has 
   expect(mock.unknown).toEqual([])
 })
 
-it("does not offer an empty editor when the existing document body failed to load", async () => {
-  let first = true
-  const mock = mockNativeSession(undefined, {
-    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
-    [`GET ${path}/revisions`]: () =>
-      json({ items: [revision], nextAfter: null }),
-    [`GET ${path}/content?revision=1`]: () => {
-      if (first) {
-        first = false
-        throw new TypeError("offline")
-      }
-      return json({ revision, markdown: "seed" })
-    },
-  })
-  const user = userEvent.setup()
-  mount()
-  expect(await screen.findByRole("alert")).toBeVisible()
-  expect(screen.queryByRole("textbox", { name: "Document content" })).toBeNull()
-  await user.click(screen.getByRole("button", { name: "Try again" }))
-  expect(
-    await screen.findByRole("textbox", { name: "Document content" })
-  ).toHaveValue("seed")
-  expect(mock.unknown).toEqual([])
-})
+it.each(["body", "history"])(
+  "offers retry, not an empty editor or endless loading, when the existing document %s failed to load",
+  async (failed) => {
+    let first = true
+    const mock = mockNativeSession(undefined, {
+      [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+      [`GET ${path}/revisions`]: () => {
+        if (first && failed === "history") {
+          first = false
+          throw new TypeError("offline")
+        }
+        return json({ items: [revision], nextAfter: null })
+      },
+      [`GET ${path}/content?revision=1`]: () => {
+        if (first && failed === "body") {
+          first = false
+          throw new TypeError("offline")
+        }
+        return json({ revision, markdown: "seed" })
+      },
+    })
+    const user = userEvent.setup()
+    mount()
+    expect(await screen.findByRole("alert")).toBeVisible()
+    expect(
+      screen.queryByRole("textbox", { name: "Document content" })
+    ).toBeNull()
+    await user.click(screen.getByRole("button", { name: "Try again" }))
+    expect(
+      await screen.findByRole("textbox", { name: "Document content" })
+    ).toHaveValue("seed")
+    expect(mock.unknown).toEqual([])
+  }
+)
 
 it("does not replace a successful save with an older poll body that finishes afterward", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
@@ -423,5 +433,37 @@ it("does not replace a successful save with an older poll body that finishes aft
   })
   expect(editor).toHaveValue("seed!")
   expect(screen.getByRole("button", { name: "Save" })).toBeDisabled()
+  expect(mock.unknown).toEqual([])
+})
+
+it("refreshes every loaded history page instead of collapsing it to the first page", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+  const history = Array.from({ length: 101 }, (_, i) => ({
+    ...revision,
+    revision: String(101 - i),
+  }))
+  const mock = mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}/content?revision=1`]: () =>
+      json({ revision, markdown: "seed" }),
+    [`GET ${path}/revisions`]: () =>
+      json({ items: history.slice(0, 100), nextAfter: "2" }),
+    [`GET ${path}/revisions?after=2`]: () =>
+      json({ items: history.slice(100), nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await screen.findByRole("textbox", { name: "Document content" })
+  await user.click(screen.getByRole("button", { name: "History" }))
+  await user.click(screen.getByRole("button", { name: "Load more" }))
+  expect(
+    await screen.findByRole("button", { name: "Compare revision 1" })
+  ).toBeVisible()
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000)
+  })
+  expect(
+    screen.getByRole("button", { name: "Compare revision 1" })
+  ).toBeVisible()
   expect(mock.unknown).toEqual([])
 })

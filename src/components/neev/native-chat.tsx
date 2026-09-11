@@ -4,12 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog"
+import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { NativeClientError } from "@/lib/neev-client"
 import {
   appendNativeMessage,
@@ -22,6 +17,7 @@ import {
 } from "@/lib/neev-content-client"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNativeAuth } from "./native-auth-provider"
+import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeError } from "./native-boundary"
 
 type Props = {
@@ -114,11 +110,19 @@ function Chat({
       do {
         const page = await listNativeMessages(resource.id, after, scope.signal)
         if (!scope.isCurrent()) return
-        setMessages((old) => [
-          ...new Map(
-            [...old, ...page.items].map((item) => [item.id, item])
-          ).values(),
-        ])
+        setMessages((old) =>
+          [
+            ...new Map(
+              [...old, ...page.items].map((item) => [item.id, item])
+            ).values(),
+          ].sort((a, b) =>
+            BigInt(a.sequence) < BigInt(b.sequence)
+              ? -1
+              : BigInt(a.sequence) > BigInt(b.sequence)
+                ? 1
+                : 0
+          )
+        )
         if (page.items.length)
           sequence.current = page.items[page.items.length - 1].sequence
         after = page.nextAfter
@@ -130,7 +134,9 @@ function Chat({
     }
   }
   useEffect(() => {
-    void refresh() /* The request lifetime owns the initial read. */
+    sending.current = false
+    setSaving(false)
+    void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope])
   async function send() {
@@ -162,9 +168,17 @@ function Chat({
         scope.signal
       )
       if (!scope.isCurrent()) return
-      setMessages((old) => [
-        ...new Map([...old, message].map((item) => [item.id, item])).values(),
-      ])
+      setMessages((old) =>
+        [
+          ...new Map([...old, message].map((item) => [item.id, item])).values(),
+        ].sort((a, b) =>
+          BigInt(a.sequence) < BigInt(b.sequence)
+            ? -1
+            : BigInt(a.sequence) > BigInt(b.sequence)
+              ? 1
+              : 0
+        )
+      )
       // Leave the incremental cursor unchanged: another author's intervening messages may exist.
       setDraft("")
       draftRef.current = ""
@@ -174,8 +188,10 @@ function Chat({
     } catch (e) {
       fail(e)
     } finally {
-      sending.current = false
-      if (scope.isCurrent()) setSaving(false)
+      if (scope.isCurrent()) {
+        sending.current = false
+        setSaving(false)
+      }
     }
   }
   if (revoked)
