@@ -3,6 +3,7 @@ use super::{
     auth::{google, magic, oauth},
     clock::{Clock, SystemClock},
     config::Config,
+    content::BlobStore,
     http, mail,
     startup::ServerState,
     test_support,
@@ -328,6 +329,7 @@ struct Fixture {
     database: sea_orm::DatabaseConnection,
     admin: sea_orm::DatabaseConnection,
     schema: String,
+    _document_roots: Vec<tempfile::TempDir>,
 }
 impl Fixture {
     async fn start() -> Self {
@@ -367,6 +369,7 @@ impl Fixture {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let mut prepared = Vec::new();
+        let mut document_roots = Vec::new();
         for (index, listener) in [a, b].into_iter().enumerate() {
             let mut values = HashMap::from([
                 ("NEEV_APP_ORIGIN".into(), origins[index].clone()),
@@ -390,6 +393,16 @@ impl Fixture {
                     .display()
                     .to_string(),
             );
+            let document_root = test_support::owned_document_root();
+            values.insert(
+                "NEEV_DOCUMENT_ROOT".into(),
+                document_root
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string(),
+            );
             let config = Config::from_values(&values).unwrap();
             let clock = Arc::new(SystemClock);
             let google = google::Google::for_test(
@@ -400,6 +413,7 @@ impl Fixture {
             )
             .unwrap();
             prepared.push((listener, config, clock, google));
+            document_roots.push(document_root);
         }
         // Resolve fallible local configuration before creating owned DB resources.
         let (database, admin, schema) = test_support::postgres_database().await;
@@ -413,6 +427,7 @@ impl Fixture {
                 .unwrap()
         })];
         for (listener, config, clock, google) in prepared {
+            let blobs = Arc::new(BlobStore::open(&config.document_root).unwrap());
             let oauth = oauth::Service::with_google(
                 database.clone(),
                 config.encryption_key,
@@ -430,6 +445,7 @@ impl Fixture {
             let state = Arc::new(ServerState {
                 database: database.clone(),
                 config,
+                blobs,
                 clock,
                 auth_limit: Arc::new(tokio::sync::Semaphore::new(32)),
                 oauth,
@@ -462,6 +478,7 @@ impl Fixture {
             database,
             admin,
             schema,
+            _document_roots: document_roots,
         }
     }
     async fn shutdown(mut self) {

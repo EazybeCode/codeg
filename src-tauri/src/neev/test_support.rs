@@ -18,7 +18,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
 };
 use tokio::sync::Mutex;
@@ -767,7 +767,19 @@ pub(super) async fn scoped_context(
         .unwrap()
 }
 
+pub(super) fn owned_document_root() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    root
+}
+
 pub(super) fn preview_config() -> super::config::Config {
+    static DOCUMENT_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let document_root = DOCUMENT_ROOT.get_or_init(owned_document_root);
     let origin = url::Url::parse("http://127.0.0.1:3100/").unwrap();
     super::config::Config {
         origin: origin.clone(),
@@ -779,6 +791,7 @@ pub(super) fn preview_config() -> super::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         trusted_proxy_ips: Vec::new(),
         static_root: std::env::current_dir().unwrap(),
+        document_root: document_root.path().canonicalize().unwrap(),
         preview: true,
         providers: super::config::ProviderConfig {
             google: None,

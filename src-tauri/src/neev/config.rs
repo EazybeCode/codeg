@@ -18,6 +18,8 @@ pub(crate) enum ConfigError {
     Bind,
     #[error("invalid native static root")]
     StaticRoot,
+    #[error("invalid native document root")]
+    DocumentRoot,
     #[error("invalid native provider configuration")]
     Provider,
 }
@@ -48,19 +50,21 @@ pub(crate) struct Config {
     pub(crate) bind: SocketAddr,
     pub(crate) trusted_proxy_ips: Vec<IpAddr>,
     pub(crate) static_root: PathBuf,
+    pub(crate) document_root: PathBuf,
     pub(crate) preview: bool,
     pub(crate) providers: ProviderConfig,
 }
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 14] = [
+        const KEYS: [&str; 15] = [
             "NEEV_APP_ORIGIN",
             "NEEV_DATABASE_URL",
             "NEEV_ENC_KEY",
             "NEEV_BIND",
             "NEEV_TRUSTED_PROXY_IPS",
             "NEEV_STATIC_ROOT",
+            "NEEV_DOCUMENT_ROOT",
             "NEEV_ALLOW_LOOPBACK_PREVIEW",
             "NEEV_GOOGLE_CLIENT_ID",
             "NEEV_GOOGLE_CLIENT_SECRET",
@@ -131,6 +135,29 @@ impl Config {
         if !static_root.is_absolute() || !static_root.is_dir() {
             return Err(ConfigError::StaticRoot);
         }
+        let document_root = PathBuf::from(required(
+            values,
+            "NEEV_DOCUMENT_ROOT",
+            ConfigError::DocumentRoot,
+        )?);
+        if !document_root.is_absolute()
+            || !document_root.is_dir()
+            || has_symlink_component(&document_root)
+        {
+            return Err(ConfigError::DocumentRoot);
+        }
+        let canonical_static = static_root
+            .canonicalize()
+            .map_err(|_| ConfigError::StaticRoot)?;
+        let canonical_documents = document_root
+            .canonicalize()
+            .map_err(|_| ConfigError::DocumentRoot)?;
+        if canonical_static == canonical_documents
+            || canonical_static.starts_with(&canonical_documents)
+            || canonical_documents.starts_with(&canonical_static)
+        {
+            return Err(ConfigError::DocumentRoot);
+        }
 
         let providers = ProviderConfig {
             google: pair(values, "NEEV_GOOGLE_CLIENT_ID", "NEEV_GOOGLE_CLIENT_SECRET")?,
@@ -147,10 +174,29 @@ impl Config {
             bind,
             trusted_proxy_ips,
             static_root,
+            document_root,
             preview,
             providers,
         })
     }
+}
+
+fn has_symlink_component(path: &std::path::Path) -> bool {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::Normal(_) => {
+                current.push(component.as_os_str());
+                match std::fs::symlink_metadata(&current) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => return true,
+                    Ok(_) => {}
+                    Err(_) => return true,
+                }
+            }
+            _ => return true,
+        }
+    }
+    false
 }
 
 fn trusted_proxy_ips(value: Option<&String>) -> Result<Vec<IpAddr>, ConfigError> {
@@ -292,9 +338,23 @@ fn mail(values: &HashMap<String, String>) -> Result<Option<MailProvider>, Config
 
 #[cfg(test)]
 mod tests {
+    use std::sync::OnceLock;
+    #[cfg(unix)]
+    use std::{fs, os::unix::fs::symlink};
+
     use super::*;
 
     fn values() -> HashMap<String, String> {
+        static DOCUMENT_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let document_root = DOCUMENT_ROOT.get_or_init(|| {
+            let root = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            root
+        });
         HashMap::from([
             ("NEEV_APP_ORIGIN".into(), "https://app.neev.so".into()),
             (
@@ -306,6 +366,15 @@ mod tests {
             (
                 "NEEV_STATIC_ROOT".into(),
                 std::env::current_dir().unwrap().display().to_string(),
+            ),
+            (
+                "NEEV_DOCUMENT_ROOT".into(),
+                document_root
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string(),
             ),
         ])
     }
@@ -447,5 +516,77 @@ mod tests {
                 "accepted {invalid:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn requires_a_dedicated_absolute_nonsymlink_document_root() {
+        let mut missing = values();
+        missing.remove("NEEV_DOCUMENT_ROOT");
+        assert_eq!(
+            Config::from_values(&missing).err(),
+            Some(ConfigError::DocumentRoot)
+        );
+
+        missing.insert("NEEV_DOCUMENT_ROOT".into(), "documents".into());
+        assert_eq!(
+            Config::from_values(&missing).err(),
+            Some(ConfigError::DocumentRoot)
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let document_root = base.join("documents");
+        fs::create_dir(&document_root).unwrap();
+        let linked_root = base.join("linked-documents");
+        symlink(&document_root, &linked_root).unwrap();
+        missing.insert(
+            "NEEV_DOCUMENT_ROOT".into(),
+            linked_root.display().to_string(),
+        );
+        assert_eq!(
+            Config::from_values(&missing).err(),
+            Some(ConfigError::DocumentRoot)
+        );
+
+        let real_parent = base.join("real-parent");
+        let child = real_parent.join("documents");
+        fs::create_dir(&real_parent).unwrap();
+        fs::create_dir(&child).unwrap();
+        let linked_parent = base.join("linked-parent");
+        symlink(&real_parent, &linked_parent).unwrap();
+        missing.insert(
+            "NEEV_DOCUMENT_ROOT".into(),
+            linked_parent.join("documents").display().to_string(),
+        );
+        assert_eq!(
+            Config::from_values(&missing).err(),
+            Some(ConfigError::DocumentRoot)
+        );
+
+        let static_root = base.join("static");
+        fs::create_dir(&static_root).unwrap();
+        missing.insert("NEEV_STATIC_ROOT".into(), static_root.display().to_string());
+        for root in [&static_root, &base] {
+            missing.insert("NEEV_DOCUMENT_ROOT".into(), root.display().to_string());
+            assert_eq!(
+                Config::from_values(&missing).err(),
+                Some(ConfigError::DocumentRoot),
+                "accepted overlapping document root {root:?}"
+            );
+        }
+        let nested = static_root.join("documents");
+        fs::create_dir(&nested).unwrap();
+        missing.insert("NEEV_DOCUMENT_ROOT".into(), nested.display().to_string());
+        assert_eq!(
+            Config::from_values(&missing).err(),
+            Some(ConfigError::DocumentRoot)
+        );
+
+        missing.insert(
+            "NEEV_DOCUMENT_ROOT".into(),
+            document_root.display().to_string(),
+        );
+        assert!(Config::from_values(&missing).is_ok());
     }
 }

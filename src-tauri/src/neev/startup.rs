@@ -7,6 +7,7 @@ use super::{
     auth::{magic, oauth},
     clock::{Clock, SystemClock},
     config::Config,
+    content::{types::ContentError, BlobStore},
     db, http,
     mail::{self, resend::Resend},
 };
@@ -14,6 +15,8 @@ use super::{
 pub(crate) struct ServerState {
     pub(crate) database: DatabaseConnection,
     pub(crate) config: Config,
+    #[allow(dead_code)] // Populated before HTTP starts; later content handlers consume it.
+    pub(crate) blobs: Arc<BlobStore>,
     pub(crate) clock: Arc<dyn Clock + Send + Sync>,
     pub(crate) auth_limit: Arc<Semaphore>,
     pub(crate) oauth: oauth::Service,
@@ -26,7 +29,8 @@ impl ServerState {
         database: DatabaseConnection,
         config: Config,
         clock: Arc<dyn Clock + Send + Sync>,
-    ) -> Result<Self, super::error::AuthError> {
+    ) -> Result<Self, ContentError> {
+        let blobs = Arc::new(BlobStore::open(&config.document_root)?);
         let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
         let mail = config
             .providers
@@ -52,6 +56,7 @@ impl ServerState {
         Ok(Self {
             database,
             config,
+            blobs,
             clock,
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
@@ -67,9 +72,11 @@ impl ServerState {
         clock: Arc<dyn Clock + Send + Sync>,
         oauth: oauth::Service,
     ) -> Self {
+        let blobs = Arc::new(BlobStore::open(&config.document_root).expect("test document root"));
         Self {
             database,
             config,
+            blobs,
             clock,
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
@@ -84,11 +91,13 @@ impl ServerState {
         config: Config,
         clock: Arc<dyn Clock + Send + Sync>,
         magic: magic::Service,
-    ) -> Result<Self, super::error::AuthError> {
+    ) -> Result<Self, ContentError> {
+        let blobs = Arc::new(BlobStore::open(&config.document_root)?);
         let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
         Ok(Self {
             database,
             config,
+            blobs,
             clock,
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
@@ -103,11 +112,13 @@ impl ServerState {
         config: Config,
         clock: Arc<dyn Clock + Send + Sync>,
         mail: mail::Service,
-    ) -> Result<Self, super::error::AuthError> {
+    ) -> Result<Self, ContentError> {
+        let blobs = Arc::new(BlobStore::open(&config.document_root)?);
         let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
         Ok(Self {
             database,
             config,
+            blobs,
             clock,
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
