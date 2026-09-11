@@ -5,6 +5,7 @@ mod browser_fixture;
 pub(crate) mod catalog;
 pub(crate) mod clock;
 pub(crate) mod config;
+pub(crate) mod content;
 pub(crate) mod db;
 pub(crate) mod error;
 pub(crate) mod http;

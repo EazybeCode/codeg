@@ -3,6 +3,7 @@ use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, ExecResult, QueryResult,
     Statement, TransactionTrait, Value,
 };
+mod content_migration;
 pub(crate) mod entities;
 mod migration;
 
@@ -85,13 +86,22 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         .iter()
         .map(|r| r.try_get("", "name").map_err(database_error))
         .collect::<Result<_, _>>()?;
-    let expected: std::collections::BTreeSet<String> = migration::TABLE_NAMES
+    let v2_expected: std::collections::BTreeSet<String> = migration::TABLE_NAMES
         .iter()
         .map(|n| (*n).to_owned())
         .collect();
-    // Empty or exactly our known native schema; refuse legacy and partial data.
+    let v3_expected: std::collections::BTreeSet<String> = v2_expected
+        .iter()
+        .cloned()
+        .chain(
+            content_migration::TABLE_NAMES
+                .iter()
+                .map(|name| (*name).to_owned()),
+        )
+        .collect();
+    // Empty, exact v2, or exact v3 only; refuse legacy and partial data.
     if !names.is_empty() {
-        if names != expected {
+        if names != v2_expected && names != v3_expected {
             return Err(AuthError::Unavailable);
         }
         let version = one(
@@ -101,11 +111,18 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         )
         .await?
         .ok_or(AuthError::Unavailable)?;
-        if version
+        let version = version
             .try_get::<i64>("", "version")
-            .map_err(database_error)?
-            != migration::SCHEMA_VERSION
-        {
+            .map_err(database_error)?;
+        if names == v2_expected && version == migration::SCHEMA_VERSION {
+            content_migration::upgrade(&tx).await?;
+            execute(
+                &tx,
+                "UPDATE neev_schema_version SET version=$1 WHERE id=1",
+                vec![content_migration::SCHEMA_VERSION.into()],
+            )
+            .await?;
+        } else if names != v3_expected || version != content_migration::SCHEMA_VERSION {
             return Err(AuthError::Unavailable);
         }
     } else {
@@ -119,14 +136,17 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 .await
                 .map_err(database_error)?;
         }
+        content_migration::upgrade(&tx).await?;
         execute(
             &tx,
             "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-            vec![migration::SCHEMA_VERSION.into()],
+            vec![content_migration::SCHEMA_VERSION.into()],
         )
         .await?;
     }
     tx.commit().await.map_err(database_error)
 }
+#[cfg(test)]
+mod content_tests;
 #[cfg(test)]
 mod tests;
