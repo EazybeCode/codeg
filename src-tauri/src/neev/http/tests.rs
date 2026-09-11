@@ -10,6 +10,35 @@ use crate::neev::{
 use super::cookies::CookieNames;
 
 #[tokio::test]
+async fn google_callback_browser_errors_use_only_fixed_private_recovery_redirects() {
+    let server = h::http_server().await;
+    let path = "/auth/google/callback?code=synthetic-secret&error_description=provider-secret&redirect=https://evil.test";
+    let browser = server
+        .get(path)
+        .add_header(header::ACCEPT, "text/html,application/xhtml+xml")
+        .await;
+    browser.assert_status(StatusCode::SEE_OTHER);
+    assert_eq!(
+        browser.header(header::LOCATION),
+        "/login?auth_error=sign_in_failed"
+    );
+    assert_eq!(browser.header(header::CACHE_CONTROL), "no-store");
+    assert_eq!(browser.header("referrer-policy"), "no-referrer");
+    assert!(!browser.text().contains("synthetic-secret"));
+    for accept in [
+        "application/json",
+        "*/*",
+        "text/html;q=0",
+        "text/html;q=invalid",
+    ] {
+        let api = server.get(path).add_header(header::ACCEPT, accept).await;
+        api.assert_status_bad_request();
+        api.assert_json(&json!({"code":"invalid"}));
+        assert!(api.headers().get(header::LOCATION).is_none());
+    }
+}
+
+#[tokio::test]
 async fn preauth_bootstrap_uses_distinct_cookies_and_preserves_browser_binding() {
     let server = h::http_server().await;
     let names = CookieNames::for_preview(true);
@@ -491,6 +520,113 @@ async fn bootstrap_requires_one_native_session_and_matching_csrf_cookie() {
         )
         .await
         .assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn native_static_export_assets_navigation_and_exact_inline_hashes() {
+    let directory = tempfile::tempdir().unwrap();
+    for path in [
+        "_next/static/chunks",
+        "_next/static/media",
+        "workspace",
+        "settings",
+        "neev-auth",
+    ] {
+        std::fs::create_dir_all(directory.path().join(path)).unwrap();
+    }
+    let html = "<html><script src=\"/_next/static/chunks/app.js\"></script><script> window.fixture = 1;\n</script></html>";
+    for (path, bytes) in [
+        ("login.html", html),
+        ("workspace.html", html),
+        ("_next/static/chunks/app.js", "window.external = true"),
+        ("_next/static/chunks/app.css", "body{margin:0}"),
+        ("_next/static/media/font.woff2", "font-fixture"),
+        ("workspace.txt", "native-flight"),
+        ("workspace/__next.workspace.__PAGE__.txt", "native-segment"),
+        ("workspace/__next._tree.txt", "native-tree"),
+        ("settings/__next.settings.agents.txt", "legacy-segment"),
+        ("settings/agents.html", "legacy-page"),
+        ("icon.svg", "<svg></svg>"),
+        (
+            "neev-auth/invite.html",
+            "<script src=\"/neev-auth/invite.js\"></script>",
+        ),
+    ] {
+        std::fs::write(directory.path().join(path), bytes).unwrap();
+    }
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.js"), "outside-root").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.js"),
+        directory.path().join("_next/static/chunks/escape.js"),
+    )
+    .unwrap();
+    let mut config = h::preview_config();
+    config.static_root = directory.path().to_owned();
+    let state = std::sync::Arc::new(
+        crate::neev::startup::ServerState::new(
+            h::database().await,
+            config,
+            std::sync::Arc::new(h::TestClock::new(1000)),
+        )
+        .unwrap(),
+    );
+    let server = axum_test::TestServer::new(crate::neev::http::router(state)).unwrap();
+    let response = server.get("/login").await;
+    response.assert_status_ok();
+    let csp = response
+        .header("content-security-policy")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(csp.contains("'sha256-tOhhWU95qU4WAXDN1Rc8acgSz5+gwkrZbXdkR/yHwlQ='"));
+    assert_eq!(csp.matches("sha256-").count(), 1);
+    assert!(!csp
+        .split("style-src")
+        .next()
+        .unwrap()
+        .contains("'unsafe-inline'"));
+    assert!(!csp.contains("unsafe-eval"));
+    assert!(csp.contains("img-src 'self' data:"));
+    for (path, content_type) in [
+        (
+            "/_next/static/chunks/app.js",
+            "text/javascript; charset=utf-8",
+        ),
+        ("/_next/static/chunks/app.css", "text/css; charset=utf-8"),
+        ("/_next/static/media/font.woff2", "font/woff2"),
+        ("/workspace.txt", "text/x-component; charset=utf-8"),
+        (
+            "/workspace/__next.workspace.__PAGE__.txt",
+            "text/x-component; charset=utf-8",
+        ),
+        (
+            "/workspace/__next._tree.txt",
+            "text/x-component; charset=utf-8",
+        ),
+        ("/icon.svg", "image/svg+xml"),
+    ] {
+        let asset = server.get(path).await;
+        asset.assert_status_ok();
+        assert_eq!(asset.header(header::CONTENT_TYPE), content_type);
+        assert_eq!(asset.header("x-content-type-options"), "nosniff");
+        assert_eq!(asset.header(header::CACHE_CONTROL), "no-store");
+    }
+    for path in [
+        "/settings/agents",
+        "/settings/agents.html",
+        "/settings/__next.settings.agents.txt",
+        "/_next/static/chunks/missing.js",
+        "/_next/static/chunks/escape.js",
+        "/_next/static/chunks/%2e%2e/%2e%2e/secret.js",
+        "/api/team/session",
+        "/push",
+    ] {
+        server.get(path).await.assert_status_not_found();
+    }
+    let fragment = server.get("/auth/invite").await;
+    assert_eq!(fragment.header("content-security-policy"), "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'");
 }
 
 #[tokio::test]

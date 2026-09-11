@@ -102,7 +102,7 @@ beforeEach(() => {
 })
 
 describe("browser transport mode gate", () => {
-  it.each(["unknown", "team"] as const)(
+  it.each(["unknown", "team", "native"] as const)(
     "refuses browser shell transport in %s mode",
     (mode) => {
       setBrowserServerMode(mode)
@@ -116,7 +116,7 @@ describe("browser transport mode gate", () => {
     expect(getShellTransport().isDesktop()).toBe(false)
   })
 
-  it.each(["unknown", "team"] as const)(
+  it.each(["unknown", "team", "native"] as const)(
     "refuses browser remote transport creation in %s mode",
     (mode) => {
       setBrowserServerMode(mode)
@@ -146,38 +146,44 @@ describe("browser transport mode gate", () => {
     expect(getTransport()).toBeDefined()
   })
 
-  it("destroys cached browser shell transport when mode becomes team", () => {
-    setBrowserServerMode("operator")
-    const transport = getShellTransport()
-    transport.destroy = () => {
-      instances.webDestroyed += 1
+  it.each(["team", "native"] as const)(
+    "destroys cached browser shell transport when mode becomes %s",
+    (mode) => {
+      setBrowserServerMode("operator")
+      const transport = getShellTransport()
+      transport.destroy = () => {
+        instances.webDestroyed += 1
+      }
+
+      setBrowserServerMode(mode)
+      expect(instances.webDestroyed).toBe(1)
+      expect(() => getTransport()).toThrow(/not available/i)
     }
+  )
 
-    setBrowserServerMode("team")
-    expect(instances.webDestroyed).toBe(1)
-    expect(() => getTransport()).toThrow(/not available/i)
-  })
+  it.each(["team", "native"] as const)(
+    "destroys and denies a cached remote transport on browser entry to %s mode",
+    (mode) => {
+      environment.value = "tauri"
+      configureRemoteDesktopTransport({
+        id: 7,
+        name: "fixture",
+        baseUrl: "https://remote.example",
+        token: "invented-token",
+        windowInstanceId: "fixture-window",
+      })
+      const cached = getTransport()
+      cached.destroy = () => {
+        instances.remoteDestroyed += 1
+      }
 
-  it("destroys and denies a cached remote transport on browser entry to team mode", () => {
-    environment.value = "tauri"
-    configureRemoteDesktopTransport({
-      id: 7,
-      name: "fixture",
-      baseUrl: "https://remote.example",
-      token: "invented-token",
-      windowInstanceId: "fixture-window",
-    })
-    const cached = getTransport()
-    cached.destroy = () => {
-      instances.remoteDestroyed += 1
+      environment.value = "web"
+      setBrowserServerMode(mode)
+      expect(instances.remoteDestroyed).toBe(1)
+      expect(getActiveRemoteConnectionId()).toBeNull()
+      expect(() => getTransport()).toThrow(/not available/i)
     }
-
-    environment.value = "web"
-    setBrowserServerMode("team")
-    expect(instances.remoteDestroyed).toBe(1)
-    expect(getActiveRemoteConnectionId()).toBeNull()
-    expect(() => getTransport()).toThrow(/not available/i)
-  })
+  )
 
   it("preserves native shell and remote desktop behavior", () => {
     environment.value = "tauri"

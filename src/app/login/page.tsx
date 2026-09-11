@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import { isDesktop } from "@/lib/platform"
 import { TeamLogin } from "@/components/team/team-login"
+import { NativeLogin } from "@/components/neev/native-login"
 import { useTeamMode } from "@/components/team/team-mode-boundary"
 
 function OperatorLoginPage() {
@@ -97,6 +98,7 @@ function OperatorLoginPage() {
 export default function LoginPage() {
   const mode = useTeamMode()
   if (mode === "unknown") return null
+  if (mode === "native") return <NativeLogin />
   if (mode === "team") {
     return (
       <Suspense fallback={null}>

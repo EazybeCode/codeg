@@ -12,8 +12,8 @@ const mocks = vi.hoisted(() => ({
   getShellTransport: vi.fn(),
 }))
 
-vi.mock("@/lib/team-client", () => ({
-  loadCapabilities: mocks.loadCapabilities,
+vi.mock("@/lib/neev-client", () => ({
+  loadServerCapabilities: mocks.loadCapabilities,
 }))
 vi.mock("@/lib/transport", () => ({
   setBrowserServerMode: mocks.setBrowserServerMode,
@@ -35,6 +35,7 @@ function boundary() {
       <TeamModeBoundary
         operator={<p>legacy operator tree</p>}
         team={<ImmediateTeamChild />}
+        native={<p>safe native identity tree</p>}
       />
     </NextIntlClientProvider>
   )
@@ -51,6 +52,20 @@ beforeEach(() => {
 })
 
 describe("TeamModeBoundary", () => {
+  it("publishes native identity mode without mounting legacy branches", async () => {
+    mocks.loadCapabilities.mockResolvedValueOnce({
+      version: 1,
+      mode: "native",
+      identityMode: "native",
+      runtimeEnabled: false,
+    })
+    showBoundary()
+    expect(await screen.findByText("safe native identity tree")).toBeVisible()
+    expect(screen.queryByText("legacy operator tree")).toBeNull()
+    expect(screen.queryByText("safe team tree")).toBeNull()
+    expect(mocks.setBrowserServerMode).toHaveBeenCalledWith("native")
+    expect(mocks.getShellTransport).not.toHaveBeenCalled()
+  })
   it("mounts neither branch and starts no legacy transport while capability is unknown", () => {
     mocks.loadCapabilities.mockReturnValue(new Promise(() => {}))
     showBoundary()

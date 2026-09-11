@@ -98,6 +98,7 @@ import { usePlatform } from "@/hooks/use-platform"
 import { Drawer, DrawerContent, DrawerTitle } from "@/components/ui/drawer"
 import { OverlayHostHiddenProvider } from "@/components/ui/overlay-host-hidden"
 import { TeamSignedInShell } from "@/components/team/team-signed-in-shell"
+import { NativeWorkspace } from "@/components/neev/native-workspace"
 import { useTeamMode } from "@/components/team/team-mode-boundary"
 
 function WorkspaceDocumentTitle() {
@@ -1367,5 +1368,6 @@ export default function WorkspaceLayout({
   const mode = useTeamMode()
   if (mode === "unknown") return null
   if (mode === "team") return <TeamSignedInShell />
+  if (mode === "native") return <NativeWorkspace />
   return <OperatorWorkspaceLayout>{children}</OperatorWorkspaceLayout>
 }

@@ -269,13 +269,63 @@ pub(super) async fn google_callback(
     headers: HeaderMap,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, ApiError> {
+    let result = google_callback_result(&state, &headers, raw.as_deref()).await;
+    match result {
+        Err(error) if accepts_html(&headers) => {
+            // Browser recovery is a fixed UI hint, never a redirect target or
+            // provider diagnostic. API callers retain their safe status/JSON.
+            let destination = match error {
+                ApiError::Conflict => "/login?auth_error=account_conflict",
+                _ => "/login?auth_error=sign_in_failed",
+            };
+            let mut response = Redirect::to(destination).into_response();
+            super::add_private_headers(&mut response);
+            Ok(response)
+        }
+        response => response,
+    }
+}
+
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(axum::http::header::ACCEPT)
+        .iter()
+        .any(|value| {
+            value.to_str().is_ok_and(|value| {
+                value.split(',').any(|range| {
+                    let mut parts = range.split(';');
+                    if !parts
+                        .next()
+                        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/html"))
+                    {
+                        return false;
+                    }
+                    parts
+                        .filter_map(|part| part.trim().split_once('='))
+                        .all(|(key, value)| {
+                            !key.trim().eq_ignore_ascii_case("q")
+                                || value
+                                    .trim()
+                                    .parse::<f32>()
+                                    .is_ok_and(|quality| quality > 0.0 && quality <= 1.0)
+                        })
+                })
+            })
+        })
+}
+
+async fn google_callback_result(
+    state: &ServerState,
+    headers: &HeaderMap,
+    raw: Option<&str>,
+) -> Result<Response, ApiError> {
     let _permit = state
         .auth_limit
         .try_acquire()
         .map_err(|_| ApiError::Limited)?;
-    let (state_token, result) = callback_query(raw.as_deref())?;
+    let (state_token, result) = callback_query(raw)?;
     let names = cookies::CookieNames::for_preview(state.config.preview);
-    let browser = cookies::required(&headers, names.browser)?;
+    let browser = cookies::required(headers, names.browser)?;
     match state
         .oauth
         .complete(Provider::Google, &state_token, result, browser)

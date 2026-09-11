@@ -64,5 +64,9 @@ function TeamEntry() {
 export default function Page() {
   const mode = useTeamMode()
   if (mode === "unknown") return null
-  return mode === "team" ? <TeamEntry /> : <OperatorEntry />
+  return mode === "team" || mode === "native" ? (
+    <TeamEntry />
+  ) : (
+    <OperatorEntry />
+  )
 }

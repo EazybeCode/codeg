@@ -147,7 +147,7 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             .route("/api/neev/email/link", post(auth::email_link))
             .route("/api/neev/email/confirm", post(auth::email_confirm));
     }
-    router.fallback(not_found).with_state(state)
+    router.fallback(static_files::fallback).with_state(state)
 }
 
 async fn health() -> Response {
@@ -170,10 +170,6 @@ async fn capabilities(State(state): State<Arc<ServerState>>) -> Response {
             chats: false,
         },
     })
-}
-
-async fn not_found() -> Response {
-    ApiError::NotFound.into_response()
 }
 
 fn private_json(value: impl Serialize) -> Response {

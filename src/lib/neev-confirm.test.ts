@@ -55,6 +55,7 @@ it("clears the magic fragment before POST and blocks repeated submissions", asyn
   })
   expect(document.querySelector("button")).not.toBeDisabled()
   expect(document.querySelector('[role="alert"]')).toHaveTextContent(
-    "expired, already used, or open in a different browser"
+    "original sign-in method"
   )
+  expect(document.querySelector('[role="alert"]')).toHaveTextContent("Settings")
 })

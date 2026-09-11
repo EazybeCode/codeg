@@ -1,17 +1,76 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, io::Read, path::Path, sync::Arc};
 
 use axum::{
     body::Body,
     extract::State,
-    http::{header, HeaderValue, StatusCode, Uri},
+    http::{header, HeaderValue, Method, StatusCode, Uri},
     response::Response,
 };
+use base64::{engine::general_purpose::STANDARD, Engine};
+use sha2::{Digest, Sha256};
 
 use crate::neev::startup::ServerState;
 
 use super::{add_private_headers, ApiError};
 
 const CONFIRM_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'";
+
+fn read_bounded(root: &Path, file: &str, limit: u64) -> Result<Vec<u8>, ApiError> {
+    let root = root.canonicalize().map_err(|_| ApiError::NotFound)?;
+    let path = root
+        .join(file)
+        .canonicalize()
+        .map_err(|_| ApiError::NotFound)?;
+    if !path.starts_with(&root) || !path.is_file() {
+        return Err(ApiError::NotFound);
+    }
+    let file = std::fs::File::open(path).map_err(|_| ApiError::NotFound)?;
+    if file.metadata().map_err(|_| ApiError::NotFound)?.len() > limit {
+        return Err(ApiError::Invalid);
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ApiError::NotFound)?;
+    if bytes.len() as u64 > limit {
+        return Err(ApiError::Invalid);
+    }
+    Ok(bytes)
+}
+
+// Next's static export embeds hydration scripts. Authorize only the exact inline
+// bytes from this admitted, trusted export file; dynamic nonce injection requires
+// a dynamic Next server and cannot work here. Never permit inline script/eval.
+fn app_csp(bytes: &[u8]) -> Result<HeaderValue, ApiError> {
+    let html = std::str::from_utf8(bytes).map_err(|_| ApiError::Invalid)?;
+    let mut remaining = html;
+    let mut hashes = BTreeSet::new();
+    while let Some(start) = remaining.find("<script") {
+        remaining = &remaining[start + 7..];
+        if !remaining.starts_with(|c: char| c == '>' || c.is_ascii_whitespace()) {
+            continue;
+        }
+        let open = remaining.find('>').ok_or(ApiError::Invalid)?;
+        let attributes = &remaining[..open];
+        let body = &remaining[open + 1..];
+        let close = body.find("</script>").ok_or(ApiError::Invalid)?;
+        if !attributes
+            .split_ascii_whitespace()
+            .any(|attr| attr.starts_with("src="))
+        {
+            hashes.insert(format!(
+                "'sha256-{}'",
+                STANDARD.encode(Sha256::digest(&body.as_bytes()[..close]))
+            ));
+            if hashes.len() > 64 {
+                return Err(ApiError::Invalid);
+            }
+        }
+        remaining = &body[close + 9..];
+    }
+    let policy = format!("default-src 'none'; script-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'", hashes.into_iter().collect::<Vec<_>>().join(" "));
+    HeaderValue::from_str(&policy).map_err(|_| ApiError::Invalid)
+}
 
 pub(super) async fn page(
     State(state): State<Arc<ServerState>>,
@@ -30,11 +89,12 @@ pub(super) async fn page(
         "/auth/invite" => ("neev-auth/invite.html", true),
         _ => return Err(ApiError::NotFound),
     };
-    let bytes =
-        std::fs::read(state.config.static_root.join(file)).map_err(|_| ApiError::NotFound)?;
-    if bytes.len() > 512 * 1024 {
-        return Err(ApiError::Invalid);
-    }
+    let bytes = read_bounded(&state.config.static_root, file, 1024 * 1024)?;
+    let csp = if confirmation {
+        HeaderValue::from_static(CONFIRM_CSP)
+    } else {
+        app_csp(&bytes)?
+    };
     let mut response = Response::new(Body::from(bytes));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
@@ -42,12 +102,13 @@ pub(super) async fn page(
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
     add_private_headers(&mut response);
-    if confirmation {
-        response.headers_mut().insert(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(CONFIRM_CSP),
-        );
-    }
+    response
+        .headers_mut()
+        .insert(header::CONTENT_SECURITY_POLICY, csp);
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     Ok(response)
 }
 
@@ -60,13 +121,14 @@ pub(super) async fn asset(
         "/neev-auth/confirm.css" => ("neev-auth/confirm.css", "text/css; charset=utf-8"),
         "/neev-auth/invite.js" => ("neev-auth/invite.js", "text/javascript; charset=utf-8"),
         "/neev-auth/invite.css" => ("neev-auth/invite.css", "text/css; charset=utf-8"),
-        _ => return Err(ApiError::NotFound),
+        path => exported_asset(path).ok_or(ApiError::NotFound)?,
     };
-    let bytes =
-        std::fs::read(state.config.static_root.join(file)).map_err(|_| ApiError::NotFound)?;
-    if bytes.len() > 128 * 1024 {
-        return Err(ApiError::Invalid);
-    }
+    let limit = if file.starts_with("neev-auth/") {
+        128 * 1024
+    } else {
+        8 * 1024 * 1024
+    };
+    let bytes = read_bounded(&state.config.static_root, file, limit)?;
     let mut response = Response::new(Body::from(bytes));
     *response.status_mut() = StatusCode::OK;
     response
@@ -77,5 +139,83 @@ pub(super) async fn asset(
         HeaderValue::from_static(CONFIRM_CSP),
     );
     add_private_headers(&mut response);
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     Ok(response)
+}
+
+fn exported_asset(path: &str) -> Option<(&str, &'static str)> {
+    if path.len() > 256
+        || !path
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"/_-.".contains(&c))
+    {
+        return None;
+    }
+    let file = path.strip_prefix('/')?;
+    if file
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return None;
+    }
+    let content_type = if file.starts_with("_next/static/") {
+        match file.rsplit('.').next()? {
+            "js" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "woff2" => "font/woff2",
+            "woff" => "font/woff",
+            "ttf" => "font/ttf",
+            "ico" => "image/x-icon",
+            "json" => "application/json",
+            _ => return None,
+        }
+    } else if matches!(
+        file,
+        "icon.svg" | "icon-32x32.png" | "icon-128x128.png" | "favicon.ico"
+    ) {
+        match file.rsplit('.').next()? {
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            _ => "image/x-icon",
+        }
+    } else if navigation_payload(file) {
+        "text/x-component; charset=utf-8"
+    } else {
+        return None;
+    };
+    Some((file, content_type))
+}
+
+fn navigation_payload(file: &str) -> bool {
+    if matches!(
+        file,
+        "index.txt" | "login.txt" | "onboarding.txt" | "workspace.txt" | "settings.txt"
+    ) {
+        return true;
+    }
+    let (page, segment) = file.split_once('/').unwrap_or(("", file));
+    if !matches!(page, "" | "login" | "onboarding" | "workspace" | "settings") {
+        return false;
+    }
+    matches!(
+        segment,
+        "__next._tree.txt" | "__next._head.txt" | "__next._full.txt" | "__next._index.txt"
+    ) || (page.is_empty() && segment == "__next.__PAGE__.txt")
+        || (!page.is_empty()
+            && (segment == format!("__next.{page}.txt")
+                || segment == format!("__next.{page}.__PAGE__.txt")))
+}
+
+pub(super) async fn fallback(
+    state: State<Arc<ServerState>>,
+    uri: Uri,
+    method: Method,
+) -> Result<Response, ApiError> {
+    if method != Method::GET {
+        return Err(ApiError::NotFound);
+    }
+    asset(state, uri).await
 }

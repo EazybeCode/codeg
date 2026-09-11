@@ -260,6 +260,7 @@ async fn google_http_callback_accepts_metadata_claims_once_and_does_not_leak_que
             urlencoding::encode(&callback_state)
         ))
         .add_header(axum::http::header::COOKIE, &cookies)
+        .add_header(axum::http::header::ACCEPT, "text/html")
         .await;
     callback.assert_status(axum::http::StatusCode::SEE_OTHER);
     assert_eq!(callback.header(axum::http::header::LOCATION), "/onboarding");
@@ -286,6 +287,70 @@ async fn google_http_callback_accepts_metadata_claims_once_and_does_not_leak_que
         .add_header(axum::http::header::COOKIE, &cookies)
         .await
         .assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn google_http_callback_conflicts_preserve_api_errors_and_offer_safe_browser_recovery() {
+    use axum::http::{header, StatusCode};
+    let now = 1_700_000_000;
+    let database = test_support::database().await;
+    test_support::native_account(&database, "original-account", "support@neev.so").await;
+    let (service, issuer) = oauth_service_fixture(database.clone(), now).await;
+    let state = Arc::new(crate::neev::startup::ServerState::with_oauth(
+        database.clone(),
+        test_support::preview_config(),
+        Arc::new(test_support::TestClock::new(now)),
+        Arc::try_unwrap(service).ok().unwrap(),
+    ));
+    let server = axum_test::TestServer::new(crate::neev::http::router(state.clone())).unwrap();
+    let browser = secrets::random_token(secrets::TokenPurpose::Browser).unwrap();
+    for accept in ["application/json", "text/html"] {
+        let begun = state
+            .oauth
+            .begin(Provider::Google, SignInIntent::Login, &browser)
+            .await
+            .unwrap();
+        let values = authorization_values(&begun);
+        let (token, _) = test_support::valid_google_token(&values["nonce"], "google-client", now);
+        *issuer.state.token_response.lock().unwrap() = serde_json::json!({
+            "access_token":"discard-provider-secret", "token_type":"Bearer", "id_token":token
+        });
+        let callback = server
+            .get(&format!(
+                "/auth/google/callback?state={}&code=synthetic-code&redirect=https://evil.test",
+                urlencoding::encode(&values["state"])
+            ))
+            .add_header(header::COOKIE, format!("neev_preview_browser={browser}"))
+            .add_header(header::ACCEPT, accept)
+            .await;
+        if accept == "text/html" {
+            callback.assert_status(StatusCode::SEE_OTHER);
+            assert_eq!(
+                callback.header(header::LOCATION),
+                "/login?auth_error=account_conflict"
+            );
+        } else {
+            callback.assert_status(StatusCode::CONFLICT);
+            callback.assert_json(&serde_json::json!({"code":"conflict"}));
+            assert!(callback.headers().get(header::LOCATION).is_none());
+        }
+        assert_eq!(callback.header(header::CACHE_CONTROL), "no-store");
+        assert_eq!(callback.header("referrer-policy"), "no-referrer");
+        assert!(callback.headers().get(header::SET_COOKIE).is_none());
+        let visible = format!("{:?} {}", callback.headers(), callback.text());
+        for secret in [
+            &values["state"],
+            "synthetic-code",
+            "discard-provider-secret",
+            "support@neev.so",
+            "evil.test",
+        ] {
+            assert!(!visible.contains(secret));
+        }
+    }
+    assert_eq!(test_support::count(&database, "neev_accounts").await, 1);
+    assert_eq!(test_support::count(&database, "neev_identities").await, 1);
+    assert_eq!(test_support::count(&database, "neev_sessions").await, 0);
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@ import { SettingsShell } from "@/components/settings/settings-shell"
 import { RemoteConnectionGate } from "@/contexts/remote-connection-context"
 import { UpdateProvider } from "@/components/providers/update-provider"
 import { TeamOrganizationSettingsPage } from "@/components/team/team-organization-settings"
+import { NativeSettings } from "@/components/neev/native-settings"
 import { useTeamMode } from "@/components/team/team-mode-boundary"
 
 function OperatorSettingsLayout({ children }: { children: React.ReactNode }) {
@@ -27,5 +28,6 @@ export default function SettingsLayout({
   const mode = useTeamMode()
   if (mode === "unknown") return null
   if (mode === "team") return <TeamOrganizationSettingsPage />
+  if (mode === "native") return <NativeSettings />
   return <OperatorSettingsLayout>{children}</OperatorSettingsLayout>
 }

@@ -47,7 +47,7 @@ form.addEventListener("submit", async (event) => {
     })
     if (!response.ok) {
       showFailure(
-        "This link is expired, already used, or open in a different browser. Request a new link."
+        "We could not confirm this link. It may be expired, already used, or open in a different browser. If you already have an account, use your original sign-in method, then return to Settings to link another method. Otherwise, request a new link."
       )
       return
     }

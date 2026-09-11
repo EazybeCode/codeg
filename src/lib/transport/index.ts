@@ -6,7 +6,7 @@ export type { RemoteTransportConfig, Transport, UnsubscribeFn } from "./types"
 let _shellTransport: Transport | null = null
 let _remoteTransport: Transport | null = null
 let _remoteConfig: RemoteTransportConfig | null = null
-let _browserServerMode: "unknown" | "operator" | "team" = "unknown"
+let _browserServerMode: "unknown" | "operator" | "team" | "native" = "unknown"
 
 function browserTransportDenied(): boolean {
   return detectEnvironment() === "web" && _browserServerMode !== "operator"
@@ -25,7 +25,7 @@ function destroyCachedTransports(): void {
 }
 
 export function setBrowserServerMode(
-  mode: "unknown" | "operator" | "team"
+  mode: "unknown" | "operator" | "team" | "native"
 ): void {
   if (detectEnvironment() !== "web") return
   const changed = _browserServerMode !== mode

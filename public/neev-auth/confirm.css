@@ -12,6 +12,12 @@ body {
   place-items: center;
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 main {
   width: min(28rem, calc(100% - 3rem));
   padding: 2.5rem;
@@ -19,6 +25,23 @@ main {
   border-radius: 1rem;
   background: #ffffff;
   box-shadow: 0 1rem 3rem rgb(23 32 51 / 10%);
+  margin-block: 1.5rem;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 420px) {
+  main {
+    padding: 1.5rem;
+  }
+}
+
+a {
+  color: #5b47d6;
+}
+a:focus-visible,
+button:focus-visible {
+  outline: 3px solid #5b47d6;
+  outline-offset: 3px;
 }
 
 .eyebrow {
@@ -32,6 +55,12 @@ main {
 h1 {
   margin-block: 0.5rem 0.75rem;
   font-size: 2rem;
+}
+
+@media (max-width: 420px) {
+  h1 {
+    font-size: 1.6rem;
+  }
 }
 
 button {

@@ -11,11 +11,11 @@ import {
 import { Loader2 } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
-import { loadCapabilities } from "@/lib/team-client"
+import { loadServerCapabilities } from "@/lib/neev-client"
 import { detectEnvironment } from "@/lib/transport/detect"
 import { setBrowserServerMode } from "@/lib/transport"
 
-export type TeamMode = "unknown" | "operator" | "team"
+export type TeamMode = "unknown" | "operator" | "team" | "native"
 
 const TeamModeContext = createContext<TeamMode>("unknown")
 
@@ -38,9 +38,11 @@ export function useTeamMode(): TeamMode {
 export function TeamModeBoundary({
   operator,
   team,
+  native: nativeIdentity,
 }: {
   operator: React.ReactNode
   team: React.ReactNode
+  native?: React.ReactNode
 }) {
   const t = useTranslations("TeamModeBoundary")
   const native = useSyncExternalStore(
@@ -63,11 +65,11 @@ export function TeamModeBoundary({
     requestRef.current = controller
     setBrowserServerMode("unknown")
 
-    void loadCapabilities(controller.signal)
+    void loadServerCapabilities(controller.signal)
       .then((capabilities) => {
         if (controller.signal.aborted) return
         setBrowserServerMode(capabilities.mode)
-        if (capabilities.mode === "team") {
+        if (capabilities.mode === "team" || capabilities.mode === "native") {
           try {
             window.localStorage.removeItem("codeg_token")
           } catch {
@@ -123,7 +125,11 @@ export function TeamModeBoundary({
 
   return (
     <TeamModeContext.Provider value={visibleMode}>
-      {visibleMode === "team" ? team : operator}
+      {visibleMode === "native"
+        ? nativeIdentity
+        : visibleMode === "team"
+          ? team
+          : operator}
     </TeamModeContext.Provider>
   )
 }

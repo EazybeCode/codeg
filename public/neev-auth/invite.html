@@ -11,14 +11,18 @@
     <main>
       <p class="eyebrow">Neev</p>
       <h1>Organization invitation</h1>
-      <p data-company>Checking your invitation…</p>
+      <p data-company role="status" aria-live="polite">
+        Checking your invitation…
+      </p>
       <form hidden>
         <button type="submit">Join this organization</button>
       </form>
       <p role="alert" aria-live="polite"></p>
       <p class="hint">
-        You must be signed in with the exact email address that received this invitation.
+        You must be signed in with the exact email address that received this
+        invitation.
       </p>
+      <a data-recovery href="/login">Sign in to Neev</a>
     </main>
   </body>
 </html>

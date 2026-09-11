@@ -16,6 +16,7 @@ import { WindowResizeGrips } from "@/components/layout/window-resize-grips"
 import { TeamModeBoundary } from "@/components/team/team-mode-boundary"
 import { TeamLocalProviders } from "@/components/team/team-local-providers"
 import { TeamAuthProvider } from "@/components/team/team-auth-provider"
+import { NativeAuthProvider } from "@/components/neev/native-auth-provider"
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -25,7 +26,7 @@ export const viewport: Viewport = {
 
 export const metadata: Metadata = {
   title: "Neev",
-  description: "Neev — a shared AI coding workspace",
+  description: "Neev — a workspace for your team’s projects and ideas",
   icons: {
     icon: [
       { url: "/icon-32x32.png", sizes: "32x32", type: "image/png" },
@@ -62,6 +63,14 @@ export default async function RootLayout({
           messages={initialMessages}
         >
           <TeamModeBoundary
+            native={
+              <TeamLocalProviders
+                initialLocale={initialLocale}
+                initialMessages={initialMessages}
+              >
+                <NativeAuthProvider>{children}</NativeAuthProvider>
+              </TeamLocalProviders>
+            }
             operator={
               <AppI18nProvider
                 initialLocale={initialLocale}
