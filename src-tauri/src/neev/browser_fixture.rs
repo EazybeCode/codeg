@@ -146,9 +146,18 @@ async fn authorize(
 }
 
 async fn choose(State(s): State<Arc<IssuerState>>, Path(id): Path<String>) -> Response {
-    if !s.attempts.lock().unwrap().contains_key(&id) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
+    let callback_origin = {
+        let attempts = s.attempts.lock().unwrap();
+        let Some(attempt) = attempts.get(&id) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        // authorize stores only exact registered callbacks. Permit that origin
+        // through the callback-to-workspace redirect chain, never query input.
+        url::Url::parse(&attempt.callback)
+            .unwrap()
+            .origin()
+            .ascii_serialization()
+    };
     let buttons = PEOPLE
         .iter()
         .enumerate()
@@ -156,10 +165,17 @@ async fn choose(State(s): State<Arc<IssuerState>>, Path(id): Path<String>) -> Re
             format!("<p><button name=person value={i}>Continue as {email}</button></p>")
         })
         .collect::<String>();
-    page(format!(
+    let mut response = page(format!(
         "<form method=post action='/choose/{}'>{buttons}</form>",
         escape(&id)
-    ))
+    ));
+    response.headers_mut().insert(
+        "content-security-policy",
+        format!("default-src 'none'; form-action 'self' {callback_origin}; frame-ancestors 'none'; base-uri 'none'")
+            .parse()
+            .unwrap(),
+    );
+    response
 }
 
 async fn approve(
@@ -790,14 +806,54 @@ impl HttpParticipant {
         let choose = authorization
             .join(response.headers()["location"].to_str().unwrap())
             .unwrap();
+        let mut chooser_request = choose.clone();
+        // Untrusted chooser query parameters cannot expand the stored attempt's
+        // allowed form destination or replace it with another origin.
+        chooser_request
+            .query_pairs_mut()
+            .append_pair(
+                "redirect_uri",
+                "https://unowned.invalid/auth/google/callback",
+            )
+            .append_pair("origin", "https://unowned.invalid");
         let response = self
             .client
-            .get(choose.clone())
+            .get(chooser_request)
             .send()
             .await
             .map_err(|_| "synthetic chooser request failed")
             .unwrap();
         assert_eq!(response.status(), 200);
+        let policy = response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap();
+        let directives = policy
+            .split(';')
+            .map(|directive| {
+                let mut parts = directive.split_whitespace();
+                (parts.next().unwrap(), parts.collect::<Vec<_>>())
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(directives.len(), 4);
+        assert_eq!(
+            directives["form-action"],
+            vec!["'self'", self.origin.as_str()]
+        );
+        for directive in ["default-src", "frame-ancestors", "base-uri"] {
+            assert_eq!(directives[directive], vec!["'none'"]);
+        }
+        let inbox = self
+            .client
+            .get(authorization.join("/inbox").unwrap())
+            .send()
+            .await
+            .map_err(|_| "synthetic inbox request failed")
+            .unwrap();
+        assert_eq!(inbox.status(), 200);
+        assert_eq!(
+            inbox.headers()["content-security-policy"],
+            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        );
         let response = self
             .client
             .post(choose)
