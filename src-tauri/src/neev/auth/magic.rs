@@ -63,7 +63,6 @@ pub(crate) async fn request(
     if now < 0 {
         return Err(AuthError::Invalid);
     }
-    let expires_at = now.checked_add(ATTEMPT_TTL).ok_or(AuthError::Invalid)?;
     let (intent_name, link_user_id, link_session_id, link_revision) = intent_columns(&intent);
     let tx = db::begin(&service.database).await?;
     quota::lock_guard(&tx).await?;
@@ -85,21 +84,6 @@ pub(crate) async fn request(
         now,
     )
     .await?;
-    db::execute(
-        &tx,
-        "INSERT INTO neev_magic_attempts(token_hash,browser_hash,canonical_email,intent,link_user_id,link_session_id,link_revision,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
-        vec![
-            token_hash.clone().into(),
-            browser_hash.into(),
-            canonical.clone().into(),
-            intent_name.into(),
-            link_user_id.into(),
-            link_session_id.into(),
-            link_revision.into(),
-            expires_at.into(),
-        ],
-    )
-    .await?;
     tx.commit().await.map_err(database_error)?;
 
     let mut confirmation = service
@@ -108,7 +92,7 @@ pub(crate) async fn request(
         .map_err(|_| AuthError::Unavailable)?;
     confirmation.set_fragment(Some(&format!("token={token}")));
     let message = MailMessage {
-        recipient: canonical,
+        recipient: canonical.clone(),
         subject: "Sign in to Neev".to_owned(),
         text: format!(
             "Confirm your Neev sign-in in the browser that requested it:\n\n{}\n\nThis one-use link expires in 10 minutes.",
@@ -116,18 +100,32 @@ pub(crate) async fn request(
         ),
     };
     if let Err(error) = service.mail.send(message).await {
-        let _ = db::execute(
-            &service.database,
-            "UPDATE neev_magic_attempts SET consumed_at=$1 WHERE token_hash=$2 AND consumed_at IS NULL",
-            vec![now.into(), token_hash.into()],
-        )
-        .await;
         tracing::warn!(
             reason = mail_failure_reason(error),
             "Neev mail request was not delivered"
         );
         return Err(error);
     }
+    let delivered_at = service.clock.now_unix();
+    let expires_at = delivered_at
+        .checked_add(ATTEMPT_TTL)
+        .filter(|_| delivered_at >= 0)
+        .ok_or(AuthError::Invalid)?;
+    db::execute(
+        &service.database,
+        "INSERT INTO neev_magic_attempts(token_hash,browser_hash,canonical_email,intent,link_user_id,link_session_id,link_revision,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+        vec![
+            token_hash.into(),
+            browser_hash.into(),
+            canonical.into(),
+            intent_name.into(),
+            link_user_id.into(),
+            link_session_id.into(),
+            link_revision.into(),
+            expires_at.into(),
+        ],
+    )
+    .await?;
     Ok(())
 }
 
@@ -180,6 +178,7 @@ pub(crate) async fn confirm(
     if updated.rows_affected() != 1 {
         return Err(AuthError::Unauthorized);
     }
+    tx.commit().await.map_err(database_error)?;
     let is_login = matches!(intent, SignInIntent::Login);
     let display_name = canonical
         .split_once('@')
@@ -193,23 +192,13 @@ pub(crate) async fn confirm(
         display_name,
         avatar_url: None,
     };
-    let resolved = identity::resolve_in_transaction(&tx, proof, intent, now).await;
-    match resolved {
-        Ok(user_id) => {
-            tx.commit().await.map_err(database_error)?;
-            if is_login {
-                Ok(Completion::LoggedIn(
-                    session::issue_identity(&service.database, user_id, now).await?,
-                ))
-            } else {
-                Ok(Completion::Linked)
-            }
-        }
-        Err(error @ (AuthError::Unauthorized | AuthError::Forbidden | AuthError::Conflict)) => {
-            tx.commit().await.map_err(database_error)?;
-            Err(error)
-        }
-        Err(error) => Err(error),
+    let user_id = identity::resolve(&service.database, proof, intent, now).await?;
+    if is_login {
+        Ok(Completion::LoggedIn(
+            session::issue_identity(&service.database, user_id, now).await?,
+        ))
+    } else {
+        Ok(Completion::Linked)
     }
 }
 

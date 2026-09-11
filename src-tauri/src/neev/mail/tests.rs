@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use sea_orm::{ConnectionTrait, Statement};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, Statement};
 use tokio::sync::Semaphore;
 
 use crate::neev::{error::AuthError, test_support as h};
@@ -116,10 +116,33 @@ async fn quota_keys_do_not_store_plain_addresses_or_ips() {
     }
 }
 
-#[test]
-fn invitation_quota_dimensions_are_closed_and_constructible() {
-    let _ = Bucket::InvitationActor(7);
-    let _ = Bucket::InvitationOrganization(11);
+#[tokio::test]
+async fn invitation_quota_reservations_enforce_actor_boundary_atomically() {
+    let db = h::database().await;
+    let buckets = [
+        Bucket::InvitationActor(7),
+        Bucket::InvitationOrganization(11),
+    ];
+    for _ in 0..20 {
+        quota::reserve(&db, &[27; 32], &buckets, 1_700_000_000)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        quota::reserve(&db, &[27; 32], &buckets, 1_700_000_000).await,
+        Err(AuthError::Limited)
+    );
+    let rows = db
+        .query_all(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT kind,used FROM neev_quota_buckets ORDER BY kind".to_owned(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row.try_get::<i64>("", "used").unwrap(), 20);
+    }
 }
 
 struct GateSender {
@@ -219,6 +242,60 @@ async fn stale_owner_cannot_release_a_replacement_lease() {
     assert_eq!(h::count(&db, "neev_mail_leases").await, 1);
 }
 
+#[tokio::test]
+#[ignore = "requires explicit isolated PostgreSQL"]
+async fn postgres_mail_lease_ttl_starts_after_observed_guard_wait() {
+    let (db, admin, schema) = h::postgres_database().await;
+    let blocker = crate::neev::db::begin(&db).await.unwrap();
+    crate::neev::db::one(
+        &blocker,
+        "SELECT version FROM neev_schema_version WHERE id=1 FOR UPDATE",
+        vec![],
+    )
+    .await
+    .unwrap();
+
+    let entered = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(Semaphore::new(0));
+    let service = Service::new(
+        db.clone(),
+        Arc::new(GateSender {
+            entered: entered.clone(),
+            gate: gate.clone(),
+        }),
+    );
+    let send = tokio::spawn(async move { service.send(message("delayed@example.test")).await });
+    h::wait_for_postgres_lock(
+        &admin,
+        "%SELECT version FROM neev_schema_version WHERE id=1 FOR UPDATE%",
+    )
+    .await;
+    assert_eq!(entered.load(Ordering::SeqCst), 0);
+    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    blocker.commit().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while entered.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let lease = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT expires_at,CAST(EXTRACT(EPOCH FROM clock_timestamp()) AS BIGINT) AS now FROM neev_mail_leases".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    let remaining =
+        lease.try_get::<i64>("", "expires_at").unwrap() - lease.try_get::<i64>("", "now").unwrap();
+    gate.add_permits(1);
+    send.await.unwrap().unwrap();
+    h::cleanup_postgres(db, admin, schema).await;
+    assert!(remaining >= 29, "new lease retained only {remaining}s");
+}
+
 struct HangingSender(Arc<tokio::sync::Notify>);
 
 #[async_trait]
@@ -308,35 +385,71 @@ fn resend_rejects_any_unapproved_sender_address() {
 
 #[tokio::test]
 #[ignore = "requires explicit isolated PostgreSQL"]
-async fn postgres_quota_serializes_across_two_service_instances() {
+async fn postgres_quota_boundaries_serialize_across_two_service_instances() {
     let (db, admin, schema) = h::postgres_database().await;
-    let bucket = Bucket::MagicAddress("shared@example.test".into());
-    let barrier = Arc::new(tokio::sync::Barrier::new(5));
-    let mut tasks = Vec::new();
-    for _ in 0..4 {
-        let database = db.clone();
-        let bucket = bucket.clone();
-        let barrier = barrier.clone();
-        tasks.push(tokio::spawn(async move {
-            barrier.wait().await;
-            quota::reserve(&database, &[27; 32], &[bucket], 1_700_000_000).await
-        }));
+    let peer = postgres_peer(&schema).await;
+    let key = [28; 32];
+    for (bucket, limit) in [
+        (Bucket::MagicAddress("shared@example.test".into()), 3),
+        (Bucket::MagicSourceIp("203.0.113.200".parse().unwrap()), 20),
+        (Bucket::DeliveryMinute, 10),
+        (Bucket::DeliveryDay, 80),
+        (Bucket::InvitationActor(701), 20),
+        (Bucket::InvitationOrganization(702), 80),
+    ] {
+        assert_two_instance_boundary(&db, &peer, key, bucket, limit).await;
     }
+    peer.close().await.unwrap();
+    h::cleanup_postgres(db, admin, schema).await;
+}
+
+async fn assert_two_instance_boundary(
+    first: &DatabaseConnection,
+    second: &DatabaseConnection,
+    key: [u8; 32],
+    bucket: Bucket,
+    limit: usize,
+) {
+    for index in 0..limit - 1 {
+        let instance = if index % 2 == 0 { first } else { second };
+        quota::reserve(instance, &key, std::slice::from_ref(&bucket), 1_700_000_000)
+            .await
+            .unwrap();
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let attempt = |database: DatabaseConnection, bucket: Bucket| {
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            quota::reserve(&database, &key, &[bucket], 1_700_000_000).await
+        })
+    };
+    let first_attempt = attempt(first.clone(), bucket.clone());
+    let second_attempt = attempt(second.clone(), bucket.clone());
     barrier.wait().await;
-    let results = futures::future::join_all(tasks).await;
+    let results = [first_attempt.await.unwrap(), second_attempt.await.unwrap()];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
     assert_eq!(
         results
             .iter()
-            .filter(|result| result.as_ref().unwrap().is_ok())
-            .count(),
-        3
-    );
-    assert_eq!(
-        results
-            .iter()
-            .filter(|result| result.as_ref().unwrap().as_ref().err() == Some(&AuthError::Limited))
+            .filter(|result| result.as_ref().err() == Some(&AuthError::Limited))
             .count(),
         1
     );
-    h::cleanup_postgres(db, admin, schema).await;
+    for instance in [first, second] {
+        assert_eq!(
+            quota::reserve(instance, &key, std::slice::from_ref(&bucket), 1_700_000_000,).await,
+            Err(AuthError::Limited)
+        );
+    }
+}
+
+async fn postgres_peer(schema: &str) -> DatabaseConnection {
+    let url = std::env::var("NEEV_TEST_DATABASE_URL").unwrap();
+    let mut options = ConnectOptions::new(url);
+    options
+        .max_connections(8)
+        .sqlx_logging(false)
+        .set_schema_search_path(schema);
+    Database::connect(options).await.unwrap()
 }

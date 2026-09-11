@@ -4,11 +4,11 @@ use std::{
 };
 
 use crate::neev::{
-    auth::{magic, secrets, secrets::TokenPurpose, session},
+    auth::{identity, magic, secrets, secrets::TokenPurpose, session},
     error::AuthError,
     mail::{self, MailMessage, MailSender},
     test_support as h,
-    types::SignInIntent,
+    types::{Provider, SignInIntent, VerifiedIdentity},
 };
 use async_trait::async_trait;
 use sea_orm::{ConnectionTrait, Statement};
@@ -146,7 +146,10 @@ async fn delivery_failure_logs_no_recipient_browser_or_magic_secret() {
         [33; 32],
         url::Url::parse("https://app.neev.so/").unwrap(),
         Arc::new(h::TestClock::new(1_700_000_000)),
-        mail::Service::new(db, Arc::new(CaptureThenFail(captured_message.clone()))),
+        mail::Service::new(
+            db.clone(),
+            Arc::new(CaptureThenFail(captured_message.clone())),
+        ),
     );
     let events = Arc::new(StdMutex::new(String::new()));
     let subscriber = tracing_subscriber::registry().with(CaptureEvents(events.clone()));
@@ -164,6 +167,11 @@ async fn delivery_failure_logs_no_recipient_browser_or_magic_secret() {
     assert_eq!(result, Err(AuthError::Unavailable));
     let message = captured_message.lock().await.take().unwrap();
     let token = fragment(&message.text);
+    assert_eq!(h::count(&db, "neev_magic_attempts").await, 0);
+    assert!(matches!(
+        magic::confirm(&service, token, &browser).await,
+        Err(AuthError::Unauthorized)
+    ));
     let rendered = events.lock().unwrap();
     assert!(rendered.contains("reason=\"provider\""));
     for secret in ["private-log@example.test", browser.as_str(), token] {
@@ -346,6 +354,102 @@ async fn linking_collision_consumes_proof_without_granting_identity() {
 }
 
 #[tokio::test]
+#[ignore = "requires explicit isolated PostgreSQL"]
+async fn postgres_unique_violation_cannot_roll_back_magic_proof_consumption() {
+    let (db, admin, schema) = h::postgres_database().await;
+    let capture = Arc::new(h::MailCapture::new());
+    let service = magic::Service::new(
+        db.clone(),
+        [34; 32],
+        url::Url::parse("https://app.neev.so/").unwrap(),
+        Arc::new(h::TestClock::new(1_700_000_000)),
+        mail::Service::new(db.clone(), capture.clone()),
+    );
+    let linking_user = h::native_account(&db, "pg-linker", "pg-linker@example.test").await;
+    let issued = session::issue_identity(&db, linking_user, 1_700_000_000)
+        .await
+        .unwrap();
+    let context = session::identity(&db, &issued.session, 1_700_000_000)
+        .await
+        .unwrap();
+    let browser = secrets::random_token(TokenPurpose::Browser).unwrap();
+    magic::request(
+        &service,
+        "pg-race@example.test",
+        &browser,
+        "203.0.113.201".parse().unwrap(),
+        SignInIntent::Link {
+            user_id: context.user_id,
+            session_id: context.session_id,
+            auth_revision: context.auth_revision,
+        },
+    )
+    .await
+    .unwrap();
+    let token = fragment(&capture.text(0).await).to_owned();
+    let token_hash = secrets::digest(TokenPurpose::Magic, &token).unwrap();
+
+    let competing = crate::neev::db::begin(&db).await.unwrap();
+    identity::resolve_in_transaction(
+        &competing,
+        VerifiedIdentity {
+            provider: Provider::Email,
+            issuer: "https://app.neev.so".into(),
+            subject: "pg-race@example.test".into(),
+            verified_email: Some("pg-race@example.test".into()),
+            display_name: "pg-race".into(),
+            avatar_url: None,
+        },
+        SignInIntent::Login,
+        1_700_000_000,
+    )
+    .await
+    .unwrap();
+    let confirmation = tokio::spawn({
+        let service = service.clone();
+        let token = token.clone();
+        let browser = browser.clone();
+        async move { magic::confirm(&service, &token, &browser).await }
+    });
+    h::wait_for_postgres_lock(&admin, "%INSERT INTO neev_identities%").await;
+    competing.commit().await.unwrap();
+    assert!(matches!(
+        confirmation.await.unwrap(),
+        Err(AuthError::Conflict)
+    ));
+    let proof = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "SELECT consumed_at FROM neev_magic_attempts WHERE token_hash=$1",
+            vec![token_hash.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        proof.try_get::<Option<i64>>("", "consumed_at").unwrap(),
+        Some(1_700_000_000)
+    );
+    assert!(matches!(
+        magic::confirm(&service, &token, &browser).await,
+        Err(AuthError::Unauthorized)
+    ));
+    let identity_count = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "SELECT COUNT(*) AS n FROM neev_identities WHERE user_id=$1 AND provider='email'",
+            vec![linking_user.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "n")
+        .unwrap();
+    assert_eq!(identity_count, 0);
+    h::cleanup_postgres(db, admin, schema).await;
+}
+
+#[tokio::test]
 async fn scanner_get_does_not_consume_magic_link() {
     let mut harness = h::MagicHarness::new().await;
     let fragment = harness.request("person@example.test").await;
@@ -401,7 +505,7 @@ impl MailSender for Failing {
 }
 
 #[tokio::test]
-async fn delivery_failure_revokes_the_pending_proof() {
+async fn delivery_failure_never_persists_a_confirmable_proof() {
     let db = h::database().await;
     let browser = secrets::random_token(TokenPurpose::Browser).unwrap();
     let service = magic::Service::new(
@@ -422,17 +526,6 @@ async fn delivery_failure_revokes_the_pending_proof() {
         .await,
         Err(AuthError::Unavailable)
     );
-    let row = db
-        .query_one(Statement::from_string(
-            db.get_database_backend(),
-            "SELECT consumed_at FROM neev_magic_attempts".to_owned(),
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        row.try_get::<Option<i64>>("", "consumed_at").unwrap(),
-        Some(1_700_000_000)
-    );
+    assert_eq!(h::count(&db, "neev_magic_attempts").await, 0);
     assert_eq!(h::count(&db, "neev_quota_buckets").await, 4);
 }

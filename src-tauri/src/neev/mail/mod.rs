@@ -124,7 +124,7 @@ async fn release_lease(database: &DatabaseConnection, lease: &Lease) -> Result<(
 async fn database_time<C: ConnectionTrait>(database: &C) -> Result<i64, AuthError> {
     let sql = match database.get_database_backend() {
         DbBackend::Postgres => {
-            "SELECT CAST(EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) AS BIGINT) AS now"
+            "SELECT CAST(EXTRACT(EPOCH FROM clock_timestamp()) AS BIGINT) AS now"
         }
         DbBackend::Sqlite => "SELECT CAST(strftime('%s','now') AS INTEGER) AS now",
         _ => return Err(AuthError::Unavailable),
