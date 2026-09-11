@@ -73,6 +73,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       auth: resource.authRevision,
     }),
     draftRef = useRef(""),
+    editGeneration = useRef(0),
     dirty = useRef(false),
     sending = useRef(false),
     retry = useRef<SaveNativeDocumentInput | null>(null),
@@ -92,6 +93,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     metadata: NativeResource,
     contentRevision: string
   ) {
+    editGeneration.current += 1
     base.current = {
       markdown,
       content: contentRevision,
@@ -141,6 +143,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         )
   }
   async function refresh() {
+    const generation = editGeneration.current
     try {
       const metadata = await loadNativeResource(
         resource.orgId,
@@ -163,7 +166,13 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       // Dirty or ambiguously committed drafts keep BOTH original preconditions.
       if (!dirty.current && !retry.current && !sending.current) {
         const body = await readBody(metadata)
-        if (!scope.isCurrent() || dirty.current || sending.current) return
+        if (
+          !scope.isCurrent() ||
+          dirty.current ||
+          sending.current ||
+          generation !== editGeneration.current
+        )
+          return
         setBody(body?.markdown ?? "", metadata, body?.revision.revision ?? "0")
       }
       setLoading(false)
@@ -401,6 +410,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                 }
               }}
               onChange={(event) => {
+                editGeneration.current += 1
                 draftRef.current = event.target.value
                 dirty.current = event.target.value !== base.current.markdown
                 setDraft(event.target.value)
@@ -603,6 +613,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                   disabled={saving || comparison?.resource.archived}
                   onClick={() => {
                     if (!comparison) return
+                    editGeneration.current += 1
                     base.current = {
                       markdown: comparison.markdown,
                       content: comparison.revision,

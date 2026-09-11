@@ -385,3 +385,43 @@ it("does not offer an empty editor when the existing document body failed to loa
   ).toHaveValue("seed")
   expect(mock.unknown).toEqual([])
 })
+
+it("does not replace a successful save with an older poll body that finishes afterward", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+  let reads = 0
+  let release!: (value: Response) => void
+  const mock = mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}/revisions`]: () =>
+      json({ items: [revision], nextAfter: null }),
+    [`GET ${path}/content?revision=1`]: () =>
+      ++reads === 1
+        ? json({ revision, markdown: "seed" })
+        : new Promise((resolve) => {
+            release = resolve
+          }),
+    [`POST ${path}/revisions`]: () =>
+      json(
+        { ...revision, revision: "2", parentRevision: "1", byteLength: "5" },
+        201
+      ),
+  })
+  const user = userEvent.setup()
+  mount()
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000)
+  })
+  expect(release).toBeDefined()
+  await user.type(editor, "!")
+  await user.click(screen.getByRole("button", { name: "Save" }))
+  expect(await screen.findByText("Saved")).toBeVisible()
+  await act(async () => {
+    release(json({ revision, markdown: "seed" }))
+  })
+  expect(editor).toHaveValue("seed!")
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled()
+  expect(mock.unknown).toEqual([])
+})
