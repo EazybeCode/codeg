@@ -99,11 +99,11 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       await load()
     },
   })
-  const actions = useRef({ load, open: openNow })
+  const actions = useRef({ load, open: openNow, update })
   useEffect(() => {
     // A confirmation may outlive a visibility refresh. Resolve its intent
     // against the current request lifetime, never an aborted closure.
-    actions.current = { load, open: openNow }
+    actions.current = { load, open: openNow, update }
   })
   const onDirtyChange = useCallback((value: boolean) => {
     dirtyRef.current = value
@@ -342,13 +342,28 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       }
     }
   }
+  function guardUpdate(
+    change: { visibility: "private" } | { archived: boolean }
+  ) {
+    const targetId = selected?.id
+    const selection = selectionGeneration.current
+    if (!targetId) return
+    guard(() => {
+      // Preserve the requested change, not a toggle against refreshed state.
+      // An old confirmation must never transfer to a different selection.
+      if (selection === selectionGeneration.current)
+        void actions.current.update(change, targetId)
+    })
+  }
   async function update(
     change: Partial<
       Pick<NativeResource, "visibility" | "archived" | "nodeId" | "title">
-    >
+    >,
+    targetId = selected?.id
   ) {
     if (
       !selected ||
+      selected.id !== targetId ||
       !auth.session ||
       mutationBusy.current ||
       !scope.isCurrent()
@@ -538,7 +553,7 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
                     onClick={() =>
                       selected.visibility === "private"
                         ? open("share")
-                        : guard(() => void update({ visibility: "private" }))
+                        : guardUpdate({ visibility: "private" })
                     }
                   >
                     {t(
@@ -552,9 +567,7 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
                   variant="ghost"
                   size="sm"
                   disabled={saving}
-                  onClick={() =>
-                    guard(() => void update({ archived: !selected.archived }))
-                  }
+                  onClick={() => guardUpdate({ archived: !selected.archived })}
                 >
                   {t(selected.archived ? "reopen" : "archive")}
                 </Button>

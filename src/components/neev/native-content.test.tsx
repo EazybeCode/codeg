@@ -144,6 +144,144 @@ it.each([false, true])(
     expect(mock.unknown).toEqual([])
   }
 )
+it.each(["Make private", "Archive", "Reopen"] as const)(
+  "executes retained %s intent on its original target with fresh metadata after visibility recovery",
+  async (action) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+    let latest: NativeResource = { ...chat, visibility: "organization" }
+    let revalidating = false
+    let release!: (response: Response) => void
+    const bootstrap = new Promise<Response>((resolve) => {
+      release = resolve
+    })
+    const bodies: Record<string, unknown>[] = []
+    const mock = mockNativeSession(undefined, {
+      "GET /api/neev/session": () =>
+        revalidating ? bootstrap : json(orgSession),
+      "GET /api/neev/nodes/4/chats": () =>
+        json({ items: [latest], nextAfter: null }),
+      [`GET /api/neev/resources/${chat.id}`]: () => json(latest),
+      [`GET /api/neev/chats/${chat.id}/messages`]: () =>
+        json({ items: [], nextAfter: null }),
+      [`PATCH /api/neev/resources/${chat.id}`]: (init) => {
+        const { expectedAuthRevision, ...change } = JSON.parse(
+          init.body as string
+        )
+        bodies.push({ expectedAuthRevision, ...change })
+        latest = { ...latest, ...change, authRevision: "3" }
+        return json(latest)
+      },
+    })
+    mount()
+    await visibilityActions.click(
+      await screen.findByRole("button", { name: /Design chat/ })
+    )
+    await visibilityActions.type(
+      await screen.findByRole("textbox", { name: "Message" }),
+      "draft before privacy action"
+    )
+    if (action === "Reopen") {
+      latest = { ...latest, archived: true }
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+      })
+      expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+    }
+    await visibilityActions.click(screen.getByRole("button", { name: action }))
+    const dialog = screen.getByRole("dialog")
+    revalidating = true
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")))
+    expect(dialog).not.toBeVisible()
+    latest = {
+      ...latest,
+      title: "Fresh title",
+      authRevision: "2",
+      visibility: action === "Make private" ? "organization" : "private",
+      archived: action === "Archive",
+    }
+    revalidating = false
+    await act(async () => release(json(orgSession)))
+    expect(await screen.findByRole("dialog")).toBeVisible()
+    expect(bodies).toEqual([])
+    await visibilityActions.click(
+      screen.getByRole("button", { name: "Discard changes" })
+    )
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({
+      expectedAuthRevision: "2",
+      title: "Fresh title",
+      nodeId: 4,
+      visibility: "private",
+      archived: action === "Archive",
+    })
+    expect(screen.getByRole("heading", { name: "Fresh title" })).toBeVisible()
+    expect(
+      screen.getByRole("button", { name: "Share with organization" })
+    ).toBeVisible()
+    if (action === "Archive") {
+      expect(screen.getByRole("button", { name: "Reopen" })).toBeVisible()
+      expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+    } else {
+      expect(screen.getByRole("button", { name: "Archive" })).toBeVisible()
+      expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled()
+    }
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("")
+    expect(mock.unknown).toEqual([])
+  }
+)
+
+it("drops a retained mutation intent when a parent creation request supersedes its selection", async () => {
+  const shared = { ...chat, visibility: "organization" as const }
+  const bodies: unknown[] = []
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/nodes/4/chats": () =>
+      json({ items: [shared], nextAfter: null }),
+    [`GET /api/neev/resources/${chat.id}`]: () => json(shared),
+    [`GET /api/neev/chats/${chat.id}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+    [`PATCH /api/neev/resources/${chat.id}`]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json(shared)
+    },
+  })
+  const tree = (create = false) => (
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeContent
+          node={node}
+          onRequestNavigationGuard={() => {}}
+          creation={create ? { kind: "chat", request: 1 } : undefined}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  const view = render(tree())
+  await visibilityActions.click(
+    await screen.findByRole("button", { name: /Design chat/ })
+  )
+  await visibilityActions.type(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "original target draft"
+  )
+  await visibilityActions.click(
+    screen.getByRole("button", { name: "Make private" })
+  )
+  await act(async () => document.dispatchEvent(new Event("visibilitychange")))
+  await screen.findByRole("dialog")
+  await act(async () => {
+    view.rerender(tree(true))
+  })
+  await visibilityActions.click(screen.getByRole("button", { name: "Cancel" }))
+  await visibilityActions.click(
+    screen.getByRole("button", { name: "Discard changes" })
+  )
+  expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  expect(screen.queryByRole("dialog")).toBeNull()
+  expect(screen.getByRole("button", { name: "New chat" })).toBeVisible()
+  expect(bodies).toEqual([])
+  expect(mock.unknown).toEqual([])
+})
+
 it.each([
   ["csrf", { ...orgSession, csrf: "rotated-proof" }],
   ["account", { ...orgSession, user: { ...orgSession.user, id: 2 } }],
