@@ -1,7 +1,8 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import {
   ChevronRight,
@@ -38,9 +39,15 @@ import {
 } from "@/lib/neev-client"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeBoundary, NativeError } from "./native-boundary"
+import {
+  NativeContent,
+  type ContentCreation,
+  type ContentNavigationGuard,
+} from "./native-content"
+import type { NativeResourceKind } from "@/lib/neev-content-client"
 
 // Native adapter of TeamWorkspaceTree's compact nested rows and focusable menus.
-// It intentionally accepts only the native Project/Folder DTO, with no chat actions.
+// Content creation always carries the native node selected in this menu.
 function NativeWorkspaceTree({
   nodes,
   parentId = null,
@@ -50,6 +57,7 @@ function NativeWorkspaceTree({
   select,
   create,
   edit,
+  createContent,
 }: {
   nodes: NativeNode[]
   parentId?: number | null
@@ -59,8 +67,10 @@ function NativeWorkspaceTree({
   select: (id: number) => void
   create: (node: NativeNode) => void
   edit: (node: NativeNode) => void
+  createContent: (node: NativeNode, kind: NativeResourceKind) => void
 }) {
   const t = useTranslations("Native")
+  const c = useTranslations("NativeContent")
   return (
     <ul
       className={cn(
@@ -127,6 +137,16 @@ function NativeWorkspaceTree({
                   <DropdownMenuItem onSelect={() => create(node)}>
                     {t("newSubfolder")}
                   </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => createContent(node, "chat")}
+                  >
+                    {c("newChat")}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() => createContent(node, "document")}
+                  >
+                    {c("newDocument")}
+                  </DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => edit(node)}>
                     {t("editDetails")}
                   </DropdownMenuItem>
@@ -143,6 +163,7 @@ function NativeWorkspaceTree({
                 select={select}
                 create={create}
                 edit={edit}
+                createContent={createContent}
               />
             )}
           </li>
@@ -159,6 +180,14 @@ function WorkspaceContent() {
   const t = useTranslations("Native"),
     auth = useNativeAuth(),
     mobile = useIsMobile()
+  const router = useRouter(),
+    c = useTranslations("NativeContent")
+  const navigationGuard = useRef<ContentNavigationGuard>((action) => action())
+  const registerGuard = useCallback((guard: ContentNavigationGuard) => {
+    navigationGuard.current = guard
+  }, [])
+  const [creation, setCreation] = useState<ContentCreation | undefined>()
+  const creationNumber = useRef(0)
   const [nodes, setNodes] = useState<NativeNode[]>([]),
     [nextAfter, setNextAfter] = useState<number | null>(null),
     [loading, setLoading] = useState(true),
@@ -299,7 +328,11 @@ function WorkspaceContent() {
       <Button
         variant="ghost"
         className="justify-start gap-2"
-        onClick={() => openEditor({ kind: "project", parentId: null })}
+        onClick={() =>
+          navigationGuard.current(() =>
+            openEditor({ kind: "project", parentId: null })
+          )
+        }
       >
         <Plus aria-hidden className="size-4" />
         {t("newProject")}
@@ -317,14 +350,40 @@ function WorkspaceContent() {
               return next
             })
           }
-          select={(id) => {
-            setSelected(id)
-            setDrawer(false)
-          }}
-          create={(node) => openEditor({ kind: "folder", parentId: node.id })}
-          edit={(node) =>
-            openEditor({ kind: node.kind, parentId: node.parentId, node })
+          select={(id) =>
+            navigationGuard.current(() => {
+              setSelected(id)
+              setCreation(undefined)
+              setDrawer(false)
+            })
           }
+          create={(node) =>
+            navigationGuard.current(() =>
+              openEditor({ kind: "folder", parentId: node.id })
+            )
+          }
+          edit={(node) =>
+            navigationGuard.current(() =>
+              openEditor({ kind: node.kind, parentId: node.parentId, node })
+            )
+          }
+          createContent={(node, kind) => {
+            const active = document.activeElement as HTMLElement | null
+            const menu = active?.closest('[role="menu"]')
+            const returnFocus =
+              document.getElementById(
+                menu?.getAttribute("aria-labelledby") ?? ""
+              ) ?? active
+            navigationGuard.current(() => {
+              setSelected(node.id)
+              setCreation({
+                kind,
+                request: ++creationNumber.current,
+                returnFocus,
+              })
+              setDrawer(false)
+            })
+          }}
         />
         {!loading && nodes.length === 0 && (
           <p className="px-2 text-sm text-muted-foreground">
@@ -347,7 +406,13 @@ function WorkspaceContent() {
       </div>
       <div className="space-y-1 border-t border-sidebar-border pt-3">
         <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <Link href="/settings">
+          <Link
+            href="/settings"
+            onClick={(event) => {
+              event.preventDefault()
+              navigationGuard.current(() => router.push("/settings"))
+            }}
+          >
             <Settings2 aria-hidden className="size-4" />
             {t("settings")}
           </Link>
@@ -445,36 +510,49 @@ function WorkspaceContent() {
                 <button
                   className="truncate rounded px-1 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
                   title={node.name}
-                  onClick={() => setSelected(node.id)}
+                  onClick={() =>
+                    navigationGuard.current(() => {
+                      setSelected(node.id)
+                      setCreation(undefined)
+                    })
+                  }
                 >
                   {node.name}
                 </button>
               </span>
             ))}
           </nav>
-          <div className="mx-auto mt-12 max-w-xl space-y-5 sm:mt-20">
-            <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
-              <Layers3 aria-hidden className="size-5 text-muted-foreground" />
-            </div>
-            <h1 className="break-words text-3xl font-semibold tracking-tight">
-              {selectedNode?.name ?? t("workspaceTitle")}
-            </h1>
-            <p className="text-sm leading-6 text-muted-foreground">
-              {t("workspaceDescription")}
-            </p>
-            <section className="space-y-2 rounded-xl border p-5">
-              <h2 className="text-sm font-medium">{t("agentUnavailable")}</h2>
+          {selectedNode ? (
+            <NativeContent
+              node={selectedNode}
+              creation={creation}
+              onRequestNavigationGuard={registerGuard}
+            />
+          ) : (
+            <div className="mx-auto mt-12 max-w-xl space-y-5 sm:mt-20">
+              <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
+                <Layers3 aria-hidden className="size-5 text-muted-foreground" />
+              </div>
+              <h1 className="break-words text-3xl font-semibold tracking-tight">
+                {t("workspaceTitle")}
+              </h1>
               <p className="text-sm leading-6 text-muted-foreground">
-                {t("agentDescription")}
+                {c("noSelection")}
               </p>
-              <Link
-                href="/settings"
-                className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {t("personalAgents")}
-              </Link>
-            </section>
-          </div>
+              <section className="space-y-2 rounded-xl border p-5">
+                <h2 className="text-sm font-medium">{t("agentUnavailable")}</h2>
+                <p className="text-sm leading-6 text-muted-foreground">
+                  {t("agentDescription")}
+                </p>
+                <Link
+                  href="/settings"
+                  className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {t("personalAgents")}
+                </Link>
+              </section>
+            </div>
+          )}
         </main>
       </div>
       <Dialog

@@ -38,6 +38,9 @@ it("supports keyboard project creation, nested placement and dialog focus restor
   const bodies: unknown[] = []
   const mock = mockNativeSession(undefined, {
     "GET /api/neev/nodes": () => json({ nodes: [], nextAfter: null }),
+    "GET /api/neev/nodes/1/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/3/chats": () => json({ items: [], nextAfter: null }),
     "POST /api/neev/nodes": (init) => {
       const body = JSON.parse(init.body as string)
       bodies.push(body)
@@ -134,6 +137,46 @@ it("uses an accessible drawer at the mobile breakpoint with Escape focus return"
   await user.keyboard("{Escape}")
   expect(trigger).toHaveFocus()
   expect(screen.queryByRole("dialog")).toBeNull()
+  expect(mock.unknown).toEqual([])
+})
+
+it("opens content creation for the context-menu node and returns focus after cancellation", async () => {
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 4,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Menu project",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/4/documents": () =>
+      json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  const trigger = await screen.findByRole("button", {
+    name: "Actions for Menu project",
+  })
+  trigger.focus()
+  await user.keyboard("{Enter}")
+  await user.click(
+    await screen.findByRole("menuitem", { name: "New document" })
+  )
+  expect(screen.getByRole("dialog")).toHaveTextContent("Inside Menu project")
+  expect(screen.getByRole("textbox", { name: "Title" })).toHaveFocus()
+  await user.keyboard("{Escape}")
+  expect(trigger).toHaveFocus()
   expect(mock.unknown).toEqual([])
 })
 
