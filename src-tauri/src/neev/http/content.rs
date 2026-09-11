@@ -1,0 +1,641 @@
+use std::sync::Arc;
+
+use axum::{
+    body::Body,
+    extract::{Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    response::{IntoResponse, Response},
+};
+use serde::{Deserialize, Serialize};
+
+use crate::neev::{
+    content::{
+        documents, messages, resources,
+        types::{
+            ContentError, Message, Page, Resource, ResourceInput, ResourceKind, ResourcePatch,
+            Revision, SaveInput, Visibility,
+        },
+    },
+    startup::ServerState,
+};
+
+use super::{catalog, private_json, ApiError};
+
+const SMALL_BODY_LIMIT: usize = 4096;
+const MESSAGE_BODY_LIMIT: usize = 6 * 32768 + 4096;
+const DOCUMENT_BODY_LIMIT: usize = 6 * 1048576 + 4096;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ResourcePageInput {
+    after: Option<String>,
+    #[serde(default)]
+    archived: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RevisionPageInput {
+    after: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RevisionInput {
+    revision: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateInput {
+    title: String,
+    request_id: String,
+    #[serde(default, deserialize_with = "present_optional")]
+    origin_chat_id: Option<Option<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PatchInput {
+    expected_auth_revision: String,
+    title: String,
+    node_id: i32,
+    visibility: VisibilityInput,
+    archived: bool,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum VisibilityInput {
+    Private,
+    Organization,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MessageInput {
+    request_id: String,
+    expected_auth_revision: String,
+    body: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SaveRevisionInput {
+    request_id: String,
+    expected_content_revision: String,
+    expected_auth_revision: String,
+    markdown: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RestoreInput {
+    request_id: String,
+    expected_content_revision: String,
+    expected_auth_revision: String,
+    source_revision: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceDto {
+    id: String,
+    org_id: i32,
+    node_id: i32,
+    kind: &'static str,
+    creator_id: i32,
+    title: String,
+    visibility: &'static str,
+    origin_chat_id: Option<String>,
+    auth_revision: String,
+    content_revision: String,
+    archived: bool,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageDto {
+    id: String,
+    sequence: String,
+    author_id: i32,
+    author_name: String,
+    body: String,
+    created_at: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevisionDto {
+    revision: String,
+    author_id: i32,
+    author_name: String,
+    byte_length: String,
+    sha256: String,
+    created_at: i64,
+    parent_revision: Option<String>,
+    restored_from: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PageDto<T> {
+    items: Vec<T>,
+    next_after: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ContentDto {
+    revision: RevisionDto,
+    markdown: String,
+}
+
+pub(super) async fn list_chats(
+    State(state): State<Arc<ServerState>>,
+    Path(node_id): Path<i32>,
+    Query(page): Query<ResourcePageInput>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    list_resources(&state, node_id, ResourceKind::Chat, page, &headers).await
+}
+
+pub(super) async fn list_documents(
+    State(state): State<Arc<ServerState>>,
+    Path(node_id): Path<i32>,
+    Query(page): Query<ResourcePageInput>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    list_resources(&state, node_id, ResourceKind::Document, page, &headers).await
+}
+
+async fn list_resources(
+    state: &ServerState,
+    node_id: i32,
+    kind: ResourceKind,
+    page: ResourcePageInput,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(state)?;
+    positive_id(node_id)?;
+    let actor = catalog::organization_get(state, headers).await?;
+    let page = resources::list(
+        state,
+        &actor,
+        node_id,
+        kind,
+        page.archived,
+        page.after.as_deref(),
+    )
+    .await?;
+    Ok(private_json(resource_page_dto(page)?))
+}
+
+pub(super) async fn create_chat(
+    State(state): State<Arc<ServerState>>,
+    Path(node_id): Path<i32>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    create_resource(&state, node_id, ResourceKind::Chat, request).await
+}
+
+pub(super) async fn create_document(
+    State(state): State<Arc<ServerState>>,
+    Path(node_id): Path<i32>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    create_resource(&state, node_id, ResourceKind::Document, request).await
+}
+
+async fn create_resource(
+    state: &ServerState,
+    node_id: i32,
+    kind: ResourceKind,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(state)?;
+    positive_id(node_id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<CreateInput>(state, request, SMALL_BODY_LIMIT).await?;
+    canonical_uuid(&input.request_id)?;
+    if kind == ResourceKind::Chat && input.origin_chat_id.is_some() {
+        return Err(ApiError::Invalid);
+    }
+    let origin_chat_id = input.origin_chat_id.flatten();
+    if let Some(origin) = &origin_chat_id {
+        canonical_uuid(origin)?;
+    }
+    let resource = resources::create(
+        state,
+        &actor,
+        ResourceInput {
+            node_id,
+            kind,
+            title: input.title,
+            origin_chat_id,
+            request_id: input.request_id,
+        },
+    )
+    .await?;
+    let mut response = private_json(resource_dto(resource)?);
+    *response.status_mut() = StatusCode::CREATED;
+    Ok(response)
+}
+
+pub(super) async fn get_resource(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    Ok(private_json(resource_dto(
+        resources::get(&state, &actor, &id).await?,
+    )?))
+}
+
+pub(super) async fn update_resource(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<PatchInput>(&state, request, SMALL_BODY_LIMIT).await?;
+    positive_id(input.node_id)?;
+    let patch = ResourcePatch {
+        expected_auth_revision: catalog::canonical_revision(&input.expected_auth_revision)?,
+        title: input.title,
+        node_id: input.node_id,
+        visibility: input.visibility.into(),
+        archived: input.archived,
+    };
+    Ok(private_json(resource_dto(
+        resources::update(&state, &actor, &id, patch).await?,
+    )?))
+}
+
+pub(super) async fn list_messages(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    Query(page): Query<RevisionPageInput>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let after = page
+        .after
+        .as_deref()
+        .map(catalog::canonical_revision)
+        .transpose()
+        .map_err(|_| ApiError::NotFound)?;
+    Ok(private_json(message_page_dto(
+        messages::list(&state, &actor, &id, after).await?,
+    )?))
+}
+
+pub(super) async fn append_message(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<MessageInput>(&state, request, MESSAGE_BODY_LIMIT).await?;
+    canonical_uuid(&input.request_id)?;
+    let message = messages::append(
+        &state,
+        &actor,
+        &id,
+        &input.request_id,
+        catalog::canonical_revision(&input.expected_auth_revision)?,
+        &input.body,
+    )
+    .await?;
+    let mut response = private_json(message_dto(message)?);
+    *response.status_mut() = StatusCode::CREATED;
+    Ok(response)
+}
+
+pub(super) async fn list_revisions(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    Query(page): Query<RevisionPageInput>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let after = page
+        .after
+        .as_deref()
+        .map(catalog::canonical_revision)
+        .transpose()
+        .map_err(|_| ApiError::NotFound)?;
+    Ok(private_json(revision_page_dto(
+        documents::history(&state, &actor, &id, after).await?,
+    )?))
+}
+
+pub(super) async fn save_revision(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<SaveRevisionInput>(&state, request, DOCUMENT_BODY_LIMIT)
+            .await?;
+    canonical_uuid(&input.request_id)?;
+    let revision = documents::save(
+        &state,
+        &actor,
+        &id,
+        SaveInput {
+            request_id: input.request_id,
+            expected_content_revision: canonical_nonnegative_revision(
+                &input.expected_content_revision,
+            )?,
+            expected_auth_revision: catalog::canonical_revision(&input.expected_auth_revision)?,
+            markdown: input.markdown,
+        },
+    )
+    .await?;
+    let mut response = private_json(revision_dto(revision)?);
+    *response.status_mut() = StatusCode::CREATED;
+    Ok(response)
+}
+
+pub(super) async fn get_document_content(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    Query(input): Query<RevisionInput>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let number = input
+        .revision
+        .as_deref()
+        .map(catalog::canonical_revision)
+        .transpose()?;
+    let (revision, bytes) = documents::read(&state, &actor, &id, number)
+        .await
+        .map_err(document_read_error)?;
+    let markdown = String::from_utf8(bytes).map_err(|_| ApiError::StorageUnavailable)?;
+    Ok(private_json(ContentDto {
+        revision: revision_dto(revision)?,
+        markdown,
+    }))
+}
+
+pub(super) async fn download_document(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    Query(input): Query<RevisionInput>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let number = input
+        .revision
+        .as_deref()
+        .map(catalog::canonical_revision)
+        .transpose()?;
+    let (_, bytes) = documents::read(&state, &actor, &id, number)
+        .await
+        .map_err(document_read_error)?;
+    String::from_utf8(bytes.clone()).map_err(|_| ApiError::StorageUnavailable)?;
+    let mut response = Body::from(bytes).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown;charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"document.md\""),
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    super::add_private_headers(&mut response);
+    Ok(response)
+}
+
+pub(super) async fn restore_revision(
+    State(state): State<Arc<ServerState>>,
+    Path(id): Path<String>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<RestoreInput>(&state, request, SMALL_BODY_LIMIT).await?;
+    canonical_uuid(&input.request_id)?;
+    let revision = documents::restore(
+        &state,
+        &actor,
+        &id,
+        catalog::canonical_revision(&input.source_revision)?,
+        &input.request_id,
+        canonical_nonnegative_revision(&input.expected_content_revision)?,
+        catalog::canonical_revision(&input.expected_auth_revision)?,
+    )
+    .await?;
+    let mut response = private_json(revision_dto(revision)?);
+    *response.status_mut() = StatusCode::CREATED;
+    Ok(response)
+}
+
+fn resource_page_dto(page: Page<Resource>) -> Result<PageDto<ResourceDto>, ApiError> {
+    Ok(PageDto {
+        items: page
+            .items
+            .into_iter()
+            .map(resource_dto)
+            .collect::<Result<Vec<_>, _>>()?,
+        next_after: page.next_after,
+    })
+}
+
+fn message_page_dto(page: Page<Message>) -> Result<PageDto<MessageDto>, ApiError> {
+    Ok(PageDto {
+        items: page
+            .items
+            .into_iter()
+            .map(message_dto)
+            .collect::<Result<Vec<_>, _>>()?,
+        next_after: page.next_after,
+    })
+}
+
+fn revision_page_dto(page: Page<Revision>) -> Result<PageDto<RevisionDto>, ApiError> {
+    Ok(PageDto {
+        items: page
+            .items
+            .into_iter()
+            .map(revision_dto)
+            .collect::<Result<Vec<_>, _>>()?,
+        next_after: page.next_after,
+    })
+}
+
+fn resource_dto(resource: Resource) -> Result<ResourceDto, ApiError> {
+    canonical_uuid(&resource.id).map_err(|_| ApiError::StorageUnavailable)?;
+    if resource.org_id < 1
+        || resource.node_id < 1
+        || resource.creator_id < 1
+        || resource.auth_revision < 1
+        || resource.content_revision < 0
+        || resource.created_at < 0
+        || resource.updated_at < 0
+    {
+        return Err(ApiError::StorageUnavailable);
+    }
+    if let Some(origin) = &resource.origin_chat_id {
+        canonical_uuid(origin).map_err(|_| ApiError::StorageUnavailable)?;
+    }
+    Ok(ResourceDto {
+        id: resource.id,
+        org_id: resource.org_id,
+        node_id: resource.node_id,
+        kind: match resource.kind {
+            ResourceKind::Chat => "chat",
+            ResourceKind::Document => "document",
+        },
+        creator_id: resource.creator_id,
+        title: resource.title,
+        visibility: match resource.visibility {
+            Visibility::Private => "private",
+            Visibility::Organization => "organization",
+        },
+        origin_chat_id: resource.origin_chat_id,
+        auth_revision: resource.auth_revision.to_string(),
+        content_revision: resource.content_revision.to_string(),
+        archived: resource.archived,
+        created_at: resource.created_at,
+        updated_at: resource.updated_at,
+    })
+}
+
+fn message_dto(message: Message) -> Result<MessageDto, ApiError> {
+    canonical_uuid(&message.id).map_err(|_| ApiError::StorageUnavailable)?;
+    if message.sequence < 1 || message.author_id < 1 || message.created_at < 0 {
+        return Err(ApiError::StorageUnavailable);
+    }
+    Ok(MessageDto {
+        id: message.id,
+        sequence: message.sequence.to_string(),
+        author_id: message.author_id,
+        author_name: message.author_name,
+        body: message.body,
+        created_at: message.created_at,
+    })
+}
+
+fn revision_dto(revision: Revision) -> Result<RevisionDto, ApiError> {
+    if revision.revision < 1
+        || revision.author_id < 1
+        || revision.byte_length < 0
+        || revision.created_at < 0
+        || !valid_sha256(&revision.sha256)
+        || revision.parent_revision.is_some_and(|value| value < 1)
+        || revision.restored_from.is_some_and(|value| value < 1)
+    {
+        return Err(ApiError::StorageUnavailable);
+    }
+    Ok(RevisionDto {
+        revision: revision.revision.to_string(),
+        author_id: revision.author_id,
+        author_name: revision.author_name,
+        byte_length: revision.byte_length.to_string(),
+        sha256: revision.sha256,
+        created_at: revision.created_at,
+        parent_revision: revision.parent_revision.map(|value| value.to_string()),
+        restored_from: revision.restored_from.map(|value| value.to_string()),
+    })
+}
+
+fn canonical_uuid(value: &str) -> Result<(), ApiError> {
+    if uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.to_string() == value) {
+        Ok(())
+    } else {
+        Err(ApiError::Invalid)
+    }
+}
+
+fn canonical_nonnegative_revision(value: &str) -> Result<i64, ApiError> {
+    if value == "0" {
+        return Ok(0);
+    }
+    catalog::canonical_revision(value)
+}
+
+fn positive_id(value: i32) -> Result<(), ApiError> {
+    if value > 0 {
+        Ok(())
+    } else {
+        Err(ApiError::Invalid)
+    }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn document_read_error(error: ContentError) -> ApiError {
+    match error {
+        ContentError::Invalid | ContentError::Storage => ApiError::StorageUnavailable,
+        error => error.into(),
+    }
+}
+
+fn present_optional<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+impl From<VisibilityInput> for Visibility {
+    fn from(value: VisibilityInput) -> Self {
+        match value {
+            VisibilityInput::Private => Self::Private,
+            VisibilityInput::Organization => Self::Organization,
+        }
+    }
+}
+
+impl From<ContentError> for ApiError {
+    fn from(value: ContentError) -> Self {
+        match value {
+            ContentError::Auth(error) => match error {
+                crate::neev::error::AuthError::Unauthorized => Self::Unauthorized,
+                crate::neev::error::AuthError::Forbidden => Self::Forbidden,
+                crate::neev::error::AuthError::Conflict => Self::Conflict,
+                crate::neev::error::AuthError::Invalid => Self::Invalid,
+                crate::neev::error::AuthError::Limited => Self::Limited,
+                crate::neev::error::AuthError::Unavailable => Self::StorageUnavailable,
+            },
+            ContentError::NotFound => Self::NotFound,
+            ContentError::Invalid => Self::Invalid,
+            ContentError::Conflict => Self::Conflict,
+            ContentError::Quota => Self::ContentQuota,
+            ContentError::Archived => Self::Archived,
+            ContentError::Storage => Self::StorageUnavailable,
+        }
+    }
+}

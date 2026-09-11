@@ -27,7 +27,8 @@ export interface NativeCapabilities {
   catalog: {
     nodeKinds: readonly ["project", "folder"]
     repositoryDefaults: false
-    chats: false
+    chats: boolean
+    documents: boolean
   }
 }
 export type ServerCapabilities =
@@ -65,7 +66,10 @@ export type NativeErrorKind =
   | "unavailable"
   | "aborted"
 export class NativeClientError extends Error {
-  constructor(public readonly kind: NativeErrorKind) {
+  constructor(
+    public readonly kind: NativeErrorKind,
+    public readonly status?: number
+  ) {
     super("Native request failed")
     this.name = "NativeClientError"
   }
@@ -190,7 +194,8 @@ export function parseCapabilities(value: unknown): ServerCapabilities {
     if (
       ![p.google, p.email, p.github].every((v) => typeof v === "boolean") ||
       c.repositoryDefaults !== false ||
-      c.chats !== false ||
+      typeof c.chats !== "boolean" ||
+      (c.documents !== undefined && typeof c.documents !== "boolean") ||
       !Array.isArray(c.nodeKinds) ||
       c.nodeKinds.length !== 2 ||
       c.nodeKinds[0] !== "project" ||
@@ -210,7 +215,8 @@ export function parseCapabilities(value: unknown): ServerCapabilities {
       catalog: {
         nodeKinds: ["project", "folder"],
         repositoryDefaults: false,
-        chats: false,
+        chats: c.chats,
+        documents: c.documents === true,
       },
     }
   }
@@ -258,7 +264,10 @@ export async function nativeRequest(
         429: "limited",
         503: "unavailable",
       }
-      throw new NativeClientError(kinds[response.status] ?? "unavailable")
+      throw new NativeClientError(
+        kinds[response.status] ?? "unavailable",
+        response.status
+      )
     }
     if (response.status === 204) return null
     if (!response.headers.get("Content-Type")?.includes("application/json"))

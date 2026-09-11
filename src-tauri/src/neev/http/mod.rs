@@ -13,6 +13,9 @@ use crate::neev::{auth::github, error::AuthError, startup::ServerState};
 
 mod auth;
 mod catalog;
+mod content;
+#[cfg(test)]
+mod content_tests;
 pub(crate) mod cookies;
 mod org;
 mod static_files;
@@ -28,8 +31,11 @@ pub(super) enum ApiError {
     Forbidden,
     Conflict,
     Limited,
+    ContentQuota,
+    Archived,
     RequestTimeout,
     Unavailable,
+    StorageUnavailable,
     NotFound,
 }
 
@@ -54,8 +60,11 @@ impl IntoResponse for ApiError {
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Self::Conflict => (StatusCode::CONFLICT, "conflict"),
             Self::Limited => (StatusCode::TOO_MANY_REQUESTS, "limited"),
+            Self::ContentQuota => (StatusCode::TOO_MANY_REQUESTS, "content_quota"),
+            Self::Archived => (StatusCode::CONFLICT, "archived"),
             Self::RequestTimeout => (StatusCode::REQUEST_TIMEOUT, "request_timeout"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+            Self::StorageUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
         };
         let mut response = (status, Json(serde_json::json!({"code": code}))).into_response();
@@ -87,6 +96,7 @@ struct CatalogCapabilities {
     node_kinds: [&'static str; 2],
     repository_defaults: bool,
     chats: bool,
+    documents: bool,
 }
 
 pub(crate) fn router(state: Arc<ServerState>) -> Router {
@@ -99,7 +109,38 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/neev/auth/methods", get(auth::methods))
         .route("/api/neev/nodes", get(catalog::list).post(catalog::create))
         .route("/api/neev/nodes/{node_id}", patch(catalog::update))
-        .route("/api/neev/nodes/{node_id}/chats", get(catalog::chats))
+        .route(
+            "/api/neev/nodes/{node_id}/chats",
+            get(content::list_chats).post(content::create_chat),
+        )
+        .route(
+            "/api/neev/nodes/{node_id}/documents",
+            get(content::list_documents).post(content::create_document),
+        )
+        .route(
+            "/api/neev/resources/{id}",
+            get(content::get_resource).patch(content::update_resource),
+        )
+        .route(
+            "/api/neev/chats/{id}/messages",
+            get(content::list_messages).post(content::append_message),
+        )
+        .route(
+            "/api/neev/documents/{id}/revisions",
+            get(content::list_revisions).post(content::save_revision),
+        )
+        .route(
+            "/api/neev/documents/{id}/content",
+            get(content::get_document_content),
+        )
+        .route(
+            "/api/neev/documents/{id}/download",
+            get(content::download_document),
+        )
+        .route(
+            "/api/neev/documents/{id}/restore",
+            post(content::restore_revision),
+        )
         .route("/api/neev/organizations", get(org::list).post(org::create))
         .route("/api/neev/organizations/select", post(org::select))
         .route(
@@ -169,7 +210,8 @@ async fn capabilities(State(state): State<Arc<ServerState>>) -> Response {
         catalog: CatalogCapabilities {
             node_kinds: ["project", "folder"],
             repository_defaults: false,
-            chats: false,
+            chats: true,
+            documents: true,
         },
     })
 }

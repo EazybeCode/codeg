@@ -78,12 +78,6 @@ struct NodesDto {
     next_after: Option<i32>,
 }
 
-#[derive(Serialize)]
-struct ChatsDto {
-    supported: bool,
-    chats: Vec<serde_json::Value>,
-}
-
 pub(super) async fn list(
     State(state): State<Arc<ServerState>>,
     Query(page): Query<PageInput>,
@@ -106,7 +100,7 @@ pub(super) async fn create(
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
     let _permit = permit(&state)?;
-    let (input, actor) = organization_mutation::<CreateInput>(&state, request).await?;
+    let (input, actor) = organization_mutation::<CreateInput>(&state, request, 4096).await?;
     reject_repository_fields(
         &input.repository_id,
         &input.repository_url,
@@ -133,7 +127,7 @@ pub(super) async fn update(
     request: Request<Body>,
 ) -> Result<Response, ApiError> {
     let _permit = permit(&state)?;
-    let (input, actor) = organization_mutation::<UpdateInput>(&state, request).await?;
+    let (input, actor) = organization_mutation::<UpdateInput>(&state, request, 4096).await?;
     reject_repository_fields(
         &input.repository_id,
         &input.repository_url,
@@ -155,23 +149,7 @@ pub(super) async fn update(
     Ok(private_json(node_dto(updated)?))
 }
 
-pub(super) async fn chats(
-    State(state): State<Arc<ServerState>>,
-    Path(node_id): Path<i32>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let _permit = permit(&state)?;
-    let actor = organization_get(&state, &headers).await?;
-    if nodes::get(&state, &actor, node_id).await?.is_none() {
-        return Err(ApiError::NotFound);
-    }
-    Ok(private_json(ChatsDto {
-        supported: false,
-        chats: Vec::new(),
-    }))
-}
-
-async fn organization_get(
+pub(super) async fn organization_get(
     state: &ServerState,
     headers: &HeaderMap,
 ) -> Result<OrgContext, ApiError> {
@@ -180,12 +158,13 @@ async fn organization_get(
     Ok(session::organization(&state.database, token, state.clock.now_unix()).await?)
 }
 
-async fn organization_mutation<T: for<'de> Deserialize<'de>>(
+pub(super) async fn organization_mutation<T: for<'de> Deserialize<'de>>(
     state: &ServerState,
     request: Request<Body>,
+    limit: usize,
 ) -> Result<(T, OrgContext), ApiError> {
     let (headers, input) =
-        auth::json_request_limited::<T>(request, &state.config.origin_header, 4096).await?;
+        auth::json_request_limited::<T>(request, &state.config.origin_header, limit).await?;
     let names = cookies::CookieNames::for_preview(state.config.preview);
     let token = cookies::required(&headers, names.session)?;
     let cookie_csrf = cookies::required(&headers, names.csrf)?;
@@ -219,7 +198,7 @@ fn node_dto(node: Node) -> Result<NodeDto, ApiError> {
     })
 }
 
-fn canonical_revision(value: &str) -> Result<i64, ApiError> {
+pub(super) fn canonical_revision(value: &str) -> Result<i64, ApiError> {
     if value.is_empty()
         || value.starts_with('0')
         || !value.bytes().all(|byte| byte.is_ascii_digit())
@@ -253,7 +232,7 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-fn permit(state: &ServerState) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
+pub(super) fn permit(state: &ServerState) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
     state
         .auth_limit
         .try_acquire()

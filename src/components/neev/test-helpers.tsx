@@ -12,7 +12,8 @@ export const nativeCapabilities = {
   catalog: {
     nodeKinds: ["project", "folder"],
     repositoryDefaults: false,
-    chats: false,
+    chats: true,
+    documents: true,
   },
 } as const
 export const orgSession: Extract<NativeSession, { scope: "organization" }> = {

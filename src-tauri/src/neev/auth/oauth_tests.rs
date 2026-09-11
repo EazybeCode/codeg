@@ -886,7 +886,8 @@ async fn unconfigured_google_is_explicitly_unavailable_and_github_stays_unmounte
             "catalog":{
                 "nodeKinds":["project","folder"],
                 "repositoryDefaults":false,
-                "chats":false
+                "chats":true,
+                "documents":true
             }
         }));
 }

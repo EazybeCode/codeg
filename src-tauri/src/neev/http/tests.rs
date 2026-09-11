@@ -285,7 +285,8 @@ async fn capabilities_are_native_disabled_and_old_routes_do_not_exist() {
         "catalog": {
             "nodeKinds":["project","folder"],
             "repositoryDefaults":false,
-            "chats":false
+            "chats":true,
+            "documents":true
         }
     }));
     assert_eq!(capabilities.header(header::CACHE_CONTROL), "no-store");
@@ -434,7 +435,7 @@ async fn native_catalog_http_uses_strict_revisioned_dtos_and_honest_boundaries()
         .get(&format!("/api/neev/nodes/{folder_id}/chats"))
         .add_header(header::COOKIE, &cookies)
         .await
-        .assert_json(&json!({"supported":false,"chats":[]}));
+        .assert_json(&json!({"items":[],"nextAfter":null}));
     server
         .post(&format!("/api/neev/nodes/{folder_id}/chats"))
         .add_header(header::ORIGIN, "http://127.0.0.1:3100")
@@ -442,7 +443,7 @@ async fn native_catalog_http_uses_strict_revisioned_dtos_and_honest_boundaries()
         .add_header("x-neev-csrf", &scoped.csrf)
         .json(&json!({}))
         .await
-        .assert_status(StatusCode::METHOD_NOT_ALLOWED);
+        .assert_status_bad_request();
     server
         .post("/api/neev/documents")
         .await

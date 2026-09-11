@@ -61,11 +61,29 @@ describe("native wire contracts", () => {
       catalog: {
         nodeKinds: ["project", "folder"],
         repositoryDefaults: false,
-        chats: false,
+        chats: true,
+        documents: true,
       },
     })
     expect(await loadServerCapabilities()).toMatchObject({
       identityMode: "native",
+      catalog: { chats: true, documents: true },
+    })
+  })
+  it("defaults a missing pre-stage-2 documents flag to false", async () => {
+    reply({
+      version: 1,
+      identityMode: "native",
+      runtimeEnabled: false,
+      providers: { google: true, email: true, github: false },
+      catalog: {
+        nodeKinds: ["project", "folder"],
+        repositoryDefaults: false,
+        chats: false,
+      },
+    })
+    expect(await loadServerCapabilities()).toMatchObject({
+      catalog: { chats: false, documents: false },
     })
   })
   it("fails closed for an unknown identity mode even with operator mode", async () => {
