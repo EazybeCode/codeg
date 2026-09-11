@@ -3,6 +3,9 @@ mod blob;
 #[cfg(all(test, unix))]
 mod blob_tests;
 #[cfg(test)]
+mod document_tests;
+pub(crate) mod documents;
+#[cfg(test)]
 mod message_tests;
 pub(crate) mod messages;
 #[cfg(test)]
