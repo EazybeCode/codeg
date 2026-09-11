@@ -427,13 +427,13 @@ pub(super) fn company_name(input: &str) -> Result<String, AuthError> {
     Ok(value.to_owned())
 }
 
-pub(super) fn normalize_request_id(input: &str) -> Result<String, AuthError> {
+pub(crate) fn normalize_request_id(input: &str) -> Result<String, AuthError> {
     uuid::Uuid::parse_str(input)
         .map(|id| id.to_string())
         .map_err(|_| AuthError::Invalid)
 }
 
-pub(super) fn digest_parts(parts: &[&str]) -> String {
+pub(crate) fn digest_parts(parts: &[&str]) -> String {
     let mut digest = Sha256::new();
     digest.update(b"neev-request-body-v1\0");
     for part in parts {
