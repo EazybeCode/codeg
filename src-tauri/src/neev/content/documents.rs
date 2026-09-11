@@ -92,6 +92,7 @@ async fn save_revision(
     if let Some(number) = resources::receipt(&tx, actor, ACTION, &request, &hash).await? {
         let number = number.parse::<i64>().map_err(|_| ContentError::Storage)?;
         let (result, _) = load(&tx, actor.org_id, id, number).await?;
+        session::recheck(&tx, actor, state.clock.now_unix()).await?;
         tx.commit().await.map_err(database_error)?;
         return Ok(result);
     }
@@ -132,6 +133,9 @@ async fn save_revision(
         return Err(ContentError::Quota);
     }
     db::execute(&tx, "INSERT INTO neev_content_leases(org_id,resource_id,id,actor_id,request_id,body_hash,blob_key,reserved_bytes,expected_content_revision,expected_auth_revision,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", vec![actor.org_id.into(),id.into(),lease_id.clone().into(),actor.identity.user_id.into(),request.clone().into(),hash.clone().into(),key.clone().into(),bytes.into(),input.expected_content_revision.into(),input.expected_auth_revision.into(),expires.into()]).await?;
+    // Held authority locks prevent mutation, but not the passage of session time.
+    // Revalidate after SQL waits so an expired reservation never commits or does I/O.
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
 
     #[cfg(test)]
@@ -181,8 +185,9 @@ async fn save_revision(
         vec![actor.org_id.into(), id.into(), lease_id.into(), state.clock.now_unix().into()],
     )
     .await?;
-    // The DELETE itself may have waited; the original expiry is immutable for
-    // this lease ID. Roll back even if its SQL predicate used a pre-wait clock.
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    // Check lease time after DELETE and the final authority await. The original
+    // expiry is immutable for this lease ID; a pre-wait SQL clock is insufficient.
     if removed.rows_affected() != 1 || state.clock.now_unix() >= expires {
         return Err(ContentError::Conflict);
     }
@@ -216,6 +221,7 @@ pub(crate) async fn history(
     } else {
         None
     };
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(Page { items, next_after })
 }
@@ -236,6 +242,7 @@ pub(crate) async fn read(
         number.unwrap_or(current.content_revision),
     )
     .await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     #[cfg(test)]
     super::document_tests::boundary("before_read").await;
@@ -252,6 +259,7 @@ pub(crate) async fn read(
     if rechecked.auth_revision != current.auth_revision {
         return Err(ContentError::Conflict);
     }
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok((revision, bytes))
 }

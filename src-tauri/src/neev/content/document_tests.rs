@@ -878,3 +878,268 @@ async fn postgres_document_publication_failures() {
     publication_failures(db.clone()).await;
     h::cleanup_postgres(db, admin, schema).await;
 }
+
+async fn short_document_session(h: &Harness) {
+    db::execute(
+        &h.state.database,
+        "UPDATE neev_sessions SET expires_at=1700000001 WHERE id=$1",
+        vec![h.creator.identity.session_id.clone().into()],
+    )
+    .await
+    .unwrap();
+}
+
+fn expire_document_session(clock: &h::TestClock) {
+    clock
+        .0
+        .store(1_700_000_001, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn unauthorized() -> ContentError {
+    ContentError::Auth(crate::neev::error::AuthError::Unauthorized)
+}
+
+// Catches session expiry hidden by a still-live document lease. These are real
+// PostgreSQL table-lock waits after the last existing session check.
+async fn session_expiry_during_publication(table: &str, waiting_query: &str) {
+    let (database, admin, schema) = h::postgres_database().await;
+    let mut h = Harness::new(database.clone()).await;
+    let clock = clock(&mut h);
+    let doc = document(&h).await;
+    short_document_session(&h).await;
+    let (p, entered, release) = pause("written");
+    let state = h.state.clone();
+    let actor = h.creator.clone();
+    let id = doc.id.clone();
+    let pending = tokio::spawn(PAUSE.scope(p, async move {
+        documents::save(&state, &actor, &id, input(0, 1, "expired")).await
+    }));
+    reached(&entered).await;
+    let guard = db::begin(&database).await.unwrap();
+    db::execute(&guard, &format!("LOCK TABLE {table} IN SHARE MODE"), vec![])
+        .await
+        .unwrap();
+    release.notify_one();
+    h::wait_for_postgres_lock(&admin, waiting_query).await;
+    expire_document_session(&clock);
+    guard.commit().await.unwrap();
+    let result = pending.await.unwrap();
+    let metadata = publication_metadata(&h, &doc.id).await;
+    let charge = h.usage("charged_bytes").await;
+    drop(h);
+    h::cleanup_postgres(database, admin, schema).await;
+    assert_eq!(result, Err(unauthorized()));
+    assert_eq!(metadata, (0, 0, 0, 1, Some(1_700_000_060)));
+    assert_eq!(charge, 7);
+}
+
+async fn publication_metadata(h: &Harness, id: &str) -> (i64, i64, i64, i64, Option<i64>) {
+    let row=db::one(&h.state.database,"SELECT content_revision AS head,(SELECT COUNT(*) FROM neev_document_revisions WHERE document_id=$1) AS revisions,(SELECT COUNT(*) FROM neev_requests WHERE action='content.document.save') AS receipts,(SELECT COUNT(*) FROM neev_content_leases WHERE resource_id=$1) AS leases,(SELECT expires_at FROM neev_content_leases WHERE resource_id=$1) AS lease_expiry FROM neev_resources WHERE id=$1",vec![id.into()]).await.unwrap().unwrap();
+    (
+        row.try_get("", "head").unwrap(),
+        row.try_get("", "revisions").unwrap(),
+        row.try_get("", "receipts").unwrap(),
+        row.try_get("", "leases").unwrap(),
+        row.try_get("", "lease_expiry").unwrap(),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_document_session_expiry_during_receipt_insert() {
+    session_expiry_during_publication("neev_requests", "INSERT INTO neev_requests%").await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_document_session_expiry_during_lease_delete() {
+    session_expiry_during_publication("neev_content_leases", "DELETE FROM neev_content_leases%")
+        .await;
+}
+
+// A failed final reservation check must undo quota and lease before any blob I/O.
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_document_session_expiry_during_reservation() {
+    let (database, admin, schema) = h::postgres_database().await;
+    let mut h = Harness::new(database.clone()).await;
+    let clock = clock(&mut h);
+    let doc = document(&h).await;
+    short_document_session(&h).await;
+    let guard = db::begin(&database).await.unwrap();
+    db::execute(
+        &guard,
+        "LOCK TABLE neev_content_leases IN SHARE MODE",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let state = h.state.clone();
+    let actor = h.creator.clone();
+    let id = doc.id.clone();
+    let pending =
+        tokio::spawn(
+            async move { documents::save(&state, &actor, &id, input(0, 1, "expired")).await },
+        );
+    h::wait_for_postgres_lock(&admin, "INSERT INTO neev_content_leases%").await;
+    expire_document_session(&clock);
+    guard.commit().await.unwrap();
+    let result = pending.await.unwrap();
+    let metadata = publication_metadata(&h, &doc.id).await;
+    let charge = h.usage("charged_bytes").await;
+    let filesystem_entries = std::fs::read_dir(&h.state.config.document_root)
+        .unwrap()
+        .count();
+    drop(h);
+    h::cleanup_postgres(database, admin, schema).await;
+    assert_eq!(result, Err(unauthorized()));
+    assert_eq!(metadata, (0, 0, 0, 0, None));
+    assert_eq!(charge, 0);
+    assert_eq!(filesystem_entries, 0);
+}
+
+async fn session_expiry_after_resource_wait(operation: &'static str) {
+    let (database, admin, schema) = h::postgres_database().await;
+    let mut h = Harness::new(database.clone()).await;
+    let clock = clock(&mut h);
+    let doc = document(&h).await;
+    let saved = input(0, 1, "saved");
+    documents::save(&h.state, &h.creator, &doc.id, saved.clone())
+        .await
+        .unwrap();
+    short_document_session(&h).await;
+    let guard = db::begin(&database).await.unwrap();
+    db::one(
+        &guard,
+        "SELECT id FROM neev_resources WHERE id=$1 FOR UPDATE",
+        vec![doc.id.clone().into()],
+    )
+    .await
+    .unwrap();
+    let state = h.state.clone();
+    let actor = h.creator.clone();
+    let id = doc.id.clone();
+    let pending = tokio::spawn(async move {
+        match operation {
+            "receipt" => documents::save(&state, &actor, &id, saved)
+                .await
+                .map(|_| ()),
+            "history" => documents::history(&state, &actor, &id, None)
+                .await
+                .map(|_| ()),
+            _ => unreachable!(),
+        }
+    });
+    h::wait_for_postgres_lock(&admin, "%neev_resources%FOR UPDATE%").await;
+    expire_document_session(&clock);
+    guard.commit().await.unwrap();
+    let result = pending.await.unwrap();
+    let metadata = publication_metadata(&h, &doc.id).await;
+    let charge = h.usage("charged_bytes").await;
+    drop(h);
+    h::cleanup_postgres(database, admin, schema).await;
+    assert_eq!(result, Err(unauthorized()));
+    assert_eq!(metadata, (1, 1, 1, 0, None));
+    assert_eq!(charge, 5);
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_document_session_expiry_during_committed_receipt() {
+    session_expiry_after_resource_wait("receipt").await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_document_session_expiry_during_history() {
+    session_expiry_after_resource_wait("history").await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_document_session_expiry_during_read_metadata() {
+    let (database, admin, schema) = h::postgres_database().await;
+    let mut h = Harness::new(database.clone()).await;
+    let clock = clock(&mut h);
+    let doc = document(&h).await;
+    documents::save(&h.state, &h.creator, &doc.id, input(0, 1, "saved"))
+        .await
+        .unwrap();
+    short_document_session(&h).await;
+    let guard = db::begin(&database).await.unwrap();
+    db::execute(
+        &guard,
+        "LOCK TABLE neev_document_revisions IN ACCESS EXCLUSIVE MODE",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let (p, entered, release) = pause("before_read");
+    // A permit lets the old implementation complete while recording that it
+    // incorrectly reached filesystem work after session expiry.
+    release.notify_one();
+    let state = h.state.clone();
+    let actor = h.creator.clone();
+    let id = doc.id.clone();
+    let pending = tokio::spawn(PAUSE.scope(p, async move {
+        documents::read(&state, &actor, &id, None).await
+    }));
+    h::wait_for_postgres_lock(&admin, "SELECT r.revision%neev_document_revisions%").await;
+    expire_document_session(&clock);
+    guard.commit().await.unwrap();
+    let result = pending.await.unwrap();
+    let reached_filesystem =
+        tokio::time::timeout(std::time::Duration::from_millis(10), entered.notified())
+            .await
+            .is_ok();
+    let metadata = publication_metadata(&h, &doc.id).await;
+    let charge = h.usage("charged_bytes").await;
+    drop(h);
+    h::cleanup_postgres(database, admin, schema).await;
+    assert_eq!(result, Err(unauthorized()));
+    assert!(
+        !reached_filesystem,
+        "expired metadata transaction must stop before blob read"
+    );
+    assert_eq!(metadata, (1, 1, 1, 0, None));
+    assert_eq!(charge, 5);
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_document_session_expiry_during_read_return() {
+    let (database, admin, schema) = h::postgres_database().await;
+    let mut h = Harness::new(database.clone()).await;
+    let clock = clock(&mut h);
+    let doc = document(&h).await;
+    documents::save(&h.state, &h.creator, &doc.id, input(0, 1, "saved"))
+        .await
+        .unwrap();
+    short_document_session(&h).await;
+    let (p, entered, release) = pause("read");
+    let state = h.state.clone();
+    let actor = h.creator.clone();
+    let id = doc.id.clone();
+    let pending = tokio::spawn(PAUSE.scope(p, async move {
+        documents::read(&state, &actor, &id, None).await
+    }));
+    reached(&entered).await;
+    let guard = db::begin(&database).await.unwrap();
+    db::one(
+        &guard,
+        "SELECT id FROM neev_resources WHERE id=$1 FOR UPDATE",
+        vec![doc.id.clone().into()],
+    )
+    .await
+    .unwrap();
+    release.notify_one();
+    h::wait_for_postgres_lock(&admin, "%neev_resources%FOR UPDATE%").await;
+    expire_document_session(&clock);
+    guard.commit().await.unwrap();
+    let result = pending.await.unwrap();
+    let metadata = publication_metadata(&h, &doc.id).await;
+    drop(h);
+    h::cleanup_postgres(database, admin, schema).await;
+    assert_eq!(result, Err(unauthorized()));
+    assert_eq!(metadata, (1, 1, 1, 0, None));
+}
