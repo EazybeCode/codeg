@@ -1,5 +1,7 @@
 //! Native Neev identity and tenancy. No legacy router or database fallback.
 pub(crate) mod auth;
+#[cfg(test)]
+mod browser_fixture;
 pub(crate) mod catalog;
 pub(crate) mod clock;
 pub(crate) mod config;

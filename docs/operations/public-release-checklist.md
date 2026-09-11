@@ -1,57 +1,64 @@
-# Public-release gates — 2026-09-09
+# Public release checklist
 
-Current decision: **not ready for public signup**. The private hosted pilot and infrastructure are not equivalent to accepted multi-tenant application behavior. Keep catalog agent execution disabled until its integration and acceptance gates pass.
+September 11, 2026: not ready for public rollout. Stage 1 native identity is a
+separate milestone. GitHub is optional; admission uses native identity and explicit
+native membership. Keep `runtimeEnabled:false`.
 
-Owner decision September10: signup should be open to anyone with GitHub, without
-an organization allowlist. This supersedes earlier invite-only rollout wording,
-not verified membership, private-chat permissions, isolation or abuse-control gates.
+## Stage 1 local review gate
 
-September10 installation preflight is resolved: after the owner signed in,
-authenticated Advanced settings explicitly showed that EazyWorkOS is public and
-cannot be made private because it is already installed on other accounts. General
-settings showed homepage `https://neev.so` and exact callback
-`https://app.neev.so/auth/github/callback`, with wildcard matching disabled. No
-visibility, permission, installation, callback or secret was changed. The existing
-onboarding UI links to installation when no organization is available. This verifies
-installation eligibility, not a real external-user onboarding or provider run.
+- [ ] Reviewed identity, session, linking and native organization code.
+- [x] Fresh SQLite/PostgreSQL constraints, races and final-write authority tests.
+- [ ] Actual native HTTP Google fixture begin/callback/session and email scanner/
+      explicit-confirm paths; actual browser hierarchy, invitation, denial,
+      conflict, stale-tab/logout, Settings return, keyboard and 375px checks.
+- [x] Current full native/frontend suites, TypeScript, touched-file lint/format,
+      static export and `neev-server` build; exact warnings/failures retained.
+- [ ] Exact diff and secret findings reviewed; environment contract recorded in
+      [native acceptance](neev-native-identity-acceptance.md).
+- [ ] Reviewed passing source publication to Workos through current interactive
+      `ship` gate. Never source codeg direct push; no automatic deployment.
 
-## Delivery order
+Unchecked boxes remain release gates, not a claim of no partial evidence. Use the
+acceptance record for exact results, never historical counts. Synthetic providers
+do not certify real Google or delivery.
 
-| Gate | Current evidence / remaining work |
-| --- | --- |
-| Authentication correctness | Library orchestration accepted at `76b28dfe`: final cross-account session-rotation race fixed, both PostgreSQL ordering regressions reproduced before the fix and passed afterward, and scoped review found no remaining findings. Fresh controller verification passed 152 targeted tests. This is library evidence, not HTTP/UI/runtime acceptance; see `team-auth-acceptance.md`. |
-| Team HTTP and onboarding | All four tasks and final review accepted through `b7a2f180`; all review findings addressed. Earlier controller evidence: 189 targeted Rust tests, 184 UI tests, lint/export/TypeScript, standalone build and eight startup controls. Fresh final-fix checks: 37 server tests, six affected UI tests, scoped lint and fake-provider desktop/mobile browser acceptance. Standalone/export artifacts predate the two-icon route fix. See [acceptance evidence](team-http-acceptance.md). Do not deploy this authentication shell as the completed product. |
-| Workspace access and multiplayer | Current-org settings are accepted through `63a51bbf`. Private storage migration and versioned creation fingerprints have passed task gates through `82f252c8`. Local reviewed source now has catalog evidence for nested projects/folders/working directories, verified repository mappings, private-by-default chat metadata, creator-controlled exact-organization visibility, scoped pagination/polling, account/logout cache clearing, and synthetic two-person browser coverage; this catalog is not yet deployed to the private pilot. Search, files/downloads, scoped events, chat/runtime execution, real-provider acceptance, and public multi-tenant acceptance remain pending; private/org-wide rules must hold across each of those surfaces. In-app org switching remains intentionally deferred. |
-| Feedback for founders | Private to submitter and authorized founders only; org admins have no implicit access. Design proposed in `2026-09-09-founder-feedback-design.md`; owner confirmed visibility, written design review pending. Implement persistence, safe user/founder views, replies/status/unread after team authority is accepted. |
-| Prompt-completion notifications | Owner approved sound pings plus optional desktop alerts on September 9: Settings → Notifications → “Ping when my prompt finishes,” off by default, volume and test-ping controls, once per completed reply to the person's own prompt, and no private response text in desktop alerts. Implementation remains pending. Reuse suitable legacy sound components through reviewed team completion events, derive the prompt author server-side, reauthorize visibility and deduplicate alerts across tabs. Do not mount the legacy global ACP provider merely to obtain notifications. First version requires the app to remain open (background tab supported), not browser/laptop-closed delivery. |
-| Cloud agent execution | gVisor runtime is installed and synthetic isolation tests passed; application jobs do not yet use it. Implement/test per-job and per-org filesystem/credential boundaries, durable queue/recovery, cancellation, quotas, bounded concurrency, safe network access and real provider connection. A provider shown in a dropdown is not a working provider integration. |
-| Git and knowledge workflow | Prove per-conversation working branch/worktree mapping, concurrent work without cross-user private-file leaks, deliberate publish/PR actions, and useful org wiki compilation. Private chats and private founder feedback must not leak into shared wiki/Git/agent context. Do not automatically promote unreviewed generated knowledge. |
-| Website/application split | Namecheap DNS is verified for neev.so/www and app.neev.so. Keep the website separate from the authenticated app; website sign-in links go to app.neev.so/login. Website content/design and both HTTPS routes remain unaccepted; no website host may expose the legacy operator router. |
-| Public operational boundary | HTTPS origin and matching GitHub callbacks; safe secrets handling; error/uptime/backup monitoring with an owner; verified encrypted restore; documented recovery and release rollback; rate limits and storage/job abuse limits. Review public privacy/data deletion/export expectations and provider credential consent before inviting external organizations. |
-| Acceptance and deployment | Test two people in one org and people in two separate orgs with actual browser sessions. Test real GitHub/provider consent, run/edit/cancel/reconnect/restart/restore flows and denied cross-org access. Reviewed42536219 was directly published with owner authorization and privately deployed September10; its fresh-backup migration/restart rehearsal and11 live HTTP checks passed. Public HTTPS and full product acceptance remain open. See [deployment evidence](neev-private-deployment-2026-09-10.md), including retained legacy credential mounts and remaining live hardening. |
+## Private native candidate gate
 
-## Infrastructure already established
+- [ ] Reviewed native image digest/CMD and matching export. Existing operator/team
+      Docker targets are insufficient; no test fixture in the production image.
+- [ ] Fresh native PG database, separate files and fresh encryption key. Old
+      schema/cookies rejected; historical data and archives preserved.
+- [ ] Private HTTPS, exact trusted proxy peer list and spoofed-forwarded-header
+      denial; host-only cookies, exact callbacks and secret-free access logs.
+- [ ] Owner-approved Google client/policy/consent. Basic `openid email profile`
+      Testing sign-in is exempt from the ordinary test-user allowlist restriction;
+      zero listed users alone is not a blocker. Actual HTTPS/account/workspace
+      acceptance and public branding/policy readiness remain separate gates.
+- [ ] Apex Resend domain all records verified, approved send-only key and
+      `verification@neev.so` sender. Actual consenting recipient receives an
+      unmodified link. Synthetic `support@neev.so` has no inbox; old verified
+      `mail.neev.so` does not establish apex verification.
+- [ ] Two actual consenting users exercise same-org access and other-org denial;
+      joining remains explicit and linking never merges existing accounts.
+- [ ] Fresh DB/files backups, independent recovery custody and isolated restore
+      before retiring old jobs. Never incidentally delete schedules/archives.
+- [ ] Exact old Coolify auto-deploy/routing rechecked; native app/proxy/rollback
+      reviewed. No old operator mounts, credential reuse or Docker socket.
 
-- Hetzner host, Coolify-managed private application and PostgreSQL exist; current application is healthy with agent catalog execution disabled.
-- Named gVisor runtime is installed; the default Docker runtime and live database are unchanged. This proves only host runtime readiness, not application job isolation.
-- Native local archive schedules exist. Missing midnight database execution was investigated: a 02:40 UTC scheduled probe passed; final daily DB time changed to 00:17 UTC. Next overnight execution requires observation.
-- Hetzner Storage Box authentication and encrypted Restic repository are working. Snapshot `941b108f` was downloaded and verified with the separate recovery-password copy; full pack read and isolated PostgreSQL/tar restore passed. The normal September 9 daily-window run completed successfully at 04:38 UTC with snapshot `92a203ae`, beyond the earlier transient probe. The recurring timer and 7/4/3 retention gate remain enabled. See `backups.md` for retained-snapshot evidence and the still-required operator monitoring/independent key-vault handoff.
+## Full public product gate — later work
 
-## Decisions and external inputs
+- [ ] Repository-optional chats and document revisions with private/org authority
+      across reads, writes, downloads and events.
+- [ ] Personal agents use each person's subscription and isolated credentials;
+      no operator/org/shared fallback or another member's credential. Real
+      provider/client acceptance and custody remain required.
+- [ ] Durable jobs, isolation, quotas, cancellation, restart/recovery, reconnect
+      and abuse controls integrated and accepted before enabling runtime.
+- [ ] Separate `neev.so` website/`www` redirect, privacy/terms and truthful content;
+      app remains `app.neev.so` with host-only cookies.
+- [ ] Google public branding/policy readiness, monitoring/recovery ownership and
+      complete real-user public acceptance.
 
-- No in-app org switching for v1: sign out and sign in again to choose another organization.
-- Every member uses their own Claude/Codex/other supported agent subscription. Each prompt uses its sender's personal connection; shared chats never grant use of another person's credentials, and disconnected users cannot fall back to an org/operator account. Ownership is owner-approved; provider support, isolated runner implementation and real-account acceptance remain pending.
-- The September9 personal-agent connection design is approved. Metadata storage and historical rollback fixes are accepted through232aed8c with independent reviews and real SQLite/PostgreSQL tests; see [storage acceptance](personal-agent-storage-acceptance.md). Lifecycle, official-client supervisor and onboarding/settings integration follow; none is currently enabled for real sign-in. Design approval alone does not accept provider commercial terms or certify credential encryption.
-- In a separate September9 reply to the specific Claude hosting-terms question,
-  the owner confirmed “accepted tnc”. Record that owner confirmation for Claude;
-  no agent accepted terms or performed a provider login. Credential encryption,
-  pinned unmodified clients and real-user acceptance gates remain open.
-- No mandatory Google sign-in, billing, public feedback board, Slack/email feedback integration or automatic upstream production updates for the first release.
-- Owner selected the founder account and its immutable GitHub ID was verified. The protected allowlist still needs to be applied/tested with the feedback implementation; organization-admin status grants no founder access.
-- Owner selected Neev: neev.so for the website, app.neev.so for the application. Namecheap website apex/www and app A records are verified. The existing GitHub App homepage and added application callback were saved with exact owner approval on September10; existing local callbacks, permissions and secrets were preserved. Live app-origin/callback configuration matches, but public HTTPS and real OAuth acceptance remain pending. The owner also needs to retain recovery secrets in an approved independent vault, provide a notification destination and participate in real second-user/provider acceptance. Direct publication is authorized and completed for the private checkpoint; it is not a remaining interactive gate. The staged rollout is recorded in [neev-release-plan.md](neev-release-plan.md).
-- Follow-up authenticated GitHub App review confirmed public installation eligibility and the exact saved website/application callback. No additional GitHub setting change is required for this eligibility gate; it does not replace real external-account consent testing.
-- The earlier Task4 disk pause is resolved by owner cleanup. Post-fix library and standalone binary compilation both completed; latest sample17GiB free. Only previously authorized regenerable outputs were removed during the earlier pause, not personal/project source or GitHub data. Keep builds serial and monitor remaining space; no further cleanup is currently needed.
-
-Open GitHub signup can follow successful tenant/runtime/operational acceptance and
-public abuse controls; do not add an organization allowlist. No launch date or
-completion percentage is asserted by this checklist.
+Founder feedback and inboxes are deferred. Historical team metadata, gVisor host
+readiness and old backup proofs do not complete native runtime or new backup
+acceptance. No launch date is asserted.

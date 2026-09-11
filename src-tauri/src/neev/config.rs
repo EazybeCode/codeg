@@ -222,12 +222,12 @@ fn valid_origin(origin: &Url, preview: bool) -> bool {
     }
     if preview {
         origin.scheme() == "http"
-            && origin.host_str().is_some_and(|host| {
-                host.eq_ignore_ascii_case("localhost")
-                    || host
-                        .parse::<IpAddr>()
-                        .is_ok_and(|address| address.is_loopback())
-            })
+            && match origin.host() {
+                Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+                Some(url::Host::Ipv4(address)) => address.is_loopback(),
+                Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                None => false,
+            }
     } else {
         origin.scheme() == "https" && origin.host_str().is_some()
     }
@@ -341,6 +341,27 @@ mod tests {
                 Config::from_values(&preview).err(),
                 Some(ConfigError::Bind),
                 "preview accepted non-loopback bind {bind}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_preview_accepts_only_literal_loopback() {
+        let mut candidate = values();
+        candidate.insert("NEEV_ALLOW_LOOPBACK_PREVIEW".into(), "true".into());
+        candidate.insert("NEEV_BIND".into(), "[::1]:3100".into());
+        candidate.insert("NEEV_APP_ORIGIN".into(), "http://[::1]:3100".into());
+        assert!(Config::from_values(&candidate).is_ok());
+        for origin in [
+            "http://[::]:3100",
+            "http://[2001:db8::1]:3100",
+            "http://example.test:3100",
+            "http://[::1]:3100/path",
+        ] {
+            candidate.insert("NEEV_APP_ORIGIN".into(), origin.into());
+            assert_eq!(
+                Config::from_values(&candidate).err(),
+                Some(ConfigError::Origin)
             );
         }
     }

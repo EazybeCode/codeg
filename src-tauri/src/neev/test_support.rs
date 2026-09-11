@@ -628,6 +628,16 @@ pub(super) fn valid_google_token(
     client_id: &str,
     now: i64,
 ) -> (String, serde_json::Value) {
+    browser_google_token(nonce, client_id, now, "google-123", "support@neev.so")
+}
+
+pub(super) fn browser_google_token(
+    nonce: &str,
+    client_id: &str,
+    now: i64,
+    subject: &str,
+    email: &str,
+) -> (String, serde_json::Value) {
     let key = CoreRsaPrivateSigningKey::from_pem(
         GOOGLE_TEST_RSA_KEY,
         Some(JsonWebKeyId::new("test-key".to_owned())),
@@ -638,8 +648,8 @@ pub(super) fn valid_google_token(
         vec![Audience::new(client_id.to_owned())],
         Utc.timestamp_opt(now + 300, 0).single().unwrap(),
         Utc.timestamp_opt(now - 1, 0).single().unwrap(),
-        StandardClaims::new(SubjectIdentifier::new("google-123".to_owned()))
-            .set_email(Some(EndUserEmail::new("support@neev.so".to_owned())))
+        StandardClaims::new(SubjectIdentifier::new(subject.to_owned()))
+            .set_email(Some(EndUserEmail::new(email.to_owned())))
             .set_email_verified(Some(true)),
         Default::default(),
     )
