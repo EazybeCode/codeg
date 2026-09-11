@@ -93,17 +93,19 @@ distinguish extension errors. Zero GitHub calls requires connected network/servi
 observations, not an unused counter or arbitrary-socket claim. Execution results
 are recorded after the integrated gate.
 
-## Local execution evidence and open browser gate
+## Consolidated local evidence awaiting final review
 
-Initial full native gate: 119 passed, 0 failed, 0 ignored; 3,781 filtered, with only the exact
-interactive driver excluded from the native filter. This includes the isolated PG
+Current emitted-binary native gate: 121 passed, 0 failed, 0 ignored; 3,781 filtered,
+5.53s, exit0, with only the exact interactive driver excluded. The controller ran
+the guarded PostgreSQL native filter after the fixture fixes; this includes
 constraints, concurrent proof consumption, inviter removal and final-write checks.
-The initial emitted browser-fixture filter separately passed2/2. After fixture
+Historically the initial full native gate passed119 and the focused fixture filter
+passed2/2. After fixture
 fixes through `5b6ab8bc`, the focused filter passed4/4, 0 failed, 0 ignored: actual
 HTTP identity/hierarchy/invitation/magic-link roundtrip with chooser-policy checks,
 production-router launcher absence, server-panic cleanup, and unrelated/native
-cookie handling. Only the exact interactive driver was skipped. The 119-test full
-run predates those added regressions; it is not a new full-suite count. HTTP
+cookie handling. The current 121-test full native run includes those added
+regressions. It does not imply a new frontend or production-binary build. HTTP
 results are not browser layout or CSP-enforcement evidence.
 
 Frontend: 459 files / 6,279 tests passed with `--maxWorkers=2 --minWorkers=1` and no
@@ -145,27 +147,41 @@ synthetic runs; these are not real provider/delivery/users or independent browse
   organization displayed Marketing. This supplies actual stale-tab/logout and
   explicit organization-selection evidence.
 
-The latest desktop screenshot was inspected. A new 375px override attempt returned
-success from the controller API but the actual DOM stayed1440px; it supplies no
-new responsive pass. The override was reset and duplicate tab closed. The earlier
-verified 375px results above remain historical, not a fresh check of the latest run.
+The final consolidated Chrome run at `c38025ff` repeated synthetic Google login
+through callback/onboarding, created Neev Final Check and a Sales project, and
+opened Settings. Native DevTools Responsive Width was set to375; actual
+`innerWidth` and `scrollWidth` both measured375 for workspace and Settings, with
+screenshots confirming both. Enter opened navigation, New project focused Name,
+Return saved and restored trigger focus, Escape closed navigation and restored
+Open navigation focus, and Enter navigated to Settings. These measured checks
+supersede the earlier unsuccessful controller-API viewport override. Emulation
+was disabled and DevTools closed; desktop width/scrollWidth returned to1440.
 
-IPv6 Google return remains a disclosed fixture limitation, not a passing browser
-check. Final consolidated keyboard/accessibility and console/network audit,
-remaining browser-specific denial coverage and independent whole-branch review
-remain open. Extension `feature_flags` errors and
-safesearch iframe interference were observed; there is no pristine-console or
-complete browser-wide zero-GitHub network claim. Older completed fixtures were
-stopped normally with exact cleanup. The latest controller-owned run also stopped
-normally with exact schema/listener cleanup; its owned tabs were closed and the
-viewport reset. No active acceptance fixture remains.
-These results do not complete Task 8 or certify public readiness.
+Network recording with preserved log began before that Google flow. Native API
+reads/login/select returned200 and creates201; a GitHub substring URL filter found
+0 matches among207 recorded requests. Captured console errors were extension
+`feature_flags` TypeErrors, not observed application errors. Earlier safesearch
+iframe interference remains disclosed. This is bounded recorded-flow evidence,
+not arbitrary-socket absence, a pristine browser or real-provider certification.
+Direct top-level API navigation in another owned tab was browser-blocked and is
+inconclusive, not a passed tenant-denial check. Tenant denial is supported by the
+actual HTTP regression and the recorded two-organization browser journeys.
+
+Local synthetic milestone evidence is consolidated for independent whole-branch
+review, not final approval. IPv6 Google return remains a fixture limitation; use
+email for participant two. That limitation, the HTTP fixture timeout Minor and
+other deferred findings require final-review triage. Older and final fixtures
+stopped normally with exact schema/listener cleanup; owned tabs were closed and
+native emulation/DevTools reset. No active acceptance fixture remains. These
+results do not approve Task 8, implement subproject two, authorize deployment or
+certify real Google/mail, hosted Stage 2 or public readiness.
 
 The native hierarchy's connected outbound-boundary regression passed: its positive
 OAuth control observes real fixture requests, then native catalog operations add
 zero calls to that configured transport. GitHub stays unmounted and hierarchy
-needs no GitHub identity. This is bounded transport/source evidence, not proof of
-arbitrary socket absence or a completed browser-wide network audit.
+needs no GitHub identity. Together with the recorded browser flow, this is bounded
+transport/source/URL evidence, not proof of arbitrary socket absence or all
+possible browser traffic.
 
 ## Fresh deployment contract
 
