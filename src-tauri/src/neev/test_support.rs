@@ -18,7 +18,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
-        Arc, OnceLock,
+        Arc,
     },
 };
 use tokio::sync::Mutex;
@@ -778,8 +778,8 @@ pub(super) fn owned_document_root() -> tempfile::TempDir {
 }
 
 pub(super) fn preview_config() -> super::config::Config {
-    static DOCUMENT_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
-    let document_root = DOCUMENT_ROOT.get_or_init(owned_document_root);
+    let document_root = owned_document_root();
+    let document_root_path = document_root.path().canonicalize().unwrap();
     let origin = url::Url::parse("http://127.0.0.1:3100/").unwrap();
     super::config::Config {
         origin: origin.clone(),
@@ -791,13 +791,14 @@ pub(super) fn preview_config() -> super::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         trusted_proxy_ips: Vec::new(),
         static_root: std::env::current_dir().unwrap(),
-        document_root: document_root.path().canonicalize().unwrap(),
+        document_root: document_root_path,
         preview: true,
         providers: super::config::ProviderConfig {
             google: None,
             github: None,
             email: None,
         },
+        _document_root_guard: Some(document_root),
     }
 }
 
@@ -895,7 +896,7 @@ pub(super) async fn wait_for_postgres_locks(
 
 #[cfg(test)]
 mod tests {
-    use super::isolated_postgres_database_name;
+    use super::{isolated_postgres_database_name, preview_config};
 
     #[test]
     fn postgres_guard_requires_the_exact_decoded_database_name() {
@@ -917,5 +918,21 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn preview_configs_own_distinct_document_roots() {
+        let first = preview_config();
+        let first_root = first.document_root.clone();
+        let second = preview_config();
+        let second_root = second.document_root.clone();
+        assert_ne!(first_root, second_root);
+        assert!(first_root.is_dir());
+        assert!(second_root.is_dir());
+        drop(first);
+        assert!(!first_root.exists());
+        assert!(second_root.is_dir());
+        drop(second);
+        assert!(!second_root.exists());
     }
 }

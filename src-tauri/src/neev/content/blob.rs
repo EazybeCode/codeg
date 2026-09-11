@@ -14,6 +14,11 @@ pub(crate) struct BlobInfo {
 
 #[cfg(unix)]
 mod unix {
+    #[cfg(test)]
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
     use std::{
         ffi::{CStr, CString},
         fs::File,
@@ -47,6 +52,14 @@ mod unix {
         root: File,
         #[cfg(test)]
         failure: Option<FailurePoint>,
+        #[cfg(test)]
+        root_sync_probe: Option<Arc<RootSyncProbe>>,
+    }
+
+    #[cfg(test)]
+    struct RootSyncProbe {
+        fail_next: AtomicBool,
+        attempts: AtomicUsize,
     }
 
     impl BlobStore {
@@ -69,6 +82,8 @@ mod unix {
                 root: current,
                 #[cfg(test)]
                 failure: None,
+                #[cfg(test)]
+                root_sync_probe: None,
             })
         }
 
@@ -80,6 +95,24 @@ mod unix {
             let mut store = Self::open(root)?;
             store.failure = Some(failure);
             Ok(store)
+        }
+
+        #[cfg(test)]
+        pub(crate) fn open_with_root_sync_failure(root: &Path) -> Result<Self, ContentError> {
+            let mut store = Self::open(root)?;
+            store.root_sync_probe = Some(Arc::new(RootSyncProbe {
+                fail_next: AtomicBool::new(true),
+                attempts: AtomicUsize::new(0),
+            }));
+            Ok(store)
+        }
+
+        #[cfg(test)]
+        pub(crate) fn root_sync_attempts(&self) -> usize {
+            self.root_sync_probe
+                .as_ref()
+                .map(|probe| probe.attempts.load(Ordering::SeqCst))
+                .unwrap_or(0)
         }
 
         pub(crate) async fn put(
@@ -178,11 +211,12 @@ mod unix {
             let name = c_string(&org_id.to_string())?;
             if create {
                 let result = unsafe { libc::mkdirat(self.root.as_raw_fd(), name.as_ptr(), 0o700) };
-                if result == 0 {
-                    self.root.sync_all().map_err(|_| ContentError::Storage)?;
-                } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+                if result != 0
+                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
+                {
                     return Err(ContentError::Storage);
                 }
+                self.sync_root()?;
             }
             let directory =
                 open_directory_at(self.root.as_raw_fd(), name.as_bytes()).map_err(|error| {
@@ -196,6 +230,17 @@ mod unix {
                 })?;
             verify_directory(&directory)?;
             Ok(directory)
+        }
+
+        fn sync_root(&self) -> Result<(), ContentError> {
+            #[cfg(test)]
+            if let Some(probe) = &self.root_sync_probe {
+                probe.attempts.fetch_add(1, Ordering::SeqCst);
+                if probe.fail_next.swap(false, Ordering::SeqCst) {
+                    return Err(ContentError::Storage);
+                }
+            }
+            self.root.sync_all().map_err(|_| ContentError::Storage)
         }
     }
 
@@ -254,7 +299,7 @@ mod unix {
             libc::openat(
                 parent,
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         };
         if fd < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {

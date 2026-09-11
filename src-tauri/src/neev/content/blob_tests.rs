@@ -1,7 +1,14 @@
 use std::{
+    ffi::CString,
     fs,
-    os::unix::fs::{symlink, PermissionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{symlink, PermissionsExt},
+    },
     path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use sha2::{Digest, Sha256};
@@ -240,4 +247,68 @@ async fn injected_stage_failures_never_replace_published_bytes() {
             bytes
         );
     }
+}
+
+#[test]
+fn fifo_blob_is_rejected_without_waiting_for_a_writer() {
+    let root = RootFixture::new();
+    let org = root.path().join("1");
+    fs::create_dir(&org).unwrap();
+    fs::set_permissions(&org, fs::Permissions::from_mode(0o700)).unwrap();
+    let fifo = org.join(format!("{KEY}.md"));
+    let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+    fs::set_permissions(&fifo, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let store = BlobStore::open(root.path()).unwrap();
+    let (send, receive) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(store.read(1, KEY, 0, &hash(b"")));
+        let _ = send.send(result);
+    });
+    let result = receive
+        .recv_timeout(Duration::from_secs(2))
+        .expect("FIFO read blocked before inode validation");
+    worker.join().unwrap();
+    assert_eq!(result.err(), Some(ContentError::Storage));
+}
+
+#[tokio::test]
+async fn retry_after_root_sync_failure_syncs_the_existing_org_entry() {
+    let root = RootFixture::new();
+    let store = BlobStore::open_with_root_sync_failure(root.path()).unwrap();
+    assert_eq!(
+        store.put(1, KEY, b"first attempt").await.err(),
+        Some(ContentError::Storage)
+    );
+    assert!(root.path().join("1").is_dir());
+    assert_eq!(store.root_sync_attempts(), 1);
+
+    let info = store.put(1, KEY, b"retry").await.unwrap();
+    assert_eq!(info.byte_length, 5);
+    assert_eq!(store.root_sync_attempts(), 2);
+}
+
+#[tokio::test]
+async fn rejects_a_blob_with_an_additional_hard_link() {
+    let root = RootFixture::new();
+    let store = BlobStore::open(root.path()).unwrap();
+    let bytes = b"linked";
+    store.put(1, KEY, bytes).await.unwrap();
+    let org = root.path().join("1");
+    let original = org.join(format!("{KEY}.md"));
+    let linked_key = "11234567-89ab-4def-8123-456789abcdef";
+    fs::hard_link(&original, org.join(format!("{linked_key}.md"))).unwrap();
+
+    assert_eq!(
+        store.read(1, KEY, 6, &hash(bytes)).await.err(),
+        Some(ContentError::Storage)
+    );
+    assert_eq!(
+        store.read(1, linked_key, 6, &hash(bytes)).await.err(),
+        Some(ContentError::Storage)
+    );
 }

@@ -53,6 +53,8 @@ pub(crate) struct Config {
     pub(crate) document_root: PathBuf,
     pub(crate) preview: bool,
     pub(crate) providers: ProviderConfig,
+    #[cfg(test)]
+    pub(crate) _document_root_guard: Option<tempfile::TempDir>,
 }
 
 impl Config {
@@ -177,6 +179,8 @@ impl Config {
             document_root,
             preview,
             providers,
+            #[cfg(test)]
+            _document_root_guard: None,
         })
     }
 }
@@ -338,24 +342,39 @@ fn mail(values: &HashMap<String, String>) -> Result<Option<MailProvider>, Config
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
+    use std::ops::{Deref, DerefMut};
     #[cfg(unix)]
     use std::{fs, os::unix::fs::symlink};
 
     use super::*;
 
-    fn values() -> HashMap<String, String> {
-        static DOCUMENT_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
-        let document_root = DOCUMENT_ROOT.get_or_init(|| {
-            let root = tempfile::tempdir().unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
-            }
-            root
-        });
-        HashMap::from([
+    struct Values {
+        entries: HashMap<String, String>,
+        _document_root: tempfile::TempDir,
+    }
+
+    impl Deref for Values {
+        type Target = HashMap<String, String>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.entries
+        }
+    }
+
+    impl DerefMut for Values {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.entries
+        }
+    }
+
+    fn values() -> Values {
+        let document_root = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(document_root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let entries = HashMap::from([
             ("NEEV_APP_ORIGIN".into(), "https://app.neev.so".into()),
             (
                 "NEEV_DATABASE_URL".into(),
@@ -376,7 +395,11 @@ mod tests {
                     .display()
                     .to_string(),
             ),
-        ])
+        ]);
+        Values {
+            entries,
+            _document_root: document_root,
+        }
     }
 
     #[test]
@@ -588,5 +611,21 @@ mod tests {
             document_root.display().to_string(),
         );
         assert!(Config::from_values(&missing).is_ok());
+    }
+
+    #[test]
+    fn config_value_fixtures_own_distinct_document_roots() {
+        let first = values();
+        let first_root = PathBuf::from(first.get("NEEV_DOCUMENT_ROOT").unwrap());
+        let second = values();
+        let second_root = PathBuf::from(second.get("NEEV_DOCUMENT_ROOT").unwrap());
+        assert_ne!(first_root, second_root);
+        assert!(first_root.is_dir());
+        assert!(second_root.is_dir());
+        drop(first);
+        assert!(!first_root.exists());
+        assert!(second_root.is_dir());
+        drop(second);
+        assert!(!second_root.exists());
     }
 }

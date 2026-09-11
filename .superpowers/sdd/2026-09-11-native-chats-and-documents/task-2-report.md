@@ -238,7 +238,7 @@ git diff --check
   foreign-owned inode, so the suite exercises current ownership positively and
   mode/type/symlink failures behaviorally; no privileged `chown` was attempted.
 - The final `src-tauri/target` footprint is `1.6G`; the emitted native test
-  binary is `287,205,840` bytes. Free disk was 26 GiB immediately before the
+  binary is now `287,376,480` bytes. Free disk was 26 GiB immediately before the
   final suite and 25 GiB afterward (well above the 3 GiB stop threshold); it
   varied between 25-27 GiB during builds due to filesystem rounding/build
   activity.
@@ -250,3 +250,119 @@ git diff --check
 The WorkOS architecture and trusted-network boundary in organizational memory
 were consulted while preserving the native-server-only scope.
 [org-memory: wiki/engineering/workos.md]
+
+## Review fix round 1
+
+### Corrections
+
+- Added `O_NONBLOCK` to descriptor-relative blob reads. FIFOs and other
+  nonregular special files can now be opened without waiting for a peer and are
+  immediately rejected by the existing `fstat` regular-file validation.
+- Root-directory sync is now required on every creating `put` path after
+  `mkdirat`, whether that call created the organization directory or observed
+  `EEXIST`. This closes both the failed-first-sync retry gap and the concurrent
+  creator gap before a blob is acknowledged.
+- Replaced process-static test document roots with fixture-owned roots. A
+  strictly `cfg(test)` `Config` guard preserves existing fixture call sites;
+  config parser test inputs use a small per-call guard wrapper. Roots are
+  distinct and removed when their owning fixture/config drops. The browser
+  fixture continues to retain its explicit per-fixture guard vector.
+- Added a real hard-link regression: an otherwise valid blob with link count
+  two is rejected through either name. This makes the original report's link
+  validation mutation claim accurate.
+- Reconfirmed the production startup order from the controller's inspected
+  lines: `ServerState::new` completes before listener bind. No native launcher
+  or preflight environment source exists in this scope; runtime smoke remains
+  Task 8.
+
+### Review-fix RED evidence
+
+Blob regressions were added before the fixes, with only the root-sync probe
+seam introduced so the durability failure was observable:
+
+```text
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+cargo test --lib --no-default-features neev::content::blob_tests -- --test-threads=1
+```
+
+```text
+running 10 tests
+... fifo_blob_is_rejected_without_waiting_for_a_writer ... FAILED
+... rejects_a_blob_with_an_additional_hard_link ... ok
+... retry_after_root_sync_failure_syncs_the_existing_org_entry ... FAILED
+FIFO read blocked before inode validation: Timeout
+root sync attempts: left 1, right 2
+test result: FAILED. 8 passed; 2 failed; 3919 filtered out; finished in 2.38s
+```
+
+The FIFO regression runs `BlobStore::read` on a separate OS thread and waits
+through `std::sync::mpsc::recv_timeout(Duration::from_secs(2))`, so the timeout
+cannot be starved by the blocked async runtime worker and the test process does
+not hang.
+
+Fixture ownership RED, using the same newly emitted binary:
+
+```text
+./target/debug/deps/codeg_lib-9b806c9f34534627 own_distinct_document_roots --test-threads=1
+```
+
+```text
+running 2 tests
+... config_value_fixtures_own_distinct_document_roots ... FAILED
+... preview_configs_own_distinct_document_roots ... FAILED
+assertion `left != right` failed
+test result: FAILED. 0 passed; 2 failed; 3927 filtered out
+```
+
+Both failures showed consecutive fixtures returning the identical static root.
+
+### Review-fix GREEN evidence
+
+Fresh focused blob build and tests after the correction:
+
+```text
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+cargo test --lib --no-default-features neev::content::blob_tests -- --test-threads=1
+```
+
+```text
+Finished `test` profile [unoptimized] target(s) in 4m 27s
+test result: ok. 10 passed; 0 failed; 0 ignored; 3919 filtered out; finished in 0.35s
+```
+
+Fresh config, test-support, and directly affected HTTP-state fixture tests,
+reusing that final emitted binary:
+
+```text
+./target/debug/deps/codeg_lib-9b806c9f34534627 'neev::config::tests' --test-threads=1
+./target/debug/deps/codeg_lib-9b806c9f34534627 'neev::test_support::tests' --test-threads=1
+./target/debug/deps/codeg_lib-9b806c9f34534627 \
+  'neev::browser_fixture::native_production_router_has_no_synthetic_google_launcher' \
+  --exact --test-threads=1
+```
+
+```text
+config:       7 passed; 0 failed; 3922 filtered out
+test_support: 2 passed; 0 failed; 3927 filtered out
+browser:      1 passed; 0 failed; 3928 filtered out
+```
+
+The full native suite was not repeated for this four-file scoped amendment per
+controller direction. The immediately preceding committed baseline remains
+`143 passed; 0 failed; 3781 filtered out`; all amended code has fresh covering
+evidence above. Output retains only the previously disclosed legacy unused
+`DbBackend` and macOS compact-unwind linker warnings.
+
+### Review-fix files and self-review
+
+- `src-tauri/src/neev/content/blob.rs`
+- `src-tauri/src/neev/content/blob_tests.rs`
+- `src-tauri/src/neev/config.rs`
+- `src-tauri/src/neev/test_support.rs`
+- `.superpowers/sdd/2026-09-11-native-chats-and-documents/task-2-report.md`
+
+Mutation checks now cover removing `O_NONBLOCK`, skipping root sync after
+`EEXIST`, restoring either static `OnceLock<TempDir>`, and removing the
+single-link requirement. No privileged ownership operation, non-Unix runtime,
+browser automation, network access, or launcher smoke was claimed or used.
+Final disk remains 25 GiB free with a `1.6G` existing target tree.
