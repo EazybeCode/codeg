@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, net::IpAddr};
 
 use hmac::{Hmac, Mac};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend};
+use sea_orm::{DatabaseConnection, DatabaseTransaction};
 use sha2::Sha256;
 
 use crate::neev::{
@@ -20,6 +20,7 @@ pub(crate) enum Bucket {
     DeliveryDay,
     InvitationActor(i32),
     InvitationOrganization(i32),
+    OrganizationCreation(i32),
 }
 
 pub(crate) async fn reserve(
@@ -35,16 +36,7 @@ pub(crate) async fn reserve(
 }
 
 pub(crate) async fn lock_guard(tx: &DatabaseTransaction) -> Result<(), AuthError> {
-    if tx.get_database_backend() == DbBackend::Postgres {
-        db::one(
-            tx,
-            "SELECT version FROM neev_schema_version WHERE id=1 FOR UPDATE",
-            vec![],
-        )
-        .await?
-        .ok_or(AuthError::Unavailable)?;
-    }
-    Ok(())
+    db::lock_admission_guard(tx).await
 }
 
 pub(crate) async fn reserve_in_transaction(
@@ -161,6 +153,9 @@ impl Descriptor {
             }
             Bucket::InvitationOrganization(id) if *id > 0 => {
                 ("invitation_org_day", id.to_string(), 24 * 60 * 60, 80)
+            }
+            Bucket::OrganizationCreation(id) if *id > 0 => {
+                ("organization_creation_day", id.to_string(), 24 * 60 * 60, 3)
             }
             _ => return Err(AuthError::Invalid),
         };

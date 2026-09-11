@@ -255,15 +255,7 @@ async fn insert_attempt(
     )?;
 
     let tx = db::begin(database).await?;
-    if tx.get_database_backend() == DbBackend::Postgres {
-        db::one(
-            &tx,
-            "SELECT version FROM neev_schema_version WHERE id=1 FOR UPDATE",
-            vec![],
-        )
-        .await?
-        .ok_or(AuthError::Unavailable)?;
-    }
+    db::lock_admission_guard(&tx).await?;
     db::execute(
         &tx,
         "DELETE FROM neev_oauth_attempts WHERE state_hash IN (SELECT state_hash FROM neev_oauth_attempts WHERE expires_at<=$1 ORDER BY expires_at LIMIT $2)",

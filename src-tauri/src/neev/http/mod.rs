@@ -4,7 +4,7 @@ use axum::{
     extract::State,
     http::{header, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use serde::Serialize;
@@ -13,6 +13,7 @@ use crate::neev::{auth::github, error::AuthError, startup::ServerState};
 
 mod auth;
 pub(crate) mod cookies;
+mod org;
 mod static_files;
 #[cfg(test)]
 mod tests;
@@ -83,6 +84,35 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/workos/capabilities", get(capabilities))
         .route("/api/neev/preauth", get(auth::preauth))
         .route("/api/neev/session", get(auth::bootstrap))
+        .route("/api/neev/auth/methods", get(auth::methods))
+        .route("/api/neev/organizations", get(org::list).post(org::create))
+        .route("/api/neev/organizations/select", post(org::select))
+        .route(
+            "/api/neev/organization",
+            get(org::details).patch(org::update_branding),
+        )
+        .route("/api/neev/organization/members", get(org::members))
+        .route(
+            "/api/neev/organization/members/{member_id}/role",
+            patch(org::set_role),
+        )
+        .route(
+            "/api/neev/organization/members/{member_id}",
+            delete(org::remove),
+        )
+        .route(
+            "/api/neev/organization/invitations",
+            post(org::send_invitation),
+        )
+        .route(
+            "/api/neev/organization/invitations/{invite_id}",
+            delete(org::revoke_invitation),
+        )
+        .route(
+            "/api/neev/invitations/preview",
+            post(org::preview_invitation),
+        )
+        .route("/api/neev/invitations/accept", post(org::accept_invitation))
         .route("/api/neev/logout", post(auth::logout))
         .route("/api/neev/auth/google/login", post(auth::google_login))
         .route("/api/neev/auth/google/link", post(auth::google_link))
@@ -93,8 +123,11 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/workspace", get(static_files::page))
         .route("/settings", get(static_files::page))
         .route("/auth/email/confirm", get(static_files::page))
+        .route("/auth/invite", get(static_files::page))
         .route("/neev-auth/confirm.js", get(static_files::asset))
-        .route("/neev-auth/confirm.css", get(static_files::asset));
+        .route("/neev-auth/confirm.css", get(static_files::asset))
+        .route("/neev-auth/invite.js", get(static_files::asset))
+        .route("/neev-auth/invite.css", get(static_files::asset));
     if email_available {
         router = router
             .route("/api/neev/email/login", post(auth::email_login))

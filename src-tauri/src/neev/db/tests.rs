@@ -40,6 +40,41 @@ async fn refuses_unknown_schema_version() {
 }
 
 #[tokio::test]
+async fn fresh_schema_is_version_two_with_separate_branding_revision() {
+    let db = h::database().await;
+    let version = db
+        .query_one(Statement::from_string(
+            db.get_database_backend(),
+            "SELECT version FROM neev_schema_version WHERE id=1".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "version")
+        .unwrap();
+    assert_eq!(version, 2);
+
+    let user = h::native_account(&db, "schema-owner", "schema@example.test").await;
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "INSERT INTO neev_organizations(owner_user_id,name,revision,disabled,created_at) VALUES($1,'Schema org',1,false,1000) RETURNING branding_revision",
+            vec![user.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i64>("", "branding_revision").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn version_one_native_schema_is_refused_without_migration() {
+    let db = h::database().await;
+    h::execute(&db, "UPDATE neev_schema_version SET version=1", vec![]).await;
+    assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
+}
+
+#[tokio::test]
 async fn membership_requires_real_account_and_org() {
     let db = h::database().await;
     let result = db.execute(Statement::from_string(db.get_database_backend(), "INSERT INTO neev_memberships(org_id,user_id,role,revision,active) VALUES(999,999,'admin',1,true)")).await;

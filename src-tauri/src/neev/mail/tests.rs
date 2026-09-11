@@ -145,6 +145,21 @@ async fn invitation_quota_reservations_enforce_actor_boundary_atomically() {
     }
 }
 
+#[tokio::test]
+async fn organization_creation_quota_is_three_per_actor_per_utc_day() {
+    let db = h::database().await;
+    let bucket = Bucket::OrganizationCreation(7);
+    for _ in 0..3 {
+        quota::reserve(&db, &[28; 32], std::slice::from_ref(&bucket), 1_700_000_000)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        quota::reserve(&db, &[28; 32], &[bucket], 1_700_000_000).await,
+        Err(AuthError::Limited)
+    );
+}
+
 struct GateSender {
     entered: Arc<AtomicUsize>,
     gate: Arc<Semaphore>,

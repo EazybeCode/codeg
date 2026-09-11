@@ -58,15 +58,7 @@ struct Lease {
 
 async fn acquire_lease(database: &DatabaseConnection) -> Result<Lease, AuthError> {
     let tx = crate::neev::db::begin(database).await?;
-    if tx.get_database_backend() == DbBackend::Postgres {
-        crate::neev::db::one(
-            &tx,
-            "SELECT version FROM neev_schema_version WHERE id=1 FOR UPDATE",
-            vec![],
-        )
-        .await?
-        .ok_or(AuthError::Unavailable)?;
-    }
+    crate::neev::db::lock_admission_guard(&tx).await?;
     let now = database_time(&tx).await?;
     let expires_at = now.checked_add(30).ok_or(AuthError::Unavailable)?;
     for id in ["mail-0", "mail-1"] {

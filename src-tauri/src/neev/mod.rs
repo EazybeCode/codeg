@@ -6,6 +6,7 @@ pub(crate) mod db;
 pub(crate) mod error;
 pub(crate) mod http;
 pub(crate) mod mail;
+pub(crate) mod org;
 mod startup;
 #[cfg(test)]
 mod test_support;

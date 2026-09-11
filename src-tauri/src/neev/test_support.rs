@@ -42,6 +42,115 @@ pub(super) struct MailCapture {
     fail: AtomicBool,
 }
 
+pub(super) struct OrgHarness {
+    pub(super) state: Arc<super::startup::ServerState>,
+    pub(super) database: DatabaseConnection,
+    pub(super) capture: Arc<MailCapture>,
+    owner: super::types::OrgContext,
+    member: super::types::OrgContext,
+    other_org_owner: super::types::OrgContext,
+    inviter: super::types::OrgContext,
+    inviter_member_id: i32,
+    invitee: super::types::IdentityContext,
+    wrong_recipient: super::types::IdentityContext,
+    org_id: i32,
+}
+
+impl OrgHarness {
+    pub(super) async fn new() -> Self {
+        let database = database().await;
+        let clock = Arc::new(TestClock::new(1_700_000_000));
+        let capture = Arc::new(MailCapture::new());
+        let mail = super::mail::Service::new(database.clone(), capture.clone());
+        let state = Arc::new(
+            super::startup::ServerState::with_mail(database.clone(), preview_config(), clock, mail)
+                .unwrap(),
+        );
+        let owner_user = native_account(&database, "org-owner", "owner@example.test").await;
+        let inviter_user = native_account(&database, "org-inviter", "inviter@example.test").await;
+        let member_user = native_account(&database, "org-member", "member@example.test").await;
+        let invitee_user = native_account(&database, "org-invitee", "invitee@example.test").await;
+        let wrong_user = native_account(&database, "org-wrong", "wrong@example.test").await;
+        let other_owner_user =
+            native_account(&database, "org-other", "other-owner@example.test").await;
+        let (org_id, _) = organization(&database, owner_user, "admin").await;
+        let inviter_member_id = add_membership(&database, org_id, inviter_user, "admin").await;
+        add_membership(&database, org_id, member_user, "member").await;
+        let (other_org, _) = organization(&database, other_owner_user, "admin").await;
+        let owner = scoped_context(&database, owner_user, org_id, 1_700_000_000).await;
+        let inviter = scoped_context(&database, inviter_user, org_id, 1_700_000_000).await;
+        let member = scoped_context(&database, member_user, org_id, 1_700_000_000).await;
+        let other_org_owner =
+            scoped_context(&database, other_owner_user, other_org, 1_700_000_000).await;
+        let invitee = identity_context(&database, invitee_user, 1_700_000_000).await;
+        let wrong_recipient = identity_context(&database, wrong_user, 1_700_000_000).await;
+        Self {
+            state,
+            database,
+            capture,
+            owner,
+            member,
+            other_org_owner,
+            inviter,
+            inviter_member_id,
+            invitee,
+            wrong_recipient,
+            org_id,
+        }
+    }
+
+    pub(super) async fn invite(&self, email: &str) -> String {
+        super::org::invites::send(
+            &self.state,
+            &self.inviter,
+            email,
+            super::types::Role::Member,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .unwrap();
+        self.capture.latest_fragment().await
+    }
+
+    pub(super) fn wrong_recipient(&self) -> super::types::IdentityContext {
+        self.wrong_recipient.clone()
+    }
+
+    pub(super) fn invitee(&self) -> super::types::IdentityContext {
+        self.invitee.clone()
+    }
+
+    pub(super) async fn revoke_inviter_membership(&self) {
+        super::org::remove(&self.state, &self.owner, self.inviter_member_id)
+            .await
+            .unwrap();
+    }
+
+    pub(super) async fn accept(
+        &self,
+        identity: super::types::IdentityContext,
+        token: &str,
+    ) -> Result<i32, AuthError> {
+        super::org::invites::accept(&self.state, &identity, token, self.org_id).await
+    }
+
+    pub(super) fn owner(&self) -> super::types::OrgContext {
+        self.owner.clone()
+    }
+
+    pub(super) fn member(&self) -> super::types::OrgContext {
+        self.member.clone()
+    }
+
+    pub(super) fn other_org_owner(&self) -> super::types::OrgContext {
+        self.other_org_owner.clone()
+    }
+
+    pub(super) fn org_id(&self) -> i32 {
+        self.org_id
+    }
+}
+
 impl MailCapture {
     pub(super) fn new() -> Self {
         Self {
@@ -498,6 +607,57 @@ pub(super) async fn organization(db: &DatabaseConnection, user: i32, role: &str)
     )).await.unwrap().unwrap();
     let member: i32 = row.try_get("", "id").unwrap();
     (org, member)
+}
+
+pub(super) async fn add_membership(
+    db: &DatabaseConnection,
+    org: i32,
+    user: i32,
+    role: &str,
+) -> i32 {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "INSERT INTO neev_memberships(org_id,user_id,role,revision,active) VALUES($1,$2,$3,1,true) RETURNING id",
+            vec![org.into(), user.into(), role.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    row.try_get("", "id").unwrap()
+}
+
+pub(super) async fn identity_context(
+    db: &DatabaseConnection,
+    user: i32,
+    now: i64,
+) -> super::types::IdentityContext {
+    let issued = super::auth::session::issue_identity(db, user, now)
+        .await
+        .unwrap();
+    super::auth::session::identity(db, &issued.session, now)
+        .await
+        .unwrap()
+}
+
+pub(super) async fn scoped_context(
+    db: &DatabaseConnection,
+    user: i32,
+    org: i32,
+    now: i64,
+) -> super::types::OrgContext {
+    let issued = super::auth::session::issue_identity(db, user, now)
+        .await
+        .unwrap();
+    let identity = super::auth::session::identity(db, &issued.session, now)
+        .await
+        .unwrap();
+    let scoped = super::auth::session::select_organization(db, &identity, org, now)
+        .await
+        .unwrap();
+    super::auth::session::organization(db, &scoped.session, now)
+        .await
+        .unwrap()
 }
 
 pub(super) fn preview_config() -> super::config::Config {

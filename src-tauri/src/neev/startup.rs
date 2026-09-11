@@ -18,6 +18,7 @@ pub(crate) struct ServerState {
     pub(crate) auth_limit: Arc<Semaphore>,
     pub(crate) oauth: oauth::Service,
     pub(crate) magic: Option<magic::Service>,
+    pub(crate) mail: Option<mail::Service>,
 }
 
 impl ServerState {
@@ -27,7 +28,7 @@ impl ServerState {
         clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<Self, super::error::AuthError> {
         let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
-        let magic = config
+        let mail = config
             .providers
             .email
             .as_ref()
@@ -36,16 +37,18 @@ impl ServerState {
                     provider.api_key.clone(),
                     provider.from.clone(),
                 )?);
-                let mail = mail::Service::new(database.clone(), sender);
-                Ok::<_, super::error::AuthError>(magic::Service::new(
-                    database.clone(),
-                    config.encryption_key,
-                    config.origin.clone(),
-                    clock.clone(),
-                    mail,
-                ))
+                Ok::<_, super::error::AuthError>(mail::Service::new(database.clone(), sender))
             })
             .transpose()?;
+        let magic = mail.as_ref().map(|mail| {
+            magic::Service::new(
+                database.clone(),
+                config.encryption_key,
+                config.origin.clone(),
+                clock.clone(),
+                mail.clone(),
+            )
+        });
         Ok(Self {
             database,
             config,
@@ -53,6 +56,7 @@ impl ServerState {
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
             magic,
+            mail,
         })
     }
 
@@ -70,6 +74,7 @@ impl ServerState {
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
             magic: None,
+            mail: None,
         }
     }
 
@@ -88,6 +93,26 @@ impl ServerState {
             auth_limit: Arc::new(Semaphore::new(32)),
             oauth,
             magic: Some(magic),
+            mail: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_mail(
+        database: DatabaseConnection,
+        config: Config,
+        clock: Arc<dyn Clock + Send + Sync>,
+        mail: mail::Service,
+    ) -> Result<Self, super::error::AuthError> {
+        let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
+        Ok(Self {
+            database,
+            config,
+            clock,
+            auth_limit: Arc::new(Semaphore::new(32)),
+            oauth,
+            magic: None,
+            mail: Some(mail),
         })
     }
 }

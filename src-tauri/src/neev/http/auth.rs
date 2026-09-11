@@ -21,18 +21,32 @@ use super::{cookies, private_json, ApiError};
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionDto {
-    user_id: i32,
+    user: UserDto,
+    organization: Option<OrganizationDto>,
+    role: Option<&'static str>,
+    scope: &'static str,
     csrf: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    organization: Option<OrganizationSessionDto>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct OrganizationSessionDto {
-    org_id: i32,
-    member_id: i32,
-    role: &'static str,
+struct UserDto {
+    id: i32,
+    display_name: String,
+    avatar_url: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrganizationDto {
+    id: i32,
+    name: String,
+    avatar_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct MethodsDto {
+    methods: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -103,26 +117,51 @@ pub(super) async fn bootstrap(
     let names = cookies::CookieNames::for_preview(state.config.preview);
     let token = cookies::required(&headers, names.session)?;
     let raw_csrf = cookies::required(&headers, names.csrf)?;
-    let identity = session::identity(&state.database, token, state.clock.now_unix()).await?;
-    session::validate_csrf(&state.database, &identity, raw_csrf, state.clock.now_unix()).await?;
-    let organization =
-        match session::organization(&state.database, token, state.clock.now_unix()).await {
-            Ok(context) => Some(OrganizationSessionDto {
-                org_id: context.org_id,
-                member_id: context.member_id,
-                role: match context.role {
-                    Role::Admin => "admin",
-                    Role::Member => "member",
-                },
-            }),
-            Err(AuthError::Forbidden) => None,
-            Err(error) => return Err(error.into()),
-        };
+    let now = state.clock.now_unix();
+    let view = session::view(&state.database, token, Some(raw_csrf), now).await?;
+    let organization = view.organization.map(|organization| OrganizationDto {
+        id: organization.id,
+        name: organization.name,
+        avatar_url: organization.logo_data,
+    });
+    let role = view.role.map(role_name);
+    let scope = if organization.is_some() {
+        "organization"
+    } else {
+        "identity"
+    };
     Ok(private_json(SessionDto {
-        user_id: identity.user_id,
-        csrf: raw_csrf.to_owned(),
+        user: UserDto {
+            id: view.user.id,
+            display_name: view.user.display_name,
+            avatar_url: view.user.avatar_url,
+        },
         organization,
+        role,
+        scope,
+        csrf: raw_csrf.to_owned(),
     }))
+}
+
+pub(super) async fn methods(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = state
+        .auth_limit
+        .try_acquire()
+        .map_err(|_| ApiError::Limited)?;
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let token = cookies::required(&headers, names.session)?;
+    let methods = session::methods(&state.database, token, state.clock.now_unix()).await?;
+    Ok(private_json(MethodsDto { methods }))
+}
+
+fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Admin => "admin",
+        Role::Member => "member",
+    }
 }
 
 pub(super) async fn logout(
@@ -413,6 +452,14 @@ async fn json_request<T: DeserializeOwned>(
     request: Request<Body>,
     expected_origin: &str,
 ) -> Result<(HeaderMap, T), ApiError> {
+    json_request_limited(request, expected_origin, 1024).await
+}
+
+pub(super) async fn json_request_limited<T: DeserializeOwned>(
+    request: Request<Body>,
+    expected_origin: &str,
+    limit: usize,
+) -> Result<(HeaderMap, T), ApiError> {
     let (parts, body) = request.into_parts();
     if !cookies::exact_origin(&parts.headers, expected_origin) {
         return Err(ApiError::Forbidden);
@@ -420,7 +467,7 @@ async fn json_request<T: DeserializeOwned>(
     if !cookies::is_json(&parts.headers) {
         return Err(ApiError::Invalid);
     }
-    let body = to_bytes(body, 1024).await.map_err(|_| ApiError::Invalid)?;
+    let body = to_bytes(body, limit).await.map_err(|_| ApiError::Invalid)?;
     let input = serde_json::from_slice(&body).map_err(|_| ApiError::Invalid)?;
     Ok((parts.headers, input))
 }

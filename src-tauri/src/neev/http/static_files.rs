@@ -17,6 +17,9 @@ pub(super) async fn page(
     State(state): State<Arc<ServerState>>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
+    if uri.path() == "/auth/invite" && uri.query().is_some() {
+        return Err(ApiError::Invalid);
+    }
     let (file, confirmation) = match uri.path() {
         "/" => ("index.html", false),
         "/login" => ("login.html", false),
@@ -24,6 +27,7 @@ pub(super) async fn page(
         "/workspace" => ("workspace.html", false),
         "/settings" => ("settings.html", false),
         "/auth/email/confirm" => ("neev-auth/confirm.html", true),
+        "/auth/invite" => ("neev-auth/invite.html", true),
         _ => return Err(ApiError::NotFound),
     };
     let bytes =
@@ -54,6 +58,8 @@ pub(super) async fn asset(
     let (file, content_type) = match uri.path() {
         "/neev-auth/confirm.js" => ("neev-auth/confirm.js", "text/javascript; charset=utf-8"),
         "/neev-auth/confirm.css" => ("neev-auth/confirm.css", "text/css; charset=utf-8"),
+        "/neev-auth/invite.js" => ("neev-auth/invite.js", "text/javascript; charset=utf-8"),
+        "/neev-auth/invite.css" => ("neev-auth/invite.css", "text/css; charset=utf-8"),
         _ => return Err(ApiError::NotFound),
     };
     let bytes =

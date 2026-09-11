@@ -15,6 +15,168 @@ use super::secrets::{self, TokenPurpose};
 const IDENTITY_TTL: i64 = 30 * 60;
 const ORGANIZATION_TTL: i64 = 12 * 60 * 60;
 
+pub(crate) struct SessionUser {
+    pub(crate) id: UserId,
+    pub(crate) display_name: String,
+    pub(crate) avatar_url: Option<String>,
+}
+
+pub(crate) struct SessionOrganization {
+    pub(crate) id: OrgId,
+    pub(crate) name: String,
+    pub(crate) logo_data: Option<String>,
+}
+
+pub(crate) struct SessionView {
+    pub(crate) identity: IdentityContext,
+    pub(crate) user: SessionUser,
+    pub(crate) organization: Option<SessionOrganization>,
+    pub(crate) role: Option<Role>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct IdentityScopeHint {
+    pub(crate) org_id: OrgId,
+    pub(crate) member_id: i32,
+    pub(crate) member_revision: i64,
+    pub(crate) org_revision: i64,
+}
+
+pub(crate) async fn identity_scope_hint(
+    database: &DatabaseConnection,
+    identity: &IdentityContext,
+) -> Result<Option<IdentityScopeHint>, AuthError> {
+    let row = db::one(
+        database,
+        "SELECT user_id,account_revision,org_id,member_id,member_revision,org_revision,authenticated_at FROM neev_sessions WHERE id=$1",
+        vec![identity.session_id.clone().into()],
+    )
+    .await?
+    .ok_or(AuthError::Unauthorized)?;
+    if row.try_get::<i32>("", "user_id").map_err(database_error)? != identity.user_id
+        || row
+            .try_get::<i64>("", "account_revision")
+            .map_err(database_error)?
+            != identity.auth_revision
+        || row
+            .try_get::<i64>("", "authenticated_at")
+            .map_err(database_error)?
+            != identity.authenticated_at
+    {
+        return Err(AuthError::Unauthorized);
+    }
+    match (
+        row.try_get::<Option<i32>>("", "org_id")
+            .map_err(database_error)?,
+        row.try_get::<Option<i32>>("", "member_id")
+            .map_err(database_error)?,
+        row.try_get::<Option<i64>>("", "member_revision")
+            .map_err(database_error)?,
+        row.try_get::<Option<i64>>("", "org_revision")
+            .map_err(database_error)?,
+    ) {
+        (None, None, None, None) => Ok(None),
+        (Some(org_id), Some(member_id), Some(member_revision), Some(org_revision)) => {
+            Ok(Some(IdentityScopeHint {
+                org_id,
+                member_id,
+                member_revision,
+                org_revision,
+            }))
+        }
+        _ => Err(AuthError::Unauthorized),
+    }
+}
+
+pub(crate) async fn validate_identity_locked(
+    tx: &DatabaseTransaction,
+    identity: &IdentityContext,
+    account: &Account,
+    scope: Option<(&OrganizationRow, &Membership)>,
+    now: i64,
+) -> Result<(), AuthError> {
+    let current = lock_session(tx, &identity.session_id).await?;
+    validate_session(&current, account.auth_revision, account.disabled, now)?;
+    if account.id != identity.user_id
+        || account.auth_revision != identity.auth_revision
+        || current.user_id != identity.user_id
+        || current.account_revision != identity.auth_revision
+        || current.authenticated_at != identity.authenticated_at
+    {
+        return Err(AuthError::Unauthorized);
+    }
+    match (
+        scope,
+        current.org_id,
+        current.member_id,
+        current.member_revision,
+        current.org_revision,
+    ) {
+        (None, None, None, None, None) => Ok(()),
+        (
+            Some((organization, membership)),
+            Some(org_id),
+            Some(member_id),
+            Some(member_revision),
+            Some(org_revision),
+        ) if organization.id == org_id
+            && organization.revision == org_revision
+            && !organization.disabled
+            && membership.id == member_id
+            && membership.revision == member_revision
+            && membership.active
+            && role(&membership.role).is_ok() =>
+        {
+            Ok(())
+        }
+        (Some(_), Some(_), Some(_), Some(_), Some(_)) => Err(AuthError::Forbidden),
+        _ => Err(AuthError::Unauthorized),
+    }
+}
+
+pub(crate) async fn validate_identity_session_locked(
+    tx: &DatabaseTransaction,
+    identity: &IdentityContext,
+    account: &Account,
+    scope: Option<IdentityScopeHint>,
+    now: i64,
+) -> Result<(), AuthError> {
+    let current = lock_session(tx, &identity.session_id).await?;
+    validate_session(&current, account.auth_revision, account.disabled, now)?;
+    if account.id != identity.user_id
+        || account.auth_revision != identity.auth_revision
+        || current.user_id != identity.user_id
+        || current.account_revision != identity.auth_revision
+        || current.authenticated_at != identity.authenticated_at
+    {
+        return Err(AuthError::Unauthorized);
+    }
+    match (
+        scope,
+        current.org_id,
+        current.member_id,
+        current.member_revision,
+        current.org_revision,
+    ) {
+        (None, None, None, None, None) => Ok(()),
+        (
+            Some(expected),
+            Some(org_id),
+            Some(member_id),
+            Some(member_revision),
+            Some(org_revision),
+        ) if expected.org_id == org_id
+            && expected.member_id == member_id
+            && expected.member_revision == member_revision
+            && expected.org_revision == org_revision =>
+        {
+            Ok(())
+        }
+        (Some(_), Some(_), Some(_), Some(_), Some(_)) => Err(AuthError::Forbidden),
+        _ => Err(AuthError::Unauthorized),
+    }
+}
+
 pub(crate) async fn issue_identity(
     database: &DatabaseConnection,
     user_id: UserId,
@@ -73,6 +235,181 @@ pub(crate) async fn identity(
         auth_revision: session.account_revision,
         authenticated_at: session.authenticated_at,
     })
+}
+
+pub(crate) async fn view(
+    database: &DatabaseConnection,
+    token: &str,
+    raw_csrf: Option<&str>,
+    now: i64,
+) -> Result<SessionView, AuthError> {
+    let token_hash =
+        secrets::digest(TokenPurpose::Session, token).map_err(|_| AuthError::Unauthorized)?;
+    let csrf_hash = raw_csrf
+        .map(|raw| secrets::digest(TokenPurpose::Csrf, raw))
+        .transpose()
+        .map_err(|_| AuthError::Unauthorized)?;
+    let tx = db::begin(database).await?;
+    let row = db::one(
+        &tx,
+        "SELECT s.id,s.user_id,s.account_revision,s.org_id,s.member_id,s.member_revision,s.org_revision,s.authenticated_at,s.expires_at,s.revoked_at,s.csrf_hash,a.auth_revision AS current_account_revision,a.disabled AS account_disabled,a.display_name,a.avatar_url,o.name AS org_name,o.logo_data,o.revision AS current_org_revision,o.disabled AS org_disabled,m.id AS current_member_id,m.revision AS current_member_revision,m.active AS member_active,m.role AS member_role FROM neev_sessions s JOIN neev_accounts a ON a.id=s.user_id LEFT JOIN neev_organizations o ON o.id=s.org_id LEFT JOIN neev_memberships m ON m.id=s.member_id AND m.org_id=s.org_id AND m.user_id=s.user_id WHERE s.token_hash=$1",
+        vec![token_hash.into()],
+    )
+    .await?
+    .ok_or(AuthError::Unauthorized)?;
+    let session = Session::from_query_result(&row, "").map_err(database_error)?;
+    let current_account_revision: i64 = row
+        .try_get("", "current_account_revision")
+        .map_err(database_error)?;
+    let account_disabled: bool = row
+        .try_get("", "account_disabled")
+        .map_err(database_error)?;
+    validate_session(&session, current_account_revision, account_disabled, now)?;
+    if let Some(expected) = csrf_hash {
+        let stored: String = row.try_get("", "csrf_hash").map_err(database_error)?;
+        if stored != expected {
+            return Err(AuthError::Unauthorized);
+        }
+    }
+    let display_name: String = row.try_get("", "display_name").map_err(database_error)?;
+    let avatar_url: Option<String> = row.try_get("", "avatar_url").map_err(database_error)?;
+    let (organization, selected_role) = match (
+        session.org_id,
+        session.member_id,
+        session.member_revision,
+        session.org_revision,
+    ) {
+        (None, None, None, None) => (None, None),
+        (Some(org_id), Some(member_id), Some(member_revision), Some(org_revision)) => {
+            let current_org_revision: Option<i64> = row
+                .try_get("", "current_org_revision")
+                .map_err(database_error)?;
+            let org_disabled: Option<bool> =
+                row.try_get("", "org_disabled").map_err(database_error)?;
+            let current_member_id: Option<i32> = row
+                .try_get("", "current_member_id")
+                .map_err(database_error)?;
+            let current_member_revision: Option<i64> = row
+                .try_get("", "current_member_revision")
+                .map_err(database_error)?;
+            let member_active: Option<bool> =
+                row.try_get("", "member_active").map_err(database_error)?;
+            let member_role: Option<String> =
+                row.try_get("", "member_role").map_err(database_error)?;
+            if current_org_revision != Some(org_revision)
+                || org_disabled != Some(false)
+                || current_member_id != Some(member_id)
+                || current_member_revision != Some(member_revision)
+                || member_active != Some(true)
+            {
+                return Err(AuthError::Forbidden);
+            }
+            let selected_role = role(&member_role.ok_or(AuthError::Forbidden)?)?;
+            (
+                Some(SessionOrganization {
+                    id: org_id,
+                    name: row.try_get("", "org_name").map_err(database_error)?,
+                    logo_data: row.try_get("", "logo_data").map_err(database_error)?,
+                }),
+                Some(selected_role),
+            )
+        }
+        _ => return Err(AuthError::Unauthorized),
+    };
+    let result = SessionView {
+        identity: IdentityContext {
+            user_id: session.user_id,
+            session_id: session.id,
+            auth_revision: session.account_revision,
+            authenticated_at: session.authenticated_at,
+        },
+        user: SessionUser {
+            id: session.user_id,
+            display_name,
+            avatar_url,
+        },
+        organization,
+        role: selected_role,
+    };
+    tx.commit().await.map_err(database_error)?;
+    Ok(result)
+}
+
+pub(crate) async fn methods(
+    database: &DatabaseConnection,
+    token: &str,
+    now: i64,
+) -> Result<Vec<String>, AuthError> {
+    let token_hash =
+        secrets::digest(TokenPurpose::Session, token).map_err(|_| AuthError::Unauthorized)?;
+    let tx = db::begin(database).await?;
+    let row = db::one(
+        &tx,
+        "SELECT s.id,s.user_id,s.account_revision,s.org_id,s.member_id,s.member_revision,s.org_revision,s.authenticated_at,s.expires_at,s.revoked_at,a.auth_revision AS current_account_revision,a.disabled AS account_disabled,o.revision AS current_org_revision,o.disabled AS org_disabled,m.id AS current_member_id,m.revision AS current_member_revision,m.active AS member_active,m.role AS member_role FROM neev_sessions s JOIN neev_accounts a ON a.id=s.user_id LEFT JOIN neev_organizations o ON o.id=s.org_id LEFT JOIN neev_memberships m ON m.id=s.member_id AND m.org_id=s.org_id AND m.user_id=s.user_id WHERE s.token_hash=$1",
+        vec![token_hash.into()],
+    )
+    .await?
+    .ok_or(AuthError::Unauthorized)?;
+    let session = Session::from_query_result(&row, "").map_err(database_error)?;
+    let revision: i64 = row
+        .try_get("", "current_account_revision")
+        .map_err(database_error)?;
+    let disabled: bool = row
+        .try_get("", "account_disabled")
+        .map_err(database_error)?;
+    validate_session(&session, revision, disabled, now)?;
+    match (
+        session.org_id,
+        session.member_id,
+        session.member_revision,
+        session.org_revision,
+    ) {
+        (None, None, None, None) => {}
+        (Some(_), Some(member_id), Some(member_revision), Some(org_revision)) => {
+            let current_org_revision: Option<i64> = row
+                .try_get("", "current_org_revision")
+                .map_err(database_error)?;
+            let org_disabled: Option<bool> =
+                row.try_get("", "org_disabled").map_err(database_error)?;
+            let current_member_id: Option<i32> = row
+                .try_get("", "current_member_id")
+                .map_err(database_error)?;
+            let current_member_revision: Option<i64> = row
+                .try_get("", "current_member_revision")
+                .map_err(database_error)?;
+            let member_active: Option<bool> =
+                row.try_get("", "member_active").map_err(database_error)?;
+            let member_role: Option<String> =
+                row.try_get("", "member_role").map_err(database_error)?;
+            if current_org_revision != Some(org_revision)
+                || org_disabled != Some(false)
+                || current_member_id != Some(member_id)
+                || current_member_revision != Some(member_revision)
+                || member_active != Some(true)
+            {
+                return Err(AuthError::Forbidden);
+            }
+            role(&member_role.ok_or(AuthError::Forbidden)?)?;
+        }
+        _ => return Err(AuthError::Unauthorized),
+    }
+    let rows = tx
+        .query_all(db::statement(
+            &tx,
+            "SELECT DISTINCT provider FROM neev_identities WHERE user_id=$1 ORDER BY provider",
+            vec![session.user_id.into()],
+        ))
+        .await
+        .map_err(database_error)?;
+    let methods = rows
+        .into_iter()
+        .map(|row| {
+            row.try_get::<String>("", "provider")
+                .map_err(database_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(methods)
 }
 
 pub(crate) async fn organization(
@@ -337,7 +674,10 @@ fn validate_session(
     Ok(())
 }
 
-async fn lock_account(tx: &DatabaseTransaction, id: UserId) -> Result<Account, AuthError> {
+pub(crate) async fn lock_account(
+    tx: &DatabaseTransaction,
+    id: UserId,
+) -> Result<Account, AuthError> {
     let row = db::one(
         tx,
         &format!(
@@ -355,7 +695,7 @@ async fn lock_account(tx: &DatabaseTransaction, id: UserId) -> Result<Account, A
     Ok(account)
 }
 
-async fn lock_organization(
+pub(crate) async fn lock_organization(
     tx: &DatabaseTransaction,
     id: OrgId,
 ) -> Result<OrganizationRow, AuthError> {
@@ -376,7 +716,7 @@ async fn lock_organization(
     Ok(organization)
 }
 
-async fn lock_membership(
+pub(crate) async fn lock_membership(
     tx: &DatabaseTransaction,
     org: OrgId,
     user: UserId,
@@ -399,12 +739,12 @@ async fn lock_membership(
     Ok(membership)
 }
 
-async fn lock_session(tx: &DatabaseTransaction, id: &str) -> Result<Session, AuthError> {
+pub(crate) async fn lock_session(tx: &DatabaseTransaction, id: &str) -> Result<Session, AuthError> {
     let row = db::one(tx, &format!("SELECT id,user_id,account_revision,org_id,member_id,member_revision,org_revision,authenticated_at,expires_at,revoked_at FROM neev_sessions WHERE id=$1{}", lock(tx)), vec![id.into()]).await?.ok_or(AuthError::Unauthorized)?;
     Session::from_query_result(&row, "").map_err(database_error)
 }
 
-fn lock(tx: &DatabaseTransaction) -> &'static str {
+pub(crate) fn lock(tx: &DatabaseTransaction) -> &'static str {
     if tx.get_database_backend() == DbBackend::Postgres {
         " FOR UPDATE"
     } else {
@@ -412,7 +752,7 @@ fn lock(tx: &DatabaseTransaction) -> &'static str {
     }
 }
 
-fn role(value: &str) -> Result<Role, AuthError> {
+pub(crate) fn role(value: &str) -> Result<Role, AuthError> {
     match value {
         "admin" => Ok(Role::Admin),
         "member" => Ok(Role::Member),

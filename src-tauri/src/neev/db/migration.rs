@@ -20,6 +20,7 @@ pub(super) const TABLE_NAMES: &[&str] = &[
     "neev_requests",
     "neev_nodes",
 ];
+pub(super) const SCHEMA_VERSION: i64 = 2;
 
 // Column descriptors keep identical SQL types/constraints across supported DBs.
 // i=integer, l=bigint, t=text, b=boolean; ? suffix means nullable.
@@ -58,6 +59,9 @@ fn table(
             _ => {
                 c.text();
             }
+        }
+        if *kind == "l1" {
+            c.default(1);
         }
         if !kind.ends_with('?') {
             c.not_null();
@@ -99,7 +103,7 @@ pub(super) fn tables() -> Vec<TableCreateStatement> {
         table("neev_accounts", &[("display_name","t"),("avatar_url","t?"),("auth_revision","l"),("disabled","b"),("created_at","l")], true, &[], &["id>0", "auth_revision>=1", "length(display_name) BETWEEN 1 AND 200"], &[], &[]),
         table("neev_identities", &[("user_id","i"),("provider","t"),("issuer","t"),("subject","t"),("created_at","l")], true, &[], &["provider IN ('google','github','email')", "length(subject) BETWEEN 1 AND 255"], &[&["provider","issuer","subject"]], &[("user_id","neev_accounts","id")]),
         table("neev_verified_emails", &[("user_id","i"),("canonical_email","t"),("verified_at","l")], true, &[], &["length(canonical_email) BETWEEN 3 AND 254"], &[&["canonical_email"]], &[("user_id","neev_accounts","id")]),
-        table("neev_organizations", &[("owner_user_id","i"),("name","t"),("logo_data","t?"),("revision","l"),("disabled","b"),("created_at","l")], true, &[], &["id>0", "revision>=1", "length(name) BETWEEN 1 AND 100"], &[], &[("owner_user_id","neev_accounts","id")]),
+        table("neev_organizations", &[("owner_user_id","i"),("name","t"),("logo_data","t?"),("revision","l"),("branding_revision","l1"),("disabled","b"),("created_at","l")], true, &[], &["id>0", "revision>=1", "branding_revision>=1", "length(name) BETWEEN 1 AND 100"], &[], &[("owner_user_id","neev_accounts","id")]),
         table("neev_memberships", &[("org_id","i"),("user_id","i"),("role","t"),("revision","l"),("active","b")], true, &[], &["id>0", "revision>=1", "role IN ('admin','member')"], &[&["org_id","user_id"], &["id","org_id","user_id"]], &[("org_id","neev_organizations","id"),("user_id","neev_accounts","id")]),
         table("neev_sessions", &[("id","t"),("token_hash","t"),("csrf_hash","t"),("user_id","i"),("account_revision","l"),("org_id","i?"),("member_id","i?"),("member_revision","l?"),("org_revision","l?"),("authenticated_at","l"),("expires_at","l"),("revoked_at","l?")], false, &["id"], &[
             "account_revision>=1", "expires_at>authenticated_at", "length(token_hash)=64", "length(csrf_hash)=64",
@@ -116,7 +120,7 @@ pub(super) fn tables() -> Vec<TableCreateStatement> {
         ], &[&["token_hash"]], &[("org_id","neev_organizations","id"),("inviter_id","neev_accounts","id"),("accepted_by","neev_accounts","id")]),
         table("neev_quota_buckets", &[("kind","t"),("key_hash","t"),("window_start","l"),("used","l"),("expires_at","l")], false, &["kind","key_hash","window_start"], &["used>=0"], &[], &[]),
         table("neev_mail_leases", &[("id","t"),("expires_at","l")], false, &["id"], &[], &[], &[]),
-        table("neev_requests", &[("user_id","i"),("action","t"),("request_id","t"),("body_hash","t"),("resource_id","i"),("expires_at","l")], false, &["user_id","action","request_id"], &["length(body_hash)=64"], &[], &[("user_id","neev_accounts","id")]),
+        table("neev_requests", &[("user_id","i"),("action","t"),("request_id","t"),("body_hash","t"),("resource_id","t"),("expires_at","l")], false, &["user_id","action","request_id"], &["length(body_hash)=64", "length(resource_id) BETWEEN 1 AND 64"], &[], &[("user_id","neev_accounts","id")]),
         table("neev_nodes", &[("org_id","i"),("parent_id","i?"),("kind","t"),("name","t"),("revision","l"),("created_by","i")], true, &[], &[
             "id>0", "revision>=1", "kind IN ('project','folder','working_directory')", "length(name) BETWEEN 1 AND 100", "parent_id IS NULL OR parent_id<>id", "(kind='project' AND parent_id IS NULL) OR (kind<>'project' AND parent_id IS NOT NULL)",
         ], &[&["id","org_id"]], &[("org_id","neev_organizations","id"),("created_by","neev_accounts","id")]),

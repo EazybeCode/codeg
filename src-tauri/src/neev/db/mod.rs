@@ -28,8 +28,9 @@ pub(crate) async fn execute<C: ConnectionTrait>(
         .map_err(database_error)
 }
 
-/// Native transaction lock order: accounts ascending, org, memberships ascending,
-/// then session/attempt/invite/resource. No network calls inside transactions.
+/// Native transaction lock order: admission guard, accounts ascending, organizations
+/// ascending, memberships ascending, then session/attempt/invite/resource. No network
+/// calls inside transactions.
 pub(crate) async fn begin(db: &DatabaseConnection) -> Result<DatabaseTransaction, AuthError> {
     let tx = db.begin().await.map_err(database_error)?;
     if db.get_database_backend() == DbBackend::Sqlite {
@@ -42,6 +43,20 @@ pub(crate) async fn begin(db: &DatabaseConnection) -> Result<DatabaseTransaction
         .await?;
     }
     Ok(tx)
+}
+
+/// Serializes all admission/quota decisions before any domain lock is acquired.
+pub(crate) async fn lock_admission_guard(tx: &DatabaseTransaction) -> Result<(), AuthError> {
+    if tx.get_database_backend() == DbBackend::Postgres {
+        one(
+            tx,
+            "SELECT version FROM neev_schema_version WHERE id=1 FOR UPDATE",
+            vec![],
+        )
+        .await?
+        .ok_or(AuthError::Unavailable)?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError> {
@@ -89,7 +104,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         if version
             .try_get::<i64>("", "version")
             .map_err(database_error)?
-            != 1
+            != migration::SCHEMA_VERSION
         {
             return Err(AuthError::Unavailable);
         }
@@ -106,8 +121,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         }
         execute(
             &tx,
-            "INSERT INTO neev_schema_version(id,version) VALUES(1,1)",
-            vec![],
+            "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
+            vec![migration::SCHEMA_VERSION.into()],
         )
         .await?;
     }
