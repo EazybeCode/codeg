@@ -744,18 +744,26 @@ pub(super) async fn cleanup_postgres(
 }
 
 pub(super) async fn wait_for_postgres_lock(admin: &DatabaseConnection, query_pattern: &str) {
+    wait_for_postgres_locks(admin, query_pattern, 1).await;
+}
+
+pub(super) async fn wait_for_postgres_locks(
+    admin: &DatabaseConnection,
+    query_pattern: &str,
+    expected: i64,
+) {
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             let row = admin
                 .query_one(Statement::from_sql_and_values(
                     admin.get_database_backend(),
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1) AS waiting",
+                    "SELECT COUNT(*) AS waiting FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE $1",
                     vec![query_pattern.into()],
                 ))
                 .await
                 .unwrap()
                 .unwrap();
-            if row.try_get::<bool>("", "waiting").unwrap() {
+            if row.try_get::<i64>("", "waiting").unwrap() >= expected {
                 return;
             }
             tokio::task::yield_now().await;
