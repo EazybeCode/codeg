@@ -140,6 +140,38 @@ Existing app/database start times were unchanged and their health remained good.
 Production supervisor key/store roots were still absent: no production
 credentials were provisioned and no real provider was contacted.
 
+### Final reviewed source and host installation
+
+After whole-plan review and the scoped correction review, source `f5f3cefa`
+passed a fresh Linux run: 59 ordinary tests passed with one privileged test
+skipped (60 total, 0.519s), followed by the explicit real-Linux acceptance
+test passing 1/1 in 0.965s. The final corrections revalidate mapping ownership
+before failed-open cleanup and close directory descriptors on validation errors.
+No review findings remain for this storage slice.
+
+The second retained invented fixture is
+`/var/tmp/neev-volume-acceptance.xdvkq1bs`, handle
+`ea013e7c825e49c499d59efed229bbf5`. Post-test inspection confirmed locked
+status and no remaining mapper. Both encrypted test fixtures and their keys
+are retained; neither contains a real provider account.
+
+The reviewed helper files are installed under
+`/opt/neev-supervisor/f5f3cefa/`, root-owned mode `0400` with private `0700`
+directories. The fixed-path CLI initialized the production master key at
+`/etc/neev-supervisor/credential-master.key` (root-owned `0600`, 32 bytes) and
+store at `/var/lib/neev-supervisor/credentials` (root-owned `0700`). A second
+process retained the same key, compared privately without emitting it or its
+digest. An unprivileged read check was denied. The production store contains
+only its lock file: zero provider connection volumes have been provisioned.
+Existing app and database container start times were unchanged.
+
+Installation added no daemon, public endpoint, provider login, or agent runtime.
+It did not restart the host or deploy the native application. Read-only checks
+confirmed the deployed legacy backup script and its current archive sources
+exclude the new key/store roots; future native backup coverage still needs
+separate acceptance. At this checkpoint, HTTPS connections to both `neev.so`
+and `app.neev.so` were refused; this is not a public-release acceptance.
+
 Authenticated supervisor controls, egress enforcement, browser/session and
 generation handling, real provider/account tests, HTTP/job wiring, host reboot,
 provider refresh, native-backup exclusion validation, and public release are
