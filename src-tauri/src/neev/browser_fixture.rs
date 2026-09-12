@@ -20,6 +20,8 @@ use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
+    io::{self, Read},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -980,6 +982,166 @@ async fn native_browser_http_round_trip_tenant_denial_and_link_conflict() {
     result.unwrap();
 }
 
+const FIXTURE_CHILD_OUTPUT_LIMIT: u64 = 16 * 1024;
+
+fn read_fixture_child_output(path: &std::path::Path) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    std::fs::File::open(path)?
+        .take(FIXTURE_CHILD_OUTPUT_LIMIT + 1)
+        .read_to_end(&mut output)?;
+    if output.len() as u64 > FIXTURE_CHILD_OUTPUT_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "fixture child output exceeded limit",
+        ));
+    }
+    Ok(output)
+}
+
+struct ReapedFixtureChild(Child);
+
+impl ReapedFixtureChild {
+    fn kill_and_wait(&mut self) -> io::Result<ExitStatus> {
+        if self.0.try_wait()?.is_none() {
+            self.0.kill()?;
+        }
+        self.0.wait()
+    }
+}
+
+impl Drop for ReapedFixtureChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+async fn bounded_fixture_child(
+    mut command: Command,
+    deadline: Duration,
+) -> io::Result<Option<Output>> {
+    let output_root = tempfile::tempdir()?;
+    let stdout_path = output_root.path().join("stdout");
+    let stderr_path = output_root.path().join("stderr");
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(std::fs::File::create(&stdout_path)?))
+        .stderr(Stdio::from(std::fs::File::create(&stderr_path)?));
+    let mut child = ReapedFixtureChild(command.spawn()?);
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.0.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= deadline {
+            child.kill_and_wait()?;
+            return Ok(None);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let stdout = read_fixture_child_output(&stdout_path)?;
+    let stderr = read_fixture_child_output(&stderr_path)?;
+    Ok(Some(Output {
+        status,
+        stdout,
+        stderr,
+    }))
+}
+
+fn stalled_fixture_child_command(
+    started: &std::path::Path,
+    outlived_cleanup: &std::path::Path,
+    owned_root: &std::path::Path,
+) -> Command {
+    let node = std::env::var_os("NEEV_TEST_NODE").unwrap_or_else(|| "node".into());
+    let mut command = Command::new(node);
+    command
+        .args([
+            "-e",
+            "const fs=require('node:fs');fs.writeFileSync(process.env.NEEV_STALLED_CHILD_STARTED,'started');setTimeout(()=>{if(!fs.existsSync(process.env.NEEV_STALLED_CHILD_OWNED_ROOT))fs.writeFileSync(process.env.NEEV_STALLED_CHILD_OUTLIVED_CLEANUP,'child outlived fixture cleanup')},5000)",
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("NEEV_STALLED_CHILD_STARTED", started)
+        .env("NEEV_STALLED_CHILD_OUTLIVED_CLEANUP", outlived_cleanup)
+        .env("NEEV_STALLED_CHILD_OWNED_ROOT", owned_root);
+    command
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL; included by full native gate"]
+async fn stalled_preflight_child_is_reaped_before_exact_fixture_cleanup() {
+    use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
+
+    let fixture = Fixture::start().await;
+    let owned_document_root = fixture.document_root.path().to_path_buf();
+    let owned_schema = fixture.schema.clone();
+    let observer = Database::connect(std::env::var("NEEV_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let marker_root = tempfile::tempdir().unwrap();
+    let started = marker_root.path().join("started");
+    let outlived_cleanup = marker_root.path().join("outlived-cleanup");
+    let cancelled_started = marker_root.path().join("cancelled-started");
+    let cancelled_outlived_cleanup = marker_root.path().join("cancelled-outlived-cleanup");
+    let command = stalled_fixture_child_command(&started, &outlived_cleanup, &owned_document_root);
+
+    let outcome = bounded_fixture_child(command, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert!(
+        outcome.is_none(),
+        "the lifecycle control must reach its deadline"
+    );
+    assert!(started.exists(), "the stalled child must actually start");
+
+    let cancelled_command = stalled_fixture_child_command(
+        &cancelled_started,
+        &cancelled_outlived_cleanup,
+        &owned_document_root,
+    );
+    let cancelled_child = tokio::spawn(bounded_fixture_child(
+        cancelled_command,
+        Duration::from_secs(30),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !cancelled_started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    cancelled_child.abort();
+    assert!(cancelled_child.await.unwrap_err().is_cancelled());
+
+    fixture.shutdown().await;
+    assert!(!owned_document_root.exists());
+    let row = observer
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*) AS remaining FROM pg_namespace WHERE nspname = $1",
+            vec![owned_schema.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    observer.close().await.unwrap();
+    assert_eq!(row.try_get::<i64>("", "remaining").unwrap(), 0);
+    // Both synthetic children would write after five seconds if either escaped
+    // its owner; wait beyond that point before accepting cleanup ordering.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        !outlived_cleanup.exists(),
+        "stalled preflight child continued after exact fixture cleanup"
+    );
+    assert!(
+        !cancelled_outlived_cleanup.exists(),
+        "cancelled preflight child continued after exact fixture cleanup"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires explicitly isolated PostgreSQL; included by full native gate"]
 async fn native_browser_http_content_collaboration_conflict_restore_and_revocation() {
@@ -1271,22 +1433,21 @@ async fn native_browser_http_content_collaboration_conflict_restore_and_revocati
         let session_name = http::cookies::CookieNames::for_preview(true).session;
         let native_session = member.cookies.get(session_name).unwrap().clone();
         let preflight_origin = member.origin.clone();
-        let preflight = tokio::task::spawn_blocking(move || {
-            let node = std::env::var_os("NEEV_TEST_NODE").unwrap_or_else(|| "node".into());
-            std::process::Command::new(node)
-                .arg(
-                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                        .join("../scripts/neev-content-preflight.mjs"),
-                )
-                .env_clear()
-                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-                .env("NEEV_PREFLIGHT_ORIGIN", preflight_origin)
-                .env("NEEV_PREFLIGHT_SESSION", native_session)
-                .output()
-        })
-        .await
-        .unwrap()
-        .unwrap();
+        let node = std::env::var_os("NEEV_TEST_NODE").unwrap_or_else(|| "node".into());
+        let mut command = Command::new(node);
+        command
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../scripts/neev-content-preflight.mjs"),
+            )
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("NEEV_PREFLIGHT_ORIGIN", preflight_origin)
+            .env("NEEV_PREFLIGHT_SESSION", native_session);
+        let preflight = bounded_fixture_child(command, Duration::from_secs(20))
+            .await
+            .unwrap()
+            .expect("fixture-owned native content preflight timed out after child termination");
         assert!(
             preflight.status.success(),
             "fixture-owned native content preflight failed: {}",

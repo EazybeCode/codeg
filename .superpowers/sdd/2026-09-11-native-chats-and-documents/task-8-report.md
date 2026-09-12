@@ -336,6 +336,82 @@ founder feedback open. Existing upstream workflow/docs prove read-only discovery
 only; automatic adaptation, proposal, merge and deployment remain separate
 maintenance work, and no live GitHub state was checked.
 
+## Review fix round 1: bounded preflight child ownership
+
+Independent review found that the real-HTTP workflow ran Node through
+`spawn_blocking(Command::output)`. The installed Tokio 1.49 source confirms that
+a started blocking task cannot be aborted and runtime shutdown may wait for it
+indefinitely. Consequently, the workflow's 120-second action timeout could abort
+only the surrounding async task while a stalled Node process and blocking worker
+continued across fixture cleanup.
+
+The behavioral RED added a real stalled child that wrote a marker if it survived
+until after the fixture-owned document root disappeared. It used the exact native
+test contract:
+
+```sh
+PATH=/Users/air1/.cargo/bin:/opt/homebrew/opt/node@22/bin:$PATH \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 \
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+NEEV_TEST_DATABASE_URL='postgresql:///neev_identity_test?host=/tmp/neev-pg.aTlLNW&port=55439&user=air1' \
+cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features \
+  neev::browser_fixture::stalled_preflight_child_is_reaped_before_exact_fixture_cleanup \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+RED result: emitted
+`src-tauri/target/debug/deps/codeg_lib-9b806c9f34534627`; `0/1` passed, `3977`
+filtered, `5.19s`, exit `101`. Before the assertion, the owned root was absent
+and a read-only `pg_namespace` query returned zero for the exact generated schema;
+the child then wrote `child outlived fixture cleanup`.
+
+The fix removes `spawn_blocking` and `Command::output`. A test-only owner retains
+the actual `std::process::Child`, writes stdout/stderr into a separate owned
+temporary directory, caps each captured stream at 16 KiB, and polls `try_wait`
+without blocking. The real preflight has a 20-second parent deadline around its
+own 15-second JavaScript deadline. Deadline expiry performs explicit kill and
+wait before returning. If the outer 120-second action task instead aborts this
+future, the owner's `Drop` performs synchronous kill and wait before task
+cancellation completes; fixture cleanup therefore cannot overtake the child.
+The output directory is removed on every return/drop and contains no session
+value because the preflight emits only sanitized counts.
+
+The final regression exercises both paths with real Node children: one reaches
+the two-second child deadline; a second has a 30-second child deadline but its
+owning async task is aborted and awaited, mirroring the outer workflow timeout.
+Only after both ownership paths return does the test stop listeners, drop the
+exact UUID schema, and remove the exact root. It then waits through the children's
+five-second would-have-written boundary and finds neither escape marker. Final
+result: `1/1` passed, `3976` filtered, `7.20s`, exit `0` (fresh serial rebuild
+`5m48s`).
+
+The unchanged real-HTTP content workflow was rerun on that final binary with the
+same environment/flags and its exact test name:
+
+```sh
+PATH=/Users/air1/.cargo/bin:/opt/homebrew/opt/node@22/bin:$PATH \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 \
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+NEEV_TEST_DATABASE_URL='postgresql:///neev_identity_test?host=/tmp/neev-pg.aTlLNW&port=55439&user=air1' \
+cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features \
+  neev::browser_fixture::native_browser_http_content_collaboration_conflict_restore_and_revocation \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+Result: `1/1` passed, `3976` filtered, `0.67s`, exit `0`; the actual Node
+preflight DTO/count check, cross-listener document path and exact schema/root
+cleanup all completed. Both final commands retained the three existing Rust
+warnings (unused migration import, dead `nodes::get`, linker `__eh_frame`) plus
+the existing future-incompatibility notice. No frontend source changed, so the
+controller explicitly did not request another frontend/export/browser run.
+
+Self-review checked the outer-cancellation ordering, normal completion, deadline
+expiry, output-limit/error and helper-future-drop paths. The deliberate
+test-fixture tradeoff is a short synchronous `kill`/`wait` during cancellation;
+for this same-user owned child, that prevents a zombie or resource-cleanup race.
+The normal async polling path does not block. Production server/runtime/provider
+code and flags remain unchanged. [org-memory: wiki/engineering/workos.md]
+
 ## Exact Task 8 files
 
 - `src-tauri/src/neev/browser_fixture.rs`
