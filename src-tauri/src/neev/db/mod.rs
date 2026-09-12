@@ -151,8 +151,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
 /// Shares the migrator's authoritative table names but never calls the migrator.
 pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(db: &C) -> Result<(), AuthError> {
     let sql = match db.get_database_backend() {
-        DbBackend::Postgres => "SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','f')",
-        DbBackend::Sqlite => "SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'",
+        DbBackend::Postgres => "SELECT c.relname AS name,(c.relkind='r' AND NOT c.relispartition) AS native_table FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','f')",
+        DbBackend::Sqlite => "SELECT name,type='table' AS native_table FROM pragma_table_list WHERE schema='main' AND name NOT LIKE 'sqlite_%'",
         _ => return Err(AuthError::Unavailable),
     };
     let rows = db
@@ -163,6 +163,14 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(db: &C) -> Res
         .iter()
         .map(|row| row.try_get("", "name").map_err(database_error))
         .collect::<Result<_, _>>()?;
+    for row in &rows {
+        if !row
+            .try_get::<bool>("", "native_table")
+            .map_err(database_error)?
+        {
+            return Err(AuthError::Unavailable);
+        }
+    }
     let expected = migration::TABLE_NAMES
         .iter()
         .chain(content_migration::TABLE_NAMES.iter())

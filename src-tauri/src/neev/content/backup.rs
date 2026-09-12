@@ -152,37 +152,223 @@ pub(super) fn arguments(args: &[String]) -> Result<Arguments, ContentError> {
     Ok(Arguments { database, schema })
 }
 
+pub(super) fn isolated_command(
+    executable: &std::path::Path,
+    args: &[String],
+    database_url: &std::ffi::OsStr,
+    document_root: &std::ffi::OsStr,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
+    command
+        .env_clear()
+        .args(args)
+        .env("NEEV_VERIFY_DATABASE_URL", database_url)
+        .env("NEEV_VERIFY_DOCUMENT_ROOT", document_root)
+        .env("NEEV_VERIFY_ISOLATED", "1");
+    command
+}
+
+fn isolated_environment() -> Result<(), ContentError> {
+    if std::env::var("NEEV_VERIFY_ISOLATED").as_deref() != Ok("1")
+        || std::env::vars_os().any(|(name, _)| {
+            // CoreFoundation adds this after exec on macOS. Never forward or
+            // use its value; no PostgreSQL or general environment exception.
+            if cfg!(target_os = "macos") && name == "__CF_USER_TEXT_ENCODING" {
+                return false;
+            }
+            !matches!(
+                name.to_str(),
+                Some(
+                    "NEEV_VERIFY_DATABASE_URL"
+                        | "NEEV_VERIFY_DOCUMENT_ROOT"
+                        | "NEEV_VERIFY_ISOLATED"
+                )
+            )
+        })
+    {
+        return Err(ContentError::Invalid);
+    }
+    Ok(())
+}
+
+pub(super) fn controlled_options(
+    raw: &str,
+    schema: &str,
+) -> Result<sea_orm::sqlx::postgres::PgConnectOptions, ContentError> {
+    use sea_orm::sqlx::{
+        postgres::{PgConnectOptions, PgSslMode},
+        ConnectOptions,
+    };
+    use std::collections::BTreeMap;
+    // new_without_pgpass still reads PG*; this contract must precede its call.
+    isolated_environment()?;
+    if !identifier(schema) || raw.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(ContentError::Invalid);
+    }
+    let (scheme, rest) = raw.split_once("://").ok_or(ContentError::Invalid)?;
+    if !matches!(scheme, "postgres" | "postgresql") {
+        return Err(ContentError::Invalid);
+    }
+    let (_, path) = rest.split_once('/').ok_or(ContentError::Invalid)?;
+    let raw_database = path.split(['?', '#']).next().ok_or(ContentError::Invalid)?;
+    let database = urlencoding::decode(raw_database).map_err(|_| ContentError::Invalid)?;
+    if !identifier(&database) || raw_database.contains('/') {
+        return Err(ContentError::Invalid);
+    }
+    let parsed = url::Url::parse(raw).map_err(|_| ContentError::Invalid)?;
+    if parsed.fragment().is_some()
+        || urlencoding::decode(parsed.path().trim_start_matches('/'))
+            .map_err(|_| ContentError::Invalid)?
+            != database
+    {
+        return Err(ContentError::Invalid);
+    }
+    let mut values = BTreeMap::<String, String>::new();
+    fn insert(
+        values: &mut BTreeMap<String, String>,
+        name: &str,
+        value: String,
+    ) -> Result<(), ContentError> {
+        if (value.is_empty() && name != "password")
+            || value.contains('\0')
+            || values.insert(name.into(), value).is_some()
+        {
+            return Err(ContentError::Invalid);
+        }
+        Ok(())
+    }
+    if let Some(host) = parsed.host_str().filter(|host| !host.is_empty()) {
+        insert(
+            &mut values,
+            "host",
+            urlencoding::decode(host.trim_start_matches('[').trim_end_matches(']'))
+                .map_err(|_| ContentError::Invalid)?
+                .into_owned(),
+        )?;
+    }
+    if let Some(port) = parsed.port() {
+        insert(&mut values, "port", port.to_string())?;
+    }
+    if !parsed.username().is_empty() {
+        insert(
+            &mut values,
+            "user",
+            urlencoding::decode(parsed.username())
+                .map_err(|_| ContentError::Invalid)?
+                .into_owned(),
+        )?;
+    }
+    if let Some(password) = parsed.password() {
+        insert(
+            &mut values,
+            "password",
+            urlencoding::decode(password)
+                .map_err(|_| ContentError::Invalid)?
+                .into_owned(),
+        )?;
+    }
+    for pair in parsed
+        .query()
+        .unwrap_or("")
+        .split('&')
+        .filter(|part| !part.is_empty())
+    {
+        let (key, value) = pair.split_once('=').ok_or(ContentError::Invalid)?;
+        let key = urlencoding::decode(key).map_err(|_| ContentError::Invalid)?;
+        if !matches!(
+            key.as_ref(),
+            "host"
+                | "port"
+                | "user"
+                | "password"
+                | "sslmode"
+                | "sslrootcert"
+                | "sslcert"
+                | "sslkey"
+        ) {
+            return Err(ContentError::Invalid);
+        }
+        insert(
+            &mut values,
+            &key,
+            urlencoding::decode(value)
+                .map_err(|_| ContentError::Invalid)?
+                .into_owned(),
+        )?;
+    }
+    let host = values.get("host").ok_or(ContentError::Invalid)?;
+    let user = values.get("user").ok_or(ContentError::Invalid)?;
+    let port: u16 = values
+        .get("port")
+        .map(|value| value.parse().map_err(|_| ContentError::Invalid))
+        .transpose()?
+        .unwrap_or(5432);
+    if port == 0
+        || host.contains(',')
+        || values.contains_key("sslcert") != values.contains_key("sslkey")
+    {
+        return Err(ContentError::Invalid);
+    }
+    let ssl = values
+        .get("sslmode")
+        .map(|value| {
+            value
+                .parse::<PgSslMode>()
+                .map_err(|_| ContentError::Invalid)
+        })
+        .transpose()?
+        .unwrap_or(PgSslMode::Prefer);
+    // SQLx 0.8 treats Allow as Disable (its fallback is unimplemented).
+    if matches!(ssl, PgSslMode::Allow) {
+        return Err(ContentError::Invalid);
+    }
+    // Public constructor, public setters, no URL parser and no apply_pgpass path.
+    let mut options = PgConnectOptions::new_without_pgpass()
+        .host(host)
+        .port(port)
+        .username(user)
+        .database(&database)
+        .ssl_mode(ssl)
+        .application_name("neev-content-verify")
+        .options([("search_path", schema)])
+        .disable_statement_logging();
+    if host.starts_with('/') {
+        options = options.socket(host);
+    }
+    if let Some(password) = values.get("password") {
+        options = options.password(password);
+    }
+    if let Some(path) = values.get("sslrootcert") {
+        options = options.ssl_root_cert(path);
+    }
+    if let Some(path) = values.get("sslcert") {
+        options = options.ssl_client_cert(path);
+    }
+    if let Some(path) = values.get("sslkey") {
+        options = options.ssl_client_key(path);
+    }
+    Ok(options)
+}
+
 async fn run(args: Arguments) -> Result<String, ContentError> {
-    use sea_orm::{ConnectOptions, Database};
     use sha2::{Digest, Sha256};
+    isolated_environment()?;
     let database_url =
         std::env::var("NEEV_VERIFY_DATABASE_URL").map_err(|_| ContentError::Invalid)?;
     let document_root =
         std::env::var_os("NEEV_VERIFY_DOCUMENT_ROOT").ok_or(ContentError::Invalid)?;
-    let parsed = url::Url::parse(&database_url).map_err(|_| ContentError::Invalid)?;
-    if !matches!(parsed.scheme(), "postgres" | "postgresql")
-        || parsed.fragment().is_some()
-        || urlencoding::decode(
-            parsed
-                .path()
-                .strip_prefix('/')
-                .ok_or(ContentError::Invalid)?,
-        )
-        .map_err(|_| ContentError::Invalid)?
-            != args.database
-    {
+    let options = controlled_options(&database_url, &args.schema)?;
+    if options.get_database() != Some(args.database.as_str()) {
         return Err(ContentError::Invalid);
     }
     let store = BlobStore::open(std::path::Path::new(&document_root))?;
-    let mut options = ConnectOptions::new(database_url);
-    options
+    let pool = sea_orm::sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .sqlx_logging(false)
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .set_schema_search_path(&args.schema);
-    let database = Database::connect(options)
+        .acquire_timeout(std::time::Duration::from_secs(15))
+        .connect_with(options)
         .await
         .map_err(|_| ContentError::Storage)?;
+    let database = sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(pool);
     let result = async {
         verify_destination(&database, &args.database, &args.schema, true).await?;
         verify_snapshot(&database, &store).await
@@ -202,7 +388,22 @@ async fn run(args: Arguments) -> Result<String, ContentError> {
 
 pub(crate) fn run_content_verifier() -> std::process::ExitCode {
     let result = (|| {
-        let args = arguments(&std::env::args().skip(1).collect::<Vec<_>>())?;
+        let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+        let args = arguments(&raw_args)?;
+        if std::env::var("NEEV_VERIFY_ISOLATED").as_deref() != Ok("1") {
+            let url = std::env::var_os("NEEV_VERIFY_DATABASE_URL").ok_or(ContentError::Invalid)?;
+            let root =
+                std::env::var_os("NEEV_VERIFY_DOCUMENT_ROOT").ok_or(ContentError::Invalid)?;
+            let executable = std::env::current_exe().map_err(|_| ContentError::Storage)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                // exec replaces this process: no waiting parent or orphan child.
+                let _ = isolated_command(&executable, &raw_args, &url, &root).exec();
+            }
+            return Err(ContentError::Storage);
+        }
+        isolated_environment()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

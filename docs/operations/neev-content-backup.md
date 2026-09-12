@@ -105,7 +105,35 @@ wrong schema marker, missing blob, cross-organization lookup, or size/hash failu
 causes a nonzero exit. It does not initialize/migrate the database, acquire a
 write-intent/admission lock, or start providers/server services.
 
-It reads the exact schema3 marker/table inventory and all historical revision
+On Unix the verifier replaces its process with the same executable in a cleared
+environment containing only the dedicated URL/root and an internal invocation
+marker. The restarted process checks this environment contract before constructing
+connection options. On macOS only, it also tolerates the single
+`__CF_USER_TEXT_ENCODING` key added by CoreFoundation during startup; that key is
+never forwarded or used for connection settings. The marker conveys no
+authorization. Inherited PostgreSQL
+settings, `HOME`, and password files cannot supply connection authority or secrets;
+the connection uses SQLx's no-password-file constructor and an explicitly built
+pool, without its URL parser or SeaORM's URL connection path. There is no child
+process left behind when verification ends.
+
+The native verifier URL must explicitly supply a host, user, and database, either
+in the URL authority/path or using `host` and `user` query parameters. The local
+Unix-socket form `postgresql:///DATABASE?host=/absolute/socket-directory&port=PORT&user=USER`
+is supported. A missing port means 5432; a missing password means no password.
+Supported native URL options are only `host`, `port`, `user`, `password`, `sslmode`,
+`sslrootcert`, `sslcert`, and `sslkey`. The native list is narrower than the backup
+script's libpq list: unsupported options fail before connecting. Duplicate or
+conflicting values and nonliteral database paths are refused. Percent decoding
+preserves literal `+` characters. Explicit TLS settings are retained; the default
+mode is `prefer`. Native `sslmode=allow` is refused because the installed SQLx
+version does not implement its TLS fallback; use a supported explicit mode.
+SQLx applies TLS negotiation to Unix sockets as well as TCP connections. The
+checked `--schema` supplies the only startup search path.
+
+It requires actual ordinary native tables (not same-name views, foreign tables,
+or partitioned relations), and reads the exact schema3 marker/table inventory and
+all historical revision
 references in a read-only snapshot transaction, then verifies each file through
 the same no-follow BlobStore API used by native content. Extra copied orphan
 files and temporary files do not affect reference verification. The deterministic
