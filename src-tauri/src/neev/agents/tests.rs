@@ -388,9 +388,9 @@ async fn disconnect_of_idle_disconnected_connection_completes_immediately() {
     );
 }
 
-#[tokio::test]
-async fn lifecycle_intents_recheck_session_membership_org_and_account() {
-    let h = Harness::new(h::database().await).await;
+async fn authority_invalidation_contract(database: DatabaseConnection) {
+    let h = Harness::new(database).await;
+    let operations_before = h::count(&h.state.database, "neev_agent_operations").await;
     let ticket = begin_ticket(&h, &h.alice_a, Provider::Codex, "authority-start").await;
     h::execute(
         &h.state.database,
@@ -440,8 +440,13 @@ async fn lifecycle_intents_recheck_session_membership_org_and_account() {
     assert_all_intents_denied(&h, &ticket, AuthError::Unauthorized).await;
     assert_eq!(
         h::count(&h.state.database, "neev_agent_operations").await,
-        1
+        operations_before + 1
     );
+}
+
+#[tokio::test]
+async fn sqlite_lifecycle_intents_recheck_session_membership_org_and_account() {
+    authority_invalidation_contract(h::database().await).await;
 }
 
 #[tokio::test]
@@ -571,6 +576,7 @@ async fn postgres_authority_and_admission_contracts() {
     let (database, admin, schema) = h::postgres_database().await;
     eprintln!("agent lifecycle owned schema: {schema}");
     simultaneous_same_key_contract(database.clone()).await;
+    authority_invalidation_contract(database.clone()).await;
     h::cleanup_postgres(database, admin, schema).await;
 }
 
