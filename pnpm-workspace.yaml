@@ -1,5 +1,8 @@
 overrides:
+  linkify-it: 5.0.2
+  lodash-es: 4.18.1
   mermaid: ">=11.13.0"
+  postcss: 8.5.23
 
 allowBuilds:
   "@parcel/watcher": true
