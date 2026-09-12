@@ -70,6 +70,12 @@ Provider expiry or revocation may still require personal reauthentication. This
 restart requirement does not change the separate disaster-recovery/backup boundary
 above, and does not claim that persistent custody has already been implemented.
 
+The owner subsequently approved keeping the persistent unlock key on the existing
+Hetzner host, accessible only to the privileged supervisor, with the host
+administrator trusted. No external paid key-management service is required for
+this pilot. This does not protect against full host compromise or a full-machine
+snapshot containing both the unlock key and encrypted credential storage.
+
 ## Provider contracts
 
 ### Codex
