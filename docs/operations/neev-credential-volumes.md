@@ -125,7 +125,21 @@ artifact and key for controller inspection and prints the exact fixture path.
 It closes only its owned safe mapping/mount identifiers in `finally` and reports
 them if cleanup fails. This is process-reopen evidence, not a host-reboot test.
 
-The Linux acceptance remains pending until the controller runs that command.
+## Recorded Linux acceptance
+
+On September12,2026 the controller ran committed source `fb911da5` on the
+prepared Linux host after task review, scoped fix review and a clean secret scan.
+Under umask077, Python3.14.4 passed55 ordinary tests with the one privileged test
+skipped (56total,0.494s). The explicit privileged command above then passed1/1
+in0.930s. This exercised real dm-crypt/ext4, not the simulated tool boundary.
+
+The retained invented fixture was subsequently inspected: authenticated manifest
+ready, helper status locked, mapper absent, master key root-owned0600/32bytes,
+image root-owned0600/100663296bytes with physical allocation, fixture root0700.
+Existing app/database start times were unchanged and their health remained good.
+Production supervisor key/store roots were still absent: no production
+credentials were provisioned and no real provider was contacted.
+
 Authenticated supervisor controls, egress enforcement, browser/session and
 generation handling, real provider/account tests, HTTP/job wiring, host reboot,
 provider refresh, native-backup exclusion validation, and public release are
