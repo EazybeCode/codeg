@@ -1,6 +1,7 @@
 """Behavioral tests for the persistent Neev credential-key custody store."""
 
 from pathlib import Path
+import errno
 import hashlib
 import hmac
 import importlib.util
@@ -403,6 +404,72 @@ class CredentialStoreTests(unittest.TestCase):
             self.assert_store_error(
                 "invalid", lambda: self.store.read_manifest(self.scope, handle)
             )
+
+    def test_rejected_entry_directory_closes_its_open_descriptor(self):
+        handle = self.initialize_and_allocate()
+        (self.root / handle).chmod(0o755)
+        real_open = os.open
+        opened_entries = []
+
+        def record_entry_open(path, flags, *args, **kwargs):
+            file_fd = real_open(path, flags, *args, **kwargs)
+            if path == handle:
+                opened_entries.append(file_fd)
+            return file_fd
+
+        with mock.patch.object(self.module.os, "open", side_effect=record_entry_open):
+            with self.store.locked():
+                self.assert_store_error(
+                    "unavailable", lambda: self.store.read_manifest(self.scope, handle)
+                )
+        self.assertEqual(len(opened_entries), 1)
+        file_fd = opened_entries[0]
+        try:
+            with self.assertRaises(OSError) as caught:
+                os.fstat(file_fd)
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+        finally:
+            try:
+                os.close(file_fd)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+
+    def test_entry_fstat_failure_closes_its_open_descriptor(self):
+        handle = self.initialize_and_allocate()
+        real_open = os.open
+        real_fstat = os.fstat
+        entry_fd = []
+
+        def record_entry_open(path, flags, *args, **kwargs):
+            file_fd = real_open(path, flags, *args, **kwargs)
+            if path == handle:
+                entry_fd.append(file_fd)
+            return file_fd
+
+        def fail_entry_fstat(file_fd):
+            if entry_fd and file_fd == entry_fd[0]:
+                raise OSError(errno.EIO, "injected fstat failure")
+            return real_fstat(file_fd)
+
+        with mock.patch.object(
+            self.module.os, "open", side_effect=record_entry_open
+        ), mock.patch.object(self.module.os, "fstat", side_effect=fail_entry_fstat):
+            with self.store.locked():
+                self.assert_store_error(
+                    "invalid", lambda: self.store.read_manifest(self.scope, handle)
+                )
+        self.assertEqual(len(entry_fd), 1)
+        try:
+            with self.assertRaises(OSError) as caught:
+                real_fstat(entry_fd[0])
+            self.assertEqual(caught.exception.errno, errno.EBADF)
+        finally:
+            try:
+                os.close(entry_fd[0])
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
 
     def test_unverified_existing_manifest_is_never_overwritten(self):
         handle = self.initialize_and_allocate()

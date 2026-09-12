@@ -319,7 +319,7 @@ class CredentialVolumes:
                 self._validate_owned_mount(mounted, mountpoint, mapping_path)
                 _validate_mountpoint(mountpoint, mounted=True)
             except StoreError:
-                self._cleanup_failed_open(mapping, mountpoint, opened)
+                self._cleanup_failed_open(mapping, image, mountpoint, opened)
                 raise
             return mountpoint
 
@@ -500,10 +500,13 @@ class CredentialVolumes:
         except (OSError, ValueError, TypeError):
             raise StoreError("unavailable") from None
 
-    def _cleanup_failed_open(self, mapping: str, mountpoint: Path, opened: bool) -> None:
+    def _cleanup_failed_open(
+        self, mapping: str, image: Path, mountpoint: Path, opened: bool
+    ) -> None:
         if not opened:
             return
         try:
+            self._validate_mapping(mapping, image)
             mounts = self._mounts(mountpoint)
             if mounts:
                 mapping_path = MAPPER_ROOT / mapping

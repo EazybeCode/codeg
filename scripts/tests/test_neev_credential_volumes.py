@@ -276,6 +276,31 @@ class CredentialVolumeTests(unittest.TestCase):
         self.assertFalse(any(argv[1:2] == ["open"] for argv in commands))
         self.assertEqual(self.volumes.status(self.scope, handle), "open")
 
+    def test_failed_open_preserves_mapping_replaced_during_mount_failure(self):
+        handle = self.create()
+        self.runner.calls.clear()
+        self.runner.fail_program = self.module.MOUNT
+        self.runner.replace_mapping_on_failure = True
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.open(self.scope, handle)
+        self.assertEqual(caught.exception.code, "unavailable")
+        self.assertTrue(self.runner.mapping)
+        self.assertFalse(any(
+            argv[1:2] == ["close"] for argv, unused in self.runner.calls
+        ))
+
+    def test_failed_open_closes_unchanged_owned_mapping(self):
+        handle = self.create()
+        self.runner.calls.clear()
+        self.runner.fail_program = self.module.MOUNT
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.open(self.scope, handle)
+        self.assertEqual(caught.exception.code, "unavailable")
+        self.assertFalse(self.runner.mapping)
+        self.assertTrue(any(
+            argv[1:2] == ["close"] for argv, unused in self.runner.calls
+        ))
+
     def test_tool_failure_preserves_provisioning_image_for_inspection(self):
         self.runner.fail_program = self.module.MKFS
         with self.assertRaises(self.store_module.StoreError) as caught:

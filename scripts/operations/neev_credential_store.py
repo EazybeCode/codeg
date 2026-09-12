@@ -398,14 +398,23 @@ class CredentialStore:
         self._validate_handle(handle)
         assert self._root_fd is not None
         flags = os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC
+        entry_fd: Optional[int] = None
+        transferred = False
         try:
             entry_fd = os.open(handle, flags, dir_fd=self._root_fd)
             self._validate_private_directory(os.fstat(entry_fd))
+            transferred = True
             return entry_fd
         except StoreError:
             raise
         except (OSError, ValueError, TypeError):
             raise StoreError("invalid") from None
+        finally:
+            if entry_fd is not None and not transferred:
+                try:
+                    os.close(entry_fd)
+                except OSError:
+                    pass
 
     def _open_checked_file(
         self,
