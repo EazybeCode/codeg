@@ -380,7 +380,7 @@ async fn content_routes_publish_strict_safe_wire_dtos() {
 
     h::execute(
         &h.database,
-        "UPDATE neev_document_revisions SET blob_key='not-a-uuid' WHERE org_id=$1 AND document_id=$2 AND revision=2",
+        "UPDATE neev_document_revisions SET blob_key='00000000-0000-4000-8000-000000000099' WHERE org_id=$1 AND document_id=$2 AND revision=2",
         vec![h.org_id.into(), document_id.into()],
     )
     .await;
@@ -393,6 +393,37 @@ async fn content_routes_publish_strict_safe_wire_dtos() {
         .await;
     unavailable.assert_status(StatusCode::SERVICE_UNAVAILABLE);
     unavailable.assert_json(&json!({"code":"storage_unavailable"}));
+
+    let unavailable = h
+        .server
+        .get(&format!(
+            "/api/neev/documents/{document_id}/download?revision=2"
+        ))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    unavailable.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    unavailable.assert_json(&json!({"code":"storage_unavailable"}));
+    let unavailable = h
+        .mutation(
+            "POST",
+            &format!("/api/neev/documents/{document_id}/restore"),
+            json!({
+                "requestId":uuid::Uuid::new_v4().to_string(), "sourceRevision":"2",
+                "expectedContentRevision":"2", "expectedAuthRevision":"1"
+            }),
+        )
+        .await;
+    unavailable.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    unavailable.assert_json(&json!({"code":"storage_unavailable"}));
+    for (cookie, number) in [(&h.member_cookies, 2), (&h.cookies, 99)] {
+        h.server
+            .get(&format!(
+                "/api/neev/documents/{document_id}/content?revision={number}"
+            ))
+            .add_header(header::COOKIE, cookie)
+            .await
+            .assert_status_not_found();
+    }
 
     h.server
         .get(&format!("/api/neev/resources/{}", uuid::Uuid::new_v4()))

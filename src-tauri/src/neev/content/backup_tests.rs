@@ -36,7 +36,7 @@ async fn restored_bytes(database: DatabaseConnection) {
     let manifest = verify_snapshot(&h.state.database, &h.state.blobs)
         .await
         .unwrap();
-    assert_eq!(manifest.schema_version, 3);
+    assert_eq!(manifest.schema_version, 4);
     assert_eq!(manifest.blobs.len(), 2);
     assert_eq!(
         manifest.blobs.iter().map(|b| b.byte_length).sum::<i64>(),
@@ -185,7 +185,35 @@ async fn snapshot_schema_is_exact_and_read_only() {
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
         .unwrap();
-    for version in [1_i64, 2, 4] {
+    for version in [3_i64, 4] {
+        db::execute(
+            &db,
+            "UPDATE neev_schema_version SET version=$1",
+            vec![version.into()],
+        )
+        .await
+        .unwrap();
+        db::execute(&db, "PRAGMA query_only=ON", vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            verify_snapshot(&db, &store).await.unwrap().schema_version,
+            version
+        );
+        db::execute(&db, "PRAGMA query_only=OFF", vec![])
+            .await
+            .unwrap();
+        assert_eq!(
+            db::one(&db, "SELECT version FROM neev_schema_version", vec![])
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "version")
+                .unwrap(),
+            version
+        );
+    }
+    for version in [1_i64, 2, 5] {
         db::execute(
             &db,
             "UPDATE neev_schema_version SET version=$1",

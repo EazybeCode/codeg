@@ -20,7 +20,7 @@
 - "Do not persist private drafts to localStorage."
 - "No blob garbage collection or physical history deletion in the initial release."
 - "An expired lease cannot publish."
-- "Fresh database initializes version3; unknown/native1/legacy schemas remain refused."
+- Final-review schema amendment: fresh databases initialize through3 then4; unknown/native1/legacy schemas remain refused.
 - "No unreviewed environment switch disables quotas."
 - "RuntimeEnabled:false" remains authoritative; do not simulate agent replies, enable jobs, attach GitHub or expose legacy files.
 - Body: document1MiB UTF-8; message32KiB UTF-8; title100 Unicode scalar values without controls. Organization1GiB charged bytes,10,000 documents,10,000 chats,100,000 messages. Document1,000 revisions. Page100. Lease60s. Poll5s only while visible.
@@ -35,7 +35,7 @@
 
 ## File responsibility map
 
-`neev/db/content_migration.rs`: version3 table/index definitions and version2 upgrade.
+`neev/db/content_migration.rs`: version3 table/index definitions, version2 upgrade, and version4 source-link guards.
 `neev/content/types.rs`: typed inputs/results and limits; no HTTP serialization.
 `neev/content/access.rs`: scoped transaction/resource authorization and budgets.
 `neev/content/resources.rs`: create/list/get/metadata transitions for chat/doc rows.
@@ -53,9 +53,9 @@ Tests stay beside production units or in dedicated `*_tests.rs`; fixture utiliti
 
 **Files:** Create `src-tauri/src/neev/db/content_migration.rs`, `src-tauri/src/neev/content/{mod.rs,types.rs}`, `src-tauri/src/neev/db/content_tests.rs`. Modify `neev/{mod.rs,db/mod.rs,db/migration.rs,db/tests.rs}`. Preserve existing v2 definitions as the exact upgrade input.
 
-**Interfaces:** Produces `content::types::{Resource,ResourceKind,Visibility,ResourceInput,ResourcePatch,Message,Revision,SaveInput,ContentError,Page}`. Produces version3 initialization through existing `db::initialize`; no startup/config change yet.
+**Interfaces:** Produces `content::types::{Resource,ResourceKind,Visibility,ResourceInput,ResourcePatch,Message,Revision,SaveInput,ContentError,Page}`. Produces version4 initialization through existing `db::initialize`, including exact3 forward hardening; no startup/config change yet.
 
-- [ ] Write failing migration tests using existing `test_support::database`/guarded PG helpers: initialize exact v2 tables and seed an account/org/member/node, run initialize, assert version3 plus unchanged IDs/name, run again idempotently; insert cross-org references and assert constraints reject; unknown/version1/extra/partial schema remains refused with no new tables. Inject an invalid upgrade statement in a test-only transaction to prove rollback leaves v2 and its data intact.
+- [ ] Write failing migration tests using existing `test_support::database`/guarded PG helpers: initialize exact v2 tables and seed an account/org/member/node, run initialize, assert version4 plus unchanged IDs/name, run again idempotently; reconstruct historical3 and verify populated3 upgrades4 while malformed3 refuses unchanged; insert/update half-NULL and invalid source references and assert constraints reject; unknown/version1/extra/partial schema remains refused with no new tables. Inject an invalid upgrade statement in a test-only transaction to prove rollback leaves v2 and its data intact.
 
 Implement test-local query helpers `schema_version(&DatabaseConnection)->i64`,
 `node_name(&DatabaseConnection,i32)->String`,
@@ -83,7 +83,9 @@ neev_resources: org_id i32, id text UUID, kind text(chat|document), node_id i32,
  PK(org_id,id), UNIQUE(org_id,id,kind), FK(org_id,node_id)->neev_nodes(org_id,id),
  FK creator_id->neev_accounts(id), FK org_id->neev_organizations(id),
  FK(org_id,origin_chat_id,origin_kind)->neev_resources(org_id,id,kind).
- CHECK origin fields both null OR kind=document AND origin_kind=chat.
+ CHECK (origin_chat_id IS NULL AND origin_kind IS NULL) OR
+       (origin_chat_id IS NOT NULL AND origin_kind IS NOT NULL
+        AND kind='document' AND origin_kind='chat').
 neev_messages: org_id, chat_id text, resource_kind text CHECK=chat, id text UUID,
  sequence bigint>=1, author_id i32, body text, byte_length bigint 1..32768,
  created_at bigint>=0; PK(org_id,chat_id,sequence), UNIQUE(org_id,id),
@@ -144,7 +146,7 @@ pub(crate) enum ContentError {
 }
 ```
 
-- [ ] Initialize empty DB directly at3; permit exactly known v2 table names/version2 through a single transactional upgrade, require exact v3 set/version3 thereafter. Do not silently repair partial schemas. Preserve PG advisory initialization lock and SQLite transaction behavior. Add native mod registration/types only, no stub routes.
+- [ ] Final-review amendment: initialize fresh and exact2 through3 then4; exact3 upgrades4; exact4 is idempotent. Validate existing source pairs before advancing the marker; refuse malformed3 transactionally. PostgreSQL adds a named validated CHECK; SQLite adds NULL-safe INSERT/UPDATE guards without rebuilding the FK-linked table. Read-only backup verification accepts exact3/4 and reports the actual version. Do not silently repair partial/unknown/legacy schemas. Preserve PG advisory initialization lock and SQLite transaction behavior.
 - [ ] Run database tests including ignored guarded PG cases, then full native suite once; update obsolete v2-only test expectations with explicit v2→3 preservation tests. Commit exact task files.
 
 ### Task 2: Protected immutable blob store and startup configuration

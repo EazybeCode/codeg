@@ -107,6 +107,7 @@ pub(crate) async fn create(
     // A retry still needs current access, but does not consume quota a second time.
     if let Some(id) = receipt(&tx, actor, "content.resource.create", &request, &hash).await? {
         let result = access::authorized(&tx, actor, &id, false).await?;
+        session::recheck(&tx, actor, state.clock.now_unix()).await?;
         tx.commit().await.map_err(database_error)?;
         return Ok(result);
     }
@@ -137,6 +138,7 @@ pub(crate) async fn create(
     db::execute(&tx,"INSERT INTO neev_resources(org_id,id,kind,node_id,creator_id,title,visibility,origin_chat_id,origin_kind,auth_revision,content_revision,archived,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,0,false,$10,$10)",vec![actor.org_id.into(),id.clone().into(),access::kind_name(input.kind).into(),input.node_id.into(),actor.identity.user_id.into(),title.into(),access::visibility_name(visibility).into(),input.origin_chat_id.clone().into(),input.origin_chat_id.as_ref().map(|_|"chat".to_string()).into(),now.into()]).await?;
     record_receipt(&tx, actor, "content.resource.create", &request, &hash, &id).await?;
     let result = access::authorized(&tx, actor, &id, false).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(result)
 }
@@ -148,6 +150,7 @@ pub(crate) async fn get(
 ) -> Result<Resource, ContentError> {
     let tx = begin(state, actor).await?;
     let result = access::authorized(&tx, actor, id, false).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(result)
 }
@@ -208,6 +211,7 @@ pub(crate) async fn list(
     } else {
         None
     };
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(Page { items, next_after })
 }
@@ -270,6 +274,7 @@ pub(crate) async fn update(
         }
     }
     let result = access::authorized(&tx, actor, id, false).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(result)
 }

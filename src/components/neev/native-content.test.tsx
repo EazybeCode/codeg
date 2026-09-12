@@ -499,6 +499,8 @@ it.each(["chat", "document"] as const)(
         json({ items: [], nextAfter: null }),
       [`GET /api/neev/documents/${chat.id}/revisions`]: () =>
         json({ items: [revision], nextAfter: null }),
+      [`GET /api/neev/documents/${chat.id}/revisions?after=1`]: () =>
+        json({ items: [{ ...revision, revision: "2" }], nextAfter: null }),
       [`GET /api/neev/documents/${chat.id}/content?revision=1`]: () =>
         json({ revision, markdown: "seed" }),
       [`POST /api/neev/${kind === "chat" ? "chats" : "documents"}/${chat.id}/${kind === "chat" ? "messages" : "revisions"}`]:

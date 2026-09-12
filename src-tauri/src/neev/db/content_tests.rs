@@ -144,7 +144,7 @@ async fn assert_v2_upgrades(db: &DatabaseConnection) {
     let original_node_id = seed_v2(db).await;
 
     assert_eq!(initialize(db).await, Ok(()));
-    assert_eq!(schema_version(db).await, 3);
+    assert_eq!(schema_version(db).await, 4);
     assert_eq!(node_name(db, original_node_id).await, "Marketing");
     assert!(insert_cross_org_resource(db).await.is_err());
     assert!(insert_document_revision_for_chat(db).await.is_err());
@@ -166,10 +166,10 @@ async fn sqlite_v2_upgrades_transactionally_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn fresh_database_initializes_directly_at_version_three() {
+async fn fresh_database_initializes_at_version_four() {
     let db = h::empty_database().await;
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(schema_version(&db).await, 3);
+    assert_eq!(schema_version(&db).await, 4);
     assert!(table_exists(&db, "neev_resources").await);
     assert!(table_exists(&db, "neev_content_leases").await);
 }
@@ -272,5 +272,161 @@ async fn postgres_v2_upgrade_preserves_data_and_enforces_content_foreign_keys() 
     .unwrap();
 
     assert_v2_upgrades(&db).await;
+    h::cleanup_postgres(db, admin, schema).await;
+}
+
+// Reconstruct the previously committed v3 CHECK, including SQL NULL semantics, without
+// weakening the production DDL or depending on whichever guards v4 adds.
+async fn historical_v3(db: &DatabaseConnection) {
+    let backend = db.get_database_backend();
+    let tx = db.begin().await.unwrap();
+    for table in content_migration::tables() {
+        let sql = backend.build(&table).to_string().replace(
+            "origin_chat_id IS NOT NULL AND origin_kind IS NOT NULL AND",
+            "origin_chat_id IS NOT NULL AND",
+        );
+        execute(&tx, &sql, vec![]).await.unwrap();
+    }
+    for index in content_migration::indexes() {
+        tx.execute(backend.build(&index)).await.unwrap();
+    }
+    execute(&tx, "UPDATE neev_schema_version SET version=3", vec![])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn origin_resource(
+    db: &DatabaseConnection,
+    id: &str,
+    kind: &str,
+    origin: Option<&str>,
+    origin_kind: Option<&str>,
+) -> Result<(), AuthError> {
+    execute(db, "INSERT INTO neev_resources(org_id,id,kind,node_id,creator_id,title,visibility,origin_chat_id,origin_kind,auth_revision,content_revision,archived,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'Retained','private',$6,$7,1,0,false,1000,1000)", vec![ORG_ID.into(),id.into(),kind.into(),NODE_ID.into(),OWNER_ID.into(),origin.map(str::to_owned).into(),origin_kind.map(str::to_owned).into()]).await.map(|_| ())
+}
+
+async fn origin_constraints(db: &DatabaseConnection) {
+    origin_resource(db, "source", "chat", None, None)
+        .await
+        .unwrap();
+    origin_resource(db, "document", "document", None, None)
+        .await
+        .unwrap();
+    // A real foreign-organization source with otherwise valid placement.
+    execute(db, "INSERT INTO neev_nodes(id,org_id,parent_id,kind,name,revision,created_by) VALUES(302,$1,NULL,'project','Other',1,$2)", vec![OTHER_ORG_ID.into(),OTHER_OWNER_ID.into()]).await.unwrap();
+    execute(db, "INSERT INTO neev_resources(org_id,id,kind,node_id,creator_id,title,visibility,auth_revision,content_revision,archived,created_at,updated_at) VALUES($1,'foreign','chat',302,$2,'Foreign','private',1,0,false,1000,1000)", vec![OTHER_ORG_ID.into(),OTHER_OWNER_ID.into()]).await.unwrap();
+    for (origin, kind) in [
+        (Some("source"), None),
+        (None, Some("chat")),
+        (Some("missing"), Some("chat")),
+        (Some("document"), Some("chat")),
+        (Some("foreign"), Some("chat")),
+    ] {
+        assert!(
+            origin_resource(db, "invalid", "document", origin, kind)
+                .await
+                .is_err(),
+            "insert {origin:?}/{kind:?}"
+        );
+        assert!(
+            execute(
+                db,
+                "UPDATE neev_resources SET origin_chat_id=$1,origin_kind=$2 WHERE id='document'",
+                vec![
+                    origin.map(str::to_owned).into(),
+                    kind.map(str::to_owned).into()
+                ]
+            )
+            .await
+            .is_err(),
+            "update {origin:?}/{kind:?}"
+        );
+    }
+    origin_resource(db, "linked", "document", Some("source"), Some("chat"))
+        .await
+        .unwrap();
+}
+
+async fn v3_forward_hardening(db: &DatabaseConnection, invalid: bool) {
+    seed_v2(db).await;
+    historical_v3(db).await;
+    origin_resource(
+        db,
+        "retained",
+        "document",
+        if invalid { Some("missing") } else { None },
+        None,
+    )
+    .await
+    .unwrap();
+    if invalid {
+        assert_eq!(initialize(db).await, Err(AuthError::Unavailable));
+        assert_eq!(schema_version(db).await, 3);
+        assert_eq!(
+            scalar(
+                db,
+                "SELECT origin_chat_id FROM neev_resources WHERE id='retained'"
+            )
+            .await
+            .try_get::<String>("", "origin_chat_id")
+            .unwrap(),
+            "missing"
+        );
+    } else {
+        assert_eq!(validate_content_snapshot(db).await, Ok(3));
+        assert_eq!(initialize(db).await, Ok(()));
+        assert_eq!(schema_version(db).await, 4);
+        assert_eq!(validate_content_snapshot(db).await, Ok(4));
+        assert_eq!(node_name(db, NODE_ID).await, "Marketing");
+        assert_eq!(
+            scalar(db, "SELECT title FROM neev_resources WHERE id='retained'")
+                .await
+                .try_get::<String>("", "title")
+                .unwrap(),
+            "Retained"
+        );
+        assert_eq!(initialize(db).await, Ok(()));
+        origin_constraints(db).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_v3_forward_origin_hardening() {
+    for invalid in [false, true] {
+        let db = h::empty_database().await;
+        initialize_v2(&db).await;
+        v3_forward_hardening(&db, invalid).await;
+    }
+    let db = h::database().await;
+    seed_v2(&db).await;
+    origin_constraints(&db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_v3_forward_origin_hardening() {
+    use futures::FutureExt;
+    for invalid in [false, true] {
+        let (db, admin, schema) = h::postgres_database().await;
+        for table in content_migration::TABLE_NAMES.iter().rev() {
+            execute(&db, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
+        execute(&db, "UPDATE neev_schema_version SET version=2", vec![])
+            .await
+            .unwrap();
+        let outcome = std::panic::AssertUnwindSafe(v3_forward_hardening(&db, invalid))
+            .catch_unwind()
+            .await;
+        h::cleanup_postgres(db, admin, schema).await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+    let (db, admin, schema) = h::postgres_database().await;
+    seed_v2(&db).await;
+    origin_constraints(&db).await;
     h::cleanup_postgres(db, admin, schema).await;
 }

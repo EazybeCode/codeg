@@ -99,7 +99,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 .map(|name| (*name).to_owned()),
         )
         .collect();
-    // Empty, exact v2, or exact v3 only; refuse legacy and partial data.
+    // Empty or exact v2/v3/v4 only; refuse legacy and partial data.
     if !names.is_empty() {
         if names != v2_expected && names != v3_expected {
             return Err(AuthError::Unavailable);
@@ -116,13 +116,22 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             .map_err(database_error)?;
         if names == v2_expected && version == migration::SCHEMA_VERSION {
             content_migration::upgrade(&tx).await?;
+            content_migration::harden_origins(&tx).await?;
             execute(
                 &tx,
                 "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-                vec![content_migration::SCHEMA_VERSION.into()],
+                vec![content_migration::HARDENED_SCHEMA_VERSION.into()],
             )
             .await?;
-        } else if names != v3_expected || version != content_migration::SCHEMA_VERSION {
+        } else if names == v3_expected && version == content_migration::SCHEMA_VERSION {
+            content_migration::harden_origins(&tx).await?;
+            execute(
+                &tx,
+                "UPDATE neev_schema_version SET version=$1 WHERE id=1",
+                vec![content_migration::HARDENED_SCHEMA_VERSION.into()],
+            )
+            .await?;
+        } else if names != v3_expected || version != content_migration::HARDENED_SCHEMA_VERSION {
             return Err(AuthError::Unavailable);
         }
     } else {
@@ -137,19 +146,22 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 .map_err(database_error)?;
         }
         content_migration::upgrade(&tx).await?;
+        content_migration::harden_origins(&tx).await?;
         execute(
             &tx,
             "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-            vec![content_migration::SCHEMA_VERSION.into()],
+            vec![content_migration::HARDENED_SCHEMA_VERSION.into()],
         )
         .await?;
     }
     tx.commit().await.map_err(database_error)
 }
 
-/// Inspect restored evidence only: exact native3 table inventory and marker.
+/// Inspect restored evidence only: exact native3/4 inventory and actual marker.
 /// Shares the migrator's authoritative table names but never calls the migrator.
-pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(db: &C) -> Result<(), AuthError> {
+pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
+    db: &C,
+) -> Result<i64, AuthError> {
     let sql = match db.get_database_backend() {
         DbBackend::Postgres => "SELECT c.relname AS name,(c.relkind='r' AND NOT c.relispartition) AS native_table FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','f')",
         DbBackend::Sqlite => "SELECT name,type='table' AS native_table FROM pragma_table_list WHERE schema='main' AND name NOT LIKE 'sqlite_%'",
@@ -192,14 +204,21 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(db: &C) -> Res
             .try_get::<i32>("", "id")
             .map_err(database_error)?
             != 1
-        || markers[0]
-            .try_get::<i64>("", "version")
-            .map_err(database_error)?
-            != content_migration::SCHEMA_VERSION
     {
         return Err(AuthError::Unavailable);
     }
-    Ok(())
+    let version = markers[0]
+        .try_get::<i64>("", "version")
+        .map_err(database_error)?;
+    if ![
+        content_migration::SCHEMA_VERSION,
+        content_migration::HARDENED_SCHEMA_VERSION,
+    ]
+    .contains(&version)
+    {
+        return Err(AuthError::Unavailable);
+    }
+    Ok(version)
 }
 #[cfg(test)]
 mod content_tests;

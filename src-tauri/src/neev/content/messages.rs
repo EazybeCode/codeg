@@ -1,5 +1,7 @@
 use super::{access, resources, types::*};
-use crate::neev::{db, error::database_error, org, startup::ServerState, types::OrgContext};
+use crate::neev::{
+    auth::session, db, error::database_error, org, startup::ServerState, types::OrgContext,
+};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, QueryResult};
 
 fn message(row: &QueryResult) -> Result<Message, ContentError> {
@@ -54,6 +56,7 @@ pub(crate) async fn append(
         resources::receipt(&tx, actor, "content.message.append", &request, &hash).await?
     {
         let result = load(&tx, actor.org_id, chat_id, &id).await?;
+        session::recheck(&tx, actor, state.clock.now_unix()).await?;
         tx.commit().await.map_err(database_error)?;
         return Ok(result);
     }
@@ -90,6 +93,7 @@ pub(crate) async fn append(
     .await?;
     resources::record_receipt(&tx, actor, "content.message.append", &request, &hash, &id).await?;
     let result = load(&tx, actor.org_id, chat_id, &id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(result)
 }
@@ -130,6 +134,7 @@ pub(crate) async fn list(
     } else {
         None
     };
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(Page { items, next_after })
 }

@@ -249,7 +249,7 @@ pub(crate) async fn read(
     let bytes = state
         .blobs
         .read(actor.org_id, &key, revision.byte_length, &revision.sha256)
-        .await?;
+        .await;
     #[cfg(test)]
     super::document_tests::boundary("read").await;
     let tx = resources::begin(state, actor).await?;
@@ -260,6 +260,10 @@ pub(crate) async fn read(
         return Err(ContentError::Conflict);
     }
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    // Metadata already proved the revision exists. A missing/corrupt physical
+    // blob is unavailable storage, never a resource 404 that discards a draft.
+    // Recheck authority before returning either content or a storage failure.
+    let bytes = bytes.map_err(|_| ContentError::Storage)?;
     tx.commit().await.map_err(database_error)?;
     Ok((revision, bytes))
 }

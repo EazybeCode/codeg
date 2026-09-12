@@ -6,6 +6,137 @@ use super::{
 use crate::neev::{db, test_support as h};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
+// Every operation waits on SQL after admission; expiry must prevent both disclosure
+// and publication, including successful idempotent replays.
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_resource_and_message_post_admission_expiry() {
+    use super::messages;
+    use std::sync::{atomic::Ordering, Arc};
+    for operation in [
+        "create",
+        "get",
+        "list",
+        "update",
+        "resource_receipt",
+        "send",
+        "message_list",
+        "message_receipt",
+    ] {
+        let (database, admin, schema) = h::postgres_database().await;
+        let mut harness = Harness::new(database.clone()).await;
+        let clock = Arc::new(h::TestClock::new(1_700_000_000));
+        Arc::get_mut(&mut harness.state).unwrap().clock = clock.clone();
+        let input = harness.input(ResourceKind::Chat, "Private title");
+        let chat = resources::create(&harness.state, &harness.creator, input.clone())
+            .await
+            .unwrap();
+        let message_request = request();
+        messages::append(
+            &harness.state,
+            &harness.creator,
+            &chat.id,
+            &message_request,
+            1,
+            "private body",
+        )
+        .await
+        .unwrap();
+        db::execute(
+            &database,
+            "UPDATE neev_sessions SET expires_at=1700000001 WHERE id=$1",
+            vec![harness.creator.identity.session_id.clone().into()],
+        )
+        .await
+        .unwrap();
+        let guard = db::begin(&database).await.unwrap();
+        let (table, waiting) = match operation {
+            "create" => ("neev_requests", "INSERT INTO neev_requests%"),
+            "resource_receipt" => ("neev_requests", "SELECT body_hash%"),
+            "message_list" => ("neev_messages", "SELECT m.id%"),
+            "message_receipt" => ("neev_requests", "SELECT body_hash%"),
+            _ => ("neev_resources", "%neev_resources%"),
+        };
+        let mode = if operation == "create" {
+            "SHARE"
+        } else {
+            "ACCESS EXCLUSIVE"
+        };
+        db::execute(
+            &guard,
+            &format!("LOCK TABLE {table} IN {mode} MODE"),
+            vec![],
+        )
+        .await
+        .unwrap();
+        let state = harness.state.clone();
+        let actor = harness.creator.clone();
+        let node = harness.node;
+        let pending = tokio::spawn(async move {
+            match operation {
+                "create" => {
+                    let mut input = input;
+                    input.request_id = request();
+                    resources::create(&state, &actor, input).await.map(|_| ())
+                }
+                "get" => resources::get(&state, &actor, &chat.id).await.map(|_| ()),
+                "list" => resources::list(&state, &actor, node, ResourceKind::Chat, false, None)
+                    .await
+                    .map(|_| ()),
+                "update" => {
+                    let mut patch = patch(&chat);
+                    patch.title = "Changed".into();
+                    resources::update(&state, &actor, &chat.id, patch)
+                        .await
+                        .map(|_| ())
+                }
+                "resource_receipt" => resources::create(&state, &actor, input).await.map(|_| ()),
+                "send" => messages::append(&state, &actor, &chat.id, &request(), 1, "new body")
+                    .await
+                    .map(|_| ()),
+                "message_list" => messages::list(&state, &actor, &chat.id, None)
+                    .await
+                    .map(|_| ()),
+                _ => messages::append(
+                    &state,
+                    &actor,
+                    &chat.id,
+                    &message_request,
+                    1,
+                    "private body",
+                )
+                .await
+                .map(|_| ()),
+            }
+        });
+        h::wait_for_postgres_lock(&admin, waiting).await;
+        clock.0.store(1_700_000_001, Ordering::SeqCst);
+        guard.commit().await.unwrap();
+        let result = pending.await.unwrap();
+        let row = db::one(&database, "SELECT COUNT(*) AS n,MIN(title) AS title,MAX(content_revision) AS head FROM neev_resources", vec![]).await.unwrap().unwrap();
+        let counts = (
+            row.try_get::<i64>("", "n").unwrap(),
+            row.try_get::<String>("", "title").unwrap(),
+            row.try_get::<i64>("", "head").unwrap(),
+        );
+        let usage = (
+            harness.usage("chats").await,
+            harness.usage("messages").await,
+        );
+        drop(harness);
+        h::cleanup_postgres(database, admin, schema).await;
+        assert_eq!(
+            result,
+            Err(ContentError::Auth(
+                crate::neev::error::AuthError::Unauthorized
+            )),
+            "{operation}"
+        );
+        assert_eq!(counts, (1, "Private title".into(), 1), "{operation}");
+        assert_eq!(usage, (1, 1), "{operation}");
+    }
+}
+
 async fn authority(database: sea_orm::DatabaseConnection) {
     let h = Harness::new(database).await;
     let input = h.input(ResourceKind::Chat, "Private title");

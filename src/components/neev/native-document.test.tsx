@@ -75,6 +75,8 @@ it.each(["content", "audience"])(
         }),
       [`GET ${path}/revisions`]: () =>
         json({ items: [revision], nextAfter: null }),
+      [`GET ${path}/revisions?after=1`]: () =>
+        json({ items: [{ ...revision, revision: "2" }], nextAfter: null }),
       [`POST ${path}/revisions`]: (init) => {
         body = JSON.parse(init.body as string)
         return json({ code: "conflict" }, 409)
@@ -109,6 +111,12 @@ it.each(["content", "audience"])(
       expectedAuthRevision: "1",
       markdown: "my unsaved changes",
     })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Your draft is preserved"
+    )
     await user.click(
       screen.getByRole("button", { name: "Compare with latest" })
     )
@@ -449,25 +457,30 @@ it.each(["body", "history"])(
   }
 )
 
-it("does not replace a successful save with an older poll body that finishes afterward", async () => {
+it("preserves edits and their original preconditions when a changed-head poll body finishes afterward", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
-  let reads = 0
+  let metadataReads = 0
   let release!: (value: Response) => void
+  let submitted: unknown
   const mock = mockNativeSession(undefined, {
-    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET /api/neev/resources/${resource.id}`]: () =>
+      json(
+        ++metadataReads === 1 ? resource : { ...resource, contentRevision: "2" }
+      ),
     [`GET ${path}/revisions`]: () =>
       json({ items: [revision], nextAfter: null }),
     [`GET ${path}/content?revision=1`]: () =>
-      ++reads === 1
-        ? json({ revision, markdown: "seed" })
-        : new Promise((resolve) => {
-            release = resolve
-          }),
-    [`POST ${path}/revisions`]: () =>
-      json(
-        { ...revision, revision: "2", parentRevision: "1", byteLength: "5" },
-        201
-      ),
+      json({ revision, markdown: "seed" }),
+    [`GET ${path}/content?revision=2`]: () =>
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    [`GET ${path}/revisions?after=1`]: () =>
+      json({ items: [{ ...revision, revision: "2" }], nextAfter: null }),
+    [`POST ${path}/revisions`]: (init) => {
+      submitted = JSON.parse(init.body as string)
+      return json({ code: "conflict" }, 409)
+    },
   })
   const user = userEvent.setup()
   mount()
@@ -479,30 +492,72 @@ it("does not replace a successful save with an older poll body that finishes aft
   })
   expect(release).toBeDefined()
   await user.type(editor, "!")
-  await user.click(screen.getByRole("button", { name: "Save" }))
-  expect(await screen.findByText("Saved")).toBeVisible()
   await act(async () => {
-    release(json({ revision, markdown: "seed" }))
+    release(
+      json({ revision: { ...revision, revision: "2" }, markdown: "peer" })
+    )
   })
   expect(editor).toHaveValue("seed!")
-  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled()
+  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled()
+  await user.click(screen.getByRole("button", { name: "Save" }))
+  expect(submitted).toEqual({
+    requestId: expect.any(String),
+    markdown: "seed!",
+    expectedContentRevision: "1",
+    expectedAuthRevision: "1",
+  })
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Your draft is preserved"
+  )
   expect(mock.unknown).toEqual([])
 })
 
-it("refreshes every loaded history page instead of collapsing it to the first page", async () => {
+it("reuses unchanged body and history pages while polling authority, then merges new revisions", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
   const history = Array.from({ length: 101 }, (_, i) => ({
     ...revision,
-    revision: String(101 - i),
+    revision: String(i + 1),
   }))
+  let head = "101"
+  let metadataReads = 0,
+    bodyReads = 0,
+    firstPages = 0,
+    olderPages = 0,
+    newPages = 0
   const mock = mockNativeSession(undefined, {
-    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
-    [`GET ${path}/content?revision=1`]: () =>
-      json({ revision, markdown: "seed" }),
-    [`GET ${path}/revisions`]: () =>
-      json({ items: history.slice(0, 100), nextAfter: "2" }),
-    [`GET ${path}/revisions?after=2`]: () =>
-      json({ items: history.slice(100), nextAfter: null }),
+    [`GET /api/neev/resources/${resource.id}`]: () => {
+      metadataReads++
+      return json({ ...resource, contentRevision: head })
+    },
+    [`GET ${path}/content?revision=101`]: () => {
+      bodyReads++
+      return json({
+        revision: { ...revision, revision: "101" },
+        markdown: "seed",
+      })
+    },
+    [`GET ${path}/content?revision=102`]: () => {
+      bodyReads++
+      return json({
+        revision: { ...revision, revision: "102", byteLength: "3" },
+        markdown: "new",
+      })
+    },
+    [`GET ${path}/revisions`]: () => {
+      firstPages++
+      return json({ items: history.slice(0, 100), nextAfter: "100" })
+    },
+    [`GET ${path}/revisions?after=100`]: () => {
+      olderPages++
+      return json({ items: history.slice(100), nextAfter: null })
+    },
+    [`GET ${path}/revisions?after=101`]: () => {
+      newPages++
+      return json({
+        items: [{ ...revision, revision: "102" }],
+        nextAfter: null,
+      })
+    },
   })
   const user = userEvent.setup()
   mount()
@@ -510,7 +565,7 @@ it("refreshes every loaded history page instead of collapsing it to the first pa
   await user.click(screen.getByRole("button", { name: "History" }))
   await user.click(screen.getByRole("button", { name: "Load more" }))
   expect(
-    await screen.findByRole("button", { name: "Compare revision 1" })
+    await screen.findByRole("button", { name: "Compare revision 101" })
   ).toBeVisible()
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000)
@@ -518,5 +573,56 @@ it("refreshes every loaded history page instead of collapsing it to the first pa
   expect(
     screen.getByRole("button", { name: "Compare revision 1" })
   ).toBeVisible()
+  expect(metadataReads).toBe(2)
+  expect([bodyReads, firstPages, olderPages, newPages]).toEqual([1, 1, 1, 0])
+  head = "102"
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000)
+  })
+  expect(
+    screen.getByRole("button", { name: "Compare revision 102" })
+  ).toBeVisible()
+  expect(
+    screen.getByRole("button", { name: "Compare revision 1" })
+  ).toBeVisible()
+  expect(screen.getByRole("textbox", { name: "Document content" })).toHaveValue(
+    "new"
+  )
+  expect([bodyReads, firstPages, olderPages, newPages]).toEqual([2, 1, 1, 1])
+  expect(mock.unknown).toEqual([])
+})
+
+it("keeps a dirty draft and recovery controls when foreground Compare has unavailable storage", async () => {
+  let reads = 0
+  const mock = mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}/content?revision=1`]: () =>
+      ++reads === 1
+        ? json({ revision, markdown: "seed" })
+        : json({ code: "storage_unavailable" }, 503),
+    [`GET ${path}/revisions`]: () =>
+      json({ items: [revision], nextAfter: null }),
+    [`POST ${path}/revisions`]: () => json({ code: "conflict" }, 409),
+  })
+  const user = userEvent.setup()
+  mount()
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  await user.type(editor, " private draft")
+  await user.click(screen.getByRole("button", { name: "Save" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Compare with latest" })
+  )
+  expect(await screen.findByRole("alert")).toBeVisible()
+  expect(editor).toHaveValue("seed private draft")
+  for (const name of [
+    "Save",
+    "Copy draft",
+    "Reload latest",
+    "Compare with latest",
+  ])
+    expect(screen.getByRole("button", { name })).toBeEnabled()
+  expect(screen.queryByRole("dialog")).toBeNull()
   expect(mock.unknown).toEqual([])
 })

@@ -65,6 +65,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     [loaded, setLoaded] = useState(false),
     [saving, setSaving] = useState(false),
     [error, setError] = useState<unknown>(null),
+    [conflict, setConflict] = useState(false),
     [revoked, setRevoked] = useState(false),
     [saved, setSaved] = useState(false),
     [history, setHistory] = useState(false),
@@ -80,7 +81,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     }),
     draftRef = useRef(""),
     editGeneration = useRef(0),
-    historyPages = useRef(1),
+    historyHead = useRef<string | null>(null),
     historyRequest = useRef(0),
     dirty = useRef(false),
     sending = useRef(false),
@@ -97,6 +98,8 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     enabled: !loading && !revoked,
     onPoll: refresh,
   })
+  const documentError =
+    error ?? (conflict ? new NativeClientError("conflict") : null)
   useEffect(() => {
     setLatest(resource)
   }, [resource])
@@ -117,9 +120,12 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     setLoaded(true)
     onDirtyChange(false)
     retry.current = null
+    setConflict(false)
   }
   function fail(e: unknown) {
     if (!scope.isCurrent()) return
+    if (e instanceof NativeClientError && e.kind === "conflict")
+      setConflict(true)
     if (
       e instanceof NativeContentNotFoundError ||
       (e instanceof NativeClientError &&
@@ -155,7 +161,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
           scope.signal
         )
   }
-  async function refresh() {
+  async function refresh(validateContent = false) {
     const generation = editGeneration.current
     try {
       const metadata = await loadNativeResource(
@@ -168,9 +174,17 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         throw new NativeClientError("invalid_response")
       setLatest(metadata)
       onChanged(metadata)
-      if (!(await loadHistory())) return
+      if (!(await loadHistory(metadata.contentRevision))) return
       // Dirty or ambiguously committed drafts keep BOTH original preconditions.
-      if (!dirty.current && !retry.current && !sending.current) {
+      if (
+        !dirty.current &&
+        !retry.current &&
+        !sending.current &&
+        !conflict &&
+        (validateContent ||
+          !loaded ||
+          metadata.contentRevision !== base.current.content)
+      ) {
         const body = await readBody(metadata)
         if (
           !scope.isCurrent() ||
@@ -180,9 +194,20 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         )
           return
         setBody(body?.markdown ?? "", metadata, body?.revision.revision ?? "0")
+      } else if (
+        !dirty.current &&
+        !retry.current &&
+        !sending.current &&
+        !conflict
+      ) {
+        base.current.auth = metadata.authRevision
       }
       setLoading(false)
-      setError(null)
+      setError((previous: unknown) =>
+        previous instanceof NativeClientError && previous.kind === "conflict"
+          ? previous
+          : null
+      )
     } catch (e) {
       fail(e)
       if (scope.isCurrent()) setLoading(false)
@@ -192,7 +217,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     sending.current = false
     setSaving(false)
     setBusy(false)
-    void refresh()
+    void refresh(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope])
   async function save() {
@@ -346,16 +371,20 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       }
     }
   }
-  async function loadHistory(more = false) {
-    if (more) historyPages.current += 1
-    const pages = historyPages.current
+  async function loadHistory(head: string, more = false) {
+    if (!more && historyHead.current === head) return true
     const request = ++historyRequest.current
     const current = () =>
       scope.isCurrent() && request === historyRequest.current
     try {
       const refreshed: NativeRevision[] = []
-      let cursor: string | null = null
-      for (let index = 0; index < pages; index++) {
+      const initial = historyHead.current === null
+      let cursor: string | null = more
+        ? nextRevision
+        : initial || historyHead.current === "0"
+          ? null
+          : historyHead.current
+      do {
         const page = await listNativeDocumentRevisions(
           resource.id,
           cursor,
@@ -364,12 +393,17 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         if (!current()) return false
         refreshed.push(...page.items)
         cursor = page.nextAfter
-        if (!cursor) break
-      }
-      setRevisions([
-        ...new Map(refreshed.map((item) => [item.revision, item])).values(),
+        // Initial/explicit pagination loads one page. A poll only catches up
+        // newly appended immutable revisions after its previously observed head.
+        if (initial || more) break
+      } while (cursor)
+      setRevisions((previous) => [
+        ...new Map(
+          [...previous, ...refreshed].map((item) => [item.revision, item])
+        ).values(),
       ])
-      setNextRevision(cursor)
+      if (initial || more) setNextRevision(cursor)
+      if (!more) historyHead.current = head
       return true
     } catch (e) {
       if (current()) {
@@ -382,7 +416,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
   async function moreHistory() {
     if (!nextRevision || busy) return
     setBusy(true)
-    await loadHistory(true)
+    await loadHistory(latest.contentRevision, true)
     if (scope.isCurrent()) setBusy(false)
   }
   if (revoked)
@@ -415,11 +449,11 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
             <p role="status">{n("loading")}</p>
           ) : (
             <>
-              <DocumentError error={error} />
+              <DocumentError error={documentError} />
               <Button
                 onClick={() => {
                   setLoading(true)
-                  void refresh()
+                  void refresh(true)
                 }}
               >
                 {n("retry")}
@@ -494,11 +528,10 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
               {saved ? t("saved") : dirty.current ? t("unsaved") : ""}
             </span>
           </div>
-          <DocumentError error={error} />
+          <DocumentError error={documentError} />
           {(latest.contentRevision !== base.current.content ||
             latest.authRevision !== base.current.auth ||
-            (error instanceof NativeClientError &&
-              error.kind === "conflict")) && (
+            conflict) && (
             <Button
               variant="outline"
               disabled={busy || saving}
@@ -627,7 +660,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
               </pre>
             </div>
           </div>
-          <DocumentError error={error} />
+          <DocumentError error={documentError} />
           <div className="flex flex-wrap gap-2">
             <Button
               variant="ghost"
@@ -657,6 +690,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                     )
                     setComparison(null)
                     setError(null)
+                    setConflict(false)
                     setSaved(false)
                   }}
                 >
@@ -677,6 +711,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                     retry.current = null
                     setComparison(null)
                     setError(null)
+                    setConflict(false)
                   }}
                 >
                   {t("keepDraftLatest")}

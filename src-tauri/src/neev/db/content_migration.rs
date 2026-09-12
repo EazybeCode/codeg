@@ -13,6 +13,8 @@ pub(super) const TABLE_NAMES: &[&str] = &[
     "neev_content_leases",
 ];
 pub(super) const SCHEMA_VERSION: i64 = 3;
+pub(super) const HARDENED_SCHEMA_VERSION: i64 = 4;
+const VALID_ORIGIN: &str = "(origin_chat_id IS NULL AND origin_kind IS NULL) OR (origin_chat_id IS NOT NULL AND origin_kind IS NOT NULL AND kind='document' AND origin_kind='chat')";
 
 fn table(
     name: &str,
@@ -111,7 +113,7 @@ pub(super) fn tables() -> Vec<TableCreateStatement> {
             "content_revision>=0",
             "created_at>=0",
             "updated_at>=0",
-            "(origin_chat_id IS NULL AND origin_kind IS NULL) OR (origin_chat_id IS NOT NULL AND kind='document' AND origin_kind='chat')",
+            VALID_ORIGIN,
         ],
         &[&["org_id", "id", "kind"]],
     );
@@ -337,6 +339,40 @@ pub(super) async fn upgrade(tx: &DatabaseTransaction) -> Result<(), AuthError> {
         tx.execute(backend.build(&index))
             .await
             .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+/// Forward hardening for already initialized v3 stores. Do not rebuild the
+/// resource table: revision/message/source foreign keys must retain their targets.
+pub(super) async fn harden_origins(tx: &DatabaseTransaction) -> Result<(), AuthError> {
+    if super::one(
+        tx,
+        &format!("SELECT id FROM neev_resources WHERE NOT ({VALID_ORIGIN}) LIMIT 1"),
+        vec![],
+    )
+    .await?
+    .is_some()
+    {
+        return Err(AuthError::Unavailable);
+    }
+    match tx.get_database_backend() {
+        sea_orm::DbBackend::Postgres => {
+            super::execute(tx, &format!("ALTER TABLE neev_resources ADD CONSTRAINT neev_resources_valid_origin CHECK ({VALID_ORIGIN})"), vec![]).await?;
+        }
+        sea_orm::DbBackend::Sqlite => {
+            let new_origin = VALID_ORIGIN
+                .replace("origin_chat_id", "NEW.origin_chat_id")
+                .replace("origin_kind", "NEW.origin_kind")
+                .replace("AND kind=", "AND NEW.kind=");
+            for (name, event) in [
+                ("insert", "INSERT"),
+                ("update", "UPDATE OF origin_chat_id,origin_kind,kind"),
+            ] {
+                super::execute(tx, &format!("CREATE TRIGGER neev_resources_valid_origin_{name} BEFORE {event} ON neev_resources WHEN NOT ({new_origin}) BEGIN SELECT RAISE(ABORT, 'invalid resource origin'); END"), vec![]).await?;
+            }
+        }
+        _ => return Err(AuthError::Unavailable),
     }
     Ok(())
 }

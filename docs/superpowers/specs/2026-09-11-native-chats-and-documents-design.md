@@ -180,9 +180,15 @@ the whole session boundary. No cross-org cache keys or stale response commits.
 
 ## Schema and backup lifecycle
 
-Add a reviewed native-only schema version3 forward migration from the exact
-version2 marker, preserving accounts, organizations, memberships and nodes.
-Fresh database initializes version3; unknown/native1/legacy schemas remain refused.
+Add a reviewed native-only schema version3 content migration followed by version4
+source-link hardening, preserving accounts, organizations, memberships, nodes,
+and existing content. Fresh databases and exact version2 follow3 then4; exact
+version3 upgrades to4 after rejecting malformed existing origin pairs transactionally.
+Exact version4 initialization is idempotent; unknown/native1/legacy schemas remain refused.
+Both origin fields must be NULL, or both must be non-NULL with document kind and
+chat origin kind; the composite foreign key enforces source existence, kind and organization.
+Read-only backup verification accepts exact historical3 and current4 and reports
+the actual marker without initializing or migrating the restored snapshot.
 Do not invoke the legacy migrator or reset an existing native database. Test
 transactional migration/restart and foreign-key constraints on disposable SQLite
 and PostgreSQL, including rollback and preserved identity data.

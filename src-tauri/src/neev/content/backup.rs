@@ -33,7 +33,7 @@ pub(crate) async fn verify_snapshot(
         database.begin().await
     }
     .map_err(|_| ContentError::Storage)?;
-    db::validate_content_snapshot(&tx).await?;
+    let schema_version = db::validate_content_snapshot(&tx).await?;
     let rows = tx.query_all(db::statement(&tx,
         "SELECT org_id,blob_key,sha256,byte_length FROM neev_document_revisions ORDER BY org_id,blob_key", vec![]))
         .await.map_err(|_| ContentError::Storage)?;
@@ -63,7 +63,7 @@ pub(crate) async fn verify_snapshot(
             .await?;
     }
     Ok(Manifest {
-        schema_version: 3,
+        schema_version,
         blobs,
     })
 }

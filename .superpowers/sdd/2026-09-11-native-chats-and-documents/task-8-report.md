@@ -367,12 +367,15 @@ the child then wrote `child outlived fixture cleanup`.
 
 The fix removes `spawn_blocking` and `Command::output`. A test-only owner retains
 the actual `std::process::Child`, writes stdout/stderr into a separate owned
-temporary directory, caps each captured stream at 16 KiB, and polls `try_wait`
+temporary directory, bounds each post-exit stream read to 16 KiB, and polls `try_wait`
 without blocking. The real preflight has a 20-second parent deadline around its
 own 15-second JavaScript deadline. Deadline expiry performs explicit kill and
 wait before returning. If the outer 120-second action task instead aborts this
 future, the owner's `Drop` performs synchronous kill and wait before task
 cancellation completes; fixture cleanup therefore cannot overtake the child.
+The 16 KiB bound is not a disk capture cap: those owned temporary files may grow
+until the 20-second deadline kills and reaps the child. This test-only limitation
+is deferred; cancellation/reaping behavior is unchanged.
 The output directory is removed on every return/drop and contains no session
 value because the preflight emits only sanitized counts.
 
