@@ -8,8 +8,14 @@ use crate::neev::{db, test_support as h};
 use futures::FutureExt;
 use sea_orm::{ConnectionTrait, DatabaseConnection};
 
+const AGENT_TABLES: [&str; 3] = [
+    "neev_agent_connections",
+    "neev_agent_attempts",
+    "neev_agent_operations",
+];
+
 // Catches omission of historical revisions, trusting corrupt bytes, and cross-org lookup.
-async fn restored_bytes(database: DatabaseConnection) {
+async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
     let h = Harness::new(database).await;
     let doc = resources::create(
         &h.state,
@@ -33,10 +39,24 @@ async fn restored_bytes(database: DatabaseConnection) {
         .await
         .unwrap();
     }
+    if schema_version != 5 {
+        for table in AGENT_TABLES.iter().rev() {
+            db::execute(&h.state.database, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
+        db::execute(
+            &h.state.database,
+            "UPDATE neev_schema_version SET version=$1",
+            vec![schema_version.into()],
+        )
+        .await
+        .unwrap();
+    }
     let manifest = verify_snapshot(&h.state.database, &h.state.blobs)
         .await
         .unwrap();
-    assert_eq!(manifest.schema_version, 4);
+    assert_eq!(manifest.schema_version, schema_version);
     assert_eq!(manifest.blobs.len(), 2);
     assert_eq!(
         manifest.blobs.iter().map(|b| b.byte_length).sum::<i64>(),
@@ -90,20 +110,24 @@ async fn restored_bytes(database: DatabaseConnection) {
 
 #[tokio::test]
 async fn sqlite_restored_bytes() {
-    restored_bytes(h::database().await).await;
+    for version in [3, 4, 5] {
+        restored_bytes(h::database().await, version).await;
+    }
 }
 
 #[tokio::test]
 #[ignore = "requires isolated PostgreSQL"]
 async fn postgres_restored_bytes() {
-    let (db, admin, schema) = h::postgres_database().await;
-    eprintln!("backup owned schema: {schema}");
-    let outcome = std::panic::AssertUnwindSafe(restored_bytes(db.clone()))
-        .catch_unwind()
-        .await;
-    h::cleanup_postgres(db, admin, schema).await;
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic);
+    for version in [3, 4, 5] {
+        let (db, admin, schema) = h::postgres_database().await;
+        eprintln!("backup owned schema: {schema}");
+        let outcome = std::panic::AssertUnwindSafe(restored_bytes(db.clone(), version))
+            .catch_unwind()
+            .await;
+        h::cleanup_postgres(db, admin, schema).await;
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 }
 
@@ -181,10 +205,41 @@ async fn snapshot_schema_is_exact_and_read_only() {
     db::execute(&db, "PRAGMA query_only=ON", vec![])
         .await
         .unwrap();
-    assert_eq!(verify_snapshot(&db, &store).await.unwrap().blobs.len(), 0);
+    let manifest = verify_snapshot(&db, &store).await.unwrap();
+    assert_eq!(manifest.schema_version, 5);
+    assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
         .unwrap();
+    let partial = h::database().await;
+    db::execute(&partial, "DROP TABLE neev_agent_operations", vec![])
+        .await
+        .unwrap();
+    assert!(
+        verify_snapshot(&partial, &store).await.is_err(),
+        "schema5 missing one agent table must be refused"
+    );
+    for version in [3_i64, 4] {
+        db::execute(
+            &db,
+            "UPDATE neev_schema_version SET version=$1",
+            vec![version.into()],
+        )
+        .await
+        .unwrap();
+        assert!(
+            verify_snapshot(&db, &store).await.is_err(),
+            "historical marker {version} must reject agent tables"
+        );
+    }
+    db::execute(&db, "UPDATE neev_schema_version SET version=5", vec![])
+        .await
+        .unwrap();
+    for table in AGENT_TABLES.iter().rev() {
+        db::execute(&db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     for version in [3_i64, 4] {
         db::execute(
             &db,
@@ -213,7 +268,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
             version
         );
     }
-    for version in [1_i64, 2, 5] {
+    for version in [1_i64, 2, 5, 6] {
         db::execute(
             &db,
             "UPDATE neev_schema_version SET version=$1",
@@ -246,6 +301,15 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     assert!(verify_snapshot(&db, &store).await.is_err());
+
+    let missing_agent = h::database().await;
+    db::execute(&missing_agent, "DROP TABLE neev_agent_operations", vec![])
+        .await
+        .unwrap();
+    assert!(
+        verify_snapshot(&missing_agent, &store).await.is_err(),
+        "schema5 must reject a missing agent table"
+    );
 }
 
 #[test]

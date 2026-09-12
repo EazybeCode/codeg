@@ -3,6 +3,7 @@ use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, ExecResult, QueryResult,
     Statement, TransactionTrait, Value,
 };
+mod agent_migration;
 mod content_migration;
 pub(crate) mod entities;
 mod migration;
@@ -73,35 +74,75 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         // Serialize schema initialization across processes on this database.
         one(&tx, "SELECT pg_advisory_xact_lock(1852143222)", vec![]).await?;
     }
-    let sql = if backend == DbBackend::Postgres {
-        "SELECT tablename AS name FROM pg_tables WHERE schemaname=current_schema()"
-    } else {
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    };
-    let rows = tx
-        .query_all(statement(&tx, sql, vec![]))
-        .await
-        .map_err(database_error)?;
-    let names: std::collections::BTreeSet<String> = rows
-        .iter()
-        .map(|r| r.try_get("", "name").map_err(database_error))
-        .collect::<Result<_, _>>()?;
-    let v2_expected: std::collections::BTreeSet<String> = migration::TABLE_NAMES
-        .iter()
-        .map(|n| (*n).to_owned())
-        .collect();
-    let v3_expected: std::collections::BTreeSet<String> = v2_expected
-        .iter()
-        .cloned()
-        .chain(
-            content_migration::TABLE_NAMES
-                .iter()
-                .map(|name| (*name).to_owned()),
-        )
-        .collect();
-    // Empty or exact v2/v3/v4 only; refuse legacy and partial data.
-    if !names.is_empty() {
-        if names != v2_expected && names != v3_expected {
+    let result: Result<(), AuthError> = async {
+        let sql = if backend == DbBackend::Postgres {
+            "SELECT c.relname AS name,(c.relkind='r' AND NOT c.relispartition) AS native_table FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','f')"
+        } else {
+            "SELECT name,type='table' AS native_table FROM pragma_table_list WHERE schema='main' AND name NOT LIKE 'sqlite_%'"
+        };
+        let rows = tx
+            .query_all(statement(&tx, sql, vec![]))
+            .await
+            .map_err(database_error)?;
+        let names: std::collections::BTreeSet<String> = rows
+            .iter()
+            .map(|r| r.try_get("", "name").map_err(database_error))
+            .collect::<Result<_, _>>()?;
+        for row in &rows {
+            if !row
+                .try_get::<bool>("", "native_table")
+                .map_err(database_error)?
+            {
+                return Err(AuthError::Unavailable);
+            }
+        }
+        let v2_expected: std::collections::BTreeSet<String> = migration::TABLE_NAMES
+            .iter()
+            .map(|n| (*n).to_owned())
+            .collect();
+        let v3_expected: std::collections::BTreeSet<String> = v2_expected
+            .iter()
+            .cloned()
+            .chain(
+                content_migration::TABLE_NAMES
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            )
+            .collect();
+        let v5_expected: std::collections::BTreeSet<String> = v3_expected
+            .iter()
+            .cloned()
+            .chain(
+                agent_migration::TABLE_NAMES
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            )
+            .collect();
+
+        // Empty or an exact known native inventory only; refuse legacy and partial data.
+        if names.is_empty() {
+            for table in migration::tables() {
+                tx.execute(backend.build(&table))
+                    .await
+                    .map_err(database_error)?;
+            }
+            for index in migration::indexes() {
+                tx.execute(backend.build(&index))
+                    .await
+                    .map_err(database_error)?;
+            }
+            content_migration::upgrade(&tx).await?;
+            content_migration::harden_origins(&tx).await?;
+            agent_migration::upgrade(&tx).await?;
+            execute(
+                &tx,
+                "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
+                vec![agent_migration::SCHEMA_VERSION.into()],
+            )
+            .await?;
+            return Ok(());
+        }
+        if names != v2_expected && names != v3_expected && names != v5_expected {
             return Err(AuthError::Unavailable);
         }
         let version = one(
@@ -110,54 +151,44 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             vec![],
         )
         .await?
-        .ok_or(AuthError::Unavailable)?;
-        let version = version
-            .try_get::<i64>("", "version")
-            .map_err(database_error)?;
-        if names == v2_expected && version == migration::SCHEMA_VERSION {
-            content_migration::upgrade(&tx).await?;
-            content_migration::harden_origins(&tx).await?;
-            execute(
-                &tx,
-                "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-                vec![content_migration::HARDENED_SCHEMA_VERSION.into()],
-            )
-            .await?;
-        } else if names == v3_expected && version == content_migration::SCHEMA_VERSION {
-            content_migration::harden_origins(&tx).await?;
-            execute(
-                &tx,
-                "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-                vec![content_migration::HARDENED_SCHEMA_VERSION.into()],
-            )
-            .await?;
-        } else if names != v3_expected || version != content_migration::HARDENED_SCHEMA_VERSION {
-            return Err(AuthError::Unavailable);
+        .ok_or(AuthError::Unavailable)?
+        .try_get::<i64>("", "version")
+        .map_err(database_error)?;
+        match version {
+            migration::SCHEMA_VERSION if names == v2_expected => {
+                content_migration::upgrade(&tx).await?;
+                content_migration::harden_origins(&tx).await?;
+                agent_migration::upgrade(&tx).await?;
+            }
+            content_migration::SCHEMA_VERSION if names == v3_expected => {
+                content_migration::harden_origins(&tx).await?;
+                agent_migration::upgrade(&tx).await?;
+            }
+            content_migration::HARDENED_SCHEMA_VERSION if names == v3_expected => {
+                agent_migration::upgrade(&tx).await?;
+            }
+            agent_migration::SCHEMA_VERSION if names == v5_expected => return Ok(()),
+            _ => return Err(AuthError::Unavailable),
         }
-    } else {
-        for table in migration::tables() {
-            tx.execute(backend.build(&table))
-                .await
-                .map_err(database_error)?;
-        }
-        for index in migration::indexes() {
-            tx.execute(backend.build(&index))
-                .await
-                .map_err(database_error)?;
-        }
-        content_migration::upgrade(&tx).await?;
-        content_migration::harden_origins(&tx).await?;
         execute(
             &tx,
-            "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-            vec![content_migration::HARDENED_SCHEMA_VERSION.into()],
+            "UPDATE neev_schema_version SET version=$1 WHERE id=1",
+            vec![agent_migration::SCHEMA_VERSION.into()],
         )
         .await?;
+        Ok(())
     }
-    tx.commit().await.map_err(database_error)
+    .await;
+    match result {
+        Ok(()) => tx.commit().await.map_err(database_error),
+        Err(error) => {
+            tx.rollback().await.map_err(database_error)?;
+            Err(error)
+        }
+    }
 }
 
-/// Inspect restored evidence only: exact native3/4 inventory and actual marker.
+/// Inspect restored evidence only: exact native3/4/5 inventory and actual marker.
 /// Shares the migrator's authoritative table names but never calls the migrator.
 pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     db: &C,
@@ -183,14 +214,20 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             return Err(AuthError::Unavailable);
         }
     }
-    let expected = migration::TABLE_NAMES
+    let content_expected: std::collections::BTreeSet<String> = migration::TABLE_NAMES
         .iter()
         .chain(content_migration::TABLE_NAMES.iter())
         .map(|name| (*name).to_owned())
         .collect();
-    if names != expected {
-        return Err(AuthError::Unavailable);
-    }
+    let agent_expected: std::collections::BTreeSet<String> = content_expected
+        .iter()
+        .cloned()
+        .chain(
+            agent_migration::TABLE_NAMES
+                .iter()
+                .map(|name| (*name).to_owned()),
+        )
+        .collect();
     let markers = db
         .query_all(statement(
             db,
@@ -210,16 +247,20 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     let version = markers[0]
         .try_get::<i64>("", "version")
         .map_err(database_error)?;
-    if ![
-        content_migration::SCHEMA_VERSION,
-        content_migration::HARDENED_SCHEMA_VERSION,
-    ]
-    .contains(&version)
-    {
+    let valid = match version {
+        content_migration::SCHEMA_VERSION | content_migration::HARDENED_SCHEMA_VERSION => {
+            names == content_expected
+        }
+        agent_migration::SCHEMA_VERSION => names == agent_expected,
+        _ => false,
+    };
+    if !valid {
         return Err(AuthError::Unavailable);
     }
     Ok(version)
 }
+#[cfg(test)]
+mod agent_tests;
 #[cfg(test)]
 mod content_tests;
 #[cfg(test)]

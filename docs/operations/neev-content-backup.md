@@ -132,16 +132,18 @@ SQLx applies TLS negotiation to Unix sockets as well as TCP connections. The
 checked `--schema` supplies the only startup search path.
 
 It requires actual ordinary native tables (not same-name views, foreign tables,
-or partitioned relations), and reads the exact schema3 or schema4 marker/table inventory and
-all historical revision
+or partitioned relations), and accepts exactly three snapshot contracts: historical
+schema3 and schema4 with the base/content table inventory, or native schema5 with
+the base/content/personal-agent metadata inventory. It reads all historical revision
 references in a read-only snapshot transaction, then verifies each file through
 the same no-follow BlobStore API used by native content. Extra copied orphan
 files and temporary files do not affect reference verification. The deterministic
 referenced-key manifest contains only org/key/hash/size; stdout emits its SHA-256,
 schema version, reference count, and total bytes, not the inventory or body data.
-The reported version is the snapshot's actual marker. Historical schema3 restores
-remain verifiable without initialization or migration. Application startup upgrades
-exact schema3 to4 with transactional source-link validation; verification never does.
+The reported version is the snapshot's actual marker. Historical schema3 and schema4
+restores remain verifiable without initialization or migration. Application startup
+upgrades exact schema3 through transactional source-link hardening and then to schema5;
+exact schema4 advances directly to schema5. Verification never migrates an archive.
 
 Acceptance is successful only after the complete dump import and verifier both
 succeed against the named isolated destination and fresh root. Record the
