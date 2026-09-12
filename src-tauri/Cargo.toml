@@ -57,6 +57,11 @@ name = "neev-server"
 path = "src/bin/neev_server.rs"
 required-features = []
 
+[[bin]]
+name = "neev-content-verify"
+path = "src/bin/neev-content-verify.rs"
+required-features = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
 

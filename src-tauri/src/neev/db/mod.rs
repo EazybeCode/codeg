@@ -146,6 +146,53 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
     }
     tx.commit().await.map_err(database_error)
 }
+
+/// Inspect restored evidence only: exact native3 table inventory and marker.
+/// Shares the migrator's authoritative table names but never calls the migrator.
+pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(db: &C) -> Result<(), AuthError> {
+    let sql = match db.get_database_backend() {
+        DbBackend::Postgres => "SELECT c.relname AS name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','f')",
+        DbBackend::Sqlite => "SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'",
+        _ => return Err(AuthError::Unavailable),
+    };
+    let rows = db
+        .query_all(statement(db, sql, vec![]))
+        .await
+        .map_err(database_error)?;
+    let names: std::collections::BTreeSet<String> = rows
+        .iter()
+        .map(|row| row.try_get("", "name").map_err(database_error))
+        .collect::<Result<_, _>>()?;
+    let expected = migration::TABLE_NAMES
+        .iter()
+        .chain(content_migration::TABLE_NAMES.iter())
+        .map(|name| (*name).to_owned())
+        .collect();
+    if names != expected {
+        return Err(AuthError::Unavailable);
+    }
+    let markers = db
+        .query_all(statement(
+            db,
+            "SELECT id,version FROM neev_schema_version",
+            vec![],
+        ))
+        .await
+        .map_err(database_error)?;
+    if markers.len() != 1
+        || markers[0]
+            .try_get::<i32>("", "id")
+            .map_err(database_error)?
+            != 1
+        || markers[0]
+            .try_get::<i64>("", "version")
+            .map_err(database_error)?
+            != content_migration::SCHEMA_VERSION
+    {
+        return Err(AuthError::Unavailable);
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod content_tests;
 #[cfg(test)]

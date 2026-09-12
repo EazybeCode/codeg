@@ -20,6 +20,10 @@ pub fn run_server() -> std::process::ExitCode {
     startup::run_server()
 }
 
+pub fn run_content_verifier() -> std::process::ExitCode {
+    content::backup::run_content_verifier()
+}
+
 #[cfg(test)]
 mod contract_tests {
     use super::{

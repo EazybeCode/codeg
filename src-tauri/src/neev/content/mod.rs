@@ -1,4 +1,7 @@
 pub(crate) mod access;
+pub(crate) mod backup;
+#[cfg(all(test, unix))]
+mod backup_tests;
 mod blob;
 #[cfg(all(test, unix))]
 mod blob_tests;
