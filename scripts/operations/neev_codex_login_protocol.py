@@ -232,6 +232,7 @@ class CodexLoginProtocol:
             self._fatal("overflow")
 
         events: List[Event] = []
+        provider_failed = False
         offset = 0
         while offset < len(chunk):
             newline = chunk.find(b"\n", offset)
@@ -240,6 +241,8 @@ class CodexLoginProtocol:
                 if len(self._buffer) + len(segment) > MAX_FRAME_BYTES:
                     self._fatal("overflow")
                 self._buffer.extend(segment)
+                if provider_failed:
+                    raise ProtocolError("provider_failed") from None
                 return events
             segment = chunk[offset:newline]
             if len(self._buffer) + len(segment) + 1 > MAX_FRAME_BYTES:
@@ -248,10 +251,18 @@ class CodexLoginProtocol:
             raw = bytes(self._buffer)
             self._buffer.clear()
             value = self._decode(raw)
-            event = self._handle(value)
+            try:
+                event = self._handle(value)
+            except ProtocolError as error:
+                if error.code != "provider_failed":
+                    raise
+                provider_failed = True
+                event = None
             if event is not None:
                 events.append(event)
             offset = newline + 1
+        if provider_failed:
+            raise ProtocolError("provider_failed") from None
         return events
 
     def close(self) -> None:

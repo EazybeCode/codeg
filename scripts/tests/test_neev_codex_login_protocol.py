@@ -376,6 +376,54 @@ class CodexLoginProtocolTests(unittest.TestCase):
         retry = json.loads(self.protocol.read_account())
         self.assertGreater(retry["id"], request["id"])
 
+    def test_provider_error_retains_a_fragmented_notification_and_session_alignment(self):
+        self.initialize()
+        request = json.loads(self.protocol.read_account())
+        error = frame({"id": request["id"], "error": {"message": "invented"}})
+        notification = frame({"method": "account/updated", "params": {}})
+        split = 20
+        self.assert_protocol_error(
+            "provider_failed",
+            lambda: self.protocol.receive(error + notification[:split]),
+        )
+        self.assertEqual(self.protocol.receive(notification[split:]), [])
+        retry = json.loads(self.protocol.read_account())
+        event = self.reply(
+            retry, {"requiresOpenaiAuth": True, "account": None}
+        )[0]
+        self.assertEqual(event.account.status, "disconnected")
+
+    def test_provider_error_validates_all_complete_trailing_notifications(self):
+        self.initialize()
+        request = json.loads(self.protocol.read_account())
+        error = frame({"id": request["id"], "error": {"message": "invented"}})
+        updates = (
+            frame({"method": "account/updated", "params": {}})
+            + frame(
+                {
+                    "method": "account/updated",
+                    "params": {"authMode": "chatgpt", "planType": "plus"},
+                }
+            )
+        )
+        self.assert_protocol_error(
+            "provider_failed", lambda: self.protocol.receive(error + updates)
+        )
+        retry = json.loads(self.protocol.read_account(refresh=True))
+        self.assertEqual(retry["method"], "account/read")
+
+    def test_fatal_tail_error_dominates_recoverable_provider_error(self):
+        self.initialize()
+        request = json.loads(self.protocol.read_account())
+        error = frame({"id": request["id"], "error": {"message": "invented"}})
+        malformed = frame(
+            {"method": "account/updated", "params": {"authMode": "future"}}
+        )
+        self.assert_protocol_error(
+            "invalid", lambda: self.protocol.receive(error + malformed)
+        )
+        self.assert_protocol_error("invalid", self.protocol.read_account)
+
     def test_exact_login_completion_requires_an_independent_refreshed_account_read(self):
         self.initialize()
         unused_request, login_event = self.start_login()

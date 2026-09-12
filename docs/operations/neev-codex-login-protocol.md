@@ -37,7 +37,11 @@ Only one request may be in flight. Request IDs are monotonically increasing
 integers, and responses settle only the exact pending integer ID; boolean or string
 IDs, unsolicited or duplicate responses, and result/error combinations fail
 closed. Provider error messages and data are discarded and surface only the fixed
-`provider_failed` code.
+`provider_failed` code. Reporting that recoverable error is deferred until every
+complete frame remaining in the current bounded chunk has been validated and any
+partial trailing frame retained. A malformed tail still fails fatally and takes
+precedence, so provider errors cannot bypass protocol validation or disturb stream
+alignment.
 
 Input chunks and complete frames are capped at 65,536 bytes. A frame's newline is
 part of that limit. Parsing rejects invalid UTF-8, duplicate object keys,
