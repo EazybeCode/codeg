@@ -60,6 +60,16 @@ ordinary app data and Git must never contain provider credentials or login codes
 Provider credential volumes are excluded from ordinary backup/restore; recovery
 requires personal reauthentication. Do not claim instant secure erasure of media.
 
+Owner clarification, September 12: ordinary application, supervisor and host
+restarts must preserve completed personal connections and their credential state.
+RAM-only unlock-key custody that requires login again after every host reboot is
+not acceptable. The supervisor must recover protected persistent key custody and
+recheck the official client's account status before admitting work. A missing or
+unreadable key must fail closed without replacing the key or deleting ciphertext.
+Provider expiry or revocation may still require personal reauthentication. This
+restart requirement does not change the separate disaster-recovery/backup boundary
+above, and does not claim that persistent custody has already been implemented.
+
 ## Provider contracts
 
 ### Codex
@@ -129,6 +139,11 @@ concurrent writers; browser retries reuse a scoped idempotency key. Reusing a ke
 with different input returns conflict. Login codes/URLs are memory-only and expire
 after the earlier of provider expiry or ten minutes. Server restart expires pending
 attempts instead of recovering their codes from logs or the database.
+
+Expiring an unfinished login must not erase an already completed connection.
+Saved application content must likewise survive restart. The subsequent durable
+job design must preserve submitted work and distinguish interrupted or unknown
+outcomes; it must not blindly replay actions that may already have external effects.
 
 Disconnect first makes the connection unusable transactionally, then schedules
 native logout and credential-volume cleanup. Cleanup failure leaves it unusable
@@ -234,7 +249,9 @@ abort/timeout and stale-scope invalidation behavior; support the existing locale
 
 Keep provider-connection enablement separate from `runtimeEnabled`; neither is
 enabled merely because this document is approved. Publication uses the Workos
-clone and required interactive ship gate; this spec authorizes no cloud write.
+clone; the owner explicitly authorized direct push without the ship command on
+September 12. Normal repository hooks still apply, and force-push or unrelated
+repository changes are not authorized. This spec itself authorizes no cloud write.
 
 Context: [org-memory: wiki/engineering/workos.md]. Its legacy operator-mode notes
 are not the authorization contract for the new multi-tenant service.
