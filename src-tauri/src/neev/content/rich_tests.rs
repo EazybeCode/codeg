@@ -269,3 +269,238 @@ fn rich_enforces_collection_and_variant_limits() {
         );
     }
 }
+
+// Parse the actual Rust export with the existing application Markdown parser.
+// Only bounded invented Markdown enters stdin; no database/provider environment
+// is inherited. Missing tooling, parser errors, invalid JSON, or timeout fail.
+fn parsed_export(document: &RichDocument) -> (String, serde_json::Value) {
+    use std::{
+        io::{Read, Write},
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    let markdown = rich::export_markdown(document).unwrap();
+    assert!(markdown.len() < 16_000);
+    let script = r#"import fs from 'node:fs';
+import {fromMarkdown} from 'mdast-util-from-markdown';
+import gfm from 'remark-gfm';
+const data={}; gfm.call({data:()=>data});
+const tree=fromMarkdown(fs.readFileSync(0,'utf8'),{extensions:data.micromarkExtensions,mdastExtensions:data.fromMarkdownExtensions});
+process.stdout.write(JSON.stringify(tree,(key,value)=>key==='position'?undefined:value));"#;
+    let mut child = Command::new("node")
+        .env_clear()
+        .env(
+            "PATH",
+            std::env::var_os("PATH").expect("Node toolchain PATH"),
+        )
+        .current_dir(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap(),
+        )
+        .args(["--input-type=module", "-e", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("installed Node Markdown parser");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(markdown.as_bytes())
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.take(16_001).read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.take(16_001).read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(10) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("Markdown parser timed out for {markdown:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = out.join().unwrap();
+    let stderr = err.join().unwrap();
+    assert!(
+        status.success(),
+        "Markdown parser failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    assert!(stdout.len() <= 16_000 && stderr.len() <= 16_000);
+    let tree = serde_json::from_slice(&stdout).expect("valid Markdown AST response");
+    (markdown, tree)
+}
+
+fn text_styles(node: &serde_json::Value, active: u8, result: &mut Vec<(char, u8)>) {
+    let bit = match node["type"].as_str().unwrap() {
+        "strong" => 1,
+        "emphasis" => 2,
+        "delete" => 4,
+        "inlineCode" => 8,
+        _ => 0,
+    };
+    if let Some(text) = node["value"].as_str() {
+        assert_ne!(node["type"], "html", "export must not create HTML");
+        result.extend(text.chars().map(|c| (c, active | bit)));
+    }
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            text_styles(child, active | bit, result);
+        }
+    }
+}
+
+fn with_runs(runs: Vec<InlineRun>) -> RichDocument {
+    let mut doc = document();
+    if let RichBlock::Paragraph { content, .. } = &mut doc.blocks[0] {
+        *content = runs;
+    }
+    doc
+}
+fn styled(text: &str, bits: u8) -> InlineRun {
+    InlineRun {
+        text: text.into(),
+        styles: [("bold", 1), ("italic", 2), ("strike", 4), ("code", 8)]
+            .into_iter()
+            .filter(|(_, bit)| bits & bit != 0)
+            .map(|(style, _)| style.into())
+            .collect(),
+        href: None,
+    }
+}
+
+#[test]
+fn rich_export_parser_preserves_style_whitespace_and_adjacent_runs() {
+    for (runs, want) in [
+        (
+            vec![styled(" Hello ", 1)],
+            " Hello ".chars().map(|c| (c, 1)).collect::<Vec<_>>(),
+        ),
+        (
+            vec![styled("A", 1), styled("B", 1)],
+            vec![('A', 1), ('B', 1)],
+        ),
+        (
+            vec![styled("before", 0), styled("middle", 2), styled("after", 0)],
+            "before"
+                .chars()
+                .map(|c| (c, 0))
+                .chain("middle".chars().map(|c| (c, 2)))
+                .chain("after".chars().map(|c| (c, 0)))
+                .collect(),
+        ),
+        (
+            vec![styled(" ", 8), styled(" ", 8)],
+            vec![(' ', 8), (' ', 8)],
+        ),
+        (
+            vec![styled(" ` &amp; ", 8), styled("&#32; `` ", 8)],
+            " ` &amp; &#32; `` ".chars().map(|c| (c, 8)).collect(),
+        ),
+    ] {
+        let (markdown, tree) = parsed_export(&with_runs(runs));
+        let mut got = Vec::new();
+        text_styles(&tree, 0, &mut got);
+        assert_eq!(got, want, "actual export: {markdown:?}; AST: {tree}");
+    }
+}
+
+#[test]
+fn rich_export_parser_preserves_all_emphasis_transitions() {
+    for left in 0..8 {
+        for right in 0..8 {
+            let (markdown, tree) =
+                parsed_export(&with_runs(vec![styled("A", left), styled("B", right)]));
+            let mut got = Vec::new();
+            text_styles(&tree, 0, &mut got);
+            assert_eq!(
+                got,
+                vec![('A', left), ('B', right)],
+                "styles {left}->{right}; actual export: {markdown:?}; AST: {tree}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rich_export_parser_keeps_blank_line_paragraphs_inside_list_items() {
+    for (kind, bits) in [
+        ("bullet", 0),
+        ("numbered", 0),
+        ("checked", 0),
+        ("bullet", 7),
+        ("numbered", 7),
+        ("checked", 7),
+    ] {
+        let id = "11111111-1111-4111-8111-111111111111".into();
+        let content = vec![styled("first\n\nsecond", bits)];
+        let children = vec![];
+        let block = match kind {
+            "bullet" => RichBlock::BulletListItem {
+                id,
+                content,
+                children,
+            },
+            "numbered" => RichBlock::NumberedListItem {
+                id,
+                content,
+                children,
+            },
+            _ => RichBlock::CheckListItem {
+                id,
+                content,
+                children,
+                checked: true,
+            },
+        };
+        let (markdown, tree) = parsed_export(&RichDocument {
+            version: 1,
+            blocks: vec![block],
+        });
+        assert_eq!(
+            tree["children"].as_array().unwrap().len(),
+            1,
+            "{kind}: {markdown:?}; AST: {tree}"
+        );
+        let list = &tree["children"][0];
+        assert_eq!(list["type"], "list");
+        assert_eq!(list["ordered"], kind == "numbered");
+        let item = &list["children"][0];
+        assert_eq!(list["children"].as_array().unwrap().len(), 1);
+        assert_eq!(item["type"], "listItem");
+        if kind == "checked" {
+            assert_eq!(item["checked"], true);
+        }
+        assert_eq!(
+            item["children"].as_array().unwrap().len(),
+            2,
+            "{kind}: {markdown:?}; AST: {tree}"
+        );
+        for (index, want) in ["first", "second"].into_iter().enumerate() {
+            let paragraph = &item["children"][index];
+            assert_eq!(paragraph["type"], "paragraph");
+            let mut chars = Vec::new();
+            text_styles(paragraph, 0, &mut chars);
+            assert_eq!(
+                chars,
+                want.chars().map(|c| (c, bits)).collect::<Vec<_>>(),
+                "{kind}, styles {bits}: {markdown:?}; AST: {tree}"
+            );
+        }
+    }
+}
