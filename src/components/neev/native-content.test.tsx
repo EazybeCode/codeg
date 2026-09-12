@@ -787,7 +787,12 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
     await screen.findByRole("button", { name: /Draft document/ })
   )
   await user.type(
-    await screen.findByRole("textbox", { name: "Document content" }),
+    // Loading the real code-split editor is not subject to a one-second SLA.
+    await screen.findByRole(
+      "textbox",
+      { name: "Document content" },
+      { timeout: 5000 }
+    ),
     "secret draft"
   )
   const unload = new Event("beforeunload", { cancelable: true })

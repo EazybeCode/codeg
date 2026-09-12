@@ -185,20 +185,24 @@ describe("normalizeMathDelimiters", () => {
 
   it("scans container prefixes in one pass, without backtracking", () => {
     // The predecessor regex was exponential here: ~910ms at 26 markers.
-    // Compare scaling rather than wall-clock, so a loaded machine cannot
-    // flake this — a quadratic scan blows the ratio long before any budget.
+    // Compare scaling using paired median samples: a single scheduler pause
+    // must not look like algorithmic backtracking on a loaded test runner.
     const run = (n: number) => {
       const text = `${"> ".repeat(n)}x \\(a\nb\\)`
       const start = performance.now()
       const out = normalizeMathDelimiters(text)
+      const elapsed = performance.now() - start
       expect(out).toContain("$$a\nb")
       expect(out.startsWith(Z)).toBe(false)
-      return performance.now() - start
+      return elapsed
     }
-    run(200) // warm up, so the ratio below is not measuring first-call JIT
-    const small = Math.max(run(200), 0.05)
-    const large = run(4000)
-    expect(large / small).toBeLessThan(20 * 5)
+    run(200)
+    run(4000) // warm both sizes before measuring scaling
+    const ratios = Array.from({ length: 5 }, () => {
+      const small = Math.max(run(200), 0.05)
+      return run(4000) / small
+    }).sort((a, b) => a - b)
+    expect(ratios[2]).toBeLessThan(20 * 5)
   })
 
   it("preserves inline and fenced code blocks", () => {

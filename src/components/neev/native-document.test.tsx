@@ -81,9 +81,13 @@ function LogoutControl() {
 }
 
 async function editRich(text: string) {
-  const editor = await screen.findByRole("textbox", {
-    name: "Document content",
-  })
+  // The real editor is code-split; cold transformation in the full suite can
+  // exceed Testing Library's one-second default. Still wait for the actual UI.
+  const editor = await screen.findByRole(
+    "textbox",
+    { name: "Document content" },
+    { timeout: 5000 }
+  )
   const paragraph = editor.querySelector("p")
   expect(paragraph).not.toBeNull()
   await act(async () => {
