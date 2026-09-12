@@ -29,6 +29,9 @@ struct Harness {
     server: axum_test::TestServer,
     cookies: String,
     member_cookies: String,
+    member_csrf: String,
+    foreign_cookies: String,
+    foreign_csrf: String,
     csrf: String,
     node: i32,
     org_id: i32,
@@ -84,6 +87,25 @@ impl Harness {
         .await
         .unwrap();
         let names = CookieNames::for_preview(true);
+        let foreign_identity = session::issue_identity(
+            &org.database,
+            org.other_org_context().identity.user_id,
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        let foreign_identity =
+            session::identity(&org.database, &foreign_identity.session, 1_700_000_000)
+                .await
+                .unwrap();
+        let foreign_scoped = session::select_organization(
+            &org.database,
+            &foreign_identity,
+            org.other_org_context().org_id,
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
         Self {
             server: axum_test::TestServer::new(super::router(org.state.clone())).unwrap(),
             cookies: format!(
@@ -95,6 +117,12 @@ impl Harness {
                 names.session, member_scoped.session, names.csrf, member_scoped.csrf
             ),
             csrf: scoped.csrf,
+            member_csrf: member_scoped.csrf,
+            foreign_cookies: format!(
+                "{}={}; {}={}",
+                names.session, foreign_scoped.session, names.csrf, foreign_scoped.csrf
+            ),
+            foreign_csrf: foreign_scoped.csrf,
             node,
             org_id: org.org_id(),
             database: org.database.clone(),
@@ -133,6 +161,251 @@ impl Harness {
         response.assert_status(StatusCode::CREATED);
         response.json()
     }
+}
+
+#[tokio::test]
+async fn rich_routes_round_trip_export_history_restore_and_reject_corruption() {
+    let h = Harness::new().await;
+    let resource = h.create("document", None).await;
+    let id = resource["id"].as_str().unwrap();
+    let path = format!("/api/neev/documents/{id}");
+    let document = json!({"version":1,"blocks":[{"type":"paragraph","id":"00000000-0000-0000-0000-000000000000","content":[{"text":"Hello","styles":[],"href":null}],"children":[]}]});
+    let input = json!({"requestId":uuid::Uuid::new_v4().to_string(),"expectedContentRevision":"0","expectedAuthRevision":"1","document":document});
+    let saved = h
+        .mutation("POST", &format!("{path}/revisions"), input.clone())
+        .await;
+    saved.assert_status(StatusCode::CREATED);
+    let revision: Value = saved.json();
+    assert_eq!(revision["format"], "blocks");
+    assert_eq!(revision["formatVersion"], 1);
+    assert_eq!(revision["byteLength"], "156");
+    assert_eq!(
+        revision["sha256"],
+        "8f05bf0f0f2475feff5738cafac55f3e4aea98a3be5ddd4a59d23697aef8e6ea"
+    );
+    h.mutation("POST", &format!("{path}/revisions"), input.clone())
+        .await
+        .assert_json(&revision);
+    let content = h
+        .server
+        .get(&format!("{path}/content"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    content.assert_status_ok();
+    content.assert_json(&json!({"revision":revision,"markdown":"Hello\n","document":document}));
+    let download = h
+        .server
+        .get(&format!("{path}/download"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    download.assert_status_ok();
+    assert_eq!(download.text(), "Hello\n");
+    assert_eq!(
+        download.header(header::CONTENT_TYPE),
+        "text/markdown;charset=utf-8"
+    );
+    assert_eq!(
+        download.header(header::CONTENT_DISPOSITION),
+        "attachment; filename=\"document.md\""
+    );
+    assert_eq!(download.header("x-content-type-options"), "nosniff");
+    assert_eq!(download.header(header::CACHE_CONTROL), "no-store");
+    assert_eq!(download.header("referrer-policy"), "no-referrer");
+    h.mutation("POST", &format!("{path}/revisions"), json!({"requestId":uuid::Uuid::new_v4().to_string(),"expectedContentRevision":"1","expectedAuthRevision":"1","markdown":"legacy\r\n"})).await.assert_status(StatusCode::CREATED);
+    let restored = h.mutation("POST", &format!("{path}/restore"), json!({"requestId":uuid::Uuid::new_v4().to_string(),"expectedContentRevision":"2","expectedAuthRevision":"1","sourceRevision":"1"})).await;
+    restored.assert_status(StatusCode::CREATED);
+    let restored: Value = restored.json();
+    assert_eq!(restored["format"], "blocks");
+    assert_eq!(restored["formatVersion"], 1);
+    assert_eq!(restored["restoredFrom"], "1");
+    assert_eq!(restored["parentRevision"], "2");
+    assert_eq!(restored["sha256"], revision["sha256"]);
+    let history = h
+        .server
+        .get(&format!("{path}/revisions"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await
+        .json::<Value>();
+    assert_eq!(history["items"][0]["format"], "blocks");
+    assert_eq!(history["items"][1]["format"], "markdown");
+    assert_eq!(history["items"][2]["format"], "blocks");
+    assert!(history["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["formatVersion"] == 1));
+    assert_eq!(
+        h.server
+            .get(&format!("{path}/download?revision=2"))
+            .add_header(header::COOKIE, &h.cookies)
+            .await
+            .text(),
+        "legacy\r\n"
+    );
+    // Metadata is authoritative: a valid UTF-8 Markdown body labeled blocks is storage corruption.
+    h::execute(&h.database,"UPDATE neev_document_formats SET format='blocks' WHERE org_id=$1 AND document_id=$2 AND revision=2",vec![h.org_id.into(),id.into()]).await;
+    for endpoint in ["content?revision=2", "download?revision=2"] {
+        let response = h
+            .server
+            .get(&format!("{path}/{endpoint}"))
+            .add_header(header::COOKIE, &h.cookies)
+            .await;
+        response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        response.assert_json(&json!({"code":"storage_unavailable"}));
+        assert_eq!(response.header(header::CACHE_CONTROL), "no-store");
+    }
+}
+
+#[tokio::test]
+async fn rich_routes_enforce_typed_bodies_limits_and_existing_access_guards() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap();
+    let document = json!({"version":1,"blocks":[{"type":"paragraph","id":"00000000-0000-0000-0000-000000000000","content":[{"text":"Hello","styles":[],"href":null}],"children":[]}]});
+    for origin in [None, Some(chat_id)] {
+        let resource = h.create("document", origin).await;
+        let id = resource["id"].as_str().unwrap();
+        let path = format!("/api/neev/documents/{id}");
+        let input = json!({"requestId":uuid::Uuid::new_v4().to_string(),"expectedContentRevision":"0","expectedAuthRevision":"1","document":document});
+        for (cookies, csrf) in [(&h.cookies, "wrong"), (&h.cookies, &h.csrf)] {
+            let origin = if csrf == "wrong" {
+                "http://127.0.0.1:3100"
+            } else {
+                "https://evil.example"
+            };
+            h.server
+                .post(&format!("{path}/revisions"))
+                .add_header(header::ORIGIN, origin)
+                .add_header(header::COOKIE, cookies)
+                .add_header("x-neev-csrf", csrf)
+                .json(&input)
+                .await
+                .assert_status(if csrf == "wrong" {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::FORBIDDEN
+                });
+        }
+        for (cookies, csrf) in [
+            (&h.member_cookies, &h.member_csrf),
+            (&h.foreign_cookies, &h.foreign_csrf),
+        ] {
+            h.server
+                .post(&format!("{path}/revisions"))
+                .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+                .add_header(header::COOKIE, cookies)
+                .add_header("x-neev-csrf", csrf)
+                .json(&input)
+                .await
+                .assert_status_not_found();
+            for endpoint in ["content", "download", "revisions"] {
+                h.server
+                    .get(&format!("{path}/{endpoint}"))
+                    .add_header(header::COOKIE, cookies)
+                    .await
+                    .assert_status_not_found();
+            }
+        }
+        let mut both = input.clone();
+        both["markdown"] = json!("both");
+        let mut neither = input.clone();
+        neither.as_object_mut().unwrap().remove("document");
+        let mut unknown = input.clone();
+        unknown["blobKey"] = json!("injected");
+        let mut unsupported = input.clone();
+        unsupported["document"]["blocks"][0]["type"] = json!("image");
+        let mut version = input.clone();
+        version["document"]["version"] = json!(2);
+        let mut oversized = input.clone();
+        oversized["document"]["blocks"][0]["content"][0]["text"] = json!("x".repeat(1048576));
+        let mut expanded_export = input.clone();
+        // Stored JSON fits, but each literal star requires a Markdown escape:
+        // 524288 * 2 + the paragraph newline is one byte beyond the export cap.
+        expanded_export["document"]["blocks"][0]["content"][0]["text"] = json!("*".repeat(524288));
+        assert!(
+            serde_json::to_vec(&expanded_export["document"])
+                .unwrap()
+                .len()
+                < 1048576
+        );
+        let mut body_bound = input.clone();
+        body_bound["document"]["blocks"][0]["content"][0]["text"] =
+            json!("x".repeat(6 * 1048576 + 4096));
+        for bad in [
+            both,
+            neither,
+            unknown,
+            unsupported,
+            version,
+            oversized,
+            expanded_export,
+            body_bound,
+        ] {
+            assert_safe_invalid(h.mutation("POST", &format!("{path}/revisions"), bad).await);
+        }
+        h.server
+            .get(&format!("{path}/revisions"))
+            .add_header(header::COOKIE, &h.cookies)
+            .await
+            .assert_json(&json!({"items":[],"nextAfter":null}));
+        h.mutation("POST", &format!("{path}/revisions"), input.clone())
+            .await
+            .assert_status(StatusCode::CREATED);
+        if origin.is_some() {
+            h.mutation(
+                "PATCH",
+                &format!("/api/neev/resources/{chat_id}"),
+                json!({
+                    "expectedAuthRevision":"1","title":"Shared source","nodeId":h.node,
+                    "visibility":"organization","archived":false
+                }),
+            )
+            .await
+            .assert_status_ok();
+            h.server
+                .get(&format!("{path}/content"))
+                .add_header(header::COOKIE, &h.member_cookies)
+                .await
+                .assert_status_ok();
+            h.mutation(
+                "PATCH",
+                &format!("/api/neev/resources/{chat_id}"),
+                json!({
+                    "expectedAuthRevision":"2","title":"Private source","nodeId":h.node,
+                    "visibility":"private","archived":false
+                }),
+            )
+            .await
+            .assert_status_ok();
+        }
+        // Exercise denied reads after real rich content exists, including a
+        // linked document whose source-chat audience was just revoked.
+        for cookies in [&h.member_cookies, &h.foreign_cookies] {
+            for endpoint in ["content", "download", "revisions"] {
+                h.server
+                    .get(&format!("{path}/{endpoint}"))
+                    .add_header(header::COOKIE, cookies)
+                    .await
+                    .assert_status_not_found();
+            }
+        }
+        let mut stale = input.clone();
+        stale["requestId"] = json!(uuid::Uuid::new_v4().to_string());
+        h.mutation("POST", &format!("{path}/revisions"), stale)
+            .await
+            .assert_status(StatusCode::CONFLICT);
+    }
+    let resource = h.create("document", None).await;
+    let id = resource["id"].as_str().unwrap();
+    h::execute(
+        &h.database,
+        "UPDATE neev_content_usage SET charged_bytes=1073741824 WHERE org_id=$1",
+        vec![h.org_id.into()],
+    )
+    .await;
+    let quota = h.mutation("POST",&format!("/api/neev/documents/{id}/revisions"),json!({"requestId":uuid::Uuid::new_v4().to_string(),"expectedContentRevision":"0","expectedAuthRevision":"1","document":document})).await;
+    quota.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    quota.assert_json(&json!({"code":"content_quota"}));
 }
 
 #[tokio::test]
@@ -321,6 +594,8 @@ async fn content_routes_publish_strict_safe_wire_dtos() {
     let saved = saved.json::<Value>();
     assert_eq!(saved["revision"], "1");
     assert_eq!(saved["byteLength"], "6");
+    assert_eq!(saved["format"], "markdown");
+    assert_eq!(saved["formatVersion"], 1);
     assert!(saved.get("blobKey").is_none());
 
     let history = h
@@ -343,6 +618,7 @@ async fn content_routes_publish_strict_safe_wire_dtos() {
         .await;
     content.assert_status_ok();
     assert_eq!(content.json::<Value>()["markdown"], "# Safe");
+    assert_eq!(content.json::<Value>().get("document"), Some(&Value::Null));
 
     let download = h
         .server

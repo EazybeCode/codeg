@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::neev::{
     content::{
-        documents, messages, resources,
+        documents, messages, resources, rich,
         types::{
-            ContentError, Message, Page, Resource, ResourceInput, ResourceKind, ResourcePatch,
-            Revision, SaveInput, Visibility,
+            ContentError, DocumentFormat, Message, Page, Resource, ResourceInput, ResourceKind,
+            ResourcePatch, Revision, RichSaveInput, SaveInput, Visibility,
         },
     },
     startup::ServerState,
@@ -83,12 +83,20 @@ struct MessageInput {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SaveRevisionInput {
-    request_id: String,
-    expected_content_revision: String,
-    expected_auth_revision: String,
-    markdown: String,
+#[serde(untagged, rename_all_fields = "camelCase", deny_unknown_fields)]
+enum SaveRevisionInput {
+    Markdown {
+        request_id: String,
+        expected_content_revision: String,
+        expected_auth_revision: String,
+        markdown: String,
+    },
+    Blocks {
+        request_id: String,
+        expected_content_revision: String,
+        expected_auth_revision: String,
+        document: rich::RichDocument,
+    },
 }
 
 #[derive(Deserialize)]
@@ -132,6 +140,8 @@ struct MessageDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RevisionDto {
+    format: &'static str,
+    format_version: u8,
     revision: String,
     author_id: i32,
     author_name: String,
@@ -153,6 +163,7 @@ struct PageDto<T> {
 struct ContentDto {
     revision: RevisionDto,
     markdown: String,
+    document: Option<rich::RichDocument>,
 }
 
 pub(super) async fn list_chats(
@@ -369,21 +380,52 @@ pub(super) async fn save_revision(
     let (input, actor) =
         catalog::organization_mutation::<SaveRevisionInput>(&state, request, DOCUMENT_BODY_LIMIT)
             .await?;
-    canonical_uuid(&input.request_id)?;
-    let revision = documents::save(
-        &state,
-        &actor,
-        &id,
-        SaveInput {
-            request_id: input.request_id,
-            expected_content_revision: canonical_nonnegative_revision(
-                &input.expected_content_revision,
-            )?,
-            expected_auth_revision: catalog::canonical_revision(&input.expected_auth_revision)?,
-            markdown: input.markdown,
-        },
-    )
-    .await?;
+    let revision = match input {
+        SaveRevisionInput::Markdown {
+            request_id,
+            expected_content_revision,
+            expected_auth_revision,
+            markdown,
+        } => {
+            canonical_uuid(&request_id)?;
+            documents::save(
+                &state,
+                &actor,
+                &id,
+                SaveInput {
+                    request_id,
+                    expected_content_revision: canonical_nonnegative_revision(
+                        &expected_content_revision,
+                    )?,
+                    expected_auth_revision: catalog::canonical_revision(&expected_auth_revision)?,
+                    markdown,
+                },
+            )
+            .await?
+        }
+        SaveRevisionInput::Blocks {
+            request_id,
+            expected_content_revision,
+            expected_auth_revision,
+            document,
+        } => {
+            canonical_uuid(&request_id)?;
+            documents::save_rich(
+                &state,
+                &actor,
+                &id,
+                RichSaveInput {
+                    request_id,
+                    expected_content_revision: canonical_nonnegative_revision(
+                        &expected_content_revision,
+                    )?,
+                    expected_auth_revision: catalog::canonical_revision(&expected_auth_revision)?,
+                    document,
+                },
+            )
+            .await?
+        }
+    };
     let mut response = private_json(revision_dto(revision)?);
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
@@ -408,10 +450,11 @@ pub(super) async fn get_document_content(
     let (revision, bytes) = documents::read(&state, &actor, &id, number)
         .await
         .map_err(document_read_error)?;
-    let markdown = String::from_utf8(bytes).map_err(|_| ApiError::StorageUnavailable)?;
+    let (markdown, document) = document_body(&revision, bytes)?;
     Ok(private_json(ContentDto {
         revision: revision_dto(revision)?,
         markdown,
+        document,
     }))
 }
 
@@ -431,11 +474,11 @@ pub(super) async fn download_document(
         .as_deref()
         .map(catalog::canonical_revision)
         .transpose()?;
-    let (_, bytes) = documents::read(&state, &actor, &id, number)
+    let (revision, bytes) = documents::read(&state, &actor, &id, number)
         .await
         .map_err(document_read_error)?;
-    String::from_utf8(bytes.clone()).map_err(|_| ApiError::StorageUnavailable)?;
-    let mut response = Body::from(bytes).into_response();
+    let (markdown, _) = document_body(&revision, bytes)?;
+    let mut response = Body::from(markdown).into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/markdown;charset=utf-8"),
@@ -476,6 +519,26 @@ pub(super) async fn restore_revision(
     let mut response = private_json(revision_dto(revision)?);
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
+}
+
+fn document_body(
+    revision: &Revision,
+    bytes: Vec<u8>,
+) -> Result<(String, Option<rich::RichDocument>), ApiError> {
+    if revision.format_version != 1 {
+        return Err(ApiError::StorageUnavailable);
+    }
+    match revision.format {
+        DocumentFormat::Markdown => Ok((
+            String::from_utf8(bytes).map_err(|_| ApiError::StorageUnavailable)?,
+            None,
+        )),
+        DocumentFormat::Blocks => {
+            let document = rich::decode(&bytes).map_err(document_read_error)?;
+            let markdown = rich::export_markdown(&document).map_err(document_read_error)?;
+            Ok((markdown, Some(document)))
+        }
+    }
 }
 
 fn resource_page_dto(page: Page<Resource>) -> Result<PageDto<ResourceDto>, ApiError> {
@@ -568,6 +631,8 @@ fn revision_dto(revision: Revision) -> Result<RevisionDto, ApiError> {
     if revision.revision < 1
         || revision.author_id < 1
         || revision.byte_length < 0
+        || revision.byte_length > 1048576
+        || revision.format_version != 1
         || revision.created_at < 0
         || !valid_sha256(&revision.sha256)
         || revision.parent_revision.is_some_and(|value| value < 1)
@@ -576,6 +641,11 @@ fn revision_dto(revision: Revision) -> Result<RevisionDto, ApiError> {
         return Err(ApiError::StorageUnavailable);
     }
     Ok(RevisionDto {
+        format: match revision.format {
+            DocumentFormat::Markdown => "markdown",
+            DocumentFormat::Blocks => "blocks",
+        },
+        format_version: 1,
         revision: revision.revision.to_string(),
         author_id: revision.author_id,
         author_name: revision.author_name,

@@ -85,7 +85,10 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     historyRequest = useRef(0),
     dirty = useRef(false),
     sending = useRef(false),
-    retry = useRef<SaveNativeDocumentInput | null>(null),
+    retry = useRef<Extract<
+      SaveNativeDocumentInput,
+      { markdown: string }
+    > | null>(null),
     restoreRetry = useRef<RestoreNativeDocumentInput | null>(null),
     comparisonOpener = useRef<{
       element: HTMLElement

@@ -29,6 +29,8 @@ const resource: NativeResource = {
   updatedAt: 0,
 }
 const revision = {
+  format: "markdown",
+  formatVersion: 1,
   revision: "1",
   authorId: 1,
   authorName: "Sagar",
@@ -67,10 +69,11 @@ it.each(["content", "audience"])(
     const mock = mockNativeSession(undefined, {
       [`GET /api/neev/resources/${resource.id}`]: () => json(latest),
       [`GET ${path}/content?revision=1`]: () =>
-        json({ revision, markdown: "seed" }),
+        json({ document: null, revision, markdown: "seed" }),
       [`GET ${path}/content?revision=2`]: () =>
         json({
           revision: { ...revision, revision: "2", byteLength: "6" },
+          document: null,
           markdown: "latest",
         }),
       [`GET ${path}/revisions`]: () =>
@@ -133,7 +136,7 @@ it("uses the save shortcut and reuses the exact request after a lost save respon
   const mock = mockNativeSession(undefined, {
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}/content?revision=1`]: () =>
-      json({ revision, markdown: "seed" }),
+      json({ document: null, revision, markdown: "seed" }),
     [`GET ${path}/revisions`]: () =>
       json({ items: [revision], nextAfter: null }),
     [`POST ${path}/revisions`]: (init) => {
@@ -166,10 +169,11 @@ it("lets the author accept a newer content/audience basis without losing their d
   const mock = mockNativeSession(undefined, {
     [`GET /api/neev/resources/${resource.id}`]: () => json(latest),
     [`GET ${path}/content?revision=1`]: () =>
-      json({ revision, markdown: "seed" }),
+      json({ document: null, revision, markdown: "seed" }),
     [`GET ${path}/content?revision=2`]: () =>
       json({
         revision: { ...revision, revision: "2", byteLength: "6" },
+        document: null,
         markdown: "latest",
       }),
     [`GET ${path}/revisions`]: () =>
@@ -234,9 +238,9 @@ it("compares escaped historical text and restores it as a new revision with retr
   const mock = mockNativeSession(undefined, {
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}/content?revision=1`]: () =>
-      json({ revision, markdown: "seed" }),
+      json({ document: null, revision, markdown: "seed" }),
     [`GET ${path}/content?revision=2`]: () =>
-      json({ revision: old, markdown: oldText }),
+      json({ document: null, revision: old, markdown: oldText }),
     [`GET ${path}/revisions`]: () =>
       json({ items: [revision, old], nextAfter: null }),
     [`POST ${path}/restore`]: (init) => {
@@ -293,9 +297,9 @@ it("returns focus to the revision trigger when Escape closes comparison", async 
   const mock = mockNativeSession(undefined, {
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}/content?revision=1`]: () =>
-      json({ revision, markdown: "seed" }),
+      json({ document: null, revision, markdown: "seed" }),
     [`GET ${path}/content?revision=2`]: () =>
-      json({ revision: old, markdown: oldText }),
+      json({ document: null, revision: old, markdown: oldText }),
     [`GET ${path}/revisions`]: () =>
       json({ items: [revision, old], nextAfter: null }),
   })
@@ -334,7 +338,7 @@ it.each([403, 404])(
           : json(resource)
       },
       [`GET ${path}/content?revision=1`]: () =>
-        json({ revision, markdown: "seed" }),
+        json({ document: null, revision, markdown: "seed" }),
       [`GET ${path}/revisions`]: () =>
         json({ items: [revision], nextAfter: null }),
     })
@@ -387,7 +391,7 @@ it("rejects a deferred body from a previous document after the new document has 
     [`GET /api/neev/documents/${other.id}/revisions`]: () =>
       json({ items: [revision], nextAfter: null }),
     [`GET /api/neev/documents/${other.id}/content?revision=1`]: () =>
-      json({ revision, markdown: "safe" }),
+      json({ document: null, revision, markdown: "safe" }),
   })
   const renderDoc = (value: NativeResource) => (
     <NativeTestRoot>
@@ -411,6 +415,7 @@ it("rejects a deferred body from a previous document after the new document has 
     release(
       json({
         revision: { ...revision, byteLength: "27" },
+        document: null,
         markdown: "other organization's secret",
       })
     )
@@ -440,7 +445,7 @@ it.each(["body", "history"])(
           first = false
           throw new TypeError("offline")
         }
-        return json({ revision, markdown: "seed" })
+        return json({ document: null, revision, markdown: "seed" })
       },
     })
     const user = userEvent.setup()
@@ -470,7 +475,7 @@ it("preserves edits and their original preconditions when a changed-head poll bo
     [`GET ${path}/revisions`]: () =>
       json({ items: [revision], nextAfter: null }),
     [`GET ${path}/content?revision=1`]: () =>
-      json({ revision, markdown: "seed" }),
+      json({ document: null, revision, markdown: "seed" }),
     [`GET ${path}/content?revision=2`]: () =>
       new Promise((resolve) => {
         release = resolve
@@ -494,7 +499,11 @@ it("preserves edits and their original preconditions when a changed-head poll bo
   await user.type(editor, "!")
   await act(async () => {
     release(
-      json({ revision: { ...revision, revision: "2" }, markdown: "peer" })
+      json({
+        document: null,
+        revision: { ...revision, revision: "2" },
+        markdown: "peer",
+      })
     )
   })
   expect(editor).toHaveValue("seed!")
@@ -533,6 +542,7 @@ it("reuses unchanged body and history pages while polling authority, then merges
       bodyReads++
       return json({
         revision: { ...revision, revision: "101" },
+        document: null,
         markdown: "seed",
       })
     },
@@ -540,6 +550,7 @@ it("reuses unchanged body and history pages while polling authority, then merges
       bodyReads++
       return json({
         revision: { ...revision, revision: "102", byteLength: "3" },
+        document: null,
         markdown: "new",
       })
     },
@@ -598,7 +609,7 @@ it("keeps a dirty draft and recovery controls when foreground Compare has unavai
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}/content?revision=1`]: () =>
       ++reads === 1
-        ? json({ revision, markdown: "seed" })
+        ? json({ document: null, revision, markdown: "seed" })
         : json({ code: "storage_unavailable" }, 503),
     [`GET ${path}/revisions`]: () =>
       json({ items: [revision], nextAfter: null }),

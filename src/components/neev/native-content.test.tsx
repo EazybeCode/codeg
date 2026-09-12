@@ -462,6 +462,8 @@ it.each(["chat", "document"] as const)(
     const bodies: Record<string, unknown>[] = []
     const releases: Array<(response: Response) => void> = []
     const revision = {
+      format: "markdown",
+      formatVersion: 1,
       revision: "1",
       authorId: 1,
       authorName: "Sagar",
@@ -502,7 +504,7 @@ it.each(["chat", "document"] as const)(
       [`GET /api/neev/documents/${chat.id}/revisions?after=1`]: () =>
         json({ items: [{ ...revision, revision: "2" }], nextAfter: null }),
       [`GET /api/neev/documents/${chat.id}/content?revision=1`]: () =>
-        json({ revision, markdown: "seed" }),
+        json({ document: null, revision, markdown: "seed" }),
       [`POST /api/neev/${kind === "chat" ? "chats" : "documents"}/${chat.id}/${kind === "chat" ? "messages" : "revisions"}`]:
         (init) => {
           bodies.push(JSON.parse(init.body as string))

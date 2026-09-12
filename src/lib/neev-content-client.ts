@@ -1,4 +1,5 @@
 import { NativeClientError, nativeMutation, nativeRequest } from "./neev-client"
+import { parseRichDocument, type RichDocument } from "./neev-rich-document"
 
 export type NativeResourceKind = "chat" | "document"
 export type NativeVisibility = "private" | "organization"
@@ -29,6 +30,8 @@ export interface NativeMessage {
 }
 
 export interface NativeRevision {
+  format: "markdown" | "blocks"
+  formatVersion: 1
   revision: string
   authorId: number
   authorName: string
@@ -42,6 +45,7 @@ export interface NativeRevision {
 export interface NativeDocumentContent {
   revision: NativeRevision
   markdown: string
+  document: RichDocument | null
 }
 
 export interface NativePage<T> {
@@ -69,12 +73,14 @@ export interface AppendNativeMessageInput {
   body: string
 }
 
-export interface SaveNativeDocumentInput {
+export type SaveNativeDocumentInput = {
   requestId: string
   expectedContentRevision: string
   expectedAuthRevision: string
-  markdown: string
-}
+} & (
+  | { markdown: string; document?: never }
+  | { document: RichDocument; markdown?: never }
+)
 
 export interface RestoreNativeDocumentInput {
   requestId: string
@@ -257,6 +263,8 @@ export function parseMessage(value: unknown): NativeMessage {
 
 export function parseRevision(value: unknown): NativeRevision {
   const object = exact(value, [
+    "format",
+    "formatVersion",
     "revision",
     "authorId",
     "authorName",
@@ -270,7 +278,14 @@ export function parseRevision(value: unknown): NativeRevision {
   if (!/^[0-9a-f]{64}$/.test(sha256)) return invalid()
   const byteLength = integerString(object.byteLength, true)
   if (BigInt(byteLength) > 1048576n) return invalid()
+  if (
+    (object.format !== "markdown" && object.format !== "blocks") ||
+    object.formatVersion !== 1
+  )
+    return invalid()
   return {
+    format: object.format,
+    formatVersion: 1,
     revision: integerString(object.revision, false),
     authorId: positiveId(object.authorId),
     authorName: text(object.authorName),
@@ -315,12 +330,18 @@ export function parseRevisionPage(value: unknown): NativePage<NativeRevision> {
 }
 
 export function parseDocumentContent(value: unknown): NativeDocumentContent {
-  const object = exact(value, ["revision", "markdown"])
+  const object = exact(value, ["revision", "markdown", "document"])
   const revision = parseRevision(object.revision)
   const markdown = text(object.markdown)
-  if (String(new TextEncoder().encode(markdown).length) !== revision.byteLength)
+  if (new TextEncoder().encode(markdown).length > 1048576) return invalid()
+  const document =
+    revision.format === "blocks" ? parseRichDocument(object.document) : null
+  if (revision.format === "markdown" && object.document !== null)
     return invalid()
-  return { revision, markdown }
+  const stored = document === null ? markdown : JSON.stringify(document)
+  if (String(new TextEncoder().encode(stored).length) !== revision.byteLength)
+    return invalid()
+  return { revision, markdown, document }
 }
 
 export function contentGet(
@@ -556,11 +577,37 @@ export async function saveNativeDocument(
   assertUuid(input.requestId)
   assertNonnegativeRevision(input.expectedContentRevision)
   assertPositiveRevision(input.expectedAuthRevision)
-  if (typeof input.markdown !== "string") invalidRequest()
+  let body: SaveNativeDocumentInput
+  try {
+    const isMarkdown = Object.prototype.hasOwnProperty.call(input, "markdown")
+    exact(input, [
+      "requestId",
+      "expectedContentRevision",
+      "expectedAuthRevision",
+      isMarkdown ? "markdown" : "document",
+    ])
+    if (isMarkdown) {
+      if (
+        typeof input.markdown !== "string" ||
+        new TextEncoder().encode(input.markdown).length > 1048576
+      )
+        return invalidRequest()
+      body = input
+    } else {
+      body = {
+        requestId: input.requestId,
+        expectedContentRevision: input.expectedContentRevision,
+        expectedAuthRevision: input.expectedAuthRevision,
+        document: parseRichDocument(input.document),
+      }
+    }
+  } catch {
+    return invalidRequest()
+  }
   return parseRevision(
     await contentMutation(
       `/api/neev/documents/${documentId}/revisions`,
-      input,
+      body,
       csrf,
       signal
     )

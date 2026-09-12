@@ -8,7 +8,33 @@ import {
   parseResource,
   parseResourcePage,
   parseRevision,
+  parseDocumentContent,
+  saveNativeDocument,
 } from "./neev-content-client"
+
+const revision = {
+  revision: "1",
+  authorId: 9,
+  authorName: "Sagar",
+  byteLength: "4",
+  sha256: "19b25856e1c150ca834cffc8b59b23adbd0ec0389e58eb22b3b64768098d002b",
+  createdAt: 1_700_000_000,
+  parentRevision: null,
+  restoredFrom: null,
+  format: "markdown",
+  formatVersion: 1,
+}
+const rich = {
+  version: 1,
+  blocks: [
+    {
+      type: "paragraph",
+      id: "00000000-0000-0000-0000-000000000000",
+      content: [{ text: "Hello", styles: [], href: null }],
+      children: [],
+    },
+  ],
+}
 
 const resource = {
   id: "ce39f83c-4511-4ff7-80d3-c06184ee8c50",
@@ -32,6 +58,133 @@ afterEach(() => {
 })
 
 describe("native content wire validation", () => {
+  it("aborts a pending rich save without returning a late response", async () => {
+    const controller = new AbortController()
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_path, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("Aborted", "AbortError"))
+            )
+          })
+      )
+    )
+    const pending = saveNativeDocument(
+      resource.id,
+      {
+        requestId: resource.id,
+        expectedContentRevision: "3",
+        expectedAuthRevision: "2",
+        document: rich,
+      } as Parameters<typeof saveNativeDocument>[1],
+      "csrf",
+      controller.signal
+    )
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" })
+  })
+
+  it("requires format agreement and canonical rich byte length, not export length", () => {
+    expect(
+      parseDocumentContent({ revision, markdown: "seed", document: null })
+        .document
+    ).toBeNull()
+    const richRevision = {
+      ...revision,
+      format: "blocks",
+      byteLength: "156",
+      sha256:
+        "8f05bf0f0f2475feff5738cafac55f3e4aea98a3be5ddd4a59d23697aef8e6ea",
+    }
+    expect(
+      parseDocumentContent({
+        revision: richRevision,
+        markdown: "Hello\n",
+        document: rich,
+      }).document
+    ).toEqual(rich)
+    for (const body of [
+      {
+        revision: richRevision,
+        markdown: "Hello\n",
+        document: { version: 2, blocks: [] },
+      },
+      { revision, markdown: "seed", document: { version: 1, blocks: [] } },
+      {
+        revision: { ...richRevision, byteLength: "6" },
+        markdown: "Hello\n",
+        document: rich,
+      },
+      {
+        revision: { ...revision, format: "html" },
+        markdown: "seed",
+        document: null,
+      },
+      {
+        revision: { ...revision, formatVersion: 2 },
+        markdown: "seed",
+        document: null,
+      },
+      { revision: richRevision, markdown: "x".repeat(1048577), document: rich },
+    ])
+      expect(() => parseDocumentContent(body)).toThrow()
+  })
+
+  it("sends exactly one body with pinned identity, head, auth and abort signal", async () => {
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ...revision,
+            format: "blocks",
+            byteLength: "156",
+            sha256:
+              "8f05bf0f0f2475feff5738cafac55f3e4aea98a3be5ddd4a59d23697aef8e6ea",
+          }),
+          { headers: { "Content-Type": "application/json" } }
+        )
+    )
+    vi.stubGlobal("fetch", fetcher)
+    const input = {
+      requestId: resource.id,
+      expectedContentRevision: "0",
+      expectedAuthRevision: "1",
+      document: rich,
+    }
+    const signal = new AbortController().signal
+    await saveNativeDocument(
+      resource.id,
+      input as Parameters<typeof saveNativeDocument>[1],
+      "csrf",
+      signal
+    )
+    expect(fetcher).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        body: JSON.stringify(input),
+        signal,
+        cache: "no-store",
+        headers: expect.objectContaining({ "x-neev-csrf": "csrf" }),
+      })
+    )
+    for (const bad of [
+      { ...input, markdown: "both" },
+      { ...input, document: undefined },
+      { ...input, extra: true },
+    ]) {
+      await expect(
+        saveNativeDocument(
+          resource.id,
+          bad as Parameters<typeof saveNativeDocument>[1],
+          "csrf"
+        )
+      ).rejects.toMatchObject({ kind: "invalid_request" })
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
   it("accepts revision zero only for resource contentRevision", () => {
     expect(parseResource(resource).visibility).toBe("private")
     expect(() => parseResource({ ...resource, authRevision: "01" })).toThrow()
@@ -75,6 +228,8 @@ describe("native content wire validation", () => {
     ).toThrow()
     expect(
       parseRevision({
+        format: "markdown",
+        formatVersion: 1,
         revision: "1",
         authorId: 9,
         authorName: "Sagar",
