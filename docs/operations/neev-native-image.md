@@ -92,11 +92,11 @@ runtime diagnostic, and cleanup behavior checks.
 
 A separate positive private-startup check used an internal-only Docker network
 and disposable PostgreSQL 16 container (image ID prefix `cf78e766`, UID 70)
-with a 512 MiB tmpfs limit. The native candidate ran with its default UID and
-command, a read-only root, all capabilities dropped, no-new-privileges, 128
-PIDs, 1 CPU, a 1 GiB memory/swap limit, no published ports, and a mode-0700
-document tmpfs owned by UID/GID 65532. Only invented, nonsecret configuration
-was supplied.
+with a 512 MiB memory limit and 256 MiB data tmpfs. The native candidate ran
+with its default UID and command, a read-only root, all capabilities dropped,
+no-new-privileges, 128 PIDs, 1 CPU, a 1 GiB memory/swap limit, no published
+ports, and a mode-0700 document tmpfs owned by UID/GID 65532. Only invented,
+nonsecret configuration was supplied.
 
 That startup created 23 fresh public tables. `/healthz` and `/workspace`
 returned 200; workspace capabilities reported native identity mode, runtime
@@ -113,12 +113,12 @@ The browser and tunnel were closed. A container restart followed by a 200
 health check proves startup-only restart behavior, not content persistence or
 recovery.
 
-The exact test application and database containers were removed. Confirmation
-of the test network removal was still pending when this evidence was recorded;
-the legacy deployment and dedicated PostgreSQL service were untouched. A stale
-CLI stream after the completed build was resolved by checking builder history
-and the actual image before terminating the owned SSH session; it was not a
-client-exit-255 build failure.
+The exact test application and database containers and their test network were
+removed. The follow-up network list was empty, and the container list contained
+only the stopped BuildKit builder. The legacy deployment and dedicated
+PostgreSQL service were untouched. A stale CLI stream after the completed build
+was resolved by checking builder history and the actual image before
+terminating the owned SSH session; it was not a client-exit-255 build failure.
 
 This evidence accepts the packaging contract and constrained private startup
 only. It does not accept real authentication, mail delivery, content snapshots,
