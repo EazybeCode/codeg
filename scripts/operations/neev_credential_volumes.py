@@ -120,6 +120,7 @@ class FixedToolRunner:
         ):
             raise CommandError("failed")
         process = None
+        transport_complete = False
         selector = selectors.DefaultSelector()
         output = bytearray()
         pending = memoryview(input_bytes or b"")
@@ -187,26 +188,51 @@ class FixedToolRunner:
                 returncode = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 raise CommandError("timeout") from None
+            transport_complete = True
             if returncode != 0:
                 raise CommandError("failed", returncode=returncode)
             return bytes(output)
-        except CommandError:
-            if process is not None and process.poll() is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except (OSError, ProcessLookupError):
-                    pass
-                try:
-                    process.wait()
-                except OSError:
-                    pass
+        except BaseException as error:
+            if process is not None and not transport_complete:
+                FixedToolRunner._terminate_owned_process_group(process)
+            if isinstance(error, CommandError):
+                raise
+            if isinstance(error, Exception):
+                raise CommandError("failed") from None
             raise
         finally:
-            selector.close()
+            try:
+                selector.close()
+            except Exception:
+                pass
             if process is not None:
                 for stream in (process.stdin, process.stdout):
                     if stream is not None and not stream.closed:
-                        stream.close()
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+
+    @staticmethod
+    def _terminate_owned_process_group(process: subprocess.Popen) -> None:
+        """Kill the owned group even when its leader has already exited."""
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                process.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        except OSError:
+            pass
 
 
 class CredentialVolumes:
@@ -550,9 +576,12 @@ def _preallocate(file_fd: int, offset: int, length: int) -> None:
 def _validate_mountpoint(path: Path, mounted: bool) -> None:
     try:
         metadata = path.lstat()
+        expected_identity = (
+            (65532, 65532) if mounted else (os.geteuid(), os.getegid())
+        )
         if (
             not stat.S_ISDIR(metadata.st_mode)
-            or _mountpoint_owner(path) != (65532 if mounted else os.geteuid())
+            or _mountpoint_identity(metadata) != expected_identity
             or stat.S_IMODE(metadata.st_mode) != 0o700
         ):
             raise StoreError("conflict")
@@ -562,8 +591,8 @@ def _validate_mountpoint(path: Path, mounted: bool) -> None:
         raise StoreError("conflict") from None
 
 
-def _mountpoint_owner(path: Path) -> int:
-    return path.lstat().st_uid
+def _mountpoint_identity(metadata: os.stat_result) -> Tuple[int, int]:
+    return metadata.st_uid, metadata.st_gid
 
 
 def _secure_filesystem_root(path: Path) -> None:

@@ -167,14 +167,17 @@ class CredentialVolumeTests(unittest.TestCase):
         self.owner_patch = mock.patch.object(self.module, "_secure_filesystem_root")
         self.owner_patch.start()
         self.addCleanup(self.owner_patch.stop)
-        self.mount_owner_patch = mock.patch.object(
+        self.mount_identity_patch = mock.patch.object(
             self.module,
-            "_mountpoint_owner",
-            side_effect=lambda unused_path: 65532 if self.runner.mounted else os.geteuid(),
+            "_mountpoint_identity",
+            side_effect=lambda unused_path: (
+                (65532, 65532) if self.runner.mounted
+                else (os.geteuid(), os.getegid())
+            ),
             create=True,
         )
-        self.mount_owner_patch.start()
-        self.addCleanup(self.mount_owner_patch.stop)
+        self.mount_identity_patch.start()
+        self.addCleanup(self.mount_identity_patch.stop)
         self.volumes = self.module.CredentialVolumes(self.store, self.runner)
 
     def create(self):
@@ -375,17 +378,23 @@ class CredentialVolumeTests(unittest.TestCase):
         self.assertEqual(self.volumes.status(self.scope, handle), "locked")
         self.volumes.close(self.scope, handle)
 
-    def test_mounted_filesystem_root_requires_service_owner(self):
+    def test_mounted_filesystem_root_requires_exact_service_uid_and_gid(self):
         handle = self.create()
         self.volumes.open(self.scope, handle)
         with mock.patch.object(
-            self.module, "_mountpoint_owner", return_value=0, create=True
+            self.module, "_mountpoint_identity", return_value=(0, 65532), create=True
         ):
             with self.assertRaises(self.store_module.StoreError) as caught:
                 self.volumes.status(self.scope, handle)
         self.assertEqual(caught.exception.code, "conflict")
         self.assertTrue(self.runner.mounted)
         self.assertTrue(self.runner.mapping)
+        with mock.patch.object(
+            self.module, "_mountpoint_identity", return_value=(65532, 0), create=True
+        ):
+            with self.assertRaises(self.store_module.StoreError) as caught:
+                self.volumes.status(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
         self.volumes.close(self.scope, handle)
 
     def test_nested_mount_is_refused_without_tool_mutation(self):
@@ -461,6 +470,96 @@ class BoundedRunnerTests(unittest.TestCase):
                 [sys.executable, "-c", "import time; time.sleep(2)"], timeout=0.05
             ),
         )
+
+    def test_post_spawn_transport_error_kills_group_after_leader_exits(self):
+        real_selector_factory = self.module.selectors.DefaultSelector
+        real_popen = self.module.subprocess.Popen
+        captured = []
+        descendant_pid = None
+
+        class FailingSelector:
+            def __init__(self):
+                self.delegate = real_selector_factory()
+
+            def register(self, *args, **kwargs):
+                return self.delegate.register(*args, **kwargs)
+
+            def unregister(self, *args, **kwargs):
+                return self.delegate.unregister(*args, **kwargs)
+
+            def get_map(self):
+                return self.delegate.get_map()
+
+            def select(self, timeout=None):
+                events = self.delegate.select(timeout)
+                if events:
+                    raise OSError(errno.EIO, "injected transport failure")
+                return events
+
+            def close(self):
+                self.delegate.close()
+
+        def capture_popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            captured.append(process)
+            return process
+
+        with tempfile.TemporaryDirectory() as raw_temporary:
+            pid_path = Path(raw_temporary).resolve() / "descendant.pid"
+            script = (
+                "import os,sys,time\n"
+                "leader=os.getpid()\n"
+                "child=os.fork()\n"
+                "if child == 0:\n"
+                " while os.getppid() == leader: time.sleep(0.01)\n"
+                " os.write(1,b'x'); time.sleep(30); os._exit(0)\n"
+                "with open(sys.argv[1],'w') as stream:\n"
+                " stream.write(str(child)); stream.flush(); os.fsync(stream.fileno())\n"
+                "os._exit(0)\n"
+            )
+            try:
+                with mock.patch.object(
+                    self.module.selectors, "DefaultSelector", FailingSelector
+                ), mock.patch.object(
+                    self.module.subprocess, "Popen", side_effect=capture_popen
+                ):
+                    try:
+                        self.runner._run_for_test(
+                            [sys.executable, "-c", script, str(pid_path)], timeout=2
+                        )
+                    except self.module.CommandError as error:
+                        self.assertEqual(error.kind, "failed")
+                    except OSError:
+                        self.fail("post-spawn transport error was not made safe")
+                    else:
+                        self.fail("injected transport error was ignored")
+                self.assertTrue(captured)
+                self.assertEqual(captured[0].returncode, 0)
+                descendant_pid = int(pid_path.read_text())
+                deadline = self.module.time.monotonic() + 2
+                while self.module.time.monotonic() < deadline:
+                    try:
+                        os.kill(descendant_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    self.module.time.sleep(0.01)
+                else:
+                    self.fail("descendant in the owned process group survived cleanup")
+            finally:
+                if captured:
+                    try:
+                        os.killpg(captured[0].pid, self.module.signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        pass
+                    try:
+                        captured[0].wait(timeout=1)
+                    except Exception:
+                        pass
+                if descendant_pid is not None:
+                    try:
+                        os.kill(descendant_pid, self.module.signal.SIGKILL)
+                    except (OSError, ProcessLookupError):
+                        pass
 
     def test_internal_fixture_seam_maps_missing_executable_without_raw_error(self):
         self.assert_command_error(
@@ -600,6 +699,8 @@ class LinuxCredentialVolumeAcceptance(unittest.TestCase):
 
             key = key_path.read_bytes()
             image_digest = hashlib.sha256(image.read_bytes()).digest()
+            manifest_path = root / handle / "manifest.json"
+            manifest_bytes = manifest_path.read_bytes()
             saved_key = key_path.with_name("credential-master.key.acceptance-saved")
             key_path.rename(saved_key)
             try:
@@ -618,6 +719,8 @@ class LinuxCredentialVolumeAcceptance(unittest.TestCase):
                     os.close(key_fd)
                 with self.assertRaises(store_module.StoreError):
                     reopened.open(scope, handle)
+                self.assertEqual(hashlib.sha256(image.read_bytes()).digest(), image_digest)
+                self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
             finally:
                 key_fd = os.open(str(key_path), os.O_WRONLY | os.O_TRUNC)
                 try:
