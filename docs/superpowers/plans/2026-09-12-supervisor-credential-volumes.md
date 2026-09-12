@@ -93,6 +93,13 @@ Allocate a unique private directory, at most64 entries, and an authenticated pro
 
 **Files:** create `scripts/operations/neev_credential_volumes.py`, `scripts/tests/test_neev_credential_volumes.py`, `docs/operations/neev-credential-volumes.md`; modify Task1 store only for a concrete interface defect with controller agreement.
 
+Controller amendment from the first actual Linux store-test run: also correct
+`test_existing_private_directories_are_not_mode_repaired` in the Task1 test file
+to chmod its invented directory0755 explicitly after mkdir. An inherited077
+umask otherwise changes requested0755 into0700 and invalidates the unsafe fixture.
+Keep the rejection and exact-mode assertions, and verify both022/077 umasks.
+This is a test-only amendment; the production store is unchanged.
+
 **Interfaces:** consumes CredentialStore/Scope/StoreError. Produces `CredentialVolumes(store, runner)` with create(scope)->handle, open(scope,handle)->internal mount path, close(scope,handle)->None, status(scope,handle)->`locked` or `open`. The trusted runner has `run(argv: list[str], input_bytes: bytes | None = None)->bytes`. The root-only CLI exposes `init`, `create --org-id N --user-id N --provider P`, and `open|close|status` with those options plus `--handle H`. Output is bounded JSON containing only handle/state/error; never keys, arbitrary paths, provider account state or tool output.
 
 - [ ] **Step 1: Test a real orchestration boundary before implementation.** The fixture runner records fixed commands and simulates exact kernel/tool status; real temporary files verify exclusive allocation and state preservation. Assert wrong scope refuses before any tool call; open never formats; repeated create never reuses an existing image; tool failure preserves provisioning state; close refuses foreign mapping/mount and busy mounts; reopened helper uses existing key/image without format. Also test runner output overflow, timeout, missing tool and hostile inherited environment using harmless subprocess fixtures through the runner's internal test seam, not real storage tools.
