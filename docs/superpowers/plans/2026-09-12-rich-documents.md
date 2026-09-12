@@ -120,7 +120,7 @@ Use the existing valid revision fixture and independent body hashes/lengths. For
 **Consumes:** Task2 format-aware client and RichDocument type. No browser calls to direct blob paths, third-party services or legacy content APIs.
 **Produces:** A lazy client-only controlled-lifetime rich editor. Widget props: `document:RichDocument,readOnly:boolean,onChange:(next:RichDocument)=>void`; parent keys the editor by native scope/document/load generation. `NativeRichView` renders read-only canonical structure safely with React, no HTML injection or editor instance needed for history/comparison.
 
-- [ ] Check exact package licenses/peer compatibility from pinned manifests, then add core/react/shadcn0.54.2 MPL-2.0 only. Align all existing direct Tiptap pins to3.31.3; pin next/eslint-config-next16.3.5 to remove the identified vulnerable build dependency. No XL/commercial package, no Yjs provider/collaboration backend. Preserve lockfile determinism; inspect installation scripts rather than blanket trusting new builds. Dependency audit findings affecting these packages must be resolved or explicitly reachability-triaged, not hidden by audit settings.
+- [ ] Check exact package licenses/peer compatibility from pinned manifests, then add core/react/shadcn0.54.2 MPL-2.0 only. Align all existing direct Tiptap pins to3.31.3; pin next/eslint-config-next16.3.4 to remove the identified vulnerable build dependency without relaxing the existing release-age policy. No XL/commercial package, no Yjs provider/collaboration backend. Preserve lockfile determinism; inspect installation scripts rather than blanket trusting new builds. Dependency audit findings affecting these packages must be resolved or explicitly reachability-triaged, not hidden by audit settings.
 - [ ] Write RED adapter tests using every supported block and formatting combination; unsupported BlockNote block/props must throw rather than strip. A round trip `toNeev(fromNeev(document))` retains IDs, structure and supported styles. The editor schema removes unsupported blocks/styles, color/alignment controls, embeds, image/file upload and AI controls. Restrict paste: validate parsed candidate and refuse unsupported content with visible explanation; never silently drop attachments/HTML features. Use only bundled CSS/fonts already installed; no remote emoji/data/syntax-highlighter requests.
 
 ```ts
@@ -137,6 +137,17 @@ expect(() => toNeev([{id:crypto.randomUUID(),type:"image",props:{url:"https://ex
 - [ ] Extend actual isolated database/blob restore rehearsal with at least one rich and one Markdown revision using built verifier; historical schema3 retained archive still verifies unchanged. Document actual commands/manifests and rollback (preserve database+blobs, no down migration). Commit exact files; task review then whole-plan review precedes deployment.
 
 ## Plan review checklist
+
+Controller dependency correction: the initially selected Next16.3.5 was published
+September11 and the unchanged package-manager age policy rejects it on September12.
+Use16.3.4, published August31, instead of adding release-age exceptions. Both
+identified critical advisories mark16.3.3 patched; the registry advisory query for
+next/eslint-config-next16.3.4 returned no direct advisories. This does not certify
+the transitive graph; Task3 still audits that graph and tests the actual build.
+Sources: [Windows advisory](https://github.com/advisories/GHSA-p293-qw3h-jr36),
+[AVIF advisory](https://github.com/advisories/GHSA-2xp9-vwfh-vxw4),
+[16.3.4 release](https://github.com/vercel/next.js/releases/tag/v16.3.4),
+[16.3.5 release](https://github.com/vercel/next.js/releases/tag/v16.3.5).
 
 - Task1→Task2: Revision metadata and rich body signatures agree; old Markdown save/read remain wrappers over a single authority path.
 - Task2→Task3: DTO fields are mandatory and body union is exact; every affected test fixture must be updated rather than accepting multiple unchecked shapes.
