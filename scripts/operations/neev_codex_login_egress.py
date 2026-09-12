@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import socket
+import sys
 from contextlib import suppress
 from typing import Any, Awaitable, Optional, Tuple
 
@@ -28,6 +30,34 @@ DNS_SECONDS = 5.0
 CONNECT_SECONDS = 10.0
 IDLE_SECONDS = 30.0
 LIFETIME_SECONDS = 600.0
+RESOLVER_CLEANUP_SECONDS = 2.0
+
+_MAX_RESOLVER_OUTPUT_BYTES = 2048
+_RESOLVER_CODE = r"""
+import json
+import socket
+import sys
+
+try:
+    results = socket.getaddrinfo(
+        "auth.openai.com",
+        443,
+        family=socket.AF_UNSPEC,
+        type=socket.SOCK_STREAM,
+        proto=socket.IPPROTO_TCP,
+    )
+    addresses = []
+    for result in results:
+        addresses.append(result[4][0])
+        if len(addresses) > 16:
+            break
+    payload = json.dumps(addresses, separators=(",", ":")).encode("ascii")
+    if len(payload) > 2048:
+        raise RuntimeError()
+    sys.stdout.buffer.write(payload)
+except BaseException:
+    sys.exit(1)
+"""
 
 _AUTHORITY = b"auth.openai.com:443"
 _ERROR_CODES = frozenset(
@@ -148,21 +178,125 @@ def validated_ipv4(addresses: list[str]) -> tuple[str, ...]:
     return tuple(selected)
 
 
-async def _resolve(host: str) -> list[str]:
-    loop = asyncio.get_running_loop()
-    results = await loop.getaddrinfo(
-        host,
-        DESTINATION_PORT,
-        family=socket.AF_UNSPEC,
-        type=socket.SOCK_STREAM,
-        proto=socket.IPPROTO_TCP,
+class _ResolverCleanupFailure(Exception):
+    """Internal marker retaining an unconfirmed resolver helper and waiter."""
+
+    def __init__(self, process: Any, waiter: asyncio.Task):
+        self.process = process
+        self.waiter = waiter
+        super().__init__("unavailable")
+
+
+async def _launch_resolver():
+    """Launch only the fixed isolated resolver program with no inherited env."""
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-c",
+        _RESOLVER_CODE,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env={"LANG": "C", "LC_ALL": "C"},
+        close_fds=True,
     )
-    addresses = []
-    for result in results:
-        addresses.append(result[4][0])
-        if len(addresses) > MAX_DNS_RESULTS:
+
+
+def _consume_task_result(task: asyncio.Task) -> None:
+    with suppress(Exception, asyncio.CancelledError):
+        task.result()
+
+
+async def _wait_process(waiter: asyncio.Task) -> bool:
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(waiter), RESOLVER_CLEANUP_SECONDS
+        )
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+async def _terminate_resolver(process: Any) -> None:
+    """Terminate, force-kill if necessary, and reap one exact owned helper."""
+    waiter = asyncio.create_task(process.wait())
+    waiter.add_done_callback(_consume_task_result)
+    interrupted = False
+    if process.returncode is None:
+        with suppress(ProcessLookupError):
+            process.terminate()
+    try:
+        terminal = await _wait_process(waiter)
+    except asyncio.CancelledError:
+        interrupted = True
+        terminal = False
+    if not terminal:
+        with suppress(ProcessLookupError):
+            process.kill()
+        try:
+            terminal = await _wait_process(waiter)
+        except asyncio.CancelledError:
+            interrupted = True
+            terminal = False
+    if not terminal:
+        raise _ResolverCleanupFailure(process, waiter)
+    if interrupted:
+        raise asyncio.CancelledError()
+
+
+async def _read_resolver_output(process: Any) -> bytes:
+    if process.stdout is None:
+        raise EgressError("unavailable")
+    output = bytearray()
+    while len(output) <= _MAX_RESOLVER_OUTPUT_BYTES:
+        chunk = await process.stdout.read(
+            min(256, _MAX_RESOLVER_OUTPUT_BYTES + 1 - len(output))
+        )
+        if not chunk:
             break
-    return addresses
+        output.extend(chunk)
+    if len(output) > _MAX_RESOLVER_OUTPUT_BYTES:
+        raise EgressError("overflow")
+    return bytes(output)
+
+
+async def _resolve(host: str) -> list[str]:
+    if host != DESTINATION_HOST:
+        raise EgressError("denied")
+    process = None
+    try:
+        # asyncio owns cancellation during create_subprocess_exec itself; after
+        # publication this coroutine owns termination and reaping explicitly.
+        process = await _launch_resolver()
+        output = await _read_resolver_output(process)
+        returncode = await process.wait()
+        if returncode != 0:
+            raise EgressError("unavailable")
+        try:
+            addresses = json.loads(output.decode("ascii"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+            raise EgressError("unavailable") from None
+        if type(addresses) is not list:
+            raise EgressError("unavailable")
+        if len(addresses) > MAX_DNS_RESULTS + 1:
+            raise EgressError("overflow")
+        if any(type(address) is not str for address in addresses):
+            raise EgressError("unavailable")
+        return addresses
+    except asyncio.CancelledError:
+        if process is not None:
+            await _terminate_resolver(process)
+        raise
+    except _ResolverCleanupFailure:
+        raise
+    except EgressError:
+        if process is not None:
+            await _terminate_resolver(process)
+        raise
+    except Exception:
+        if process is not None:
+            await _terminate_resolver(process)
+        raise EgressError("unavailable") from None
 
 
 async def _open_connection(host: str, port: int, *, family: int):
@@ -186,15 +320,16 @@ async def _before(awaitable: Awaitable[Any], deadline: float) -> Any:
         raise EgressError("timeout") from None
 
 
-async def _close_writer(writer: Any) -> None:
-    if writer is None:
-        return
-    with suppress(Exception):
-        writer.close()
+def _abort_writer(writer: Any) -> None:
+    transport = getattr(writer, "transport", None)
+    if transport is None:
+        transport = getattr(writer, "_transport", None)
+    if transport is None:
+        raise EgressError("unavailable")
     try:
-        await asyncio.wait_for(writer.wait_closed(), IDLE_SECONDS)
-    except (Exception, asyncio.CancelledError):
-        pass
+        transport.abort()
+    except Exception:
+        raise EgressError("unavailable") from None
 
 
 def _refuse_without_waiting(writer: Any) -> None:
@@ -203,6 +338,8 @@ def _refuse_without_waiting(writer: Any) -> None:
         writer.write(_RESPONSES["busy"])
     with suppress(Exception):
         writer.close()
+    with suppress(Exception):
+        _abort_writer(writer)
 
 
 class LoginEgressProxy:
@@ -215,6 +352,8 @@ class LoginEgressProxy:
         self._resolvers = set()
         self._relays = set()
         self._writers = set()
+        self._writer_waiters = {}
+        self._cleanups = set()
 
     async def handle(self, reader: asyncio.StreamReader, writer: Any) -> None:
         """Own one inbound CONNECT connection from admission through cleanup."""
@@ -261,31 +400,142 @@ class LoginEgressProxy:
             if not established:
                 await self._send_error(writer, EgressError("unavailable"))
         finally:
-            await _close_writer(upstream_writer)
-            await _close_writer(writer)
-            if upstream_writer is not None:
-                self._writers.discard(upstream_writer)
-            self._writers.discard(writer)
+            cleanup = asyncio.create_task(
+                self._cleanup_writers(upstream_writer, writer)
+            )
+            self._cleanups.add(cleanup)
+            interrupted = False
+            try:
+                cleanup_succeeded = await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                interrupted = True
+                cleanup_succeeded = await cleanup
+            finally:
+                self._cleanups.discard(cleanup)
             if current is not None:
                 self._handlers.discard(current)
-            self._active -= 1
+            if cleanup_succeeded:
+                self._active -= 1
+            if interrupted:
+                raise asyncio.CancelledError()
 
     async def close(self) -> None:
         """Stop admission, close all streams, and reap owned asynchronous work."""
         self._closed = True
+        await self._retry_failed_resolvers()
         current = asyncio.current_task()
         handlers = tuple(task for task in self._handlers if task is not current)
         relays = tuple(task for task in self._relays if task is not current)
+        resolvers = tuple(task for task in self._resolvers if task is not current)
         for writer in tuple(self._writers):
             with suppress(Exception):
                 writer.close()
-        for task in relays + handlers:
+        for task in relays + handlers + resolvers:
             task.cancel()
-        if relays or handlers:
-            await asyncio.gather(*relays, *handlers, return_exceptions=True)
-        resolvers = tuple(self._resolvers)
         if resolvers:
-            await asyncio.gather(*resolvers, return_exceptions=True)
+            unused_done, pending = await asyncio.wait(
+                resolvers, timeout=2 * RESOLVER_CLEANUP_SECONDS
+            )
+            del unused_done, pending
+        owned = relays + handlers + tuple(self._cleanups)
+        if owned:
+            unused_done, pending = await asyncio.wait(
+                owned,
+                timeout=max(
+                    2 * RESOLVER_CLEANUP_SECONDS,
+                    2 * IDLE_SECONDS,
+                ),
+            )
+            del unused_done, pending
+        cleanup_failed = False
+        if self._writers:
+            if not await self._cleanup_writers(*tuple(self._writers)):
+                cleanup_failed = True
+        if (
+            self._handlers
+            or self._resolvers
+            or self._relays
+            or self._cleanups
+            or self._writers
+            or self._writer_waiters
+        ):
+            cleanup_failed = True
+        if not cleanup_failed:
+            self._active = 0
+        else:
+            raise EgressError("unavailable")
+
+    async def _retry_failed_resolvers(self) -> None:
+        for task in tuple(self._resolvers):
+            if not task.done():
+                continue
+            try:
+                failure = task.exception()
+            except asyncio.CancelledError:
+                self._resolvers.discard(task)
+                continue
+            if not isinstance(failure, _ResolverCleanupFailure):
+                self._resolvers.discard(task)
+                continue
+            try:
+                await _terminate_resolver(failure.process)
+            except _ResolverCleanupFailure:
+                continue
+            self._resolvers.discard(task)
+
+    def _writer_waiter(self, writer: Any) -> asyncio.Task:
+        waiter = self._writer_waiters.get(writer)
+        if waiter is None:
+            waiter = asyncio.create_task(writer.wait_closed())
+            waiter.add_done_callback(_consume_task_result)
+            self._writer_waiters[writer] = waiter
+        return waiter
+
+    async def _wait_writer(self, waiter: asyncio.Task) -> str:
+        try:
+            await asyncio.wait_for(asyncio.shield(waiter), IDLE_SECONDS)
+            return "closed"
+        except asyncio.TimeoutError:
+            return "timeout"
+        except asyncio.CancelledError:
+            return "cancelled"
+        except Exception:
+            return "failed"
+
+    async def _close_writer(self, writer: Any) -> None:
+        with suppress(Exception):
+            writer.close()
+        waiter = self._writer_waiter(writer)
+        outcome = await self._wait_writer(waiter)
+        interrupted = outcome == "cancelled"
+        if outcome != "closed":
+            _abort_writer(writer)
+            if waiter.done() and outcome == "failed":
+                self._writer_waiters.pop(writer, None)
+                waiter = self._writer_waiter(writer)
+            second_outcome = await self._wait_writer(waiter)
+            interrupted = interrupted or second_outcome == "cancelled"
+            if second_outcome != "closed":
+                raise EgressError("unavailable")
+        self._writer_waiters.pop(writer, None)
+        if interrupted:
+            raise asyncio.CancelledError()
+
+    async def _cleanup_writers(self, *writers: Any) -> bool:
+        selected = tuple(writer for writer in writers if writer is not None)
+        if not selected:
+            return True
+        results = await asyncio.gather(
+            *(self._close_writer(writer) for writer in selected),
+            return_exceptions=True,
+        )
+        succeeded = True
+        for writer, result in zip(selected, results):
+            if isinstance(result, BaseException):
+                succeeded = False
+            else:
+                self._writers.discard(writer)
+        return succeeded
 
     async def _read_header(self, reader: asyncio.StreamReader, deadline: float) -> bytes:
         try:
@@ -307,13 +557,16 @@ class LoginEgressProxy:
         self._resolvers.add(task)
 
         def resolution_finished(finished: asyncio.Task) -> None:
-            self._resolvers.discard(finished)
-            with suppress(Exception, asyncio.CancelledError):
-                finished.result()
+            try:
+                failure = finished.exception()
+            except asyncio.CancelledError:
+                failure = None
+            if not isinstance(failure, _ResolverCleanupFailure):
+                self._resolvers.discard(finished)
 
         task.add_done_callback(resolution_finished)
         try:
-            addresses = await _before(asyncio.shield(task), deadline)
+            addresses = await _before(task, deadline)
         except EgressError:
             raise
         except asyncio.CancelledError:

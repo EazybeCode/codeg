@@ -24,13 +24,24 @@ The fixed runtime bounds are:
 - 4 MiB transferred in each direction per tunnel
 - 5 seconds for the request header
 - 5 seconds for DNS
+- 2 seconds for each resolver terminate/reap attempt before force-kill or failure
 - 10 seconds for connection establishment
 - 30 seconds without tunnel activity
 - 600 seconds total connection lifetime
 
-Admission does not queue excess clients. Resolver timeouts do not free a resolver
-slot while the underlying asyncio resolver task is still running, preventing
-repeated timeouts from creating an unbounded collection of resolver work.
+Admission does not queue excess clients. Each DNS operation runs in a short-lived,
+isolated child of the current Python interpreter. The child receives no caller
+arguments or inherited environment, runs only fixed server-owned resolver code,
+and has stdin and stderr disconnected. It stops collecting addresses after the
+DNS maximum plus one and writes at most 2048 bytes of address JSON to stdout. The
+parent bounds stdout before parsing it.
+
+A DNS deadline, cancellation, or proxy shutdown terminates and reaps the exact
+owned helper. If graceful termination does not finish within 2 seconds, the proxy
+force-kills that same helper and allows another 2 seconds for reaping. Resolver
+capacity is retained until the helper is terminal. If terminal cleanup cannot be
+confirmed, shutdown fails explicitly and ownership is retained; it does not report
+a successful close or detach the helper.
 
 ## Address validation and DNS pinning
 
@@ -61,6 +72,14 @@ connection, 504 for a deadline, and 503 for capacity or shutdown. Error response
 include `Content-Length: 0` and `Connection: close`. After a 200 has been written,
 any timeout, limit, I/O failure, cancellation, or EOF closes and reaps both sides
 without injecting another HTTP response into TLS.
+
+Stream shutdown first requests graceful close and waits within the fixed bound. A
+timeout, failure, or cleanup interruption aborts the exact writer transport, and
+the proxy retains its writer and admission ownership until terminal closure is
+confirmed. For saturated or already-closed admission, the fixed 503 is written
+best-effort and the transport is immediately closed and aborted without awaiting
+untracked peer behavior; terminal resource cleanup takes priority, so delivery of
+that overload/shutdown response is not guaranteed.
 
 The component emits no logs or telemetry, writes no files, and never includes
 request bytes, addresses, authentication data, or exception diagnostics in its

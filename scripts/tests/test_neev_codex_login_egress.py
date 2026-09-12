@@ -291,6 +291,197 @@ def reader_with(data=b"", eof=True):
     return reader
 
 
+class FakeStdout:
+    def __init__(self, data=b"", stalled=False):
+        self.data = bytearray(data)
+        self.stalled = stalled
+        self.read_started = asyncio.Event()
+
+    async def read(self, maximum):
+        self.read_started.set()
+        if self.stalled:
+            await asyncio.Future()
+        if not self.data:
+            return b""
+        chunk = bytes(self.data[:maximum])
+        del self.data[:maximum]
+        await asyncio.sleep(0)
+        return chunk
+
+
+class FakeProcess:
+    def __init__(
+        self,
+        output=b"",
+        *,
+        exit_code=0,
+        stalled=False,
+        terminate_completes=True,
+        kill_completes=True,
+    ):
+        self.stdout = FakeStdout(output, stalled=stalled)
+        self.returncode = None if stalled else exit_code
+        self.exit_code = exit_code
+        self.terminate_completes = terminate_completes
+        self.kill_completes = kill_completes
+        self.terminate_calls = 0
+        self.kill_calls = 0
+        self.reaped = False
+        self.terminal = asyncio.Event()
+        if self.returncode is not None:
+            self.terminal.set()
+
+    def terminate(self):
+        self.terminate_calls += 1
+        if self.terminate_completes:
+            self.returncode = -15
+            self.terminal.set()
+
+    def kill(self):
+        self.kill_calls += 1
+        if self.kill_completes:
+            self.returncode = -9
+            self.terminal.set()
+
+    async def wait(self):
+        await self.terminal.wait()
+        self.reaped = True
+        return self.returncode
+
+
+class AbortTransport:
+    def __init__(self, writer):
+        self.writer = writer
+        self.abort_calls = 0
+
+    def abort(self):
+        self.abort_calls += 1
+        self.writer.aborted = True
+        self.writer.closed = True
+        self.writer.terminal.set()
+
+
+class BufferedWriter(MemoryWriter):
+    def __init__(self):
+        super().__init__()
+        self.close_requested = False
+        self.aborted = False
+        self.terminal = asyncio.Event()
+        self.transport = AbortTransport(self)
+
+    def close(self):
+        self.close_requested = True
+
+    async def wait_closed(self):
+        self.wait_closed_started.set()
+        await self.terminal.wait()
+        self.closed = True
+        self.waited_closed = True
+
+
+class ResolverProcessTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        if module is None:
+            self.fail("login egress module is not implemented")
+        if not hasattr(module, "_launch_resolver"):
+            self.fail("terminable resolver helper is not implemented")
+
+    async def test_launch_is_fixed_isolated_and_has_no_inherited_environment(self):
+        process = object()
+        launch = mock.AsyncMock(return_value=process)
+        with mock.patch.object(asyncio, "create_subprocess_exec", launch):
+            self.assertIs(await module._launch_resolver(), process)
+
+        args = launch.await_args.args
+        options = launch.await_args.kwargs
+        self.assertEqual(args[:3], (sys.executable, "-I", "-c"))
+        self.assertEqual(len(args), 4)
+        self.assertIn("auth.openai.com", args[3])
+        self.assertNotIn("sys.argv", args[3])
+        self.assertEqual(options["stdin"], asyncio.subprocess.DEVNULL)
+        self.assertEqual(options["stdout"], asyncio.subprocess.PIPE)
+        self.assertEqual(options["stderr"], asyncio.subprocess.DEVNULL)
+        self.assertEqual(options["env"], {"LANG": "C", "LC_ALL": "C"})
+        self.assertIs(options["close_fds"], True)
+
+    async def test_resolver_accepts_bounded_json_and_sanitizes_child_failures(self):
+        cases = (
+            (b'["1.1.1.1","2606:4700:4700::1111"]', 0, None),
+            (b"not-json", 0, "unavailable"),
+            (b"[1]", 0, "unavailable"),
+            (b'["1.1.1.1"]', 7, "unavailable"),
+            (
+                b"[" + b",".join([b'\"1.1.1.1\"'] * 18) + b"]",
+                0,
+                "overflow",
+            ),
+            (b"x" * 2049, 0, "overflow"),
+        )
+        for output, exit_code, expected_error in cases:
+            with self.subTest(expected_error=expected_error, exit_code=exit_code):
+                process = FakeProcess(output, exit_code=exit_code)
+                with mock.patch.object(
+                    module, "_launch_resolver", mock.AsyncMock(return_value=process)
+                ):
+                    if expected_error is None:
+                        self.assertEqual(
+                            await module._resolve("auth.openai.com"),
+                            ["1.1.1.1", "2606:4700:4700::1111"],
+                        )
+                    else:
+                        with self.assertRaises(module.EgressError) as caught:
+                            await module._resolve("auth.openai.com")
+                        self.assertEqual(caught.exception.code, expected_error)
+                self.assertTrue(process.reaped)
+
+    async def test_resolver_refuses_nonfixed_host_before_launch(self):
+        launch = mock.AsyncMock()
+        with mock.patch.object(module, "_launch_resolver", launch):
+            with self.assertRaises(module.EgressError) as caught:
+                await module._resolve("evil.invalid")
+        self.assertEqual(caught.exception.code, "denied")
+        launch.assert_not_awaited()
+
+    async def test_real_owned_local_child_is_killed_and_reaped_on_cancellation(self):
+        launched = asyncio.Event()
+        processes = []
+
+        async def launch_sleeping_child():
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-I",
+                "-c",
+                "import time; time.sleep(60)",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                env={"LANG": "C", "LC_ALL": "C"},
+                close_fds=True,
+            )
+            processes.append(process)
+            launched.set()
+            return process
+
+        try:
+            with mock.patch.object(
+                module, "_launch_resolver", launch_sleeping_child
+            ), mock.patch.object(module, "RESOLVER_CLEANUP_SECONDS", 0.2):
+                task = asyncio.create_task(module._resolve("auth.openai.com"))
+                await asyncio.wait_for(launched.wait(), 1.0)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 1.0)
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].returncode)
+        self.assertEqual(await processes[0].wait(), processes[0].returncode)
+
+
 class LoginEgressProxyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         if module is None:
@@ -411,31 +602,158 @@ class LoginEgressProxyTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(self.proxy.handle(reader, writer), 0.5)
                 self.assertTrue(bytes(writer.data).startswith(status))
 
-    async def test_dns_timeout_keeps_resolution_slot_until_underlying_finishes(self):
-        started = asyncio.Event()
-        finish = asyncio.Event()
+    async def test_dns_timeout_terminates_and_reaps_helper_before_slot_release(self):
+        if not hasattr(module, "_launch_resolver"):
+            self.fail("terminable resolver helper is not implemented")
+        stalled = FakeProcess(
+            stalled=True, terminate_completes=False, kill_completes=True
+        )
+        successor = FakeProcess(b'["1.1.1.1"]')
+        processes = iter((stalled, successor))
 
-        async def stalled_resolve(unused_host):
-            started.set()
-            await finish.wait()
-            return ["1.1.1.1"]
+        async def launch():
+            return next(processes)
+
+        async def failed_dial(unused_host, unused_port, *, family):
+            del family
+            raise OSError("invented dial failure")
 
         first_writer = MemoryWriter()
         second_writer = MemoryWriter()
-        with mock.patch.object(module, "_resolve", stalled_resolve), mock.patch.object(
-            module, "MAX_CONNECTIONS", 1
-        ), mock.patch.object(module, "DNS_SECONDS", 0.01):
+        with mock.patch.object(module, "_launch_resolver", launch), mock.patch.object(
+            module, "_open_connection", failed_dial
+        ), mock.patch.multiple(
+            module,
+            MAX_CONNECTIONS=1,
+            DNS_SECONDS=0.01,
+            RESOLVER_CLEANUP_SECONDS=0.01,
+        ):
             await self.proxy.handle(reader_with(VALID_REQUEST), first_writer)
-            self.assertTrue(bytes(first_writer.data).startswith(b"HTTP/1.1 504 Gateway Timeout"))
+            self.assertTrue(
+                bytes(first_writer.data).startswith(b"HTTP/1.1 504 Gateway Timeout")
+            )
+            self.assertEqual(stalled.terminate_calls, 1)
+            self.assertEqual(stalled.kill_calls, 1)
+            self.assertTrue(stalled.reaped)
+
             await self.proxy.handle(reader_with(VALID_REQUEST), second_writer)
             self.assertTrue(
-                bytes(second_writer.data).startswith(
-                    b"HTTP/1.1 503 Service Unavailable"
-                )
+                bytes(second_writer.data).startswith(b"HTTP/1.1 502 Bad Gateway")
             )
-            finish.set()
-            await asyncio.sleep(0)
-        await started.wait()
+            self.assertNotIn(b"503", second_writer.data)
+
+    async def test_shutdown_during_dns_force_kills_and_reaps_owned_helper(self):
+        if not hasattr(module, "_launch_resolver"):
+            self.fail("terminable resolver helper is not implemented")
+        process = FakeProcess(
+            stalled=True, terminate_completes=False, kill_completes=True
+        )
+        writer = MemoryWriter()
+        with mock.patch.object(
+            module, "_launch_resolver", mock.AsyncMock(return_value=process)
+        ), mock.patch.multiple(
+            module, DNS_SECONDS=5.0, RESOLVER_CLEANUP_SECONDS=0.01
+        ):
+            handler = asyncio.create_task(
+                self.proxy.handle(reader_with(VALID_REQUEST, eof=False), writer)
+            )
+            await asyncio.wait_for(process.stdout.read_started.wait(), 0.5)
+            await asyncio.wait_for(self.proxy.close(), 0.5)
+            await asyncio.gather(handler, return_exceptions=True)
+        self.assertEqual(process.terminate_calls, 1)
+        self.assertEqual(process.kill_calls, 1)
+        self.assertTrue(process.reaped)
+        self.assertTrue(writer.closed and writer.waited_closed)
+
+    async def test_unconfirmed_resolver_cleanup_fails_close_and_retains_ownership(self):
+        if not hasattr(module, "_launch_resolver"):
+            self.fail("terminable resolver helper is not implemented")
+        process = FakeProcess(
+            stalled=True, terminate_completes=False, kill_completes=False
+        )
+        writer = MemoryWriter()
+        with mock.patch.object(
+            module, "_launch_resolver", mock.AsyncMock(return_value=process)
+        ), mock.patch.multiple(
+            module, DNS_SECONDS=5.0, RESOLVER_CLEANUP_SECONDS=0.01
+        ):
+            handler = asyncio.create_task(
+                self.proxy.handle(reader_with(VALID_REQUEST, eof=False), writer)
+            )
+            await asyncio.wait_for(process.stdout.read_started.wait(), 0.5)
+            with self.assertRaises(module.EgressError) as caught:
+                await asyncio.wait_for(self.proxy.close(), 0.5)
+            self.assertEqual(caught.exception.code, "unavailable")
+            self.assertFalse(process.reaped)
+            self.assertTrue(self.proxy._resolvers)
+            await asyncio.gather(handler, return_exceptions=True)
+
+            process.kill_completes = True
+            await asyncio.wait_for(self.proxy.close(), 0.5)
+        self.assertTrue(process.reaped)
+        self.assertFalse(self.proxy._resolvers)
+
+    async def test_cancellation_during_resolver_launch_has_no_detached_task(self):
+        if not hasattr(module, "_launch_resolver"):
+            self.fail("terminable resolver helper is not implemented")
+        launch_started = asyncio.Event()
+        launch_cancelled = asyncio.Event()
+
+        async def stalled_launch():
+            launch_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                launch_cancelled.set()
+                raise
+
+        writer = MemoryWriter()
+        with mock.patch.object(module, "_launch_resolver", stalled_launch):
+            handler = asyncio.create_task(
+                self.proxy.handle(reader_with(VALID_REQUEST, eof=False), writer)
+            )
+            await asyncio.wait_for(launch_started.wait(), 0.5)
+            handler.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(handler, 0.5)
+        self.assertTrue(launch_cancelled.is_set())
+        self.assertTrue(writer.closed and writer.waited_closed)
+        await asyncio.wait_for(self.proxy.close(), 0.5)
+
+    async def test_concurrent_resolver_helpers_never_exceed_connection_ceiling(self):
+        if not hasattr(module, "_launch_resolver"):
+            self.fail("terminable resolver helper is not implemented")
+        processes = [FakeProcess(stalled=True), FakeProcess(stalled=True)]
+        launches = []
+
+        async def launch():
+            process = processes[len(launches)]
+            launches.append(process)
+            return process
+
+        with mock.patch.object(module, "_launch_resolver", launch), mock.patch.multiple(
+            module, MAX_CONNECTIONS=2, RESOLVER_CLEANUP_SECONDS=0.01
+        ):
+            handlers = [
+                asyncio.create_task(
+                    self.proxy.handle(
+                        reader_with(VALID_REQUEST, eof=False), MemoryWriter()
+                    )
+                )
+                for _unused in range(2)
+            ]
+            await asyncio.gather(
+                *(process.stdout.read_started.wait() for process in processes)
+            )
+            rejected = MemoryWriter()
+            await self.proxy.handle(reader_with(VALID_REQUEST), rejected)
+            self.assertEqual(len(launches), 2)
+            self.assertTrue(
+                bytes(rejected.data).startswith(b"HTTP/1.1 503 Service Unavailable")
+            )
+            await asyncio.wait_for(self.proxy.close(), 0.5)
+            await asyncio.gather(*handlers, return_exceptions=True)
+        self.assertTrue(all(process.reaped for process in processes))
 
     async def test_late_resolver_failure_after_timeout_is_reaped_without_diagnostic(self):
         finish = asyncio.Event()
@@ -567,6 +885,52 @@ class LoginEgressProxyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(inbound_writer.closed and outbound_writer.closed)
 
+    async def test_stalled_writer_cleanup_aborts_both_streams_before_slot_release(self):
+        async def resolve(unused_host):
+            return ["1.1.1.1"]
+
+        inbound_writer = BufferedWriter()
+        upstream_writer = BufferedWriter()
+
+        async def open_connection(unused_host, unused_port, *, family):
+            del family
+            return reader_with(b"server-tls"), upstream_writer
+
+        with mock.patch.object(module, "_resolve", resolve), mock.patch.object(
+            module, "_open_connection", open_connection
+        ), mock.patch.multiple(module, IDLE_SECONDS=0.01, MAX_CONNECTIONS=1):
+            await asyncio.wait_for(
+                self.proxy.handle(
+                    reader_with(VALID_REQUEST + b"client-tls"), inbound_writer
+                ),
+                0.5,
+            )
+            self.assertTrue(inbound_writer.close_requested)
+            self.assertTrue(upstream_writer.close_requested)
+            self.assertTrue(inbound_writer.aborted and inbound_writer.closed)
+            self.assertTrue(upstream_writer.aborted and upstream_writer.closed)
+
+            released_writer = MemoryWriter()
+            await self.proxy.handle(reader_with(b"GET / HTTP/1.1\r\n\r\n"), released_writer)
+            self.assertTrue(
+                bytes(released_writer.data).startswith(b"HTTP/1.1 400 Bad Request")
+            )
+            self.assertNotIn(b"503", released_writer.data)
+
+    async def test_interrupted_writer_cleanup_aborts_before_handler_finishes(self):
+        writer = BufferedWriter()
+        with mock.patch.object(module, "IDLE_SECONDS", 0.01):
+            handler = asyncio.create_task(
+                self.proxy.handle(reader_with(b"GET / HTTP/1.1\r\n\r\n"), writer)
+            )
+            await asyncio.wait_for(writer.wait_closed_started.wait(), 0.5)
+            handler.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(handler, 0.5)
+        self.assertTrue(writer.close_requested)
+        self.assertTrue(writer.aborted and writer.closed)
+        await asyncio.wait_for(self.proxy.close(), 0.5)
+
     async def test_idle_lifetime_and_byte_ceilings_close_established_tunnel(self):
         async def resolve(unused_host):
             return ["1.1.1.1"]
@@ -632,7 +996,7 @@ class LoginEgressProxyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         async def assert_prompt_refusal(proxy):
-            writer = MemoryWriter(stall_drain=True, stall_wait_closed=True)
+            writer = BufferedWriter()
             task = asyncio.create_task(proxy.handle(reader_with(VALID_REQUEST), writer))
             try:
                 await asyncio.sleep(0)
@@ -644,7 +1008,8 @@ class LoginEgressProxyTests(unittest.IsolatedAsyncioTestCase):
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
             self.assertEqual(bytes(writer.data), expected)
-            self.assertTrue(writer.closed)
+            self.assertTrue(writer.close_requested)
+            self.assertTrue(writer.aborted and writer.closed)
             self.assertFalse(writer.drain_started.is_set())
             self.assertFalse(writer.wait_closed_started.is_set())
 
