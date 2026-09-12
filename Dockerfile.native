@@ -10,7 +10,7 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 
 COPY src/ ./src/
 COPY public/ ./public/
-COPY components.json next-env.d.ts next.config.ts postcss.config.mjs tsconfig.json ./
+COPY components.json next.config.ts postcss.config.mjs tsconfig.json ./
 
 # Dependency lifecycle hooks stay disabled. This is the inspected root hook that
 # installs Monaco's static assets, followed by the existing static-export build.

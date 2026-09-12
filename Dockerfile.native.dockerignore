@@ -8,7 +8,6 @@
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !components.json
-!next-env.d.ts
 !next.config.ts
 !postcss.config.mjs
 !tsconfig.json

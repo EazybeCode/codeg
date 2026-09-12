@@ -107,21 +107,16 @@ test(
     assert.ok(config.Env.includes("NEEV_DOCUMENT_ROOT=/data/documents"))
     assert.ok(config.Env.includes("NEEV_BIND=0.0.0.0:3080"))
 
-    const allowedNeevDefaults = new Set([
+    const allowedImageEnv = [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
       "NEEV_RUNTIME_ENABLED=false",
       "NEEV_STATIC_ROOT=/app/web",
       "NEEV_DOCUMENT_ROOT=/data/documents",
       "NEEV_BIND=0.0.0.0:3080",
-    ])
-    const forbiddenDefaults = config.Env.filter(
-      (entry) =>
-        (entry.startsWith("NEEV_") && !allowedNeevDefaults.has(entry)) ||
-        entry.startsWith("CODEG_") ||
-        entry.startsWith("WORKOS_")
-    )
+    ]
     assert.deepEqual(
-      forbiddenDefaults,
-      [],
+      [...config.Env].sort(),
+      allowedImageEnv.sort(),
       "image contains baked secret, provider, origin, database, or legacy configuration"
     )
     assert.ok(
@@ -182,7 +177,7 @@ test(
       "test -r /usr/local/bin/neev-content-verify",
       "test -r /app/web/index.html",
       "! touch /neev-native-write-test",
-      'for tool in node npm git ssh docker rustc cargo; do ! command -v "$tool"; done',
+      'for tool in node npm git ssh docker rustc cargo; do if command -v "$tool" >/dev/null 2>&1; then echo "unexpected tool: $tool" >&2; exit 1; fi; done',
       "ldd /usr/local/bin/neev-server /usr/local/bin/neev-content-verify > /tmp/neev-ldd.txt",
       "! grep -q 'not found' /tmp/neev-ldd.txt",
     ].join("\n")
