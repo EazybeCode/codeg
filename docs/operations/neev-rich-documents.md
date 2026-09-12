@@ -3,8 +3,9 @@
 Task 3 implementation, September 12, 2026. This document distinguishes automated
 checks from the controller's actual synthetic browser and isolated recovery checks.
 Scoped automated checks, actual synthetic browser acceptance and mixed-format
-recovery passed, with the limitations below. Independent task/whole-plan reviews
-remain release gates. No deployment or real provider-account authorization is included.
+recovery passed, with the limitations below. Scoped task re-review is clean;
+whole-plan review remains a release gate. No deployment or real provider-account
+authorization is included.
 
 ## Formats and operation
 
@@ -273,7 +274,7 @@ Post-fix focused adapter/controller suites passed 52/52 tests (25 adapter,
 bytes and successful canonical parsing with the complete original draft text.
 Scoped ESLint, typecheck and `git diff --check` also exited 0. The earlier browser
 journey describes the pre-review artifact; the controller's focused browser smoke
-for this correction remains pending.
+for this correction passed as recorded below.
 
 The correction's `pnpm build` exited 0: Next 16.3.4 compiled in 4.0 seconds,
 TypeScript finished in 5.5 seconds, and 34 routes were statically exported.
@@ -282,6 +283,29 @@ Fresh `out/index.html` is 310,449 bytes, SHA256
 mtime `2026-09-12T11:26:27.449Z`. No full frontend/native suite was rerun for
 this scoped correction. Code and regression tests are in commit `95f382c9`;
 the subsequent evidence update is documentation only.
+
+Scoped re-review of `18a46d56` was clean: both Important findings addressed and
+no new breakage reported. Actual browser smoke on artifact `d4568515` visibly
+refused optional-pipe table and ordered-task plain-text ClipboardEvents without
+changing the draft; fenced code containing `~~literal~~` was accepted as code.
+This is injected browser clipboard-event coverage, not an OS clipboard claim.
+Monitored external requests and application page errors were both zero.
+
+That first smoke's follow-up incorrectly awaited an editor while Reload latest
+had opened its confirmation dialog. The controller recognized the harness step
+error and normally cleaned up that synthetic fixture; no reload pass or app fix
+is claimed from that step.
+
+A fresh fixture then verified persistence through the correct UI: create a
+synthetic organization/project/document, paste fenced text code containing
+`~~literal~~`, wait for Saved, navigate Back to folder, and reopen the document.
+The actual preformatted text remained exactly `~~literal~~`. External requests
+and application page errors were zero. Its source schema was
+`neev_test_5913a881751b4b3cbd2a5b60e7e9fc29`, temporary root basename `.tmpPEQA2t`.
+The controller closed its browser and normally stopped PTY 19567 (exit 0);
+read-only checks confirmed schema count 0 and absence of the owned source root.
+Only synthetic fixture data was cleaned up. This resolves the earlier harness
+step without source changes; whole-rich-plan review follows, not public release.
 
 ## Recovery and rollback
 
