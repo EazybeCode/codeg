@@ -1,6 +1,9 @@
 import assert from "node:assert/strict"
 import { randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import test from "node:test"
 
 const suppliedImage = process.env.NEEV_IMAGE_UNDER_TEST?.trim()
@@ -79,6 +82,11 @@ function cleanupContainer(name, invokeDocker = docker) {
     `failed to remove test container ${name}: ${removed.stderr || removed.stdout}; ` +
       `container inspection failed or still found it: ${inspected.stderr || inspected.stdout}`
   )
+}
+
+function rootWriteProbeCommand(target = "/neev-native-write-test") {
+  assert.match(target, /^\/[A-Za-z0-9_./-]+$/, "unsafe root-write probe path")
+  return `if touch '${target}'; then echo 'runtime root is writable' >&2; exit 1; fi`
 }
 
 const confinementArgs = [
@@ -195,6 +203,28 @@ test("cleanup rejects Docker daemon failure instead of treating it as absence", 
   scripted.assertFinished()
 })
 
+test("diagnostic root-write probe fails when its target is writable", () => {
+  const probeDirectory = mkdtempSync(join(tmpdir(), "neev-native-write-probe-"))
+  const probeTarget = join(probeDirectory, "writable-target")
+
+  try {
+    const result = spawnSync(
+      "/bin/sh",
+      [
+        "-c",
+        ["set -eu", rootWriteProbeCommand(probeTarget), "exit 0"].join("\n"),
+      ],
+      { encoding: "utf8" }
+    )
+
+    assert.equal(result.error, undefined)
+    assert.equal(result.status, 1, "writable root probe did not fail closed")
+    assert.match(result.stderr, /runtime root is writable/)
+  } finally {
+    rmSync(probeDirectory, { recursive: true, force: true })
+  }
+})
+
 test(
   "actual image metadata has only the native fail-closed defaults",
   { skip: integrationSkip },
@@ -289,7 +319,7 @@ test(
       "test -r /usr/local/bin/neev-server",
       "test -r /usr/local/bin/neev-content-verify",
       "test -r /app/web/index.html",
-      "! touch /neev-native-write-test",
+      rootWriteProbeCommand(),
       'for tool in node npm git ssh docker rustc cargo; do if command -v "$tool" >/dev/null 2>&1; then echo "unexpected tool: $tool" >&2; exit 1; fi; done',
       "ldd /usr/local/bin/neev-server /usr/local/bin/neev-content-verify > /tmp/neev-ldd.txt",
       "! grep -q 'not found' /tmp/neev-ldd.txt",
