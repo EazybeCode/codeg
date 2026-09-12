@@ -127,12 +127,12 @@ pnpm build
 pnpm audit --json
 ```
 
-- Final post-fix frontend gate: 46 files, 534 tests passed, exit 0 (13.06 seconds).
+- Initial Task 3 gate after browser fixes: 46 files, 534 tests passed, exit 0 (13.06 seconds).
   This includes adapter 17, actual rich widget 10, document controller 26,
   native content integration 37 and all native locale tests.
 - TypeScript: passed with the converged graph.
 - Scoped ESLint and `git diff --check`: passed, exit 0.
-- Final static build: passed, Next 16.3.4, 34 routes exported. Compilation 4.1 seconds,
+- Initial static build after browser fixes: passed, Next 16.3.4, 34 routes exported. Compilation 4.1 seconds,
   TypeScript 5.1 seconds. Existing legacy composer React `act` warnings and the
   Vite CJS warning remain disclosed; no test failures or unhandled errors.
   Build artifact: `out/index.html`, 310,449 bytes, SHA-256
@@ -271,8 +271,17 @@ No dependencies, native storage or authority contracts changed.
 Post-fix focused adapter/controller suites passed 52/52 tests (25 adapter,
 27 controller) in 4.10 seconds. The boundary test checks exactly 1,048,576 copied
 bytes and successful canonical parsing with the complete original draft text.
-The earlier browser and static-build evidence describes the pre-review artifact;
-this narrow correction has not yet had another browser journey or static rebuild.
+Scoped ESLint, typecheck and `git diff --check` also exited 0. The earlier browser
+journey describes the pre-review artifact; the controller's focused browser smoke
+for this correction remains pending.
+
+The correction's `pnpm build` exited 0: Next 16.3.4 compiled in 4.0 seconds,
+TypeScript finished in 5.5 seconds, and 34 routes were statically exported.
+Fresh `out/index.html` is 310,449 bytes, SHA256
+`d4568515e121977e127cccceb06e2c66a03b516168888b034da680946e18f02c`,
+mtime `2026-09-12T11:26:27.449Z`. No full frontend/native suite was rerun for
+this scoped correction. Code and regression tests are in commit `95f382c9`;
+the subsequent evidence update is documentation only.
 
 ## Recovery and rollback
 
