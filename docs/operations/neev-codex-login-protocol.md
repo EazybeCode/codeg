@@ -41,8 +41,9 @@ closed. Provider error messages and data are discarded and surface only the fixe
 
 Input chunks and complete frames are capped at 65,536 bytes. A frame's newline is
 part of that limit. Parsing rejects invalid UTF-8, duplicate object keys,
-non-finite numbers, malformed envelopes, unknown notifications, server-initiated
-requests, and schema additions. Fatal framing or protocol errors close the
+non-finite numbers (including exponent overflow), excessive JSON nesting,
+malformed envelopes, unknown notifications, server-initiated requests, and
+unexpected object keys or variants. Fatal framing or protocol errors close the
 instance and clear pending, partial, and login state. `account/updated` is validated
 and ignored; it never establishes authentication. Its pinned object has no required
 fields and permits only optional nullable `authMode` and `planType`. `authMode` is
@@ -72,8 +73,10 @@ A supported projection requires all of the following:
 
 Absent/null accounts project as disconnected. Exact API-key and Amazon Bedrock
 accounts, `requiresOpenaiAuth=false`, and well-formed ChatGPT plans outside the six
-recognized values project as unsupported, never connected. This explicitly
-includes the pinned schema's `free`, `go`, `prolite`,
+recognized values project as unsupported, never connected. A well-formed account
+plan is a nonempty printable string of at most 128 Unicode codepoints; it is not
+restricted to the notification enum. Unsupported values explicitly include
+future bounded plan strings and the pinned schema's `free`, `go`, `prolite`,
 `self_serve_business_prolite`, `self_serve_business_usage_based`, `ent26`,
 `enterprise_cbp_automation`, `enterprise_cbp_usage_based`, `edu_plus`, `edu_pro`,
 and `unknown` values. A profile extension requires review; enum membership alone

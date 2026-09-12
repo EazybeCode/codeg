@@ -181,6 +181,7 @@ class CodexLoginProtocolTests(unittest.TestCase):
             (dict(ACCOUNT, requiresOpenaiAuth=False), "unsupported"),
             ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "free"}}, "unsupported"),
             ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "unknown"}}, "unsupported"),
+            ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "future_bounded_plan"}}, "unsupported"),
         )
         for result, status in cases:
             with self.subTest(result=result):
@@ -202,7 +203,9 @@ class CodexLoginProtocolTests(unittest.TestCase):
             {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": 7, "planType": "plus"}},
             {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": "a\n@example.invalid", "planType": "plus"}},
             {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": "a" * 255, "planType": "plus"}},
-            {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "future"}},
+            {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": ""}},
+            {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "bad\nplan"}},
+            {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "x" * 129}},
             {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": ["plus"]}},
             {"requiresOpenaiAuth": True, "account": {"type": "future", "email": None, "planType": "plus"}},
         )
@@ -280,6 +283,7 @@ class CodexLoginProtocolTests(unittest.TestCase):
         bad_frames = (
             b'{"id":1,"id":1,"result":{"userAgent":"x"}}\n',
             b'{"id":1,"result":{"userAgent":"x","value":NaN}}\n',
+            b'{"id":1,"error":{"data":1e400}}\n',
             b'{"id":1,"result":{"userAgent":"\xff"}}\n',
         )
         for bad in bad_frames:
@@ -288,6 +292,15 @@ class CodexLoginProtocolTests(unittest.TestCase):
                 protocol.initialize()
                 self.assert_protocol_error("invalid", lambda: protocol.receive(bad))
                 self.assert_protocol_error("invalid", protocol.initialize)
+
+    def test_deeply_nested_json_is_a_fixed_fatal_invalid_error(self):
+        protocol = self.module.CodexLoginProtocol()
+        protocol.initialize()
+        nested = b"[" * 1_100 + b"0" + b"]" * 1_100
+        payload = b'{"id":1,"error":{"data":' + nested + b"}}\n"
+        self.assertLess(len(payload), 65_536)
+        self.assert_protocol_error("invalid", lambda: protocol.receive(payload))
+        self.assert_protocol_error("invalid", protocol.initialize)
 
     def test_frame_and_chunk_limits_count_the_newline(self):
         self.initialize()
@@ -307,6 +320,24 @@ class CodexLoginProtocolTests(unittest.TestCase):
         other = self.module.CodexLoginProtocol()
         other.initialize()
         self.assert_protocol_error("overflow", lambda: other.receive(b"x" * 65537))
+
+    def test_fragmented_input_never_extends_retained_buffer_past_limit(self):
+        class CappedBuffer(bytearray):
+            def extend(buffer, value):
+                if len(buffer) + len(value) > 65_536:
+                    raise AssertionError("retained buffer exceeded limit")
+                super().extend(value)
+
+        self.initialize()
+        self.protocol._buffer = CappedBuffer()
+        notification = frame({"method": "account/updated", "params": {}})[:-1]
+        first = notification + b" " * (65_535 - len(notification))
+        self.assertEqual(len(first), 65_535)
+        self.assertEqual(self.protocol.receive(first), [])
+        second = b"\n" + b" " * 65_535
+        self.assertEqual(len(second), 65_536)
+        self.assertEqual(self.protocol.receive(second), [])
+        self.assertEqual(len(self.protocol._buffer), 65_535)
 
     def test_response_id_and_envelope_must_exactly_settle_pending_request(self):
         invalid = (

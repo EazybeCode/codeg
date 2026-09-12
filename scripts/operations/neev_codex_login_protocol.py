@@ -6,6 +6,7 @@ It intentionally does not own a transport, persistence, authorization, or runtim
 
 from dataclasses import dataclass, field
 import json
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,6 +15,7 @@ MAX_CHUNK_BYTES = 65_536
 MAX_FRAME_BYTES = 65_536
 MAX_PROFILE_STRING = 256
 MAX_EMAIL_CODEPOINTS = 254
+MAX_ACCOUNT_PLAN_CODEPOINTS = 128
 MAX_LOGIN_ID_BYTES = 128
 MAX_USER_CODE_BYTES = 64
 
@@ -113,6 +115,13 @@ def _object_from_pairs(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
 
 def _reject_constant(unused_value: str) -> None:
     raise ValueError()
+
+
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError()
+    return parsed
 
 
 def _encode_request(request_id: int, method: str, params: Dict[str, Any]) -> bytes:
@@ -223,22 +232,28 @@ class CodexLoginProtocol:
         if len(chunk) > MAX_CHUNK_BYTES:
             self._fatal("overflow")
 
-        self._buffer.extend(chunk)
         events: List[Event] = []
-        while True:
-            newline = self._buffer.find(b"\n")
+        offset = 0
+        while offset < len(chunk):
+            newline = chunk.find(b"\n", offset)
             if newline < 0:
-                if len(self._buffer) > MAX_FRAME_BYTES:
+                segment = chunk[offset:]
+                if len(self._buffer) + len(segment) > MAX_FRAME_BYTES:
                     self._fatal("overflow")
+                self._buffer.extend(segment)
                 return events
-            if newline + 1 > MAX_FRAME_BYTES:
+            segment = chunk[offset:newline]
+            if len(self._buffer) + len(segment) + 1 > MAX_FRAME_BYTES:
                 self._fatal("overflow")
-            raw = bytes(self._buffer[:newline])
-            del self._buffer[: newline + 1]
+            self._buffer.extend(segment)
+            raw = bytes(self._buffer)
+            self._buffer.clear()
             value = self._decode(raw)
             event = self._handle(value)
             if event is not None:
                 events.append(event)
+            offset = newline + 1
+        return events
 
     def close(self) -> None:
         self._state = "closed"
@@ -266,8 +281,15 @@ class CodexLoginProtocol:
                 text,
                 object_pairs_hook=_object_from_pairs,
                 parse_constant=_reject_constant,
+                parse_float=_parse_finite_float,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            RecursionError,
+        ):
             self._fatal("invalid")
         if type(value) is not dict:
             self._fatal("invalid")
@@ -427,7 +449,10 @@ class CodexLoginProtocol:
         ):
             self._fatal("invalid")
         plan = account["planType"]
-        if type(plan) is not str or plan not in _PLAN_TYPES:
+        if (
+            not _bounded_string(plan, MAX_ACCOUNT_PLAN_CODEPOINTS)
+            or not plan.isprintable()
+        ):
             self._fatal("invalid")
         status = (
             "supported"
