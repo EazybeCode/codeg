@@ -197,6 +197,14 @@ async def _close_writer(writer: Any) -> None:
         pass
 
 
+def _refuse_without_waiting(writer: Any) -> None:
+    """Best-effort fixed refusal for connections outside the owned lifecycle."""
+    with suppress(Exception):
+        writer.write(_RESPONSES["busy"])
+    with suppress(Exception):
+        writer.close()
+
+
 class LoginEgressProxy:
     """Own admission, resolution, dial, relay, and shutdown for login tunnels."""
 
@@ -211,8 +219,7 @@ class LoginEgressProxy:
     async def handle(self, reader: asyncio.StreamReader, writer: Any) -> None:
         """Own one inbound CONNECT connection from admission through cleanup."""
         if self._closed or self._active >= MAX_CONNECTIONS:
-            await self._send_error(writer, EgressError("busy"))
-            await _close_writer(writer)
+            _refuse_without_waiting(writer)
             return
 
         self._active += 1

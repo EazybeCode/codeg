@@ -238,14 +238,23 @@ class PolicyTests(unittest.TestCase):
 
 
 class MemoryWriter:
-    def __init__(self, *, fail_write=False, fail_drain=False, stall_drain=False):
+    def __init__(
+        self,
+        *,
+        fail_write=False,
+        fail_drain=False,
+        stall_drain=False,
+        stall_wait_closed=False,
+    ):
         self.data = bytearray()
         self.closed = False
         self.waited_closed = False
         self.fail_write = fail_write
         self.fail_drain = fail_drain
         self.stall_drain = stall_drain
+        self.stall_wait_closed = stall_wait_closed
         self.drain_started = asyncio.Event()
+        self.wait_closed_started = asyncio.Event()
 
     def write(self, data):
         if self.fail_write:
@@ -264,6 +273,9 @@ class MemoryWriter:
         self.closed = True
 
     async def wait_closed(self):
+        self.wait_closed_started.set()
+        if self.stall_wait_closed:
+            await asyncio.Future()
         self.waited_closed = True
 
     def is_closing(self):
@@ -611,6 +623,46 @@ class LoginEgressProxyTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await first
         self.assertTrue(first_writer.closed and first_writer.waited_closed)
+
+    async def test_saturated_and_closed_refusals_never_await_untracked_writers(self):
+        expected = (
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Length: 0\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+
+        async def assert_prompt_refusal(proxy):
+            writer = MemoryWriter(stall_drain=True, stall_wait_closed=True)
+            task = asyncio.create_task(proxy.handle(reader_with(VALID_REQUEST), writer))
+            try:
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertTrue(task.done(), "rejected handler remained unowned")
+                await task
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            self.assertEqual(bytes(writer.data), expected)
+            self.assertTrue(writer.closed)
+            self.assertFalse(writer.drain_started.is_set())
+            self.assertFalse(writer.wait_closed_started.is_set())
+
+        with mock.patch.object(module, "MAX_CONNECTIONS", 1), mock.patch.object(
+            module, "IDLE_SECONDS", 0.01
+        ):
+            active = asyncio.create_task(
+                self.proxy.handle(reader_with(b"", eof=False), MemoryWriter())
+            )
+            await asyncio.sleep(0)
+            try:
+                await assert_prompt_refusal(self.proxy)
+            finally:
+                await asyncio.wait_for(self.proxy.close(), 0.5)
+                await asyncio.gather(active, return_exceptions=True)
+
+            await assert_prompt_refusal(self.proxy)
+            await asyncio.wait_for(self.proxy.close(), 0.5)
 
     async def test_real_loopback_handler_reply_shutdown_and_slot_release(self):
         with mock.patch.object(module, "MAX_CONNECTIONS", 1):
