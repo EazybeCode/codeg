@@ -63,6 +63,67 @@ UID. `/data/documents` is a separate mode-0700 directory owned by UID/GID 65532.
 A deployment must supply a mount already owned by that identity; the image does
 not recursively change ownership of an existing user mount.
 
+## Accepted candidate evidence: 2026-09-12
+
+The accepted candidate was built from the secret-scanned exact archive at
+commit `0b6028a6da76401bafba81779b5f74f1f7a26055`. The corrected host-side
+contract at `ce2269f2685ddf2e35b5dcd9ea3a12130b9d2655` changed no Dockerfile or
+image input.
+
+- Immutable image ID:
+  `sha256:331dfa73071ae6fe6aa8b654da23b11af07f302a26ac9cf41fe55041ccfa6d54`
+- Image size: 446,528,953 bytes.
+- Successful build history ID: `zd7zj5gx19gmwxivasn4yk6cr`, completed at
+  2026-09-12 12:43:28 UTC.
+- The Rust release build took 15m04s and emitted 99 library warnings plus a
+  future-incompatibility notice for `proc-macro-error2`.
+
+The first isolated build attempt used a 4 GiB physical-memory limit with the
+same memory-plus-swap limit and was killed while compiling `codeg_lib` after
+783.8 seconds. This was builder resource exhaustion, not an image-contract
+failure. An otherwise identical retry retained the 4 GiB physical-memory and
+2-CPU limits while allowing 7 GiB total memory plus swap; it completed. The
+builder was then stopped, with its cache and candidate image retained.
+
+The corrected Node contract ran through the strict SSH Docker wrapper against
+the immutable image ID above and exited 0 in 20.504 seconds: 7 tests passed and
+none failed or skipped. This includes the metadata, fail-closed default command,
+runtime diagnostic, and cleanup behavior checks.
+
+A separate positive private-startup check used an internal-only Docker network
+and disposable PostgreSQL 16 container (image ID prefix `cf78e766`, UID 70)
+with a 512 MiB tmpfs limit. The native candidate ran with its default UID and
+command, a read-only root, all capabilities dropped, no-new-privileges, 128
+PIDs, 1 CPU, a 1 GiB memory/swap limit, no published ports, and a mode-0700
+document tmpfs owned by UID/GID 65532. Only invented, nonsecret configuration
+was supplied.
+
+That startup created 23 fresh public tables. `/healthz` and `/workspace`
+returned 200; workspace capabilities reported native identity mode, runtime
+disabled, and all providers disabled. `/api/neev/session` returned 401, while
+the legacy `/api/settings`, `/api/team/session`, and synthetic
+`/__synthetic/google` routes each returned 404.
+
+A fresh headed Chromium session reached the app through an owner-controlled
+loopback SSH tunnel at a 375-pixel mobile viewport. It made no external requests
+and reported no page errors; Google and email controls were visibly unavailable.
+An initial navigation timeout and an overly exact button-name lookup were
+harness errors; DOM inspection and regex assertions confirmed the intended UI.
+The browser and tunnel were closed. A container restart followed by a 200
+health check proves startup-only restart behavior, not content persistence or
+recovery.
+
+The exact test application and database containers were removed. Confirmation
+of the test network removal was still pending when this evidence was recorded;
+the legacy deployment and dedicated PostgreSQL service were untouched. A stale
+CLI stream after the completed build was resolved by checking builder history
+and the actual image before terminating the owned SSH session; it was not a
+client-exit-255 build failure.
+
+This evidence accepts the packaging contract and constrained private startup
+only. It does not accept real authentication, mail delivery, content snapshots,
+recovery, or production deployment.
+
 ## Deployment prerequisites and remaining release gates
 
 Before any private deployment, operators must provide through the protected
