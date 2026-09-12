@@ -5,6 +5,9 @@ use sea_orm::{
 };
 mod agent_migration;
 mod content_migration;
+mod document_format_migration;
+#[cfg(test)]
+mod document_format_tests;
 pub(crate) mod entities;
 mod migration;
 
@@ -118,6 +121,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                     .map(|name| (*name).to_owned()),
             )
             .collect();
+        let v6_expected: std::collections::BTreeSet<String> = v5_expected.iter().cloned()
+            .chain(document_format_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
 
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
@@ -134,15 +139,16 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             content_migration::upgrade(&tx).await?;
             content_migration::harden_origins(&tx).await?;
             agent_migration::upgrade(&tx).await?;
+            document_format_migration::upgrade(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![agent_migration::SCHEMA_VERSION.into()],
+                vec![document_format_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
         }
-        if names != v2_expected && names != v3_expected && names != v5_expected {
+        if names != v2_expected && names != v3_expected && names != v5_expected && names != v6_expected {
             return Err(AuthError::Unavailable);
         }
         let version = one(
@@ -167,13 +173,15 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             content_migration::HARDENED_SCHEMA_VERSION if names == v3_expected => {
                 agent_migration::upgrade(&tx).await?;
             }
-            agent_migration::SCHEMA_VERSION if names == v5_expected => return Ok(()),
+            agent_migration::SCHEMA_VERSION if names == v5_expected => {},
+            document_format_migration::SCHEMA_VERSION if names == v6_expected => return document_format_migration::validate(&tx).await,
             _ => return Err(AuthError::Unavailable),
         }
+        document_format_migration::upgrade(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![agent_migration::SCHEMA_VERSION.into()],
+            vec![document_format_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -188,7 +196,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
     }
 }
 
-/// Inspect restored evidence only: exact native3/4/5 inventory and actual marker.
+/// Inspect restored evidence only: exact native3/4/5/6 inventory and actual marker.
 /// Shares the migrator's authoritative table names but never calls the migrator.
 pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     db: &C,
@@ -228,6 +236,15 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
                 .map(|name| (*name).to_owned()),
         )
         .collect();
+    let format_expected: std::collections::BTreeSet<String> = agent_expected
+        .iter()
+        .cloned()
+        .chain(
+            document_format_migration::TABLE_NAMES
+                .iter()
+                .map(|name| (*name).to_owned()),
+        )
+        .collect();
     let markers = db
         .query_all(statement(
             db,
@@ -252,10 +269,14 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             names == content_expected
         }
         agent_migration::SCHEMA_VERSION => names == agent_expected,
+        document_format_migration::SCHEMA_VERSION => names == format_expected,
         _ => false,
     };
     if !valid {
         return Err(AuthError::Unavailable);
+    }
+    if version == document_format_migration::SCHEMA_VERSION {
+        document_format_migration::validate(db).await?;
     }
     Ok(version)
 }

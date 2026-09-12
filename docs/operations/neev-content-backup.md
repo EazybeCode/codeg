@@ -132,18 +132,30 @@ SQLx applies TLS negotiation to Unix sockets as well as TCP connections. The
 checked `--schema` supplies the only startup search path.
 
 It requires actual ordinary native tables (not same-name views, foreign tables,
-or partitioned relations), and accepts exactly three snapshot contracts: historical
-schema3 and schema4 with the base/content table inventory, or native schema5 with
-the base/content/personal-agent metadata inventory. It reads all historical revision
+or partitioned relations), and accepts exactly four snapshot contracts: historical
+schema3 and schema4 with the base/content table inventory, schema5 with
+the base/content/personal-agent metadata inventory, and schema6 with that inventory
+plus `neev_document_formats`. Schema6 requires exactly one valid format/version row
+for every document revision, with no orphan rows. It reads all historical revision
 references in a read-only snapshot transaction, then verifies each file through
 the same no-follow BlobStore API used by native content. Extra copied orphan
 files and temporary files do not affect reference verification. The deterministic
 referenced-key manifest contains only org/key/hash/size; stdout emits its SHA-256,
 schema version, reference count, and total bytes, not the inventory or body data.
-The reported version is the snapshot's actual marker. Historical schema3 and schema4
+The reported version is the snapshot's actual marker. Historical schema3, schema4, and schema5
 restores remain verifiable without initialization or migration. Application startup
-upgrades exact schema3 through transactional source-link hardening and then to schema5;
-exact schema4 advances directly to schema5. Verification never migrates an archive.
+upgrades exact schema3 through transactional source-link hardening and personal-agent
+metadata, then backfills document format metadata as schema6; exact schema4 and schema5
+follow the remaining forward migrations. Existing revisions are tagged `markdown` version1
+without changing their bytes, hashes, quotas, or receipts. Verification never migrates an archive.
+
+Rich revisions store a validated `blocks` version1 JSON envelope, not Markdown.
+The verifier checks each rich envelope after its immutable byte length and SHA-256,
+including supported fields, IDs, depth, tables, links, and the1MiB stored/export limits.
+Markdown history keeps its existing byte validation; JSON-looking Markdown is never
+guessed to be rich content. Restoring either format appends a new revision with the
+selected revision's exact stored bytes and format metadata. Unsupported or corrupt
+rich envelopes fail verification and restore even when their stored hash matches.
 
 Acceptance is successful only after the complete dump import and verifier both
 succeed against the named isolated destination and fresh root. Record the

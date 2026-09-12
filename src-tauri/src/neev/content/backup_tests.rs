@@ -23,6 +23,87 @@ const CONTENT_TABLES: [&str; 5] = [
 const CONTENT_INDEXES: [&str; 2] = ["neev_resources_node_kind", "neev_resources_origin"];
 const HISTORICAL_ORIGIN: &str = "(origin_chat_id IS NULL AND origin_kind IS NULL) OR (origin_chat_id IS NOT NULL AND kind='document' AND origin_kind='chat')";
 
+// A correct hash alone must not make an invalid rich envelope restorable.
+async fn rich_snapshot_contract(database: DatabaseConnection) {
+    let h = Harness::new(database).await;
+    let doc = resources::create(
+        &h.state,
+        &h.creator,
+        h.input(ResourceKind::Document, "Mixed archive"),
+    )
+    .await
+    .unwrap();
+    documents::save(
+        &h.state,
+        &h.creator,
+        &doc.id,
+        SaveInput {
+            request_id: request(),
+            expected_content_revision: 0,
+            expected_auth_revision: 1,
+            markdown: "{not a rich envelope}".into(),
+        },
+    )
+    .await
+    .unwrap();
+    documents::save_rich(
+        &h.state,
+        &h.creator,
+        &doc.id,
+        RichSaveInput {
+            request_id: request(),
+            expected_content_revision: 1,
+            expected_auth_revision: 1,
+            document: super::rich_tests::document(),
+        },
+    )
+    .await
+    .unwrap();
+    let manifest = verify_snapshot(&h.state.database, &h.state.blobs)
+        .await
+        .unwrap();
+    assert_eq!((manifest.schema_version, manifest.blobs.len()), (6, 2));
+    let corrupt = h
+        .state
+        .blobs
+        .put(
+            h.creator.org_id,
+            &uuid::Uuid::new_v4().to_string(),
+            b"{\"version\":1,\"blocks\":[]}",
+        )
+        .await
+        .unwrap();
+    db::execute(&h.state.database,"UPDATE neev_document_revisions SET blob_key=$1,sha256=$2,byte_length=$3 WHERE org_id=$4 AND document_id=$5 AND revision=2",vec![corrupt.key.into(),corrupt.sha256.into(),corrupt.byte_length.into(),h.creator.org_id.into(),doc.id.clone().into()]).await.unwrap();
+    assert_eq!(
+        verify_snapshot(&h.state.database, &h.state.blobs).await,
+        Err(ContentError::Storage)
+    );
+    assert_eq!(
+        documents::restore(&h.state, &h.creator, &doc.id, 2, &request(), 2, 1).await,
+        Err(ContentError::Storage)
+    );
+    assert_eq!(
+        documents::read(&h.state, &h.creator, &doc.id, Some(1))
+            .await
+            .unwrap()
+            .1,
+        b"{not a rich envelope}"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_rich_backup_validates_body_format() {
+    rich_snapshot_contract(h::database().await).await;
+}
+#[tokio::test]
+#[ignore = "requires guarded PostgreSQL"]
+async fn postgres_rich_backup_validates_body_format() {
+    let (db, admin, schema) = h::postgres_database().await;
+    eprintln!("rich backup owned schema: {schema}");
+    rich_snapshot_contract(db.clone()).await;
+    h::cleanup_postgres(db, admin, schema).await;
+}
+
 async fn reconstruct_sqlite_v3(tx: &sea_orm::DatabaseTransaction) {
     let mut tables = Vec::new();
     for name in CONTENT_TABLES {
@@ -54,6 +135,13 @@ async fn reconstruct_sqlite_v3(tx: &sea_orm::DatabaseTransaction) {
         );
     }
     for name in CONTENT_TABLES.iter().rev() {
+        db::execute(
+            tx,
+            &format!("CREATE TEMP TABLE backup_fixture_{name} AS SELECT * FROM {name}"),
+            vec![],
+        )
+        .await
+        .unwrap();
         db::execute(tx, &format!("DROP TABLE {name}"), vec![])
             .await
             .unwrap();
@@ -73,6 +161,18 @@ async fn reconstruct_sqlite_v3(tx: &sea_orm::DatabaseTransaction) {
     }
     for sql in indexes {
         db::execute(tx, &sql, vec![]).await.unwrap();
+    }
+    for name in CONTENT_TABLES {
+        db::execute(
+            tx,
+            &format!("INSERT INTO {name} SELECT * FROM backup_fixture_{name}"),
+            vec![],
+        )
+        .await
+        .unwrap();
+        db::execute(tx, &format!("DROP TABLE backup_fixture_{name}"), vec![])
+            .await
+            .unwrap();
     }
 }
 
@@ -117,14 +217,26 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
-    if schema_version == 5 {
+    if schema_version == 6 {
         return;
     }
-    let tx = database.begin().await.unwrap();
-    for table in AGENT_TABLES.iter().rev() {
-        db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
+    let sqlite_rebuild =
+        schema_version == 3 && database.get_database_backend() == DbBackend::Sqlite;
+    if sqlite_rebuild {
+        db::execute(database, "PRAGMA foreign_keys=OFF", vec![])
             .await
             .unwrap();
+    }
+    let tx = database.begin().await.unwrap();
+    db::execute(&tx, "DROP TABLE neev_document_formats", vec![])
+        .await
+        .unwrap();
+    if schema_version < 5 {
+        for table in AGENT_TABLES.iter().rev() {
+            db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
     }
     if schema_version == 3 {
         match database.get_database_backend() {
@@ -141,11 +253,20 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
     .await
     .unwrap();
     tx.commit().await.unwrap();
+    if sqlite_rebuild {
+        db::execute(database, "PRAGMA foreign_keys=ON", vec![])
+            .await
+            .unwrap();
+        assert!(database
+            .query_all(db::statement(database, "PRAGMA foreign_key_check", vec![]))
+            .await
+            .unwrap()
+            .is_empty());
+    }
 }
 
 // Catches omission of historical revisions, trusting corrupt bytes, and cross-org lookup.
 async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
-    downgrade_snapshot(&database, schema_version).await;
     let h = Harness::new(database).await;
     let doc = resources::create(
         &h.state,
@@ -154,27 +275,6 @@ async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
     )
     .await
     .unwrap();
-    let historical_null_shape = db::execute(
-        &h.state.database,
-        "UPDATE neev_resources SET origin_chat_id='missing-source',origin_kind=NULL WHERE org_id=$1 AND id=$2",
-        vec![h.creator.org_id.into(), doc.id.clone().into()],
-    )
-    .await;
-    if schema_version == 3 {
-        assert!(
-            historical_null_shape.is_ok(),
-            "schema3 must retain its historical SQL-NULL origin behavior"
-        );
-        db::execute(
-            &h.state.database,
-            "UPDATE neev_resources SET origin_chat_id=NULL,origin_kind=NULL WHERE org_id=$1 AND id=$2",
-            vec![h.creator.org_id.into(), doc.id.clone().into()],
-        )
-        .await
-        .unwrap();
-    } else {
-        assert!(historical_null_shape.is_err());
-    }
     for (head, text) in [(0, "old secret"), (1, "new secret")] {
         documents::save(
             &h.state,
@@ -189,6 +289,23 @@ async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
         )
         .await
         .unwrap();
+    }
+    // Populate through the current service, then reconstruct the actual archive
+    // inventory. Historical verification never calls a schema6 service writer.
+    downgrade_snapshot(&h.state.database, schema_version).await;
+    let historical_null_shape = db::execute(
+        &h.state.database,
+        "UPDATE neev_resources SET origin_chat_id='missing-source',origin_kind=NULL WHERE org_id=$1 AND id=$2",
+        vec![h.creator.org_id.into(), doc.id.clone().into()],
+    ).await;
+    if schema_version == 3 {
+        assert!(
+            historical_null_shape.is_ok(),
+            "schema3 retains its historical SQL-NULL origin behavior"
+        );
+        db::execute(&h.state.database,"UPDATE neev_resources SET origin_chat_id=NULL,origin_kind=NULL WHERE org_id=$1 AND id=$2",vec![h.creator.org_id.into(),doc.id.clone().into()]).await.unwrap();
+    } else {
+        assert!(historical_null_shape.is_err());
     }
     let manifest = verify_snapshot(&h.state.database, &h.state.blobs)
         .await
@@ -247,7 +364,7 @@ async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
 
 #[tokio::test]
 async fn sqlite_restored_bytes() {
-    for version in [3, 4, 5] {
+    for version in [3, 4, 5, 6] {
         restored_bytes(h::database().await, version).await;
     }
 }
@@ -255,7 +372,7 @@ async fn sqlite_restored_bytes() {
 #[tokio::test]
 #[ignore = "requires isolated PostgreSQL"]
 async fn postgres_restored_bytes() {
-    for version in [3, 4, 5] {
+    for version in [3, 4, 5, 6] {
         let (db, admin, schema) = h::postgres_database().await;
         eprintln!("backup owned schema: {schema}");
         let outcome = std::panic::AssertUnwindSafe(restored_bytes(db.clone(), version))
@@ -348,7 +465,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 5);
+    assert_eq!(manifest.schema_version, 6);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -375,6 +492,9 @@ async fn snapshot_schema_is_exact_and_read_only() {
         );
     }
     db::execute(&db, "UPDATE neev_schema_version SET version=5", vec![])
+        .await
+        .unwrap();
+    db::execute(&db, "DROP TABLE neev_document_formats", vec![])
         .await
         .unwrap();
     for table in AGENT_TABLES.iter().rev() {
@@ -489,6 +609,9 @@ fn verifier_arguments_require_explicit_isolation_and_confirmation() {
 async fn revision_view_is_refused(database: DatabaseConnection) {
     let cfg = h::preview_config();
     let store = super::BlobStore::open(&cfg.document_root).unwrap();
+    // Use the exact schema5 inventory to isolate the original relation-kind
+    // regression from schema6's new restrictive revision foreign key.
+    downgrade_snapshot(&database, 5).await;
     db::execute(&database, "DROP TABLE neev_document_revisions", vec![])
         .await
         .unwrap();
@@ -531,10 +654,54 @@ async fn postgres_revision_view_is_refused_without_writes() {
     let outcome = std::panic::AssertUnwindSafe(revision_view_is_refused(db.clone()))
         .catch_unwind()
         .await;
-    h::cleanup_postgres(db, admin, schema).await;
+    finish_postgres_fixture(db, admin, schema, outcome).await;
+}
+
+async fn finish_postgres_fixture(
+    db: DatabaseConnection,
+    admin: DatabaseConnection,
+    schema: String,
+    outcome: Result<(), Box<dyn std::any::Any + Send>>,
+) {
     if let Err(panic) = outcome {
+        eprintln!("retained failed backup fixture: {schema}");
+        drop(db);
+        drop(admin);
         std::panic::resume_unwind(panic);
     }
+    h::cleanup_postgres(db, admin, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires guarded PostgreSQL"]
+async fn postgres_backup_failure_retains_fixture_before_rethrow() {
+    let (db, admin, schema) = h::postgres_database().await;
+    let retained = db.clone();
+    let inspect = admin.clone();
+    let name = schema.clone();
+    let outcome = std::panic::AssertUnwindSafe(finish_postgres_fixture(
+        db,
+        admin,
+        schema,
+        Err(Box::new("intentional retention probe")),
+    ))
+    .catch_unwind()
+    .await;
+    assert!(outcome.is_err());
+    assert!(
+        db::one(
+            &inspect,
+            "SELECT 1 AS present FROM pg_namespace WHERE nspname=$1",
+            vec![name.clone().into()]
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "failure evidence must exist before rethrow"
+    );
+    // This regression passed: its intentional probe is disposable. A real test
+    // failure above unwinds before reaching this successful-test cleanup.
+    h::cleanup_postgres(retained, inspect, name).await;
 }
 
 fn bounded_child(mut command: std::process::Command) -> std::process::Output {

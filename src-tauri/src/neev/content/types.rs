@@ -59,6 +59,8 @@ pub(crate) struct Message {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Revision {
+    pub format: DocumentFormat,
+    pub format_version: u8,
     pub revision: i64,
     pub author_id: i32,
     pub author_name: String,
@@ -75,6 +77,20 @@ pub(crate) struct SaveInput {
     pub expected_content_revision: i64,
     pub expected_auth_revision: i64,
     pub markdown: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DocumentFormat {
+    Markdown,
+    Blocks,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RichSaveInput {
+    pub request_id: String,
+    pub expected_content_revision: i64,
+    pub expected_auth_revision: i64,
+    pub document: super::rich::RichDocument,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +161,8 @@ mod tests {
             created_at: 10,
         };
         let revision = Revision {
+            format: DocumentFormat::Markdown,
+            format_version: 1,
             revision: 11,
             author_id: 3,
             author_name: "Author".into(),

@@ -14,6 +14,12 @@ pub(crate) mod messages;
 #[cfg(test)]
 mod resource_tests;
 pub(crate) mod resources;
+pub(crate) mod rich;
+#[cfg(test)]
+mod rich_document_tests;
+mod rich_export;
+#[cfg(test)]
+mod rich_tests;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod types;

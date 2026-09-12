@@ -1,4 +1,4 @@
-use super::{types::ContentError, BlobStore};
+use super::{rich, types::ContentError, BlobStore};
 use crate::neev::db;
 use sea_orm::{
     AccessMode, ConnectionTrait, DatabaseConnection, DbBackend, IsolationLevel, TransactionTrait,
@@ -33,14 +33,21 @@ pub(crate) async fn verify_snapshot(
         database.begin().await
     }
     .map_err(|_| ContentError::Storage)?;
-    // Return the archive's verified historical3/4 or native5 marker unchanged.
+    // Return the archive's verified historical marker unchanged.
     let schema_version = db::validate_content_snapshot(&tx).await?;
-    let rows = tx.query_all(db::statement(&tx,
-        "SELECT org_id,blob_key,sha256,byte_length FROM neev_document_revisions ORDER BY org_id,blob_key", vec![]))
-        .await.map_err(|_| ContentError::Storage)?;
+    let sql = if schema_version == 6 {
+        "SELECT r.org_id,r.blob_key,r.sha256,r.byte_length,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision ORDER BY r.org_id,r.blob_key"
+    } else {
+        "SELECT org_id,blob_key,sha256,byte_length,'markdown' AS format FROM neev_document_revisions ORDER BY org_id,blob_key"
+    };
+    let rows = tx
+        .query_all(db::statement(&tx, sql, vec![]))
+        .await
+        .map_err(|_| ContentError::Storage)?;
     let mut blobs = Vec::with_capacity(rows.len());
+    let mut rich_blobs = std::collections::HashSet::new();
     for row in rows {
-        blobs.push(Reference {
+        let reference = Reference {
             org_id: row
                 .try_get("", "org_id")
                 .map_err(|_| ContentError::Storage)?,
@@ -53,15 +60,26 @@ pub(crate) async fn verify_snapshot(
             byte_length: row
                 .try_get("", "byte_length")
                 .map_err(|_| ContentError::Storage)?,
-        });
+        };
+        if row
+            .try_get::<String>("", "format")
+            .map_err(|_| ContentError::Storage)?
+            == "blocks"
+        {
+            rich_blobs.insert((reference.org_id, reference.key.clone()));
+        }
+        blobs.push(reference);
     }
     tx.rollback().await.map_err(|_| ContentError::Storage)?;
     // Canonical ordering independent of a restored database's collation.
     blobs.sort_by(|a, b| (a.org_id, &a.key).cmp(&(b.org_id, &b.key)));
     for blob in &blobs {
-        store
+        let bytes = store
             .read(blob.org_id, &blob.key, blob.byte_length, &blob.sha256)
             .await?;
+        if rich_blobs.contains(&(blob.org_id, blob.key.clone())) {
+            rich::decode(&bytes).map_err(|_| ContentError::Storage)?;
+        }
     }
     Ok(Manifest {
         schema_version,

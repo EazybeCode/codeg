@@ -1,14 +1,61 @@
-use super::{access, resources, types::*};
+use super::{access, resources, rich, types::*};
 use crate::neev::{
     auth::session, db, error::database_error, org, startup::ServerState, types::OrgContext,
 };
 use sea_orm::{ConnectionTrait, DatabaseTransaction, QueryResult};
 
 const ACTION: &str = "content.document.save";
-const REVISION_COLUMNS: &str = "r.revision,r.blob_key,r.sha256,r.byte_length,r.author_id,a.display_name AS author_name,r.created_at,r.parent_revision,r.restored_from";
+pub(crate) async fn save_rich(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    input: RichSaveInput,
+) -> Result<Revision, ContentError> {
+    let bytes = rich::encode(&input.document)?;
+    save_revision(
+        state,
+        actor,
+        id,
+        PreparedSave {
+            request_id: input.request_id,
+            expected_content_revision: input.expected_content_revision,
+            expected_auth_revision: input.expected_auth_revision,
+            bytes,
+            format: DocumentFormat::Blocks,
+        },
+        None,
+    )
+    .await
+}
+const REVISION_COLUMNS: &str = "r.revision,r.blob_key,r.sha256,r.byte_length,r.author_id,a.display_name AS author_name,r.created_at,r.parent_revision,r.restored_from,f.format,f.format_version";
+const REVISION_JOINS: &str = "JOIN neev_accounts a ON a.id=r.author_id LEFT JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision";
+
+struct PreparedSave {
+    request_id: String,
+    expected_content_revision: i64,
+    expected_auth_revision: i64,
+    bytes: Vec<u8>,
+    format: DocumentFormat,
+}
 
 fn revision(row: &QueryResult) -> Result<Revision, ContentError> {
     Ok(Revision {
+        format: match row
+            .try_get::<String>("", "format")
+            .map_err(|_| ContentError::Storage)?
+            .as_str()
+        {
+            "markdown" => DocumentFormat::Markdown,
+            "blocks" => DocumentFormat::Blocks,
+            _ => return Err(ContentError::Storage),
+        },
+        format_version: match row
+            .try_get::<i32>("", "format_version")
+            .map_err(|_| ContentError::Storage)?
+        {
+            1 => 1,
+            _ => return Err(ContentError::Storage),
+        },
         revision: row.try_get("", "revision").map_err(database_error)?,
         author_id: row.try_get("", "author_id").map_err(database_error)?,
         author_name: row.try_get("", "author_name").map_err(database_error)?,
@@ -26,7 +73,7 @@ async fn load(
     id: &str,
     number: i64,
 ) -> Result<(Revision, String), ContentError> {
-    let row = db::one(tx, &format!("SELECT {REVISION_COLUMNS} FROM neev_document_revisions r JOIN neev_accounts a ON a.id=r.author_id WHERE r.org_id=$1 AND r.document_id=$2 AND r.revision=$3"), vec![org_id.into(),id.into(),number.into()]).await?.ok_or(ContentError::NotFound)?;
+    let row = db::one(tx, &format!("SELECT {REVISION_COLUMNS} FROM neev_document_revisions r {REVISION_JOINS} WHERE r.org_id=$1 AND r.document_id=$2 AND r.revision=$3"), vec![org_id.into(),id.into(),number.into()]).await?.ok_or(ContentError::NotFound)?;
     Ok((
         revision(&row)?,
         row.try_get("", "blob_key").map_err(database_error)?,
@@ -52,17 +99,30 @@ pub(crate) async fn save(
     document_id: &str,
     input: SaveInput,
 ) -> Result<Revision, ContentError> {
-    save_revision(state, actor, document_id, input, None).await
+    save_revision(
+        state,
+        actor,
+        document_id,
+        PreparedSave {
+            request_id: input.request_id,
+            expected_content_revision: input.expected_content_revision,
+            expected_auth_revision: input.expected_auth_revision,
+            bytes: input.markdown.into_bytes(),
+            format: DocumentFormat::Markdown,
+        },
+        None,
+    )
+    .await
 }
 
 async fn save_revision(
     state: &ServerState,
     actor: &OrgContext,
     id: &str,
-    input: SaveInput,
+    input: PreparedSave,
     restored_from: Option<i64>,
 ) -> Result<Revision, ContentError> {
-    if input.markdown.len() > 1048576
+    if input.bytes.len() > 1048576
         || input.expected_content_revision < 0
         || input.expected_auth_revision < 1
     {
@@ -77,10 +137,16 @@ async fn save_revision(
         id,
         &input.expected_content_revision.to_string(),
         &input.expected_auth_revision.to_string(),
-        &input.markdown,
+        std::str::from_utf8(&input.bytes).map_err(|_| ContentError::Invalid)?,
         &restored_from.map(|n| n.to_string()).unwrap_or_default(),
     ]);
-    let bytes = input.markdown.len() as i64;
+    // Preserve the historical Markdown receipt recipe byte-for-byte. Blocks v1
+    // have an explicit, fixed domain separator even when the text looks identical.
+    let hash = match input.format {
+        DocumentFormat::Markdown => hash,
+        DocumentFormat::Blocks => org::digest_parts(&["content.document.save.blocks.v1", &hash]),
+    };
+    let bytes = input.bytes.len() as i64;
     let lease_id = uuid::Uuid::new_v4().to_string();
     let key = uuid::Uuid::new_v4().to_string();
 
@@ -140,12 +206,11 @@ async fn save_revision(
 
     #[cfg(test)]
     super::document_tests::boundary("reserved").await;
-    let blob = state
-        .blobs
-        .put(actor.org_id, &key, input.markdown.as_bytes())
-        .await?;
+    let blob = state.blobs.put(actor.org_id, &key, &input.bytes).await?;
     #[cfg(test)]
     super::document_tests::boundary("written").await;
+    #[cfg(test)]
+    super::rich_document_tests::boundary("written").await;
 
     // Reacquire all authority after I/O. Read the clock after potentially blocking
     // resource and session locks; request-start/reservation time cannot authorize publish.
@@ -169,6 +234,7 @@ async fn save_revision(
     let number = current.content_revision + 1;
     let parent = (current.content_revision > 0).then_some(current.content_revision);
     db::execute(&tx, "INSERT INTO neev_document_revisions(org_id,document_id,resource_kind,revision,blob_key,sha256,byte_length,author_id,created_at,parent_revision,restored_from) VALUES($1,$2,'document',$3,$4,$5,$6,$7,$8,$9,$10)", vec![actor.org_id.into(),id.into(),number.into(),blob.key.into(),blob.sha256.into(),blob.byte_length.into(),actor.identity.user_id.into(),now.into(),parent.into(),restored_from.into()]).await?;
+    db::execute(&tx, "INSERT INTO neev_document_formats(org_id,document_id,revision,format,format_version) VALUES($1,$2,$3,$4,1)", vec![actor.org_id.into(),id.into(),number.into(),match input.format {DocumentFormat::Markdown=>"markdown",DocumentFormat::Blocks=>"blocks"}.into()]).await?;
     db::execute(
         &tx,
         "UPDATE neev_resources SET content_revision=$1,updated_at=$2 WHERE org_id=$3 AND id=$4",
@@ -210,7 +276,7 @@ pub(crate) async fn history(
         }
         load(&tx, actor.org_id, id, cursor).await?;
     }
-    let rows = tx.query_all(db::statement(&tx, &format!("SELECT {REVISION_COLUMNS} FROM neev_document_revisions r JOIN neev_accounts a ON a.id=r.author_id WHERE r.org_id=$1 AND r.document_id=$2 AND r.revision>$3 ORDER BY r.revision LIMIT 101"), vec![actor.org_id.into(),id.into(),after.unwrap_or(0).into()])).await.map_err(database_error)?;
+    let rows = tx.query_all(db::statement(&tx, &format!("SELECT {REVISION_COLUMNS} FROM neev_document_revisions r {REVISION_JOINS} WHERE r.org_id=$1 AND r.document_id=$2 AND r.revision>$3 ORDER BY r.revision LIMIT 101"), vec![actor.org_id.into(),id.into(),after.unwrap_or(0).into()])).await.map_err(database_error)?;
     let items = rows
         .iter()
         .take(100)
@@ -252,6 +318,8 @@ pub(crate) async fn read(
         .await;
     #[cfg(test)]
     super::document_tests::boundary("read").await;
+    #[cfg(test)]
+    super::rich_document_tests::boundary("read").await;
     let tx = resources::begin(state, actor).await?;
     access::lock_resources(&tx, actor, id, false).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
@@ -277,17 +345,22 @@ pub(crate) async fn restore(
     expected_content_revision: i64,
     expected_auth_revision: i64,
 ) -> Result<Revision, ContentError> {
-    let (_, bytes) = read(state, actor, id, Some(source_revision)).await?;
-    let markdown = String::from_utf8(bytes).map_err(|_| ContentError::Storage)?;
+    let (source, bytes) = read(state, actor, id, Some(source_revision)).await?;
+    if source.format == DocumentFormat::Blocks {
+        rich::decode(&bytes).map_err(|_| ContentError::Storage)?;
+    } else {
+        std::str::from_utf8(&bytes).map_err(|_| ContentError::Storage)?;
+    }
     save_revision(
         state,
         actor,
         id,
-        SaveInput {
+        PreparedSave {
             request_id: request_id.to_owned(),
             expected_content_revision,
             expected_auth_revision,
-            markdown,
+            bytes,
+            format: source.format,
         },
         Some(source_revision),
     )

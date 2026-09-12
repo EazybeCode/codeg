@@ -382,6 +382,7 @@ async fn revision_limit(database: sea_orm::DatabaseConnection) {
     let tx = db::begin(&h.state.database).await.unwrap();
     for revision in 2_i64..=999 {
         db::execute(&tx,"INSERT INTO neev_document_revisions(org_id,document_id,resource_kind,revision,blob_key,sha256,byte_length,author_id,created_at,parent_revision,restored_from) VALUES($1,$2,'document',$3,$4,$5,0,$6,1700000000,$7,NULL)",vec![h.creator.org_id.into(),doc.id.clone().into(),revision.into(),request().into(),"0".repeat(64).into(),h.creator.identity.user_id.into(),(revision-1).into()]).await.unwrap();
+        db::execute(&tx,"INSERT INTO neev_document_formats(org_id,document_id,revision,format,format_version) VALUES($1,$2,$3,'markdown',1)",vec![h.creator.org_id.into(),doc.id.clone().into(),revision.into()]).await.unwrap();
     }
     db::execute(
         &tx,
