@@ -1,4 +1,11 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeDocument } from "./native-document"
@@ -10,6 +17,10 @@ import {
   orgSession,
 } from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
+import { importMarkdown } from "@/lib/neev-rich-adapter"
+import { useNativeAuth } from "./native-auth-provider"
+// jsdom has no hit-testing geometry; actual pointer acceptance runs in browser.
+document.elementsFromPoint ??= () => []
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
 }))
@@ -45,12 +56,12 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
-function mount() {
+function mount(current = resource) {
   return render(
     <NativeTestRoot>
       <NativeBoundary>
         <NativeDocument
-          resource={resource}
+          resource={current}
           onBack={() => {}}
           onChanged={() => {}}
           onDirtyChange={() => {}}
@@ -59,6 +70,338 @@ function mount() {
     </NativeTestRoot>
   )
 }
+
+function LogoutControl() {
+  const auth = useNativeAuth()
+  return (
+    <button onClick={() => void auth.logout()}>Log out test session</button>
+  )
+}
+
+async function editRich(text: string) {
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  const paragraph = editor.querySelector("p")
+  expect(paragraph).not.toBeNull()
+  await act(async () => {
+    paragraph!.textContent = text
+    fireEvent.input(paragraph!, { inputType: "insertText", data: text })
+  })
+  return editor
+}
+
+it("opens an unsaved document as rich and saves/reloads its canonical body with the keyboard", async () => {
+  let latest = { ...resource, contentRevision: "0" }
+  let savedDocument: unknown
+  let savedRevision = { ...revision, format: "blocks", byteLength: "0" }
+  const mock = mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(latest),
+    [`GET ${path}/revisions`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}/revisions`]: (init) => {
+      const input = JSON.parse(init.body as string)
+      expect(input).toMatchObject({
+        expectedAuthRevision: "1",
+        expectedContentRevision: "0",
+      })
+      expect(input).not.toHaveProperty("markdown")
+      savedDocument = input.document
+      savedRevision = {
+        ...savedRevision,
+        byteLength: String(
+          new TextEncoder().encode(JSON.stringify(savedDocument)).length
+        ),
+      }
+      latest = { ...latest, contentRevision: "1" }
+      return json(savedRevision, 201)
+    },
+    [`GET ${path}/content?revision=1`]: () =>
+      json({
+        revision: savedRevision,
+        document: savedDocument,
+        markdown: "Fresh rich\n",
+      }),
+  })
+  const user = userEvent.setup()
+  const first = mount(latest)
+  const editor = await editRich("Fresh rich")
+  fireEvent.keyDown(editor, { key: "s", ctrlKey: true })
+  expect(await screen.findByText("Saved")).toBeVisible()
+  expect(savedDocument).toMatchObject({
+    version: 1,
+    blocks: [
+      {
+        type: "paragraph",
+        content: [{ text: "Fresh rich", styles: [], href: null }],
+      },
+    ],
+  })
+  first.unmount()
+  mount(latest)
+  expect(
+    await screen.findByRole("textbox", { name: "Document content" })
+  ).toHaveTextContent("Fresh rich")
+  await user.click(screen.getByRole("button", { name: "History" }))
+  expect(mock.unknown).toEqual([])
+})
+
+it.each([409, 400, "lost"] as const)(
+  "preserves rich draft/preconditions and exact retry after %s save",
+  async (failure) => {
+    const document = importMarkdown("Seed rich")
+    const richRevision = {
+      ...revision,
+      format: "blocks",
+      byteLength: String(
+        new TextEncoder().encode(JSON.stringify(document)).length
+      ),
+    }
+    const bodies: Record<string, unknown>[] = []
+    mockNativeSession(undefined, {
+      [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+      [`GET ${path}/content?revision=1`]: () =>
+        json({ revision: richRevision, document, markdown: "Seed rich\n" }),
+      [`GET ${path}/revisions`]: () =>
+        json({ items: [richRevision], nextAfter: null }),
+      [`POST ${path}/revisions`]: (init) => {
+        bodies.push(JSON.parse(init.body as string))
+        if (failure === "lost") throw new TypeError("lost response")
+        return json(
+          { code: failure === 409 ? "conflict" : "invalid_request" },
+          failure
+        )
+      },
+    })
+    const user = userEvent.setup()
+    mount()
+    const editor = await editRich("My rich draft")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(await screen.findByRole("alert")).toBeVisible()
+    expect(editor).toHaveTextContent("My rich draft")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1]).toEqual(bodies[0])
+    expect(bodies[1]).toMatchObject({
+      expectedContentRevision: "1",
+      expectedAuthRevision: "1",
+      document: { blocks: [{ content: [{ text: "My rich draft" }] }] },
+    })
+  }
+)
+
+it.each([false, true])(
+  "previews Markdown conversion without saving and refuses unsupported content (%s)",
+  async (unsupported) => {
+    const markdown = unsupported
+      ? "![image](https://example.test/a)"
+      : "# Original"
+    let posted = false
+    mockNativeSession(undefined, {
+      [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+      [`GET ${path}/content?revision=1`]: () =>
+        json({
+          revision: { ...revision, byteLength: String(markdown.length) },
+          document: null,
+          markdown,
+        }),
+      [`GET ${path}/revisions`]: () =>
+        json({ items: [revision], nextAfter: null }),
+      [`POST ${path}/revisions`]: () => {
+        posted = true
+        return json({}, 500)
+      },
+    })
+    const user = userEvent.setup()
+    mount()
+    await screen.findByRole("textbox", { name: "Document content" })
+    await user.click(
+      screen.getByRole("button", { name: "Convert to rich document" })
+    )
+    if (unsupported) {
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /Conversion refused/
+      )
+      expect(screen.getByDisplayValue(markdown)).toHaveValue(markdown)
+    } else {
+      const dialog = await screen.findByRole("dialog")
+      expect(
+        within(dialog).getByRole("heading", { name: "Original" })
+      ).toBeVisible()
+      expect(screen.getByDisplayValue(markdown)).toHaveValue(markdown)
+      await user.click(
+        within(dialog).getByRole("button", { name: "Confirm conversion" })
+      )
+      expect(
+        await screen.findByRole("textbox", { name: "Document content" })
+      ).toHaveTextContent("Original")
+      expect(screen.getByText("Unsaved changes")).toBeVisible()
+    }
+    expect(posted).toBe(false)
+  }
+)
+
+it("copies the dirty rich JSON separately from explicitly labeled saved-only Markdown", async () => {
+  const document = importMarkdown("Saved rich")
+  const richRevision = {
+    ...revision,
+    format: "blocks",
+    byteLength: String(
+      new TextEncoder().encode(JSON.stringify(document)).length
+    ),
+  }
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}/content?revision=1`]: () =>
+      json({ revision: richRevision, document, markdown: "Saved rich\n" }),
+    [`GET ${path}/revisions`]: () =>
+      json({ items: [richRevision], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  const copy = vi.spyOn(navigator.clipboard, "writeText")
+  mount()
+  await editRich("Unsaved rich")
+  await user.click(screen.getByRole("button", { name: "Copy structured JSON" }))
+  expect(JSON.parse(copy.mock.lastCall![0])).toMatchObject({
+    blocks: [{ content: [{ text: "Unsaved rich" }] }],
+  })
+  await user.click(
+    screen.getByRole("button", {
+      name: /Export saved Markdown.*revision 1.*unsaved changes excluded/i,
+    })
+  )
+  expect(copy.mock.lastCall![0]).toBe("Saved rich\n")
+})
+
+it("renders mixed history and restores the selected Markdown format while preserving source audience", async () => {
+  const document = importMarkdown("Rich current")
+  const richRevision = {
+    ...revision,
+    format: "blocks",
+    revision: "2",
+    parentRevision: "1",
+    byteLength: String(
+      new TextEncoder().encode(JSON.stringify(document)).length
+    ),
+  }
+  const current = {
+    ...resource,
+    contentRevision: "2",
+    visibility: "organization" as const,
+    originChatId: "22222222-2222-4222-8222-222222222222",
+  }
+  let restore: unknown
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(current),
+    [`GET ${path}/content?revision=2`]: () =>
+      json({ revision: richRevision, document, markdown: "Rich current\n" }),
+    [`GET ${path}/content?revision=1`]: () =>
+      json({ revision, document: null, markdown: "seed" }),
+    [`GET ${path}/revisions`]: () =>
+      json({ items: [revision, richRevision], nextAfter: null }),
+    [`POST ${path}/restore`]: (init) => {
+      restore = JSON.parse(init.body as string)
+      return json(
+        { ...revision, revision: "3", parentRevision: "2", restoredFrom: "1" },
+        201
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount(current)
+  await screen.findByRole("textbox", { name: "Document content" })
+  expect(screen.getByText(/Audience follows source chat/)).toBeVisible()
+  await user.click(screen.getByRole("button", { name: "History" }))
+  const history = screen.getByRole("region", { name: "History" })
+  expect(history).toHaveTextContent("Rich document")
+  expect(history).toHaveTextContent("Markdown")
+  await user.click(screen.getByRole("button", { name: "Compare revision 1" }))
+  expect(await screen.findByRole("dialog")).toHaveTextContent("Rich current")
+  await user.click(
+    screen.getByRole("button", { name: "Restore as new revision" })
+  )
+  expect(
+    await screen.findByRole("textbox", { name: "Document content" })
+  ).toHaveValue("seed")
+  expect(restore).toMatchObject({
+    sourceRevision: "1",
+    expectedContentRevision: "2",
+    expectedAuthRevision: "1",
+  })
+})
+
+it.each(["navigation", "logout"])(
+  "ignores a rich save response after %s invalidates its scope",
+  async (action) => {
+    const document = importMarkdown("Private rich")
+    const richRevision = {
+      ...revision,
+      format: "blocks",
+      byteLength: String(
+        new TextEncoder().encode(JSON.stringify(document)).length
+      ),
+    }
+    const other = {
+      ...resource,
+      id: "44444444-4444-4444-8444-444444444444",
+      title: "Other document",
+    }
+    let release!: (value: Response) => void
+    const changed = vi.fn()
+    mockNativeSession(undefined, {
+      [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+      [`GET ${path}/content?revision=1`]: () =>
+        json({ revision: richRevision, document, markdown: "Private rich\n" }),
+      [`GET ${path}/revisions`]: () =>
+        json({ items: [richRevision], nextAfter: null }),
+      [`POST ${path}/revisions`]: () =>
+        new Promise((resolve) => {
+          release = resolve
+        }),
+      [`GET /api/neev/resources/${other.id}`]: () => json(other),
+      [`GET /api/neev/documents/${other.id}/content?revision=1`]: () =>
+        json({ revision, document: null, markdown: "safe" }),
+      [`GET /api/neev/documents/${other.id}/revisions`]: () =>
+        json({ items: [revision], nextAfter: null }),
+      "POST /api/neev/logout": () => new Response(null, { status: 204 }),
+    })
+    const user = userEvent.setup()
+    const renderDocument = (current: NativeResource) => (
+      <NativeTestRoot>
+        <LogoutControl />
+        <NativeBoundary>
+          <NativeDocument
+            resource={current}
+            onBack={() => {}}
+            onChanged={changed}
+            onDirtyChange={() => {}}
+          />
+        </NativeBoundary>
+      </NativeTestRoot>
+    )
+    const view = render(renderDocument(resource))
+    await editRich("Unsaved secret")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+    await waitFor(() => expect(release).toBeDefined())
+    if (action === "navigation") {
+      view.rerender(renderDocument(other))
+      expect(
+        await screen.findByRole("textbox", { name: "Document content" })
+      ).toHaveValue("safe")
+    } else
+      await user.click(
+        screen.getByRole("button", { name: "Log out test session" })
+      )
+    changed.mockClear()
+    await act(async () => {
+      release(
+        json({ ...richRevision, revision: "2", parentRevision: "1" }, 201)
+      )
+    })
+    expect(changed).not.toHaveBeenCalled()
+    expect(screen.queryByText("Unsaved secret")).toBeNull()
+    expect(screen.queryByText("Saved")).toBeNull()
+  }
+)
 
 it.each(["content", "audience"])(
   "pins dirty %s revisions through polling and retains a 409 draft for deliberate comparison",
@@ -317,9 +660,24 @@ it("returns focus to the revision trigger when Escape closes comparison", async 
   expect(mock.unknown).toEqual([])
 })
 
-it.each([403, 404])(
-  "erases loaded document, draft, and history on %s and stops polling",
-  async (status) => {
+it.each([
+  [403, false],
+  [404, false],
+  [403, true],
+  [404, true],
+] as const)(
+  "erases loaded document, draft, export, and history on %s (rich=%s) and stops polling",
+  async (status, rich) => {
+    const document = rich ? importMarkdown("seed") : null
+    const bodyRevision = document
+      ? {
+          ...revision,
+          format: "blocks",
+          byteLength: String(
+            new TextEncoder().encode(JSON.stringify(document)).length
+          ),
+        }
+      : revision
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
     let revoked = false,
       calls = 0,
@@ -338,16 +696,18 @@ it.each([403, 404])(
           : json(resource)
       },
       [`GET ${path}/content?revision=1`]: () =>
-        json({ document: null, revision, markdown: "seed" }),
+        json({ document, revision: bodyRevision, markdown: "seed" }),
       [`GET ${path}/revisions`]: () =>
         json({ items: [revision], nextAfter: null }),
     })
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
     mount()
-    await user.type(
-      await screen.findByRole("textbox", { name: "Document content" }),
-      " secret draft"
-    )
+    if (rich) await editRich("seed secret draft")
+    else
+      await user.type(
+        await screen.findByRole("textbox", { name: "Document content" }),
+        " secret draft"
+      )
     await user.click(screen.getByRole("button", { name: "History" }))
     const comparisonTrigger = screen.getByRole("button", {
       name: "Compare revision 1",
@@ -360,6 +720,13 @@ it.each([403, 404])(
       await vi.advanceTimersByTimeAsync(5000)
     })
     expect(screen.queryByDisplayValue("seed secret draft")).toBeNull()
+    expect(screen.queryByText("seed secret draft")).toBeNull()
+    expect(
+      screen.queryByRole("textbox", { name: "Document content" })
+    ).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: /Export saved Markdown/ })
+    ).toBeNull()
     expect(screen.queryByText("Sagar")).toBeNull()
     expect(comparisonTrigger).not.toHaveFocus()
     expect(bootstraps).toBe(status === 403 ? 2 : 1)

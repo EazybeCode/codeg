@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+import dynamic from "next/dynamic"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog"
@@ -23,6 +24,40 @@ import { useNativeAuth } from "./native-auth-provider"
 import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeError } from "./native-boundary"
 import { NativeMarkdown } from "./native-markdown"
+import { NativeRichView } from "./native-rich-view"
+import { importMarkdown } from "@/lib/neev-rich-adapter"
+import type { RichDocument } from "@/lib/neev-rich-document"
+
+const NativeRichEditor = dynamic(
+  () =>
+    import("./native-rich-editor").then((module) => module.NativeRichEditor),
+  { ssr: false }
+)
+type Body =
+  | { format: "markdown"; markdown: string }
+  | { format: "blocks"; document: RichDocument }
+const emptyBody: Body = { format: "markdown", markdown: "" }
+function bodyFromContent(content: NativeDocumentContent | null): Body {
+  return content?.document
+    ? { format: "blocks", document: content.document }
+    : content
+      ? { format: "markdown", markdown: content.markdown }
+      : { format: "blocks", document: importMarkdown("") }
+}
+function sameBody(left: Body, right: Body) {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+function BodyView({ body, source = false }: { body: Body; source?: boolean }) {
+  return body.format === "blocks" ? (
+    <NativeRichView document={body.document} />
+  ) : source ? (
+    <pre className="whitespace-pre-wrap break-words rounded border p-3 text-xs">
+      {body.markdown}
+    </pre>
+  ) : (
+    <NativeMarkdown markdown={body.markdown} />
+  )
+}
 
 type Props = {
   resource: NativeResource
@@ -32,7 +67,8 @@ type Props = {
 }
 type Comparison = {
   resource: NativeResource
-  markdown: string
+  body: Body
+  exported: NativeDocumentContent | null
   revision: string
   history: boolean
 }
@@ -60,7 +96,12 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
   const [latest, setLatest] = useState(resource),
-    [draft, setDraft] = useState(""),
+    [draft, setDraft] = useState<Body>(emptyBody),
+    [conversion, setConversion] = useState<RichDocument | null>(null),
+    [conversionFailed, setConversionFailed] = useState(false),
+    [savedExport, setSavedExport] = useState<NativeDocumentContent | null>(
+      null
+    ),
     [loading, setLoading] = useState(true),
     [loaded, setLoaded] = useState(false),
     [saving, setSaving] = useState(false),
@@ -75,20 +116,18 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     [reload, setReload] = useState(false),
     [busy, setBusy] = useState(false)
   const base = useRef({
-      markdown: "",
+      body: emptyBody,
       content: resource.contentRevision,
       auth: resource.authRevision,
     }),
-    draftRef = useRef(""),
+    draftRef = useRef<Body>(emptyBody),
+    editorGeneration = useRef(0),
     editGeneration = useRef(0),
     historyHead = useRef<string | null>(null),
     historyRequest = useRef(0),
     dirty = useRef(false),
     sending = useRef(false),
-    retry = useRef<Extract<
-      SaveNativeDocumentInput,
-      { markdown: string }
-    > | null>(null),
+    retry = useRef<SaveNativeDocumentInput | null>(null),
     restoreRetry = useRef<RestoreNativeDocumentInput | null>(null),
     comparisonOpener = useRef<{
       element: HTMLElement
@@ -103,27 +142,50 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
   })
   const documentError =
     error ?? (conflict ? new NativeClientError("conflict") : null)
+  const visibleEditorGeneration = editorGeneration.current
   useEffect(() => {
     setLatest(resource)
   }, [resource])
   function setBody(
-    markdown: string,
+    body: Body,
     metadata: NativeResource,
-    contentRevision: string
+    contentRevision: string,
+    exported: NativeDocumentContent | null = null
   ) {
     editGeneration.current += 1
+    editorGeneration.current += 1
     base.current = {
-      markdown,
+      body,
       content: contentRevision,
       auth: metadata.authRevision,
     }
-    draftRef.current = markdown
+    draftRef.current = body
     dirty.current = false
-    setDraft(markdown)
+    setDraft(body)
+    setSavedExport(exported)
+    setConversion(null)
+    setConversionFailed(false)
     setLoaded(true)
     onDirtyChange(false)
     retry.current = null
     setConflict(false)
+  }
+  function edit(body: Body) {
+    if (
+      !scope.isCurrent() ||
+      sending.current ||
+      latest.archived ||
+      visibleEditorGeneration !== editorGeneration.current
+    )
+      return
+    editGeneration.current += 1
+    draftRef.current = body
+    dirty.current = !sameBody(body, base.current.body)
+    setDraft(body)
+    retry.current = null
+    onDirtyChange(dirty.current)
+    setSaved(false)
+    setConversionFailed(false)
   }
   function fail(e: unknown) {
     if (!scope.isCurrent()) return
@@ -134,9 +196,14 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       (e instanceof NativeClientError &&
         (e.kind === "forbidden" || e.kind === "unauthorized"))
     ) {
-      setDraft("")
-      draftRef.current = ""
-      base.current = { markdown: "", content: "0", auth: "1" }
+      editorGeneration.current += 1
+      setDraft(emptyBody)
+      draftRef.current = emptyBody
+      base.current = { body: emptyBody, content: "0", auth: "1" }
+      setConversion(null)
+      setConversionFailed(false)
+      setSavedExport(null)
+      setHistory(false)
       dirty.current = false
       retry.current = null
       restoreRetry.current = null
@@ -196,7 +263,12 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
           generation !== editGeneration.current
         )
           return
-        setBody(body?.markdown ?? "", metadata, body?.revision.revision ?? "0")
+        setBody(
+          bodyFromContent(body),
+          metadata,
+          body?.revision.revision ?? "0",
+          body
+        )
       } else if (
         !dirty.current &&
         !retry.current &&
@@ -236,19 +308,23 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     setSaving(true)
     setError(null)
     setSaved(false)
-    const candidate = {
-      markdown: draftRef.current,
+    const candidate: SaveNativeDocumentInput = {
+      requestId: crypto.randomUUID(),
+      ...(draftRef.current.format === "blocks"
+        ? { document: draftRef.current.document }
+        : { markdown: draftRef.current.markdown }),
       expectedContentRevision: base.current.content,
       expectedAuthRevision: base.current.auth,
     }
     const previous = retry.current
     const input =
       previous &&
-      previous.markdown === candidate.markdown &&
+      JSON.stringify(previous.document ?? previous.markdown) ===
+        JSON.stringify(candidate.document ?? candidate.markdown) &&
       previous.expectedContentRevision === candidate.expectedContentRevision &&
       previous.expectedAuthRevision === candidate.expectedAuthRevision
         ? previous
-        : { ...candidate, requestId: crypto.randomUUID() }
+        : candidate
     retry.current = input
     try {
       const revision = await saveNativeDocument(
@@ -263,7 +339,13 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         contentRevision: revision.revision,
         authRevision: input.expectedAuthRevision,
       }
-      setBody(input.markdown, metadata, revision.revision)
+      setBody(
+        input.document
+          ? { format: "blocks", document: input.document }
+          : { format: "markdown", markdown: input.markdown },
+        metadata,
+        revision.revision
+      )
       historyRequest.current += 1
       setLatest(metadata)
       onChanged(metadata)
@@ -309,7 +391,8 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       onChanged(metadata)
       setComparison({
         resource: metadata,
-        markdown: body?.markdown ?? "",
+        body: bodyFromContent(body),
+        exported: body,
         revision: body?.revision.revision ?? "0",
         history: !!revision,
       })
@@ -357,7 +440,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         ...comparison.resource,
         contentRevision: revision.revision,
       }
-      setBody(comparison.markdown, metadata, revision.revision)
+      setBody(comparison.body, metadata, revision.revision)
       historyRequest.current += 1
       setLatest(metadata)
       onChanged(metadata)
@@ -432,7 +515,19 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       </div>
     )
   return (
-    <section className="space-y-5" aria-label={latest.title}>
+    <section
+      className="mx-auto w-full min-w-0 max-w-4xl space-y-5"
+      aria-label={latest.title}
+      onKeyDown={(event) => {
+        if (
+          (event.ctrlKey || event.metaKey) &&
+          event.key.toLowerCase() === "s"
+        ) {
+          event.preventDefault()
+          void save()
+        }
+      }}
+    >
       <Button variant="ghost" onClick={onBack}>
         {t("back")}
       </Button>
@@ -468,32 +563,26 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         <p role="status">{n("loading")}</p>
       ) : (
         <>
-          <label className="block space-y-2">
-            <span className="text-sm">{t("documentContent")}</span>
-            <textarea
-              value={draft}
-              disabled={saving || latest.archived}
-              onKeyDown={(event) => {
-                if (
-                  (event.ctrlKey || event.metaKey) &&
-                  event.key.toLowerCase() === "s"
-                ) {
-                  event.preventDefault()
-                  void save()
-                }
-              }}
-              onChange={(event) => {
-                editGeneration.current += 1
-                draftRef.current = event.target.value
-                dirty.current = event.target.value !== base.current.markdown
-                setDraft(event.target.value)
-                retry.current = null
-                onDirtyChange(dirty.current)
-                setSaved(false)
-              }}
-              className="min-h-64 w-full resize-y rounded-lg border bg-background p-3 font-mono text-base leading-6 sm:text-sm"
+          {draft.format === "blocks" ? (
+            <NativeRichEditor
+              key={`${auth.scopeKey}:${resource.id}:${visibleEditorGeneration}`}
+              document={draft.document}
+              readOnly={saving || latest.archived}
+              onChange={(document) => edit({ format: "blocks", document })}
             />
-          </label>
+          ) : (
+            <label className="block space-y-2">
+              <span className="text-sm">{t("documentContent")}</span>
+              <textarea
+                value={draft.markdown}
+                disabled={saving || latest.archived}
+                onChange={(event) =>
+                  edit({ format: "markdown", markdown: event.target.value })
+                }
+                className="min-h-64 w-full resize-y rounded-lg border bg-background p-3 font-mono text-base leading-6 sm:text-sm"
+              />
+            </label>
+          )}
           <div className="flex flex-wrap items-center gap-2">
             <Button
               disabled={saving || latest.archived || !dirty.current}
@@ -520,17 +609,57 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                 variant="ghost"
                 onClick={() => {
                   void navigator.clipboard
-                    .writeText(draftRef.current)
+                    .writeText(
+                      draftRef.current.format === "blocks"
+                        ? JSON.stringify(draftRef.current.document, null, 2)
+                        : draftRef.current.markdown
+                    )
                     .catch(fail)
                 }}
               >
-                {t("copyDraft")}
+                {t(draft.format === "blocks" ? "copyRichDraft" : "copyDraft")}
+              </Button>
+            )}
+            {draft.format === "markdown" && (
+              <Button
+                variant="ghost"
+                disabled={saving || latest.archived}
+                onClick={() => {
+                  try {
+                    setConversion(importMarkdown(draft.markdown))
+                    setConversionFailed(false)
+                  } catch {
+                    setConversionFailed(true)
+                  }
+                }}
+              >
+                {t("convertRich")}
+              </Button>
+            )}
+            {draft.format === "blocks" && savedExport?.document && (
+              <Button
+                variant="ghost"
+                className="h-auto min-w-0 max-w-full shrink whitespace-normal text-left"
+                onClick={() => {
+                  void navigator.clipboard
+                    .writeText(savedExport.markdown)
+                    .catch(fail)
+                }}
+              >
+                {t("exportSavedMarkdown", {
+                  revision: savedExport.revision.revision,
+                })}
               </Button>
             )}
             <span role="status" className="text-xs text-muted-foreground">
               {saved ? t("saved") : dirty.current ? t("unsaved") : ""}
             </span>
           </div>
+          {conversionFailed && (
+            <p role="alert" className="text-sm text-destructive">
+              {t("conversionRefused")}
+            </p>
+          )}
           <DocumentError error={documentError} />
           {(latest.contentRevision !== base.current.content ||
             latest.authRevision !== base.current.auth ||
@@ -556,7 +685,12 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                 >
                   <span>
                     {t("revision", { revision: revision.revision })} ·{" "}
-                    {revision.authorName} ·{" "}
+                    {t(
+                      revision.format === "blocks"
+                        ? "richFormat"
+                        : "markdownFormat"
+                    )}{" "}
+                    · {revision.authorName} ·{" "}
                     <time
                       dateTime={new Date(
                         revision.createdAt * 1000
@@ -592,10 +726,36 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
             <h3 className="text-xs font-medium text-muted-foreground">
               {t("preview")}
             </h3>
-            <NativeMarkdown markdown={draft} />
+            <BodyView body={draft} />
           </section>
         </>
       )}
+      <Dialog
+        open={!!conversion}
+        onOpenChange={(open) => {
+          if (!open) setConversion(null)
+        }}
+      >
+        <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-3xl">
+          <DialogTitle>{t("conversionPreview")}</DialogTitle>
+          <DialogDescription>{t("conversionDescription")}</DialogDescription>
+          {conversion && <NativeRichView document={conversion} />}
+          <Button variant="ghost" onClick={() => setConversion(null)}>
+            {n("cancel")}
+          </Button>
+          <Button
+            disabled={saving || latest.archived}
+            onClick={() => {
+              if (!conversion) return
+              edit({ format: "blocks", document: conversion })
+              editorGeneration.current += 1
+              setConversion(null)
+            }}
+          >
+            {t("confirmConversion")}
+          </Button>
+        </DialogContent>
+      </Dialog>
       <Dialog open={reload} onOpenChange={setReload}>
         <DialogContent>
           <DialogTitle>{t("reloadLatest")}</DialogTitle>
@@ -652,15 +812,11 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
           <div className="grid min-w-0 gap-4 sm:grid-cols-2">
             <div>
               <h3 className="mb-2 text-sm font-medium">{t("yourDraft")}</h3>
-              <pre className="whitespace-pre-wrap break-words rounded border p-3 text-xs">
-                {draft}
-              </pre>
+              <BodyView body={draft} source />
             </div>
             <div>
               <h3 className="mb-2 text-sm font-medium">{t("serverVersion")}</h3>
-              <pre className="whitespace-pre-wrap break-words rounded border p-3 text-xs">
-                {comparison?.markdown}
-              </pre>
+              {comparison && <BodyView body={comparison.body} source />}
             </div>
           </div>
           <DocumentError error={documentError} />
@@ -687,9 +843,10 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                   onClick={() => {
                     if (!comparison) return
                     setBody(
-                      comparison.markdown,
+                      comparison.body,
                       comparison.resource,
-                      comparison.revision
+                      comparison.revision,
+                      comparison.exported
                     )
                     setComparison(null)
                     setError(null)
@@ -705,11 +862,12 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                     if (!comparison) return
                     editGeneration.current += 1
                     base.current = {
-                      markdown: comparison.markdown,
+                      body: comparison.body,
                       content: comparison.revision,
                       auth: comparison.resource.authRevision,
                     }
-                    dirty.current = draftRef.current !== comparison.markdown
+                    dirty.current = !sameBody(draftRef.current, comparison.body)
+                    setSavedExport(comparison.exported)
                     onDirtyChange(dirty.current)
                     retry.current = null
                     setComparison(null)

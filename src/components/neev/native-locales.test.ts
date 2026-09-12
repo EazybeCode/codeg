@@ -50,6 +50,7 @@ it.each([
           organization: "Test organization",
           audience: "Private",
           revision: "1",
+          level: 2,
         })
       ).toBeTruthy()
     }

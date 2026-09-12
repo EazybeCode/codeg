@@ -1,0 +1,285 @@
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { BlockNoteEditor } from "@blocknote/core"
+import { expect, it, vi } from "vitest"
+import userEvent from "@testing-library/user-event"
+import { NextIntlClientProvider } from "next-intl"
+import { ThemeProvider, useTheme } from "next-themes"
+import messages from "@/i18n/messages/en.json"
+import { NativeRichEditor, richSchema } from "./native-rich-editor"
+import { NativeRichView } from "./native-rich-view"
+import { fromNeev, importMarkdown, toNeev } from "@/lib/neev-rich-adapter"
+document.elementsFromPoint ??= () => []
+
+function NativeTestRoot({ children }: { children: React.ReactNode }) {
+  return (
+    <NextIntlClientProvider locale="en" messages={messages}>
+      {children}
+    </NextIntlClientProvider>
+  )
+}
+
+function ThemeControl() {
+  const { setTheme } = useTheme()
+  return <button onClick={() => setTheme("light")}>Use light theme</button>
+}
+
+it("matches the shell's resolved theme and keeps the same draft when theme changes", async () => {
+  const onChange = vi.fn()
+  const originalClass = document.documentElement.className
+  const mounted = render(
+    <ThemeProvider
+      attribute="class"
+      defaultTheme="dark"
+      enableSystem={false}
+      storageKey="neev-rich-theme-test"
+    >
+      <NativeTestRoot>
+        <ThemeControl />
+        <NativeRichEditor
+          document={importMarkdown("Private draft")}
+          readOnly={false}
+          onChange={onChange}
+        />
+      </NativeTestRoot>
+    </ThemeProvider>
+  )
+  try {
+    const editor = await screen.findByRole("textbox", {
+      name: "Document content",
+    })
+    expect(document.documentElement).toHaveClass("dark")
+    expect(editor.closest(".bn-container")).toHaveAttribute(
+      "data-color-scheme",
+      "dark"
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Use light theme" }))
+    await waitFor(() =>
+      expect(editor.closest(".bn-container")).toHaveAttribute(
+        "data-color-scheme",
+        "light"
+      )
+    )
+    expect(screen.getByRole("textbox", { name: "Document content" })).toBe(
+      editor
+    )
+    expect(editor).toHaveTextContent("Private draft")
+    expect(onChange).not.toHaveBeenCalled()
+  } finally {
+    mounted.unmount()
+    localStorage.removeItem("neev-rich-theme-test")
+    document.documentElement.className = originalClass
+  }
+})
+
+it("round-trips canonical content through the actual pinned editor schema", () => {
+  const original = importMarkdown(
+    "# Heading\n\n**Bold** and [link](https://example.test)\n\n- item\n\n```js\nx()\n```"
+  )
+  const editor = BlockNoteEditor.create({
+    schema: richSchema,
+    initialContent: fromNeev(original) as never,
+    trailingBlock: false,
+  })
+  expect(toNeev(editor.document)).toEqual(original)
+  expect(() =>
+    editor.updateBlock(editor.document[0], { type: "image" } as never)
+  ).toThrow()
+})
+
+it("keeps a controlled-lifetime draft across prop updates and emits actual text edits", async () => {
+  const changes = vi.fn()
+  const original = importMarkdown("Seed")
+  const mounted = render(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={original}
+        readOnly={false}
+        onChange={changes}
+      />
+    </NativeTestRoot>
+  )
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  const paragraph = editor.querySelector("p")!
+  await act(async () => {
+    paragraph.textContent = "Draft"
+    fireEvent.input(paragraph, { inputType: "insertText", data: "Draft" })
+  })
+  await waitFor(() => expect(changes).toHaveBeenCalled())
+  expect(changes.mock.lastCall?.[0].blocks[0].content[0].text).toBe("Draft")
+  mounted.rerender(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={importMarkdown("External")}
+        readOnly={false}
+        onChange={changes}
+      />
+    </NativeTestRoot>
+  )
+  expect(editor).toHaveTextContent("Draft")
+  mounted.rerender(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={original}
+        readOnly={true}
+        onChange={changes}
+      />
+    </NativeTestRoot>
+  )
+  await waitFor(() =>
+    expect(editor).toHaveAttribute("contenteditable", "false")
+  )
+})
+
+it("refuses HTML or file paste visibly and preserves the rich draft", async () => {
+  render(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={importMarkdown("Keep me")}
+        readOnly={false}
+        onChange={() => {}}
+      />
+    </NativeTestRoot>
+  )
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  fireEvent.paste(editor, {
+    clipboardData: {
+      files: [],
+      types: ["text/html", "text/plain"],
+      getData: (type: string) =>
+        type === "text/html"
+          ? '<img src="https://example.test/a">'
+          : "lost image",
+    },
+  })
+  expect(await screen.findByRole("alert")).toHaveTextContent(/paste/i)
+  expect(editor).toHaveTextContent("Keep me")
+})
+
+it("renders rich history as React content without an editor or injected HTML", () => {
+  const document = importMarkdown(
+    "# Safe\n\n`<img src=x onerror=alert(1)>` [link](https://example.test)"
+  )
+  const { container } = render(<NativeRichView document={document} />)
+  expect(screen.getByRole("heading", { name: "Safe" })).toBeVisible()
+  expect(screen.getByRole("link")).toHaveAttribute("rel", "noreferrer")
+  expect(container.querySelector("img")).toBeNull()
+  expect(container.querySelector("[contenteditable]")).toBeNull()
+})
+
+it("refuses externally supplied blocknote HTML drops before parsing attachments", async () => {
+  render(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={importMarkdown("Keep me")}
+        readOnly={false}
+        onChange={() => {}}
+      />
+    </NativeTestRoot>
+  )
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  const getData = vi.fn(() => '<img src="https://example.test/a">')
+  fireEvent.drop(editor, {
+    dataTransfer: { files: [], types: ["blocknote/html"], getData },
+  })
+  expect(await screen.findByRole("alert")).toHaveTextContent(/refused/i)
+  expect(getData).not.toHaveBeenCalled()
+  expect(editor).toHaveTextContent("Keep me")
+})
+
+it("renders consecutive numbered items as one semantic ordered list", () => {
+  render(<NativeRichView document={importMarkdown("1. First\n2. Second")} />)
+  expect(screen.getAllByRole("list")).toHaveLength(1)
+  expect(screen.getAllByRole("listitem")).toHaveLength(2)
+})
+
+it("keeps rich tables and checklist state in an actual editor snapshot", () => {
+  const document = {
+    version: 1 as const,
+    blocks: [
+      {
+        type: "table" as const,
+        id: crypto.randomUUID(),
+        children: [],
+        rows: [
+          [[{ text: "cell", styles: [], href: null }], []],
+          [[], []],
+        ],
+      },
+      {
+        type: "checkListItem" as const,
+        id: crypto.randomUUID(),
+        children: [],
+        checked: true,
+        content: [{ text: "done", styles: [], href: null }],
+      },
+    ],
+  }
+  const editor = BlockNoteEditor.create({
+    schema: richSchema,
+    initialContent: fromNeev(document) as never,
+    trailingBlock: false,
+  })
+  expect(toNeev(editor.document)).toEqual(document)
+})
+
+it("allows Enter to create a new canonical paragraph with its own ID", async () => {
+  const changes = vi.fn()
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={importMarkdown("Seed")}
+        readOnly={false}
+        onChange={changes}
+      />
+    </NativeTestRoot>
+  )
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  await user.click(editor.querySelector("p")!)
+  const range = document.createRange()
+  range.selectNodeContents(editor.querySelector("p")!)
+  range.collapse(false)
+  document.getSelection()!.removeAllRanges()
+  document.getSelection()!.addRange(range)
+  fireEvent.keyDown(editor, { key: "Enter", code: "Enter", keyCode: 13 })
+  await waitFor(() => expect(changes.mock.lastCall?.[0].blocks).toHaveLength(2))
+  expect(changes.mock.lastCall?.[0].blocks[1]).toMatchObject({
+    type: "paragraph",
+    id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+  })
+  expect(screen.queryByRole("alert")).toBeNull()
+})
+
+it("visibly refuses a paste whose combined document would exceed stored byte limits", async () => {
+  const change = vi.fn()
+  render(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={importMarkdown("a".repeat(600_000))}
+        readOnly={false}
+        onChange={change}
+      />
+    </NativeTestRoot>
+  )
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  fireEvent.paste(editor, {
+    clipboardData: {
+      files: [],
+      types: ["text/plain"],
+      getData: () => "b".repeat(600_000),
+    },
+  })
+  expect(editor.textContent?.length).toBe(600_000)
+  expect(change).not.toHaveBeenCalled()
+  expect(screen.queryByRole("alert")).not.toBeNull()
+})

@@ -14,6 +14,8 @@ import {
 } from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
 import { NativeClientError } from "@/lib/neev-client"
+// The real rich editor uses hit testing; jsdom has no layout geometry.
+document.elementsFromPoint ??= () => []
 vi.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => false }))
 const push = vi.hoisted(() => vi.fn())
 vi.mock("next/navigation", () => ({
@@ -796,9 +798,9 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
     "Discard unsaved changes?"
   )
   await user.click(screen.getByRole("button", { name: "Keep editing" }))
-  expect(screen.getByRole("textbox", { name: "Document content" })).toHaveValue(
-    "secret draft"
-  )
+  expect(
+    screen.getByRole("textbox", { name: "Document content" })
+  ).toHaveTextContent("secret draft")
   await user.click(screen.getByRole("link", { name: "Settings" }))
   expect(screen.getByRole("dialog")).toBeVisible()
   expect(push).not.toHaveBeenCalled()
@@ -810,9 +812,7 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
   )
   await user.click(screen.getByRole("button", { name: "Keep editing" }))
   await user.click(screen.getByRole("button", { name: "Sign out" }))
-  await waitFor(() =>
-    expect(screen.queryByDisplayValue("secret draft")).toBeNull()
-  )
+  await waitFor(() => expect(screen.queryByText("secret draft")).toBeNull())
   expect(mock.unknown).toEqual([])
 })
 
