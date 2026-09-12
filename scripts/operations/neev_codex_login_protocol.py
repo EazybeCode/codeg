@@ -15,7 +15,6 @@ MAX_CHUNK_BYTES = 65_536
 MAX_FRAME_BYTES = 65_536
 MAX_PROFILE_STRING = 256
 MAX_EMAIL_CODEPOINTS = 254
-MAX_ACCOUNT_PLAN_CODEPOINTS = 128
 MAX_LOGIN_ID_BYTES = 128
 MAX_USER_CODE_BYTES = 64
 
@@ -449,17 +448,11 @@ class CodexLoginProtocol:
         ):
             self._fatal("invalid")
         plan = account["planType"]
-        if (
-            not _bounded_string(plan, MAX_ACCOUNT_PLAN_CODEPOINTS)
-            or not plan.isprintable()
-        ):
+        if type(plan) is not str:
             self._fatal("invalid")
-        status = (
-            "supported"
-            if requires_auth and plan in _SUPPORTED_PLANS
-            else "unsupported"
-        )
-        return AccountProjection(status, plan=plan, email=email)
+        if requires_auth and plan in _SUPPORTED_PLANS:
+            return AccountProjection("supported", plan=plan, email=email)
+        return AccountProjection("unsupported")
 
     def _validate_device(self, result: Any) -> LoginChallenge:
         if type(result) is not dict or frozenset(result) != frozenset(

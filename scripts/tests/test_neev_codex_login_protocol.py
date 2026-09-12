@@ -182,6 +182,9 @@ class CodexLoginProtocolTests(unittest.TestCase):
             ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "free"}}, "unsupported"),
             ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "unknown"}}, "unsupported"),
             ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "future_bounded_plan"}}, "unsupported"),
+            ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": ""}}, "unsupported"),
+            ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "bad\nplan"}}, "unsupported"),
+            ({"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "x" * 129}}, "unsupported"),
         )
         for result, status in cases:
             with self.subTest(result=result):
@@ -189,6 +192,9 @@ class CodexLoginProtocolTests(unittest.TestCase):
                 event = self.reply(request, result)[0]
                 self.assertEqual(event.account.status, status)
                 self.assertNotEqual(event.account.status, "connected")
+                if status == "unsupported":
+                    self.assertIsNone(event.account.plan)
+                    self.assertIsNone(event.account.email)
 
     def test_account_shapes_bool_and_email_are_strict(self):
         self.initialize()
@@ -203,9 +209,6 @@ class CodexLoginProtocolTests(unittest.TestCase):
             {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": 7, "planType": "plus"}},
             {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": "a\n@example.invalid", "planType": "plus"}},
             {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": "a" * 255, "planType": "plus"}},
-            {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": ""}},
-            {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "bad\nplan"}},
-            {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": "x" * 129}},
             {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": None, "planType": ["plus"]}},
             {"requiresOpenaiAuth": True, "account": {"type": "future", "email": None, "planType": "plus"}},
         )

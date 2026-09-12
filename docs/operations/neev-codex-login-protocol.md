@@ -73,10 +73,11 @@ A supported projection requires all of the following:
 
 Absent/null accounts project as disconnected. Exact API-key and Amazon Bedrock
 accounts, `requiresOpenaiAuth=false`, and well-formed ChatGPT plans outside the six
-recognized values project as unsupported, never connected. A well-formed account
-plan is a nonempty printable string of at most 128 Unicode codepoints; it is not
-restricted to the notification enum. Unsupported values explicitly include
-future bounded plan strings and the pinned schema's `free`, `go`, `prolite`,
+recognized values project as unsupported, never connected. Account-read
+`planType` requires only a JSON string and is not restricted to the notification
+enum; the global frame cap bounds its encoded size. Unsupported projections do
+not retain the raw plan string. Unsupported values explicitly include future plan
+strings and the pinned schema's `free`, `go`, `prolite`,
 `self_serve_business_prolite`, `self_serve_business_usage_based`, `ent26`,
 `enterprise_cbp_automation`, `enterprise_cbp_usage_based`, `edu_plus`, `edu_pro`,
 and `unknown` values. A profile extension requires review; enum membership alone
