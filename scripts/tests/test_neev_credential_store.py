@@ -228,6 +228,7 @@ class CredentialStoreTests(unittest.TestCase):
 
     def test_existing_private_directories_are_not_mode_repaired(self):
         self.root.mkdir(mode=0o755)
+        self.root.chmod(0o755)
         self.key_path.parent.mkdir(mode=0o700)
         self.assert_store_error("unavailable", self.store.initialize)
         self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o755)
