@@ -25,6 +25,12 @@
 - Guarded PostgreSQL: NEEV_TEST_DATABASE_URL='postgresql:///neev_identity_test?host=/tmp/neev-pg.aTlLNW&port=55439&user=air1'. Isolated invented fixtures only; retain failed owned fixtures.
 - No cloud mutation, real account authorization, dependency auto-fix, push, or publication in this plan. Dependencies only in Task3, with exact versions/license checks.
 
+Exact full native gate (after focused iterations):
+
+```sh
+PATH=/Users/air1/.cargo/bin:/opt/homebrew/opt/node@22/bin:$PATH CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 NEEV_TEST_DATABASE_URL='postgresql:///neev_identity_test?host=/tmp/neev-pg.aTlLNW&port=55439&user=air1' cargo test --manifest-path src-tauri/Cargo.toml --lib --no-default-features neev:: -- --include-ignored --skip neev::browser_fixture::browser_acceptance_driver --test-threads=1
+```
+
 ## File and interface map
 
 `content/rich.rs` owns bounded Neev JSON decoding, canonical serialization, validation and deterministic Markdown export. Split export into `rich_export.rs` if needed; no frontend/server parser reuse claim.
@@ -89,7 +95,7 @@ assert_eq!(rich::export_markdown(&rich).unwrap(), "Hello\n");
 
 ### Task 2: Format-aware native HTTP and client contracts
 
-**Files:** Modify `src-tauri/src/neev/http/content.rs`, `src-tauri/src/neev/http/content_tests.rs`, `src/lib/neev-content-client.ts` and `src/lib/neev-content-client.test.ts`. Create `src/lib/neev-rich-document.ts` and `src/lib/neev-rich-document.test.ts`. Keep backend persistence from Task1 unchanged except a concrete integration fix reported for review.
+**Files:** Modify `src-tauri/src/neev/http/content.rs`, `src-tauri/src/neev/http/content_tests.rs`, `src/lib/neev-content-client.ts` and `src/lib/neev-content-client.test.ts`. Create `src/lib/neev-rich-document.ts` and `src/lib/neev-rich-document.test.ts`. Mechanically update existing Markdown response fixtures in `src/components/neev/native-document.test.tsx` and `src/components/neev/native-content.test.tsx` to the mandatory metadata/null-body contract; preserve their assertions and defer editor behavior to Task3. In `native-document.tsx`, narrowly type the existing Markdown-only retry ref as `Extract<SaveNativeDocumentInput,{markdown:string}> | null` so the new union compiles without changing its current behavior; Task3 generalizes this controller. Keep backend persistence from Task1 unchanged except a concrete integration fix reported for review.
 
 **Consumes:** Task1 Revision.format/format_version, rich::{decode,encode,export_markdown}, documents::{save,save_rich,read,restore}.
 **Produces:** Existing route paths and client function names retained. `NativeRevision` gains mandatory `format:"markdown"|"blocks"`, `formatVersion:1`. Content response becomes `{revision,markdown,document}` with document:null for Markdown and validated RichDocument for blocks; Markdown field for blocks is server-produced export only. Save requests are an exact union: existing Markdown keys OR `{requestId,expectedContentRevision,expectedAuthRevision,document}`. Both/neither bodies are rejected. No new authorization path.
