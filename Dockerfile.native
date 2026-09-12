@@ -20,11 +20,13 @@ RUN pnpm run postinstall \
     && install -D -m 0644 node_modules/@blocknote/core/LICENSE /usr/share/doc/neev/blocknote-core-LICENSE \
     && install -D -m 0644 node_modules/@blocknote/react/LICENSE /usr/share/doc/neev/blocknote-react-LICENSE \
     && install -D -m 0644 node_modules/@blocknote/shadcn/LICENSE /usr/share/doc/neev/blocknote-shadcn-LICENSE \
+    && install -D -m 0644 src/styles/vendor/shadcn-tailwind.LICENSE.md /usr/share/doc/neev/shadcn-tailwind-LICENSE.md \
     && printf '%s\n' \
       'Bundled frontend attribution' \
       '@blocknote/core 0.54.2 — https://github.com/TypeCellOS/BlockNote/tree/main/packages/core' \
       '@blocknote/react 0.54.2 — https://github.com/TypeCellOS/BlockNote/tree/main/packages/react' \
       '@blocknote/shadcn 0.54.2 — https://github.com/TypeCellOS/BlockNote/tree/main/packages/shadcn' \
+      'shadcn/ui 3.8.4 tailwind.css — https://github.com/shadcn-ui/ui' \
       > /usr/share/doc/neev/THIRD_PARTY_NOTICES.txt
 
 FROM rust:1.98.1-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS backend

@@ -75,3 +75,17 @@ git commit -m 'fix(neev): remediate reviewed frontend dependency advisories'
 ```
 
 Controller task review and final scoped review cover changed graph and evidence before publication. This plan does not supersede the separate personal-agent runtime and production deployment gates.
+
+### Task 2: Remove obsolete CLI graph and patch residual critical/high paths
+
+**Files:** package.json, pnpm-workspace.yaml, pnpm-lock.yaml, src/app/globals.css; new vendored shadcn stylesheet and MIT notice; docs/operations/neev-dependency-security.md; narrowly required test-tool configuration/tests.
+
+**Interfaces:** consume Task 1's patched graph, preserve rendered CSS and all existing product behavior. Keep @blocknote/shadcn and protected Next/BlockNote/Tiptap versions. Task 1 approved floors are lodash-es 4.18.1 and postcss 8.5.23, superseding obsolete original floors.
+
+1. Read saved audit `/tmp/neev-dependency-audit-final-20260913.json` and reproduce affected resolutions. Verify official registry/advisory/migration sources before upgrades.
+2. Vendor the exact installed standalone shadcn 3.8.4 tailwind.css (95 lines, 1669 bytes, SHA256 146941ac3ff65496fdf1cb306e697255328e4dadc7c105d66e36bb031b00f6d6), retain MIT copyright/license from official shadcn-ui/ui LICENSE.md, update globals.css import and remove standalone shadcn package. Do not remove @blocknote/shadcn or project-boot/shadcn. Prove exact stylesheet equivalence.
+3. Upgrade Vitest and matching UI/coverage packages to compatible patched versions at least 3.2.6, Vite at least 6.4.3 with compatible React plugin, reading official migration guidance. No forced cross-major transitive override. Preserve test assertions; report real application regressions.
+4. Patch remaining critical/high paths with compatible major-scoped overrides or direct dependency updates: brace-expansion, browserslist, flatted, form-data, glob, js-yaml, minimatch, picomatch, ws. Let obsolete shadcn-only paths disappear first. Verify actual patched floors from current advisories, not assumptions. No forced audit fix or unrelated whole-graph refresh.
+5. Add focused coverage for the optional ansi-to-react linkification path using the Task 1 linkify-it override, recording a genuine failing baseline if behavior needs correction. Current app leaves optional path disabled; do not enable it.
+6. Run fresh audit, full frontend tests, typecheck, static export, diff check serially using Node 22. Record exact residual advisory inventory and classify, without suppressions or claiming zero when not zero. Mac has about 11 GiB free; no cache deletions.
+7. Update security operations evidence with official citations, exact versions/tests, outstanding moderate/low or other issues. Commit scoped changes only; no pushes/cloud/credentials/provider calls. Report full evidence and concerns in task-2-report.md for independent review.

@@ -1,6 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "shadcn/tailwind.css";
+@import "../styles/vendor/shadcn-tailwind.css";
 @import "@xterm/xterm/css/xterm.css";
 /* 自托管字体（@font-face 声明惰性，woff2 仅在被应用/预览时下载） */
 @import "@fontsource-variable/inter";
