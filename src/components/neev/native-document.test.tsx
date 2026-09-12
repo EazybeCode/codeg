@@ -18,6 +18,7 @@ import {
 } from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
 import { importMarkdown } from "@/lib/neev-rich-adapter"
+import { parseRichDocument } from "@/lib/neev-rich-document"
 import { useNativeAuth } from "./native-auth-provider"
 // jsdom has no hit-testing geometry; actual pointer acceptance runs in browser.
 document.elementsFromPoint ??= () => []
@@ -270,6 +271,26 @@ it("copies the dirty rich JSON separately from explicitly labeled saved-only Mar
     })
   )
   expect(copy.mock.lastCall![0]).toBe("Saved rich\n")
+})
+
+it("copies a boundary-size dirty rich draft as bounded, valid recovery JSON", async () => {
+  const current = { ...resource, contentRevision: "0" }
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(current),
+    [`GET ${path}/revisions`]: () => json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  const copy = vi.spyOn(navigator.clipboard, "writeText")
+  mount(current)
+  // One paragraph/run with a 36-character UUID has 151 bytes of JSON overhead.
+  const text = "x".repeat(1_048_576 - 151)
+  await editRich(text)
+  await user.click(screen.getByRole("button", { name: "Copy structured JSON" }))
+  const copied = copy.mock.lastCall![0]
+  expect(new TextEncoder().encode(copied).length).toBe(1_048_576)
+  expect(parseRichDocument(JSON.parse(copied)).blocks).toMatchObject([
+    { type: "paragraph", content: [{ text, styles: [], href: null }] },
+  ])
 })
 
 it("renders mixed history and restores the selected Markdown format while preserving source audience", async () => {

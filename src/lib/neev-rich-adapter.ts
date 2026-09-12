@@ -4,7 +4,9 @@ import type {
   DefaultInlineContentSchema,
   DefaultStyleSchema,
 } from "@blocknote/core"
-import { fromMarkdown } from "mdast-util-from-markdown"
+import { unified } from "unified"
+import remarkParse from "remark-parse"
+import remarkGfm from "remark-gfm"
 import {
   parseRichDocument,
   type RichBlock,
@@ -216,9 +218,8 @@ export function toNeev(value: unknown): RichDocument {
 export function importMarkdown(markdown: string): RichDocument {
   if (new TextEncoder().encode(markdown).length > 1_048_576)
     return unsupported()
-  // These extensions would otherwise be parsed as ordinary text by CommonMark.
-  if (/~~|^\s*\|.*\||^\s*[-+*]\s+\[[ xX]\]/m.test(markdown))
-    return unsupported()
+  // Recognize unsupported extensions as syntax, without rejecting code/literals.
+  const tree = unified().use(remarkParse).use(remarkGfm).parse(markdown)
   type Node = {
     type: string
     value?: string
@@ -229,6 +230,7 @@ export function importMarkdown(markdown: string): RichDocument {
     meta?: string | null
     ordered?: boolean
     start?: number | null
+    checked?: boolean | null
     children?: Node[]
   }
   const inline = (
@@ -315,7 +317,8 @@ export function importMarkdown(markdown: string): RichDocument {
         case "list":
           if (node.ordered && node.start !== 1) return unsupported()
           return (node.children ?? []).map((item): RichBlock => {
-            if (item.type !== "listItem") return unsupported()
+            if (item.type !== "listItem" || item.checked != null)
+              return unsupported()
             const children = convert(item.children ?? [])
             if (children[0]?.type !== "paragraph") return unsupported()
             return {
@@ -329,7 +332,7 @@ export function importMarkdown(markdown: string): RichDocument {
           return unsupported()
       }
     })
-  const blocks = convert(fromMarkdown(markdown).children as Node[])
+  const blocks = convert(tree.children as Node[])
   return parseRichDocument({
     version: 1,
     blocks: blocks.length

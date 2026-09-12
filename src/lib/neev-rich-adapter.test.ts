@@ -130,9 +130,38 @@ describe("deliberate Markdown conversion", () => {
     "---",
     "~~strike~~",
     "| a | b |\n| --- | --- |",
+    "a | b\n--- | ---\nc | d",
+    "a | b |\n--- | --- |\nc | d |",
     "- [ ] task",
+    "1. [ ] task",
+    "1) [x] task",
+    "> 1. [ ] nested task",
     "[bad](javascript:alert)",
   ])("refuses unsupported Markdown: %s", (markdown) => {
     expect(() => importMarkdown(markdown)).toThrow()
+  })
+  it.each([
+    [
+      "```txt\n~~literal~~\n1. [ ] task\na | b\n--- | ---\n```",
+      "~~literal~~\n1. [ ] task\na | b\n--- | ---",
+    ],
+    ["    ~~literal~~", "~~literal~~"],
+  ])("preserves GFM-looking literal code: %s", (markdown, text) => {
+    expect(importMarkdown(markdown).blocks).toMatchObject([
+      { type: "codeBlock", text },
+    ])
+  })
+  it("preserves GFM-looking inline code and escaped literal punctuation", () => {
+    expect(
+      importMarkdown("`~~literal~~` and \\~\\~escaped\\~\\~").blocks
+    ).toMatchObject([
+      {
+        type: "paragraph",
+        content: [
+          { text: "~~literal~~", styles: ["code"] },
+          { text: " and ~~escaped~~", styles: [] },
+        ],
+      },
+    ])
   })
 })

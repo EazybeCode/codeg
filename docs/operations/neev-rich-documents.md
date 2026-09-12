@@ -14,8 +14,10 @@ Markdown remains byte-identical until an author previews and confirms conversion
 in memory, then explicitly saves. Unsupported CommonMark nodes and unsupported
 extension syntax cause visible conversion refusal. HTML, attachments, definitions,
 link titles, heading levels above three and unsupported structures are not silently
-removed. Markdown with GFM tables, strike or task syntax is conservatively refused
-by conversion; rich tables, strike and checklist blocks are available directly.
+removed. Markdown with GFM tables (including optional outer pipes), strike or
+ordered/unordered task syntax is conservatively refused by syntax-aware parsing;
+code and escaped literal punctuation remain valid. Rich tables, strike and
+checklist blocks are available directly.
 
 Canonical rich blocks support paragraphs, headings 1–3, bullet/numbered lists,
 checklists, quotes, plain code blocks and rectangular tables. Inline styles are
@@ -40,7 +42,8 @@ rebase/reload actions determine when a dirty editor may be replaced. Authority
 loss clears the editor, comparisons, history, draft and saved export cache.
 Source-chat documents continue to display and inherit their source audience.
 
-Recovery copying is format-specific: a dirty rich draft copies structured JSON.
+Recovery copying is format-specific: a dirty rich draft copies compact canonical
+JSON, preserving the stored byte bound without indentation expansion.
 Markdown export is the native-produced export of an exact loaded saved revision;
 its label names that revision, excludes unsaved changes and warns that formatting
 may be simplified. No client Markdown exporter or draft-export endpoint was added.
@@ -254,6 +257,22 @@ remain retained; no user or production data was removed.
 
 The controller independently repeated the final frontend gate: 534/534 tests in
 46 files passed in 14.83 seconds; typecheck and `git diff --check` exited 0.
+
+### Task-review correction round 1
+
+Review identified optional-pipe tables/ordered tasks bypassing a raw Markdown
+heuristic, valid code being refused by that heuristic, and pretty-printed rich
+recovery JSON expanding a boundary draft from 1,048,576 to 1,048,691 bytes.
+Behavioral RED reproduced all findings before changes. The adapter now uses the
+existing unified/remark-parse/remark-gfm dependencies to recognize AST syntax;
+unsupported nodes and checked list items are refused. Recovery JSON is compact.
+No dependencies, native storage or authority contracts changed.
+
+Post-fix focused adapter/controller suites passed 52/52 tests (25 adapter,
+27 controller) in 4.10 seconds. The boundary test checks exactly 1,048,576 copied
+bytes and successful canonical parsing with the complete original draft text.
+The earlier browser and static-build evidence describes the pre-review artifact;
+this narrow correction has not yet had another browser journey or static rebuild.
 
 ## Recovery and rollback
 

@@ -611,7 +611,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
                   void navigator.clipboard
                     .writeText(
                       draftRef.current.format === "blocks"
-                        ? JSON.stringify(draftRef.current.document, null, 2)
+                        ? JSON.stringify(draftRef.current.document)
                         : draftRef.current.markdown
                     )
                     .catch(fail)
