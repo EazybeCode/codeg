@@ -58,8 +58,27 @@ function uniqueContainerName(label) {
   return `neev-native-${label}-${process.pid}-${randomUUID()}`
 }
 
-function cleanupContainer(name) {
-  docker(["container", "rm", "--force", name], { allowFailure: true })
+function cleanupContainer(name, invokeDocker = docker) {
+  const removed = invokeDocker(["container", "rm", "--force", name], {
+    allowFailure: true,
+  })
+  if (removed.status === 0) return
+
+  const inspected = invokeDocker(["container", "inspect", name], {
+    allowFailure: true,
+  })
+  const inspectOutput = `${inspected.stdout}\n${inspected.stderr}`
+  if (
+    inspected.status === 1 &&
+    /no such (?:container|object)(?::|\s)/i.test(inspectOutput)
+  ) {
+    return
+  }
+
+  assert.fail(
+    `failed to remove test container ${name}: ${removed.stderr || removed.stdout}; ` +
+      `container inspection failed or still found it: ${inspected.stderr || inspected.stdout}`
+  )
 }
 
 const confinementArgs = [
@@ -81,6 +100,100 @@ const confinementArgs = [
   "--tmpfs",
   "/tmp:rw,noexec,nosuid,nodev,size=64m",
 ]
+
+function dockerResult(status, stderr = "", stdout = "") {
+  return {
+    pid: 1,
+    output: [null, stdout, stderr],
+    stdout,
+    stderr,
+    status,
+    signal: null,
+    error: undefined,
+  }
+}
+
+function scriptedDocker(steps) {
+  const remaining = [...steps]
+  const calls = []
+  return {
+    calls,
+    invoke(args, options) {
+      calls.push({ args, options })
+      assert.ok(
+        remaining.length > 0,
+        "cleanup issued an unexpected Docker call"
+      )
+      return remaining.shift()
+    },
+    assertFinished() {
+      assert.equal(
+        remaining.length,
+        0,
+        "cleanup omitted an expected Docker call"
+      )
+    },
+  }
+}
+
+test("cleanup accepts successful removal of its exact container", () => {
+  const scripted = scriptedDocker([dockerResult(0)])
+
+  cleanupContainer("neev-native-owned", scripted.invoke)
+
+  scripted.assertFinished()
+  assert.deepEqual(scripted.calls, [
+    {
+      args: ["container", "rm", "--force", "neev-native-owned"],
+      options: { allowFailure: true },
+    },
+  ])
+})
+
+test("cleanup accepts a container confirmed genuinely absent", () => {
+  const scripted = scriptedDocker([
+    dockerResult(1, "Error: No such container: neev-native-absent"),
+    dockerResult(1, "Error: No such object: neev-native-absent"),
+  ])
+
+  cleanupContainer("neev-native-absent", scripted.invoke)
+
+  scripted.assertFinished()
+  assert.deepEqual(
+    scripted.calls.map(({ args }) => args),
+    [
+      ["container", "rm", "--force", "neev-native-absent"],
+      ["container", "inspect", "neev-native-absent"],
+    ]
+  )
+})
+
+test("cleanup rejects a removal error when its container remains", () => {
+  const scripted = scriptedDocker([
+    dockerResult(1, "permission denied"),
+    dockerResult(0, "", '[{"State":{"Status":"running"}}]'),
+  ])
+
+  assert.throws(
+    () => cleanupContainer("neev-native-remains", scripted.invoke),
+    /failed to remove test container neev-native-remains/
+  )
+  scripted.assertFinished()
+})
+
+test("cleanup rejects Docker daemon failure instead of treating it as absence", () => {
+  const daemonFailure = "Cannot connect to the Docker daemon"
+  const scripted = scriptedDocker([
+    dockerResult(1, daemonFailure),
+    dockerResult(1, daemonFailure),
+  ])
+
+  assert.throws(
+    () => cleanupContainer("neev-native-daemon", scripted.invoke),
+    /failed to remove test container neev-native-daemon/
+  )
+  scripted.assertFinished()
+})
 
 test(
   "actual image metadata has only the native fail-closed defaults",

@@ -84,5 +84,6 @@ Restart and content recovery, mixed-format isolated restore, rejection of the
 wrong database certificate, two-organization privacy, HTTPS, backup scheduling,
 and personal-agent jobs remain release gates outside this packaging task. Keep
 the runtime disabled. This task authorizes neither a public port/proxy cutover
-nor any cloud mutation, and old databases, volumes, and backups remain offline
-and untouched.
+nor any cloud mutation. Existing databases, volumes, and backups remain
+preserved and untouched; the legacy deployment, including its PostgreSQL
+container, continues running until a separately authorized transition.
