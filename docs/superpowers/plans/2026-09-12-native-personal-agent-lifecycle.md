@@ -186,6 +186,15 @@ assert_eq!(intents::attempt(&h.state, &h.alice_a, Provider::Codex,
 
 ### Task 3: Final-result fencing, cleanup and native logout
 
+Controller clarification: “foreign session/owner” below refers to native
+organization/member/exact initiating session. Reject that foreign native scope
+with NotFound before lifecycle-state inspection. An otherwise correctly scoped
+ticket with a wrong, stale or cleared mutation lease owner returns Conflict,
+both before and after invalidation. Do not retain cleared lease metadata or change
+the schema to reconstruct old lease ownership. Test both distinctions with
+unchanged-row assertions. This resolves the canceled-ticket case consistently;
+the internal mutation lease token is not a second native resource-owner identity.
+
 **Files:** Create `neev/agents/{completion.rs,recovery.rs,recovery_tests.rs}`; extend agents/{mod.rs,store.rs,test_support.rs} narrowly. Modify `neev/auth/session.rs` for admission-first atomic pending-login invalidation on revoke, `neev/http/auth.rs` for its clock argument, and native auth/session or HTTP tests covering that integration. Do not wire startup recovery to every ServerState constructor or change provider capability flags.
 
 **Interfaces:** Free async functions using Task1 types and Task2 locked store helpers:
