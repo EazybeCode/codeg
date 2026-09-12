@@ -1,0 +1,24 @@
+# Fixed deployment: build with --platform=linux/amd64 and inspect that platform.
+FROM debian:bookworm-slim@sha256:5ae3c39ebd15e229dcedd5cee596b2497182493d41ff162e824ba13fc1b2b867
+
+# The isolated build context contains only these pinned public artifacts.
+COPY --chown=0:0 --chmod=0444 ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --chown=0:0 --chmod=0555 codex /usr/local/bin/codex
+COPY --chown=0:0 --chmod=0444 LICENSE NOTICE /usr/share/doc/codex/
+
+RUN test "$(sha256sum /usr/local/bin/codex | cut -d ' ' -f 1)" = 3188814c35471432d4123203e0eb38e5bddc60226e3d7ddf0e59e649ea140022 \
+    && test "$(sha256sum /etc/ssl/certs/ca-certificates.crt | cut -d ' ' -f 1)" = 714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5 \
+    && test "$(sha256sum /usr/share/doc/codex/LICENSE | cut -d ' ' -f 1)" = d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc \
+    && test "$(sha256sum /usr/share/doc/codex/NOTICE | cut -d ' ' -f 1)" = 9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915 \
+    && install -d -o 65532 -g 65532 -m 0700 /home/neev
+
+ENV HOME=/home/neev \
+    CODEX_HOME=/home/neev/.codex \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    PATH=/usr/local/bin:/usr/bin:/bin \
+    LANG=C.UTF-8
+
+WORKDIR /home/neev
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/codex"]
+CMD ["app-server"]

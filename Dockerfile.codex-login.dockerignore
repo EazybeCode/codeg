@@ -1,0 +1,7 @@
+**
+!Dockerfile.codex-login
+!Dockerfile.codex-login.dockerignore
+!codex
+!LICENSE
+!NOTICE
+!ca-certificates.crt
