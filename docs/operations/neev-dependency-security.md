@@ -64,9 +64,41 @@ finding][vitest-critical], whose patched floor is 3.2.6. The single Vite 6.4.3
 resolution clears the high [server.fs bypass finding][vite-high], whose patched
 floor is 6.4.3, without a forced cross-major transitive override.
 
+### Compatible residual browser and tooling remediation
+
+The remaining compatible browser/rendering and lint-chain patches were applied
+without changing the protected Next, BlockNote, Tiptap, Vitest or Vite versions.
+Direct parents are pinned at the first reviewed compatible release when their
+children were exact dependencies: `ai` 6.0.214 is the first 6.0.x release whose
+direct and gateway paths both use `@ai-sdk/provider-utils` 4.0.33, and
+`next-intl` 4.9.2 keeps its documented Next 16 / React 19 peer support. Its
+declared compatible child ranges resolve `icu-minify` and `use-intl` 4.14.4.
+
+The other paths use package-major or exact-parent floors already admitted by
+their parents' declared ranges:
+
+| Package | Task 2 resolution | Accepted resolution | Parent chain and official evidence |
+| --- | --- | --- | --- |
+| `dompurify` | 3.2.7 / 3.3.3 | 3.4.13 | `monaco-editor` and `@streamdown/mermaid > mermaid`; the governing [detached-subtree XSS advisory][dompurify-final] patches at 3.4.13 and subsumes the earlier Task 2 DOMPurify findings. |
+| `mermaid` | 11.13.0 | 11.16.1 | `@streamdown/mermaid` declares `^11.12.2`; 11.16.1 clears the [configuration prototype-pollution][mermaid-prototype] and [sibling CSS injection][mermaid-css] floors plus the earlier Mermaid findings. |
+| `uuid` | 11.1.0 | 11.1.1 | `mermaid` declares `^11.1.0` for the 11.x line; [buffer-bounds advisory][uuid-bounds]. |
+| `@babel/core` | 7.29.0 | 7.29.6 | Vite React, Next/styled-jsx and ESLint React hooks all admit Babel 7.x. The original audit named 7.29.1, but that version is not published; current official [advisory metadata][babel-read] names 7.29.6 as the first patched 7.x release. |
+| `@humanfs/node` / `ajv` | 0.16.7 / 6.12.6 | 0.16.8 / 6.14.0 | Development-only ESLint 9.39.2 ranges admit both patches; [humanfs symlink-copy advisory][humanfs-copy] and [Ajv ReDoS advisory][ajv-redos]. |
+| `baseline-browser-mapping` | 2.10.38 on Next; 2.11.22 on Browserslist | 2.11.0 | An exact `next@16.3.4` child floor stays inside Next's `^2.9.19` range; [invalid-input DoS advisory][baseline-dos]. |
+| `@ai-sdk/provider-utils` | 4.0.14 | 4.0.33 | `ai` 6.0.214 and `@ai-sdk/gateway` 3.0.139 both declare the patched version exactly; [resource-consumption advisory][ai-provider-dos]. |
+| `next-intl` / `icu-minify` | 4.8.3 / 4.8.3 | 4.9.2 / 4.14.4 | Direct compatible parent update; [next-intl precompile prototype pollution][next-intl-dos], [next-intl open redirect][next-intl-cache], and [icu-minify prototype lookup][icu-minify-dos]. |
+
+The real Streamdown Mermaid renderer is now exercised with strict security
+configuration: legitimate `<b>` label markup survives, while a `javascript:`
+click target does not appear in the generated SVG. This is a behavioral
+security-boundary regression, not a claim that the test reproduces the
+specific CSS/prototype-pollution advisories. Existing diagram component tests
+and native rich-document parser, adapter, editor and document tests remain
+unchanged and pass with the upgraded graph.
+
 ## Audit result
 
-`pnpm audit --json` still exits 1 because moderate and low advisories remain:
+`pnpm audit --json` still exits 1 because moderate advisories remain:
 
 | Audit | Low | Moderate | High | Critical | Total advisories | Total dependencies |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -74,22 +106,19 @@ floor is 6.4.3, without a forced cross-major transitive override.
 | After Task 1 | 14 | 74 | 44 | 1 | 133 | 1,421 |
 | After Task 2 | 8 | 30 | 0 | 0 | 38 | 1,244 |
 | Task 2 change | -6 | -44 | -44 | -1 | -95 | -177 |
+| After Task 3 | 0 | 2 | 0 | 0 | 2 | 1,232 |
+| Task 3 change | -8 | -28 | 0 | 0 | -36 | -12 |
 
-There are no residual critical or high findings. The 38 remaining advisory
-entries comprise 30 moderate and 8 low entries. Four are reported as
-development-only: `@humanfs/node` (1), `ajv` (1), `@vitest/mocker` (1), and
-`vitest` (1). The other 34 are reported on production findings:
-`baseline-browser-mapping` (1 moderate), `dompurify` (14 moderate / 4 low),
-`mermaid` (8 moderate / 1 low), `next-intl` (2 moderate), `uuid`
-(1 moderate), `@ai-sdk/provider-utils` (1 low), `@babel/core` (1 low), and
-`icu-minify` (1 low). Audit finding flags are dependency-graph metadata, not a
-complete runtime reachability proof.
-
-No advisory is suppressed. The audit's remaining patched candidates include
-Vitest and `@vitest/mocker` 4.1.11, plus compatible updates in the ESLint,
-Monaco/DOMPurify, Mermaid, Next/next-intl, and AI SDK graphs. Those moderate/low
-families require separately reviewed compatibility slices and are not part of
-this critical/high remediation.
+There are no residual low, high or critical findings. The two remaining
+moderate entries are the same [Vitest redirect-mock advisory][vitest-mocker]
+reported on Vitest 3.2.7 and `@vitest/mocker` 3.2.7. Their exact paths are the
+direct `vitest` development dependency and the matching `@vitest/ui` and
+`@vitest/coverage-v8` development paths. They are test-tooling only and are not
+part of the production static application graph; that classification limits
+runtime reachability but does not suppress or invalidate the registry finding.
+The patched floor is Vitest / mocker 4.1.11. That cross-major migration remains
+deferred because Task 2 observed an assertion-level compatibility change and
+this slice explicitly retains the accepted 3.2.7 toolchain.
 
 ## Verification evidence
 
@@ -101,16 +130,16 @@ All commands used `/opt/homebrew/opt/node@22/bin` and ran serially:
   with the SHA-256 above.
 - Native notice packaging check: the Dockerfile contains the explicit install
   and attribution, a staged install is byte-identical, and its mode is 0644.
-- Focused migration/linkification verification: 150/150 representative tests
-  passed after the final `clearMocks` configuration.
-- `pnpm test`: exit 0; 469 test files and 6,421 tests passed in 142.24s. Existing
+- Task 3 focused diagram/native-rich verification: exit 0; 7 files and 125/125
+  tests passed, including the real Mermaid safe-markup/executable-link boundary.
+- `pnpm test`: exit 0; 469 test files and 6,422 tests passed in 133.70s. Existing
   expected stderr/warnings remained (React `act`, jsdom canvas, invalid nested
   HTML, and deliberate mocked failure logs); none was a test failure.
 - `pnpm exec tsc --noEmit`: exit 0, no diagnostics.
-- `pnpm build`: exit 0; Next 16.3.4 compiled, typechecked, and generated all 34
-  static routes.
-- `pnpm audit --json`: exit 1 with exactly 30 moderate and 8 low findings;
-  zero critical and zero high.
+- `pnpm build`: exit 0; Next 16.3.4 compiled in 16.5s, typechecked, and generated
+  all 34 static routes.
+- `pnpm audit --json`: exit 1 with exactly 2 moderate development-only findings;
+  zero low, critical and high.
 - `git diff --check`: exit 0.
 
 This evidence accepts the local package graph, frontend export, and notice
@@ -139,3 +168,16 @@ image review and deployment remain separate release gates.
 [minimatch-3]: https://github.com/advisories/GHSA-23c5-xmqv-rm74
 [picomatch]: https://github.com/advisories/GHSA-c2c7-rcm5-vvqj
 [ws]: https://github.com/advisories/GHSA-96hv-2xvq-fx4p
+[dompurify-final]: https://github.com/advisories/GHSA-55q2-fjhq-7xh7
+[mermaid-prototype]: https://github.com/advisories/GHSA-c4c3-pg64-4m4v
+[mermaid-css]: https://github.com/advisories/GHSA-6x64-9x62-f2gx
+[uuid-bounds]: https://github.com/advisories/GHSA-w5hq-g745-h8pq
+[babel-read]: https://github.com/advisories/GHSA-4x5r-pxfx-6jf8
+[humanfs-copy]: https://github.com/advisories/GHSA-p498-v437-472g
+[ajv-redos]: https://github.com/advisories/GHSA-2g4f-4pwh-qvx6
+[baseline-dos]: https://github.com/advisories/GHSA-w5vr-8v7q-w6rv
+[ai-provider-dos]: https://github.com/advisories/GHSA-866g-f22w-33x8
+[next-intl-dos]: https://github.com/advisories/GHSA-4c35-wcg5-mm9h
+[next-intl-cache]: https://github.com/advisories/GHSA-8f24-v5vv-gm5j
+[icu-minify-dos]: https://github.com/advisories/GHSA-r27j-894h-3w3p
+[vitest-mocker]: https://github.com/advisories/GHSA-82fw-gwwq-j7x9

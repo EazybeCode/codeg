@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest"
+import { mermaid } from "@streamdown/mermaid"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   clampAxis,
@@ -23,6 +24,60 @@ const MERMAID_SVG =
   'style="max-width: 780px; background-color: transparent;" ' +
   'width="100%" id="mermaid-1" xmlns="http://www.w3.org/2000/svg">' +
   "<g></g></svg>"
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
+describe("real Mermaid renderer security boundary", () => {
+  it("preserves safe label markup and rejects executable link targets", async () => {
+    vi.stubGlobal("CSSStyleSheet", window.CSSStyleSheet)
+    const getBBox = Object.getOwnPropertyDescriptor(
+      SVGElement.prototype,
+      "getBBox"
+    )
+    const getComputedTextLength = Object.getOwnPropertyDescriptor(
+      SVGElement.prototype,
+      "getComputedTextLength"
+    )
+    Object.defineProperty(SVGElement.prototype, "getBBox", {
+      configurable: true,
+      value: () => ({ x: 0, y: 0, width: 100, height: 20 }),
+    })
+    Object.defineProperty(SVGElement.prototype, "getComputedTextLength", {
+      configurable: true,
+      value: () => 100,
+    })
+
+    try {
+      const source =
+        'flowchart TD\n A["<b>Safe</b>"] --> B[Done]\n' +
+        ' click A "javascript:alert(1)"'
+      const { svg } = await mermaid
+        .getMermaid({ theme: "default" })
+        .render("mermaid-security-boundary", source)
+
+      expect(svg).toContain("<b>Safe</b>")
+      expect(svg).not.toMatch(/href=["']javascript:|onerror|<script/i)
+    } finally {
+      if (getBBox) {
+        Object.defineProperty(SVGElement.prototype, "getBBox", getBBox)
+      } else {
+        delete (SVGElement.prototype as { getBBox?: unknown }).getBBox
+      }
+      if (getComputedTextLength) {
+        Object.defineProperty(
+          SVGElement.prototype,
+          "getComputedTextLength",
+          getComputedTextLength
+        )
+      } else {
+        delete (SVGElement.prototype as { getComputedTextLength?: unknown })
+          .getComputedTextLength
+      }
+    }
+  })
+})
 
 describe("clampZoom / stepZoom", () => {
   it("holds the zoom inside the bounds", () => {
