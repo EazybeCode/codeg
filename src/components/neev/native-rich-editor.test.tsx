@@ -1,5 +1,8 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { BlockNoteEditor } from "@blocknote/core"
+import type { Editor } from "@tiptap/core"
+import { undoDepth } from "@tiptap/pm/history"
+import { StrictMode } from "react"
 import { expect, it, vi } from "vitest"
 import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
@@ -7,6 +10,7 @@ import { ThemeProvider, useTheme } from "next-themes"
 import messages from "@/i18n/messages/en.json"
 import { NativeRichEditor, richSchema } from "./native-rich-editor"
 import { NativeRichView } from "./native-rich-view"
+import { NativeSuspendedSurface } from "./native-suspended-surface"
 import { fromNeev, importMarkdown, toNeev } from "@/lib/neev-rich-adapter"
 document.elementsFromPoint ??= () => []
 
@@ -22,6 +26,106 @@ function ThemeControl() {
   const { setTheme } = useTheme()
   return <button onClick={() => setTheme("light")}>Use light theme</button>
 }
+
+it("does not publish a private debug handle or clobber another editor's global", async () => {
+  const other = BlockNoteEditor.create({
+    initialContent: [{ type: "paragraph", content: "Other editor" }],
+  })
+  const browser = window as Window & { ProseMirror?: Editor }
+  const previous = browser.ProseMirror
+  browser.ProseMirror = other._tiptapEditor
+  const mounted = render(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={importMarkdown("Private draft")}
+        readOnly={false}
+        onChange={() => {}}
+      />
+    </NativeTestRoot>
+  )
+  try {
+    await screen.findByRole("textbox", { name: "Document content" })
+    expect(browser.ProseMirror === other._tiptapEditor).toBe(true)
+    mounted.unmount()
+    await act(async () => {})
+    expect(browser.ProseMirror === other._tiptapEditor).toBe(true)
+    expect(other._tiptapEditor.state.doc.textContent).toBe("Other editor")
+  } finally {
+    mounted.unmount()
+    if (previous) browser.ProseMirror = previous
+    else delete browser.ProseMirror
+    other._tiptapEditor.destroy()
+  }
+})
+
+it.each([false, true])(
+  "releases retained private state after real removal, but retains Activity drafts (StrictMode=%s)",
+  async (strict) => {
+    const changed = vi.fn()
+    const content = (hidden: boolean) => {
+      const surface = (
+        <NativeTestRoot>
+          <NativeSuspendedSurface hidden={hidden}>
+            <NativeRichEditor
+              document={importMarkdown("Initial private body")}
+              readOnly={false}
+              onChange={changed}
+            />
+          </NativeSuspendedSurface>
+        </NativeTestRoot>
+      )
+      return strict ? <StrictMode>{surface}</StrictMode> : surface
+    }
+    const mounted = render(content(false))
+    const textbox = await screen.findByRole("textbox", {
+      name: "Document content",
+    })
+    const retained = (textbox as HTMLElement & { editor: Editor }).editor
+    expect(retained.state.doc.textContent).toBe("Initial private body")
+    await act(async () => {
+      const paragraph = textbox.querySelector("p")!
+      paragraph.textContent = "Unsaved private draft"
+      fireEvent.input(paragraph, {
+        inputType: "insertText",
+        data: "Unsaved private draft",
+      })
+    })
+    expect(retained.state.doc.textContent).toBe("Unsaved private draft")
+    expect(undoDepth(retained.state)).toBeGreaterThan(0)
+    await act(async () => mounted.rerender(content(true)))
+    expect(textbox).not.toBeVisible()
+    expect(retained.state.doc.textContent).toBe("Unsaved private draft")
+    await act(async () => mounted.rerender(content(false)))
+    const resumed = await screen.findByRole("textbox", {
+      name: "Document content",
+    })
+    expect(
+      (resumed as HTMLElement & { editor: Editor }).editor === retained
+    ).toBe(true)
+    expect(resumed).toHaveTextContent("Unsaved private draft")
+    await act(async () => mounted.rerender(content(true)))
+    changed.mockClear()
+    mounted.unmount()
+    await waitFor(() => expect(retained.state.doc.textContent).toBe(""))
+    expect(retained.state.plugins).toHaveLength(0)
+    expect(undoDepth(retained.state)).toBe(0)
+    const retainedBlockNote = retained.state.schema.cached.blockNoteEditor
+    expect(JSON.stringify(retainedBlockNote.document)).not.toContain("private")
+    expect(
+      String(JSON.stringify(retainedBlockNote.options.initialContent))
+    ).not.toContain("private")
+    expect(JSON.stringify(retained.options.content)).not.toContain(
+      "Initial private body"
+    )
+    expect(JSON.stringify(retained.options.content)).not.toContain(
+      "Unsaved private draft"
+    )
+    expect(
+      (window as Window & { ProseMirror?: Editor }).ProseMirror === retained
+    ).toBe(false)
+    expect(changed).not.toHaveBeenCalled()
+  }
+)
 
 it("matches the shell's resolved theme and keeps the same draft when theme changes", async () => {
   const onChange = vi.fn()

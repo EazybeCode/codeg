@@ -3,8 +3,10 @@
 Task 3 implementation, September 12, 2026. This document distinguishes automated
 checks from the controller's actual synthetic browser and isolated recovery checks.
 Scoped automated checks, actual synthetic browser acceptance and mixed-format
-recovery passed, with the limitations below. Scoped task re-review is clean;
-whole-plan review remains a release gate. No deployment or real provider-account
+recovery passed, with the limitations below. Task-level re-review was clean;
+whole-plan review's editor-lifetime correction passed browser verification and
+awaits its scoped final re-review.
+No deployment or real provider-account
 authorization is included.
 
 ## Formats and operation
@@ -306,6 +308,50 @@ The controller closed its browser and normally stopped PTY 19567 (exit 0);
 read-only checks confirmed schema count 0 and absence of the owned source root.
 Only synthetic fixture data was cleaned up. This resolves the earlier harness
 step without source changes; whole-rich-plan review follows, not public release.
+
+### Whole-plan review: private editor lifetime
+
+Whole-plan review found that BlockNote 0.54.2's React creation hook publishes a
+private Tiptap handle to `window.ProseMirror`. Its default unmount and even Tiptap
+destroy retain the cached document; DOM disappearance alone therefore did not
+release private editor data after logout or revocation. This was not an HTTP
+authorization bypass. Neev now creates its editor directly without that hook and
+without ever storing private initial text in constructor content options.
+
+An ownership-local host observer preserves the existing Activity/StrictMode
+lifetime: ref/effect detachment while the host remains connected retains the same
+dirty editor. Actual removal, including unmount while already hidden, disconnects
+the observer and replaces the owned cached document/history with empty state,
+empties retained content options/cache/render references, and destroys the editor.
+It never assigns or deletes another editor's debug global. Cleanup emits no draft
+transaction. The observer watches child-list changes to detect ancestor removal;
+it releases its host closure after disconnect. This is bounded application-state
+cleanup, not forensic heap erasure or erasure of previously captured external copies.
+
+Behavioral RED reproduced seven failures before the fix. Focused widget,
+controller, native-content and suspended-surface suites then passed 81/81 tests
+in four files (7.09 seconds). Tests cover retained current text, initial content,
+populated then cleared undo history, unrelated editor/global ownership,
+StrictMode hide/resume, removal while hidden, logout, navigation and 403/404.
+Typecheck, scoped ESLint and diff check exited 0; the existing Vite CJS warning
+remains. No native/Rust or dependency changes were made.
+
+Fresh static build passed: Next 16.3.4, 4.0-second compilation, 5.6-second
+TypeScript, 34 routes. `out/index.html`: 310,449 bytes, SHA256
+`6a82ad19c3473674aa9e259717827032c2ea30c757458490fcd7983493c40228`,
+mtime `2026-09-12T11:45:44.374Z`. The controller's fresh synthetic browser check
+against this artifact passed: a newly created private document was actually typed
+and `window.ProseMirror` was absent. A JSHandle retained the real contenteditable's
+`element.editor`, initially containing `invented retained private state` with
+107 plugins. After native Sign out and the sign-in UI appearing, that handle had
+empty document text, zero plugins and an empty constructor-content document
+structure; the debug global was absent and visible editor count was zero.
+
+Controller independently reran the real widget/controller suites: 40/40 passed,
+exit 0, 4.43 seconds. Activity hide/resume is automated test evidence only, not
+browser-certified behavior. The one scoped final whole-plan re-review follows;
+no further source/build changes were made for this evidence update. No public
+release is claimed.
 
 ## Recovery and rollback
 

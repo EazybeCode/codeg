@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
+import type { Editor } from "@tiptap/core"
 import { NativeDocument } from "./native-document"
 import { NativeBoundary } from "./native-boundary"
 import {
@@ -400,7 +401,8 @@ it.each(["navigation", "logout"])(
       </NativeTestRoot>
     )
     const view = render(renderDocument(resource))
-    await editRich("Unsaved secret")
+    const richTextbox = await editRich("Unsaved secret")
+    const retained = (richTextbox as HTMLElement & { editor: Editor }).editor
     await user.click(screen.getByRole("button", { name: "Save" }))
     await waitFor(() => expect(release).toBeDefined())
     if (action === "navigation") {
@@ -421,6 +423,14 @@ it.each(["navigation", "logout"])(
     expect(changed).not.toHaveBeenCalled()
     expect(screen.queryByText("Unsaved secret")).toBeNull()
     expect(screen.queryByText("Saved")).toBeNull()
+    await waitFor(() => expect(retained.state.doc.textContent).toBe(""))
+    expect(retained.state.plugins).toHaveLength(0)
+    expect(JSON.stringify(retained.options.content)).not.toContain(
+      "Private rich"
+    )
+    expect(
+      (window as Window & { ProseMirror?: Editor }).ProseMirror === retained
+    ).toBe(false)
   }
 )
 
@@ -729,6 +739,13 @@ it.each([
         await screen.findByRole("textbox", { name: "Document content" }),
         " secret draft"
       )
+    const retained = rich
+      ? (
+          screen.getByRole("textbox", {
+            name: "Document content",
+          }) as HTMLElement & { editor: Editor }
+        ).editor
+      : null
     await user.click(screen.getByRole("button", { name: "History" }))
     const comparisonTrigger = screen.getByRole("button", {
       name: "Compare revision 1",
@@ -749,6 +766,14 @@ it.each([
       screen.queryByRole("button", { name: /Export saved Markdown/ })
     ).toBeNull()
     expect(screen.queryByText("Sagar")).toBeNull()
+    if (retained) {
+      await waitFor(() => expect(retained.state.doc.textContent).toBe(""))
+      expect(retained.state.plugins).toHaveLength(0)
+      expect(JSON.stringify(retained.options.content)).not.toContain("seed")
+      expect(
+        (window as Window & { ProseMirror?: Editor }).ProseMirror === retained
+      ).toBe(false)
+    }
     expect(comparisonTrigger).not.toHaveFocus()
     expect(bootstraps).toBe(status === 403 ? 2 : 1)
     const count = calls
