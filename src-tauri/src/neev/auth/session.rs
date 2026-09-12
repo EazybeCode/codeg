@@ -552,18 +552,35 @@ pub(crate) async fn validate_csrf(
 pub(crate) async fn revoke(
     database: &DatabaseConnection,
     identity: &IdentityContext,
-    now: i64,
+    clock: &dyn crate::neev::clock::Clock,
 ) -> Result<(), AuthError> {
     let tx = db::begin(database).await?;
+    db::lock_admission_guard(&tx).await?;
     let account = lock_account(&tx, identity.user_id).await?;
     if account.auth_revision != identity.auth_revision {
         return Err(AuthError::Unauthorized);
     }
     let current = lock_session(&tx, &identity.session_id).await?;
+    let now = clock.now_unix();
     validate_session(&current, account.auth_revision, account.disabled, now)?;
     if current.user_id != identity.user_id || current.authenticated_at != identity.authenticated_at
     {
         return Err(AuthError::Unauthorized);
+    }
+    crate::neev::agents::recovery::invalidate_session_in_transaction(
+        &tx,
+        &identity.session_id,
+        clock,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::neev::agents::types::AgentError::Conflict => AuthError::Conflict,
+        crate::neev::agents::types::AgentError::InvalidInput => AuthError::Invalid,
+        _ => AuthError::Unavailable,
+    })?;
+    let now = clock.now_unix();
+    if now < 0 {
+        return Err(AuthError::Invalid);
     }
     let result = db::execute(
         &tx,
@@ -862,7 +879,9 @@ mod tests {
         let user = h::native_account(&database, "owner", "support@neev.so").await;
         let issued = issue_identity(&database, user, 1000).await.unwrap();
         let context = identity(&database, &issued.session, 1001).await.unwrap();
-        revoke(&database, &context, 1001).await.unwrap();
+        revoke(&database, &context, &h::TestClock::new(1001))
+            .await
+            .unwrap();
         assert_eq!(
             identity(&database, &issued.session, 1001).await.err(),
             Some(AuthError::Unauthorized)
@@ -904,7 +923,9 @@ mod tests {
                 )
                 .await;
             } else {
-                revoke(&database, &scoped_identity, 1004).await.unwrap();
+                revoke(&database, &scoped_identity, &h::TestClock::new(1004))
+                    .await
+                    .unwrap();
             }
             resume.wait().await;
             assert_eq!(task.await.unwrap().err(), Some(AuthError::Unauthorized));
@@ -930,8 +951,9 @@ mod tests {
         recheck(&tx, &context, 1003).await.unwrap();
         let other_database = database.clone();
         let revoke_context = context.identity.clone();
-        let task =
-            tokio::spawn(async move { revoke(&other_database, &revoke_context, 1004).await });
+        let task = tokio::spawn(async move {
+            revoke(&other_database, &revoke_context, &h::TestClock::new(1004)).await
+        });
         h::wait_for_postgres_lock(&admin, "%neev_accounts%FOR UPDATE%").await;
         tx.commit().await.unwrap();
         assert_eq!(task.await.unwrap(), Ok(()));

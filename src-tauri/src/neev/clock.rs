@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) trait Clock {
+pub(crate) trait Clock: Send + Sync {
     fn now_unix(&self) -> i64;
 }
 

@@ -205,7 +205,7 @@ pub(super) async fn logout(
     let now = state.clock.now_unix();
     let identity = session::identity(&state.database, token, now).await?;
     session::validate_csrf(&state.database, &identity, cookie_csrf, now).await?;
-    session::revoke(&state.database, &identity, now).await?;
+    session::revoke(&state.database, &identity, state.clock.as_ref()).await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
     cookies::clear_browser_state(response.headers_mut(), names);
     super::add_private_headers(&mut response);

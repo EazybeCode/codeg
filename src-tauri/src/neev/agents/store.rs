@@ -203,6 +203,41 @@ fn attempt_row(row: &QueryResult) -> Result<AttemptRow, AgentError> {
     Ok(result)
 }
 
+/// Stored ownership permits cleanup without manufacturing native member authority.
+pub(super) async fn lock_owned_connection(
+    tx: &DatabaseTransaction,
+    id: &str,
+    org_id: i32,
+    user_id: i32,
+) -> Result<Option<ConnectionRow>, AgentError> {
+    let sql = format!("SELECT id,org_id,user_id,provider,generation,state,account_label,checked_at,error_code,storage_handle FROM neev_agent_connections WHERE id=$1 AND org_id=$2 AND user_id=$3{}", lock_suffix(tx));
+    db::one(tx, &sql, vec![id.into(), org_id.into(), user_id.into()])
+        .await
+        .map_err(unavailable)?
+        .map(|row| connection(&row))
+        .transpose()
+}
+
+pub(super) async fn stored_ownership<C: ConnectionTrait>(
+    database: &C,
+    connection_id: &str,
+) -> Result<Option<(i32, i32)>, AgentError> {
+    db::one(
+        database,
+        "SELECT org_id,user_id FROM neev_agent_connections WHERE id=$1",
+        vec![connection_id.into()],
+    )
+    .await
+    .map_err(unavailable)?
+    .map(|row| {
+        Ok((
+            row.try_get("", "org_id").map_err(unavailable)?,
+            row.try_get("", "user_id").map_err(unavailable)?,
+        ))
+    })
+    .transpose()
+}
+
 fn operation_row(row: &QueryResult) -> Result<OperationRow, AgentError> {
     let result = OperationRow {
         id: row.try_get("", "id").map_err(unavailable)?,
