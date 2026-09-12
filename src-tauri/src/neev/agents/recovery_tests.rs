@@ -566,8 +566,14 @@ async fn postgres_admission_serializes_starts_replay_quota_and_cleanup_claims() 
         }
         h::wait_for_postgres_locks(&admin, "%neev_schema_version%FOR UPDATE%", 2).await;
         blocker.commit().await.unwrap();
-        let a = tasks.remove(0).await.unwrap();
-        let b = tasks.remove(0).await.unwrap();
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            (
+                tasks.remove(0).await.unwrap(),
+                tasks.remove(0).await.unwrap(),
+            )
+        })
+        .await
+        .expect("start and replay contenders must finish after admission release");
         if same_key {
             match (a, b) {
                 (Ok(BeginOutcome::Pending(a)), Ok(BeginOutcome::Pending(b))) => {
@@ -630,8 +636,14 @@ async fn postgres_admission_serializes_starts_replay_quota_and_cleanup_claims() 
     }
     h::wait_for_postgres_locks(&admin, "%neev_schema_version%FOR UPDATE%", 2).await;
     blocker.commit().await.unwrap();
-    let a = tasks.remove(0).await.unwrap();
-    let b = tasks.remove(0).await.unwrap();
+    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        (
+            tasks.remove(0).await.unwrap(),
+            tasks.remove(0).await.unwrap(),
+        )
+    })
+    .await
+    .expect("quota contenders must finish after admission release");
     assert!(matches!(
         (&a, &b),
         (Ok(BeginOutcome::Pending(_)), Err(AgentError::RateLimited))
@@ -657,8 +669,13 @@ async fn postgres_admission_serializes_starts_replay_quota_and_cleanup_claims() 
     let second = tokio::spawn(async move { recovery::claim_cleanup(&state, &op).await });
     h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
     blocker.commit().await.unwrap();
-    assert!(first.await.unwrap().unwrap().is_some());
-    assert!(second.await.unwrap().unwrap().is_none());
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        (first.await.unwrap(), second.await.unwrap())
+    })
+    .await
+    .expect("cleanup claim contenders must finish after connection release");
+    assert!(first.unwrap().is_some());
+    assert!(second.unwrap().is_none());
     drop(h);
     h::cleanup_postgres(database, admin, schema).await;
 }
