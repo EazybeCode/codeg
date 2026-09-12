@@ -6,16 +6,146 @@ use super::{
 };
 use crate::neev::{db, test_support as h};
 use futures::FutureExt;
-use sea_orm::{ConnectionTrait, DatabaseConnection};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, TransactionTrait};
 
 const AGENT_TABLES: [&str; 3] = [
     "neev_agent_connections",
     "neev_agent_attempts",
     "neev_agent_operations",
 ];
+const CONTENT_TABLES: [&str; 5] = [
+    "neev_resources",
+    "neev_messages",
+    "neev_document_revisions",
+    "neev_content_usage",
+    "neev_content_leases",
+];
+const CONTENT_INDEXES: [&str; 2] = ["neev_resources_node_kind", "neev_resources_origin"];
+const HISTORICAL_ORIGIN: &str = "(origin_chat_id IS NULL AND origin_kind IS NULL) OR (origin_chat_id IS NOT NULL AND kind='document' AND origin_kind='chat')";
+
+async fn reconstruct_sqlite_v3(tx: &sea_orm::DatabaseTransaction) {
+    let mut tables = Vec::new();
+    for name in CONTENT_TABLES {
+        let sql = db::one(
+            tx,
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=$1",
+            vec![name.into()],
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<String>("", "sql")
+        .unwrap();
+        tables.push((name, sql));
+    }
+    let mut indexes = Vec::new();
+    for name in CONTENT_INDEXES {
+        indexes.push(
+            db::one(
+                tx,
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=$1",
+                vec![name.into()],
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<String>("", "sql")
+            .unwrap(),
+        );
+    }
+    for name in CONTENT_TABLES.iter().rev() {
+        db::execute(tx, &format!("DROP TABLE {name}"), vec![])
+            .await
+            .unwrap();
+    }
+    for (name, sql) in tables {
+        let sql = if name == "neev_resources" {
+            let historical = sql.replace(
+                "origin_chat_id IS NOT NULL AND origin_kind IS NOT NULL AND",
+                "origin_chat_id IS NOT NULL AND",
+            );
+            assert_ne!(historical, sql, "SQLite v3 origin CHECK was not weakened");
+            historical
+        } else {
+            sql
+        };
+        db::execute(tx, &sql, vec![]).await.unwrap();
+    }
+    for sql in indexes {
+        db::execute(tx, &sql, vec![]).await.unwrap();
+    }
+}
+
+async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
+    let constraints = tx
+        .query_all(db::statement(
+            tx,
+            "SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() AND t.relname='neev_resources' AND c.contype='c' AND pg_get_constraintdef(c.oid) LIKE '%origin_chat_id%'",
+            vec![],
+        ))
+        .await
+        .unwrap();
+    assert!(
+        constraints.len() >= 2,
+        "fresh native5 must contain creation and hardening origin CHECKs"
+    );
+    for row in constraints {
+        let name = row.try_get::<String>("", "conname").unwrap();
+        assert!(
+            !name.is_empty()
+                && name.len() <= 63
+                && name
+                    .bytes()
+                    .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric()),
+            "unexpected owned constraint identifier"
+        );
+        db::execute(
+            tx,
+            &format!("ALTER TABLE neev_resources DROP CONSTRAINT \"{name}\""),
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    db::execute(
+        tx,
+        &format!("ALTER TABLE neev_resources ADD CONSTRAINT neev_resources_valid_origin_v3 CHECK ({HISTORICAL_ORIGIN})"),
+        vec![],
+    )
+    .await
+    .unwrap();
+}
+
+async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
+    if schema_version == 5 {
+        return;
+    }
+    let tx = database.begin().await.unwrap();
+    for table in AGENT_TABLES.iter().rev() {
+        db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
+    if schema_version == 3 {
+        match database.get_database_backend() {
+            DbBackend::Sqlite => reconstruct_sqlite_v3(&tx).await,
+            DbBackend::Postgres => reconstruct_postgres_v3(&tx).await,
+            _ => panic!("unsupported test database"),
+        }
+    }
+    db::execute(
+        &tx,
+        "UPDATE neev_schema_version SET version=$1",
+        vec![schema_version.into()],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
 
 // Catches omission of historical revisions, trusting corrupt bytes, and cross-org lookup.
 async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
+    downgrade_snapshot(&database, schema_version).await;
     let h = Harness::new(database).await;
     let doc = resources::create(
         &h.state,
@@ -24,6 +154,27 @@ async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
     )
     .await
     .unwrap();
+    let historical_null_shape = db::execute(
+        &h.state.database,
+        "UPDATE neev_resources SET origin_chat_id='missing-source',origin_kind=NULL WHERE org_id=$1 AND id=$2",
+        vec![h.creator.org_id.into(), doc.id.clone().into()],
+    )
+    .await;
+    if schema_version == 3 {
+        assert!(
+            historical_null_shape.is_ok(),
+            "schema3 must retain its historical SQL-NULL origin behavior"
+        );
+        db::execute(
+            &h.state.database,
+            "UPDATE neev_resources SET origin_chat_id=NULL,origin_kind=NULL WHERE org_id=$1 AND id=$2",
+            vec![h.creator.org_id.into(), doc.id.clone().into()],
+        )
+        .await
+        .unwrap();
+    } else {
+        assert!(historical_null_shape.is_err());
+    }
     for (head, text) in [(0, "old secret"), (1, "new secret")] {
         documents::save(
             &h.state,
@@ -35,20 +186,6 @@ async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
                 expected_auth_revision: 1,
                 markdown: text.into(),
             },
-        )
-        .await
-        .unwrap();
-    }
-    if schema_version != 5 {
-        for table in AGENT_TABLES.iter().rev() {
-            db::execute(&h.state.database, &format!("DROP TABLE {table}"), vec![])
-                .await
-                .unwrap();
-        }
-        db::execute(
-            &h.state.database,
-            "UPDATE neev_schema_version SET version=$1",
-            vec![schema_version.into()],
         )
         .await
         .unwrap();
@@ -124,9 +261,14 @@ async fn postgres_restored_bytes() {
         let outcome = std::panic::AssertUnwindSafe(restored_bytes(db.clone(), version))
             .catch_unwind()
             .await;
-        h::cleanup_postgres(db, admin, schema).await;
-        if let Err(panic) = outcome {
-            std::panic::resume_unwind(panic);
+        match outcome {
+            Ok(()) => h::cleanup_postgres(db, admin, schema).await,
+            Err(panic) => {
+                eprintln!("retained failed backup owned schema: {schema}");
+                drop(db);
+                drop(admin);
+                std::panic::resume_unwind(panic);
+            }
         }
     }
 }

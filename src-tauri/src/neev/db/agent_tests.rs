@@ -1777,9 +1777,14 @@ async fn postgres_agent_constraints_and_ownership_are_enforced() {
     })
     .catch_unwind()
     .await;
-    h::cleanup_postgres(db, admin, schema).await;
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic);
+    match outcome {
+        Ok(()) => h::cleanup_postgres(db, admin, schema).await,
+        Err(panic) => {
+            eprintln!("retained failed agent contract owned schema: {schema}");
+            drop(db);
+            drop(admin);
+            std::panic::resume_unwind(panic);
+        }
     }
 }
 
@@ -1809,9 +1814,14 @@ async fn postgres_exact_native_versions_upgrade_without_data_loss() {
         })
         .catch_unwind()
         .await;
-        h::cleanup_postgres(db, admin, schema).await;
-        if let Err(panic) = outcome {
-            std::panic::resume_unwind(panic);
+        match outcome {
+            Ok(()) => h::cleanup_postgres(db, admin, schema).await,
+            Err(panic) => {
+                eprintln!("retained failed agent upgrade owned schema: {schema}");
+                drop(db);
+                drop(admin);
+                std::panic::resume_unwind(panic);
+            }
         }
     }
 }
