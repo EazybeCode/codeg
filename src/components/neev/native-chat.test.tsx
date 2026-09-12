@@ -193,18 +193,20 @@ it.each([403, 404, 401])(
       calls = 0
     const mock = mockNativeSession(undefined, {
       "GET /api/neev/session": () =>
-        json(
-          revoked && status === 401
-            ? {
-                ...orgSession,
-                organization: {
-                  id: 9,
-                  name: "Other organization",
-                  avatarUrl: null,
-                },
-              }
-            : orgSession
-        ),
+        revoked && status === 403
+          ? json({ code: "unauthorized" }, 401)
+          : json(
+              revoked && status === 401
+                ? {
+                    ...orgSession,
+                    organization: {
+                      id: 9,
+                      name: "Other organization",
+                      avatarUrl: null,
+                    },
+                  }
+                : orgSession
+            ),
       [`GET /api/neev/resources/${resource.id}`]: () => {
         calls++
         return revoked

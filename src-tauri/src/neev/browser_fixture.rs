@@ -329,7 +329,7 @@ struct Fixture {
     database: sea_orm::DatabaseConnection,
     admin: sea_orm::DatabaseConnection,
     schema: String,
-    _document_roots: Vec<tempfile::TempDir>,
+    document_root: tempfile::TempDir,
 }
 impl Fixture {
     async fn start() -> Self {
@@ -368,8 +368,10 @@ impl Fixture {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
+        let document_root = test_support::owned_document_root();
+        let document_root_path = document_root.path().canonicalize().unwrap();
+        let blobs = Arc::new(BlobStore::open(&document_root_path).unwrap());
         let mut prepared = Vec::new();
-        let mut document_roots = Vec::new();
         for (index, listener) in [a, b].into_iter().enumerate() {
             let mut values = HashMap::from([
                 ("NEEV_APP_ORIGIN".into(), origins[index].clone()),
@@ -393,15 +395,9 @@ impl Fixture {
                     .display()
                     .to_string(),
             );
-            let document_root = test_support::owned_document_root();
             values.insert(
                 "NEEV_DOCUMENT_ROOT".into(),
-                document_root
-                    .path()
-                    .canonicalize()
-                    .unwrap()
-                    .display()
-                    .to_string(),
+                document_root_path.display().to_string(),
             );
             let config = Config::from_values(&values).unwrap();
             let clock = Arc::new(SystemClock);
@@ -413,7 +409,6 @@ impl Fixture {
             )
             .unwrap();
             prepared.push((listener, config, clock, google));
-            document_roots.push(document_root);
         }
         // Resolve fallible local configuration before creating owned DB resources.
         let (database, admin, schema) = test_support::postgres_database().await;
@@ -427,7 +422,6 @@ impl Fixture {
                 .unwrap()
         })];
         for (listener, config, clock, google) in prepared {
-            let blobs = Arc::new(BlobStore::open(&config.document_root).unwrap());
             let oauth = oauth::Service::with_google(
                 database.clone(),
                 config.encryption_key,
@@ -445,7 +439,7 @@ impl Fixture {
             let state = Arc::new(ServerState {
                 database: database.clone(),
                 config,
-                blobs,
+                blobs: blobs.clone(),
                 clock,
                 auth_limit: Arc::new(tokio::sync::Semaphore::new(32)),
                 oauth,
@@ -478,7 +472,7 @@ impl Fixture {
             database,
             admin,
             schema,
-            _document_roots: document_roots,
+            document_root,
         }
     }
     async fn shutdown(mut self) {
@@ -524,6 +518,15 @@ impl Drop for Fixture {
 async fn browser_acceptance_driver() {
     let fixture = Fixture::start().await;
     println!("OWNED SYNTHETIC SCHEMA: {}", fixture.schema);
+    println!(
+        "OWNED SYNTHETIC DOCUMENT ROOT: {}",
+        fixture
+            .document_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .display()
+    );
     println!("SYNTHETIC PARTICIPANT 1: {}", fixture.origins[0]);
     println!("SYNTHETIC PARTICIPANT 2: {}", fixture.origins[1]);
     println!("SYNTHETIC CAPTURE INBOX: {}/inbox", fixture.issuer.origin);
@@ -728,6 +731,7 @@ impl HttpParticipant {
             client: reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(5))
                 .build()
                 .unwrap(),
             origin,
@@ -974,4 +978,436 @@ async fn native_browser_http_round_trip_tenant_denial_and_link_conflict() {
     .contains(&p.as_str())));
     fixture.shutdown().await;
     result.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly isolated PostgreSQL; included by full native gate"]
+async fn native_browser_http_content_collaboration_conflict_restore_and_revocation() {
+    let fixture = Fixture::start().await;
+    // Always stop tasks/close pools before rethrowing an assertion failure.
+    let origins = fixture.origins.clone();
+    let capture = fixture.issuer.capture.clone();
+    let owned_document_root = fixture.document_root.path().to_path_buf();
+    let result = tokio::spawn(async move {
+        let mut founder = HttpParticipant::new(origins[0].clone());
+        let mut member = HttpParticipant::new(origins[1].clone());
+        assert_eq!(founder.login(0, false).await, 303);
+        assert_eq!(member.login(1, false).await, 303);
+        let founder_session = founder.bootstrap().await;
+        let member_session = member.bootstrap().await;
+
+        let response = founder
+            .request(
+                reqwest::Method::POST,
+                "/api/neev/organizations",
+                Some(serde_json::json!({
+                    "requestId": uuid::Uuid::new_v4().to_string(),
+                    "name": "Synthetic native content"
+                })),
+            )
+            .await;
+        assert_eq!(response.status(), 201);
+        let organization: serde_json::Value = response.json().await.unwrap();
+        let organization_id = organization["organization"]["id"].as_i64().unwrap();
+        assert_eq!(
+            founder
+                .request(
+                    reqwest::Method::POST,
+                    "/api/neev/organizations/select",
+                    Some(serde_json::json!({"organizationId": organization_id})),
+                )
+                .await
+                .status(),
+            200
+        );
+        founder.bootstrap().await;
+        assert_eq!(
+            founder
+                .request(
+                    reqwest::Method::POST,
+                    "/api/neev/organization/invitations",
+                    Some(serde_json::json!({
+                        "email": "recipient2@example.test",
+                        "role": "member",
+                        "requestId": uuid::Uuid::new_v4().to_string()
+                    })),
+                )
+                .await
+                .status(),
+            201
+        );
+        let invitation = capture.latest_fragment().await;
+        assert_eq!(
+            member
+                .request(
+                    reqwest::Method::POST,
+                    "/api/neev/invitations/accept",
+                    Some(serde_json::json!({
+                        "token": invitation,
+                        "confirmedOrgId": organization_id
+                    })),
+                )
+                .await
+                .status(),
+            200
+        );
+        assert_eq!(
+            member
+                .request(
+                    reqwest::Method::POST,
+                    "/api/neev/organizations/select",
+                    Some(serde_json::json!({"organizationId": organization_id})),
+                )
+                .await
+                .status(),
+            200
+        );
+        member.bootstrap().await;
+
+        let response = founder
+            .request(
+                reqwest::Method::POST,
+                "/api/neev/nodes",
+                Some(serde_json::json!({
+                    "parentId": null,
+                    "kind": "project",
+                    "name": "Shared project"
+                })),
+            )
+            .await;
+        assert_eq!(response.status(), 201);
+        let node: serde_json::Value = response.json().await.unwrap();
+        let node_id = node["id"].as_i64().unwrap();
+
+        let response = founder
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/neev/nodes/{node_id}/chats"),
+                Some(serde_json::json!({
+                    "title": "Private planning",
+                    "requestId": uuid::Uuid::new_v4().to_string()
+                })),
+            )
+            .await;
+        assert_eq!(response.status(), 201);
+        let chat: serde_json::Value = response.json().await.unwrap();
+        let chat_id = chat["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            member
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/api/neev/resources/{chat_id}"),
+                    None,
+                )
+                .await
+                .status(),
+            404
+        );
+        let response = founder
+            .request(
+                reqwest::Method::PATCH,
+                &format!("/api/neev/resources/{chat_id}"),
+                Some(serde_json::json!({
+                    "expectedAuthRevision": "1",
+                    "title": "Organization planning",
+                    "nodeId": node_id,
+                    "visibility": "organization",
+                    "archived": false
+                })),
+            )
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["authRevision"],
+            "2"
+        );
+
+        let first_message = founder
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/neev/chats/{chat_id}/messages"),
+                Some(serde_json::json!({
+                    "requestId": uuid::Uuid::new_v4().to_string(),
+                    "expectedAuthRevision": "2",
+                    "body": "Founder message"
+                })),
+            )
+            .await;
+        assert_eq!(first_message.status(), 201);
+        assert_eq!(
+            first_message.json::<serde_json::Value>().await.unwrap()["authorId"],
+            founder_session["user"]["id"]
+        );
+        let shared_message = member
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/neev/chats/{chat_id}/messages"),
+                Some(serde_json::json!({
+                    "requestId": uuid::Uuid::new_v4().to_string(),
+                    "expectedAuthRevision": "2",
+                    "body": "Member message"
+                })),
+            )
+            .await;
+        assert_eq!(shared_message.status(), 201);
+        assert_eq!(
+            shared_message.json::<serde_json::Value>().await.unwrap()["authorId"],
+            member_session["user"]["id"]
+        );
+        let messages = founder
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/neev/chats/{chat_id}/messages"),
+                None,
+            )
+            .await;
+        assert_eq!(messages.status(), 200);
+        let messages: serde_json::Value = messages.json().await.unwrap();
+        assert_eq!(messages["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            messages["items"][0]["authorId"],
+            founder_session["user"]["id"]
+        );
+        assert_eq!(
+            messages["items"][1]["authorId"],
+            member_session["user"]["id"]
+        );
+
+        let response = founder
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/neev/nodes/{node_id}/documents"),
+                Some(serde_json::json!({
+                    "title": "Shared brief",
+                    "originChatId": chat_id,
+                    "requestId": uuid::Uuid::new_v4().to_string()
+                })),
+            )
+            .await;
+        assert_eq!(response.status(), 201);
+        let document: serde_json::Value = response.json().await.unwrap();
+        let document_id = document["id"].as_str().unwrap().to_owned();
+        let first_revision = founder
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/neev/documents/{document_id}/revisions"),
+                Some(serde_json::json!({
+                    "requestId": uuid::Uuid::new_v4().to_string(),
+                    "expectedContentRevision": "0",
+                    "expectedAuthRevision": "1",
+                    "markdown": "# Shared through one owned store"
+                })),
+            )
+            .await;
+        assert_eq!(first_revision.status(), 201);
+        assert_eq!(
+            first_revision.json::<serde_json::Value>().await.unwrap()["revision"],
+            "1"
+        );
+
+        // This write-on-listener-one/read-on-listener-two control fails when the
+        // two routers share PostgreSQL metadata but open distinct blob roots.
+        let shared_content = member
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/neev/documents/{document_id}/content?revision=1"),
+                None,
+            )
+            .await;
+        assert_eq!(shared_content.status(), 200);
+        assert_eq!(
+            shared_content.json::<serde_json::Value>().await.unwrap()["markdown"],
+            "# Shared through one owned store"
+        );
+
+        let second_revision = member
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/neev/documents/{document_id}/revisions"),
+                Some(serde_json::json!({
+                    "requestId": uuid::Uuid::new_v4().to_string(),
+                    "expectedContentRevision": "1",
+                    "expectedAuthRevision": "1",
+                    "markdown": "# Member edit"
+                })),
+            )
+            .await;
+        assert_eq!(second_revision.status(), 201);
+        assert_eq!(
+            second_revision.json::<serde_json::Value>().await.unwrap()["parentRevision"],
+            "1"
+        );
+        let stale_save_response = founder
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/neev/documents/{document_id}/revisions"),
+                Some(serde_json::json!({
+                    "requestId": uuid::Uuid::new_v4().to_string(),
+                    "expectedContentRevision": "1",
+                    "expectedAuthRevision": "1",
+                    "markdown": "# Preserved stale draft"
+                })),
+            )
+            .await;
+        assert_eq!(stale_save_response.status(), 409);
+        let restored_revision = founder
+            .request(
+                reqwest::Method::POST,
+                &format!("/api/neev/documents/{document_id}/restore"),
+                Some(serde_json::json!({
+                    "requestId": uuid::Uuid::new_v4().to_string(),
+                    "expectedContentRevision": "2",
+                    "expectedAuthRevision": "1",
+                    "sourceRevision": "1"
+                })),
+            )
+            .await;
+        assert_eq!(restored_revision.status(), 201);
+        let restored_revision: serde_json::Value = restored_revision.json().await.unwrap();
+        assert_eq!(restored_revision["revision"], "3");
+        assert_eq!(restored_revision["parentRevision"], "2");
+        assert_eq!(restored_revision["restoredFrom"], "1");
+
+        let session_name = http::cookies::CookieNames::for_preview(true).session;
+        let native_session = member.cookies.get(session_name).unwrap().clone();
+        let preflight_origin = member.origin.clone();
+        let preflight = tokio::task::spawn_blocking(move || {
+            let node = std::env::var_os("NEEV_TEST_NODE").unwrap_or_else(|| "node".into());
+            std::process::Command::new(node)
+                .arg(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../scripts/neev-content-preflight.mjs"),
+                )
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("NEEV_PREFLIGHT_ORIGIN", preflight_origin)
+                .env("NEEV_PREFLIGHT_SESSION", native_session)
+                .output()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            preflight.status.success(),
+            "fixture-owned native content preflight failed: {}",
+            String::from_utf8_lossy(&preflight.stderr)
+        );
+        assert!(preflight.stderr.is_empty());
+        let summary: serde_json::Value = serde_json::from_slice(&preflight.stdout).unwrap();
+        assert_eq!(
+            summary,
+            serde_json::json!({
+                "identityMode": "native",
+                "runtimeEnabled": false,
+                "organizationScoped": true,
+                "nodes": 1,
+                "chats": 1,
+                "documents": 1
+            })
+        );
+
+        let response = founder
+            .request(
+                reqwest::Method::PATCH,
+                &format!("/api/neev/resources/{chat_id}"),
+                Some(serde_json::json!({
+                    "expectedAuthRevision": "2",
+                    "title": "Private again",
+                    "nodeId": node_id,
+                    "visibility": "private",
+                    "archived": false
+                })),
+            )
+            .await;
+        assert_eq!(response.status(), 200);
+        let hidden_resource_response = member
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/neev/documents/{document_id}/content"),
+                None,
+            )
+            .await;
+        assert_eq!(hidden_resource_response.status(), 404);
+
+        let response = founder
+            .request(
+                reqwest::Method::PATCH,
+                &format!("/api/neev/resources/{chat_id}"),
+                Some(serde_json::json!({
+                    "expectedAuthRevision": "3",
+                    "title": "Organization again",
+                    "nodeId": node_id,
+                    "visibility": "organization",
+                    "archived": false
+                })),
+            )
+            .await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["authRevision"],
+            "4"
+        );
+        assert_eq!(
+            member
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/api/neev/documents/{document_id}/content"),
+                    None,
+                )
+                .await
+                .status(),
+            200
+        );
+
+        let response = founder
+            .request(reqwest::Method::GET, "/api/neev/organization/members", None)
+            .await;
+        assert_eq!(response.status(), 200);
+        let members: serde_json::Value = response.json().await.unwrap();
+        let member_id = members["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["user"]["id"] == member_session["user"]["id"])
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let response = founder
+            .request(
+                reqwest::Method::DELETE,
+                &format!("/api/neev/organization/members/{member_id}"),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(response.status(), 204);
+        assert_eq!(
+            member
+                .request(
+                    reqwest::Method::GET,
+                    &format!("/api/neev/resources/{chat_id}"),
+                    None,
+                )
+                .await
+                .status(),
+            403
+        );
+    });
+    let mut result = result;
+    let (result, timed_out, action_task_stopped) =
+        match tokio::time::timeout(Duration::from_secs(120), &mut result).await {
+            Ok(result) => (Some(result), false, true),
+            Err(_) => {
+                result.abort();
+                let action_task_stopped = result.await.is_err_and(|error| error.is_cancelled());
+                (None, true, action_task_stopped)
+            }
+        };
+    fixture.shutdown().await;
+    assert!(!owned_document_root.exists());
+    assert!(
+        action_task_stopped,
+        "bounded native content action task did not stop"
+    );
+    assert!(!timed_out, "bounded native content fixture timed out");
+    result.unwrap().unwrap();
 }

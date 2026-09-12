@@ -2,7 +2,10 @@
 
 September 11, 2026. Local synthetic acceptance is separate from real providers,
 hosted deployment and public product readiness. Runtime remains false. This
-milestone does not implement chats, document revisions or agent jobs.
+identity milestone preceded chats and document revisions; their separate,
+source-linked gate is recorded in
+[native content acceptance](neev-native-content-acceptance.md). Neither milestone
+implements agent jobs.
 
 ## Local review outcome
 
@@ -73,7 +76,9 @@ kill the process as ordinary cleanup. After abnormal exit, verify exact schema
 ownership before any cleanup; never broadly delete old schemas or volumes.
 
 Actual native routers listen on literal `127.0.0.1` and `[::1]` ephemeral ports,
-sharing one fresh schema/key. The synthetic issuer URL is `localhost`, bound to
+sharing one fresh schema/key and one fixture-owned document store. The driver
+prints the exact owned document root for the controller's content backup handoff,
+without printing credentials. The synthetic issuer URL is `localhost`, bound to
 loopback, so native host-only cookies do not reach it. Ports alone do not isolate
 cookies. Verify actual browser host/cookie behavior. Two hosts in one profile are
 synthetic participants, not two real users or independent browsers. Same-origin
@@ -118,6 +123,12 @@ Run `NEEV_PREFLIGHT_ORIGIN=<printed-app-origin> node scripts/neev-identity-prefl
 This credential-free read-only script accepts only explicit literal loopback HTTP
 origins with ports, refuses redirects/credentials/paths, checks native/runtime-false
 capabilities and legacy route absence.
+
+The authenticated content preflight is exercised inside the owned Rust HTTP
+regression by passing its synthetic session in memory through a cleared child
+environment. Do not inspect or copy a browser cookie to run it manually. See
+[native content acceptance](neev-native-content-acceptance.md) for its bounded
+contract and the controller-owned browser/restore checks.
 
 Required browser evidence: Google fixture login → company → project → folder →
 subfolder; email request → scanner GET → confirm; recipient two → explicit join;

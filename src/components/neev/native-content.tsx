@@ -163,7 +163,7 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       scope.stop()
     }
     setError(e)
-    auth.handleError(e)
+    auth.handleAuthorityError(e)
   }
   async function load(after: string | null = null) {
     if (after) loadedPages.current += 1
@@ -533,52 +533,70 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
         ) : (
           <>
             {selected.creatorId === auth.session?.user.id && (
-              <div
-                aria-label={t("resourceActions")}
-                className="flex flex-wrap gap-2"
-              >
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => open("rename")}
+              <div className="space-y-1">
+                <div
+                  aria-label={t("resourceActions")}
+                  className="flex flex-wrap gap-2"
                 >
-                  {t("rename")}
-                </Button>
-                {!selected.originChatId && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={saving}
+                    onClick={() => open("rename")}
+                  >
+                    {t("rename")}
+                  </Button>
+                  {!selected.originChatId && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={saving}
+                      aria-describedby={
+                        selected.visibility === "organization"
+                          ? "native-make-private-warning"
+                          : undefined
+                      }
+                      onClick={() =>
+                        selected.visibility === "private"
+                          ? open("share")
+                          : guardUpdate({ visibility: "private" })
+                      }
+                    >
+                      {t(
+                        selected.visibility === "private"
+                          ? "share"
+                          : "makePrivate"
+                      )}
+                    </Button>
+                  )}
                   <Button
                     variant="ghost"
                     size="sm"
                     disabled={saving}
                     onClick={() =>
-                      selected.visibility === "private"
-                        ? open("share")
-                        : guardUpdate({ visibility: "private" })
+                      guardUpdate({ archived: !selected.archived })
                     }
                   >
-                    {t(
-                      selected.visibility === "private"
-                        ? "share"
-                        : "makePrivate"
-                    )}
+                    {t(selected.archived ? "reopen" : "archive")}
                   </Button>
-                )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => guardUpdate({ archived: !selected.archived })}
-                >
-                  {t(selected.archived ? "reopen" : "archive")}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={saving}
-                  onClick={() => open("move")}
-                >
-                  {t("move")}
-                </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={saving}
+                    onClick={() => open("move")}
+                  >
+                    {t("move")}
+                  </Button>
+                </div>
+                {!selected.originChatId &&
+                  selected.visibility === "organization" && (
+                    <p
+                      id="native-make-private-warning"
+                      className="text-xs text-muted-foreground"
+                    >
+                      {t("makePrivateWarning")}
+                    </p>
+                  )}
               </div>
             )}
             {selected.kind === "chat" ? (

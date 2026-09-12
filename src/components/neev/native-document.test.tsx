@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeDocument } from "./native-document"
 import { NativeBoundary } from "./native-boundary"
-import { json, mockNativeSession, NativeTestRoot } from "./test-helpers"
+import {
+  json,
+  mockNativeSession,
+  NativeTestRoot,
+  orgSession,
+} from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
@@ -93,7 +98,10 @@ it.each(["content", "audience"])(
       screen.getByRole("button", { name: "Compare with latest" })
     ).toBeVisible()
     await user.click(screen.getByRole("button", { name: "Save" }))
-    expect(await screen.findByRole("alert")).toBeVisible()
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This document changed since you started editing. Your draft is preserved. Compare it with the latest version before saving again."
+    )
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/sign-in method/i)
     expect(editor).toHaveValue("my unsaved changes")
     expect(body).toEqual({
       requestId: expect.any(String),
@@ -267,13 +275,50 @@ it("compares escaped historical text and restores it as a new revision with retr
   expect(mock.unknown).toEqual([])
 })
 
+it("returns focus to the revision trigger when Escape closes comparison", async () => {
+  const oldText = "old text"
+  const old = {
+    ...revision,
+    revision: "2",
+    byteLength: String(new TextEncoder().encode(oldText).length),
+  }
+  const mock = mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}/content?revision=1`]: () =>
+      json({ revision, markdown: "seed" }),
+    [`GET ${path}/content?revision=2`]: () =>
+      json({ revision: old, markdown: oldText }),
+    [`GET ${path}/revisions`]: () =>
+      json({ items: [revision, old], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await screen.findByRole("textbox", { name: "Document content" })
+  await user.click(screen.getByRole("button", { name: "History" }))
+  const trigger = screen.getByRole("button", { name: "Compare revision 2" })
+  trigger.focus()
+  await user.keyboard("{Enter}")
+  expect(await screen.findByRole("dialog")).toBeVisible()
+  await user.keyboard("{Escape}")
+  expect(screen.queryByRole("dialog")).toBeNull()
+  expect(trigger).toHaveFocus()
+  expect(mock.unknown).toEqual([])
+})
+
 it.each([403, 404])(
   "erases loaded document, draft, and history on %s and stops polling",
   async (status) => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
     let revoked = false,
-      calls = 0
+      calls = 0,
+      bootstraps = 0
     const mock = mockNativeSession(undefined, {
+      "GET /api/neev/session": () => {
+        bootstraps += 1
+        return status === 403 && revoked
+          ? json({ code: "unauthorized" }, 401)
+          : json(orgSession)
+      },
       [`GET /api/neev/resources/${resource.id}`]: () => {
         calls++
         return revoked
@@ -292,12 +337,20 @@ it.each([403, 404])(
       " secret draft"
     )
     await user.click(screen.getByRole("button", { name: "History" }))
+    const comparisonTrigger = screen.getByRole("button", {
+      name: "Compare revision 1",
+    })
+    comparisonTrigger.focus()
+    await user.keyboard("{Enter}")
+    expect(await screen.findByRole("dialog")).toBeVisible()
     revoked = true
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000)
     })
     expect(screen.queryByDisplayValue("seed secret draft")).toBeNull()
     expect(screen.queryByText("Sagar")).toBeNull()
+    expect(comparisonTrigger).not.toHaveFocus()
+    expect(bootstraps).toBe(status === 403 ? 2 : 1)
     const count = calls
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15000)

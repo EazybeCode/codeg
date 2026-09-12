@@ -89,7 +89,7 @@ function Chat({
       onBack()
     }
     setError(e)
-    auth.handleError(e)
+    auth.handleAuthorityError(e)
   }
   async function refresh() {
     try {

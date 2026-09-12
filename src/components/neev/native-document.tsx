@@ -36,6 +36,16 @@ type Comparison = {
   revision: string
   history: boolean
 }
+function DocumentError({ error }: { error: unknown }) {
+  const t = useTranslations("NativeContent")
+  return error instanceof NativeClientError && error.kind === "conflict" ? (
+    <p role="alert" className="text-sm text-destructive">
+      {t("documentConflict")}
+    </p>
+  ) : (
+    <NativeError error={error} />
+  )
+}
 export function NativeDocument(props: Props) {
   const auth = useNativeAuth()
   if (
@@ -75,7 +85,11 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     dirty = useRef(false),
     sending = useRef(false),
     retry = useRef<SaveNativeDocumentInput | null>(null),
-    restoreRetry = useRef<RestoreNativeDocumentInput | null>(null)
+    restoreRetry = useRef<RestoreNativeDocumentInput | null>(null),
+    comparisonOpener = useRef<{
+      element: HTMLElement
+      scopeKey: string | null
+    } | null>(null)
   const scope = useNeevContentPoll({
     signal: auth.signal,
     scopeKey: auth.scopeKey,
@@ -118,6 +132,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       retry.current = null
       restoreRetry.current = null
       setRevisions([])
+      comparisonOpener.current = null
       setComparison(null)
       setReload(false)
       setRevoked(true)
@@ -126,7 +141,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       onBack()
     }
     setError(e)
-    auth.handleError(e)
+    auth.handleAuthorityError(e)
   }
   async function readBody(
     metadata: NativeResource
@@ -239,6 +254,11 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     }
   }
   async function compare(revision?: string) {
+    const opener = document.activeElement
+    comparisonOpener.current =
+      opener instanceof HTMLElement
+        ? { element: opener, scopeKey: auth.scopeKey }
+        : null
     setBusy(true)
     setError(null)
     try {
@@ -395,7 +415,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
             <p role="status">{n("loading")}</p>
           ) : (
             <>
-              <NativeError error={error} />
+              <DocumentError error={error} />
               <Button
                 onClick={() => {
                   setLoading(true)
@@ -474,7 +494,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
               {saved ? t("saved") : dirty.current ? t("unsaved") : ""}
             </span>
           </div>
-          <NativeError error={error} />
+          <DocumentError error={error} />
           {(latest.contentRevision !== base.current.content ||
             latest.authRevision !== base.current.auth ||
             (error instanceof NativeClientError &&
@@ -563,7 +583,24 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
           if (!open && !saving) setComparison(null)
         }}
       >
-        <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-3xl">
+        <DialogContent
+          className="max-h-[85dvh] overflow-y-auto sm:max-w-3xl"
+          onCloseAutoFocus={(event) => {
+            const opener = comparisonOpener.current
+            comparisonOpener.current = null
+            if (
+              opener &&
+              opener.scopeKey === auth.scopeKey &&
+              auth.status === "authenticated" &&
+              opener.element.isConnected &&
+              !opener.element.matches(":disabled") &&
+              !opener.element.closest("[inert]")
+            ) {
+              event.preventDefault()
+              opener.element.focus()
+            }
+          }}
+        >
           <DialogTitle>
             {comparison?.history
               ? t("compareRevision", { revision: comparison.revision })
@@ -590,7 +627,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
               </pre>
             </div>
           </div>
-          <NativeError error={error} />
+          <DocumentError error={error} />
           <div className="flex flex-wrap gap-2">
             <Button
               variant="ghost"

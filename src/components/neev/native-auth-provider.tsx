@@ -37,6 +37,7 @@ interface NativeAuth {
   logout: () => Promise<void>
   changed: () => Promise<void>
   handleError: (error: unknown) => void
+  handleAuthorityError: (error: unknown) => void
 }
 const Context = createContext<NativeAuth | null>(null)
 export function useNativeAuth() {
@@ -229,6 +230,16 @@ export function NativeAuthProvider({
     },
     [refresh]
   )
+  const handleAuthorityError = useCallback(
+    (error: unknown) => {
+      if (
+        error instanceof NativeClientError &&
+        (error.kind === "unauthorized" || error.kind === "forbidden")
+      )
+        void refresh()
+    },
+    [refresh]
+  )
   useEffect(() => {
     mounted.current = true
     void refresh()
@@ -279,6 +290,7 @@ export function NativeAuthProvider({
       logout,
       changed,
       handleError,
+      handleAuthorityError,
     }),
     [
       status,
@@ -291,6 +303,7 @@ export function NativeAuthProvider({
       logout,
       changed,
       handleError,
+      handleAuthorityError,
     ]
   )
   return <Context.Provider value={value}>{children}</Context.Provider>

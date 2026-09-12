@@ -10,12 +10,14 @@ import {
   orgSession,
 } from "./test-helpers"
 const viewport = vi.hoisted(() => ({ mobile: false }))
+const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }))
 vi.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => viewport.mobile }))
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
+  useRouter: () => router,
 }))
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.clearAllMocks()
   viewport.mobile = false
 })
 it("hides and disables an open workspace menu until visibility auth is revalidated", async () => {
@@ -81,6 +83,46 @@ it("shows the person and organization without GitHub or chat controls", async ()
     screen.queryByRole("button", { name: "New chat" })
   ).not.toBeInTheDocument()
   expect(screen.getByText("Agent chats are being enabled")).toBeVisible()
+  expect(mock.unknown).toEqual([])
+})
+
+it("clears the organization tree when a foreground content 403 exposes revoked membership", async () => {
+  let bootstraps = 0
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/session": () =>
+      ++bootstraps === 1
+        ? json(orgSession)
+        : json({ code: "unauthorized" }, 401),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 4,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Revoked project",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/4/chats": () => json({ code: "forbidden" }, 403),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  await user.click(
+    await screen.findByRole("button", { name: "Revoked project" })
+  )
+  await waitFor(() => expect(bootstraps).toBe(2))
+  await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"))
+  expect(screen.queryByText("Neev demo")).toBeNull()
+  expect(screen.queryByText("Revoked project")).toBeNull()
+  expect(screen.queryByRole("button", { name: "New project" })).toBeNull()
   expect(mock.unknown).toEqual([])
 })
 

@@ -187,6 +187,13 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
       })
       expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
     }
+    if (action === "Make private") {
+      expect(
+        screen.getByRole("button", { name: "Make private" })
+      ).toHaveAccessibleDescription(
+        "Making this private blocks future access, but copies that people already downloaded cannot be recalled."
+      )
+    }
     await visibilityActions.click(screen.getByRole("button", { name: action }))
     const dialog = screen.getByRole("dialog")
     revalidating = true
