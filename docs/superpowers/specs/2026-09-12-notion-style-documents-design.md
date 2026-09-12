@@ -1,9 +1,11 @@
 # Neev Notion-style documents
 
 Date:2026-09-12. Owner approved the BlockNote/editor-storage direction in
-conversation. This written refinement is pending owner review; no editor code or
-dependency has been added. Existing native content/identity authorization remains
-binding. This extends document editing, not the agent lifecycle plan.
+conversation and subsequently requested continuous completion after the release
+status explicitly identified BlockNote as unimplemented. Proceed with this
+existing scope; no new live-collaboration or third-party-content features are
+inferred. Existing native content/identity authorization remains binding.
+This extends document editing, not the agent lifecycle plan.
 
 ## Product experience
 
