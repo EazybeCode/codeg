@@ -74,12 +74,15 @@ direct and gateway paths both use `@ai-sdk/provider-utils` 4.0.33, and
 `next-intl` 4.9.2 keeps its documented Next 16 / React 19 peer support. Its
 declared compatible child ranges resolve `icu-minify` and `use-intl` 4.14.4.
 
-The other paths use package-major or exact-parent floors already admitted by
-their parents' declared ranges:
+The other paths use package-major or exact-parent floors. Each accepted
+resolution is admitted by its parent's declared range except Monaco's
+DOMPurify child: `monaco-editor` 0.55.1 exact-pins 3.2.7, and the workspace
+intentionally overrides that exact pin with the same-major patched 3.4.13
+security floor.
 
 | Package | Task 2 resolution | Accepted resolution | Parent chain and official evidence |
 | --- | --- | --- | --- |
-| `dompurify` | 3.2.7 / 3.3.3 | 3.4.13 | `monaco-editor` and `@streamdown/mermaid > mermaid`; the governing [detached-subtree XSS advisory][dompurify-final] patches at 3.4.13 and subsumes the earlier Task 2 DOMPurify findings. |
+| `dompurify` | 3.2.7 / 3.3.3 | 3.4.13 | The workspace intentionally replaces `monaco-editor`'s exact 3.2.7 pin; `@streamdown/mermaid > mermaid` admits 3.4.13 through `^3.3.3`. The governing [detached-subtree XSS advisory][dompurify-final] patches at 3.4.13 and subsumes the earlier Task 2 DOMPurify findings. |
 | `mermaid` | 11.13.0 | 11.16.1 | `@streamdown/mermaid` declares `^11.12.2`; 11.16.1 clears the [configuration prototype-pollution][mermaid-prototype] and [sibling CSS injection][mermaid-css] floors plus the earlier Mermaid findings. |
 | `uuid` | 11.1.0 | 11.1.1 | `mermaid` declares `^11.1.0` for the 11.x line; [buffer-bounds advisory][uuid-bounds]. |
 | `@babel/core` | 7.29.0 | 7.29.6 | Vite React, Next/styled-jsx and ESLint React hooks all admit Babel 7.x. The original audit named 7.29.1, but that version is not published; current official [advisory metadata][babel-read] names 7.29.6 as the first patched 7.x release. |
