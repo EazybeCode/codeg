@@ -43,6 +43,13 @@ capacity is retained until the helper is terminal. If terminal cleanup cannot be
 confirmed, shutdown fails explicitly and ownership is retained; it does not report
 a successful close or detach the helper.
 
+If another in-process close attempt is made, it reuses the exact retained waiter
+for that owned helper; repeated failures do not create detached waiters. Deployment
+must still issue only one bounded proxy shutdown and, on failure or deadline,
+perform and confirm terminal teardown of the exact proxy container and cgroup.
+That standalone one-shot teardown remains defense in depth; a supervisor must not
+depend on endless in-process close retries.
+
 ## Address validation and DNS pinning
 
 The proxy validates the complete DNS answer before opening a connection. Empty or

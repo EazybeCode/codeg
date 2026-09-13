@@ -326,6 +326,7 @@ class FakeProcess:
         self.kill_completes = kill_completes
         self.terminate_calls = 0
         self.kill_calls = 0
+        self.wait_calls = 0
         self.reaped = False
         self.terminal = asyncio.Event()
         if self.returncode is not None:
@@ -344,6 +345,7 @@ class FakeProcess:
             self.terminal.set()
 
     async def wait(self):
+        self.wait_calls += 1
         await self.terminal.wait()
         self.reaped = True
         return self.returncode
@@ -691,6 +693,44 @@ class LoginEgressProxyTests(unittest.IsolatedAsyncioTestCase):
             process.kill_completes = True
             await asyncio.wait_for(self.proxy.close(), 0.5)
         self.assertTrue(process.reaped)
+        self.assertFalse(self.proxy._resolvers)
+
+    async def test_repeated_failed_close_reuses_retained_resolver_waiter(self):
+        process = FakeProcess(
+            stalled=True, terminate_completes=False, kill_completes=False
+        )
+        writer = MemoryWriter()
+        with mock.patch.object(
+            module, "_launch_resolver", mock.AsyncMock(return_value=process)
+        ), mock.patch.multiple(
+            module, DNS_SECONDS=5.0, RESOLVER_CLEANUP_SECONDS=0.01
+        ):
+            handler = asyncio.create_task(
+                self.proxy.handle(reader_with(VALID_REQUEST, eof=False), writer)
+            )
+            await asyncio.wait_for(process.stdout.read_started.wait(), 0.5)
+
+            retained_waiter = None
+            for unused_attempt in range(3):
+                with self.assertRaises(module.EgressError) as caught:
+                    await asyncio.wait_for(self.proxy.close(), 0.5)
+                self.assertEqual(caught.exception.code, "unavailable")
+                self.assertEqual(len(self.proxy._resolvers), 1)
+                retained = next(iter(self.proxy._resolvers)).exception()
+                self.assertIsInstance(retained, module._ResolverCleanupFailure)
+                self.assertIs(retained.process, process)
+                if retained_waiter is None:
+                    retained_waiter = retained.waiter
+                self.assertIs(retained.waiter, retained_waiter)
+                self.assertFalse(retained.waiter.done())
+                self.assertEqual(process.wait_calls, 1)
+
+            await asyncio.gather(handler, return_exceptions=True)
+            process.kill_completes = True
+            await asyncio.wait_for(self.proxy.close(), 0.5)
+
+        self.assertTrue(process.reaped)
+        self.assertEqual(process.wait_calls, 1)
         self.assertFalse(self.proxy._resolvers)
 
     async def test_cancellation_during_resolver_launch_has_no_detached_task(self):

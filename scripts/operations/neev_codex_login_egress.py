@@ -217,10 +217,13 @@ async def _wait_process(waiter: asyncio.Task) -> bool:
         return False
 
 
-async def _terminate_resolver(process: Any) -> None:
+async def _terminate_resolver(
+    process: Any, waiter: Optional[asyncio.Task] = None
+) -> None:
     """Terminate, force-kill if necessary, and reap one exact owned helper."""
-    waiter = asyncio.create_task(process.wait())
-    waiter.add_done_callback(_consume_task_result)
+    if waiter is None:
+        waiter = asyncio.create_task(process.wait())
+        waiter.add_done_callback(_consume_task_result)
     interrupted = False
     if process.returncode is None:
         with suppress(ProcessLookupError):
@@ -478,7 +481,7 @@ class LoginEgressProxy:
                 self._resolvers.discard(task)
                 continue
             try:
-                await _terminate_resolver(failure.process)
+                await _terminate_resolver(failure.process, failure.waiter)
             except _ResolverCleanupFailure:
                 continue
             self._resolvers.discard(task)
