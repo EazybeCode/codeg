@@ -306,6 +306,26 @@ string_type!(NativeId, valid_native_id);
 string_type!(Name, valid_name);
 string_type!(Email, valid_email);
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct RequiredNullable<T>(Option<T>);
+
+impl<T> RequiredNullable<T> {
+    fn is_some(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<RequiredNullable<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(RequiredNullable)
+}
+
 impl Counter {
     fn value(&self) -> u64 {
         self.0.parse().expect("validated counter")
@@ -603,9 +623,12 @@ pub(crate) struct RevocationEvent {
     pub(crate) event_id: UuidV4,
     pub(crate) cursor: Counter,
     pub(crate) scope: EventScope,
-    pub(crate) user_id: Option<NativeId>,
-    pub(crate) org_id: Option<NativeId>,
-    pub(crate) source_session_id: Option<UuidV4>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub(crate) user_id: RequiredNullable<NativeId>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub(crate) org_id: RequiredNullable<NativeId>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub(crate) source_session_id: RequiredNullable<UuidV4>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

@@ -448,6 +448,36 @@ fn every_event_scope_requires_exact_nullable_identity_fields() {
 }
 
 #[test]
+fn every_event_scope_requires_all_nullable_keys_even_when_values_are_null() {
+    let revocations = fixture("revocations");
+    for (scope, user, org, session) in [
+        ("session", json!("1"), json!("2"), json!(OTHER_ID)),
+        ("account", json!("1"), Value::Null, Value::Null),
+        ("org", Value::Null, json!("2"), Value::Null),
+        ("membership", json!("1"), json!("2"), Value::Null),
+    ] {
+        let mut response = revocations.success.clone();
+        let event = response["data"]["events"][0]
+            .as_object_mut()
+            .expect("fixture event is an object");
+        event.insert("scope".into(), json!(scope));
+        event.insert("user_id".into(), user);
+        event.insert("org_id".into(), org);
+        event.insert("source_session_id".into(), session);
+        assert!(decode_response(Operation::Revocations, &bytes(&response), REQUEST_ID).is_ok());
+
+        for key in ["user_id", "org_id", "source_session_id"] {
+            let mut omitted = response.clone();
+            omitted["data"]["events"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+            rejects_response(Operation::Revocations, &omitted);
+        }
+    }
+}
+
+#[test]
 fn revocation_pages_require_unique_contiguous_ordered_events_and_valid_watermarks() {
     let revocations = fixture("revocations");
     for cursors in [["1", "3"], ["2", "1"]] {
