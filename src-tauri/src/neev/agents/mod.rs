@@ -4,6 +4,7 @@ pub(crate) mod control_dto;
 pub(crate) mod control_wire;
 pub(crate) mod intents;
 pub(crate) mod recovery;
+pub(crate) mod status;
 pub(super) mod store;
 pub(crate) mod types;
 
