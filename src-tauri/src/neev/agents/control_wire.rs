@@ -87,9 +87,12 @@ pub(crate) fn encode_server_hello(
 
 pub(crate) fn decode_server_hello(
     key: &[u8; 32],
-    expected_client_nonce: &[u8; 32],
+    expected_client_nonce: &[u8],
     raw: &[u8],
 ) -> Result<WireContext, WireError> {
+    let expected_client_nonce: &[u8; 32] = expected_client_nonce
+        .try_into()
+        .map_err(|_| WireError::Invalid)?;
     if raw.len() != SERVER_HELLO_SIZE || &raw[..MAGIC.len()] != MAGIC {
         return Err(WireError::Invalid);
     }

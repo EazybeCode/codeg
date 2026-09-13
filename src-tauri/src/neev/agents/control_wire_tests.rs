@@ -195,6 +195,36 @@ fn server_hello_validates_extent_magic_mac_and_echoed_nonce() {
 }
 
 #[test]
+fn server_hello_accepts_an_exact_expected_nonce_slice() {
+    let input = inputs();
+    let expected_nonce = input.client_nonce.to_vec();
+    let expected_nonce_slice: &[u8] = &expected_nonce;
+    assert!(decode_server_hello(&input.key, expected_nonce_slice, &input.server_hello).is_ok());
+}
+
+#[test]
+fn server_hello_rejects_a_short_expected_nonce_slice_as_invalid() {
+    let input = inputs();
+    assert_invalid(decode_server_hello(
+        &input.key,
+        &input.client_nonce[..31],
+        &input.server_hello,
+    ));
+}
+
+#[test]
+fn server_hello_rejects_a_long_expected_nonce_slice_as_invalid() {
+    let input = inputs();
+    let mut expected_nonce = input.client_nonce.to_vec();
+    expected_nonce.push(0);
+    assert_invalid(decode_server_hello(
+        &input.key,
+        &expected_nonce,
+        &input.server_hello,
+    ));
+}
+
+#[test]
 fn server_hello_rejects_a_mac_from_another_domain() {
     let input = inputs();
     let prefix = &input.server_hello[..input.server_hello.len() - 32];
