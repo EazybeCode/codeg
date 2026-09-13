@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import traceback
 import unittest
 
 
@@ -67,6 +68,21 @@ class SupervisorDtoTests(unittest.TestCase):
 
     def response(self, name):
         return self.dto.decode_response(self.responses[name])
+
+    def reconcile_entry(
+        self, entry_number, phase, handle=False, receipt=False, cleanup=False
+    ):
+        binding = self.request("check").body.ticket.binding
+        return self.dto.ReconcileEntry(
+            self.dto.Id(format(entry_number, "032x")),
+            binding,
+            self.dto.Id("5" * 32),
+            self.dto.Id("6" * 32),
+            phase,
+            self.dto.Id("9" * 32) if handle else None,
+            self.dto.Id("8" * 32) if receipt else None,
+            self.dto.Id("7" * 32) if cleanup else None,
+        )
 
     def test_first_page_roundtrip(self):
         request = self.request("reconcile_first")
@@ -204,6 +220,56 @@ class SupervisorDtoTests(unittest.TestCase):
             self.dto.CleanupFailedReason.CLEANUP_FAILED,
         )
 
+    def test_closed_tags_and_nested_values_are_revalidated_at_boundaries(self):
+        class EqualityCompatibleTag:
+            value = "SYNTHETIC-UNKNOWN-STATE"
+
+            def __eq__(self, _other):
+                return True
+
+        lookalike = EqualityCompatibleTag()
+        for constructor, arguments in (
+            (
+                self.dto.LoginProgress,
+                (lookalike, self.dto.UnixSec(1), self.dto.RetryMs(250)),
+            ),
+            (self.dto.LoginTerminal, (lookalike,)),
+            (
+                self.dto.CheckPending,
+                (lookalike, self.dto.Id("a" * 32), self.dto.RetryMs(250)),
+            ),
+        ):
+            with self.subTest(constructor=constructor.__name__):
+                self.assert_dto_error("invalid", lambda c=constructor, a=arguments: c(*a))
+
+        observe_request = self.request("observe")
+        invalid_response = self.response("observe_queued")
+        object.__setattr__(invalid_response.body, "state", lookalike)
+        self.assert_dto_error("invalid", lambda: self.dto.encode_response(invalid_response))
+        self.assert_dto_error(
+            "invalid",
+            lambda: self.dto.validate_response(
+                observe_request, invalid_response, self.dto.Id("3" * 32)
+            ),
+        )
+        client = self.dto.ClientChannel(
+            observe_request.coordinator, self.dto.Id("3" * 32)
+        )
+        client.begin(observe_request)
+        self.assert_dto_error("invalid", lambda: client.finish(invalid_response))
+        self.assert_dto_error("state", lambda: client.begin(observe_request))
+
+        invalid_request = self.request("cleanup")
+        object.__setattr__(
+            invalid_request.body.ticket, "result_generation", self.dto.Counter("3")
+        )
+        self.assert_dto_error("invalid", lambda: self.dto.encode_request(invalid_request))
+        server = self.dto.ServerChannel(
+            invalid_request.coordinator, self.dto.Id("3" * 32)
+        )
+        self.assert_dto_error("invalid", lambda: server.accept(invalid_request))
+        self.assert_dto_error("state", lambda: server.accept(invalid_request))
+
     def test_strict_syntax_duplicate_numeric_and_extent_boundaries(self):
         raw = self.first_request_bytes
         mutations = (
@@ -245,6 +311,29 @@ class SupervisorDtoTests(unittest.TestCase):
         self.dto.decode_request(padded)
         self.assert_dto_error("invalid", lambda: self.dto.decode_request(padded + b" "))
 
+    def test_parser_member_key_string_and_array_boundaries(self):
+        members_32 = (
+            "{" + ",".join('"k%02d":null' % index for index in range(32)) + "}"
+        ).encode("ascii")
+        members_33 = members_32[:-1] + b',"overflow":null}'
+        key_64 = ('{"%s":null}' % ("k" * 64)).encode("ascii")
+        key_65 = ('{"%s":null}' % ("k" * 65)).encode("ascii")
+        string_1024 = ('{"x":"%s"}' % ("s" * 1024)).encode("ascii")
+        string_1025 = ('{"x":"%s"}' % ("s" * 1025)).encode("ascii")
+        array_32 = ('{"x":[%s]}' % ",".join("0" for _ in range(32))).encode(
+            "ascii"
+        )
+        array_33 = array_32.replace(b"]}", b",0]}")
+
+        for value in (members_32, key_64, string_1024, array_32):
+            with self.subTest(accepted_length=len(value)):
+                self.dto._strict_parse(value, 8192)
+        for value in (members_33, key_65, string_1025, array_33):
+            with self.subTest(rejected_length=len(value)):
+                self.assert_dto_error(
+                    "invalid", lambda value=value: self.dto._strict_parse(value, 8192)
+                )
+
     def test_every_invalid_literal_fixture_is_rejected(self):
         for item in self.fixture["invalid"]:
             decoder = (
@@ -259,6 +348,28 @@ class SupervisorDtoTests(unittest.TestCase):
                         bytes.fromhex(item["payload_hex"])
                     ),
                 )
+
+    def test_invalid_errors_do_not_retain_rejected_exception_context(self):
+        rejected = "SYNTHETIC-UNKNOWN-OP-CANARY"
+        invalid_op = self.first_request_bytes.replace(
+            b'"reconcile_page"', json.dumps(rejected).encode("ascii")
+        )
+        calls = (
+            lambda: self.dto.decode_request(invalid_op),
+            lambda: self.dto.decode_request(b"\xff"),
+            lambda: self.dto._encode_json({"value": object()}, 8192),
+        )
+        for call in calls:
+            with self.subTest(call=call):
+                with self.assertRaises(self.dto.DtoError) as caught:
+                    call()
+                error = caught.exception
+                rendered = "".join(
+                    traceback.format_exception(type(error), error, error.__traceback__)
+                )
+                self.assertIsNone(error.__context__)
+                self.assertIsNone(error.__cause__)
+                self.assertNotIn(rejected, rendered)
 
     def test_response_extent_and_closed_variant_rules(self):
         raw = self.first_response_bytes
@@ -408,6 +519,142 @@ class SupervisorDtoTests(unittest.TestCase):
                 None,
             ),
         )
+
+    def test_reconcile_phase_nullability_matrix(self):
+        phases = tuple(self.dto.RegistryPhase)
+        for phase in phases:
+            for handle in (False, True):
+                for receipt in (False, True):
+                    for cleanup in (False, True):
+                        if phase is self.dto.RegistryPhase.ALLOCATION_PENDING:
+                            valid = not handle and not receipt and not cleanup
+                        elif phase is self.dto.RegistryPhase.PENDING_LOGIN:
+                            valid = handle and not receipt and not cleanup
+                        elif phase in (
+                            self.dto.RegistryPhase.PREPARED,
+                            self.dto.RegistryPhase.COMMITTED,
+                        ):
+                            valid = handle and receipt and not cleanup
+                        elif phase is self.dto.RegistryPhase.CLEANUP_PENDING:
+                            valid = cleanup and (not receipt or handle)
+                        else:
+                            valid = not receipt or handle
+                        arguments = (1, phase, handle, receipt, cleanup)
+                        with self.subTest(
+                            phase=phase.value,
+                            handle=handle,
+                            receipt=receipt,
+                            cleanup=cleanup,
+                        ):
+                            if valid:
+                                self.reconcile_entry(*arguments)
+                            else:
+                                self.assert_dto_error(
+                                    "invalid",
+                                    lambda arguments=arguments: self.reconcile_entry(
+                                        *arguments
+                                    ),
+                                )
+
+    def test_reconcile_entry_count_order_revision_and_size_controls(self):
+        boot = self.dto.Id("3" * 32)
+        request = self.request("reconcile_first")
+        response = self.response("reconcile_first_page")
+        request_32 = replace(request, body=replace(request.body, limit=32))
+        entries_32 = tuple(
+            self.reconcile_entry(index + 1, self.dto.RegistryPhase.ALLOCATION_PENDING)
+            for index in range(32)
+        )
+        page_32 = self.dto.ReconcilePage(self.dto.Counter("1"), entries_32, None)
+        response_32 = replace(response, body=page_32)
+        encoded_32 = self.dto.encode_response(response_32)
+        self.assertEqual(len(self.dto.decode_response(encoded_32).body.entries), 32)
+        self.dto.validate_response(request_32, response_32, boot)
+        self.assert_dto_error(
+            "invalid",
+            lambda: self.dto.ReconcilePage(
+                self.dto.Counter("1"),
+                entries_32 + (self.reconcile_entry(33, self.dto.RegistryPhase.ALLOCATION_PENDING),),
+                None,
+            ),
+        )
+
+        continuation = replace(
+            request,
+            body=self.dto.ReconcilePageRequest(
+                self.dto.Counter("1"), self.dto.Id("0" * 32), 32
+            ),
+        )
+        one_entry = self.reconcile_entry(1, self.dto.RegistryPhase.ALLOCATION_PENDING)
+        short_page = self.dto.ReconcilePage(
+            self.dto.Counter("1"), (one_entry,), one_entry.entry_id
+        )
+        short_response = replace(response, body=short_page)
+        self.dto.validate_response(continuation, short_response, boot)
+        self.assert_dto_error(
+            "correlation",
+            lambda: self.dto.validate_response(
+                continuation,
+                replace(
+                    short_response,
+                    body=replace(short_page, snapshot_revision=self.dto.Counter("2")),
+                ),
+                boot,
+            ),
+        )
+
+        duplicate = self.dto.ReconcilePage(
+            self.dto.Counter("1"), (one_entry, one_entry), None
+        )
+        descending = self.dto.ReconcilePage(
+            self.dto.Counter("1"),
+            (
+                self.reconcile_entry(2, self.dto.RegistryPhase.ALLOCATION_PENDING),
+                one_entry,
+            ),
+            None,
+        )
+        for page in (duplicate, descending):
+            self.assert_dto_error(
+                "correlation",
+                lambda page=page: self.dto.validate_response(
+                    request_32, replace(response, body=page), boot
+                ),
+            )
+
+        maximal_binding = self.dto.ConnectionBinding(
+            self.dto.Scope(
+                self.dto.OwnerId(2147483647),
+                self.dto.OwnerId(2147483647),
+                self.dto.Provider.CODEX,
+            ),
+            self.dto.Id("f" * 32),
+            self.dto.Counter(str(I64_MAX)),
+        )
+        maximal_entries = []
+        for index in range(32):
+            long_entry_id = self.dto.Id(format(index + 1, "032x"))
+            object.__setattr__(long_entry_id, "value", "f" * 1024)
+            maximal_entries.append(
+                replace(
+                    self.reconcile_entry(
+                        index + 1,
+                        self.dto.RegistryPhase.QUARANTINED,
+                        handle=True,
+                        receipt=True,
+                        cleanup=True,
+                    ),
+                    entry_id=long_entry_id,
+                    binding=maximal_binding,
+                )
+            )
+        oversized = replace(
+            response,
+            body=self.dto.ReconcilePage(
+                self.dto.Counter(str(I64_MAX)), tuple(maximal_entries), None
+            ),
+        )
+        self.assert_dto_error("invalid", lambda: self.dto.encode_response(oversized))
 
     def test_semantic_keys_distinguish_only_the_specified_fields(self):
         login = self.request("start").body.ticket

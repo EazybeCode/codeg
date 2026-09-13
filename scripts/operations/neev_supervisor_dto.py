@@ -406,6 +406,7 @@ class LoginProgress(LoginSnapshot):
     poll_after_ms: RetryMs
 
     def __post_init__(self):
+        _exact(self.state, LoginState)
         if self.state not in (
             LoginState.QUEUED,
             LoginState.STARTING,
@@ -489,6 +490,7 @@ class LoginTerminal(LoginSnapshot):
     state: LoginState
 
     def __post_init__(self):
+        _exact(self.state, LoginState)
         if self.state not in (
             LoginState.EXPIRED,
             LoginState.CANCELED,
@@ -634,6 +636,7 @@ class CheckPending(_SafeRepr):
     poll_after_ms: RetryMs
 
     def __post_init__(self):
+        _exact(self.state, CheckState)
         if self.state not in (CheckState.QUEUED, CheckState.CHECKING):
             raise DtoError("invalid")
         _exact(self.check_id, Id)
@@ -928,7 +931,8 @@ def _strict_parse(payload, maximum):
     except DtoError:
         raise
     except Exception:
-        raise DtoError("invalid")
+        pass
+    raise DtoError("invalid")
 
 
 def _keys(value, expected):
@@ -940,9 +944,12 @@ def _enum(kind, value):
     if type(value) is not str:
         raise DtoError("invalid")
     try:
-        return kind(value)
+        result = kind(value)
     except ValueError:
+        result = None
+    if result is None:
         raise DtoError("invalid")
+    return result
 
 
 def _scope(value):
@@ -1190,32 +1197,49 @@ def _encode_request_body(body):
 
 
 def _encode_json(value, maximum):
+    encoded = None
     try:
         encoded = json.dumps(
             value, separators=(",", ":"), ensure_ascii=False, allow_nan=False
         ).encode("utf-8")
     except Exception:
+        pass
+    if encoded is None:
         raise DtoError("invalid")
     _strict_parse(encoded, maximum)
     return encoded
 
 
+def _fixed_invalid(call):
+    try:
+        return call()
+    except DtoError:
+        raise
+    except Exception:
+        pass
+    raise DtoError("invalid")
+
+
 def encode_request(request):
     _exact(request, Request)
-    return _encode_json(
-        {
-            "v": 1,
-            "coordinator": {
-                "epoch": request.coordinator.epoch.value,
-                "boot_id": request.coordinator.boot_id.value,
+    encoded = _fixed_invalid(
+        lambda: _encode_json(
+            {
+                "v": 1,
+                "coordinator": {
+                    "epoch": request.coordinator.epoch.value,
+                    "boot_id": request.coordinator.boot_id.value,
+                },
+                "sequence": request.sequence.value,
+                "request_id": request.request_id.value,
+                "op": request.op().value,
+                "body": _encode_request_body(request.body),
             },
-            "sequence": request.sequence.value,
-            "request_id": request.request_id.value,
-            "op": request.op().value,
-            "body": _encode_request_body(request.body),
-        },
-        _REQUEST_MAX,
+            _REQUEST_MAX,
+        )
     )
+    decode_request(encoded)
+    return encoded
 
 
 def _login_snapshot(value):
@@ -1513,36 +1537,43 @@ def _encode_success(body):
 
 def encode_response(response):
     _exact(response, Response)
-    value = {
-        "v": 1,
-        "coordinator": {
-            "epoch": response.coordinator.epoch.value,
-            "boot_id": response.coordinator.boot_id.value,
-        },
-        "supervisor_boot_id": response.supervisor_boot_id.value,
-        "sequence": response.sequence.value,
-        "request_id": response.request_id.value,
-        "op": response.operation.value,
-        "outcome": response.outcome.value,
-    }
-    if response.outcome is Outcome.OK:
-        value["body"] = _encode_success(response.body)
-    else:
-        value["error"] = {
-            "code": response.error.code.value,
-            "retry_after_ms": (
-                None
-                if response.error.retry_after_ms is None
-                else response.error.retry_after_ms.value
-            ),
+    def build():
+        value = {
+            "v": 1,
+            "coordinator": {
+                "epoch": response.coordinator.epoch.value,
+                "boot_id": response.coordinator.boot_id.value,
+            },
+            "supervisor_boot_id": response.supervisor_boot_id.value,
+            "sequence": response.sequence.value,
+            "request_id": response.request_id.value,
+            "op": response.operation.value,
+            "outcome": response.outcome.value,
         }
-    return _encode_json(value, _RESPONSE_MAX)
+        if response.outcome is Outcome.OK:
+            value["body"] = _encode_success(response.body)
+        else:
+            value["error"] = {
+                "code": response.error.code.value,
+                "retry_after_ms": (
+                    None
+                    if response.error.retry_after_ms is None
+                    else response.error.retry_after_ms.value
+                ),
+            }
+        return _encode_json(value, _RESPONSE_MAX)
+
+    encoded = _fixed_invalid(build)
+    decode_response(encoded)
+    return encoded
 
 
 def validate_response(request, response, supervisor_boot_id):
     _exact(request, Request)
     _exact(response, Response)
     _exact(supervisor_boot_id, Id)
+    encode_request(request)
+    encode_response(response)
     if (
         response.coordinator != request.coordinator
         or response.supervisor_boot_id != supervisor_boot_id
@@ -1674,6 +1705,14 @@ class _Channel(_SafeRepr):
             self._fail("state")
         if type(request) is not Request:
             self._fail("invalid")
+        try:
+            encode_request(request)
+        except DtoError as error:
+            category = error.category
+        else:
+            category = None
+        if category is not None:
+            self._fail(category)
         if request.coordinator != self._coordinator:
             self._fail("correlation")
         if int(request.sequence.value) != self._next_sequence:

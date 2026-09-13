@@ -59,6 +59,11 @@ impl Id {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn invalid_id_for_test(value: String) -> Id {
+    Id(value)
+}
+
 impl<'de> Deserialize<'de> for Id {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
@@ -1096,6 +1101,11 @@ fn parse_tree(raw: &[u8], maximum: usize) -> Result<JsonNode, DtoError> {
         return Err(DtoError::Invalid);
     }
     Ok(value)
+}
+
+#[cfg(test)]
+pub(crate) fn validate_bounded_json_for_test(raw: &[u8], maximum: usize) -> Result<(), DtoError> {
+    parse_tree(raw, maximum).map(|_| ())
 }
 
 fn parse_as<T: DeserializeOwned>(tree: &JsonNode) -> Result<T, DtoError> {

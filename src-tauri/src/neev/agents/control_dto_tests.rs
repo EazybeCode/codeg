@@ -86,6 +86,44 @@ fn first_response_bytes() -> Vec<u8> {
     response_bytes("reconcile_first_page")
 }
 
+fn reconcile_entry(
+    entry_number: u128,
+    phase: dto::RegistryPhase,
+    handle: bool,
+    receipt: bool,
+    cleanup: bool,
+) -> dto::ReconcileEntry {
+    let request = dto::decode_request(&request_bytes("check")).unwrap();
+    let binding = match request.body {
+        dto::RequestBody::CheckConnection(body) => body.ticket.binding,
+        _ => panic!("check fixture decoded to another closed request variant"),
+    };
+    dto::ReconcileEntry {
+        entry_id: dto::Id::new(format!("{entry_number:032x}")).unwrap(),
+        binding,
+        attempt_id: dto::Id::new("5".repeat(32)).unwrap(),
+        operation_id: dto::Id::new("6".repeat(32)).unwrap(),
+        phase,
+        storage_handle: handle.then(|| dto::Id::new("9".repeat(32)).unwrap()),
+        receipt_id: receipt.then(|| dto::Id::new("8".repeat(32)).unwrap()),
+        cleanup_operation_id: cleanup.then(|| dto::Id::new("7".repeat(32)).unwrap()),
+    }
+}
+
+fn reconcile_response(
+    revision: &str,
+    entries: Vec<dto::ReconcileEntry>,
+    next: Option<dto::Id>,
+) -> dto::Response {
+    let mut response = dto::decode_response(&first_response_bytes()).unwrap();
+    response.body = Some(dto::ResultBody::ReconcilePage(dto::ReconcilePage {
+        snapshot_revision: dto::Counter::new(revision.into()).unwrap(),
+        entries,
+        next_after_entry_id: next,
+    }));
+    response
+}
+
 fn assert_error<T>(result: Result<T, dto::DtoError>, expected: dto::DtoError) {
     assert!(matches!(result, Err(error) if error == expected));
 }
@@ -230,6 +268,38 @@ fn strict_json_rejects_duplicates_numbers_depth_and_bad_extent() {
         dto::decode_request(depth_17.as_bytes()),
         dto::DtoError::Invalid,
     );
+}
+
+#[test]
+fn bounded_json_accepts_and_rejects_exact_member_key_string_array_and_depth_limits() {
+    let members_32 = format!(
+        "{{{}}}",
+        (0..32)
+            .map(|index| format!("\"k{index:02}\":null"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+    .into_bytes();
+    let mut members_33 = members_32[..members_32.len() - 1].to_vec();
+    members_33.extend_from_slice(b",\"overflow\":null}");
+    let key_64 = format!("{{\"{}\":null}}", "k".repeat(64)).into_bytes();
+    let key_65 = format!("{{\"{}\":null}}", "k".repeat(65)).into_bytes();
+    let string_1024 = format!("{{\"x\":\"{}\"}}", "s".repeat(1024)).into_bytes();
+    let string_1025 = format!("{{\"x\":\"{}\"}}", "s".repeat(1025)).into_bytes();
+    let array_32 = format!("{{\"x\":[{}]}}", vec!["0"; 32].join(",")).into_bytes();
+    let array_33 = format!("{{\"x\":[{}]}}", vec!["0"; 33].join(",")).into_bytes();
+    let depth_16 = format!("{{\"x\":{}0{}}}", "[".repeat(15), "]".repeat(15)).into_bytes();
+    let depth_17 = format!("{{\"x\":{}0{}}}", "[".repeat(16), "]".repeat(16)).into_bytes();
+
+    for raw in [members_32, key_64, string_1024, array_32, depth_16] {
+        assert!(dto::validate_bounded_json_for_test(&raw, 8192).is_ok());
+    }
+    for raw in [members_33, key_65, string_1025, array_33, depth_17] {
+        assert_error(
+            dto::validate_bounded_json_for_test(&raw, 8192),
+            dto::DtoError::Invalid,
+        );
+    }
 }
 
 #[test]
@@ -417,6 +487,154 @@ fn response_bounds_correlation_and_reconcile_cursor_are_strict() {
 }
 
 #[test]
+fn reconcile_phase_nullability_matrix_is_complete() {
+    let phases = [
+        dto::RegistryPhase::AllocationPending,
+        dto::RegistryPhase::PendingLogin,
+        dto::RegistryPhase::Prepared,
+        dto::RegistryPhase::Committed,
+        dto::RegistryPhase::CleanupPending,
+        dto::RegistryPhase::Quarantined,
+        dto::RegistryPhase::Disposed,
+    ];
+    for phase in phases {
+        for handle in [false, true] {
+            for receipt in [false, true] {
+                for cleanup in [false, true] {
+                    let valid = match phase {
+                        dto::RegistryPhase::AllocationPending => !handle && !receipt && !cleanup,
+                        dto::RegistryPhase::PendingLogin => handle && !receipt && !cleanup,
+                        dto::RegistryPhase::Prepared | dto::RegistryPhase::Committed => {
+                            handle && receipt && !cleanup
+                        }
+                        dto::RegistryPhase::CleanupPending => cleanup && (!receipt || handle),
+                        dto::RegistryPhase::Quarantined | dto::RegistryPhase::Disposed => {
+                            !receipt || handle
+                        }
+                    };
+                    let response = reconcile_response(
+                        "1",
+                        vec![reconcile_entry(1, phase, handle, receipt, cleanup)],
+                        None,
+                    );
+                    assert!(dto::encode_response(&response).is_ok() == valid);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn reconcile_entry_count_order_revision_and_encoded_size_are_bounded() {
+    let boot = dto::Id::new("3".repeat(32)).unwrap();
+    let mut request = dto::decode_request(&first_request_bytes()).unwrap();
+    if let dto::RequestBody::ReconcilePage(body) = &mut request.body {
+        body.limit = 32;
+    } else {
+        panic!("reconcile fixture decoded to another closed request variant");
+    }
+    let entries_32 = (1..=32)
+        .map(|index| {
+            reconcile_entry(
+                index,
+                dto::RegistryPhase::AllocationPending,
+                false,
+                false,
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    let response_32 = reconcile_response("1", entries_32.clone(), None);
+    let encoded_32 = dto::encode_response(&response_32).unwrap();
+    assert!(match dto::decode_response(&encoded_32).unwrap().body {
+        Some(dto::ResultBody::ReconcilePage(page)) => page.entries.len() == 32,
+        _ => false,
+    });
+    assert!(dto::validate_response(&request, &response_32, &boot).is_ok());
+
+    let mut entries_33 = entries_32;
+    entries_33.push(reconcile_entry(
+        33,
+        dto::RegistryPhase::AllocationPending,
+        false,
+        false,
+        false,
+    ));
+    assert_error(
+        dto::encode_response(&reconcile_response("1", entries_33, None)),
+        dto::DtoError::Invalid,
+    );
+
+    let mut continuation = request.clone();
+    if let dto::RequestBody::ReconcilePage(body) = &mut continuation.body {
+        body.snapshot_revision = Some(dto::Counter::new("1".into()).unwrap());
+        body.after_entry_id = Some(dto::Id::new("0".repeat(32)).unwrap());
+    }
+    let one_entry = reconcile_entry(
+        1,
+        dto::RegistryPhase::AllocationPending,
+        false,
+        false,
+        false,
+    );
+    let short_page = reconcile_response(
+        "1",
+        vec![one_entry.clone()],
+        Some(one_entry.entry_id.clone()),
+    );
+    assert!(dto::validate_response(&continuation, &short_page, &boot).is_ok());
+    assert_error(
+        dto::validate_response(
+            &continuation,
+            &reconcile_response(
+                "2",
+                vec![one_entry.clone()],
+                Some(one_entry.entry_id.clone()),
+            ),
+            &boot,
+        ),
+        dto::DtoError::Correlation,
+    );
+
+    assert_error(
+        dto::validate_response(
+            &request,
+            &reconcile_response("1", vec![one_entry.clone(), one_entry.clone()], None),
+            &boot,
+        ),
+        dto::DtoError::Correlation,
+    );
+    let higher = reconcile_entry(
+        2,
+        dto::RegistryPhase::AllocationPending,
+        false,
+        false,
+        false,
+    );
+    assert_error(
+        dto::validate_response(
+            &request,
+            &reconcile_response("1", vec![higher, one_entry], None),
+            &boot,
+        ),
+        dto::DtoError::Correlation,
+    );
+
+    let oversized_entries = (1..=32)
+        .map(|index| {
+            let mut entry =
+                reconcile_entry(index, dto::RegistryPhase::Quarantined, true, true, true);
+            entry.entry_id = dto::invalid_id_for_test("f".repeat(1024));
+            entry
+        })
+        .collect();
+    assert_error(
+        dto::encode_response(&reconcile_response("1", oversized_entries, None)),
+        dto::DtoError::Invalid,
+    );
+}
+
+#[test]
 fn authenticated_wire_bytes_still_require_dto_validation() {
     use super::control_wire as wire;
 
@@ -445,6 +663,7 @@ fn typed_values_are_revalidated_at_channel_boundaries() {
     } else {
         panic!("cleanup fixture decoded to another closed request variant");
     }
+    assert_error(dto::encode_request(&cleanup), dto::DtoError::Invalid);
     let mut server = dto::ServerChannel::new(
         cleanup.coordinator.clone(),
         dto::Id::new("3".repeat(32)).unwrap(),
@@ -459,4 +678,33 @@ fn typed_values_are_revalidated_at_channel_boundaries() {
         dto::validate_response(&request, &response, &dto::Id::new("3".repeat(32)).unwrap()),
         dto::DtoError::Invalid,
     );
+
+    let observe = dto::decode_request(&request_bytes("observe")).unwrap();
+    let mut invalid_snapshot =
+        dto::decode_response(&response_bytes("observe_awaiting_user")).unwrap();
+    match invalid_snapshot.body.as_mut() {
+        Some(dto::ResultBody::ObserveLogin(dto::LoginSnapshot::AwaitingUser {
+            challenge, ..
+        })) => challenge.verification_url = "SYNTHETIC-INVALID-URL".into(),
+        _ => panic!("awaiting-user fixture decoded to another closed result variant"),
+    }
+    assert_error(
+        dto::encode_response(&invalid_snapshot),
+        dto::DtoError::Invalid,
+    );
+    assert_error(
+        dto::validate_response(
+            &observe,
+            &invalid_snapshot,
+            &dto::Id::new("3".repeat(32)).unwrap(),
+        ),
+        dto::DtoError::Invalid,
+    );
+    let mut client = dto::ClientChannel::new(
+        observe.coordinator.clone(),
+        dto::Id::new("3".repeat(32)).unwrap(),
+    );
+    assert!(client.begin(&observe).is_ok());
+    assert_error(client.finish(&invalid_snapshot), dto::DtoError::Invalid);
+    assert_error(client.begin(&observe), dto::DtoError::State);
 }
