@@ -8,6 +8,24 @@ use crate::neev::{db, test_support as h};
 use futures::FutureExt;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, TransactionTrait};
 
+fn assert_bounded_failure(
+    failure: super::backup::VerifierFailure,
+    expected_code: &str,
+    canaries: &[&str],
+) -> ContentError {
+    assert_eq!(failure.stage_code(), expected_code);
+    let diagnostic = failure.diagnostic();
+    assert!(diagnostic.starts_with("Native content verification failed. Require --database NAME --schema NAME --confirm-isolated and dedicated verifier environment; inspect the isolated restore privately."));
+    assert_eq!(diagnostic.matches("NEEV_VERIFY_STAGE_").count(), 1);
+    for canary in canaries {
+        assert!(
+            !diagnostic.contains(canary),
+            "diagnostic reflected synthetic input"
+        );
+    }
+    failure.into_content_error()
+}
+
 const AGENT_TABLES: [&str; 3] = [
     "neev_agent_connections",
     "neev_agent_attempts",
@@ -77,6 +95,16 @@ async fn rich_snapshot_contract(database: DatabaseConnection) {
     assert_eq!(
         verify_snapshot(&h.state.database, &h.state.blobs).await,
         Err(ContentError::Storage)
+    );
+    assert_eq!(
+        assert_bounded_failure(
+            super::backup::verify_snapshot_staged(&h.state.database, &h.state.blobs)
+                .await
+                .unwrap_err(),
+            "NEEV_VERIFY_STAGE_RICH_DECODE",
+            &["{not a rich envelope}", "Mixed archive"],
+        ),
+        ContentError::Storage
     );
     assert_eq!(
         documents::restore(&h.state, &h.creator, &doc.id, 2, &request(), 2, 1).await,
@@ -347,9 +375,20 @@ async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
     let path = org.join(format!("{key}.md"));
     let bytes = std::fs::read(&path).unwrap();
     std::fs::write(&path, b"bad secret").unwrap();
-    assert!(verify_snapshot(&h.state.database, &h.state.blobs)
-        .await
-        .is_err());
+    assert_eq!(
+        assert_bounded_failure(
+            super::backup::verify_snapshot_staged(&h.state.database, &h.state.blobs)
+                .await
+                .unwrap_err(),
+            "NEEV_VERIFY_STAGE_BLOB_READ",
+            &["bad secret", "Secret title", path.to_str().unwrap()],
+        ),
+        ContentError::Storage
+    );
+    assert_eq!(
+        verify_snapshot(&h.state.database, &h.state.blobs).await,
+        Err(ContentError::Storage)
+    );
     std::fs::write(&path, &bytes).unwrap();
     h.state
         .blobs
@@ -451,6 +490,16 @@ async fn snapshot_schema_is_exact_and_read_only() {
     let cfg = h::preview_config();
     let store = super::BlobStore::open(&cfg.document_root).unwrap();
     let empty = h::empty_database().await;
+    assert_eq!(
+        assert_bounded_failure(
+            super::backup::verify_snapshot_staged(&empty, &store)
+                .await
+                .unwrap_err(),
+            "NEEV_VERIFY_STAGE_SNAPSHOT_SCHEMA",
+            &[cfg.document_root.to_str().unwrap()],
+        ),
+        ContentError::Auth(crate::neev::error::AuthError::Unavailable)
+    );
     assert!(verify_snapshot(&empty, &store).await.is_err());
     assert!(db::one(
         &empty,
@@ -603,6 +652,91 @@ fn verifier_arguments_require_explicit_isolation_and_confirmation() {
     let mut duplicate = valid.clone();
     duplicate.extend(["--schema".into(), "public".into()]);
     assert!(arguments(&duplicate).is_err());
+
+    let argument_canary = "cli-secret.example.test/account-42";
+    let failure = super::backup::staged_arguments(
+        &["--database", argument_canary, "--confirm-isolated"].map(String::from),
+    )
+    .unwrap_err();
+    assert_eq!(
+        assert_bounded_failure(
+            failure,
+            "NEEV_VERIFY_STAGE_ARGUMENTS",
+            &[argument_canary]
+        ),
+        ContentError::Invalid
+    );
+
+    let root_canary = "relative/private-document-root";
+    let failure = match super::backup::staged_document_root(std::path::Path::new(root_canary)) {
+        Ok(_) => panic!("relative document root must fail closed"),
+        Err(failure) => failure,
+    };
+    assert_eq!(
+        assert_bounded_failure(
+            failure,
+            "NEEV_VERIFY_STAGE_DOCUMENT_ROOT",
+            &[root_canary]
+        ),
+        ContentError::Invalid
+    );
+}
+
+// A valid native schema can still contain a value that cannot be extracted as
+// the verifier's declared reference type when SQLite constraints were bypassed.
+#[tokio::test]
+async fn snapshot_reference_extraction_has_a_bounded_stage() {
+    let h = Harness::new(h::database().await).await;
+    let title_canary = "reference-secret.example.test/account-84";
+    let doc = resources::create(
+        &h.state,
+        &h.creator,
+        h.input(ResourceKind::Document, title_canary),
+    )
+    .await
+    .unwrap();
+    documents::save(
+        &h.state,
+        &h.creator,
+        &doc.id,
+        SaveInput {
+            request_id: request(),
+            expected_content_revision: 0,
+            expected_auth_revision: 1,
+            markdown: "typed extraction canary".into(),
+        },
+    )
+    .await
+    .unwrap();
+    db::execute(
+        &h.state.database,
+        "PRAGMA ignore_check_constraints=ON",
+        vec![],
+    )
+    .await
+    .unwrap();
+    db::execute(
+        &h.state.database,
+        "UPDATE neev_document_revisions SET byte_length=X'0102' WHERE org_id=$1 AND document_id=$2",
+        vec![h.creator.org_id.into(), doc.id.into()],
+    )
+    .await
+    .unwrap();
+    let failure = super::backup::verify_snapshot_staged(&h.state.database, &h.state.blobs)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        assert_bounded_failure(
+            failure,
+            "NEEV_VERIFY_STAGE_REFERENCE_EXTRACTION",
+            &[title_canary, "typed extraction canary"],
+        ),
+        ContentError::Storage
+    );
+    assert_eq!(
+        verify_snapshot(&h.state.database, &h.state.blobs).await,
+        Err(ContentError::Storage)
+    );
 }
 
 // A same-name empty view must not hide missing revision storage as zero references.
@@ -788,6 +922,15 @@ fn ambient_connection_child() {
         return;
     };
     let root = std::env::var_os("NEEV_VERIFY_DOCUMENT_ROOT").unwrap();
+    let failure = super::backup::staged_isolated_environment().unwrap_err();
+    assert_eq!(
+        assert_bounded_failure(
+            failure,
+            "NEEV_VERIFY_STAGE_ENVIRONMENT",
+            &["synthetic-env-password", "unintended.invalid"],
+        ),
+        ContentError::Invalid
+    );
     assert!(
         super::backup::controlled_options(&url, "public").is_err(),
         "an internal marker alone must not bypass the environment contract"
@@ -897,4 +1040,15 @@ fn controlled_connection_child() {
             "ambiguous or unsupported connection must fail closed"
         );
     }
+    let options_canary =
+        "postgresql://test:options-secret@localhost/db?options=/private/canary.sql";
+    let failure = super::backup::staged_controlled_options(options_canary, "public").unwrap_err();
+    assert_eq!(
+        assert_bounded_failure(
+            failure,
+            "NEEV_VERIFY_STAGE_DATABASE_OPTIONS",
+            &["options-secret", "/private/canary.sql", options_canary],
+        ),
+        ContentError::Invalid
+    );
 }

@@ -17,10 +17,95 @@ pub(crate) struct Reference {
     pub(crate) byte_length: i64,
 }
 
+const FAILURE_GUIDANCE: &str = "Native content verification failed. Require --database NAME --schema NAME --confirm-isolated and dedicated verifier environment; inspect the isolated restore privately.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerificationStage {
+    Arguments,
+    Environment,
+    Reexec,
+    Runtime,
+    DocumentRoot,
+    DatabaseOptions,
+    DatabaseConnect,
+    Destination,
+    SnapshotSchema,
+    ReferenceQuery,
+    ReferenceExtraction,
+    TransactionRollback,
+    BlobRead,
+    RichDecode,
+    DatabaseClose,
+    ManifestEncoding,
+}
+
+impl VerificationStage {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Arguments => "NEEV_VERIFY_STAGE_ARGUMENTS",
+            Self::Environment => "NEEV_VERIFY_STAGE_ENVIRONMENT",
+            Self::Reexec => "NEEV_VERIFY_STAGE_REEXEC",
+            Self::Runtime => "NEEV_VERIFY_STAGE_RUNTIME",
+            Self::DocumentRoot => "NEEV_VERIFY_STAGE_DOCUMENT_ROOT",
+            Self::DatabaseOptions => "NEEV_VERIFY_STAGE_DATABASE_OPTIONS",
+            Self::DatabaseConnect => "NEEV_VERIFY_STAGE_DATABASE_CONNECT",
+            Self::Destination => "NEEV_VERIFY_STAGE_DESTINATION",
+            Self::SnapshotSchema => "NEEV_VERIFY_STAGE_SNAPSHOT_SCHEMA",
+            Self::ReferenceQuery => "NEEV_VERIFY_STAGE_REFERENCE_QUERY",
+            Self::ReferenceExtraction => "NEEV_VERIFY_STAGE_REFERENCE_EXTRACTION",
+            Self::TransactionRollback => "NEEV_VERIFY_STAGE_TRANSACTION_ROLLBACK",
+            Self::BlobRead => "NEEV_VERIFY_STAGE_BLOB_READ",
+            Self::RichDecode => "NEEV_VERIFY_STAGE_RICH_DECODE",
+            Self::DatabaseClose => "NEEV_VERIFY_STAGE_DATABASE_CLOSE",
+            Self::ManifestEncoding => "NEEV_VERIFY_STAGE_MANIFEST_ENCODING",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct VerifierFailure {
+    stage: VerificationStage,
+    error: ContentError,
+}
+
+impl VerifierFailure {
+    fn new(stage: VerificationStage, error: ContentError) -> Self {
+        Self { stage, error }
+    }
+
+    pub(super) fn stage_code(&self) -> &'static str {
+        self.stage.code()
+    }
+
+    pub(super) fn diagnostic(&self) -> String {
+        format!("{FAILURE_GUIDANCE} [{}]", self.stage.code())
+    }
+
+    pub(super) fn into_content_error(self) -> ContentError {
+        self.error
+    }
+}
+
+fn at_stage<T>(
+    result: Result<T, ContentError>,
+    stage: VerificationStage,
+) -> Result<T, VerifierFailure> {
+    result.map_err(|error| VerifierFailure::new(stage, error))
+}
+
 pub(crate) async fn verify_snapshot(
     database: &DatabaseConnection,
     store: &BlobStore,
 ) -> Result<Manifest, ContentError> {
+    verify_snapshot_staged(database, store)
+        .await
+        .map_err(VerifierFailure::into_content_error)
+}
+
+pub(super) async fn verify_snapshot_staged(
+    database: &DatabaseConnection,
+    store: &BlobStore,
+) -> Result<Manifest, VerifierFailure> {
     // Never use db::begin (SQLite write intent), initialize, or application startup.
     let tx = if database.get_database_backend() == DbBackend::Postgres {
         database
@@ -32,9 +117,15 @@ pub(crate) async fn verify_snapshot(
     } else {
         database.begin().await
     }
-    .map_err(|_| ContentError::Storage)?;
+    .map_err(|_| ContentError::Storage);
+    let tx = at_stage(tx, VerificationStage::SnapshotSchema)?;
     // Return the archive's verified historical marker unchanged.
-    let schema_version = db::validate_content_snapshot(&tx).await?;
+    let schema_version = at_stage(
+        db::validate_content_snapshot(&tx)
+            .await
+            .map_err(ContentError::from),
+        VerificationStage::SnapshotSchema,
+    )?;
     let sql = if schema_version == 6 {
         "SELECT r.org_id,r.blob_key,r.sha256,r.byte_length,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision ORDER BY r.org_id,r.blob_key"
     } else {
@@ -43,42 +134,67 @@ pub(crate) async fn verify_snapshot(
     let rows = tx
         .query_all(db::statement(&tx, sql, vec![]))
         .await
-        .map_err(|_| ContentError::Storage)?;
+        .map_err(|_| ContentError::Storage);
+    let rows = at_stage(rows, VerificationStage::ReferenceQuery)?;
     let mut blobs = Vec::with_capacity(rows.len());
     let mut rich_blobs = std::collections::HashSet::new();
     for row in rows {
         let reference = Reference {
             org_id: row
                 .try_get("", "org_id")
-                .map_err(|_| ContentError::Storage)?,
+                .map_err(|_| ContentError::Storage)
+                .map_err(|error| {
+                    VerifierFailure::new(VerificationStage::ReferenceExtraction, error)
+                })?,
             key: row
                 .try_get("", "blob_key")
-                .map_err(|_| ContentError::Storage)?,
+                .map_err(|_| ContentError::Storage)
+                .map_err(|error| {
+                    VerifierFailure::new(VerificationStage::ReferenceExtraction, error)
+                })?,
             sha256: row
                 .try_get("", "sha256")
-                .map_err(|_| ContentError::Storage)?,
+                .map_err(|_| ContentError::Storage)
+                .map_err(|error| {
+                    VerifierFailure::new(VerificationStage::ReferenceExtraction, error)
+                })?,
             byte_length: row
                 .try_get("", "byte_length")
-                .map_err(|_| ContentError::Storage)?,
+                .map_err(|_| ContentError::Storage)
+                .map_err(|error| {
+                    VerifierFailure::new(VerificationStage::ReferenceExtraction, error)
+                })?,
         };
         if row
             .try_get::<String>("", "format")
-            .map_err(|_| ContentError::Storage)?
+            .map_err(|_| ContentError::Storage)
+            .map_err(|error| {
+                VerifierFailure::new(VerificationStage::ReferenceExtraction, error)
+            })?
             == "blocks"
         {
             rich_blobs.insert((reference.org_id, reference.key.clone()));
         }
         blobs.push(reference);
     }
-    tx.rollback().await.map_err(|_| ContentError::Storage)?;
+    at_stage(
+        tx.rollback().await.map_err(|_| ContentError::Storage),
+        VerificationStage::TransactionRollback,
+    )?;
     // Canonical ordering independent of a restored database's collation.
     blobs.sort_by(|a, b| (a.org_id, &a.key).cmp(&(b.org_id, &b.key)));
     for blob in &blobs {
-        let bytes = store
-            .read(blob.org_id, &blob.key, blob.byte_length, &blob.sha256)
-            .await?;
+        let bytes = at_stage(
+            store
+                .read(blob.org_id, &blob.key, blob.byte_length, &blob.sha256)
+                .await,
+            VerificationStage::BlobRead,
+        )?;
         if rich_blobs.contains(&(blob.org_id, blob.key.clone())) {
-            rich::decode(&bytes).map_err(|_| ContentError::Storage)?;
+            at_stage(
+                rich::decode(&bytes).map_err(|_| ContentError::Storage),
+                VerificationStage::RichDecode,
+            )?;
         }
     }
     Ok(Manifest {
@@ -171,6 +287,10 @@ pub(super) fn arguments(args: &[String]) -> Result<Arguments, ContentError> {
     Ok(Arguments { database, schema })
 }
 
+pub(super) fn staged_arguments(args: &[String]) -> Result<Arguments, VerifierFailure> {
+    at_stage(arguments(args), VerificationStage::Arguments)
+}
+
 pub(super) fn isolated_command(
     executable: &std::path::Path,
     args: &[String],
@@ -208,6 +328,10 @@ fn isolated_environment() -> Result<(), ContentError> {
         return Err(ContentError::Invalid);
     }
     Ok(())
+}
+
+pub(super) fn staged_isolated_environment() -> Result<(), VerifierFailure> {
+    at_stage(isolated_environment(), VerificationStage::Environment)
 }
 
 pub(super) fn controlled_options(
@@ -369,33 +493,66 @@ pub(super) fn controlled_options(
     Ok(options)
 }
 
-async fn run(args: Arguments) -> Result<String, ContentError> {
+pub(super) fn staged_controlled_options(
+    raw: &str,
+    schema: &str,
+) -> Result<sea_orm::sqlx::postgres::PgConnectOptions, VerifierFailure> {
+    at_stage(
+        controlled_options(raw, schema),
+        VerificationStage::DatabaseOptions,
+    )
+}
+
+pub(super) fn staged_document_root(
+    root: &std::path::Path,
+) -> Result<BlobStore, VerifierFailure> {
+    at_stage(BlobStore::open(root), VerificationStage::DocumentRoot)
+}
+
+async fn run(args: Arguments) -> Result<String, VerifierFailure> {
     use sha2::{Digest, Sha256};
-    isolated_environment()?;
-    let database_url =
-        std::env::var("NEEV_VERIFY_DATABASE_URL").map_err(|_| ContentError::Invalid)?;
-    let document_root =
-        std::env::var_os("NEEV_VERIFY_DOCUMENT_ROOT").ok_or(ContentError::Invalid)?;
-    let options = controlled_options(&database_url, &args.schema)?;
+    staged_isolated_environment()?;
+    let database_url = at_stage(
+        std::env::var("NEEV_VERIFY_DATABASE_URL").map_err(|_| ContentError::Invalid),
+        VerificationStage::Environment,
+    )?;
+    let document_root = at_stage(
+        std::env::var_os("NEEV_VERIFY_DOCUMENT_ROOT").ok_or(ContentError::Invalid),
+        VerificationStage::Environment,
+    )?;
+    let options = staged_controlled_options(&database_url, &args.schema)?;
     if options.get_database() != Some(args.database.as_str()) {
-        return Err(ContentError::Invalid);
+        return Err(VerifierFailure::new(
+            VerificationStage::DatabaseOptions,
+            ContentError::Invalid,
+        ));
     }
-    let store = BlobStore::open(std::path::Path::new(&document_root))?;
+    let store = staged_document_root(std::path::Path::new(&document_root))?;
     let pool = sea_orm::sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(15))
         .connect_with(options)
         .await
-        .map_err(|_| ContentError::Storage)?;
+        .map_err(|_| ContentError::Storage);
+    let pool = at_stage(pool, VerificationStage::DatabaseConnect)?;
     let database = sea_orm::SqlxPostgresConnector::from_sqlx_postgres_pool(pool);
     let result = async {
-        verify_destination(&database, &args.database, &args.schema, true).await?;
-        verify_snapshot(&database, &store).await
+        at_stage(
+            verify_destination(&database, &args.database, &args.schema, true).await,
+            VerificationStage::Destination,
+        )?;
+        verify_snapshot_staged(&database, &store).await
     }
     .await;
-    database.close().await.map_err(|_| ContentError::Storage)?;
+    at_stage(
+        database.close().await.map_err(|_| ContentError::Storage),
+        VerificationStage::DatabaseClose,
+    )?;
     let manifest = result?;
-    let encoded = serde_json::to_vec(&manifest).map_err(|_| ContentError::Storage)?;
+    let encoded = at_stage(
+        serde_json::to_vec(&manifest).map_err(|_| ContentError::Storage),
+        VerificationStage::ManifestEncoding,
+    )?;
     Ok(serde_json::json!({
         "schema_version": manifest.schema_version,
         "referenced_blobs": manifest.blobs.len(),
@@ -406,27 +563,39 @@ async fn run(args: Arguments) -> Result<String, ContentError> {
 }
 
 pub(crate) fn run_content_verifier() -> std::process::ExitCode {
-    let result = (|| {
+    let result: Result<String, VerifierFailure> = (|| {
         let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
-        let args = arguments(&raw_args)?;
+        let args = staged_arguments(&raw_args)?;
         if std::env::var("NEEV_VERIFY_ISOLATED").as_deref() != Ok("1") {
-            let url = std::env::var_os("NEEV_VERIFY_DATABASE_URL").ok_or(ContentError::Invalid)?;
-            let root =
-                std::env::var_os("NEEV_VERIFY_DOCUMENT_ROOT").ok_or(ContentError::Invalid)?;
-            let executable = std::env::current_exe().map_err(|_| ContentError::Storage)?;
+            let url = at_stage(
+                std::env::var_os("NEEV_VERIFY_DATABASE_URL").ok_or(ContentError::Invalid),
+                VerificationStage::Environment,
+            )?;
+            let root = at_stage(
+                std::env::var_os("NEEV_VERIFY_DOCUMENT_ROOT").ok_or(ContentError::Invalid),
+                VerificationStage::Environment,
+            )?;
+            let executable = at_stage(
+                std::env::current_exe().map_err(|_| ContentError::Storage),
+                VerificationStage::Reexec,
+            )?;
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
                 // exec replaces this process: no waiting parent or orphan child.
                 let _ = isolated_command(&executable, &raw_args, &url, &root).exec();
             }
-            return Err(ContentError::Storage);
+            return Err(VerifierFailure::new(
+                VerificationStage::Reexec,
+                ContentError::Storage,
+            ));
         }
-        isolated_environment()?;
+        staged_isolated_environment()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|_| ContentError::Storage)?;
+            .map_err(|_| ContentError::Storage);
+        let runtime = at_stage(runtime, VerificationStage::Runtime)?;
         runtime.block_on(run(args))
     })();
     match result {
@@ -434,9 +603,9 @@ pub(crate) fn run_content_verifier() -> std::process::ExitCode {
             println!("{summary}");
             std::process::ExitCode::SUCCESS
         }
-        Err(_) => {
+        Err(error) => {
             // Never print connection, SQL, path, or content diagnostics.
-            eprintln!("Native content verification failed. Require --database NAME --schema NAME --confirm-isolated and dedicated verifier environment; inspect the isolated restore privately.");
+            eprintln!("{}", error.diagnostic());
             std::process::ExitCode::FAILURE
         }
     }
