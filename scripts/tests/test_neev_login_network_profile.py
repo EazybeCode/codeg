@@ -253,8 +253,15 @@ class LoginNetworkProfileTests(unittest.TestCase):
                 role, bridge, ipv4, "02:00:00:00:00:06", "veth6f"
             )
             with self.subTest(role=role, bridge=bridge, ipv4=ipv4):
+                if role.startswith("proxy_"):
+                    endpoints = tuple(
+                        endpoint if item.role == role else item for item in proxies
+                    )
+                else:
+                    endpoints = proxies + (endpoint,)
+                self.assertEqual(len({item.role for item in endpoints}), len(endpoints))
                 self.assert_invalid(
-                    lambda endpoint=endpoint: module.validate_endpoints(proxies + (endpoint,))
+                    lambda endpoints=endpoints: module.validate_endpoints(endpoints)
                 )
 
     def test_rejects_nonexact_string_types_for_every_endpoint_field(self):
