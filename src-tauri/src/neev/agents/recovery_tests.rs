@@ -5,6 +5,1096 @@ use super::{
 };
 use crate::neev::{auth::session, db, test_support as h};
 
+fn completion_lookup(ticket: &LoginTicket, storage_handle: &str) -> completion::CompletionLookup {
+    completion::CompletionLookup::new(
+        ticket.org_id,
+        ticket.user_id,
+        ticket.provider,
+        ticket.connection_id.clone(),
+        ticket.generation,
+        ticket.attempt_id.clone(),
+        ticket.operation_id.clone(),
+        storage_handle.to_owned(),
+    )
+    .unwrap()
+}
+
+async fn operation_lease_snapshot(
+    h: &Harness,
+    operation_id: &str,
+) -> (String, Option<String>, Option<i64>, i64) {
+    let row = db::one(
+        &h.state.database,
+        "SELECT state,lease_owner,lease_expires_at,updated_at FROM neev_agent_operations WHERE id=$1",
+        vec![operation_id.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    (
+        row.try_get("", "state").unwrap(),
+        row.try_get("", "lease_owner").unwrap(),
+        row.try_get("", "lease_expires_at").unwrap(),
+        row.try_get("", "updated_at").unwrap(),
+    )
+}
+
+async fn import_operation_half_lease(h: &Harness, operation_id: &str, owner_only: bool) {
+    h::execute(
+        &h.state.database,
+        "PRAGMA ignore_check_constraints=ON",
+        vec![],
+    )
+    .await;
+    if owner_only {
+        h::execute(
+            &h.state.database,
+            "UPDATE neev_agent_operations SET lease_owner=$1,lease_expires_at=NULL WHERE id=$2",
+            vec![store::random_id().into(), operation_id.into()],
+        )
+        .await;
+    } else {
+        h::execute(
+            &h.state.database,
+            "UPDATE neev_agent_operations SET lease_owner=NULL,lease_expires_at=1700000030 WHERE id=$1",
+            vec![operation_id.into()],
+        )
+        .await;
+    }
+    h::execute(
+        &h.state.database,
+        "PRAGMA ignore_check_constraints=OFF",
+        vec![],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn witness_repeats_after_expiry_and_logout_without_mutating_rows() {
+    let h = Harness::new(h::database().await).await;
+    let ticket = begin(&h, &h.alice_a, Provider::Codex, "witness-repeat").await;
+    let evidence = account();
+    let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+    completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+        .await
+        .unwrap();
+    let before = snapshot(&h, &ticket).await;
+
+    let first = completion::read_completed_witness(&h.state, &lookup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.org_id(), ticket.org_id);
+    assert_eq!(first.user_id(), ticket.user_id);
+    assert_eq!(first.provider(), ticket.provider);
+    assert_eq!(first.connection_id(), ticket.connection_id);
+    assert_eq!(first.generation(), ticket.generation);
+    assert_eq!(first.session_id(), ticket.session_id);
+    assert_eq!(first.attempt_id(), ticket.attempt_id);
+    assert_eq!(first.operation_id(), ticket.operation_id);
+    assert_eq!(first.storage_handle(), evidence.storage_handle);
+    assert_eq!(first.completed_at(), 1_700_000_000);
+
+    h.set_now(ticket.expires_at + 1);
+    session::revoke(&h.state.database, &h.alice_a.identity, h.clock.as_ref())
+        .await
+        .unwrap();
+    let second = completion::read_completed_witness(&h.state, &lookup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.session_id(), first.session_id());
+    assert_eq!(second.completed_at(), first.completed_at());
+    assert_eq!(snapshot(&h, &ticket).await, before);
+}
+
+#[tokio::test]
+async fn witness_rejects_each_lookup_mismatch_without_mutation() {
+    let h = Harness::new(h::database().await).await;
+    let ticket = begin(&h, &h.alice_a, Provider::Claude, "witness-mismatch").await;
+    let evidence = account();
+    completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+        .await
+        .unwrap();
+    let before = snapshot(&h, &ticket).await;
+
+    let mut values = vec![
+        (
+            h.org_b,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        (
+            ticket.org_id,
+            h.bob_a.identity.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        (
+            ticket.org_id,
+            ticket.user_id,
+            Provider::Codex,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        (
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            store::random_id(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        (
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation + 1,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        (
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            store::random_id(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        (
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            store::random_id(),
+            evidence.storage_handle.clone(),
+        ),
+        (
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            store::random_id(),
+        ),
+    ];
+    for (org, user, provider, connection, generation, attempt, operation, handle) in
+        values.drain(..)
+    {
+        let lookup = completion::CompletionLookup::new(
+            org, user, provider, connection, generation, attempt, operation, handle,
+        )
+        .unwrap();
+        assert!(completion::read_completed_witness(&h.state, &lookup)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(snapshot(&h, &ticket).await, before);
+    }
+
+    for invalid in [
+        completion::CompletionLookup::new(
+            0,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        completion::CompletionLookup::new(
+            ticket.org_id,
+            0,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        completion::CompletionLookup::new(
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            "x".into(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        completion::CompletionLookup::new(
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            0,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        completion::CompletionLookup::new(
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            "x".into(),
+            ticket.operation_id.clone(),
+            evidence.storage_handle.clone(),
+        ),
+        completion::CompletionLookup::new(
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            "x".into(),
+            evidence.storage_handle.clone(),
+        ),
+        completion::CompletionLookup::new(
+            ticket.org_id,
+            ticket.user_id,
+            ticket.provider,
+            ticket.connection_id.clone(),
+            ticket.generation,
+            ticket.attempt_id.clone(),
+            ticket.operation_id.clone(),
+            "x".into(),
+        ),
+    ] {
+        assert!(matches!(invalid, Err(AgentError::InvalidInput)));
+    }
+}
+
+#[tokio::test]
+async fn witness_accepts_only_exact_completed_chronology_and_allowed_state() {
+    for mutation in [
+        "UPDATE neev_agent_attempts SET state='pending' WHERE id=$1",
+        "UPDATE neev_agent_attempts SET state='canceled' WHERE id=$1",
+        "UPDATE neev_agent_attempts SET state='failed' WHERE id=$1",
+        "UPDATE neev_agent_operations SET state='queued' WHERE id=$1",
+        "UPDATE neev_agent_operations SET state='abandoned' WHERE id=$1",
+        "UPDATE neev_agent_operations SET updated_at=updated_at+1 WHERE id=$1",
+        "UPDATE neev_agent_attempts SET updated_at=expires_at WHERE id=$1",
+    ] {
+        let h = Harness::new(h::database().await).await;
+        let ticket = begin(&h, &h.alice_a, Provider::Claude, "witness-shape").await;
+        let evidence = account();
+        completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+            .await
+            .unwrap();
+        let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+        let id = if mutation.contains("attempts") {
+            ticket.attempt_id.clone()
+        } else {
+            ticket.operation_id.clone()
+        };
+        h::execute(&h.state.database, mutation, vec![id.into()]).await;
+        let before = snapshot(&h, &ticket).await;
+        assert!(completion::read_completed_witness(&h.state, &lookup)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(snapshot(&h, &ticket).await, before);
+    }
+
+    let h = Harness::new(h::database().await).await;
+    let ticket = begin(&h, &h.alice_a, Provider::Claude, "witness-operation-expiry").await;
+    let evidence = account();
+    completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+        .await
+        .unwrap();
+    let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+    h::execute(
+        &h.state.database,
+        "UPDATE neev_agent_attempts SET updated_at=created_at+1 WHERE id=$1",
+        vec![ticket.attempt_id.clone().into()],
+    )
+    .await;
+    h::execute(&h.state.database, "UPDATE neev_agent_operations SET updated_at=created_at+1,expires_at=created_at+1 WHERE id=$1", vec![ticket.operation_id.clone().into()]).await;
+    assert!(completion::read_completed_witness(&h.state, &lookup)
+        .await
+        .unwrap()
+        .is_none());
+
+    for state in ["connecting", "disconnecting", "disconnected", "unavailable"] {
+        let h = Harness::new(h::database().await).await;
+        let ticket = begin(&h, &h.alice_a, Provider::Claude, "witness-state").await;
+        let evidence = account();
+        completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+            .await
+            .unwrap();
+        let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+        if state == "disconnected" {
+            h::execute(&h.state.database, "UPDATE neev_agent_connections SET state=$1,account_label=NULL,checked_at=NULL,storage_handle=NULL,error_code=NULL WHERE id=$2", vec![state.into(), ticket.connection_id.clone().into()]).await;
+        } else {
+            h::execute(&h.state.database, "UPDATE neev_agent_connections SET state=$1,account_label=NULL,checked_at=NULL,error_code='interrupted' WHERE id=$2", vec![state.into(), ticket.connection_id.clone().into()]).await;
+        }
+        assert!(completion::read_completed_witness(&h.state, &lookup)
+            .await
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn witness_rejects_each_completed_operation_tuple_mismatch_without_mutation() {
+    for mutation in ["kind", "attempt", "target_generation", "result_generation"] {
+        let h = Harness::new(h::database().await).await;
+        let ticket = begin(&h, &h.alice_a, Provider::Claude, "witness-operation-tuple").await;
+        let evidence = account();
+        completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+            .await
+            .unwrap();
+
+        let lookup = if matches!(mutation, "target_generation" | "result_generation") {
+            h::execute(
+                &h.state.database,
+                "UPDATE neev_agent_connections SET generation=2 WHERE id=$1",
+                vec![ticket.connection_id.clone().into()],
+            )
+            .await;
+            h::execute(
+                &h.state.database,
+                "UPDATE neev_agent_attempts SET generation=2 WHERE id=$1",
+                vec![ticket.attempt_id.clone().into()],
+            )
+            .await;
+            h::execute(
+                &h.state.database,
+                "UPDATE neev_agent_operations SET target_generation=2,result_generation=2 WHERE id=$1",
+                vec![ticket.operation_id.clone().into()],
+            )
+            .await;
+            completion::CompletionLookup::new(
+                ticket.org_id,
+                ticket.user_id,
+                ticket.provider,
+                ticket.connection_id.clone(),
+                2,
+                ticket.attempt_id.clone(),
+                ticket.operation_id.clone(),
+                evidence.storage_handle.clone(),
+            )
+            .unwrap()
+        } else {
+            completion_lookup(&ticket, &evidence.storage_handle)
+        };
+        assert!(completion::read_completed_witness(&h.state, &lookup)
+            .await
+            .unwrap()
+            .is_some());
+
+        match mutation {
+            "kind" => {
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET kind='cancel' WHERE id=$1",
+                    vec![ticket.operation_id.clone().into()],
+                )
+                .await;
+            }
+            "attempt" => {
+                let other_attempt = store::random_id();
+                h::execute(
+                    &h.state.database,
+                    "INSERT INTO neev_agent_attempts(id,connection_id,generation,session_id,state,created_at,expires_at,updated_at) SELECT $1,connection_id,generation+1,session_id,state,created_at,expires_at,updated_at FROM neev_agent_attempts WHERE id=$2",
+                    vec![other_attempt.clone().into(), ticket.attempt_id.clone().into()],
+                )
+                .await;
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET target_attempt_id=$1 WHERE id=$2",
+                    vec![other_attempt.into(), ticket.operation_id.clone().into()],
+                )
+                .await;
+            }
+            "target_generation" => {
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET target_generation=1 WHERE id=$1",
+                    vec![ticket.operation_id.clone().into()],
+                )
+                .await;
+            }
+            "result_generation" => {
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET result_generation=3 WHERE id=$1",
+                    vec![ticket.operation_id.clone().into()],
+                )
+                .await;
+            }
+            _ => unreachable!(),
+        }
+        let before = snapshot(&h, &ticket).await;
+        assert!(completion::read_completed_witness(&h.state, &lookup)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(snapshot(&h, &ticket).await, before);
+    }
+}
+
+#[tokio::test]
+async fn witness_rejects_leases_expired_attempt_and_malformed_projection_without_mutation() {
+    for mutation in [
+        "leased_operation",
+        "completed_lease_residue",
+        "expired_attempt",
+        "negative_operation_updated_at",
+    ] {
+        let h = Harness::new(h::database().await).await;
+        let ticket = begin(&h, &h.alice_a, Provider::Claude, "witness-stored-shape").await;
+        let evidence = account();
+        completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+            .await
+            .unwrap();
+        let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+
+        match mutation {
+            "leased_operation" => {
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET state='leased',lease_owner=$1,lease_expires_at=expires_at WHERE id=$2",
+                    vec![store::random_id().into(), ticket.operation_id.clone().into()],
+                )
+                .await;
+            }
+            "completed_lease_residue" => {
+                h::execute(
+                    &h.state.database,
+                    "PRAGMA ignore_check_constraints=ON",
+                    vec![],
+                )
+                .await;
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET lease_owner=$1,lease_expires_at=expires_at WHERE id=$2",
+                    vec![store::random_id().into(), ticket.operation_id.clone().into()],
+                )
+                .await;
+                h::execute(
+                    &h.state.database,
+                    "PRAGMA ignore_check_constraints=OFF",
+                    vec![],
+                )
+                .await;
+            }
+            "expired_attempt" => {
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_attempts SET state='expired' WHERE id=$1",
+                    vec![ticket.attempt_id.clone().into()],
+                )
+                .await;
+            }
+            "negative_operation_updated_at" => {
+                h::execute(
+                    &h.state.database,
+                    "PRAGMA ignore_check_constraints=ON",
+                    vec![],
+                )
+                .await;
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET updated_at=-1 WHERE id=$1",
+                    vec![ticket.operation_id.clone().into()],
+                )
+                .await;
+                h::execute(
+                    &h.state.database,
+                    "PRAGMA ignore_check_constraints=OFF",
+                    vec![],
+                )
+                .await;
+            }
+            _ => unreachable!(),
+        }
+        let before = snapshot(&h, &ticket).await;
+        let observed = completion::read_completed_witness(&h.state, &lookup).await;
+        if matches!(
+            mutation,
+            "completed_lease_residue" | "negative_operation_updated_at"
+        ) {
+            assert!(matches!(observed, Err(AgentError::Unavailable)));
+        } else {
+            assert!(observed.unwrap().is_none());
+        }
+        assert_eq!(snapshot(&h, &ticket).await, before);
+    }
+}
+
+#[tokio::test]
+async fn witness_rejects_completed_operation_with_each_half_lease_without_mutation() {
+    for owner_only in [true, false] {
+        let h = Harness::new(h::database().await).await;
+        let ticket = begin(&h, &h.alice_a, Provider::Claude, "witness-half-lease").await;
+        let evidence = account();
+        completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+            .await
+            .unwrap();
+        let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+        import_operation_half_lease(&h, &ticket.operation_id, owner_only).await;
+        let before = snapshot(&h, &ticket).await;
+
+        match completion::read_completed_witness(&h.state, &lookup).await {
+            Err(AgentError::Unavailable) => {}
+            Ok(None) => panic!("expected Unavailable, got Ok(None) for completed half-lease"),
+            _ => panic!("expected Unavailable from malformed completed witness operation"),
+        }
+        assert_eq!(snapshot(&h, &ticket).await, before);
+    }
+}
+
+#[tokio::test]
+async fn witness_rejects_every_newer_generation_state_without_mutation() {
+    for state in ["disconnecting", "disconnected", "connected"] {
+        let h = Harness::new(h::database().await).await;
+        let ticket = begin(&h, &h.alice_a, Provider::Codex, "witness-newer-generation").await;
+        let evidence = account();
+        completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+            .await
+            .unwrap();
+        let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+        match state {
+            "disconnecting" => {
+                h::execute(&h.state.database, "UPDATE neev_agent_connections SET generation=generation+1,state='disconnecting',account_label=NULL,checked_at=NULL,error_code=NULL WHERE id=$1", vec![ticket.connection_id.clone().into()]).await;
+            }
+            "disconnected" => {
+                h::execute(&h.state.database, "UPDATE neev_agent_connections SET generation=generation+1,state='disconnected',account_label=NULL,checked_at=NULL,storage_handle=NULL,error_code=NULL WHERE id=$1", vec![ticket.connection_id.clone().into()]).await;
+            }
+            "connected" => {
+                // Deliberately retain the exact old handle to isolate the generation fence.
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_connections SET generation=generation+1 WHERE id=$1",
+                    vec![ticket.connection_id.clone().into()],
+                )
+                .await;
+            }
+            _ => unreachable!(),
+        }
+        let before = snapshot(&h, &ticket).await;
+        assert!(completion::read_completed_witness(&h.state, &lookup)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(snapshot(&h, &ticket).await, before);
+    }
+}
+
+#[tokio::test]
+async fn witness_accepts_same_generation_reconnect_required_as_history_only() {
+    let h = Harness::new(h::database().await).await;
+    let ticket = begin(&h, &h.alice_a, Provider::Codex, "witness-reconnect").await;
+    let evidence = account();
+    completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+        .await
+        .unwrap();
+    h::execute(&h.state.database, "UPDATE neev_agent_connections SET state='reconnect_required',account_label=NULL,checked_at=NULL,error_code='reauth_required',updated_at=1700000001 WHERE id=$1", vec![ticket.connection_id.clone().into()]).await;
+    let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+    let before = snapshot(&h, &ticket).await;
+    let witness = completion::read_completed_witness(&h.state, &lookup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(witness.generation(), ticket.generation);
+    assert_eq!(witness.storage_handle(), evidence.storage_handle);
+    assert_eq!(witness.completed_at(), 1_700_000_000);
+    assert_eq!(snapshot(&h, &ticket).await, before);
+
+    h::execute(&h.state.database, "UPDATE neev_agent_connections SET generation=generation+1,state='connected',account_label='new account',checked_at=1700000002,storage_handle=$1,error_code=NULL WHERE id=$2", vec![store::random_id().into(), ticket.connection_id.clone().into()]).await;
+    assert!(completion::read_completed_witness(&h.state, &lookup)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn cleanup_target_comes_from_exact_cancel_or_disconnect_operation() {
+    let h = Harness::new(h::database().await).await;
+    let cancel_login = begin(&h, &h.alice_a, Provider::Claude, "typed-cancel").await;
+    let cancel = intents::cancel(
+        &h.state,
+        &h.alice_a,
+        Provider::Claude,
+        &cancel_login.attempt_id,
+        "typed-cancel-op",
+    )
+    .await
+    .unwrap();
+    let cancel_ticket = recovery::claim_cleanup(&h.state, &cancel.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &cancel_ticket.target,
+        CleanupTarget::Cancel { attempt_id } if attempt_id == &cancel_login.attempt_id
+    ));
+
+    let connected_login = begin(&h, &h.alice_a, Provider::Codex, "typed-disconnect").await;
+    completion::complete(&h.state, &h.alice_a, &connected_login, account())
+        .await
+        .unwrap();
+    let disconnect =
+        intents::disconnect(&h.state, &h.alice_a, Provider::Codex, "typed-disconnect-op")
+            .await
+            .unwrap();
+    let disconnect_ticket = recovery::claim_cleanup(&h.state, &disconnect.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        disconnect_ticket.target,
+        CleanupTarget::Disconnect
+    ));
+}
+
+#[tokio::test]
+async fn cleanup_target_recovery_causes_are_disconnect_not_cancel() {
+    let h = Harness::new(h::database().await).await;
+    let expired = begin(&h, &h.alice_a, Provider::Claude, "typed-expiry").await;
+    h.set_now(expired.expires_at);
+    assert_eq!(recovery::expire_pending(&h.state).await.unwrap(), 1);
+    let expired_cleanup = cleanup_id(&h, &expired).await;
+    let claimed = recovery::claim_cleanup(&h.state, &expired_cleanup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(claimed.target, CleanupTarget::Disconnect));
+
+    let h = Harness::new(h::database().await).await;
+    let startup = begin(&h, &h.alice_a, Provider::Claude, "typed-startup").await;
+    assert_eq!(recovery::recover_startup(&h.state).await.unwrap(), 1);
+    let startup_cleanup = cleanup_id(&h, &startup).await;
+    let claimed = recovery::claim_cleanup(&h.state, &startup_cleanup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(claimed.target, CleanupTarget::Disconnect));
+
+    let h = Harness::new(h::database().await).await;
+    let logout = begin(&h, &h.alice_a, Provider::Claude, "typed-logout").await;
+    session::revoke(&h.state.database, &h.alice_a.identity, h.clock.as_ref())
+        .await
+        .unwrap();
+    let logout_cleanup = cleanup_id(&h, &logout).await;
+    let claimed = recovery::claim_cleanup(&h.state, &logout_cleanup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(claimed.target, CleanupTarget::Disconnect));
+}
+
+#[tokio::test]
+async fn cleanup_target_tampering_and_renewed_leases_preserve_immutable_target() {
+    let h = Harness::new(h::database().await).await;
+    let login = begin(&h, &h.alice_a, Provider::Claude, "typed-renew").await;
+    let receipt = intents::cancel(
+        &h.state,
+        &h.alice_a,
+        Provider::Claude,
+        &login.attempt_id,
+        "typed-renew-op",
+    )
+    .await
+    .unwrap();
+    let first = recovery::claim_cleanup(&h.state, &receipt.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let before = operation_lease_snapshot(&h, &receipt.operation_id).await;
+    let before_connection = snapshot(&h, &login).await;
+    let mut wrong_kind = first.clone();
+    wrong_kind.target = CleanupTarget::Disconnect;
+    assert_eq!(
+        recovery::finish_cleanup(&h.state, &wrong_kind, true).await,
+        Err(AgentError::Conflict)
+    );
+    let mut wrong_attempt = first.clone();
+    wrong_attempt.target = CleanupTarget::Cancel {
+        attempt_id: store::random_id(),
+    };
+    assert_eq!(
+        operation_lease_snapshot(&h, &receipt.operation_id).await,
+        before
+    );
+    assert_eq!(snapshot(&h, &login).await, before_connection);
+    let before = operation_lease_snapshot(&h, &receipt.operation_id).await;
+    let before_connection = snapshot(&h, &login).await;
+    assert_eq!(
+        recovery::finish_cleanup(&h.state, &wrong_attempt, true).await,
+        Err(AgentError::Conflict)
+    );
+    assert_eq!(
+        operation_lease_snapshot(&h, &receipt.operation_id).await,
+        before
+    );
+    assert_eq!(snapshot(&h, &login).await, before_connection);
+
+    h.set_now(first.lease_expires_at);
+    let renewed = recovery::claim_cleanup(&h.state, &receipt.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        &renewed.target,
+        CleanupTarget::Cancel { attempt_id } if attempt_id == &login.attempt_id
+    ));
+    let before = operation_lease_snapshot(&h, &receipt.operation_id).await;
+    let before_connection = snapshot(&h, &login).await;
+    assert_eq!(
+        recovery::finish_cleanup(&h.state, &first, true).await,
+        Err(AgentError::Conflict)
+    );
+    assert_eq!(
+        operation_lease_snapshot(&h, &receipt.operation_id).await,
+        before
+    );
+    assert_eq!(snapshot(&h, &login).await, before_connection);
+    recovery::finish_cleanup(&h.state, &renewed, true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn cleanup_target_renewed_disconnect_lease_preserves_disconnect() {
+    let h = Harness::new(h::database().await).await;
+    let login = begin(&h, &h.alice_a, Provider::Codex, "typed-disconnect-renew").await;
+    completion::complete(&h.state, &h.alice_a, &login, account())
+        .await
+        .unwrap();
+    let receipt = intents::disconnect(
+        &h.state,
+        &h.alice_a,
+        Provider::Codex,
+        "typed-disconnect-renew-op",
+    )
+    .await
+    .unwrap();
+    let first = recovery::claim_cleanup(&h.state, &receipt.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(first.target, CleanupTarget::Disconnect));
+    h.set_now(first.lease_expires_at);
+    let renewed = recovery::claim_cleanup(&h.state, &receipt.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(renewed.target, CleanupTarget::Disconnect));
+    assert_ne!(renewed.lease_owner, first.lease_owner);
+}
+
+#[tokio::test]
+async fn cleanup_target_generation_corruption_never_issues_or_finishes_a_lease() {
+    for (target, result) in [(1_i64, 1_i64), (i64::MAX, i64::MAX)] {
+        let h = Harness::new(h::database().await).await;
+        let login = begin(&h, &h.alice_a, Provider::Claude, "typed-corrupt-claim").await;
+        let receipt = intents::cancel(
+            &h.state,
+            &h.alice_a,
+            Provider::Claude,
+            &login.attempt_id,
+            "typed-corrupt-claim-op",
+        )
+        .await
+        .unwrap();
+        h::execute(&h.state.database, "UPDATE neev_agent_operations SET target_generation=$1,result_generation=$2 WHERE id=$3", vec![target.into(), result.into(), receipt.operation_id.clone().into()]).await;
+        let before = operation_lease_snapshot(&h, &receipt.operation_id).await;
+        let before_connection = snapshot(&h, &login).await;
+        assert!(matches!(
+            recovery::claim_cleanup(&h.state, &receipt.operation_id).await,
+            Err(AgentError::Unavailable)
+        ));
+        assert_eq!(
+            operation_lease_snapshot(&h, &receipt.operation_id).await,
+            before
+        );
+        assert_eq!(snapshot(&h, &login).await, before_connection);
+    }
+
+    for (target, result) in [(1_i64, 1_i64), (i64::MAX, i64::MAX)] {
+        let h = Harness::new(h::database().await).await;
+        let login = begin(&h, &h.alice_a, Provider::Claude, "typed-corrupt-finish").await;
+        let receipt = intents::cancel(
+            &h.state,
+            &h.alice_a,
+            Provider::Claude,
+            &login.attempt_id,
+            "typed-corrupt-finish-op",
+        )
+        .await
+        .unwrap();
+        let ticket = recovery::claim_cleanup(&h.state, &receipt.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        h::execute(
+            &h.state.database,
+            "UPDATE neev_agent_operations SET target_generation=$1,result_generation=$2 WHERE id=$3",
+            vec![target.into(), result.into(), receipt.operation_id.clone().into()],
+        )
+        .await;
+        let before = operation_lease_snapshot(&h, &receipt.operation_id).await;
+        let before_connection = snapshot(&h, &login).await;
+        assert_eq!(
+            recovery::finish_cleanup(&h.state, &ticket, true).await,
+            Err(AgentError::Unavailable)
+        );
+        assert_eq!(
+            operation_lease_snapshot(&h, &receipt.operation_id).await,
+            before
+        );
+        assert_eq!(snapshot(&h, &login).await, before_connection);
+    }
+}
+
+#[tokio::test]
+async fn cleanup_target_malformed_completed_row_is_unavailable_without_mutation() {
+    let h = Harness::new(h::database().await).await;
+    let login = begin(
+        &h,
+        &h.alice_a,
+        Provider::Claude,
+        "typed-malformed-completed",
+    )
+    .await;
+    let receipt = intents::cancel(
+        &h.state,
+        &h.alice_a,
+        Provider::Claude,
+        &login.attempt_id,
+        "typed-malformed-completed-op",
+    )
+    .await
+    .unwrap();
+    let ticket = recovery::claim_cleanup(&h.state, &receipt.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    recovery::finish_cleanup(&h.state, &ticket, true)
+        .await
+        .unwrap();
+    h::execute(
+        &h.state.database,
+        "UPDATE neev_agent_operations SET result_generation=target_generation WHERE id=$1",
+        vec![receipt.operation_id.clone().into()],
+    )
+    .await;
+    let before_operation = operation_lease_snapshot(&h, &receipt.operation_id).await;
+    let before_connection = snapshot(&h, &login).await;
+
+    match recovery::claim_cleanup(&h.state, &receipt.operation_id).await {
+        Err(AgentError::Unavailable) => {}
+        Ok(None) => panic!("expected Unavailable, got Ok(None)"),
+        _ => panic!("expected Unavailable from malformed completed cleanup"),
+    }
+    assert_eq!(
+        operation_lease_snapshot(&h, &receipt.operation_id).await,
+        before_operation
+    );
+    assert_eq!(snapshot(&h, &login).await, before_connection);
+}
+
+#[tokio::test]
+async fn cleanup_target_malformed_live_lease_is_unavailable_without_mutation() {
+    let h = Harness::new(h::database().await).await;
+    let login = begin(&h, &h.alice_a, Provider::Claude, "typed-malformed-leased").await;
+    let receipt = intents::cancel(
+        &h.state,
+        &h.alice_a,
+        Provider::Claude,
+        &login.attempt_id,
+        "typed-malformed-leased-op",
+    )
+    .await
+    .unwrap();
+    recovery::claim_cleanup(&h.state, &receipt.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    h::execute(
+        &h.state.database,
+        "UPDATE neev_agent_operations SET result_generation=target_generation WHERE id=$1",
+        vec![receipt.operation_id.clone().into()],
+    )
+    .await;
+    let before_operation = operation_lease_snapshot(&h, &receipt.operation_id).await;
+    let before_connection = snapshot(&h, &login).await;
+
+    match recovery::claim_cleanup(&h.state, &receipt.operation_id).await {
+        Err(AgentError::Unavailable) => {}
+        Ok(None) => panic!("expected Unavailable, got Ok(None)"),
+        _ => panic!("expected Unavailable from malformed live-leased cleanup"),
+    }
+    assert_eq!(
+        operation_lease_snapshot(&h, &receipt.operation_id).await,
+        before_operation
+    );
+    assert_eq!(snapshot(&h, &login).await, before_connection);
+}
+
+#[tokio::test]
+async fn cleanup_target_stored_shape_corruption_fails_closed_at_claim_and_finish() {
+    for kind in ["cancel", "disconnect"] {
+        for finish in [false, true] {
+            let h = Harness::new(h::database().await).await;
+            let login = begin(&h, &h.alice_a, Provider::Codex, "typed-target-shape").await;
+            let receipt = if kind == "cancel" {
+                intents::cancel(
+                    &h.state,
+                    &h.alice_a,
+                    Provider::Codex,
+                    &login.attempt_id,
+                    "typed-target-shape-cancel",
+                )
+                .await
+                .unwrap()
+            } else {
+                completion::complete(&h.state, &h.alice_a, &login, account())
+                    .await
+                    .unwrap();
+                intents::disconnect(
+                    &h.state,
+                    &h.alice_a,
+                    Provider::Codex,
+                    "typed-target-shape-disconnect",
+                )
+                .await
+                .unwrap()
+            };
+            let ticket = if finish {
+                Some(
+                    recovery::claim_cleanup(&h.state, &receipt.operation_id)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+
+            h::execute(
+                &h.state.database,
+                "PRAGMA ignore_check_constraints=ON",
+                vec![],
+            )
+            .await;
+            if kind == "cancel" {
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET target_attempt_id=NULL WHERE id=$1",
+                    vec![receipt.operation_id.clone().into()],
+                )
+                .await;
+            } else {
+                h::execute(
+                    &h.state.database,
+                    "UPDATE neev_agent_operations SET target_attempt_id=$1 WHERE id=$2",
+                    vec![
+                        login.attempt_id.clone().into(),
+                        receipt.operation_id.clone().into(),
+                    ],
+                )
+                .await;
+            }
+            h::execute(
+                &h.state.database,
+                "PRAGMA ignore_check_constraints=OFF",
+                vec![],
+            )
+            .await;
+            let before_operation = operation_lease_snapshot(&h, &receipt.operation_id).await;
+            let before_connection = snapshot(&h, &login).await;
+            if let Some(ticket) = ticket {
+                assert_eq!(
+                    recovery::finish_cleanup(&h.state, &ticket, true).await,
+                    Err(AgentError::Unavailable)
+                );
+            } else {
+                assert!(matches!(
+                    recovery::claim_cleanup(&h.state, &receipt.operation_id).await,
+                    Err(AgentError::Unavailable)
+                ));
+            }
+            assert_eq!(
+                operation_lease_snapshot(&h, &receipt.operation_id).await,
+                before_operation
+            );
+            assert_eq!(snapshot(&h, &login).await, before_connection);
+        }
+    }
+}
+
+#[tokio::test]
+async fn cleanup_target_each_half_lease_is_unavailable_without_mutation() {
+    for completed in [false, true] {
+        for owner_only in [true, false] {
+            let h = Harness::new(h::database().await).await;
+            let login = begin(&h, &h.alice_a, Provider::Claude, "cleanup-half-lease").await;
+            let receipt = intents::cancel(
+                &h.state,
+                &h.alice_a,
+                Provider::Claude,
+                &login.attempt_id,
+                "cleanup-half-lease-op",
+            )
+            .await
+            .unwrap();
+            if completed {
+                let ticket = recovery::claim_cleanup(&h.state, &receipt.operation_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                recovery::finish_cleanup(&h.state, &ticket, true)
+                    .await
+                    .unwrap();
+            }
+            import_operation_half_lease(&h, &receipt.operation_id, owner_only).await;
+            let before_operation = operation_lease_snapshot(&h, &receipt.operation_id).await;
+            let before_connection = snapshot(&h, &login).await;
+
+            match recovery::claim_cleanup(&h.state, &receipt.operation_id).await {
+                Err(AgentError::Unavailable) => {}
+                Ok(None) => panic!("expected Unavailable, got Ok(None) for cleanup half-lease"),
+                Ok(Some(_)) => panic!("expected Unavailable, malformed cleanup was claimed"),
+                Err(_) => panic!("expected Unavailable from malformed cleanup operation"),
+            }
+            assert_eq!(
+                operation_lease_snapshot(&h, &receipt.operation_id).await,
+                before_operation
+            );
+            assert_eq!(snapshot(&h, &login).await, before_connection);
+        }
+    }
+}
+
 // Missing final-result fencing must never revive a canceled login.
 #[tokio::test]
 async fn canceled_completion_conflicts_and_own_completion_connects() {
@@ -292,7 +1382,7 @@ async fn cleanup_tampering_and_old_results_cannot_change_newer_connected_row() {
             .await
             .unwrap()
             .unwrap();
-        for field in 0..9 {
+        for field in 0..11 {
             let mut wrong = cleanup.clone();
             match field {
                 0 => wrong.operation_id = store::random_id(),
@@ -300,15 +1390,28 @@ async fn cleanup_tampering_and_old_results_cannot_change_newer_connected_row() {
                 2 => wrong.provider = Provider::Codex,
                 3 => wrong.org_id = h.org_b,
                 4 => wrong.user_id = h.bob_a.identity.user_id,
-                5 => wrong.target_generation += 1,
-                6 => wrong.result_generation += 1,
-                7 => wrong.lease_owner = store::random_id(),
-                8 => wrong.lease_expires_at += 1,
+                5 => wrong.target = CleanupTarget::Disconnect,
+                6 => {
+                    wrong.target = CleanupTarget::Cancel {
+                        attempt_id: store::random_id(),
+                    }
+                }
+                7 => wrong.target_generation += 1,
+                8 => wrong.result_generation += 1,
+                9 => wrong.lease_owner = store::random_id(),
+                10 => wrong.lease_expires_at += 1,
                 _ => unreachable!(),
             }
+            let before_operation = operation_lease_snapshot(&h, &receipt.operation_id).await;
+            let before_connection = snapshot(&h, &ticket).await;
             assert!(recovery::finish_cleanup(&h.state, &wrong, true)
                 .await
                 .is_err());
+            assert_eq!(
+                operation_lease_snapshot(&h, &receipt.operation_id).await,
+                before_operation
+            );
+            assert_eq!(snapshot(&h, &ticket).await, before_connection);
         }
         let metadata = account();
         h::execute(&h.state.database,"UPDATE neev_agent_connections SET generation=3,state='connected',account_label=$1,checked_at=1700000001,storage_handle=$2,error_code=NULL WHERE id=$3",vec![metadata.account_label.into(),metadata.storage_handle.into(),ticket.connection_id.clone().into()]).await;
@@ -457,6 +1560,147 @@ async fn final_result_authority_failures_leave_agent_rows_unchanged() {
             Err(AgentError::Auth(_))
         ));
         assert_eq!(snapshot(&h, &ticket).await, before);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL"]
+async fn postgres_witness_serializes_with_completion_and_disconnect_in_both_orders() {
+    for completion_first in [false, true] {
+        let (database, admin, schema) = h::postgres_database().await;
+        eprintln!("agent witness owned schema: {schema}; completion first={completion_first}");
+        let h = Harness::new(database.clone()).await;
+        let ticket = begin(&h, &h.alice_a, Provider::Codex, "witness-completion-race").await;
+        let evidence = account();
+        let blocker = db::begin(&database).await.unwrap();
+        db::lock_admission_guard(&blocker).await.unwrap();
+
+        if completion_first {
+            let state = h.state.clone();
+            let actor = h.alice_a.clone();
+            let task_ticket = ticket.clone();
+            let task_evidence = evidence.clone();
+            let complete = tokio::spawn(async move {
+                completion::complete(&state, &actor, &task_ticket, task_evidence).await
+            });
+            h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
+            let state = h.state.clone();
+            let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+            let witness =
+                tokio::spawn(
+                    async move { completion::read_completed_witness(&state, &lookup).await },
+                );
+            h::wait_for_postgres_locks(&admin, "%neev_schema_version%FOR UPDATE%", 2).await;
+            blocker.commit().await.unwrap();
+            let (completed, observed) =
+                tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                    (complete.await.unwrap(), witness.await.unwrap())
+                })
+                .await
+                .unwrap();
+            assert_eq!(completed, Ok(()));
+            assert!(observed.unwrap().is_some());
+        } else {
+            let state = h.state.clone();
+            let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+            let witness =
+                tokio::spawn(
+                    async move { completion::read_completed_witness(&state, &lookup).await },
+                );
+            h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
+            let state = h.state.clone();
+            let actor = h.alice_a.clone();
+            let task_ticket = ticket.clone();
+            let task_evidence = evidence.clone();
+            let complete = tokio::spawn(async move {
+                completion::complete(&state, &actor, &task_ticket, task_evidence).await
+            });
+            h::wait_for_postgres_locks(&admin, "%neev_schema_version%FOR UPDATE%", 2).await;
+            blocker.commit().await.unwrap();
+            let (observed, completed) =
+                tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                    (witness.await.unwrap(), complete.await.unwrap())
+                })
+                .await
+                .unwrap();
+            assert!(observed.unwrap().is_none());
+            assert_eq!(completed, Ok(()));
+            let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+            assert!(completion::read_completed_witness(&h.state, &lookup)
+                .await
+                .unwrap()
+                .is_some());
+        }
+        drop(h);
+        h::cleanup_postgres(database, admin, schema).await;
+    }
+
+    for disconnect_first in [false, true] {
+        let (database, admin, schema) = h::postgres_database().await;
+        eprintln!("agent witness owned schema: {schema}; disconnect first={disconnect_first}");
+        let h = Harness::new(database.clone()).await;
+        let ticket = begin(&h, &h.alice_a, Provider::Codex, "witness-disconnect-race").await;
+        let evidence = account();
+        completion::complete(&h.state, &h.alice_a, &ticket, evidence.clone())
+            .await
+            .unwrap();
+        let blocker = db::begin(&database).await.unwrap();
+        db::lock_admission_guard(&blocker).await.unwrap();
+
+        if disconnect_first {
+            let state = h.state.clone();
+            let actor = h.alice_a.clone();
+            let disconnect = tokio::spawn(async move {
+                intents::disconnect(&state, &actor, Provider::Codex, "witness-disconnect").await
+            });
+            h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
+            let state = h.state.clone();
+            let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+            let witness =
+                tokio::spawn(
+                    async move { completion::read_completed_witness(&state, &lookup).await },
+                );
+            h::wait_for_postgres_locks(&admin, "%neev_schema_version%FOR UPDATE%", 2).await;
+            blocker.commit().await.unwrap();
+            let (disconnected, observed) =
+                tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                    (disconnect.await.unwrap(), witness.await.unwrap())
+                })
+                .await
+                .unwrap();
+            disconnected.unwrap();
+            assert!(observed.unwrap().is_none());
+        } else {
+            let state = h.state.clone();
+            let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+            let witness =
+                tokio::spawn(
+                    async move { completion::read_completed_witness(&state, &lookup).await },
+                );
+            h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
+            let state = h.state.clone();
+            let actor = h.alice_a.clone();
+            let disconnect = tokio::spawn(async move {
+                intents::disconnect(&state, &actor, Provider::Codex, "witness-disconnect").await
+            });
+            h::wait_for_postgres_locks(&admin, "%neev_schema_version%FOR UPDATE%", 2).await;
+            blocker.commit().await.unwrap();
+            let (observed, disconnected) =
+                tokio::time::timeout(std::time::Duration::from_secs(4), async {
+                    (witness.await.unwrap(), disconnect.await.unwrap())
+                })
+                .await
+                .unwrap();
+            assert!(observed.unwrap().is_some());
+            disconnected.unwrap();
+            let lookup = completion_lookup(&ticket, &evidence.storage_handle);
+            assert!(completion::read_completed_witness(&h.state, &lookup)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        drop(h);
+        h::cleanup_postgres(database, admin, schema).await;
     }
 }
 

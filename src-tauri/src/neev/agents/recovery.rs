@@ -1,6 +1,6 @@
 use super::{
     store,
-    types::{AgentError, CleanupTicket, ConnectionState},
+    types::{AgentError, CleanupTarget, CleanupTicket, ConnectionState},
 };
 use crate::neev::{clock::Clock, db, startup::ServerState};
 use sea_orm::{ConnectionTrait, DatabaseTransaction};
@@ -43,6 +43,26 @@ async fn cleanup_rows(
     Ok(Some((connection, operation)))
 }
 
+fn cleanup_target(operation: &store::OperationRow) -> Result<CleanupTarget, AgentError> {
+    match (
+        operation.kind.as_str(),
+        operation.target_attempt_id.as_deref(),
+    ) {
+        ("cancel", Some(attempt_id)) => Ok(CleanupTarget::Cancel {
+            attempt_id: attempt_id.to_owned(),
+        }),
+        ("disconnect", None) => Ok(CleanupTarget::Disconnect),
+        _ => Err(AgentError::Unavailable),
+    }
+}
+
+fn validate_cleanup_generation(operation: &store::OperationRow) -> Result<(), AgentError> {
+    if operation.target_generation.checked_add(1) != Some(operation.result_generation) {
+        return Err(AgentError::Unavailable);
+    }
+    Ok(())
+}
+
 pub(crate) async fn claim_cleanup(
     state: &ServerState,
     operation_id: &str,
@@ -56,13 +76,17 @@ pub(crate) async fn claim_cleanup(
     let Some((connection, operation)) = cleanup_rows(&tx, operation_id).await? else {
         return Ok(None);
     };
+    if !matches!(operation.kind.as_str(), "cancel" | "disconnect") {
+        return Ok(None);
+    }
+    let target = cleanup_target(&operation)?;
+    validate_cleanup_generation(&operation)?;
     let now = now(state.clock.as_ref())?;
-    if !matches!(operation.kind.as_str(), "cancel" | "disconnect")
-        || !(operation.state == "queued"
-            || operation.state == "leased"
-                && operation
-                    .lease_expires_at
-                    .is_some_and(|deadline| deadline <= now))
+    if !(operation.state == "queued"
+        || operation.state == "leased"
+            && operation
+                .lease_expires_at
+                .is_some_and(|deadline| deadline <= now))
     {
         return Ok(None);
     }
@@ -87,6 +111,7 @@ pub(crate) async fn claim_cleanup(
         provider: connection.provider,
         org_id: connection.org_id,
         user_id: connection.user_id,
+        target,
         target_generation: operation.target_generation,
         result_generation: operation.result_generation,
         lease_owner: owner,
@@ -111,10 +136,18 @@ pub(crate) async fn finish_cleanup(
         .await?
         .ok_or(AgentError::NotFound)?;
     let now = now(state.clock.as_ref())?;
+    let target = if matches!(operation.kind.as_str(), "cancel" | "disconnect") {
+        let target = cleanup_target(&operation)?;
+        validate_cleanup_generation(&operation)?;
+        target
+    } else {
+        return Err(AgentError::Conflict);
+    };
     if connection.id != ticket.connection_id
         || connection.provider != ticket.provider
         || connection.org_id != ticket.org_id
         || connection.user_id != ticket.user_id
+        || target != ticket.target
         || operation.target_generation != ticket.target_generation
         || operation.result_generation != ticket.result_generation
         || !matches!(operation.kind.as_str(), "cancel" | "disconnect")

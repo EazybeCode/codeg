@@ -5,6 +5,187 @@ use super::{
 use crate::neev::{db, startup::ServerState, types::OrgContext};
 use sea_orm::DatabaseTransaction;
 
+/// Untrusted values used only to find and compare native committed state.
+pub(crate) struct CompletionLookup {
+    org_id: i32,
+    user_id: i32,
+    provider: super::types::Provider,
+    connection_id: String,
+    generation: i64,
+    attempt_id: String,
+    operation_id: String,
+    storage_handle: String,
+}
+
+impl CompletionLookup {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        org_id: i32,
+        user_id: i32,
+        provider: super::types::Provider,
+        connection_id: String,
+        generation: i64,
+        attempt_id: String,
+        operation_id: String,
+        storage_handle: String,
+    ) -> Result<Self, AgentError> {
+        if org_id <= 0
+            || user_id <= 0
+            || generation <= 0
+            || !store::simple_id(&connection_id)
+            || !store::simple_id(&attempt_id)
+            || !store::simple_id(&operation_id)
+            || !store::simple_id(&storage_handle)
+        {
+            return Err(AgentError::InvalidInput);
+        }
+        Ok(Self {
+            org_id,
+            user_id,
+            provider,
+            connection_id,
+            generation,
+            attempt_id,
+            operation_id,
+            storage_handle,
+        })
+    }
+}
+
+/// Historical proof of an exact native login commit. It grants no current authority.
+pub(crate) struct CommittedLoginWitness {
+    org_id: i32,
+    user_id: i32,
+    provider: super::types::Provider,
+    connection_id: String,
+    generation: i64,
+    session_id: String,
+    attempt_id: String,
+    operation_id: String,
+    storage_handle: String,
+    completed_at: i64,
+}
+
+#[allow(dead_code)] // Consumed by the later reviewed coordinator adapter.
+impl CommittedLoginWitness {
+    pub(crate) fn org_id(&self) -> i32 {
+        self.org_id
+    }
+
+    pub(crate) fn user_id(&self) -> i32 {
+        self.user_id
+    }
+
+    pub(crate) fn provider(&self) -> super::types::Provider {
+        self.provider
+    }
+
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
+    pub(crate) fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+
+    pub(crate) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub(crate) fn storage_handle(&self) -> &str {
+        &self.storage_handle
+    }
+
+    pub(crate) fn completed_at(&self) -> i64 {
+        self.completed_at
+    }
+}
+
+#[allow(dead_code)] // Consumed by the later reviewed coordinator adapter.
+pub(crate) async fn read_completed_witness(
+    state: &ServerState,
+    expected: &CompletionLookup,
+) -> Result<Option<CommittedLoginWitness>, AgentError> {
+    let tx = db::begin(&state.database)
+        .await
+        .map_err(|_| AgentError::Unavailable)?;
+    db::lock_admission_guard(&tx)
+        .await
+        .map_err(|_| AgentError::Unavailable)?;
+
+    let mut witness = None;
+    if let Some(connection) = store::lock_owned_connection(
+        &tx,
+        &expected.connection_id,
+        expected.org_id,
+        expected.user_id,
+    )
+    .await?
+    {
+        if connection.provider == expected.provider
+            && connection.generation == expected.generation
+            && matches!(
+                connection.state,
+                ConnectionState::Connected | ConnectionState::ReconnectRequired
+            )
+            && connection.storage_handle.as_deref() == Some(expected.storage_handle.as_str())
+        {
+            if let Some(attempt) =
+                store::lock_attempt_for_connection(&tx, &connection.id, &expected.attempt_id)
+                    .await?
+            {
+                if attempt.connection_id == connection.id
+                    && attempt.generation == expected.generation
+                    && attempt.state == "completed"
+                {
+                    if let Some(operation) =
+                        store::lock_operation(&tx, &connection.id, &expected.operation_id).await?
+                    {
+                        let completed_at = attempt.updated_at;
+                        if operation.connection_id == connection.id
+                            && operation.kind == "connect"
+                            && operation.target_attempt_id.as_deref()
+                                == Some(expected.attempt_id.as_str())
+                            && operation.target_generation == expected.generation
+                            && operation.result_generation == expected.generation
+                            && operation.state == "completed"
+                            && operation.lease_owner.is_none()
+                            && operation.lease_expires_at.is_none()
+                            && operation.updated_at == completed_at
+                            && completed_at >= attempt.created_at
+                            && completed_at < attempt.expires_at
+                            && completed_at < operation.expires_at
+                        {
+                            witness = Some(CommittedLoginWitness {
+                                org_id: connection.org_id,
+                                user_id: connection.user_id,
+                                provider: connection.provider,
+                                connection_id: connection.id,
+                                generation: connection.generation,
+                                session_id: attempt.session_id,
+                                attempt_id: attempt.id,
+                                operation_id: operation.id,
+                                storage_handle: expected.storage_handle.clone(),
+                                completed_at,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    tx.commit().await.map_err(|_| AgentError::Unavailable)?;
+    Ok(witness)
+}
+
 async fn lock_ticket(
     state: &ServerState,
     actor: &OrgContext,

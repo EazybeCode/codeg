@@ -41,6 +41,7 @@ pub(super) struct OperationRow {
     pub(super) lease_owner: Option<String>,
     pub(super) lease_expires_at: Option<i64>,
     pub(super) expires_at: i64,
+    pub(super) updated_at: i64,
 }
 
 fn unavailable<T>(_error: T) -> AgentError {
@@ -251,6 +252,7 @@ fn operation_row(row: &QueryResult) -> Result<OperationRow, AgentError> {
         lease_owner: row.try_get("", "lease_owner").map_err(unavailable)?,
         lease_expires_at: row.try_get("", "lease_expires_at").map_err(unavailable)?,
         expires_at: row.try_get("", "expires_at").map_err(unavailable)?,
+        updated_at: row.try_get("", "updated_at").map_err(unavailable)?,
     };
     if !simple_id(&result.id)
         || !simple_id(&result.connection_id)
@@ -273,8 +275,12 @@ fn operation_row(row: &QueryResult) -> Result<OperationRow, AgentError> {
             .is_some_and(|value| !simple_id(value))
         || result.lease_expires_at.is_some_and(|value| value < 0)
         || result.expires_at < 0
-        || (result.state == "leased")
-            != (result.lease_owner.is_some() && result.lease_expires_at.is_some())
+        || result.updated_at < 0
+        || (if result.state == "leased" {
+            result.lease_owner.is_none() || result.lease_expires_at.is_none()
+        } else {
+            result.lease_owner.is_some() || result.lease_expires_at.is_some()
+        })
         || (result.kind == "disconnect") != result.target_attempt_id.is_none()
     {
         return Err(AgentError::Unavailable);
@@ -427,7 +433,7 @@ pub(super) async fn lock_operation_key(
     request_key: &str,
 ) -> Result<Option<OperationRow>, AgentError> {
     let sql = format!(
-        "SELECT id,connection_id,kind,request_key,target_attempt_id,target_generation,result_generation,state,lease_owner,lease_expires_at,expires_at FROM neev_agent_operations WHERE connection_id=$1 AND kind=$2 AND request_key=$3{}",
+        "SELECT id,connection_id,kind,request_key,target_attempt_id,target_generation,result_generation,state,lease_owner,lease_expires_at,expires_at,updated_at FROM neev_agent_operations WHERE connection_id=$1 AND kind=$2 AND request_key=$3{}",
         lock_suffix(tx)
     );
     db::one(
@@ -448,7 +454,7 @@ pub(super) async fn lock_operation(
     operation_id: &str,
 ) -> Result<Option<OperationRow>, AgentError> {
     let sql = format!(
-        "SELECT id,connection_id,kind,request_key,target_attempt_id,target_generation,result_generation,state,lease_owner,lease_expires_at,expires_at FROM neev_agent_operations WHERE connection_id=$1 AND id=$2{}",
+        "SELECT id,connection_id,kind,request_key,target_attempt_id,target_generation,result_generation,state,lease_owner,lease_expires_at,expires_at,updated_at FROM neev_agent_operations WHERE connection_id=$1 AND id=$2{}",
         lock_suffix(tx)
     );
     db::one(tx, &sql, vec![connection_id.into(), operation_id.into()])
@@ -463,7 +469,7 @@ pub(super) async fn lock_active_operations(
     connection_id: &str,
 ) -> Result<Vec<OperationRow>, AgentError> {
     let sql = format!(
-        "SELECT id,connection_id,kind,request_key,target_attempt_id,target_generation,result_generation,state,lease_owner,lease_expires_at,expires_at FROM neev_agent_operations WHERE connection_id=$1 AND state IN ('queued','leased') ORDER BY id{}",
+        "SELECT id,connection_id,kind,request_key,target_attempt_id,target_generation,result_generation,state,lease_owner,lease_expires_at,expires_at,updated_at FROM neev_agent_operations WHERE connection_id=$1 AND state IN ('queued','leased') ORDER BY id{}",
         lock_suffix(tx)
     );
     tx.query_all(db::statement(tx, &sql, vec![connection_id.into()]))

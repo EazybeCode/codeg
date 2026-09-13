@@ -74,12 +74,19 @@ pub(crate) struct VerifiedSubscription {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+pub(crate) enum CleanupTarget {
+    Cancel { attempt_id: String },
+    Disconnect,
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct CleanupTicket {
     pub(crate) operation_id: String,
     pub(crate) connection_id: String,
     pub(crate) provider: Provider,
     pub(crate) org_id: i32,
     pub(crate) user_id: i32,
+    pub(crate) target: CleanupTarget,
     pub(crate) target_generation: i64,
     pub(crate) result_generation: i64,
     pub(crate) lease_owner: String,
