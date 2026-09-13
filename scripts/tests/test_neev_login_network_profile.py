@@ -30,6 +30,10 @@ def load_module():
 module = load_module()
 
 
+class StringSubclass(str):
+    pass
+
+
 class LoginNetworkProfileTests(unittest.TestCase):
     def setUp(self):
         if module is None:
@@ -252,6 +256,34 @@ class LoginNetworkProfileTests(unittest.TestCase):
                 self.assert_invalid(
                     lambda endpoint=endpoint: module.validate_endpoints(proxies + (endpoint,))
                 )
+
+    def test_rejects_nonexact_string_types_for_every_endpoint_field(self):
+        proxies = self.proxy_endpoints()
+        original = proxies[0]
+        secret = "invented-endpoint-secret"
+        valid_values = {
+            "role": original.role,
+            "bridge": original.bridge,
+            "ipv4": original.ipv4,
+            "mac": original.mac,
+            "interface": original.interface,
+        }
+        for field, valid in valid_values.items():
+            malformed_values = (
+                [secret],
+                {secret: valid},
+                None,
+                7,
+                StringSubclass(valid),
+            )
+            for malformed in malformed_values:
+                with self.subTest(field=field, malformed_type=type(malformed).__name__):
+                    replacement = dataclasses.replace(original, **{field: malformed})
+                    endpoints = (replacement,) + proxies[1:]
+                    self.assert_invalid(
+                        lambda endpoints=endpoints: module.validate_endpoints(endpoints),
+                        secret,
+                    )
 
     def test_rejects_duplicate_mac_or_host_interface_across_roles(self):
         proxies = self.proxy_endpoints()

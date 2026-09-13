@@ -128,6 +128,17 @@ def validate_endpoints(endpoints: tuple[Endpoint, ...]) -> tuple[Endpoint, ...]:
     for endpoint in endpoints:
         if type(endpoint) is not Endpoint:
             raise ProfileError("invalid")
+        if any(
+            type(value) is not str
+            for value in (
+                endpoint.role,
+                endpoint.bridge,
+                endpoint.ipv4,
+                endpoint.mac,
+                endpoint.interface,
+            )
+        ):
+            raise ProfileError("invalid")
         if endpoint.role not in _ENDPOINT_ADDRESSES or endpoint.role in roles:
             raise ProfileError("invalid")
         if (endpoint.bridge, endpoint.ipv4) != _ENDPOINT_ADDRESSES[endpoint.role]:
