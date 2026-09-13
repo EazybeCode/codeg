@@ -1,0 +1,302 @@
+[
+  {
+    "operation": "begin",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {}
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "attempt_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "challenge": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "csrf": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "expires_at": 2000000000
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "issue",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "attempt_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "challenge": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "code": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "expires_at": 2000000000
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "complete",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "attempt_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "code": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "workspace_id": "11111111-1111-4111-8111-111111111111",
+        "user_id": "22222222-2222-4222-8222-222222222222",
+        "csrf": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "csrf_expires_at": 2000000000,
+        "expires_at": 2000001000,
+        "destination": "/workspace"
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "session",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {}
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "workspace_id": "11111111-1111-4111-8111-111111111111",
+        "user_id": "22222222-2222-4222-8222-222222222222",
+        "csrf": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "csrf_expires_at": 2000000000,
+        "expires_at": 2000001000
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "redeem",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "attempt_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "code": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "verifier": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "receipt_id": "11111111-1111-4111-8111-111111111111",
+        "issuer": "neev-native-v1",
+        "audience": "neev-collaboration-v1",
+        "relying_ref": "11111111-1111-4111-8111-111111111111",
+        "subject": {
+          "user_id": "2147483647",
+          "org_id": "2",
+          "source_session_id": "22222222-2222-4222-8222-222222222222",
+          "account_revision": "1",
+          "org_revision": "1",
+          "member_revision": "1",
+          "role": "admin",
+          "display_name": "Invented Person",
+          "org_name": "Invented Workspace",
+          "verified_email": "invented@example.test"
+        },
+        "expires_at": 2000001000,
+        "issued_after_cursor": "0",
+        "revocation_cursor": "9223372036854775807"
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "validate",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "relying_ref": "11111111-1111-4111-8111-111111111111"
+      }
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "subject": {
+          "user_id": "2147483647",
+          "org_id": "2",
+          "source_session_id": "22222222-2222-4222-8222-222222222222",
+          "account_revision": "1",
+          "org_revision": "1",
+          "member_revision": "1",
+          "role": "admin",
+          "display_name": "Invented Person",
+          "org_name": "Invented Workspace",
+          "verified_email": "invented@example.test"
+        },
+        "expires_at": 2000001000,
+        "issued_after_cursor": "0",
+        "revocation_cursor": "9223372036854775807"
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "logout",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {}
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "state": "local_denied",
+        "propagation": "pending"
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "revoke",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "relying_ref": "11111111-1111-4111-8111-111111111111",
+        "intent_id": "22222222-2222-4222-8222-222222222222"
+      }
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "event_id": "11111111-1111-4111-8111-111111111111",
+        "cursor": "9223372036854775807",
+        "state": "revoked"
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "revocations",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "after_cursor": "9223372036854775806",
+        "limit": 50
+      }
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "events": [
+          {
+            "event_id": "11111111-1111-4111-8111-111111111111",
+            "cursor": "9223372036854775807",
+            "scope": "membership",
+            "user_id": "2147483647",
+            "org_id": "2",
+            "source_session_id": null
+          }
+        ],
+        "next_cursor": "9223372036854775807",
+        "high_watermark": "9223372036854775807"
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  },
+  {
+    "operation": "ack",
+    "request": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "through_cursor": "0",
+        "writer_epoch": "9223372036854775807"
+      }
+    },
+    "success": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "data": {
+        "acknowledged_cursor": "0"
+      }
+    },
+    "error": {
+      "v": 1,
+      "request_id": "11111111-1111-4111-8111-111111111111",
+      "error": {
+        "code": "unavailable"
+      }
+    }
+  }
+]

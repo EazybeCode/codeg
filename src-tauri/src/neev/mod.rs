@@ -9,6 +9,7 @@ pub(crate) mod config;
 pub(crate) mod content;
 pub(crate) mod db;
 pub(crate) mod error;
+mod gateway;
 pub(crate) mod http;
 pub(crate) mod mail;
 pub(crate) mod org;
