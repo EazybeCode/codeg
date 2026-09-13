@@ -1,5 +1,8 @@
 use super::wire::preflight;
-use super::wire_types::{ErrorCode, ResponseEnvelope, Role, UnixTime};
+use super::wire_types::{
+    Counter, Cursor, Envelope, ErrorCode, EventScope, NativeId, RequiredNullable, ResponseEnvelope,
+    RevocationEvent, RevocationsSuccessData, Role, UnixTime, UuidV4, Version,
+};
 use super::{
     decode_request, decode_response, encode_request, encode_response, Operation, Response,
     WireError,
@@ -420,6 +423,36 @@ fn encoding_rechecks_semantic_relationships_and_bounds() {
         encode_response(Operation::Revocations, &response),
         Err(WireError::InvalidMessage)
     );
+}
+
+#[test]
+fn native_producer_constructs_and_encodes_present_and_null_event_fields() {
+    let event = RevocationEvent {
+        event_id: UuidV4::new(REQUEST_ID.into()).unwrap(),
+        cursor: Counter::new("1".into()).unwrap(),
+        scope: EventScope::Account,
+        user_id: RequiredNullable::new(Some(NativeId::new("1".into()).unwrap())),
+        org_id: RequiredNullable::new(None),
+        source_session_id: RequiredNullable::new(None),
+    };
+    let response = Response::Revocations(ResponseEnvelope::Success(Envelope {
+        v: Version,
+        request_id: UuidV4::new(REQUEST_ID.into()).unwrap(),
+        data: RevocationsSuccessData {
+            events: vec![event],
+            next_cursor: Cursor::new("1".into()).unwrap(),
+            high_watermark: Cursor::new("1".into()).unwrap(),
+        },
+    }));
+
+    let encoded = encode_response(Operation::Revocations, &response).unwrap();
+    let value: Value = serde_json::from_slice(&encoded).unwrap();
+    let event = &value["data"]["events"][0];
+    assert_eq!(event["user_id"], json!("1"));
+    assert_eq!(event["org_id"], Value::Null);
+    assert_eq!(event["source_session_id"], Value::Null);
+    assert!(event.as_object().unwrap().contains_key("org_id"));
+    assert!(event.as_object().unwrap().contains_key("source_session_id"));
 }
 
 #[test]

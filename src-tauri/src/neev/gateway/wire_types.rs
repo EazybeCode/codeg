@@ -311,6 +311,10 @@ string_type!(Email, valid_email);
 pub(crate) struct RequiredNullable<T>(Option<T>);
 
 impl<T> RequiredNullable<T> {
+    pub(crate) fn new(value: Option<T>) -> Self {
+        Self(value)
+    }
+
     fn is_some(&self) -> bool {
         self.0.is_some()
     }
