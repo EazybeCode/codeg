@@ -334,6 +334,27 @@ class SupervisorDtoTests(unittest.TestCase):
                     "invalid", lambda value=value: self.dto._strict_parse(value, 8192)
                 )
 
+    def test_bounded_serialization_exact_response_extent_control(self):
+        envelope_overhead = len(
+            json.dumps(
+                {"value": [""] * 16}, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+        )
+        final_string_size = 16384 - envelope_overhead - (15 * 1024)
+        self.assertEqual(final_string_size, 965)
+        exact_value = ["s" * 1024] * 15 + ["s" * final_string_size]
+        one_over_value = exact_value[:-1] + [exact_value[-1] + "s"]
+        encoded = self.dto._encode_json(
+            {"value": exact_value}, self.dto._RESPONSE_MAX
+        )
+        self.assertEqual(len(encoded), 16384)
+        self.assert_dto_error(
+            "invalid",
+            lambda: self.dto._encode_json(
+                {"value": one_over_value}, self.dto._RESPONSE_MAX
+            ),
+        )
+
     def test_every_invalid_literal_fixture_is_rejected(self):
         for item in self.fixture["invalid"]:
             decoder = (
@@ -631,30 +652,36 @@ class SupervisorDtoTests(unittest.TestCase):
             self.dto.Id("f" * 32),
             self.dto.Counter(str(I64_MAX)),
         )
-        maximal_entries = []
-        for index in range(32):
-            long_entry_id = self.dto.Id(format(index + 1, "032x"))
-            object.__setattr__(long_entry_id, "value", "f" * 1024)
-            maximal_entries.append(
-                replace(
-                    self.reconcile_entry(
-                        index + 1,
-                        self.dto.RegistryPhase.QUARANTINED,
-                        handle=True,
-                        receipt=True,
-                        cleanup=True,
-                    ),
-                    entry_id=long_entry_id,
-                    binding=maximal_binding,
-                )
+        maximal_entries = tuple(
+            replace(
+                self.reconcile_entry(
+                    index + 1,
+                    self.dto.RegistryPhase.CLEANUP_PENDING,
+                    handle=True,
+                    receipt=True,
+                    cleanup=True,
+                ),
+                binding=maximal_binding,
             )
-        oversized = replace(
+            for index in range(32)
+        )
+        maximal_response = replace(
             response,
+            coordinator=replace(
+                response.coordinator, epoch=self.dto.Counter(str(I64_MAX))
+            ),
+            sequence=self.dto.Counter(str(I64_MAX)),
             body=self.dto.ReconcilePage(
-                self.dto.Counter(str(I64_MAX)), tuple(maximal_entries), None
+                self.dto.Counter(str(I64_MAX)),
+                maximal_entries,
+                maximal_entries[-1].entry_id,
             ),
         )
-        self.assert_dto_error("invalid", lambda: self.dto.encode_response(oversized))
+        maximal_encoded = self.dto.encode_response(maximal_response)
+        self.assertLess(len(maximal_encoded), 16384)
+        self.assertEqual(
+            len(self.dto.decode_response(maximal_encoded).body.entries), 32
+        )
 
     def test_semantic_keys_distinguish_only_the_specified_fields(self):
         login = self.request("start").body.ticket

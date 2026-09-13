@@ -59,11 +59,6 @@ impl Id {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn invalid_id_for_test(value: String) -> Id {
-    Id(value)
-}
-
 impl<'de> Deserialize<'de> for Id {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
@@ -1108,6 +1103,26 @@ pub(crate) fn validate_bounded_json_for_test(raw: &[u8], maximum: usize) -> Resu
     parse_tree(raw, maximum).map(|_| ())
 }
 
+fn encode_json<T: Serialize>(value: &T, maximum: usize) -> Result<Vec<u8>, DtoError> {
+    let encoded = serde_json::to_vec(value).map_err(|_| DtoError::Invalid)?;
+    parse_tree(&encoded, maximum)?;
+    Ok(encoded)
+}
+
+#[cfg(test)]
+pub(crate) fn encode_response_bound_control_for_test(
+    final_string_size: usize,
+) -> Result<Vec<u8>, DtoError> {
+    #[derive(Serialize)]
+    struct BoundControl {
+        value: Vec<String>,
+    }
+
+    let mut value = vec!["s".repeat(MAX_STRING_BYTES); 15];
+    value.push("s".repeat(final_string_size));
+    encode_json(&BoundControl { value }, RESPONSE_MAX)
+}
+
 fn parse_as<T: DeserializeOwned>(tree: &JsonNode) -> Result<T, DtoError> {
     let encoded = serde_json::to_vec(tree).map_err(|_| DtoError::Invalid)?;
     serde_json::from_slice(&encoded).map_err(|_| DtoError::Invalid)
@@ -1417,15 +1432,17 @@ pub(crate) fn encode_request(request: &Request) -> Result<Vec<u8>, DtoError> {
     request.validate()?;
     macro_rules! encode_body {
         ($body:expr) => {
-            serde_json::to_vec(&RequestEnvelopeRef {
-                v: 1,
-                coordinator: &request.coordinator,
-                sequence: &request.sequence,
-                request_id: &request.request_id,
-                op: request.op(),
-                body: $body,
-            })
-            .map_err(|_| DtoError::Invalid)?
+            encode_json(
+                &RequestEnvelopeRef {
+                    v: 1,
+                    coordinator: &request.coordinator,
+                    sequence: &request.sequence,
+                    request_id: &request.request_id,
+                    op: request.op(),
+                    body: $body,
+                },
+                REQUEST_MAX,
+            )?
         };
     }
     let encoded = match &request.body {
@@ -1548,17 +1565,19 @@ pub(crate) fn encode_response(response: &Response) -> Result<Vec<u8>, DtoError> 
     response.validate()?;
     macro_rules! encode_result {
         ($body:expr) => {
-            serde_json::to_vec(&SuccessEnvelopeRef {
-                v: 1,
-                coordinator: &response.coordinator,
-                supervisor_boot_id: &response.supervisor_boot_id,
-                sequence: &response.sequence,
-                request_id: &response.request_id,
-                op: response.operation,
-                outcome: Outcome::Ok,
-                body: $body,
-            })
-            .map_err(|_| DtoError::Invalid)?
+            encode_json(
+                &SuccessEnvelopeRef {
+                    v: 1,
+                    coordinator: &response.coordinator,
+                    supervisor_boot_id: &response.supervisor_boot_id,
+                    sequence: &response.sequence,
+                    request_id: &response.request_id,
+                    op: response.operation,
+                    outcome: Outcome::Ok,
+                    body: $body,
+                },
+                RESPONSE_MAX,
+            )?
         };
     }
     let encoded = match (&response.body, &response.error, response.outcome) {
@@ -1568,17 +1587,19 @@ pub(crate) fn encode_response(response: &Response) -> Result<Vec<u8>, DtoError> 
         (Some(ResultBody::CheckConnection(body)), None, Outcome::Ok) => encode_result!(body),
         (Some(ResultBody::CleanupConnection(body)), None, Outcome::Ok) => encode_result!(body),
         (Some(ResultBody::ReconcilePage(body)), None, Outcome::Ok) => encode_result!(body),
-        (None, Some(error), Outcome::Error) => serde_json::to_vec(&ErrorEnvelopeRef {
-            v: 1,
-            coordinator: &response.coordinator,
-            supervisor_boot_id: &response.supervisor_boot_id,
-            sequence: &response.sequence,
-            request_id: &response.request_id,
-            op: response.operation,
-            outcome: Outcome::Error,
-            error,
-        })
-        .map_err(|_| DtoError::Invalid)?,
+        (None, Some(error), Outcome::Error) => encode_json(
+            &ErrorEnvelopeRef {
+                v: 1,
+                coordinator: &response.coordinator,
+                supervisor_boot_id: &response.supervisor_boot_id,
+                sequence: &response.sequence,
+                request_id: &response.request_id,
+                op: response.operation,
+                outcome: Outcome::Error,
+                error,
+            },
+            RESPONSE_MAX,
+        )?,
         _ => return Err(DtoError::Invalid),
     };
     decode_response(&encoded)?;

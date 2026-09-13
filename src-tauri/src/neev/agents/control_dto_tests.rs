@@ -155,7 +155,7 @@ fn literal_fixture_covers_every_request_response_and_error() {
             assert!(dto::decode_request(&encoded).unwrap() == decoded);
             (item.name.clone(), decoded)
         })
-        .collect();
+        .collect::<Vec<_>>();
     let boot = dto::Id::new("3".repeat(32)).unwrap();
     for item in &fixture.responses {
         let decoded = dto::decode_response(&decode_hex(&item.payload_hex)).unwrap();
@@ -300,6 +300,16 @@ fn bounded_json_accepts_and_rejects_exact_member_key_string_array_and_depth_limi
             dto::DtoError::Invalid,
         );
     }
+}
+
+#[test]
+fn bounded_serialization_accepts_exact_response_extent_and_rejects_one_over() {
+    let exact = dto::encode_response_bound_control_for_test(965).unwrap();
+    assert!(exact.len() == 16_384);
+    assert_error(
+        dto::encode_response_bound_control_for_test(966),
+        dto::DtoError::Invalid,
+    );
 }
 
 #[test]
@@ -620,18 +630,33 @@ fn reconcile_entry_count_order_revision_and_encoded_size_are_bounded() {
         dto::DtoError::Correlation,
     );
 
-    let oversized_entries = (1..=32)
+    let maximal_binding = dto::ConnectionBinding {
+        scope: dto::Scope {
+            org_id: dto::OwnerId::new(2_147_483_647).unwrap(),
+            user_id: dto::OwnerId::new(2_147_483_647).unwrap(),
+            provider: dto::Provider::Codex,
+        },
+        connection_id: dto::Id::new("f".repeat(32)).unwrap(),
+        generation: dto::Counter::new(I64_MAX.to_string()).unwrap(),
+    };
+    let maximal_entries = (1..=32)
         .map(|index| {
             let mut entry =
-                reconcile_entry(index, dto::RegistryPhase::Quarantined, true, true, true);
-            entry.entry_id = dto::invalid_id_for_test("f".repeat(1024));
+                reconcile_entry(index, dto::RegistryPhase::CleanupPending, true, true, true);
+            entry.binding = maximal_binding.clone();
             entry
         })
-        .collect();
-    assert_error(
-        dto::encode_response(&reconcile_response("1", oversized_entries, None)),
-        dto::DtoError::Invalid,
-    );
+        .collect::<Vec<_>>();
+    let next = maximal_entries.last().map(|entry| entry.entry_id.clone());
+    let mut maximal_response = reconcile_response(&I64_MAX.to_string(), maximal_entries, next);
+    maximal_response.coordinator.epoch = dto::Counter::new(I64_MAX.to_string()).unwrap();
+    maximal_response.sequence = dto::Counter::new(I64_MAX.to_string()).unwrap();
+    let maximal_encoded = dto::encode_response(&maximal_response).unwrap();
+    assert!(maximal_encoded.len() < 16_384);
+    assert!(match dto::decode_response(&maximal_encoded).unwrap().body {
+        Some(dto::ResultBody::ReconcilePage(page)) => page.entries.len() == 32,
+        _ => false,
+    });
 }
 
 #[test]
