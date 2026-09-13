@@ -100,7 +100,8 @@ where
     T: DeserializeOwned + Validated,
 {
     preflight(raw)?;
-    let value: T = serde_json::from_slice(raw).map_err(|_| WireError::InvalidMessage)?;
+    let MapOnly(value): MapOnly<T> =
+        serde_json::from_slice(raw).map_err(|_| WireError::InvalidMessage)?;
     if !value.valid() {
         return Err(WireError::InvalidMessage);
     }

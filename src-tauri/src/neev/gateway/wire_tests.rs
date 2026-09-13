@@ -241,6 +241,117 @@ fn strict_objects_reject_unknown_fields_and_success_error_ambiguity() {
 }
 
 #[test]
+fn root_request_and_error_envelopes_reject_positional_arrays() {
+    rejects_request(Operation::Begin, &json!([1, REQUEST_ID, {}]));
+    rejects_response(Operation::Begin, &json!([1, REQUEST_ID, ["unavailable"]]));
+}
+
+#[test]
+fn empty_and_nonempty_data_reject_positional_arrays() {
+    let begin = json!({"v":1,"request_id":REQUEST_ID,"data":[]});
+    rejects_request(Operation::Begin, &begin);
+
+    let issue = fixture("issue");
+    let mut request = issue.request.clone();
+    request["data"] = json!([
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ]);
+    rejects_request(Operation::Issue, &request);
+
+    let mut success = issue.success.clone();
+    success["data"] = json!(["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 2000000000]);
+    rejects_response(Operation::Issue, &success);
+}
+
+#[test]
+fn nested_subject_event_and_error_objects_reject_positional_arrays() {
+    let validate = fixture("validate");
+    let mut success = validate.success.clone();
+    success["data"]["subject"] = json!([
+        "2147483647",
+        "2",
+        OTHER_ID,
+        "1",
+        "1",
+        "1",
+        "admin",
+        "Invented Person",
+        "Invented Workspace",
+        "invented@example.test"
+    ]);
+    rejects_response(Operation::Validate, &success);
+
+    let revocations = fixture("revocations");
+    let mut success = revocations.success.clone();
+    success["data"]["events"][0] = json!([
+        REQUEST_ID,
+        MAX_COUNTER,
+        "membership",
+        "2147483647",
+        "2",
+        null
+    ]);
+    rejects_response(Operation::Revocations, &success);
+
+    let begin = fixture("begin");
+    let mut error = begin.error.clone();
+    error["error"] = json!(["unavailable"]);
+    rejects_response(Operation::Begin, &error);
+}
+
+#[test]
+fn every_vocabulary_enum_rejects_externally_tagged_objects() {
+    let mut cases = Vec::new();
+
+    let begin = fixture("begin");
+    let mut error_code = begin.error.clone();
+    error_code["error"]["code"] = json!({"unavailable":null});
+    cases.push((Operation::Begin, error_code));
+
+    let redeem = fixture("redeem");
+    let mut role = redeem.success.clone();
+    role["data"]["subject"]["role"] = json!({"admin":null});
+    cases.push((Operation::Redeem, role));
+
+    let mut issuer = redeem.success.clone();
+    issuer["data"]["issuer"] = json!({"neev-native-v1":null});
+    cases.push((Operation::Redeem, issuer));
+
+    let mut audience = redeem.success.clone();
+    audience["data"]["audience"] = json!({"neev-collaboration-v1":null});
+    cases.push((Operation::Redeem, audience));
+
+    let complete = fixture("complete");
+    let mut destination = complete.success.clone();
+    destination["data"]["destination"] = json!({"/workspace":null});
+    cases.push((Operation::Complete, destination));
+
+    let logout = fixture("logout");
+    let mut logout_state = logout.success.clone();
+    logout_state["data"]["state"] = json!({"local_denied":null});
+    cases.push((Operation::Logout, logout_state));
+
+    let mut propagation = logout.success.clone();
+    propagation["data"]["propagation"] = json!({"pending":null});
+    cases.push((Operation::Logout, propagation));
+
+    let revoke = fixture("revoke");
+    let mut revoke_state = revoke.success.clone();
+    revoke_state["data"]["state"] = json!({"revoked":null});
+    cases.push((Operation::Revoke, revoke_state));
+
+    let revocations = fixture("revocations");
+    let mut event_scope = revocations.success.clone();
+    event_scope["data"]["events"][0]["scope"] = json!({"membership":null});
+    cases.push((Operation::Revocations, event_scope));
+
+    for (operation, value) in cases {
+        rejects_response(operation, &value);
+    }
+}
+
+#[test]
 fn trusted_operation_selects_the_only_valid_shape() {
     let begin = fixture("begin");
     assert!(decode_request(Operation::Session, &bytes(&begin.request)).is_ok());

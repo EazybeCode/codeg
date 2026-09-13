@@ -2,10 +2,11 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use serde::de::{Error as DeError, Visitor};
+use serde::de::{value::MapAccessDeserializer, Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashSet;
 use std::fmt;
+use std::marker::PhantomData;
 
 const COUNTER_MAX: u64 = i64::MAX as u64;
 const NATIVE_ID_MAX: u64 = i32::MAX as u64;
@@ -342,7 +343,99 @@ impl Cursor {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct MapOnly<T>(pub(super) T);
+
+impl<'de, T> Deserialize<'de> for MapOnly<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct MapOnlyVisitor<T>(PhantomData<T>);
+
+        impl<'de, T> Visitor<'de> for MapOnlyVisitor<T>
+        where
+            T: Deserialize<'de>,
+        {
+            type Value = MapOnly<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                T::deserialize(MapAccessDeserializer::new(map)).map(MapOnly)
+            }
+        }
+
+        deserializer.deserialize_map(MapOnlyVisitor(PhantomData))
+    }
+}
+
+fn deserialize_map_only<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    MapOnly::<T>::deserialize(deserializer).map(|value| value.0)
+}
+
+fn deserialize_map_only_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct MapOnlyVecVisitor<T>(PhantomData<T>);
+
+    impl<'de, T> Visitor<'de> for MapOnlyVecVisitor<T>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an array of JSON objects")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+            let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0));
+            while let Some(MapOnly(value)) = sequence.next_element::<MapOnly<T>>()? {
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_seq(MapOnlyVecVisitor(PhantomData))
+}
+
+macro_rules! deserialize_string_enum {
+    ($name:ident { $($wire:literal => $variant:ident),+ $(,)? }) => {
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                struct StringEnumVisitor;
+
+                impl<'de> Visitor<'de> for StringEnumVisitor {
+                    type Value = $name;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        formatter.write_str("a recognized string value")
+                    }
+
+                    fn visit_str<E: DeError>(self, value: &str) -> Result<Self::Value, E> {
+                        match value {
+                            $($wire => Ok($name::$variant),)+
+                            _ => Err(E::unknown_variant(value, &[$($wire),+])),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_str(StringEnumVisitor)
+            }
+        }
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Role {
     #[serde(rename = "admin")]
     Admin,
@@ -350,7 +443,7 @@ pub(crate) enum Role {
     Member,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum ErrorCode {
     #[serde(rename = "invalid_request")]
     InvalidRequest,
@@ -370,7 +463,7 @@ pub(crate) enum ErrorCode {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Propagation {
     #[serde(rename = "pending")]
     Pending,
@@ -378,7 +471,7 @@ pub(crate) enum Propagation {
     Complete,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum EventScope {
     #[serde(rename = "session")]
     Session,
@@ -390,41 +483,82 @@ pub(crate) enum EventScope {
     Membership,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Destination {
     #[serde(rename = "/workspace")]
     Workspace,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Issuer {
     #[serde(rename = "neev-native-v1")]
     NeevNativeV1,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum Audience {
     #[serde(rename = "neev-collaboration-v1")]
     NeevCollaborationV1,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum LogoutState {
     #[serde(rename = "local_denied")]
     LocalDenied,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum RevokeState {
     #[serde(rename = "revoked")]
     Revoked,
 }
 
+deserialize_string_enum!(Role {
+    "admin" => Admin,
+    "member" => Member,
+});
+deserialize_string_enum!(ErrorCode {
+    "invalid_request" => InvalidRequest,
+    "unauthorized" => Unauthorized,
+    "forbidden" => Forbidden,
+    "authority_changed" => AuthorityChanged,
+    "login_retry_required" => LoginRetryRequired,
+    "conflict" => Conflict,
+    "rate_limited" => RateLimited,
+    "unavailable" => Unavailable,
+});
+deserialize_string_enum!(Propagation {
+    "pending" => Pending,
+    "complete" => Complete,
+});
+deserialize_string_enum!(EventScope {
+    "session" => Session,
+    "account" => Account,
+    "org" => Org,
+    "membership" => Membership,
+});
+deserialize_string_enum!(Destination {
+    "/workspace" => Workspace,
+});
+deserialize_string_enum!(Issuer {
+    "neev-native-v1" => NeevNativeV1,
+});
+deserialize_string_enum!(Audience {
+    "neev-collaboration-v1" => NeevCollaborationV1,
+});
+deserialize_string_enum!(LogoutState {
+    "local_denied" => LocalDenied,
+});
+deserialize_string_enum!(RevokeState {
+    "revoked" => Revoked,
+});
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(bound(deserialize = "D: Deserialize<'de>"), deny_unknown_fields)]
 pub(crate) struct Envelope<D> {
     pub(super) v: Version,
     pub(crate) request_id: UuidV4,
+    #[serde(deserialize_with = "deserialize_map_only")]
     pub(crate) data: D,
 }
 
@@ -433,6 +567,7 @@ pub(crate) struct Envelope<D> {
 pub(crate) struct ErrorEnvelope {
     pub(super) v: Version,
     pub(crate) request_id: UuidV4,
+    #[serde(deserialize_with = "deserialize_map_only")]
     pub(crate) error: ErrorBody,
 }
 
@@ -591,6 +726,7 @@ pub(crate) struct RedeemSuccessData {
     pub(crate) issuer: Issuer,
     pub(crate) audience: Audience,
     pub(crate) relying_ref: UuidV4,
+    #[serde(deserialize_with = "deserialize_map_only")]
     pub(crate) subject: Subject,
     pub(crate) expires_at: UnixTime,
     pub(crate) issued_after_cursor: Cursor,
@@ -600,6 +736,7 @@ pub(crate) struct RedeemSuccessData {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ValidateSuccessData {
+    #[serde(deserialize_with = "deserialize_map_only")]
     pub(crate) subject: Subject,
     pub(crate) expires_at: UnixTime,
     pub(crate) issued_after_cursor: Cursor,
@@ -638,6 +775,7 @@ pub(crate) struct RevocationEvent {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RevocationsSuccessData {
+    #[serde(deserialize_with = "deserialize_map_only_vec")]
     pub(crate) events: Vec<RevocationEvent>,
     pub(crate) next_cursor: Cursor,
     pub(crate) high_watermark: Cursor,
