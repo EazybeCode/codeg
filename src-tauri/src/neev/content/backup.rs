@@ -126,7 +126,7 @@ pub(super) async fn verify_snapshot_staged(
             .map_err(ContentError::from),
         VerificationStage::SnapshotSchema,
     )?;
-    let sql = if schema_version == 6 {
+    let sql = if matches!(schema_version, 6 | 7) {
         "SELECT r.org_id,r.blob_key,r.sha256,r.byte_length,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision ORDER BY r.org_id,r.blob_key"
     } else {
         "SELECT org_id,blob_key,sha256,byte_length,'markdown' AS format FROM neev_document_revisions ORDER BY org_id,blob_key"

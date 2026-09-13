@@ -31,6 +31,7 @@ const AGENT_TABLES: [&str; 3] = [
     "neev_agent_attempts",
     "neev_agent_operations",
 ];
+const STATUS_TABLES: [&str; 2] = ["neev_agent_status_owner", "neev_agent_status_checks"];
 const CONTENT_TABLES: [&str; 5] = [
     "neev_resources",
     "neev_messages",
@@ -42,7 +43,7 @@ const CONTENT_INDEXES: [&str; 2] = ["neev_resources_node_kind", "neev_resources_
 const HISTORICAL_ORIGIN: &str = "(origin_chat_id IS NULL AND origin_kind IS NULL) OR (origin_chat_id IS NOT NULL AND kind='document' AND origin_kind='chat')";
 
 // A correct hash alone must not make an invalid rich envelope restorable.
-async fn rich_snapshot_contract(database: DatabaseConnection) {
+async fn rich_snapshot_contract(database: DatabaseConnection, schema_version: i64) {
     let h = Harness::new(database).await;
     let doc = resources::create(
         &h.state,
@@ -77,10 +78,14 @@ async fn rich_snapshot_contract(database: DatabaseConnection) {
     )
     .await
     .unwrap();
+    downgrade_snapshot(&h.state.database, schema_version).await;
     let manifest = verify_snapshot(&h.state.database, &h.state.blobs)
         .await
         .unwrap();
-    assert_eq!((manifest.schema_version, manifest.blobs.len()), (6, 2));
+    assert_eq!(
+        (manifest.schema_version, manifest.blobs.len()),
+        (schema_version, 2)
+    );
     let corrupt = h
         .state
         .blobs
@@ -121,14 +126,28 @@ async fn rich_snapshot_contract(database: DatabaseConnection) {
 
 #[tokio::test]
 async fn sqlite_rich_backup_validates_body_format() {
-    rich_snapshot_contract(h::database().await).await;
+    rich_snapshot_contract(h::database().await, 6).await;
+}
+
+#[tokio::test]
+async fn schema_seven_blocks_verification_uses_format_metadata() {
+    rich_snapshot_contract(h::database().await, 7).await;
 }
 #[tokio::test]
 #[ignore = "requires guarded PostgreSQL"]
 async fn postgres_rich_backup_validates_body_format() {
     let (db, admin, schema) = h::postgres_database().await;
     eprintln!("rich backup owned schema: {schema}");
-    rich_snapshot_contract(db.clone()).await;
+    rich_snapshot_contract(db.clone(), 6).await;
+    h::cleanup_postgres(db, admin, schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires guarded PostgreSQL"]
+async fn postgres_schema_seven_blocks_verification_uses_format_metadata() {
+    let (db, admin, schema) = h::postgres_database().await;
+    eprintln!("schema7 rich backup owned schema: {schema}");
+    rich_snapshot_contract(db.clone(), 7).await;
     h::cleanup_postgres(db, admin, schema).await;
 }
 
@@ -245,7 +264,7 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
-    if schema_version == 6 {
+    if schema_version == 7 {
         return;
     }
     let sqlite_rebuild =
@@ -256,9 +275,16 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
             .unwrap();
     }
     let tx = database.begin().await.unwrap();
-    db::execute(&tx, "DROP TABLE neev_document_formats", vec![])
-        .await
-        .unwrap();
+    for table in STATUS_TABLES.iter().rev() {
+        db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
+    if schema_version < 6 {
+        db::execute(&tx, "DROP TABLE neev_document_formats", vec![])
+            .await
+            .unwrap();
+    }
     if schema_version < 5 {
         for table in AGENT_TABLES.iter().rev() {
             db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
@@ -403,7 +429,7 @@ async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
 
 #[tokio::test]
 async fn sqlite_restored_bytes() {
-    for version in [3, 4, 5, 6] {
+    for version in [3, 4, 5, 6, 7] {
         restored_bytes(h::database().await, version).await;
     }
 }
@@ -411,7 +437,7 @@ async fn sqlite_restored_bytes() {
 #[tokio::test]
 #[ignore = "requires isolated PostgreSQL"]
 async fn postgres_restored_bytes() {
-    for version in [3, 4, 5, 6] {
+    for version in [3, 4, 5, 6, 7] {
         let (db, admin, schema) = h::postgres_database().await;
         eprintln!("backup owned schema: {schema}");
         let outcome = std::panic::AssertUnwindSafe(restored_bytes(db.clone(), version))
@@ -514,7 +540,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 6);
+    assert_eq!(manifest.schema_version, 7);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -543,6 +569,11 @@ async fn snapshot_schema_is_exact_and_read_only() {
     db::execute(&db, "UPDATE neev_schema_version SET version=5", vec![])
         .await
         .unwrap();
+    for table in STATUS_TABLES.iter().rev() {
+        db::execute(&db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     db::execute(&db, "DROP TABLE neev_document_formats", vec![])
         .await
         .unwrap();
@@ -659,11 +690,7 @@ fn verifier_arguments_require_explicit_isolation_and_confirmation() {
     )
     .unwrap_err();
     assert_eq!(
-        assert_bounded_failure(
-            failure,
-            "NEEV_VERIFY_STAGE_ARGUMENTS",
-            &[argument_canary]
-        ),
+        assert_bounded_failure(failure, "NEEV_VERIFY_STAGE_ARGUMENTS", &[argument_canary]),
         ContentError::Invalid
     );
 
@@ -673,11 +700,7 @@ fn verifier_arguments_require_explicit_isolation_and_confirmation() {
         Err(failure) => failure,
     };
     assert_eq!(
-        assert_bounded_failure(
-            failure,
-            "NEEV_VERIFY_STAGE_DOCUMENT_ROOT",
-            &[root_canary]
-        ),
+        assert_bounded_failure(failure, "NEEV_VERIFY_STAGE_DOCUMENT_ROOT", &[root_canary]),
         ContentError::Invalid
     );
 }
