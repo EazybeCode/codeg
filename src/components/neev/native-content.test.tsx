@@ -58,6 +58,23 @@ function mount() {
     </NativeTestRoot>
   )
 }
+it("opens a chat as a page and restores the folder listing on Back", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/nodes/4/chats": () =>
+      json({ items: [chat], nextAfter: null }),
+    [`GET /api/neev/resources/${chat.id}`]: () => json(chat),
+    [`GET /api/neev/chats/${chat.id}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+  })
+  mount()
+  const user = userEvent.setup()
+  await user.click(await screen.findByRole("button", { name: /Design chat/ }))
+  expect(await screen.findByRole("textbox", { name: "Message" })).toBeVisible()
+  expect(screen.queryByRole("tablist")).toBeNull()
+  expect(screen.queryByRole("heading", { name: "Research" })).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Back to folder" }))
+  expect(await screen.findByRole("tablist")).toBeVisible()
+})
 // Activity can suspend synchronously when hiding. Await React's event flush
 // explicitly; user-event's synchronous act wrapper cannot await that suspension.
 const visibilityActions = {
@@ -936,7 +953,7 @@ it("discards the actual draft before opening a creator action on the same resour
   expect(mock.unknown).toEqual([])
 })
 
-it("restores keyboard focus to the destination tab after confirming a dirty tab switch", async () => {
+it("guards leaving a dirty page before keyboard switching folder tabs", async () => {
   const mock = mockNativeSession(undefined, {
     "GET /api/neev/nodes/4/chats": () =>
       json({ items: [chat], nextAfter: null }),
@@ -953,9 +970,12 @@ it("restores keyboard focus to the destination tab after confirming a dirty tab 
     await screen.findByRole("textbox", { name: "Message" }),
     "dirty"
   )
+  expect(screen.queryByRole("tablist")).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Back to folder" }))
+  await user.click(screen.getByRole("button", { name: "Discard changes" }))
+  expect(screen.queryByDisplayValue("dirty")).toBeNull()
   screen.getByRole("tab", { name: "Chats" }).focus()
   await user.keyboard("{ArrowRight}")
-  await user.click(screen.getByRole("button", { name: "Discard changes" }))
   await waitFor(() =>
     expect(screen.getByRole("tab", { name: "Documents" })).toHaveAttribute(
       "aria-selected",

@@ -144,7 +144,7 @@ async fn assert_v2_upgrades(db: &DatabaseConnection) {
     let original_node_id = seed_v2(db).await;
 
     assert_eq!(initialize(db).await, Ok(()));
-    assert_eq!(schema_version(db).await, 7);
+    assert_eq!(schema_version(db).await, 8);
     assert_eq!(node_name(db, original_node_id).await, "Marketing");
     assert!(insert_cross_org_resource(db).await.is_err());
     assert!(insert_document_revision_for_chat(db).await.is_err());
@@ -166,10 +166,10 @@ async fn sqlite_v2_upgrades_transactionally_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn fresh_database_initializes_at_version_seven() {
+async fn fresh_database_initializes_at_version_eight() {
     let db = h::empty_database().await;
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(schema_version(&db).await, 7);
+    assert_eq!(schema_version(&db).await, 8);
     assert!(table_exists(&db, "neev_resources").await);
     assert!(table_exists(&db, "neev_content_leases").await);
 }
@@ -258,6 +258,19 @@ async fn partial_v3_schema_is_refused_without_repair() {
 #[ignore = "requires explicitly isolated NEEV_TEST_DATABASE_URL"]
 async fn postgres_v2_upgrade_preserves_data_and_enforces_content_foreign_keys() {
     let (db, admin, schema) = h::postgres_database().await;
+    for table in [
+        "neev_gateway_revoke_intents",
+        "neev_gateway_redemptions",
+        "neev_gateway_relying_sessions",
+        "neev_gateway_exchanges",
+        "neev_gateway_relying_bindings",
+        "neev_gateway_revocations",
+        "neev_gateway_audience",
+    ] {
+        execute(&db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     for table in agent_status_migration::TABLE_NAMES.iter().rev() {
         execute(&db, &format!("DROP TABLE {table}"), vec![])
             .await
@@ -395,8 +408,8 @@ async fn v3_forward_hardening(db: &DatabaseConnection, invalid: bool) {
     } else {
         assert_eq!(validate_content_snapshot(db).await, Ok(3));
         assert_eq!(initialize(db).await, Ok(()));
-        assert_eq!(schema_version(db).await, 7);
-        assert_eq!(validate_content_snapshot(db).await, Ok(7));
+        assert_eq!(schema_version(db).await, 8);
+        assert_eq!(validate_content_snapshot(db).await, Ok(8));
         assert_eq!(node_name(db, NODE_ID).await, "Marketing");
         assert_eq!(
             scalar(db, "SELECT title FROM neev_resources WHERE id='retained'")
@@ -428,6 +441,19 @@ async fn postgres_v3_forward_origin_hardening() {
     use futures::FutureExt;
     for invalid in [false, true] {
         let (db, admin, schema) = h::postgres_database().await;
+        for table in [
+            "neev_gateway_revoke_intents",
+            "neev_gateway_redemptions",
+            "neev_gateway_relying_sessions",
+            "neev_gateway_exchanges",
+            "neev_gateway_relying_bindings",
+            "neev_gateway_revocations",
+            "neev_gateway_audience",
+        ] {
+            execute(&db, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
         for table in agent_status_migration::TABLE_NAMES.iter().rev() {
             execute(&db, &format!("DROP TABLE {table}"), vec![])
                 .await

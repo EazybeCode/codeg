@@ -53,13 +53,17 @@ pub(crate) struct Config {
     pub(crate) document_root: PathBuf,
     pub(crate) preview: bool,
     pub(crate) providers: ProviderConfig,
+    /// Integration setting (default false): when enabled, native authority
+    /// revocations (logout, member removal/role change) append a deny-only
+    /// gateway revocation event in the same transaction. Requires schema8.
+    pub(crate) gateway_events: bool,
     #[cfg(test)]
     pub(crate) _document_root_guard: Option<tempfile::TempDir>,
 }
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 15] = [
+        const KEYS: [&str; 16] = [
             "NEEV_APP_ORIGIN",
             "NEEV_DATABASE_URL",
             "NEEV_ENC_KEY",
@@ -75,6 +79,7 @@ impl Config {
             "NEEV_RESEND_API_KEY",
             "NEEV_MAIL_FROM",
             "NEEV_RUNTIME_ENABLED",
+            "NEEV_GATEWAY_EVENTS_ENABLED",
         ];
         let mut values = HashMap::new();
         for key in KEYS {
@@ -166,6 +171,8 @@ impl Config {
             github: pair(values, "NEEV_GITHUB_CLIENT_ID", "NEEV_GITHUB_CLIENT_SECRET")?,
             email: mail(values)?,
         };
+        let gateway_events = optional_bool(values.get("NEEV_GATEWAY_EVENTS_ENABLED"))
+            .map_err(|_| ConfigError::Provider)?;
         Ok(Self {
             origin,
             origin_header,
@@ -179,6 +186,7 @@ impl Config {
             document_root,
             preview,
             providers,
+            gateway_events,
             #[cfg(test)]
             _document_root_guard: None,
         })
@@ -611,6 +619,20 @@ mod tests {
             document_root.display().to_string(),
         );
         assert!(Config::from_values(&missing).is_ok());
+    }
+
+    #[test]
+    fn gateway_events_flag_defaults_false_and_parses_explicit_bool() {
+        assert!(!Config::from_values(&values()).unwrap().gateway_events);
+        let mut enabled = values();
+        enabled.insert("NEEV_GATEWAY_EVENTS_ENABLED".into(), "true".into());
+        assert!(Config::from_values(&enabled).unwrap().gateway_events);
+        let mut invalid = values();
+        invalid.insert("NEEV_GATEWAY_EVENTS_ENABLED".into(), "maybe".into());
+        assert_eq!(
+            Config::from_values(&invalid).err(),
+            Some(ConfigError::Provider)
+        );
     }
 
     #[test]

@@ -1,4 +1,11 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeChat } from "./native-chat"
@@ -55,6 +62,42 @@ function mount() {
     </NativeTestRoot>
   )
 }
+it("renders message Markdown without activating unsafe links", async () => {
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({
+        items: [{ ...message, body: "**Decision** [bad](javascript:alert)" }],
+        nextAfter: null,
+      }),
+  })
+  mount()
+  expect((await screen.findByText("Decision")).tagName).toBe("STRONG")
+  expect(screen.queryByRole("link", { name: "bad" })).toBeNull()
+})
+it("brings a successfully sent message into view from older history", async () => {
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}`]: () => json(message, 201),
+  })
+  mount()
+  const history = await screen.findByRole("list", { name: "Messages" })
+  Object.defineProperties(history, {
+    scrollHeight: { value: 900 },
+    clientHeight: { value: 200 },
+  })
+  history.scrollTop = 0
+  fireEvent.scroll(history)
+  const user = userEvent.setup()
+  await user.type(
+    screen.getByRole("textbox", { name: "Message" }),
+    message.body
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await screen.findByText(message.body)
+  expect(history.scrollTop).toBe(900)
+})
 
 it("retries a committed message with the same request ID and displays its human author", async () => {
   const bodies: Record<string, unknown>[] = []

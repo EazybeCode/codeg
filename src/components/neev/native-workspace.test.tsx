@@ -20,6 +20,23 @@ afterEach(() => {
   vi.clearAllMocks()
   viewport.mobile = false
 })
+it("collapses desktop navigation without leaving the workspace", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/nodes": () => json({ nodes: [], nextAfter: null }),
+  })
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  const user = userEvent.setup()
+  const toggle = await screen.findByRole("button", { name: "Open navigation" })
+  expect(toggle).toHaveAttribute("aria-expanded", "true")
+  await user.click(toggle)
+  expect(screen.queryByRole("complementary")).toBeNull()
+  await user.click(toggle)
+  expect(screen.getByRole("complementary")).toBeVisible()
+})
 it("hides and disables an open workspace menu until visibility auth is revalidated", async () => {
   let revalidating = false
   let release!: (response: Response) => void

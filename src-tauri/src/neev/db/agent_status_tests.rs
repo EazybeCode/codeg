@@ -87,9 +87,9 @@ async fn insert_valid_check(db: &DatabaseConnection) {
 }
 
 #[tokio::test]
-async fn sqlite_status_schema_fresh_snapshot_is_seven() {
+async fn sqlite_status_schema_fresh_snapshot_is_eight() {
     let db = h::database().await;
-    assert_eq!(validate_content_snapshot(&db).await, Ok(7));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(8));
 }
 
 #[tokio::test]
@@ -126,13 +126,26 @@ async fn status_upgrade_preserves_exact_six_and_ready_seven(db: &DatabaseConnect
         before.try_get("", "format").unwrap(),
         before.try_get("", "format_version").unwrap(),
     );
+    for table in [
+        "neev_gateway_revoke_intents",
+        "neev_gateway_redemptions",
+        "neev_gateway_relying_sessions",
+        "neev_gateway_exchanges",
+        "neev_gateway_relying_bindings",
+        "neev_gateway_revocations",
+        "neev_gateway_audience",
+    ] {
+        execute(db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     drop_status(db).await;
     execute(db, "UPDATE neev_schema_version SET version=6", vec![])
         .await
         .unwrap();
     assert_eq!(validate_content_snapshot(db).await, Ok(6));
     assert_eq!(initialize(db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(db).await, Ok(7));
+    assert_eq!(validate_content_snapshot(db).await, Ok(8));
     let after = one(db, "SELECT c.state,c.account_label,c.checked_at,c.storage_handle,r.blob_key,r.sha256,r.byte_length,f.format,f.format_version FROM neev_agent_connections c JOIN neev_document_revisions r ON r.org_id=$1 AND r.document_id=$2 JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE c.id=$3", vec![org.into(), DOCUMENT_ID.into(), CONNECTION_ID.into()]).await.unwrap().unwrap();
     let after: (
         String,
@@ -171,7 +184,7 @@ async fn status_upgrade_preserves_exact_six_and_ready_seven(db: &DatabaseConnect
         Some((1, 1, Some(BOOT_ID.to_owned()), "ready".to_owned()))
     );
     assert_eq!(h::count(db, "neev_agent_status_checks").await, 1);
-    assert_eq!(validate_content_snapshot(db).await, Ok(7));
+    assert_eq!(validate_content_snapshot(db).await, Ok(8));
 }
 
 #[tokio::test]
@@ -214,6 +227,19 @@ async fn sqlite_status_schema_failed_six_upgrade_is_atomic() {
     .unwrap()
     .try_get::<String>("", "display_name")
     .unwrap();
+    for table in [
+        "neev_gateway_revoke_intents",
+        "neev_gateway_redemptions",
+        "neev_gateway_relying_sessions",
+        "neev_gateway_exchanges",
+        "neev_gateway_relying_bindings",
+        "neev_gateway_revocations",
+        "neev_gateway_audience",
+    ] {
+        execute(&db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     drop_status(&db).await;
     execute(&db, "UPDATE neev_schema_version SET version=6", vec![])
         .await
@@ -371,7 +397,7 @@ async fn sqlite_status_schema_accepts_intrinsically_valid_stale_observation() {
     .unwrap();
     insert_valid_check(&db).await;
     assert_eq!(agent_status_migration::validate(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(7));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(8));
 }
 
 #[tokio::test]

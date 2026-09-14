@@ -10,6 +10,7 @@ import {
   Layers3,
   Menu,
   MoreHorizontal,
+  PanelLeft,
   Plus,
   Settings2,
 } from "lucide-react"
@@ -196,7 +197,8 @@ function WorkspaceContent() {
     [error, setError] = useState<unknown>(null)
   const [expanded, setExpanded] = useState(new Set<number>()),
     [selected, setSelected] = useState<number | null>(null),
-    [drawer, setDrawer] = useState(false)
+    [drawer, setDrawer] = useState(false),
+    [sidebarOpen, setSidebarOpen] = useState(true)
   const [editor, setEditor] = useState<Editor | null>(null),
     [name, setName] = useState(""),
     [parent, setParent] = useState<number | null>(null),
@@ -432,6 +434,18 @@ function WorkspaceContent() {
   return (
     <div className="flex h-dvh min-w-0 flex-col overflow-hidden">
       <header className="flex min-h-16 shrink-0 items-center gap-3 border-b px-4 sm:px-6">
+        {!mobile && (
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("openNavigation")}
+            title={t("openNavigation")}
+            aria-expanded={sidebarOpen}
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+          >
+            <PanelLeft aria-hidden />
+          </Button>
+        )}
         {mobile && (
           <Dialog open={drawer} onOpenChange={setDrawer}>
             <DialogTrigger asChild>
@@ -488,15 +502,15 @@ function WorkspaceContent() {
         </span>
       </header>
       <div className="flex min-h-0 min-w-0 flex-1">
-        {!mobile && (
+        {!mobile && sidebarOpen && (
           <aside className="w-64 shrink-0 border-e bg-sidebar text-sidebar-foreground">
             {sidebar}
           </aside>
         )}
-        <main className="min-w-0 flex-1 overflow-y-auto p-5 sm:p-10">
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <nav
             aria-label={t("breadcrumbs")}
-            className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground"
+            className="flex shrink-0 flex-wrap items-center gap-1 border-b px-5 py-3 text-xs text-muted-foreground sm:px-8"
           >
             {breadcrumbs.map((node, index) => (
               <span
@@ -531,7 +545,7 @@ function WorkspaceContent() {
               onRequestNavigationGuard={registerGuard}
             />
           ) : (
-            <div className="mx-auto mt-12 max-w-xl space-y-5 sm:mt-20">
+            <div className="mx-auto w-full max-w-xl space-y-5 overflow-y-auto px-5 py-12 sm:py-20">
               <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
                 <Layers3 aria-hidden className="size-5 text-muted-foreground" />
               </div>

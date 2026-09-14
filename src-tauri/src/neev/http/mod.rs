@@ -190,6 +190,14 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             .route("/api/neev/email/link", post(auth::email_link))
             .route("/api/neev/email/confirm", post(auth::email_confirm));
     }
+    // Gateway browser exchange-issue is mounted only when the integration is
+    // enabled (schema8 + `NEEV_GATEWAY_EVENTS_ENABLED`); otherwise it 404s.
+    if state.config.gateway_events {
+        router = router.route(
+            "/api/neev/collaboration/issue",
+            post(auth::collaboration_issue),
+        );
+    }
     router.fallback(static_files::fallback).with_state(state)
 }
 

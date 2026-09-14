@@ -554,6 +554,19 @@ pub(crate) async fn revoke(
     identity: &IdentityContext,
     clock: &dyn crate::neev::clock::Clock,
 ) -> Result<(), AuthError> {
+    revoke_with_gateway(database, identity, clock, false).await
+}
+
+/// Native logout. When `gateway_events` is set (integration enabled, schema8),
+/// an org-scoped session revocation also appends a deny-only session-scope
+/// gateway event in the same transaction, after native recovery and before the
+/// audience counter is touched.
+pub(crate) async fn revoke_with_gateway(
+    database: &DatabaseConnection,
+    identity: &IdentityContext,
+    clock: &dyn crate::neev::clock::Clock,
+    gateway_events: bool,
+) -> Result<(), AuthError> {
     let tx = db::begin(database).await?;
     db::lock_admission_guard(&tx).await?;
     let account = lock_account(&tx, identity.user_id).await?;
@@ -590,6 +603,20 @@ pub(crate) async fn revoke(
     .await?;
     if result.rows_affected() != 1 {
         return Err(AuthError::Conflict);
+    }
+    // Deny-only gateway session event for an org-scoped source (counter last).
+    if gateway_events {
+        if let Some(org_id) = current.org_id {
+            crate::neev::gateway::issuer::append_revocation(
+                &tx,
+                "session",
+                Some(current.user_id),
+                Some(org_id),
+                Some(&identity.session_id),
+                now,
+            )
+            .await?;
+        }
     }
     tx.commit().await.map_err(database_error)
 }

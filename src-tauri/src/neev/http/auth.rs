@@ -205,9 +205,56 @@ pub(super) async fn logout(
     let now = state.clock.now_unix();
     let identity = session::identity(&state.database, token, now).await?;
     session::validate_csrf(&state.database, &identity, cookie_csrf, now).await?;
-    session::revoke(&state.database, &identity, state.clock.as_ref()).await?;
+    session::revoke_with_gateway(
+        &state.database,
+        &identity,
+        state.clock.as_ref(),
+        state.config.gateway_events,
+    )
+    .await?;
     let mut response = StatusCode::NO_CONTENT.into_response();
     cookies::clear_browser_state(response.headers_mut(), names);
+    super::add_private_headers(&mut response);
+    Ok(response)
+}
+
+/// Browser-facing gateway exchange-issue (integration-gated). Native org session
+/// + exact Origin + session CSRF; the bounded wire envelope is handled by the
+/// gateway codec. Returns the one-use code envelope with the wire HTTP status.
+pub(super) async fn collaboration_issue(
+    State(state): State<Arc<ServerState>>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = state
+        .auth_limit
+        .try_acquire()
+        .map_err(|_| ApiError::Limited)?;
+    let (parts, body) = request.into_parts();
+    if !cookies::exact_origin(&parts.headers, &state.config.origin_header) {
+        return Err(ApiError::Forbidden);
+    }
+    if !cookies::is_json(&parts.headers) {
+        return Err(ApiError::Invalid);
+    }
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let token = cookies::required(&parts.headers, names.session)?.to_owned();
+    let cookie_csrf = cookies::required(&parts.headers, names.csrf)?;
+    if cookie_csrf != cookies::csrf_header(&parts.headers)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let now = state.clock.now_unix();
+    session::view(&state.database, &token, Some(cookie_csrf), now).await?;
+    let context = session::organization(&state.database, &token, now).await?;
+    let body = read_body(body, 16_384).await?;
+    let encoded =
+        crate::neev::gateway::routes::issue(&state.database, &context, state.clock.as_ref(), &body)
+            .await;
+    let status = StatusCode::from_u16(encoded.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut response = Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(encoded.body))
+        .map_err(|_| ApiError::Unavailable)?;
     super::add_private_headers(&mut response);
     Ok(response)
 }

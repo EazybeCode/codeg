@@ -421,61 +421,71 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       )}
       <NativeSuspendedSurface
         hidden={authorizedSignal !== auth.signal}
-        className="mx-auto mt-6 max-w-4xl space-y-6 pb-10"
+        className={
+          selected
+            ? "flex min-h-0 flex-1 flex-col"
+            : "mx-auto w-full max-w-4xl space-y-6 overflow-y-auto px-5 py-10 sm:px-10"
+        }
       >
-        <h1 className="break-words text-3xl font-semibold tracking-tight">
-          {node.name}
-        </h1>
-        <div
-          role="tablist"
-          aria-label={node.name}
-          className="flex gap-4 border-b"
-        >
-          {(["chat", "document"] as const).map((value) => (
-            <button
-              key={value}
-              role="tab"
-              aria-selected={kind === value}
-              tabIndex={kind === value ? 0 : -1}
-              onClick={() =>
-                guard(() => {
-                  onDirtyChange(false)
-                  selectResource(null)
-                  setKind(value)
-                })
-              }
-              onKeyDown={(event) => {
-                if (
-                  ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
-                ) {
-                  event.preventDefault()
-                  const target =
-                    event.key === "Home"
-                      ? "chat"
-                      : event.key === "End"
-                        ? "document"
-                        : value === "chat"
-                          ? "document"
-                          : "chat"
-                  const tab =
-                    event.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
-                      '[role="tab"]'
-                    )[target === "chat" ? 0 : 1]
-                  guard(() => {
-                    onDirtyChange(false)
-                    selectResource(null)
-                    setKind(target)
-                    opener.current = tab ?? null
-                    tab?.focus()
-                  })
-                }
-              }}
-              className={`rounded-t px-1 py-3 text-sm focus-visible:ring-2 focus-visible:ring-ring ${kind === value ? "border-b-2 border-foreground font-medium" : "text-muted-foreground"}`}
+        {!selected && (
+          <>
+            <h1 className="break-words text-3xl font-semibold tracking-tight">
+              {node.name}
+            </h1>
+            <div
+              role="tablist"
+              aria-label={node.name}
+              className="flex gap-4 border-b"
             >
-              {t(value === "chat" ? "chats" : "documents")}
-            </button>
-          ))}
-        </div>
+              {(["chat", "document"] as const).map((value) => (
+                <button
+                  key={value}
+                  role="tab"
+                  aria-selected={kind === value}
+                  tabIndex={kind === value ? 0 : -1}
+                  onClick={() =>
+                    guard(() => {
+                      onDirtyChange(false)
+                      selectResource(null)
+                      setKind(value)
+                    })
+                  }
+                  onKeyDown={(event) => {
+                    if (
+                      ["ArrowLeft", "ArrowRight", "Home", "End"].includes(
+                        event.key
+                      )
+                    ) {
+                      event.preventDefault()
+                      const target =
+                        event.key === "Home"
+                          ? "chat"
+                          : event.key === "End"
+                            ? "document"
+                            : value === "chat"
+                              ? "document"
+                              : "chat"
+                      const tab =
+                        event.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
+                          '[role="tab"]'
+                        )[target === "chat" ? 0 : 1]
+                      guard(() => {
+                        onDirtyChange(false)
+                        selectResource(null)
+                        setKind(target)
+                        opener.current = tab ?? null
+                        tab?.focus()
+                      })
+                    }
+                  }}
+                  className={`rounded-t px-1 py-3 text-sm focus-visible:ring-2 focus-visible:ring-ring ${kind === value ? "border-b-2 border-foreground font-medium" : "text-muted-foreground"}`}
+                >
+                  {t(value === "chat" ? "chats" : "documents")}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         {!selected ? (
           <section
             role="tabpanel"
@@ -533,7 +543,7 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
         ) : (
           <>
             {selected.creatorId === auth.session?.user.id && (
-              <div className="space-y-1">
+              <div className="shrink-0 space-y-1 border-b px-5 py-2 sm:px-8">
                 <div
                   aria-label={t("resourceActions")}
                   className="flex flex-wrap gap-2"

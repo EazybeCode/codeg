@@ -392,7 +392,21 @@ async fn mutate_member(
             .await?;
         }
     }
-    revoke_scoped_state(&tx, actor.org_id, target.user_id, state.clock.now_unix()).await?;
+    let now = state.clock.now_unix();
+    revoke_scoped_state(&tx, actor.org_id, target.user_id, now).await?;
+    // Deny-only gateway membership-scope event (integration-gated, counter last):
+    // a removal or role change revokes every relying binding for (user, org).
+    if state.config.gateway_events {
+        crate::neev::gateway::issuer::append_revocation(
+            &tx,
+            "membership",
+            Some(target.user_id),
+            Some(actor.org_id),
+            None,
+            now,
+        )
+        .await?;
+    }
     tx.commit().await.map_err(database_error)
 }
 

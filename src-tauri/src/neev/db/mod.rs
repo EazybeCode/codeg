@@ -12,6 +12,9 @@ mod document_format_migration;
 #[cfg(test)]
 mod document_format_tests;
 pub(crate) mod entities;
+mod gateway_migration;
+#[cfg(test)]
+mod gateway_migration_tests;
 mod migration;
 
 pub(crate) fn statement<C: ConnectionTrait>(db: &C, sql: &str, values: Vec<Value>) -> Statement {
@@ -135,6 +138,15 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                     .map(|name| (*name).to_owned()),
             )
             .collect();
+        let v8_expected: std::collections::BTreeSet<String> = v7_expected
+            .iter()
+            .cloned()
+            .chain(
+                gateway_migration::TABLE_NAMES
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            )
+            .collect();
 
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
@@ -153,10 +165,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             agent_migration::upgrade(&tx).await?;
             document_format_migration::upgrade(&tx).await?;
             agent_status_migration::upgrade(&tx).await?;
+            gateway_migration::upgrade(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![agent_status_migration::SCHEMA_VERSION.into()],
+                vec![gateway_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -166,55 +179,78 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             && names != v5_expected
             && names != v6_expected
             && names != v7_expected
+            && names != v8_expected
         {
             return Err(AuthError::Unavailable);
         }
-        let version = one(
-            &tx,
-            "SELECT version FROM neev_schema_version WHERE id=1",
-            vec![],
-        )
-        .await?
-        .ok_or(AuthError::Unavailable)?
-        .try_get::<i64>("", "version")
-        .map_err(database_error)?;
+        // Bounded marker inventory: exactly one (id=1,version) row; reject extra
+        // or non-id1 markers without mutation (R10).
+        let markers = tx
+            .query_all(statement(
+                &tx,
+                "SELECT id,version FROM neev_schema_version LIMIT 2",
+                vec![],
+            ))
+            .await
+            .map_err(database_error)?;
+        if markers.len() != 1
+            || markers[0]
+                .try_get::<i32>("", "id")
+                .map_err(database_error)?
+                != 1
+        {
+            return Err(AuthError::Unavailable);
+        }
+        let version = markers[0]
+            .try_get::<i64>("", "version")
+            .map_err(database_error)?;
+        // Each arm advances to the status7 state; the shared tail then performs
+        // the additive gateway8 upgrade and publishes marker8 exactly once. The
+        // exact8 arm validates in place and preserves every row.
         match version {
             migration::SCHEMA_VERSION if names == v2_expected => {
                 content_migration::upgrade(&tx).await?;
                 content_migration::harden_origins(&tx).await?;
                 agent_migration::upgrade(&tx).await?;
+                document_format_migration::upgrade(&tx).await?;
+                agent_status_migration::upgrade(&tx).await?;
             }
             content_migration::SCHEMA_VERSION if names == v3_expected => {
                 content_migration::harden_origins(&tx).await?;
                 agent_migration::upgrade(&tx).await?;
+                document_format_migration::upgrade(&tx).await?;
+                agent_status_migration::upgrade(&tx).await?;
             }
             content_migration::HARDENED_SCHEMA_VERSION if names == v3_expected => {
                 agent_migration::upgrade(&tx).await?;
+                document_format_migration::upgrade(&tx).await?;
+                agent_status_migration::upgrade(&tx).await?;
             }
-            agent_migration::SCHEMA_VERSION if names == v5_expected => {},
+            agent_migration::SCHEMA_VERSION if names == v5_expected => {
+                document_format_migration::upgrade(&tx).await?;
+                agent_status_migration::upgrade(&tx).await?;
+            }
             document_format_migration::SCHEMA_VERSION if names == v6_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::upgrade(&tx).await?;
-                execute(
-                    &tx,
-                    "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-                    vec![agent_status_migration::SCHEMA_VERSION.into()],
-                )
-                .await?;
-                return Ok(());
             }
             agent_status_migration::SCHEMA_VERSION if names == v7_expected => {
                 document_format_migration::validate(&tx).await?;
-                return agent_status_migration::validate(&tx).await;
+                agent_status_migration::validate(&tx).await?;
+            }
+            gateway_migration::SCHEMA_VERSION if names == v8_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
         }
-        document_format_migration::upgrade(&tx).await?;
-        agent_status_migration::upgrade(&tx).await?;
+        gateway_migration::upgrade(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![agent_status_migration::SCHEMA_VERSION.into()],
+            vec![gateway_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -287,10 +323,19 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
                 .map(|name| (*name).to_owned()),
         )
         .collect();
+    let gateway_expected: std::collections::BTreeSet<String> = status_expected
+        .iter()
+        .cloned()
+        .chain(
+            gateway_migration::TABLE_NAMES
+                .iter()
+                .map(|name| (*name).to_owned()),
+        )
+        .collect();
     let markers = db
         .query_all(statement(
             db,
-            "SELECT id,version FROM neev_schema_version",
+            "SELECT id,version FROM neev_schema_version LIMIT 2",
             vec![],
         ))
         .await
@@ -313,19 +358,20 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         agent_migration::SCHEMA_VERSION => names == agent_expected,
         document_format_migration::SCHEMA_VERSION => names == format_expected,
         agent_status_migration::SCHEMA_VERSION => names == status_expected,
+        gateway_migration::SCHEMA_VERSION => names == gateway_expected,
         _ => false,
     };
     if !valid {
         return Err(AuthError::Unavailable);
     }
-    if matches!(
-        version,
-        document_format_migration::SCHEMA_VERSION | agent_status_migration::SCHEMA_VERSION
-    ) {
+    if matches!(version, 6 | 7 | 8) {
         document_format_migration::validate(db).await?;
     }
-    if version == agent_status_migration::SCHEMA_VERSION {
+    if matches!(version, 7 | 8) {
         agent_status_migration::validate(db).await?;
+    }
+    if version == 8 {
+        gateway_migration::validate(db).await?;
     }
     Ok(version)
 }

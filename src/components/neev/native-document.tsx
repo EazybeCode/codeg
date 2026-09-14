@@ -1,5 +1,7 @@
 "use client"
 
+import { ArrowLeft } from "lucide-react"
+
 import { useEffect, useRef, useState } from "react"
 import dynamic from "next/dynamic"
 import { useTranslations } from "next-intl"
@@ -516,7 +518,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     )
   return (
     <section
-      className="mx-auto w-full min-w-0 max-w-4xl space-y-5"
+      className="min-h-0 min-w-0 flex-1 overflow-y-auto px-7 pb-16 pt-4 sm:px-12 [&>div]:mx-auto [&>div]:max-w-3xl"
       aria-label={latest.title}
       onKeyDown={(event) => {
         if (
@@ -528,11 +530,17 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         }
       }}
     >
-      <Button variant="ghost" onClick={onBack}>
-        {t("back")}
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label={t("back")}
+        title={t("back")}
+        onClick={onBack}
+      >
+        <ArrowLeft aria-hidden />
       </Button>
-      <div className="space-y-1">
-        <h2 className="break-words text-2xl font-semibold tracking-tight">
+      <div className="space-y-3 pb-5 pt-8 sm:pt-12">
+        <h2 className="break-words text-4xl font-semibold leading-tight">
           {latest.title}
         </h2>
         <p className="text-xs text-muted-foreground">
@@ -562,28 +570,8 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       ) : loading ? (
         <p role="status">{n("loading")}</p>
       ) : (
-        <>
-          {draft.format === "blocks" ? (
-            <NativeRichEditor
-              key={`${auth.scopeKey}:${resource.id}:${visibleEditorGeneration}`}
-              document={draft.document}
-              readOnly={saving || latest.archived}
-              onChange={(document) => edit({ format: "blocks", document })}
-            />
-          ) : (
-            <label className="block space-y-2">
-              <span className="text-sm">{t("documentContent")}</span>
-              <textarea
-                value={draft.markdown}
-                disabled={saving || latest.archived}
-                onChange={(event) =>
-                  edit({ format: "markdown", markdown: event.target.value })
-                }
-                className="min-h-64 w-full resize-y rounded-lg border bg-background p-3 font-mono text-base leading-6 sm:text-sm"
-              />
-            </label>
-          )}
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-col gap-5">
+          <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b bg-background py-2">
             <Button
               disabled={saving || latest.archived || !dirty.current}
               onClick={() => void save()}
@@ -655,6 +643,26 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
               {saved ? t("saved") : dirty.current ? t("unsaved") : ""}
             </span>
           </div>
+          {draft.format === "blocks" ? (
+            <NativeRichEditor
+              key={`${auth.scopeKey}:${resource.id}:${visibleEditorGeneration}`}
+              document={draft.document}
+              readOnly={saving || latest.archived}
+              onChange={(document) => edit({ format: "blocks", document })}
+            />
+          ) : (
+            <label className="block space-y-2">
+              <span className="text-sm">{t("documentContent")}</span>
+              <textarea
+                value={draft.markdown}
+                disabled={saving || latest.archived}
+                onChange={(event) =>
+                  edit({ format: "markdown", markdown: event.target.value })
+                }
+                className="min-h-64 w-full resize-y rounded-lg border bg-background p-3 font-mono text-base leading-6 sm:text-sm"
+              />
+            </label>
+          )}
           {conversionFailed && (
             <p role="alert" className="text-sm text-destructive">
               {t("conversionRefused")}
@@ -719,16 +727,18 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
               )}
             </section>
           )}
-          <section
-            className="space-y-3 border-t pt-5"
-            aria-label={t("preview")}
-          >
-            <h3 className="text-xs font-medium text-muted-foreground">
-              {t("preview")}
-            </h3>
-            <BodyView body={draft} />
-          </section>
-        </>
+          {draft.format === "markdown" && (
+            <section
+              className="space-y-3 border-t pt-5"
+              aria-label={t("preview")}
+            >
+              <h3 className="text-xs font-medium text-muted-foreground">
+                {t("preview")}
+              </h3>
+              <BodyView body={draft} />
+            </section>
+          )}
+        </div>
       )}
       <Dialog
         open={!!conversion}

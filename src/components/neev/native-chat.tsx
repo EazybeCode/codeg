@@ -1,6 +1,9 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { ArrowLeft, ArrowUp, Sparkles } from "lucide-react"
+import { NativeMarkdown } from "./native-markdown"
+
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
@@ -54,6 +57,13 @@ function Chat({
     [saving, setSaving] = useState(false),
     [revoked, setRevoked] = useState(false),
     [review, setReview] = useState(false)
+  const historyElement = useRef<HTMLOListElement>(null)
+  const followHistory = useRef(true)
+  useLayoutEffect(() => {
+    const history = historyElement.current
+    if (history && followHistory.current)
+      history.scrollTop = history.scrollHeight
+  }, [messages, loading])
   const pinned = useRef(resource.authRevision),
     draftRef = useRef(""),
     sequence = useRef<string | null>(null),
@@ -168,6 +178,7 @@ function Chat({
         scope.signal
       )
       if (!scope.isCurrent()) return
+      followHistory.current = true
       setMessages((old) =>
         [
           ...new Map([...old, message].map((item) => [item.id, item])).values(),
@@ -205,38 +216,63 @@ function Chat({
     )
   if (loading) return <p role="status">{n("loading")}</p>
   return (
-    <section className="space-y-5" aria-label={latest.title}>
-      <Button variant="ghost" onClick={onBack}>
-        {t("back")}
-      </Button>
-      <div className="space-y-1">
-        <h2 className="break-words text-2xl font-semibold tracking-tight">
-          {latest.title}
-        </h2>
-        <p className="text-xs text-muted-foreground">
-          {t(latest.visibility)}
-          {latest.archived ? ` · ${t("archived")}` : ""}
-        </p>
+    <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
+      <div className="flex shrink-0 items-start gap-3 px-5 py-5 sm:px-8">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={t("back")}
+          title={t("back")}
+          onClick={onBack}
+        >
+          <ArrowLeft aria-hidden />
+        </Button>
+        <div className="min-w-0 flex-1 space-y-1">
+          <h2 className="break-words text-lg font-semibold">{latest.title}</h2>
+          <p className="text-xs text-muted-foreground">
+            {t(latest.visibility)}
+            {latest.archived ? ` · ${t("archived")}` : ""}
+          </p>
+        </div>
       </div>
       {loading ? (
         <p role="status">{n("loading")}</p>
       ) : (
-        <ol aria-label={t("messages")} className="space-y-5">
+        <ol
+          ref={historyElement}
+          onScroll={(event) => {
+            const history = event.currentTarget
+            followHistory.current =
+              history.scrollHeight - history.scrollTop - history.clientHeight <
+              48
+          }}
+          aria-label={t("messages")}
+          className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-5 py-6 sm:px-8"
+        >
           {messages.map((message) => (
-            <li key={message.id} className="space-y-1 border-b pb-4">
-              <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">
-                  {message.authorName}
-                </span>
-                <time
-                  dateTime={new Date(message.createdAt * 1000).toISOString()}
-                >
-                  {new Date(message.createdAt * 1000).toLocaleString()}
-                </time>
+            <li
+              key={message.id}
+              className="mx-auto flex w-full max-w-3xl gap-3"
+            >
+              <span
+                aria-hidden
+                className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium"
+              >
+                {message.authorName.slice(0, 1)}
+              </span>
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
+                  <span className="font-medium text-foreground">
+                    {message.authorName}
+                  </span>
+                  <time
+                    dateTime={new Date(message.createdAt * 1000).toISOString()}
+                  >
+                    {new Date(message.createdAt * 1000).toLocaleString()}
+                  </time>
+                </div>
+                <NativeMarkdown markdown={message.body} />
               </div>
-              <p className="whitespace-pre-wrap break-words text-sm leading-6">
-                {message.body}
-              </p>
             </li>
           ))}
         </ol>
@@ -246,62 +282,69 @@ function Chat({
           event.preventDefault()
           void send()
         }}
-        className="space-y-3"
+        className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-5 pb-5 pt-3 sm:px-8"
       >
-        <label className="block space-y-2">
-          <span className="text-sm">{t("message")}</span>
-          <textarea
-            value={draft}
-            disabled={loading || saving || latest.archived}
-            onChange={(event) => {
-              if (!draftRef.current) pinned.current = latest.authRevision
-              draftRef.current = event.target.value
-              setDraft(event.target.value)
-              retry.current = null
-              onDirtyChange?.(!!event.target.value)
-            }}
-            className="min-h-24 w-full resize-y rounded-lg border bg-background p-3 text-base sm:text-sm"
-          />
-        </label>
-        <NativeError error={error} />
-        {(latest.authRevision !== pinned.current ||
-          (error instanceof NativeClientError &&
-            error.kind === "conflict")) && (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={async () => {
-              await refresh()
-              if (scope.isCurrent()) setReview(true)
-            }}
-          >
-            {t("reviewAudience")}
-          </Button>
-        )}
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            type="submit"
-            disabled={loading || saving || latest.archived || !draft.trim()}
-          >
-            {saving ? n("working") : t("send")}
-          </Button>
-          <Button type="button" variant="outline" disabled>
-            {t("askAgent")}
-          </Button>
-          <Link
-            href="/settings"
-            onClick={(event) => {
-              if (onRequestSettings) {
-                event.preventDefault()
-                onRequestSettings()
-              }
-            }}
-            className="rounded text-xs underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {n("personalAgents")}
-          </Link>
+        <div className="rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+          <label className="block">
+            <span className="sr-only">{t("message")}</span>
+            <textarea
+              placeholder={t("message")}
+              value={draft}
+              disabled={loading || saving || latest.archived}
+              onChange={(event) => {
+                if (!draftRef.current) pinned.current = latest.authRevision
+                draftRef.current = event.target.value
+                setDraft(event.target.value)
+                retry.current = null
+                onDirtyChange?.(!!event.target.value)
+              }}
+              className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none sm:text-sm"
+            />
+          </label>
+          <NativeError error={error} />
+          {(latest.authRevision !== pinned.current ||
+            (error instanceof NativeClientError &&
+              error.kind === "conflict")) && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={async () => {
+                await refresh()
+                if (scope.isCurrent()) setReview(true)
+              }}
+            >
+              {t("reviewAudience")}
+            </Button>
+          )}
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              type="submit"
+              size="icon"
+              className="order-last ms-auto rounded-md"
+              aria-label={saving ? n("working") : t("send")}
+              title={saving ? n("working") : t("send")}
+              disabled={loading || saving || latest.archived || !draft.trim()}
+            >
+              <ArrowUp aria-hidden />
+            </Button>
+            <Button type="button" variant="outline" disabled>
+              <Sparkles aria-hidden />
+              {t("askAgent")}
+            </Button>
+            <Link
+              href="/settings"
+              onClick={(event) => {
+                if (onRequestSettings) {
+                  event.preventDefault()
+                  onRequestSettings()
+                }
+              }}
+              className="rounded text-xs underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {n("personalAgents")}
+            </Link>
+          </div>
         </div>
-        <p className="text-xs text-muted-foreground">{n("agentDescription")}</p>
       </form>
       <Dialog open={review} onOpenChange={setReview}>
         <DialogContent>

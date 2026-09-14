@@ -32,6 +32,16 @@ const AGENT_TABLES: [&str; 3] = [
     "neev_agent_operations",
 ];
 const STATUS_TABLES: [&str; 2] = ["neev_agent_status_owner", "neev_agent_status_checks"];
+// FK-safe drop order: children before their gateway parents (section 5).
+const GATEWAY_TABLES: [&str; 7] = [
+    "neev_gateway_revoke_intents",
+    "neev_gateway_redemptions",
+    "neev_gateway_relying_sessions",
+    "neev_gateway_exchanges",
+    "neev_gateway_relying_bindings",
+    "neev_gateway_revocations",
+    "neev_gateway_audience",
+];
 const CONTENT_TABLES: [&str; 5] = [
     "neev_resources",
     "neev_messages",
@@ -151,6 +161,24 @@ async fn postgres_schema_seven_blocks_verification_uses_format_metadata() {
     h::cleanup_postgres(db, admin, schema).await;
 }
 
+#[tokio::test]
+async fn sqlite_gateway8_rich_format_six_seven_eight() {
+    for schema_version in [6, 7, 8] {
+        rich_snapshot_contract(h::database().await, schema_version).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires guarded PostgreSQL"]
+async fn postgres_gateway8_rich_format_six_seven_eight() {
+    for schema_version in [6, 7, 8] {
+        let (db, admin, schema) = h::postgres_database().await;
+        eprintln!("gateway8 rich format owned schema: {schema}");
+        rich_snapshot_contract(db.clone(), schema_version).await;
+        h::cleanup_postgres(db, admin, schema).await;
+    }
+}
+
 async fn reconstruct_sqlite_v3(tx: &sea_orm::DatabaseTransaction) {
     let mut tables = Vec::new();
     for name in CONTENT_TABLES {
@@ -264,7 +292,7 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
-    if schema_version == 7 {
+    if schema_version == 8 {
         return;
     }
     let sqlite_rebuild =
@@ -275,10 +303,17 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
             .unwrap();
     }
     let tx = database.begin().await.unwrap();
-    for table in STATUS_TABLES.iter().rev() {
+    for table in GATEWAY_TABLES {
         db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
             .await
             .unwrap();
+    }
+    if schema_version < 7 {
+        for table in STATUS_TABLES.iter().rev() {
+            db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
     }
     if schema_version < 6 {
         db::execute(&tx, "DROP TABLE neev_document_formats", vec![])
@@ -429,7 +464,7 @@ async fn restored_bytes(database: DatabaseConnection, schema_version: i64) {
 
 #[tokio::test]
 async fn sqlite_restored_bytes() {
-    for version in [3, 4, 5, 6, 7] {
+    for version in [3, 4, 5, 6, 7, 8] {
         restored_bytes(h::database().await, version).await;
     }
 }
@@ -437,7 +472,7 @@ async fn sqlite_restored_bytes() {
 #[tokio::test]
 #[ignore = "requires isolated PostgreSQL"]
 async fn postgres_restored_bytes() {
-    for version in [3, 4, 5, 6, 7] {
+    for version in [3, 4, 5, 6, 7, 8] {
         let (db, admin, schema) = h::postgres_database().await;
         eprintln!("backup owned schema: {schema}");
         let outcome = std::panic::AssertUnwindSafe(restored_bytes(db.clone(), version))
@@ -540,7 +575,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 7);
+    assert_eq!(manifest.schema_version, 8);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -569,6 +604,11 @@ async fn snapshot_schema_is_exact_and_read_only() {
     db::execute(&db, "UPDATE neev_schema_version SET version=5", vec![])
         .await
         .unwrap();
+    for table in GATEWAY_TABLES {
+        db::execute(&db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     for table in STATUS_TABLES.iter().rev() {
         db::execute(&db, &format!("DROP TABLE {table}"), vec![])
             .await

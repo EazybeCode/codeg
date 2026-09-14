@@ -29,6 +29,7 @@ import {
 import { BlockNoteView } from "@blocknote/shadcn"
 import { EditorState } from "@tiptap/pm/state"
 import "@blocknote/shadcn/style.css"
+import "./native-rich-editor.css"
 import { fromNeev, importMarkdown, toNeev } from "@/lib/neev-rich-adapter"
 import type { RichDocument } from "@/lib/neev-rich-document"
 
@@ -191,7 +192,10 @@ export function NativeRichEditor({
     },
   ]
   return (
-    <div ref={ownHost} className="min-w-0 rounded-lg border bg-background py-4">
+    <div
+      ref={ownHost}
+      className="neev-writing-canvas min-w-0 bg-background py-4"
+    >
       {notice && (
         <p role="alert" className="px-4 pb-3 text-sm text-destructive">
           {t("richUnsupported")}

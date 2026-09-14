@@ -79,6 +79,25 @@ function LogoutControl() {
     <button onClick={() => void auth.logout()}>Log out test session</button>
   )
 }
+it("places document toolbar before the editor in keyboard order", async () => {
+  const empty = { ...resource, contentRevision: "0" }
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(empty),
+    [`GET ${path}/revisions`]: () => json({ items: [], nextAfter: null }),
+  })
+  mount(empty)
+  const editor = await screen.findByRole(
+    "textbox",
+    { name: "Document content" },
+    { timeout: 5000 }
+  )
+  expect(
+    screen
+      .getByRole("button", { name: "History" })
+      .compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBeTruthy()
+  expect(screen.queryByRole("region", { name: "Preview" })).toBeNull()
+})
 
 async function editRich(text: string) {
   // The real editor is code-split; cold transformation in the full suite can

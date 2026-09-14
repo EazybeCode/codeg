@@ -1,0 +1,19 @@
+.neev-writing-canvas .bn-editor {
+  background: transparent;
+  color: inherit;
+  border-radius: 0;
+  padding-inline: 0;
+  min-height: 320px;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.75;
+  letter-spacing: 0;
+}
+
+.neev-writing-canvas .bn-block-content {
+  padding-block: 4px;
+}
+
+.neev-writing-canvas .bn-inline-content {
+  overflow-wrap: anywhere;
+}
