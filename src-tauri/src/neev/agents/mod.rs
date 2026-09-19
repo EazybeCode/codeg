@@ -1,7 +1,9 @@
 pub(crate) mod completion;
 pub(crate) mod control_coordinator;
 pub(crate) mod control_dto;
+pub(crate) mod control_transport;
 pub(crate) mod control_wire;
+pub(crate) mod execution;
 pub(crate) mod intents;
 pub(crate) mod recovery;
 pub(crate) mod status;

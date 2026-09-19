@@ -57,6 +57,10 @@ pub(crate) struct Config {
     /// revocations (logout, member removal/role change) append a deny-only
     /// gateway revocation event in the same transaction. Requires schema8.
     pub(crate) gateway_events: bool,
+    /// Personal-agent execution runtime toggle (default false). When true,
+    /// startup binds the sandboxed provider runtime; the config layer accepts
+    /// only "true"/"false"/absent so agents can never be enabled by a typo.
+    pub(crate) runtime_enabled: bool,
     #[cfg(test)]
     pub(crate) _document_root_guard: Option<tempfile::TempDir>,
 }
@@ -94,12 +98,16 @@ impl Config {
     }
 
     pub(crate) fn from_values(values: &HashMap<String, String>) -> Result<Self, ConfigError> {
-        if values
-            .get("NEEV_RUNTIME_ENABLED")
-            .is_some_and(|value| value != "false")
-        {
-            return Err(ConfigError::Provider);
-        }
+        // Agent runtime enablement is fail-closed: absent or "false" => off;
+        // "true" => on. When on, startup binds the SANDBOXED provider runtime
+        // (per-tenant namespaces/uid/rlimits + provider-only egress via
+        // `neev_agent_launch`), never a bare provider spawn. Any other value is
+        // rejected so a typo can never silently enable an unsandboxed runtime.
+        let runtime_enabled = match values.get("NEEV_RUNTIME_ENABLED").map(String::as_str) {
+            None | Some("false") => false,
+            Some("true") => true,
+            Some(_) => return Err(ConfigError::Provider),
+        };
         let preview = optional_bool(values.get("NEEV_ALLOW_LOOPBACK_PREVIEW"))?;
         let origin = required_url(values, "NEEV_APP_ORIGIN", ConfigError::Origin)?;
         if !valid_origin(&origin, preview) {
@@ -187,6 +195,7 @@ impl Config {
             preview,
             providers,
             gateway_events,
+            runtime_enabled,
             #[cfg(test)]
             _document_root_guard: None,
         })
@@ -494,9 +503,19 @@ mod tests {
             Config::from_values(&legacy_only).err(),
             Some(ConfigError::Database)
         );
-        let mut runtime = values();
-        runtime.insert("NEEV_RUNTIME_ENABLED".into(), "true".into());
-        assert!(Config::from_values(&runtime).is_err());
+        // Runtime enablement is fail-closed: absent/"false" => off, "true" => on
+        // (binds the sandboxed runtime in startup), any other value rejected so a
+        // typo can never silently enable it.
+        assert!(!Config::from_values(&values()).unwrap().runtime_enabled);
+        let mut off = values();
+        off.insert("NEEV_RUNTIME_ENABLED".into(), "false".into());
+        assert!(!Config::from_values(&off).unwrap().runtime_enabled);
+        let mut on = values();
+        on.insert("NEEV_RUNTIME_ENABLED".into(), "true".into());
+        assert!(Config::from_values(&on).unwrap().runtime_enabled);
+        let mut typo = values();
+        typo.insert("NEEV_RUNTIME_ENABLED".into(), "1".into());
+        assert_eq!(Config::from_values(&typo).err(), Some(ConfigError::Provider));
     }
 
     #[test]

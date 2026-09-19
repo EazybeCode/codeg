@@ -22,7 +22,7 @@ export type NativeSession = { user: NativeUser; csrf: string } & (
 export interface NativeCapabilities {
   version: 1
   identityMode: "native"
-  runtimeEnabled: false
+  runtimeEnabled: boolean
   providers: Record<NativeProvider, boolean>
   catalog: {
     nodeKinds: readonly ["project", "folder"]
@@ -185,7 +185,7 @@ export function parseCapabilities(value: unknown): ServerCapabilities {
   if ("identityMode" in o) {
     if (
       o.identityMode !== "native" ||
-      o.runtimeEnabled !== false ||
+      typeof o.runtimeEnabled !== "boolean" ||
       "mode" in o
     )
       return invalid()
@@ -206,7 +206,7 @@ export function parseCapabilities(value: unknown): ServerCapabilities {
       version: 1,
       mode: "native",
       identityMode: "native",
-      runtimeEnabled: false,
+      runtimeEnabled: o.runtimeEnabled as boolean,
       providers: {
         google: p.google as boolean,
         email: p.email as boolean,

@@ -10,10 +10,10 @@
 //! No path holding the counter later takes a domain lock. Time is sampled from an
 //! injectable clock after blocking locks and re-checked before commit.
 //!
-//! Not yet implemented and required before live enablement: bounded
-//! (<=100 rows/call) cleanup of expired exchange/relying/receipt rows. Until it
-//! exists, expired attempts keep counting against per-source quota, so this is a
-//! storage layer, not a complete issuer lifecycle.
+//! Bounded (<=100 rows/call) cleanup of expired receipt/relying/exchange rows is
+//! provided by [`prune_expired`]; a deployment runs it on its own cadence (no
+//! hidden background task here). Permanent bindings, durable revocations and
+//! revoke intents are never pruned.
 #![allow(dead_code)]
 
 use crate::neev::agents::recovery::invalidate_session_in_transaction;
@@ -489,6 +489,105 @@ pub(crate) async fn append_revocation(
         return Err(AuthError::Conflict);
     }
     Ok((event_id, cursor))
+}
+
+/// Rows removed by one bounded cleanup pass, per expirable table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct CleanupCounts {
+    pub(crate) redemptions: u32,
+    pub(crate) relying_sessions: u32,
+    pub(crate) exchanges: u32,
+}
+
+impl CleanupCounts {
+    pub(crate) fn total(&self) -> u32 {
+        self.redemptions + self.relying_sessions + self.exchanges
+    }
+}
+
+/// Delete up to `budget` rows via a portable keyset subquery on the primary key.
+async fn delete_expired(
+    tx: &DatabaseTransaction,
+    sql: &str,
+    now: i64,
+    budget: i64,
+) -> Result<u32, IssuerError> {
+    let deleted = db::execute(tx, sql, vec![now.into(), budget.into()]).await?;
+    Ok(deleted.rows_affected() as u32)
+}
+
+/// Bounded, expirable-only cleanup (adopted proposal §1: `<=100` rows per call,
+/// no hidden task). Removes expired redemption receipts, then expired relying
+/// sessions and exchanges that no longer back a receipt, in FK-safe order. Never
+/// touches a permanent binding, a durable revocation, or a revoke intent — a
+/// binding without any live receipt/relying/intent row is retained precisely so
+/// a delayed first revoke can still be delivered. The total deleted across all
+/// three tables never exceeds `limit`.
+pub(crate) async fn prune_expired(
+    database: &DatabaseConnection,
+    clock: &dyn Clock,
+    limit: u32,
+) -> Result<CleanupCounts, IssuerError> {
+    if !(1..=100).contains(&limit) {
+        return Err(IssuerError::Invalid);
+    }
+    let tx = db::begin(database).await?;
+    db::lock_admission_guard(&tx).await?;
+    // Resample after the blocking lock, per this module's clock discipline.
+    let now = clock.now_unix();
+    let mut budget = i64::from(limit);
+
+    let redemptions = delete_expired(
+        &tx,
+        "DELETE FROM neev_gateway_redemptions WHERE receipt_id IN \
+         (SELECT receipt_id FROM neev_gateway_redemptions WHERE retry_until < $1 LIMIT $2)",
+        now,
+        budget,
+    )
+    .await?;
+    budget -= i64::from(redemptions);
+
+    let relying_sessions = if budget > 0 {
+        delete_expired(
+            &tx,
+            "DELETE FROM neev_gateway_relying_sessions WHERE relying_ref IN \
+             (SELECT r.relying_ref FROM neev_gateway_relying_sessions r \
+              WHERE r.expires_at < $1 \
+                AND NOT EXISTS (SELECT 1 FROM neev_gateway_redemptions d \
+                                WHERE d.relying_ref = r.relying_ref) \
+              LIMIT $2)",
+            now,
+            budget,
+        )
+        .await?
+    } else {
+        0
+    };
+    budget -= i64::from(relying_sessions);
+
+    let exchanges = if budget > 0 {
+        delete_expired(
+            &tx,
+            "DELETE FROM neev_gateway_exchanges WHERE code_hash IN \
+             (SELECT x.code_hash FROM neev_gateway_exchanges x \
+              WHERE x.retain_until < $1 \
+                AND NOT EXISTS (SELECT 1 FROM neev_gateway_redemptions d \
+                                WHERE d.code_hash = x.code_hash) \
+              LIMIT $2)",
+            now,
+            budget,
+        )
+        .await?
+    } else {
+        0
+    };
+
+    tx.commit().await.map_err(database_error)?;
+    Ok(CleanupCounts {
+        redemptions,
+        relying_sessions,
+        exchanges,
+    })
 }
 
 // ---- operations ----

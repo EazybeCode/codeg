@@ -414,3 +414,18 @@ fn other_contexts(input: &Inputs) -> [WireContext; 3] {
         WireContext::new(input.client_nonce, input.challenge, boot_id),
     ]
 }
+
+#[test]
+fn supervisor_boot_id_getter_returns_raw_context_boot() {
+    let input = inputs();
+    // Raw accessor returns exactly the context's 16 boot bytes.
+    assert_eq!(context(&input).supervisor_boot_id(), input.boot_id);
+    // The same bytes come back from a context produced by a verified server
+    // hello; authenticity lives in the decode path, not this plain getter, so a
+    // synthetic context returns its bytes too.
+    let verified =
+        decode_server_hello(&input.key, &input.client_nonce, &input.server_hello).unwrap();
+    assert_eq!(verified.supervisor_boot_id(), input.boot_id);
+    let synthetic = WireContext::new([7u8; 32], [9u8; 32], [3u8; 16]);
+    assert_eq!(synthetic.supervisor_boot_id(), [3u8; 16]);
+}

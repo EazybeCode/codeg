@@ -13,6 +13,8 @@ import {
   appendNativeMessage,
   listNativeMessages,
   loadNativeResource,
+  runNativeAgent,
+  cancelNativeAgent,
   NativeContentNotFoundError,
   type NativeResource,
   type NativeMessage,
@@ -56,7 +58,11 @@ function Chat({
     [loading, setLoading] = useState(true),
     [saving, setSaving] = useState(false),
     [revoked, setRevoked] = useState(false),
-    [review, setReview] = useState(false)
+    [review, setReview] = useState(false),
+    [agentText, setAgentText] = useState(""),
+    [agentBusy, setAgentBusy] = useState(false),
+    [agentRunId, setAgentRunId] = useState<string | null>(null)
+  const runtimeEnabled = auth.capabilities?.runtimeEnabled ?? false
   const historyElement = useRef<HTMLOListElement>(null)
   const followHistory = useRef(true)
   useLayoutEffect(() => {
@@ -149,6 +155,51 @@ function Chat({
     void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope])
+  async function askAgent() {
+    if (
+      !runtimeEnabled ||
+      !draft.trim() ||
+      agentBusy ||
+      latest.archived ||
+      !auth.session
+    )
+      return
+    const prompt = draft
+    setAgentBusy(true)
+    setAgentText("")
+    setError(null)
+    try {
+      await runNativeAgent(
+        { chatId: latest.id, prompt, provider: "claude", model: "default" },
+        auth.session.csrf,
+        (event) => {
+          if (!scope.isCurrent()) return
+          if (event.type === "started") setAgentRunId(event.runId)
+          else if (event.type === "chunk")
+            setAgentText((current) => current + event.text)
+          else if (event.type === "failed")
+            setError(new NativeClientError("unavailable"))
+        },
+        auth.signal
+      )
+    } catch (cause) {
+      if (scope.isCurrent()) setError(cause)
+    } finally {
+      if (scope.isCurrent()) {
+        setAgentBusy(false)
+        setAgentRunId(null)
+      }
+    }
+  }
+  async function cancelAgent() {
+    const runId = agentRunId
+    if (!runId || !auth.session) return
+    try {
+      await cancelNativeAgent(runId, auth.session.csrf, auth.signal)
+    } catch {
+      // Best-effort: the run stream ends with a failed(canceled) event.
+    }
+  }
   async function send() {
     if (
       !draft.trim() ||
@@ -302,6 +353,20 @@ function Chat({
             />
           </label>
           <NativeError error={error} />
+          {(agentBusy || agentText) && (
+            <div
+              role="status"
+              aria-live="polite"
+              aria-label={t("askAgent")}
+              className="rounded-md border bg-muted/40 px-3 py-2 text-sm"
+            >
+              {agentText ? (
+                <NativeMarkdown markdown={agentText} />
+              ) : (
+                <span className="text-muted-foreground">{n("working")}</span>
+              )}
+            </div>
+          )}
           {(latest.authRevision !== pinned.current ||
             (error instanceof NativeClientError &&
               error.kind === "conflict")) && (
@@ -327,10 +392,31 @@ function Chat({
             >
               <ArrowUp aria-hidden />
             </Button>
-            <Button type="button" variant="outline" disabled>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void askAgent()}
+              disabled={
+                !runtimeEnabled ||
+                loading ||
+                saving ||
+                latest.archived ||
+                !draft.trim() ||
+                agentBusy
+              }
+            >
               <Sparkles aria-hidden />
               {t("askAgent")}
             </Button>
+            {agentBusy && (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => void cancelAgent()}
+              >
+                {n("cancel")}
+              </Button>
+            )}
             <Link
               href="/settings"
               onClick={(event) => {

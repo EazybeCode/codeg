@@ -444,6 +444,8 @@ impl Fixture {
                 blobs: blobs.clone(),
                 clock,
                 auth_limit: Arc::new(tokio::sync::Semaphore::new(32)),
+                agents: crate::neev::agents::execution::disabled_runtime(),
+                agent_jobs: crate::neev::agents::execution::new_job_registry(),
                 oauth,
                 magic: Some(magic),
                 mail: Some(mail),

@@ -192,8 +192,11 @@ pub(crate) async fn accept(
         return Err(AuthError::Forbidden);
     }
     let invited_role = session::role(&locked.invitation.role)?;
-    match locked.actor_membership {
-        Some(member) if member.active => {}
+    // Reactivating an inactive member increments the membership revision and
+    // therefore changes prior authority; first-member insertion and active
+    // replay do not. Only the revision-changing reactivation earns an event.
+    let reactivated = match locked.actor_membership {
+        Some(member) if member.active => false,
         Some(member) => {
             db::execute(
                 &locked.tx,
@@ -201,6 +204,7 @@ pub(crate) async fn accept(
                 vec![role_name(invited_role).into(), member.id.into()],
             )
             .await?;
+            true
         }
         None => {
             db::execute(
@@ -209,8 +213,9 @@ pub(crate) async fn accept(
                 vec![confirmed_org_id.into(), identity.user_id.into(), role_name(invited_role).into()],
             )
             .await?;
+            false
         }
-    }
+    };
     let updated = db::execute(
         &locked.tx,
         "UPDATE neev_invitations SET accepted_by=$1,accepted_at=$2 WHERE id=$3 AND accepted_by IS NULL AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at>$2",
@@ -219,6 +224,20 @@ pub(crate) async fn accept(
     .await?;
     if updated.rows_affected() != 1 {
         return Err(AuthError::Conflict);
+    }
+    // Deny-only gateway membership-scope event (integration-gated, counter last):
+    // reactivation revokes every relying binding for (user, org). Appended after
+    // the conditional acceptance succeeds and before commit.
+    if reactivated && state.config.gateway_events {
+        crate::neev::gateway::issuer::append_revocation(
+            &locked.tx,
+            "membership",
+            Some(identity.user_id),
+            Some(confirmed_org_id),
+            None,
+            locked.now,
+        )
+        .await?;
     }
     locked.tx.commit().await.map_err(database_error)?;
     Ok(confirmed_org_id)
@@ -279,6 +298,9 @@ async fn lock_acceptance(
     let scope = session::identity_scope_hint(&state.database, identity).await?;
     let now = state.clock.now_unix();
     let tx = db::begin(&state.database).await?;
+    // Admission first (adopted lock order: admission, accounts, orgs, members,
+    // session/attempt/invite; gateway audience counter last).
+    db::lock_admission_guard(&tx).await?;
 
     let mut user_ids = vec![identity.user_id, hint.inviter_id];
     user_ids.sort_unstable();

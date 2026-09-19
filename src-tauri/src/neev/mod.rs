@@ -11,6 +11,8 @@ pub(crate) mod db;
 pub(crate) mod error;
 mod gateway;
 pub(crate) mod http;
+#[cfg(feature = "dev-agent")]
+pub mod dev_agent;
 pub(crate) mod mail;
 pub(crate) mod org;
 mod startup;

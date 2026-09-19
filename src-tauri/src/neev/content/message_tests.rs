@@ -286,19 +286,27 @@ async fn postgres_removed_member_cannot_finish_waiting_append() {
     let (database, admin, schema) = h::postgres_database().await;
     let fixture = Harness::new(database.clone()).await;
     let chat = fixture.shared_chat().await;
+    // Hold the admission guard so the removal and the append both queue behind it.
+    // The removal (now admission-first) is enqueued first and therefore wins the
+    // guard; the later append then fails its post-admission authority recheck.
     let guard = db::begin(&database).await.unwrap();
     db::lock_admission_guard(&guard).await.unwrap();
+    let remove_state = fixture.state.clone();
+    let remove_admin = fixture.admin.clone();
+    let removed_member = fixture.creator.member_id;
+    let removal = tokio::spawn(async move {
+        crate::neev::org::remove(&remove_state, &remove_admin, removed_member).await
+    });
+    h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
     let state = fixture.state.clone();
     let actor = fixture.creator.clone();
     let id = chat.id.clone();
     let pending = tokio::spawn(async move {
         messages::append(&state, &actor, &id, &request(), 2, "Too late").await
     });
-    h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
-    crate::neev::org::remove(&fixture.state, &fixture.admin, fixture.creator.member_id)
-        .await
-        .unwrap();
+    h::wait_for_postgres_locks(&admin, "%neev_schema_version%FOR UPDATE%", 2).await;
     guard.commit().await.unwrap();
+    removal.await.unwrap().unwrap();
     assert!(matches!(pending.await.unwrap(), Err(ContentError::Auth(_))));
     assert_eq!(fixture.usage("messages").await, 0);
     assert_eq!(

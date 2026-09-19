@@ -10,6 +10,9 @@ import {
   parseRevision,
   parseDocumentContent,
   saveNativeDocument,
+  runNativeAgent,
+  cancelNativeAgent,
+  type NativeAgentEvent,
 } from "./neev-content-client"
 
 const revision = {
@@ -335,5 +338,68 @@ describe("native content wire validation", () => {
     await expect(listNativeResources(7, 8, "document")).rejects.toMatchObject({
       kind: "invalid_response",
     })
+  })
+})
+
+describe("agent runtime client", () => {
+  const chatId = "123e4567-e89b-42d3-a456-426614174000"
+
+  it("streams started/chunk/completed events over SSE", async () => {
+    const sse =
+      'data: {"type":"started","run_id":"r1"}\n\n' +
+      'data: {"type":"chunk","text":"hel"}\n\n' +
+      'data: {"type":"chunk","text":"lo"}\n\n' +
+      'data: {"type":"completed"}\n\n'
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sse))
+        controller.close()
+      },
+    })
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(body, { status: 200 }))
+    )
+    const events: NativeAgentEvent[] = []
+    await runNativeAgent(
+      { chatId, prompt: "hi", provider: "claude", model: "m" },
+      "csrf",
+      (event) => events.push(event)
+    )
+    expect(events).toEqual([
+      { type: "started", runId: "r1" },
+      { type: "chunk", text: "hel" },
+      { type: "chunk", text: "lo" },
+      { type: "completed" },
+    ])
+  })
+
+  it("throws unavailable when the runtime is disabled (503)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("{}", { status: 503 }))
+    )
+    await expect(
+      runNativeAgent(
+        { chatId, prompt: "hi", provider: "c", model: "m" },
+        "csrf",
+        () => {}
+      )
+    ).rejects.toMatchObject({ kind: "unavailable" })
+  })
+
+  it("cancelNativeAgent posts the run id and returns canceled", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ canceled: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    )
+    vi.stubGlobal("fetch", fetcher)
+    await expect(cancelNativeAgent("r1", "csrf")).resolves.toBe(true)
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/neev/agent/cancel",
+      expect.objectContaining({ method: "POST" })
+    )
   })
 })

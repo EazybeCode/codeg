@@ -331,6 +331,10 @@ async fn mutate_member(
         return Err(AuthError::Forbidden);
     }
     let tx = db::begin(&state.database).await?;
+    // Admission first (adopted lock order: admission, accounts, orgs, members,
+    // session; gateway audience counter last). Serializes member mutations with
+    // every other write-intent, exactly as logout/create/issuer already do.
+    db::lock_admission_guard(&tx).await?;
     let mut users = vec![actor.identity.user_id, target_user];
     users.sort_unstable();
     users.dedup();

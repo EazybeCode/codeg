@@ -13,6 +13,7 @@ import { NativeBoundary } from "./native-boundary"
 import {
   json,
   mockNativeSession,
+  nativeCapabilities,
   NativeTestRoot,
   orgSession,
 } from "./test-helpers"
@@ -375,3 +376,97 @@ it.each(["1", "9007199254740992"])(
     expect(mock.unknown).toEqual([])
   }
 )
+
+const capable = () => json({ ...nativeCapabilities, runtimeEnabled: true })
+
+it("keeps Ask agent disabled while the runtime is unavailable", async () => {
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.type(await screen.findByRole("textbox", { name: "Message" }), "help")
+  expect(screen.getByRole("button", { name: "Ask agent" })).toBeDisabled()
+})
+
+it("enables Ask agent and renders a streamed agent reply when the runtime is available", async () => {
+  const sse =
+    'data: {"type":"started","run_id":"r1"}\n\n' +
+    'data: {"type":"chunk","text":"do "}\n\n' +
+    'data: {"type":"chunk","text":"X"}\n\n' +
+    'data: {"type":"completed"}\n\n'
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    "POST /api/neev/agent/run": () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(sse))
+            controller.close()
+          },
+        }),
+        { status: 200 }
+      ),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.type(await screen.findByRole("textbox", { name: "Message" }), "help")
+  const ask = screen.getByRole("button", { name: "Ask agent" })
+  expect(ask).toBeEnabled()
+  await user.click(ask)
+  expect(await screen.findByText("do X")).toBeVisible()
+})
+
+it("surfaces an error when the runtime reports unavailable (503)", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    "POST /api/neev/agent/run": () => json({ error: "agent_runtime_disabled" }, 503),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.type(await screen.findByRole("textbox", { name: "Message" }), "help")
+  await user.click(screen.getByRole("button", { name: "Ask agent" }))
+  expect(await screen.findByRole("alert")).toBeVisible()
+})
+
+it("shows Cancel while streaming and cancels the run", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  let canceled = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    "POST /api/neev/agent/run": () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            controller = c
+            c.enqueue(
+              new TextEncoder().encode(
+                'data: {"type":"started","run_id":"r1"}\n\ndata: {"type":"chunk","text":"partial"}\n\n'
+              )
+            )
+          },
+        }),
+        { status: 200 }
+      ),
+    "POST /api/neev/agent/cancel": (init) => {
+      canceled = JSON.parse(init.body as string).run_id === "r1"
+      return json({ canceled: true })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.type(await screen.findByRole("textbox", { name: "Message" }), "help")
+  await user.click(screen.getByRole("button", { name: "Ask agent" }))
+  // Wait for streamed output so the run id from the started event is registered.
+  await screen.findByText("partial")
+  await user.click(screen.getByRole("button", { name: "Cancel" }))
+  await waitFor(() => expect(canceled).toBe(true))
+  act(() => controller.close())
+})

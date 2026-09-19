@@ -35,6 +35,14 @@ impl WireContext {
             supervisor_boot_id,
         }
     }
+
+    /// Raw 16-byte supervisor boot id carried by this context. This is a plain
+    /// accessor, NOT proof of authenticity: a `WireContext` can be constructed
+    /// from synthetic bytes. The transport mints an authenticated boot id only
+    /// from the context returned by a verified `decode_server_hello`.
+    pub(crate) fn supervisor_boot_id(&self) -> [u8; 16] {
+        self.supervisor_boot_id
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

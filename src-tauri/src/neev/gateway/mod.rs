@@ -1,5 +1,6 @@
 pub(crate) mod issuer;
 pub(crate) mod routes;
+pub(crate) mod transport;
 mod wire;
 mod wire_types;
 #[cfg(test)]

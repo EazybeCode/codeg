@@ -36,6 +36,9 @@ tauri-runtime = [
 # `db::test_helpers` module) for integration tests in `tests/*.rs`. Without
 # this feature the items are physically uncompiled in release builds.
 test-utils = []
+# Loopback, test-only dev server that binds a real agent runtime for browser
+# verification. Never enabled in a production build; production stays fail-closed.
+dev-agent = []
 
 [[bin]]
 name = "codeg"
@@ -62,6 +65,11 @@ name = "neev-content-verify"
 path = "src/bin/neev-content-verify.rs"
 required-features = []
 
+[[bin]]
+name = "neev-dev-agent"
+path = "src/bin/neev_dev_agent.rs"
+required-features = ["dev-agent"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [], optional = true }
 
@@ -86,8 +94,11 @@ walkdir = "2"
 ignore = "0.4"
 sacp = "11.0.0"
 sacp-tokio = "11.0.0"
-tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt", "net", "rt-multi-thread", "signal", "time"] }
 uuid = { version = "1", features = ["v4"] }
+# Send SIGTERM (not SIGKILL) to the sandboxed agent launcher on cancel so it can
+# tear down its per-tenant namespaces + provider-egress wiring before exiting.
+libc = "0.2"
 futures = "0.3"
 futures-lite = "2"
 # gzip/brotli: send Accept-Encoding and transparently decompress on the
@@ -133,6 +144,15 @@ tower-http = { version = "0.6", features = ["fs", "cors", "compression-gzip", "c
 # Direct deps (already in the graph via axum) so the compression predicate can
 # name the exact types tower-http's `Predicate` trait is defined over.
 http = "1"
+# Private gateway mTLS listener (in-process client-cert verification). Ring
+# provider only, matching the versions already resolved transitively so the
+# lockfile is unchanged; aws-lc-rs is deliberately excluded.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# Serve the private routes with the existing axum/hyper stack over the mTLS
+# stream rather than a bespoke parser. Both already resolved via axum.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 http-body = "1"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 futures-util = "0.3"

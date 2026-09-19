@@ -1994,15 +1994,9 @@ async fn postgres_completion_and_invalidators_serialize_in_both_orders() {
                 let complete = spawn_complete();
                 h::wait_for_postgres_lock(&admin, "%neev_agent_connections%FOR UPDATE%").await;
                 let invalidator = spawn_mutation();
-                h::wait_for_postgres_lock(
-                    &admin,
-                    if mutation == "remove" {
-                        "%neev_accounts%FOR UPDATE%"
-                    } else {
-                        "%neev_schema_version%FOR UPDATE%"
-                    },
-                )
-                .await;
+                // Every invalidator — including remove, now admission-first — blocks
+                // on the admission guard already held by the running completion.
+                h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
                 (complete, invalidator)
             } else {
                 let invalidator = spawn_mutation();
@@ -2016,11 +2010,9 @@ async fn postgres_completion_and_invalidators_serialize_in_both_orders() {
                 )
                 .await;
                 let complete = spawn_complete();
-                if mutation == "remove" {
-                    h::wait_for_postgres_locks(&admin, "%neev_accounts%FOR UPDATE%", 2).await;
-                } else {
-                    h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
-                }
+                // Completion blocks on the admission guard held by the invalidator
+                // (remove now takes admission first, like logout/cancel/disconnect).
+                h::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
                 (complete, invalidator)
             };
             blocker.commit().await.unwrap();

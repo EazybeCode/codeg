@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::neev::{auth::github, error::AuthError, startup::ServerState};
 
+mod agent;
 mod auth;
 mod catalog;
 mod content;
@@ -169,6 +170,8 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             post(org::preview_invitation),
         )
         .route("/api/neev/invitations/accept", post(org::accept_invitation))
+        .route("/api/neev/agent/run", post(agent::run))
+        .route("/api/neev/agent/cancel", post(agent::cancel))
         .route("/api/neev/logout", post(auth::logout))
         .route("/api/neev/auth/google/login", post(auth::google_login))
         .route("/api/neev/auth/google/link", post(auth::google_link))
@@ -209,7 +212,10 @@ async fn capabilities(State(state): State<Arc<ServerState>>) -> Response {
     private_json(Capabilities {
         version: 1,
         identity_mode: "native",
-        runtime_enabled: false,
+        // Reflects an actually-bound runtime. Production is always false (the
+        // config layer refuses `NEEV_RUNTIME_ENABLED`); a test/isolated harness
+        // that injects a runtime reports true, which enables the chat control.
+        runtime_enabled: state.agents.is_available(),
         providers: Providers {
             google: state.oauth.google_available(),
             email: state.magic.is_some(),

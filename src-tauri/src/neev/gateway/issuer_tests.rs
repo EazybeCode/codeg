@@ -511,6 +511,75 @@ async fn sqlite_gateway_account_org_membership_scope_events_deny() {
     }
 }
 
+// ---- Bounded expirable cleanup (prune_expired) ----
+
+#[tokio::test]
+async fn sqlite_prune_removes_expired_receipt_relying_exchange_but_keeps_binding() {
+    let (db, _user, _org, ctx) = setup(1000).await;
+    issue_redeem(&db, &ctx, 1, 9, 2000).await.unwrap();
+    assert_eq!(h::count(&db, "neev_gateway_redemptions").await, 1);
+    assert_eq!(h::count(&db, "neev_gateway_relying_sessions").await, 1);
+    assert_eq!(h::count(&db, "neev_gateway_exchanges").await, 1);
+    assert_eq!(h::count(&db, "neev_gateway_relying_bindings").await, 1);
+
+    // Nothing is expired shortly after issuance.
+    let none = issuer::prune_expired(&db, &clock(2100), 100).await.unwrap();
+    assert_eq!(none.total(), 0);
+    assert_eq!(h::count(&db, "neev_gateway_redemptions").await, 1);
+
+    // Far in the future every expirable row is gone; the permanent binding stays
+    // so a delayed first revoke can still be delivered.
+    let counts = issuer::prune_expired(&db, &clock(1_000_000), 100).await.unwrap();
+    assert_eq!(
+        counts,
+        issuer::CleanupCounts {
+            redemptions: 1,
+            relying_sessions: 1,
+            exchanges: 1
+        }
+    );
+    assert_eq!(h::count(&db, "neev_gateway_redemptions").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_relying_sessions").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_exchanges").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_relying_bindings").await, 1);
+}
+
+#[tokio::test]
+async fn sqlite_prune_never_exceeds_the_total_limit() {
+    let (db, _user, _org, ctx) = setup(1000).await;
+    for i in 1..=3u8 {
+        issue_redeem(&db, &ctx, i, i + 10, 2000).await.unwrap();
+    }
+    assert_eq!(h::count(&db, "neev_gateway_redemptions").await, 3);
+
+    // A limit of 2 deletes exactly two rows total (both receipts) and stops.
+    let first = issuer::prune_expired(&db, &clock(1_000_000), 2).await.unwrap();
+    assert_eq!(first.total(), 2);
+    assert_eq!(first.redemptions, 2);
+    assert_eq!(h::count(&db, "neev_gateway_redemptions").await, 1);
+    assert_eq!(h::count(&db, "neev_gateway_relying_sessions").await, 3);
+
+    // A follow-up pass clears the remainder in FK-safe order.
+    issuer::prune_expired(&db, &clock(1_000_000), 100).await.unwrap();
+    assert_eq!(h::count(&db, "neev_gateway_redemptions").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_relying_sessions").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_exchanges").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_relying_bindings").await, 3);
+}
+
+#[tokio::test]
+async fn sqlite_prune_rejects_out_of_range_limit() {
+    let (db, _user, _org, _ctx) = setup(1000).await;
+    assert_eq!(
+        issuer::prune_expired(&db, &clock(1000), 0).await.err(),
+        Some(IssuerError::Invalid)
+    );
+    assert_eq!(
+        issuer::prune_expired(&db, &clock(1000), 101).await.err(),
+        Some(IssuerError::Invalid)
+    );
+}
+
 // ---- Guarded PostgreSQL peers (R2/R6/R7) ----
 
 async fn pg_setup(
@@ -521,6 +590,31 @@ async fn pg_setup(
     let (org, _) = h::organization(db, user, "admin").await;
     let context = h::scoped_context(db, user, org, now).await;
     (user, org, context)
+}
+
+#[tokio::test]
+#[ignore = "requires guarded PostgreSQL"]
+async fn postgres_prune_expired_bounds_and_preserves_bindings() {
+    let (db, admin, schema) = h::postgres_database().await;
+    eprintln!("prune owned schema: {schema}");
+    let (_user, _org, ctx) = pg_setup(&db, 1000).await;
+    for i in 1..=3u8 {
+        issue_redeem(&db, &ctx, i, i + 10, 2000).await.unwrap();
+    }
+    // Bounded: limit 2 removes exactly two receipts under the PG keyset delete.
+    let first = issuer::prune_expired(&db, &clock(1_000_000), 2).await.unwrap();
+    assert_eq!(first.total(), 2);
+    // Remainder cleared; permanent bindings preserved.
+    issuer::prune_expired(&db, &clock(1_000_000), 100).await.unwrap();
+    assert_eq!(h::count(&db, "neev_gateway_redemptions").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_relying_sessions").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_exchanges").await, 0);
+    assert_eq!(h::count(&db, "neev_gateway_relying_bindings").await, 3);
+    // Not-yet-expired rows survive.
+    issue_redeem(&db, &ctx, 9, 99, 2000).await.unwrap();
+    let none = issuer::prune_expired(&db, &clock(2100), 100).await.unwrap();
+    assert_eq!(none.total(), 0);
+    h::cleanup_postgres(db, admin, schema).await;
 }
 
 #[tokio::test]

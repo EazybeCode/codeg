@@ -139,13 +139,31 @@ pub(super) struct OrgHarness {
 
 impl OrgHarness {
     pub(super) async fn new() -> Self {
-        let database = database().await;
+        Self::build_on(database().await, preview_config()).await
+    }
+
+    /// Same fixture with the integration-gated gateway event path enabled, for
+    /// the N2 transaction-coupled revocation-event tests.
+    pub(super) async fn new_with_gateway_events() -> Self {
+        let mut config = preview_config();
+        config.gateway_events = true;
+        Self::build_on(database().await, config).await
+    }
+
+    /// Events-enabled fixture on a caller-provided (already initialized)
+    /// connection, so a guarded-PostgreSQL peer can drive the same accept flow.
+    pub(super) async fn new_with_gateway_events_on(database: DatabaseConnection) -> Self {
+        let mut config = preview_config();
+        config.gateway_events = true;
+        Self::build_on(database, config).await
+    }
+
+    async fn build_on(database: DatabaseConnection, config: super::config::Config) -> Self {
         let clock = Arc::new(TestClock::new(1_700_000_000));
         let capture = Arc::new(MailCapture::new());
         let mail = super::mail::Service::new(database.clone(), capture.clone());
         let state = Arc::new(
-            super::startup::ServerState::with_mail(database.clone(), preview_config(), clock, mail)
-                .unwrap(),
+            super::startup::ServerState::with_mail(database.clone(), config, clock, mail).unwrap(),
         );
         let owner_user = native_account(&database, "org-owner", "owner@example.test").await;
         let inviter_user = native_account(&database, "org-inviter", "inviter@example.test").await;
@@ -799,6 +817,7 @@ pub(super) fn preview_config() -> super::config::Config {
             email: None,
         },
         gateway_events: false,
+        runtime_enabled: false,
         _document_root_guard: Some(document_root),
     }
 }

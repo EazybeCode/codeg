@@ -659,7 +659,10 @@ async fn postgres_authority_interleavings_preserve_owner_and_deny_removed_actor_
     let demote = tokio::spawn(async move {
         org::set_role(&demote_state, &demote_owner, owner_member_id, Role::Member).await
     });
-    test_support::wait_for_postgres_locks(&admin, "%neev_accounts%FOR UPDATE%", 2).await;
+    // Both member mutations take the admission guard first: one holds it while
+    // blocked on the held account row, the other queues behind it on admission.
+    test_support::wait_for_postgres_lock(&admin, "%neev_accounts%FOR UPDATE%").await;
+    test_support::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
     account_blocker.commit().await.unwrap();
     assert_eq!(remove.await.unwrap(), Err(AuthError::Forbidden));
     assert_eq!(demote.await.unwrap(), Err(AuthError::Forbidden));
@@ -726,7 +729,9 @@ async fn postgres_authority_interleavings_preserve_owner_and_deny_removed_actor_
     let accept_state = state.clone();
     let acceptance =
         tokio::spawn(async move { invites::accept(&accept_state, &invitee, &token, org_id).await });
-    test_support::wait_for_postgres_lock(&admin, "%neev_accounts%FOR UPDATE%").await;
+    // The removal (admission-first) holds the admission guard while blocked on the
+    // organization row, so the acceptance now queues behind it on admission.
+    test_support::wait_for_postgres_lock(&admin, "%neev_schema_version%FOR UPDATE%").await;
     org_blocker.commit().await.unwrap();
     assert_eq!(removal.await.unwrap(), Ok(()));
     assert_eq!(acceptance.await.unwrap(), Err(AuthError::Forbidden));
@@ -804,4 +809,224 @@ async fn lock_postgres_organization(
     .unwrap()
     .unwrap();
     tx
+}
+
+// ---- N2 conformance: membership event on invitation reactivation ----
+
+async fn membership_event_count(
+    database: &sea_orm::DatabaseConnection,
+    org_id: i32,
+    user_id: i32,
+) -> i64 {
+    db::one(
+        database,
+        "SELECT COUNT(*) AS n FROM neev_gateway_revocations WHERE scope='membership' AND user_id=$1 AND org_id=$2",
+        vec![user_id.into(), org_id.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get::<i64>("", "n")
+    .unwrap()
+}
+
+async fn membership_id_of(
+    database: &sea_orm::DatabaseConnection,
+    org_id: i32,
+    user_id: i32,
+) -> i32 {
+    db::one(
+        database,
+        "SELECT id FROM neev_memberships WHERE org_id=$1 AND user_id=$2",
+        vec![org_id.into(), user_id.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get::<i32>("", "id")
+    .unwrap()
+}
+
+async fn membership_active_revision(
+    database: &sea_orm::DatabaseConnection,
+    member_id: i32,
+) -> (bool, i64) {
+    let row = db::one(
+        database,
+        "SELECT active,revision FROM neev_memberships WHERE id=$1",
+        vec![member_id.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    (
+        row.try_get::<bool>("", "active").unwrap(),
+        row.try_get::<i64>("", "revision").unwrap(),
+    )
+}
+
+// Reactivating an inactive member (revision change) appends exactly one gated
+// membership event; a first insertion changes no prior authority and emits none.
+#[tokio::test]
+async fn gateway_reinvite_reactivation_appends_one_membership_event() {
+    let h = OrgHarness::new_with_gateway_events().await;
+    let invitee = h.invitee();
+    let token = h.invite("invitee@example.test").await;
+    assert_eq!(h.accept(invitee.clone(), &token).await, Ok(h.org_id()));
+    assert_eq!(
+        membership_event_count(&h.database, h.org_id(), invitee.user_id).await,
+        0,
+        "first-member insertion must emit no event"
+    );
+    let member_id = membership_id_of(&h.database, h.org_id(), invitee.user_id).await;
+    org::remove(&h.state, &h.owner(), member_id).await.unwrap();
+    assert_eq!(
+        membership_event_count(&h.database, h.org_id(), invitee.user_id).await,
+        1,
+        "removal appends one membership event"
+    );
+    let token2 = h.invite("invitee@example.test").await;
+    assert_eq!(h.accept(invitee.clone(), &token2).await, Ok(h.org_id()));
+    assert_eq!(
+        membership_event_count(&h.database, h.org_id(), invitee.user_id).await,
+        2,
+        "reactivation appends exactly one further membership event"
+    );
+    assert!(
+        membership_active_revision(&h.database, member_id).await.0,
+        "reactivated member is active"
+    );
+}
+
+// Active replay and first insertion emit nothing; the disabled flag suppresses
+// even a genuine reactivation.
+#[tokio::test]
+async fn gateway_reinvite_replay_and_disabled_emit_no_event() {
+    let h = OrgHarness::new_with_gateway_events().await;
+    let invitee = h.invitee();
+    let token = h.invite("invitee@example.test").await;
+    assert_eq!(h.accept(invitee.clone(), &token).await, Ok(h.org_id()));
+    // Replaying the same already-accepted token while active is a no-op.
+    assert_eq!(h.accept(invitee.clone(), &token).await, Ok(h.org_id()));
+    assert_eq!(
+        test_support::count(&h.database, "neev_gateway_revocations").await,
+        0,
+        "insertion + active replay emit no events"
+    );
+
+    let h = OrgHarness::new().await; // gateway_events disabled
+    let invitee = h.invitee();
+    let token = h.invite("invitee@example.test").await;
+    assert_eq!(h.accept(invitee.clone(), &token).await, Ok(h.org_id()));
+    let member_id = membership_id_of(&h.database, h.org_id(), invitee.user_id).await;
+    org::remove(&h.state, &h.owner(), member_id).await.unwrap();
+    let token2 = h.invite("invitee@example.test").await;
+    assert_eq!(h.accept(invitee, &token2).await, Ok(h.org_id()));
+    assert_eq!(
+        test_support::count(&h.database, "neev_gateway_revocations").await,
+        0,
+        "disabled integration appends nothing even on reactivation"
+    );
+}
+
+// Event/native atomicity: a forced audience-counter overflow inside the event
+// append rolls back the reactivation revision bump AND the invitation acceptance.
+#[tokio::test]
+async fn gateway_reinvite_event_failure_rolls_back_reactivation_atomically() {
+    let h = OrgHarness::new_with_gateway_events().await;
+    let invitee = h.invitee();
+    let token = h.invite("invitee@example.test").await;
+    assert_eq!(h.accept(invitee.clone(), &token).await, Ok(h.org_id()));
+    let member_id = membership_id_of(&h.database, h.org_id(), invitee.user_id).await;
+    org::remove(&h.state, &h.owner(), member_id).await.unwrap();
+    let (inactive, removed_revision) = membership_active_revision(&h.database, member_id).await;
+    assert!(!inactive);
+    // Force append_revocation to overflow the audience cursor (-> Unavailable).
+    test_support::execute(
+        &h.database,
+        "UPDATE neev_gateway_audience SET last_cursor=$1 WHERE audience='neev-collaboration-v1'",
+        vec![i64::MAX.into()],
+    )
+    .await;
+    let token2 = h.invite("invitee@example.test").await;
+    assert_eq!(
+        h.accept(invitee.clone(), &token2).await,
+        Err(AuthError::Unavailable)
+    );
+    // Membership unchanged (inactive, same revision); acceptance rolled back.
+    assert_eq!(
+        membership_active_revision(&h.database, member_id).await,
+        (false, removed_revision)
+    );
+    assert_eq!(
+        membership_event_count(&h.database, h.org_id(), invitee.user_id).await,
+        1,
+        "only the removal event survives; reactivation event rolled back"
+    );
+    let accepted_at = db::one(
+        &h.database,
+        "SELECT accepted_at FROM neev_invitations WHERE token_hash=$1",
+        vec![crate::neev::auth::secrets::digest(
+            crate::neev::auth::secrets::TokenPurpose::Invite,
+            &token2,
+        )
+        .unwrap()
+        .into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get::<Option<i64>>("", "accepted_at")
+    .unwrap();
+    assert_eq!(accepted_at, None, "invitation acceptance rolled back");
+}
+
+// Guarded-PostgreSQL peer: reactivation append and rollback injection under the
+// real FOR UPDATE admission/audience locks.
+#[tokio::test]
+#[ignore = "requires explicitly isolated NEEV_TEST_DATABASE_URL"]
+async fn postgres_gateway_reinvite_reactivation_event_and_rollback() {
+    let (database, admin, schema) = test_support::postgres_database().await;
+    let h = OrgHarness::new_with_gateway_events_on(database.clone()).await;
+    let invitee = h.invitee();
+    let org_id = h.org_id();
+    let user_id = invitee.user_id;
+
+    let token = h.invite("invitee@example.test").await;
+    assert_eq!(h.accept(invitee.clone(), &token).await, Ok(org_id));
+    let member_id = membership_id_of(&database, org_id, user_id).await;
+    org::remove(&h.state, &h.owner(), member_id).await.unwrap();
+    assert_eq!(membership_event_count(&database, org_id, user_id).await, 1);
+
+    // Reactivation appends exactly one further event under PG locks.
+    let token2 = h.invite("invitee@example.test").await;
+    assert_eq!(h.accept(invitee.clone(), &token2).await, Ok(org_id));
+    assert_eq!(membership_event_count(&database, org_id, user_id).await, 2);
+    assert!(membership_active_revision(&database, member_id).await.0);
+
+    // Remove again, then inject an overflow to prove atomic rollback on PG.
+    org::remove(&h.state, &h.owner(), member_id).await.unwrap();
+    assert_eq!(membership_event_count(&database, org_id, user_id).await, 3);
+    let (_, removed_revision) = membership_active_revision(&database, member_id).await;
+    test_support::execute(
+        &database,
+        "UPDATE neev_gateway_audience SET last_cursor=$1 WHERE audience='neev-collaboration-v1'",
+        vec![i64::MAX.into()],
+    )
+    .await;
+    let token3 = h.invite("invitee@example.test").await;
+    assert_eq!(
+        h.accept(invitee, &token3).await,
+        Err(AuthError::Unavailable)
+    );
+    assert_eq!(
+        membership_active_revision(&database, member_id).await,
+        (false, removed_revision)
+    );
+    assert_eq!(
+        membership_event_count(&database, org_id, user_id).await,
+        3,
+        "reactivation event rolled back on PG"
+    );
+    test_support::cleanup_postgres(database, admin, schema).await;
 }

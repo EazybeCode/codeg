@@ -652,3 +652,104 @@ export async function loadNativeDocumentContent(
     )
   )
 }
+
+export interface RunNativeAgentInput {
+  chatId: string
+  prompt: string
+  provider: string
+  model: string
+}
+
+export type NativeAgentEvent =
+  | { type: "started"; runId: string }
+  | { type: "chunk"; text: string }
+  | { type: "completed" }
+  | { type: "failed"; reason: string }
+
+function parseAgentEvent(json: string): NativeAgentEvent | null {
+  let value: unknown
+  try {
+    value = JSON.parse(json)
+  } catch {
+    return null
+  }
+  const object = record(value)
+  switch (object.type) {
+    case "started":
+      return { type: "started", runId: text(object.run_id) }
+    case "chunk":
+      return { type: "chunk", text: text(object.text) }
+    case "completed":
+      return { type: "completed" }
+    case "failed":
+      return { type: "failed", reason: text(object.reason) }
+    default:
+      return null
+  }
+}
+
+// Runs a personal agent for a chat, invoking onEvent for each streamed event.
+// Rejects with NativeClientError("unavailable") when the runtime is disabled.
+export async function runNativeAgent(
+  input: RunNativeAgentInput,
+  csrf: string,
+  onEvent: (event: NativeAgentEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  if (!csrf) throw new NativeClientError("invalid_request")
+  assertUuid(input.chatId)
+  if (typeof input.prompt !== "string" || !input.prompt.trim()) invalidRequest()
+  const response = await fetch("/api/neev/agent/run", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "x-neev-csrf": csrf },
+    body: JSON.stringify({
+      chat_id: input.chatId,
+      prompt: input.prompt,
+      provider: input.provider,
+      model: input.model,
+    }),
+    signal,
+  })
+  if (response.status === 503) throw new NativeClientError("unavailable")
+  if (response.status === 401) throw new NativeClientError("unauthorized")
+  if (response.status === 403) throw new NativeClientError("forbidden")
+  if (!response.ok || !response.body)
+    throw new NativeClientError("invalid_response")
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (value) buffer += decoder.decode(value, { stream: true })
+    let boundary = buffer.indexOf("\n\n")
+    while (boundary >= 0) {
+      const frame = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("data:")) {
+          const event = parseAgentEvent(line.slice(5).trim())
+          if (event) onEvent(event)
+        }
+      }
+      boundary = buffer.indexOf("\n\n")
+    }
+    if (done) break
+  }
+}
+
+export async function cancelNativeAgent(
+  runId: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<boolean> {
+  const object = record(
+    await contentMutation(
+      "/api/neev/agent/cancel",
+      { run_id: runId },
+      csrf,
+      signal
+    )
+  )
+  return object.canceled === true
+}
