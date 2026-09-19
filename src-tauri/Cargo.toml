@@ -66,6 +66,14 @@ path = "src/bin/neev-content-verify.rs"
 required-features = []
 
 [[bin]]
+# Fixed-command privileged launch helper (Linux; installed with file caps). Only
+# component that runs privileged; the web server execs it to launch a sandboxed
+# agent without itself holding any capabilities.
+name = "neev-agent-caplaunch"
+path = "src/bin/neev_agent_caplaunch.rs"
+required-features = []
+
+[[bin]]
 name = "neev-dev-agent"
 path = "src/bin/neev_dev_agent.rs"
 required-features = ["dev-agent"]

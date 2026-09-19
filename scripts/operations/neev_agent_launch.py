@@ -22,6 +22,7 @@ one or more it is a provider allowlist wired through the slot proxy.
 
 import argparse
 import os
+import re
 import signal
 import sys
 
@@ -77,9 +78,32 @@ def build_spec(args):
     return spec
 
 
+_RUN_DIR = re.compile(r"run-[A-Za-z0-9._-]{1,64}\Z")
+
+
+def _validate_workdir_under_trusted_root(workdir):
+    """The caller (potentially an attacker who can exec the privileged helper)
+    controls --workdir, but NOT the environment: the helper clears it and sets a
+    trusted NEEV_AGENT_WORKSPACE_ROOT. Require --workdir to be a safe run-dir
+    whose PARENT resolves (realpath, following any symlinks) to that trusted root,
+    so a symlinked-parent cannot trick the privileged chown into an arbitrary
+    directory. The final component is opened O_NOFOLLOW in the sandbox."""
+    root_env = os.environ.get("NEEV_AGENT_WORKSPACE_ROOT")
+    if not root_env or not os.path.isabs(root_env):
+        raise sandbox.SandboxError("invalid")
+    root = os.path.realpath(root_env)
+    if not os.path.isabs(workdir):
+        raise sandbox.SandboxError("invalid")
+    if os.path.realpath(os.path.dirname(workdir)) != root:
+        raise sandbox.SandboxError("invalid")
+    if _RUN_DIR.fullmatch(os.path.basename(workdir)) is None:
+        raise sandbox.SandboxError("invalid")
+
+
 def main(argv=None):
     args = _parse(sys.argv[1:] if argv is None else argv)
     try:
+        _validate_workdir_under_trusted_root(args.workdir)
         spec = build_spec(args)
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: invalid spec: {error.category}", file=sys.stderr)

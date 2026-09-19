@@ -339,6 +339,13 @@ pub(crate) struct SandboxedProviderCliRuntime {
     binary: String,
     workspace_root: PathBuf,
     provider_ipv4: Vec<String>,
+    /// The fixed-command privileged launch helper (`neev-agent-caplaunch`,
+    /// installed with file caps). When set, the (unprivileged) server execs THIS
+    /// instead of `python <launcher>`; the helper raises the ambient caps and
+    /// execs the launcher itself. This is what keeps the web server unprivileged
+    /// (deploy review C1). `None` = direct exec (dev/test only, needs an already
+    /// privileged context).
+    cap_helper: Option<String>,
     slots: SlotPool,
 }
 
@@ -355,6 +362,7 @@ impl SandboxedProviderCliRuntime {
         binary: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
         provider_ipv4: Vec<String>,
+        cap_helper: Option<String>,
     ) -> Self {
         Self {
             python: python.into(),
@@ -362,16 +370,15 @@ impl SandboxedProviderCliRuntime {
             binary: binary.into(),
             workspace_root: workspace_root.into(),
             provider_ipv4,
+            cap_helper,
             slots: SlotPool::new(),
         }
     }
 
-    /// Pure: the exact launcher argv for a request (unit-tested; no spawn). The
-    /// provider binary only ever appears AFTER the `--` sandbox separator.
-    fn launch_argv(&self, request: &RunRequest, lane: Lane, workdir: &Path) -> Vec<String> {
+    /// The launcher's own arguments (everything the launcher parses); the provider
+    /// binary only ever appears AFTER the `--` sandbox separator.
+    fn launcher_args(&self, request: &RunRequest, lane: Lane, workdir: &Path) -> Vec<String> {
         let mut argv = vec![
-            self.python.clone(),
-            self.launcher.to_string_lossy().into_owned(),
             "--tenant".into(),
             format!("org:{}/user:{}", request.org_id, request.user_id),
             "--slot".into(),
@@ -395,6 +402,18 @@ impl SandboxedProviderCliRuntime {
         argv.push("stream-json".into());
         argv.push("--include-partial-messages".into());
         argv.push("--verbose".into());
+        argv
+    }
+
+    /// The full spawn argv: the privileged cap-helper (production, keeps the
+    /// server unprivileged) OR a direct `python <launcher>` (dev/test) — followed
+    /// by the launcher's args. Pure; unit-tested.
+    fn launch_argv(&self, request: &RunRequest, lane: Lane, workdir: &Path) -> Vec<String> {
+        let mut argv = match &self.cap_helper {
+            Some(helper) => vec![helper.clone()],
+            None => vec![self.python.clone(), self.launcher.to_string_lossy().into_owned()],
+        };
+        argv.extend(self.launcher_args(request, lane, workdir));
         argv
     }
 }
@@ -587,12 +606,14 @@ pub(crate) fn disabled_runtime() -> std::sync::Arc<AgentRuntime> {
 /// The production sandboxed runtime, bound by startup only when
 /// `NEEV_RUNTIME_ENABLED=true`. Spawns every agent through the isolation +
 /// provider-egress launcher; never a bare provider process.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn sandboxed_runtime(
     python: impl Into<String>,
     launcher: impl Into<PathBuf>,
     binary: impl Into<String>,
     workspace_root: impl Into<PathBuf>,
     provider_ipv4: Vec<String>,
+    cap_helper: Option<String>,
 ) -> std::sync::Arc<AgentRuntime> {
     std::sync::Arc::new(AgentRuntime::Sandboxed(SandboxedProviderCliRuntime::new(
         python,
@@ -600,6 +621,7 @@ pub(crate) fn sandboxed_runtime(
         binary,
         workspace_root,
         provider_ipv4,
+        cap_helper,
     )))
 }
 
@@ -695,10 +717,33 @@ mod tests {
         SandboxedProviderCliRuntime::new(
             "python3",
             "/opt/neev/scripts/operations/neev_agent_launch.py",
-            "claude",
-            "/var/lib/neev-native/agents",
+            "/usr/local/bin/claude",
+            "/data/agents",
             vec!["140.82.112.3".into()],
+            None, // direct exec (dev/test)
         )
+    }
+
+    #[test]
+    fn sandboxed_uses_cap_helper_prefix_when_set() {
+        let runtime = SandboxedProviderCliRuntime::new(
+            "python3",
+            "/opt/neev/scripts/operations/neev_agent_launch.py",
+            "/usr/local/bin/claude",
+            "/data/agents",
+            vec!["140.82.112.3".into()],
+            Some("/opt/neev/bin/neev-agent-caplaunch".into()),
+        );
+        let lane = Lane { slot: "a", uid: 61000 };
+        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/data/agents/run-x"));
+        // The privileged fixed-command helper is argv[0] — NOT python and NOT the
+        // provider; the server execs only the helper (keeps itself unprivileged).
+        assert_eq!(argv[0], "/opt/neev/bin/neev-agent-caplaunch");
+        assert!(!argv.contains(&"python3".to_string()));
+        assert!(argv.contains(&"--tenant".to_string()));
+        let sep = argv.iter().position(|a| a == "--").expect("has -- separator");
+        assert!(!argv[..sep].contains(&"/usr/local/bin/claude".to_string()));
+        assert_eq!(argv[sep + 1], "/usr/local/bin/claude");
     }
 
     #[test]
@@ -721,8 +766,8 @@ mod tests {
         // The provider argv is AFTER the `--` separator (sandboxed), and the
         // provider binary never appears before it.
         let sep = argv.iter().position(|a| a == "--").expect("has -- separator");
-        assert!(!argv[..sep].contains(&"claude".to_string()));
-        assert_eq!(argv[sep + 1], "claude");
+        assert!(!argv[..sep].contains(&"/usr/local/bin/claude".to_string()));
+        assert_eq!(argv[sep + 1], "/usr/local/bin/claude");
         assert_eq!(&argv[sep + 2..sep + 4], &["-p".to_string(), "draft".to_string()]);
         assert!(argv.contains(&"stream-json".to_string()));
     }
@@ -730,7 +775,7 @@ mod tests {
     #[test]
     fn sandboxed_deny_all_when_no_provider_ip() {
         let runtime = SandboxedProviderCliRuntime::new(
-            "python3", "/l/launch.py", "claude", "/w", vec![],
+            "python3", "/l/launch.py", "/usr/local/bin/claude", "/w", vec![], None,
         );
         let lane = Lane { slot: "b", uid: 61001 };
         let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/w/run-x"));

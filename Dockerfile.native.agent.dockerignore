@@ -1,0 +1,15 @@
+**
+
+!Dockerfile.native.agent
+!Dockerfile.native.agent.dockerignore
+!scripts/operations/neev_agent_launch.py
+!scripts/operations/neev_agent_sandbox.py
+!scripts/operations/neev_agent_egress.py
+!scripts/operations/neev_login_network_profile.py
+!scripts/operations/neev_codex_login_egress.py
+
+**/.env*
+**/.context
+**/.context/**
+**/.git
+**/.git/**

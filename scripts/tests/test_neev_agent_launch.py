@@ -2,6 +2,7 @@
 Actually spawning the sandbox is Linux-only (`neev_agent_sandbox_acceptance.py`);
 these prove the CLI maps to a correct, validated SandboxSpec + egress policy."""
 
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -56,6 +57,39 @@ class LaunchSpecTests(unittest.TestCase):
             launch.build_spec(
                 args(["--provider-ipv4", "not-an-ip", "--", "claude", "-p", "hi"])
             )
+
+
+class WorkdirTrustTests(unittest.TestCase):
+    def test_workdir_must_be_a_run_dir_directly_under_the_trusted_root(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = root
+            try:
+                # Accepted: a run-* dir directly under the trusted root.
+                launch._validate_workdir_under_trusted_root(os.path.join(root, "run-abc123"))
+                # Rejected: escaping the root, a symlinked parent, a bad name, relative.
+                with self.assertRaises(sandbox.SandboxError):
+                    launch._validate_workdir_under_trusted_root("/etc/cron.d")
+                with self.assertRaises(sandbox.SandboxError):
+                    launch._validate_workdir_under_trusted_root(os.path.join(root, "evil", "run-x"))
+                with self.assertRaises(sandbox.SandboxError):
+                    launch._validate_workdir_under_trusted_root(os.path.join(root, "notrun"))
+                with self.assertRaises(sandbox.SandboxError):
+                    launch._validate_workdir_under_trusted_root("run-abc")
+                # Symlinked parent that escapes the root is rejected (realpath check).
+                link = os.path.join(root, "link")
+                os.symlink("/etc", link)
+                with self.assertRaises(sandbox.SandboxError):
+                    launch._validate_workdir_under_trusted_root(os.path.join(link, "run-x"))
+            finally:
+                os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
+
+    def test_missing_trusted_root_env_is_rejected(self):
+        os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
+        with self.assertRaises(sandbox.SandboxError):
+            launch._validate_workdir_under_trusted_root("/data/agents/run-x")
 
 
 if __name__ == "__main__":

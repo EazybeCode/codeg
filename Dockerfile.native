@@ -57,7 +57,8 @@ RUN cargo build \
       --release \
       --no-default-features \
       --bin neev-server \
-      --bin neev-content-verify
+      --bin neev-content-verify \
+      --bin neev-agent-caplaunch
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS native
 
@@ -73,10 +74,14 @@ RUN apt-get update \
 
 COPY --from=backend --chown=0:0 /app/src-tauri/target/release/neev-server /usr/local/bin/neev-server
 COPY --from=backend --chown=0:0 /app/src-tauri/target/release/neev-content-verify /usr/local/bin/neev-content-verify
+# The privileged launch helper is shipped inert (no file capabilities) in the base
+# image; only the agent image grants it caps. Without caps + without
+# NEEV_RUNTIME_ENABLED it can do nothing.
+COPY --from=backend --chown=0:0 /app/src-tauri/target/release/neev-agent-caplaunch /usr/local/bin/neev-agent-caplaunch
 COPY --from=frontend --chown=0:0 /app/out/ /app/web/
 COPY --from=frontend --chown=0:0 /usr/share/doc/neev/ /usr/share/doc/neev/
 
-RUN chmod 0555 /usr/local/bin/neev-server /usr/local/bin/neev-content-verify \
+RUN chmod 0555 /usr/local/bin/neev-server /usr/local/bin/neev-content-verify /usr/local/bin/neev-agent-caplaunch \
     && find /app/web /usr/share/doc/neev -type d -exec chmod 0555 {} + \
     && find /app/web /usr/share/doc/neev -type f -exec chmod 0444 {} +
 

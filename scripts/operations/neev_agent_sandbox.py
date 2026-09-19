@@ -251,8 +251,11 @@ def _secure_own_workdir(workdir, run_uid, run_gid):  # pragma: no cover - Linux 
     except OSError as error:
         raise SandboxError("invalid") from error
     try:
-        os.fchown(fd, run_uid, run_gid)
+        # chmod BEFORE chown: while the caller still owns the dir, chmod needs no
+        # CAP_FOWNER; after chown to the tenant uid it would. This keeps the
+        # privileged cap set minimal (CAP_CHOWN only, not CAP_FOWNER).
         os.fchmod(fd, 0o700)
+        os.fchown(fd, run_uid, run_gid)
     except OSError as error:
         raise SandboxError("launch") from error
     finally:

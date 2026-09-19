@@ -1,0 +1,80 @@
+# Agent-capable Neev native image — the PRIVILEGED variant that can run the
+# sandboxed personal-agent runtime. Built ON TOP of the reviewed base image
+# (Dockerfile.native), adding only what the sandbox launcher needs:
+#   * python3            — runs scripts/operations/neev_agent_launch.py + sandbox
+#   * util-linux         — unshare / setpriv / prlimit (namespaces, uid drop, rlimits)
+#   * iproute2, nftables — ip / nft (per-tenant egress netns + default-deny firewall)
+#   * the launcher + sandbox + egress scripts at NEEV_AGENT_LAUNCHER
+#
+# Defaults stay FAIL-CLOSED and non-root (NEEV_RUNTIME_ENABLED unset, USER 65532):
+# this image only *enables* the runtime when the deployment sets
+# NEEV_RUNTIME_ENABLED=true AND runs it as root (USER 0) with CAP_NET_ADMIN +
+# CAP_SYS_ADMIN and the login-isolation slot bridges/proxies provisioned. Without
+# those the runtime stays Disabled exactly as in the base image.
+#
+# Build (two-step; base first):
+#   docker build -f Dockerfile.native       -t neev-native:<tag>       .
+#   docker build -f Dockerfile.native.agent -t neev-native-agent:<tag> \
+#     --build-arg BASE_IMAGE=neev-native:<tag> .
+
+ARG BASE_IMAGE=neev-native:latest
+FROM ${BASE_IMAGE} AS agent
+
+USER 0:0
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+      python3 \
+      util-linux \
+      iproute2 \
+      nftables \
+      libcap2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o 0 -g 0 -m 0755 /opt/neev/scripts/operations \
+    && install -d -o 65532 -g 65532 -m 0700 /data/agents
+
+# Grant the FIXED-command launch helper exactly the caps the sandbox setup needs
+# (and no more): chown the per-run workdir, drop to the tenant uid/gid, drop the
+# bounding set, create namespaces, wire the egress netns/nft, mkdir under /run.
+# The web server (uid 65532) has NO effective caps; it execs this helper, which
+# raises these to the ambient set and execs the launcher. libcap2-bin is only a
+# build-time tool for setcap (the xattr persists in the layer).
+RUN setcap 'cap_chown,cap_dac_override,cap_setgid,cap_setuid,cap_setpcap,cap_net_admin,cap_sys_admin=eip' \
+      /usr/local/bin/neev-agent-caplaunch \
+    && getcap /usr/local/bin/neev-agent-caplaunch \
+    # The deploy runs with no-new-privileges:false so the helper's FILE CAPS take
+    # effect. That would also re-enable setuid-root binaries (su/mount/umount from
+    # util-linux) as an escalation path for an RCE as uid 65532 — so strip every
+    # setuid/setgid bit. This does NOT touch the helper's capability xattrs (file
+    # caps are not the setuid mode bit), and the launcher uses non-setuid
+    # unshare/setpriv/prlimit/ip/nft via the ambient caps.
+    && find / -xdev -perm /6000 -type f -exec chmod -s {} + 2>/dev/null || true \
+    # ASSERT (fail the build, not just display): the ONLY file-capped binary is the
+    # helper, and NO setuid/setgid binary remains. With no-new-privileges:false at
+    # deploy, either would be a direct escalation path for uid 65532.
+    && test -z "$(getcap -r / 2>/dev/null | grep -v '^/usr/local/bin/neev-agent-caplaunch ')" \
+    && test -z "$(find / -xdev -perm /6000 -type f 2>/dev/null)" \
+    && echo "cap/setuid assertions passed" \
+    && apt-get purge -y libcap2-bin && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# The launcher composes the sandbox + provider-egress; ship the whole operations
+# set it imports (sandbox, egress, login profile, codex login egress).
+COPY --chown=0:0 scripts/operations/neev_agent_launch.py \
+     scripts/operations/neev_agent_sandbox.py \
+     scripts/operations/neev_agent_egress.py \
+     scripts/operations/neev_login_network_profile.py \
+     scripts/operations/neev_codex_login_egress.py \
+     /opt/neev/scripts/operations/
+RUN chmod 0555 /opt/neev/scripts/operations/*.py
+
+ENV NEEV_AGENT_LAUNCHER=/opt/neev/scripts/operations/neev_agent_launch.py \
+    NEEV_AGENT_CAP_HELPER=/usr/local/bin/neev-agent-caplaunch \
+    NEEV_AGENT_WORKSPACE_ROOT=/data/agents \
+    NEEV_AGENT_BINARY=/usr/local/bin/claude
+
+# Fail-closed defaults preserved: runtime OFF, non-root. Enabling is a deploy-time
+# decision (see NEEV-PRODUCTION-RELEASE-RUNBOOK.md STEP 3/4): set
+# NEEV_RUNTIME_ENABLED=true, run as USER 0 with NET_ADMIN+SYS_ADMIN, provision the
+# slot bridges/proxies, and authenticate the provider CLI on the host.
+USER 65532:65532
+STOPSIGNAL SIGINT
+CMD ["/usr/local/bin/neev-server"]

@@ -165,6 +165,23 @@ fn no_symlink_component(path: &std::path::Path) -> Result<(), ()> {
     Ok(())
 }
 
+/// True if the path is writable by group or other (or cannot be stat'd) — the
+/// launcher/helper must be root-owned and not tenant-writable, or a tenant could
+/// swap what the privileged helper executes.
+fn is_group_or_other_writable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o022 != 0)
+        .unwrap_or(true)
+}
+
+/// True if the path is owned by root (uid 0). A privileged, file-capped helper
+/// that is not root-owned could be replaced by the tenant uid.
+fn is_root_owned(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map(|m| m.uid() == 0).unwrap_or(false)
+}
+
 pub(super) fn run_server() -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -201,40 +218,72 @@ async fn serve() -> Result<(), ()> {
     // every agent through the per-tenant isolation + provider-egress launcher
     // (never a bare provider). Default stays `Disabled` (fail-closed).
     if state.config.runtime_enabled {
-        // Validate operational paths and fail closed: an enabled runtime with a
-        // missing/relative launcher or a non-absolute/symlinked workspace root
-        // aborts startup rather than running agents through an unexpected path.
+        // Validate operational config and FAIL CLOSED at boot: an enabled runtime
+        // with a missing/relative/writable launcher, a non-absolute/symlinked
+        // workspace root, a non-absolute provider binary, or a malformed provider
+        // allowlist aborts startup rather than deferring the failure to first run.
         let launcher = std::env::var("NEEV_AGENT_LAUNCHER").map_err(|_| ())?;
         let workspace_root = std::env::var("NEEV_AGENT_WORKSPACE_ROOT")
-            .unwrap_or_else(|_| "/var/lib/neev-native/agents".to_string());
+            .unwrap_or_else(|_| "/data/agents".to_string()); // matches the image ENV/volume
         let launcher_path = std::path::Path::new(&launcher);
         let workspace_path = std::path::Path::new(&workspace_root);
         if !launcher_path.is_absolute()
             || !launcher_path.is_file()
+            || !is_root_owned(launcher_path) // launcher must be root-owned...
+            || is_group_or_other_writable(launcher_path) // ...and not tenant-writable
             || !workspace_path.is_absolute()
             || !workspace_path.is_dir()
             || no_symlink_component(workspace_path).is_err()
         {
             return Err(());
         }
+        // The provider binary must be an absolute path (no PATH ambiguity for the
+        // dropped uid) and exist.
+        let binary = std::env::var("NEEV_AGENT_BINARY").map_err(|_| ())?;
+        let binary_path = std::path::Path::new(&binary);
+        if !binary_path.is_absolute() || !binary_path.is_file() {
+            return Err(());
+        }
+        // The privileged fixed-command launch helper (`neev-agent-caplaunch`,
+        // file-capped) is REQUIRED so the server itself stays unprivileged
+        // (deploy review C1): it must be an absolute, existing, non-writable file.
+        let cap_helper = std::env::var("NEEV_AGENT_CAP_HELPER").map_err(|_| ())?;
+        let cap_helper_path = std::path::Path::new(&cap_helper);
+        if !cap_helper_path.is_absolute()
+            || !cap_helper_path.is_file()
+            || !is_root_owned(cap_helper_path)
+            || is_group_or_other_writable(cap_helper_path)
+        {
+            return Err(());
+        }
         let python = std::env::var("NEEV_AGENT_PYTHON").unwrap_or_else(|_| "python3".to_string());
-        let binary = std::env::var("NEEV_AGENT_BINARY").unwrap_or_else(|_| "claude".to_string());
-        let provider_ipv4: Vec<String> = std::env::var("NEEV_AGENT_PROVIDER_IPV4")
-            .ok()
-            .map(|raw| {
-                raw.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Parse + validate the provider allowlist at boot: each entry must be a
+        // public IPv4 (mirrors the login-egress validator's intent). Empty is
+        // allowed (=> deny-all egress, fail-safe); any malformed entry aborts.
+        let raw_ips = std::env::var("NEEV_AGENT_PROVIDER_IPV4").unwrap_or_default();
+        let mut provider_ipv4: Vec<String> = Vec::new();
+        for entry in raw_ips.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            match entry.parse::<std::net::Ipv4Addr>() {
+                Ok(ip)
+                    if !ip.is_private()
+                        && !ip.is_loopback()
+                        && !ip.is_link_local()
+                        && !ip.is_unspecified()
+                        && !ip.is_multicast()
+                        && !ip.is_broadcast() =>
+                {
+                    provider_ipv4.push(ip.to_string());
+                }
+                _ => return Err(()), // malformed/non-public allowlist entry: fail closed
+            }
+        }
         state.agents = super::agents::execution::sandboxed_runtime(
             python,
             launcher,
             binary,
             workspace_root,
             provider_ipv4,
+            Some(cap_helper),
         );
     }
     let state = Arc::new(state);
