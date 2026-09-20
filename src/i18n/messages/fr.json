@@ -7,6 +7,7 @@
     "conversionDescription": "Cet aperçu modifie seulement le brouillon. Enregistrez pour ajouter une révision enrichie ; le Markdown original reste dans l’historique.",
     "conversionRefused": "Conversion refusée : ce Markdown contient du contenu non pris en charge. Le brouillon reste inchangé.",
     "richUnsupported": "Collage ou modification refusés : formatage, fichiers ou HTML non pris en charge, ou limites dépassées. Collez du texte brut avec du Markdown pris en charge.",
+    "pastedPlainText": "Collé en texte brut — la mise en forme a été supprimée.",
     "paragraphBlock": "Paragraphe",
     "headingBlock": "Titre {level}",
     "bulletBlock": "Liste à puces",

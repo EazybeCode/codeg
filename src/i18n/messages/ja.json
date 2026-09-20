@@ -7,6 +7,7 @@
     "conversionDescription": "このプレビューは下書きのみを変更します。保存するとリッチ文書の版を追加し、元のMarkdownは履歴に残ります。",
     "conversionRefused": "変換できません：未対応の内容が含まれています。下書きは変更されていません。",
     "richUnsupported": "貼り付けまたは編集できません：未対応の書式、ファイル、HTML、または文書の上限超過です。対応するMarkdownをプレーンテキストで貼り付けてください。",
+    "pastedPlainText": "プレーンテキストとして貼り付けました（書式は削除されました）。",
     "paragraphBlock": "段落",
     "headingBlock": "見出し {level}",
     "bulletBlock": "箇条書き",

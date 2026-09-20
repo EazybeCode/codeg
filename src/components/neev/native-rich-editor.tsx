@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import { useTheme } from "next-themes"
 import {
@@ -72,10 +72,19 @@ export function NativeRichEditor({
 }: NativeRichEditorProps) {
   const t = useTranslations("NativeContent")
   const { resolvedTheme } = useTheme()
-  const [notice, setNotice] = useState(false)
+  // "unsupported" = paste/edit refused (nothing inserted); "plaintext" = rich
+  // content fell back to a plain-text paste (formatting removed). Truthful copy
+  // per state — never claim text was kept when nothing was inserted.
+  const [notice, setNotice] = useState<"none" | "unsupported" | "plaintext">(
+    "none"
+  )
   const localDrag = useRef(false)
   const callback = useRef(onChange)
-  callback.current = onChange
+  // Keep the latest onChange without re-creating the editor; sync after render
+  // (a ref must not be written during render).
+  useEffect(() => {
+    callback.current = onChange
+  })
   const [editor] = useState(() => {
     // The upstream React creation hook publishes window.ProseMirror. Own creation
     // directly, and keep private initial content out of retained constructor options.
@@ -97,27 +106,52 @@ export function NativeRichEditor({
       },
       pasteHandler: ({ event, editor }) => {
         event.preventDefault()
-        try {
-          const data = event.clipboardData
-          if (
-            !data ||
-            data.files.length ||
-            Array.from(data.types).some((type) => type !== "text/plain")
-          )
-            throw new Error("Unsupported paste")
-          const candidate = importMarkdown(data.getData("text/plain"))
-          // Parse the entire candidate before the editor can normalize clipboard data.
-          setNotice(false)
-          editor.insertBlocks(
-            fromNeev(candidate) as Parameters<typeof editor.insertBlocks>[0],
-            editor.getTextCursorPosition().block,
-            "after"
-          )
-          return true
-        } catch {
-          setNotice(true)
-          return false
+        const data = event.clipboardData
+        const plain = data ? data.getData("text/plain") : ""
+        const richOnly =
+          !!data &&
+          !data.files.length &&
+          Array.from(data.types).every((type) => type === "text/plain")
+        // First choice: parse text/plain as our restricted Markdown so pasted
+        // structure (lists, headings) is preserved when it is representable.
+        if (richOnly && plain) {
+          try {
+            const candidate = importMarkdown(plain)
+            setNotice("none")
+            editor.insertBlocks(
+              fromNeev(candidate) as Parameters<typeof editor.insertBlocks>[0],
+              editor.getTextCursorPosition().block,
+              "after"
+            )
+            return true
+          } catch {
+            // Not representable as our Markdown — fall through to plain text.
+          }
         }
+        // Fallback: if there is ANY plain text, paste it as plain paragraphs
+        // (formatting removed). Set the notice before inserting so the edit guard
+        // can override to "unsupported" if the result would exceed doc limits.
+        if (plain) {
+          try {
+            const paragraphs = plain
+              .replace(/\r\n?/g, "\n")
+              .split("\n")
+              .map((line) => ({ type: "paragraph" as const, content: line }))
+            setNotice("plaintext")
+            editor.insertBlocks(
+              paragraphs as Parameters<typeof editor.insertBlocks>[0],
+              editor.getTextCursorPosition().block,
+              "after"
+            )
+            return true
+          } catch {
+            setNotice("unsupported")
+            return false
+          }
+        }
+        // No usable text (files-only / empty clipboard): refuse, insert nothing.
+        setNotice("unsupported")
+        return false
       },
     })
     editor.replaceBlocks(
@@ -127,18 +161,21 @@ export function NativeRichEditor({
     return editor
   })
   const lastEmitted = useRef(JSON.stringify(toNeev(editor.document)))
-  const ownHost = useMemo(() => {
-    let observer: MutationObserver | null = null
-    let released = false
-    return (host: HTMLDivElement | null) => {
-      if (!host || observer || released) return
+  // Mutable across renders by design → refs (not render-scoped `let`s, which the
+  // React Compiler rule forbids reassigning after render). `observerRef` is the
+  // single live MutationObserver; `releasedRef` latches the one-shot teardown.
+  const observerRef = useRef<MutationObserver | null>(null)
+  const releasedRef = useRef(false)
+  const ownHost = useCallback(
+    (host: HTMLDivElement | null) => {
+      if (!host || observerRef.current || releasedRef.current) return
       // Activity/StrictMode detach refs and effects without removing the host.
       // Observe real removal, including an unmount while Activity is already hidden.
-      observer = new MutationObserver(() => {
+      const observer = new MutationObserver(() => {
         if (host.isConnected) return
-        released = true
-        observer?.disconnect()
-        observer = null
+        releasedRef.current = true
+        observer.disconnect()
+        observerRef.current = null
         const tiptap = editor._tiptapEditor
         const empty = EditorState.create({ schema: tiptap.state.schema })
         editor.unmount()
@@ -153,9 +190,11 @@ export function NativeRichEditor({
         callback.current = () => {}
         lastEmitted.current = ""
       })
+      observerRef.current = observer
       observer.observe(host.ownerDocument, { childList: true, subtree: true })
-    }
-  }, [editor])
+    },
+    [editor]
+  )
   useEffect(
     () =>
       editor.onBeforeChange(({ tr }) => {
@@ -163,7 +202,7 @@ export function NativeRichEditor({
         try {
           toNeev(docToBlocks(tr.doc))
         } catch {
-          setNotice(true)
+          setNotice("unsupported")
           return false
         }
       }),
@@ -196,9 +235,14 @@ export function NativeRichEditor({
       ref={ownHost}
       className="neev-writing-canvas min-w-0 bg-background py-4"
     >
-      {notice && (
+      {notice === "unsupported" && (
         <p role="alert" className="px-4 pb-3 text-sm text-destructive">
           {t("richUnsupported")}
+        </p>
+      )}
+      {notice === "plaintext" && (
+        <p role="status" className="px-4 pb-3 text-sm text-muted-foreground">
+          {t("pastedPlainText")}
         </p>
       )}
       <BlockNoteView
@@ -229,7 +273,7 @@ export function NativeRichEditor({
           ) {
             event.preventDefault()
             event.stopPropagation()
-            setNotice(true)
+            setNotice("unsupported")
           }
         }}
         onChange={() => {
@@ -241,7 +285,7 @@ export function NativeRichEditor({
               callback.current(next)
             }
           } catch {
-            setNotice(true)
+            setNotice("unsupported")
           }
         }}
       >

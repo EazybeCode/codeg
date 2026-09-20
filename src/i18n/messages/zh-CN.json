@@ -7,6 +7,7 @@
     "conversionDescription": "此预览仅更改草稿。保存后会追加富文档修订，原始 Markdown 保留在历史记录中。",
     "conversionRefused": "转换被拒绝：此 Markdown 包含不支持的内容。草稿未更改。",
     "richUnsupported": "粘贴或编辑被拒绝：包含不支持的格式、文件、HTML 或超出文档限制。请粘贴使用受支持 Markdown 的纯文本。",
+    "pastedPlainText": "已作为纯文本粘贴 — 已移除格式。",
     "paragraphBlock": "段落",
     "headingBlock": "标题 {level}",
     "bulletBlock": "无序列表",

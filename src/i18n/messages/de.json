@@ -7,6 +7,7 @@
     "conversionDescription": "Diese Vorschau ändert nur den Entwurf. Speichern fügt eine Rich-Text-Revision hinzu; das ursprüngliche Markdown bleibt im Verlauf.",
     "conversionRefused": "Umwandlung abgelehnt: Dieses Markdown enthält nicht unterstützte Inhalte. Der Entwurf bleibt unverändert.",
     "richUnsupported": "Einfügen oder Bearbeiten abgelehnt: Nicht unterstützte Formatierung, Dateien, HTML oder überschrittene Dokumentgrenzen. Fügen Sie Klartext mit unterstütztem Markdown ein.",
+    "pastedPlainText": "Als Nur-Text eingefügt – Formatierung wurde entfernt.",
     "paragraphBlock": "Absatz",
     "headingBlock": "Überschrift {level}",
     "bulletBlock": "Aufzählung",

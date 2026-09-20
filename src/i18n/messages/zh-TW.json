@@ -7,6 +7,7 @@
     "conversionDescription": "此預覽僅變更草稿。儲存後會新增富文件修訂，原始 Markdown 保留在歷史記錄中。",
     "conversionRefused": "轉換遭拒：此 Markdown 包含不支援的內容。草稿未變更。",
     "richUnsupported": "貼上或編輯遭拒：包含不支援的格式、檔案、HTML 或超出文件限制。請貼上使用支援 Markdown 的純文字。",
+    "pastedPlainText": "已以純文字貼上 — 已移除格式。",
     "paragraphBlock": "段落",
     "headingBlock": "標題 {level}",
     "bulletBlock": "項目符號清單",

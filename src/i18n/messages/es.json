@@ -7,6 +7,7 @@
     "conversionDescription": "Esta vista previa solo cambia el borrador. Guarda para añadir una revisión enriquecida; el Markdown original permanece en el historial.",
     "conversionRefused": "Conversión rechazada: este Markdown contiene contenido no compatible. El borrador no ha cambiado.",
     "richUnsupported": "Pegado o edición rechazados: formato, archivos o HTML no compatibles, o límites excedidos. Pega texto sin formato con Markdown compatible.",
+    "pastedPlainText": "Pegado como texto sin formato: se eliminó el formato.",
     "paragraphBlock": "Párrafo",
     "headingBlock": "Encabezado {level}",
     "bulletBlock": "Lista de viñetas",

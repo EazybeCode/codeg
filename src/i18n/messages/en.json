@@ -7,6 +7,7 @@
     "conversionDescription": "This preview changes only your draft. Save to append a rich revision; the original Markdown stays in history.",
     "conversionRefused": "Conversion refused: this Markdown contains unsupported content. Your draft is unchanged.",
     "richUnsupported": "Paste or edit refused: this content contains unsupported formatting, files, HTML, or exceeds document limits. Paste plain text with supported Markdown.",
+    "pastedPlainText": "Pasted as plain text — formatting was removed.",
     "paragraphBlock": "Paragraph",
     "headingBlock": "Heading {level}",
     "bulletBlock": "Bullet list",

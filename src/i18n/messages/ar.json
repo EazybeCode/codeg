@@ -7,6 +7,7 @@
     "conversionDescription": "تغير المعاينة المسودة فقط. احفظ لإضافة مراجعة منسقة؛ يبقى Markdown الأصلي في السجل.",
     "conversionRefused": "رُفض التحويل: يحتوي Markdown على محتوى غير مدعوم. لم تتغير المسودة.",
     "richUnsupported": "رُفض اللصق أو التعديل: تنسيق أو ملفات أو HTML غير مدعوم أو تجاوز للحدود. الصق نصاً عادياً باستخدام Markdown المدعوم.",
+    "pastedPlainText": "تم اللصق كنص عادي — تمت إزالة التنسيق.",
     "paragraphBlock": "فقرة",
     "headingBlock": "عنوان {level}",
     "bulletBlock": "قائمة نقطية",

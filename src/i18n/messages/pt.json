@@ -7,6 +7,7 @@
     "conversionDescription": "Esta prévia altera apenas o rascunho. Salve para adicionar uma revisão rica; o Markdown original permanece no histórico.",
     "conversionRefused": "Conversão recusada: este Markdown contém conteúdo não compatível. O rascunho não foi alterado.",
     "richUnsupported": "Colagem ou edição recusada: formatação, arquivos ou HTML não compatíveis, ou limites excedidos. Cole texto simples com Markdown compatível.",
+    "pastedPlainText": "Colado como texto simples — a formatação foi removida.",
     "paragraphBlock": "Parágrafo",
     "headingBlock": "Título {level}",
     "bulletBlock": "Lista com marcadores",

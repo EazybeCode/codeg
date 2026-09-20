@@ -236,7 +236,7 @@ it("keeps a controlled-lifetime draft across prop updates and emits actual text 
   )
 })
 
-it("refuses HTML or file paste visibly and preserves the rich draft", async () => {
+it("falls back to plain text when HTML paste is unsupported, with a truthful notice", async () => {
   render(
     <NativeTestRoot>
       <NativeRichEditor
@@ -249,6 +249,8 @@ it("refuses HTML or file paste visibly and preserves the rich draft", async () =
   const editor = await screen.findByRole("textbox", {
     name: "Document content",
   })
+  // HTML clipboard with a plain-text alternative: the HTML is dropped and the
+  // plain text is inserted (formatting removed) — NOT silently refused.
   fireEvent.paste(editor, {
     clipboardData: {
       files: [],
@@ -256,7 +258,35 @@ it("refuses HTML or file paste visibly and preserves the rich draft", async () =
       getData: (type: string) =>
         type === "text/html"
           ? '<img src="https://example.test/a">'
-          : "lost image",
+          : "plain fallback text",
+    },
+  })
+  // Truthful, non-error notice; the plain text is actually inserted.
+  expect(await screen.findByRole("status")).toHaveTextContent(/plain text/i)
+  expect(editor).toHaveTextContent("Keep me")
+  expect(editor).toHaveTextContent("plain fallback text")
+})
+
+it("refuses a files-only paste with no usable text and keeps the draft", async () => {
+  render(
+    <NativeTestRoot>
+      <NativeRichEditor
+        document={importMarkdown("Keep me")}
+        readOnly={false}
+        onChange={() => {}}
+      />
+    </NativeTestRoot>
+  )
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  // A files-only clipboard has no plain-text alternative: insert nothing and say
+  // so honestly (never claim text was kept).
+  fireEvent.paste(editor, {
+    clipboardData: {
+      files: [{ name: "a.png" } as unknown as File],
+      types: ["Files"],
+      getData: () => "",
     },
   })
   expect(await screen.findByRole("alert")).toHaveTextContent(/paste/i)
