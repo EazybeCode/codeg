@@ -241,16 +241,72 @@ it("offers no action at all when no runtime is bound", async () => {
     expect(screen.queryByRole("button", { name: `${name} claude` })).toBeNull()
 })
 
-it("does not offer a connection test the server could never settle", async () => {
+it("checks a connection and shows the answer the server gave", async () => {
+  const TEST = "POST /api/neev/agent/connections/claude/test"
+  const bodies: Record<string, unknown>[] = []
+  let state = "connected"
   mockNativeSession(undefined, {
-    "GET /api/neev/agent/connections": () => json(wiring("connected")),
+    "GET /api/neev/agent/connections": () => json(wiring(state)),
+    [TEST]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      // The check found the credential no longer usable.
+      state = "reconnect_required"
+      return json({
+        connection: {
+          provider: "claude",
+          state: "reconnect_required",
+          accountLabel: "sagar@example.test",
+          checkedAt: 1_700_000_000,
+          errorCode: "reauth_required",
+        },
+      })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Test the claude connection" })
+  )
+  expect(bodies[0]).toEqual({ requestKey: expect.any(String) })
+  // The server's own row replaces the previous state — nothing is inferred.
+  expect(await screen.findByText("Reconnect needed")).toBeVisible()
+  expect(screen.queryByText("Connected")).toBeNull()
+})
+
+it("never turns a failed check into a connected-looking row", async () => {
+  const TEST = "POST /api/neev/agent/connections/claude/test"
+  for (const status of [409, 429, 503]) {
+    localStorage.clear()
+    mockNativeSession(undefined, {
+      "GET /api/neev/agent/connections": () =>
+        json(wiring("reconnect_required")),
+      [TEST]: () => json({ code: "unavailable" }, status),
+    })
+    const user = userEvent.setup()
+    const view = mount()
+    await user.click(
+      await screen.findByRole("button", { name: "Test the claude connection" })
+    )
+    // Busy, rate-limited and unavailable all surface as themselves; the row
+    // keeps the state the server last published.
+    expect(await screen.findByRole("alert")).toBeVisible()
+    expect(screen.getByText("Reconnect needed")).toBeVisible()
+    expect(screen.queryByText("Connected")).toBeNull()
+    view.unmount()
+    vi.unstubAllGlobals()
+  }
+})
+
+it("offers no check for a connection that does not exist yet", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
   })
   mount()
-  expect(await screen.findByText("Connected")).toBeVisible()
+  await screen.findByRole("button", { name: "Connect claude" })
+  // There is nothing to check before a sign-in.
   expect(
-    screen.getByText("Testing a connection is not available yet.")
-  ).toBeVisible()
-  expect(screen.queryByRole("button", { name: /test/i })).toBeNull()
+    screen.queryByRole("button", { name: "Test the claude connection" })
+  ).toBeNull()
 })
 
 it("surfaces a sign-in already in flight rather than queueing another", async () => {

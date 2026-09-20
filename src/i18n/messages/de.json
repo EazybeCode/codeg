@@ -143,7 +143,6 @@
     "attemptState_canceled": "Anmeldung abgebrochen.",
     "attemptState_expired": "Die Anmeldung ist abgelaufen, bevor sie abgeschlossen war.",
     "attemptState_failed": "Die Anmeldung ist fehlgeschlagen.",
-    "agentTestUnavailable": "Eine Verbindung zu testen ist noch nicht verfügbar.",
     "connectProviderNamed": "{name} verbinden",
     "reconnectProviderNamed": "{name} neu verbinden",
     "disconnectProviderNamed": "{name} trennen",
@@ -153,7 +152,10 @@
     "pasteCodeLabel": "Autorisierungscode einfügen",
     "submitCode": "Code senden",
     "signInDeviceHint": "Öffne die Seite, gib diesen Code ein und bestätige dort. Neev erledigt den Rest.",
-    "signInCodeHint": "Öffne die Seite und bestätige, füge dann den erhaltenen Code hier ein."
+    "signInCodeHint": "Öffne die Seite und bestätige, füge dann den erhaltenen Code hier ein.",
+    "testConnection": "Testen",
+    "testConnectionNamed": "{name}-Verbindung testen",
+    "testingConnection": "Wird getestet…"
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

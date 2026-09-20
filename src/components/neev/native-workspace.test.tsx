@@ -717,3 +717,47 @@ it("remembers the opened resource, and forgets it on the way back", async () => 
     expect(localStorage.getItem("neev.ws.open.1:3")).toBeNull()
   )
 })
+
+it("reveals a restored resource nested under collapsed ancestors", async () => {
+  // Project → folder → subfolder; the chat lives at the bottom.
+  const tree = [
+    NODE,
+    { ...NODE, id: 5, parentId: 4, kind: "folder", name: "Reviews" },
+    { ...NODE, id: 6, parentId: 5, kind: "folder", name: "Q3" },
+  ]
+  const CHAT_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+  const chat = {
+    ...DOC,
+    id: CHAT_ID,
+    nodeId: 6,
+    kind: "chat",
+    title: "Nested team chat",
+  }
+  localStorage.setItem("neev.ws.section", "team")
+  localStorage.setItem(
+    "neev.ws.open.1:3",
+    JSON.stringify({ resourceId: CHAT_ID, nodeId: 6 })
+  )
+  mockNativeSession(undefined, {
+    "GET /api/neev/nodes": () => json({ nodes: tree, nextAfter: null }),
+    "GET /api/neev/nodes/6/chats": () =>
+      json({ items: [chat], nextAfter: null }),
+    [`GET /api/neev/resources/${CHAT_ID}`]: () => json(chat),
+    [`GET /api/neev/chats/${CHAT_ID}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+  })
+  mountWorkspace()
+  // Every ancestor is expanded, not just the chat's own folder — otherwise the
+  // restored item sits inside a collapsed project and cannot be seen.
+  const rail = await screen.findByRole("navigation", { name: "Projects" })
+  for (const name of ["Roadmap", "Reviews", "Q3"])
+    await waitFor(() =>
+      expect(
+        within(rail).getByRole("button", { name: `Collapse ${name}` })
+      ).toBeVisible()
+    )
+  // And the chat itself is both listed and open.
+  await waitFor(() =>
+    expect(screen.getAllByTitle("Nested team chat").length).toBeGreaterThan(1)
+  )
+})

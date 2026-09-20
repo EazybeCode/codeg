@@ -30,13 +30,22 @@ function runs(content: RichInlineRun[]): ReactNode {
     return <Fragment key={index}>{text}</Fragment>
   })
 }
+/** Mirrors the editor's heading scale in `native-rich-editor.css`. */
+const HEADING_CLASS: Record<1 | 2 | 3, string> = {
+  1: "mt-3 text-[30px] font-semibold leading-tight tracking-tight",
+  2: "mt-3 text-2xl font-semibold leading-snug",
+  3: "mt-3 text-xl font-semibold leading-snug",
+}
+
 function block(value: RichBlock): ReactNode {
   let content: ReactNode
   switch (value.type) {
     case "heading": {
       const Heading = `h${value.level}` as "h1" | "h2" | "h3"
+      // The same 30/24/20 scale the editor uses, so a document does not change
+      // shape the moment it is saved. All three stay below the page title.
       content = (
-        <Heading className="text-lg font-semibold">
+        <Heading className={HEADING_CLASS[value.level]}>
           {runs(value.content)}
         </Heading>
       )

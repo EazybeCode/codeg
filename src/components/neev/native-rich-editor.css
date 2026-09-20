@@ -19,13 +19,56 @@
 }
 
 /*
+ * Body heading hierarchy, shared verbatim with the read-only view
+ * (`native-rich-view.tsx`). Two things were wrong: BlockNote's default H1 came
+ * out around 48px — LARGER than the 36px page title, so a document's first
+ * heading outshouted its own name — and the read-only view flattened every
+ * level to 18px, so the same document had no hierarchy at all once saved.
+ *
+ * H1 sits deliberately below the page title: the title is the document, a
+ * heading is a section inside it.
+ */
+.neev-writing-canvas
+  .bn-block-content[data-content-type="heading"][data-level="1"]
+  .bn-inline-content {
+  font-size: 30px;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.neev-writing-canvas
+  .bn-block-content[data-content-type="heading"][data-level="2"]
+  .bn-inline-content {
+  font-size: 24px;
+  line-height: 1.35;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+.neev-writing-canvas
+  .bn-block-content[data-content-type="heading"][data-level="3"]
+  .bn-inline-content {
+  font-size: 20px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+/* Headings need room above them, less below: they belong to what follows. */
+.neev-writing-canvas .bn-block-content[data-content-type="heading"] {
+  padding-block: 12px 2px;
+}
+
+/*
  * Full-canvas readability: when a document is in full-width mode
  * (`[data-doc-width="full"]`, set on the document section), the workspace and
  * wide blocks (tables, images, code) expand to the available width, but running
  * text keeps a comfortable reading MEASURE rather than stretching edge to edge.
  * Focus mode is unaffected (the section already caps the whole column at 3xl).
  */
-[data-doc-width="full"] .neev-writing-canvas .bn-block-content:where(
+[data-doc-width="full"]
+  .neev-writing-canvas
+  .bn-block-content:where(
     [data-content-type="paragraph"],
     [data-content-type="heading"],
     [data-content-type="bulletListItem"],
@@ -37,7 +80,9 @@
 }
 
 /* Wide blocks intentionally ignore the prose measure and use the full canvas. */
-[data-doc-width="full"] .neev-writing-canvas .bn-block-content:where(
+[data-doc-width="full"]
+  .neev-writing-canvas
+  .bn-block-content:where(
     [data-content-type="table"],
     [data-content-type="codeBlock"]
   ) {
