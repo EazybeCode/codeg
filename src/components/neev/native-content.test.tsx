@@ -73,7 +73,7 @@ async function openContentMenu() {
 // Rename/Archive/Reopen/Move live in that menu; Share/Make private stay visible
 // header buttons.
 async function triggerAction(
-  user: ReturnType<typeof userEvent.setup>,
+  user: { click: (element: Element) => Promise<void> },
   name: string
 ) {
   if (name === "Make private" || name === "Share with organization") {

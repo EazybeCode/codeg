@@ -80,7 +80,9 @@ function LogoutControl() {
   )
 }
 // The compact header collects history/reload/width/convert/export in one menu.
-async function openMenu(user: ReturnType<typeof userEvent.setup> = userEvent) {
+async function openMenu(
+  user: { click: (element: Element) => Promise<void> } = userEvent
+) {
   await user.click(screen.getByRole("button", { name: "Content actions" }))
 }
 it("places document toolbar before the editor in keyboard order", async () => {
