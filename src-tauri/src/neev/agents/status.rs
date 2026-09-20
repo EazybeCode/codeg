@@ -478,9 +478,6 @@ pub(crate) async fn prepare_connection_check(
     provider: Provider,
 ) -> Result<CheckAdmission, StatusError> {
     valid_epoch(epoch.epoch, &epoch.boot_id)?;
-    if provider != Provider::Codex {
-        return Err(StatusError::Agent(AgentError::Unavailable));
-    }
     let tx = store::authorized_transaction(state, actor)
         .await
         .map_err(agent)?;
@@ -548,15 +545,19 @@ pub(crate) async fn prepare_connection_check(
         epoch.boot_id.clone().into(),
         connection.org_id.into(),
         connection.user_id.into(),
+        // Bound, never interpolated: the admitted row must belong to the very
+        // provider this ticket names, so a Claude check can never be admitted
+        // against a Codex connection (or the reverse).
+        store::provider_name(provider).into(),
     ]);
-    execute_exact(&tx,"INSERT INTO neev_agent_status_checks(connection_id,check_id,owner_epoch,session_id,generation,storage_handle,issued_at,expires_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8 WHERE EXISTS(SELECT 1 FROM neev_agent_status_owner WHERE id=1 AND epoch=$3 AND boot_id=$9 AND phase='ready') AND EXISTS(SELECT 1 FROM neev_agent_connections WHERE id=$1 AND org_id=$10 AND user_id=$11 AND provider='codex' AND generation=$5 AND storage_handle=$6 AND state IN ('connected','reconnect_required'))",values,1).await?;
+    execute_exact(&tx,"INSERT INTO neev_agent_status_checks(connection_id,check_id,owner_epoch,session_id,generation,storage_handle,issued_at,expires_at) SELECT $1,$2,$3,$4,$5,$6,$7,$8 WHERE EXISTS(SELECT 1 FROM neev_agent_status_owner WHERE id=1 AND epoch=$3 AND boot_id=$9 AND phase='ready') AND EXISTS(SELECT 1 FROM neev_agent_connections WHERE id=$1 AND org_id=$10 AND user_id=$11 AND provider=$12 AND generation=$5 AND storage_handle=$6 AND state IN ('connected','reconnect_required'))",values,1).await?;
     commit_live(tx, state, actor, expires_at).await?;
     Ok(CheckAdmission::Started(ticket))
 }
 
 async fn delete_ticket(tx: &DatabaseTransaction, t: &StatusTicket) -> Result<u64, StatusError> {
-    Ok(db::execute(tx,"DELETE FROM neev_agent_status_checks WHERE connection_id=$1 AND check_id=$2 AND owner_epoch=$3 AND session_id=$4 AND generation=$5 AND storage_handle=$6 AND issued_at=$7 AND expires_at=$8 AND EXISTS(SELECT 1 FROM neev_agent_status_owner WHERE id=1 AND epoch=$3 AND boot_id=$9 AND phase='ready') AND EXISTS(SELECT 1 FROM neev_agent_connections WHERE id=$1 AND org_id=$10 AND user_id=$11 AND provider='codex')",
-        vec![t.connection_id.clone().into(),t.check_id.clone().into(),t.epoch.into(),t.session_id.clone().into(),t.generation.into(),t.storage_handle.clone().into(),t.issued_at.into(),t.expires_at.into(),t.boot_id.clone().into(),t.org_id.into(),t.user_id.into()]).await.map_err(unavailable)?.rows_affected())
+    Ok(db::execute(tx,"DELETE FROM neev_agent_status_checks WHERE connection_id=$1 AND check_id=$2 AND owner_epoch=$3 AND session_id=$4 AND generation=$5 AND storage_handle=$6 AND issued_at=$7 AND expires_at=$8 AND EXISTS(SELECT 1 FROM neev_agent_status_owner WHERE id=1 AND epoch=$3 AND boot_id=$9 AND phase='ready') AND EXISTS(SELECT 1 FROM neev_agent_connections WHERE id=$1 AND org_id=$10 AND user_id=$11 AND provider=$12)",
+        vec![t.connection_id.clone().into(),t.check_id.clone().into(),t.epoch.into(),t.session_id.clone().into(),t.generation.into(),t.storage_handle.clone().into(),t.issued_at.into(),t.expires_at.into(),t.boot_id.clone().into(),t.org_id.into(),t.user_id.into(),store::provider_name(t.provider).into()]).await.map_err(unavailable)?.rows_affected())
 }
 
 pub(crate) async fn finalize_connection_check(
@@ -573,9 +574,6 @@ pub(crate) async fn finalize_connection_check(
         return Err(StatusError::Agent(AgentError::NotFound));
     }
     valid_ticket(ticket)?;
-    if ticket.provider != Provider::Codex {
-        return Err(StatusError::Agent(AgentError::Unavailable));
-    }
     let tx = store::authorized_transaction(state, actor)
         .await
         .map_err(agent)?;
@@ -585,7 +583,9 @@ pub(crate) async fn finalize_connection_check(
         boot_id: ticket.boot_id.clone(),
     };
     // Still validate intrinsic persisted state before returning a stale fence.
-    let connection = store::lock_connection(&tx, actor, Provider::Codex)
+    // Locking by the TICKET's provider is what keeps the two isolated: a ticket
+    // minted for one provider can only ever reach that provider's connection.
+    let connection = store::lock_connection(&tx, actor, ticket.provider)
         .await
         .map_err(agent)?;
     let checks = lock_checks(&tx, &owner).await?;
@@ -596,7 +596,8 @@ pub(crate) async fn finalize_connection_check(
         return Ok(CheckFinalized::Stale);
     };
     valid_connection(&connection)?;
-    if connection.id != ticket.connection_id
+    if connection.provider != ticket.provider
+        || connection.id != ticket.connection_id
         || connection.generation != ticket.generation
         || connection.storage_handle.as_deref() != Some(ticket.storage_handle.as_str())
         || !checkable(&connection)
@@ -661,7 +662,7 @@ pub(crate) async fn finalize_connection_check(
     execute_exact(&tx,
         "UPDATE neev_agent_connections
          SET state=$1,account_label=$2,checked_at=$3,error_code=$4,updated_at=$5
-         WHERE id=$6 AND org_id=$7 AND user_id=$8 AND provider='codex'
+         WHERE id=$6 AND org_id=$7 AND user_id=$8 AND provider=$17
            AND generation=$9 AND storage_handle=$10 AND state IN ('connected','reconnect_required')
            AND EXISTS(SELECT 1 FROM neev_agent_status_checks s,neev_agent_status_owner o
              WHERE s.connection_id=$6 AND s.check_id=$11 AND s.owner_epoch=$12 AND s.session_id=$13
@@ -670,13 +671,14 @@ pub(crate) async fn finalize_connection_check(
         vec![state_name.into(),label.clone().into(),checked_at.into(),error_code.into(),now.into(),
             ticket.connection_id.clone().into(),ticket.org_id.into(),ticket.user_id.into(),ticket.generation.into(),
             ticket.storage_handle.clone().into(),ticket.check_id.clone().into(),ticket.epoch.into(),ticket.session_id.clone().into(),
-            ticket.issued_at.into(),ticket.expires_at.into(),ticket.boot_id.clone().into()],1).await?;
+            ticket.issued_at.into(),ticket.expires_at.into(),ticket.boot_id.clone().into(),
+            store::provider_name(ticket.provider).into()],1).await?;
     if delete_ticket(&tx, ticket).await? != 1 {
         return Err(StatusError::Unavailable);
     }
     commit_live(tx, state, actor, ticket.expires_at).await?;
     Ok(CheckFinalized::Applied(ConnectionView {
-        provider: Provider::Codex,
+        provider: ticket.provider,
         state: if state_name == "connected" {
             ConnectionState::Connected
         } else {
@@ -698,9 +700,6 @@ pub(crate) async fn clear_connection_check(
     if epoch.epoch != ticket.epoch || epoch.boot_id != ticket.boot_id {
         return Err(StatusError::Stale);
     }
-    if ticket.provider != Provider::Codex {
-        return Err(StatusError::Agent(AgentError::Unavailable));
-    }
     let tx = internal_transaction(state).await?;
     let owner = lock_owner(&tx).await?;
     let connection =
@@ -710,6 +709,11 @@ pub(crate) async fn clear_connection_check(
     lock_checks(&tx, &owner).await?;
     if let Some(connection) = connection {
         valid_connection(&connection)?;
+        // This path looks the row up by id alone, so the provider has to be
+        // re-proved here: a ticket must not clear another provider's check.
+        if connection.provider != ticket.provider {
+            return Err(StatusError::Stale);
+        }
     }
     if owner.require_ready(epoch).is_ok() && delete_ticket(&tx, ticket).await? > 1 {
         return Err(StatusError::Unavailable);
