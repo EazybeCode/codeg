@@ -536,6 +536,12 @@ function Chat({
                 {t("agentsOff")}
               </p>
             )}
+            {/* This one-shot reply is not persisted and not team-visible.
+                Saying so keeps the panel from implying a shared transcript the
+                server does not store (spec §5.3). */}
+            <p className="text-xs text-muted-foreground">
+              {t("agentReplyPrivate")}
+            </p>
             {(agentBusy || agentText) && (
               <div
                 role="status"

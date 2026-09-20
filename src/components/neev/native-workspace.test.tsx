@@ -86,6 +86,20 @@ it("hides and disables an open workspace menu until visibility auth is revalidat
 it("shows the person and organization without GitHub or chat controls", async () => {
   const mock = mockNativeSession(undefined, {
     "GET /api/neev/nodes": () => json({ nodes: [], nextAfter: null }),
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: false,
+        connections: [
+          {
+            provider: "claude",
+            state: "disabled",
+            accountLabel: null,
+            checkedAt: null,
+            errorCode: null,
+          },
+        ],
+      }),
   })
   const user = userEvent.setup()
   render(
@@ -101,9 +115,14 @@ it("shows the person and organization without GitHub or chat controls", async ()
   expect(
     screen.queryByRole("button", { name: "New chat" })
   ).not.toBeInTheDocument()
-  // The Agent Chats destination shows an honest connect surface, never fake controls.
+  // The Agent Chats destination lists the caller's own saved sessions and is
+  // available whatever the rail has selected — sessions are not filed under a
+  // project or folder. With no runtime bound it says so rather than offering a
+  // connection that cannot be exercised.
   await user.click(screen.getByRole("button", { name: "Agent chats" }))
-  expect(screen.getByText("Agent chats are being enabled")).toBeVisible()
+  expect(await screen.findByText(/No saved agent chats yet/)).toBeVisible()
+  expect(screen.getByRole("button", { name: "New agent chat" })).toBeEnabled()
+  expect(screen.getByText("Agents are turned off.")).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
 
