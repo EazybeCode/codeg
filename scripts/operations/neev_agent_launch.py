@@ -198,6 +198,10 @@ def main(argv=None, volumes=None):
         import neev_login_network_profile as network_profile
 
         proxy_env = network_profile.proxy_env(args.slot)
+    # The provider sees its credentials at a lane-traversable HOME under the run
+    # workdir; the sandbox bind-mounts the physical volume there in its private
+    # mount namespace (the 0700 secret store is never made traversable).
+    home_as = sandbox.home_path(spec.workdir)
     try:
         with credentials.deliver(
             volumes,
@@ -206,8 +210,11 @@ def main(argv=None, volumes=None):
             args.credential_handle,
             args.uid,
             args.gid,
+            home_as=home_as,
         ) as delivery:
-            return _run_child(spec, child_env(delivery, proxy_env))
+            return _run_child(
+                spec, child_env(delivery, proxy_env), bind_source=delivery.mount
+            )
     except credentials.CredentialError as error:
         # Honest, non-sensitive reason ("busy" = another run for this user+provider
         # holds the volume). Rust surfaces waiting/busy; nothing runs unauthorized.
@@ -218,11 +225,11 @@ def main(argv=None, volumes=None):
         return 5
 
 
-def _run_child(spec, env):
+def _run_child(spec, env, bind_source=None):
     """Launch the provider in the sandbox, forward its stream, and always tear the
     sandbox down. Runs while the credential volume is lent to this run's uid."""
     try:
-        handle = sandbox.launch(spec, env=env)
+        handle = sandbox.launch(spec, env=env, bind_source=bind_source)
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: launch failed: {error.category}", file=sys.stderr)
         return 3

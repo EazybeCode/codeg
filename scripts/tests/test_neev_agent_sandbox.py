@@ -104,6 +104,37 @@ class SandboxSpecTests(unittest.TestCase):
         with self.assertRaises(sandbox.SandboxError):
             sandbox.build_launch_argv(spec(), join_netns="; rm -rf /")
 
+    def test_home_path_is_a_home_leaf_under_the_run_workdir(self):
+        self.assertEqual(
+            sandbox.home_path("/var/lib/neev-native/agents/org3-user7"),
+            "/var/lib/neev-native/agents/org3-user7/home",
+        )
+        with self.assertRaises(sandbox.SandboxError):
+            sandbox.home_path("relative/x")
+
+    def test_bind_source_inserts_the_ns_prelude_before_the_drop_chain(self):
+        mount = "/var/lib/neev-supervisor/credentials/" + "a" * 32 + "/mount"
+        argv = sandbox.build_launch_argv(spec(), bind_source=mount)
+        # The prelude runs the fixed interpreter + prelude script, as root inside the
+        # new mount namespace, BEFORE prlimit/setpriv drop privilege.
+        self.assertIn(sandbox.PYTHON, argv)
+        self.assertIn(sandbox.NS_PRELUDE, argv)
+        i = argv.index(sandbox.NS_PRELUDE)
+        self.assertEqual(argv[i + 1:i + 5], ["--src", mount, "--dst",
+                                             sandbox.home_path(spec().workdir)])
+        self.assertEqual(argv[i + 5], "--")
+        # Prelude sits after unshare, before prlimit/setpriv; provider still last.
+        self.assertLess(argv.index(sandbox.NS_PRELUDE), argv.index(sandbox.PRLIMIT))
+        self.assertLess(argv.index(sandbox.PRLIMIT), argv.index(sandbox.SETPRIV))
+        self.assertEqual(argv[-5:], list(spec().provider_argv))
+        # A malformed bind source (traversal) is rejected.
+        with self.assertRaises(sandbox.SandboxError):
+            sandbox.build_launch_argv(spec(), bind_source="/a/../b")
+
+    def test_no_bind_source_omits_the_prelude(self):
+        argv = sandbox.build_launch_argv(spec())
+        self.assertNotIn(sandbox.NS_PRELUDE, argv)
+
     def test_distinct_tenants_requires_separate_identity(self):
         a = spec()
         b = spec(

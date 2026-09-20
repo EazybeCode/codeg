@@ -27,6 +27,13 @@ UNSHARE = "/usr/bin/unshare"
 SETPRIV = "/usr/bin/setpriv"
 PRLIMIT = "/usr/bin/prlimit"
 IP = "/usr/sbin/ip"
+# Fixed interpreter + in-namespace bind prelude (same interpreter the caplaunch
+# helper uses). The prelude lives beside this module so a relocated install
+# (/opt/neev/scripts/operations) resolves it without configuration.
+PYTHON = "/usr/bin/python3"
+NS_PRELUDE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neev_agent_ns_prelude.py")
+# The in-sandbox HOME leaf under the run workdir (see `home_path`).
+_HOME_LEAF = "home"
 
 # A dedicated agent uid must be an unprivileged, non-login, non-service id.
 _MIN_RUN_UID = 60000
@@ -167,8 +174,26 @@ def validate_spec(spec):
         raise SandboxError("invalid")
 
 
-def build_launch_argv(spec, join_netns=None):
+def home_path(workdir):
+    """The in-sandbox HOME mountpoint: a `home` dir directly under the run workdir.
+
+    The dropped lane uid can traverse this (the workdir is 0700 lane-owned with
+    world-traversable ancestry under the trusted agents root), unlike the 0700
+    root-owned secret credential store where the volume is physically mounted. The
+    sandbox bind-mounts the credential volume here inside its private mount
+    namespace (see `neev_agent_ns_prelude`)."""
+    _validate_workdir(workdir)
+    return os.path.join(workdir, _HOME_LEAF)
+
+
+def build_launch_argv(spec, join_netns=None, bind_source=None):
     """Construct the isolated launch argv (pure; no execution).
+
+    `bind_source`, when given, is the physical path of the delivered credential
+    volume mount; the argv inserts the fixed in-namespace prelude (running as root
+    inside the fresh mount namespace, before setpriv) to bind it privately onto
+    `home_path(workdir)` and then exec the drop chain. Without it the provider gets
+    no HOME bind (deny-all/no-credential runs).
 
     The launcher runs as root and `unshare` creates fresh mount/uts/ipc/pid
     namespaces (`--fork` so the agent is PID 1 of its own tree) plus a private
@@ -207,9 +232,19 @@ def build_launch_argv(spec, join_netns=None):
             raise SandboxError("invalid")
         prefix = [IP, "netns", "exec", join_netns]  # join the pre-wired netns
     unshare_argv += ["--fork", "--mount-proc"]
+    prelude = []
+    if bind_source is not None:
+        _validate_workdir(bind_source)  # abs, bounded, no '..'/NUL/trailing slash
+        prelude = [
+            PYTHON, "-I", NS_PRELUDE,
+            "--src", bind_source,
+            "--dst", home_path(spec.workdir),
+            "--",
+        ]
     return [
         *prefix,
         *unshare_argv,
+        *prelude,
         PRLIMIT,
         "--cpu=%d" % limits.cpu_seconds,
         "--as=%d" % limits.address_space_bytes,
@@ -311,7 +346,29 @@ class _CommandRunner:  # pragma: no cover - Linux path
         subprocess.run(argv, check=True, capture_output=True, timeout=15)
 
 
-def launch(spec, env=None):  # pragma: no cover - Linux production path
+def _create_bind_mountpoint(workdir, run_uid, run_gid):  # pragma: no cover - Linux path
+    """Create `home_path(workdir)` (in the parent, so the child mount namespace sees
+    it) owned by the lane uid at 0700. Its own perms are masked once the volume is
+    bound over it, but a sane owner keeps it safe if the bind ever fails."""
+    target = home_path(workdir)
+    try:
+        os.mkdir(target, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise SandboxError("launch") from error
+    fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    try:
+        os.fchmod(fd, 0o700)
+        os.fchown(fd, run_uid, run_gid)
+    except OSError as error:
+        raise SandboxError("launch") from error
+    finally:
+        os.close(fd)
+    return target
+
+
+def launch(spec, env=None, bind_source=None):  # pragma: no cover - Linux production path
     """Launch the agent inside the sandbox. Linux only.
 
     For a `provider_allowlist` egress policy this wires (and later tears down) a
@@ -321,7 +378,11 @@ def launch(spec, env=None):  # pragma: no cover - Linux production path
     `env`, when given, is the COMPLETE environment for the provider process — the
     caller (neev_agent_launch) builds a minimal allowlist (HOME + provider config +
     PATH/locale) so the server's own environment (DB URL, keys) is never inherited
-    by the sandboxed provider. `None` keeps the inherited environment (dev/tests)."""
+    by the sandboxed provider. `None` keeps the inherited environment (dev/tests).
+
+    `bind_source`, when given, is the physical credential-volume mount to bind onto
+    the lane-traversable `home_path(workdir)` inside the sandbox's private mount
+    namespace (so the 0700 secret store is never exposed)."""
     if platform.system() != "Linux":
         raise SandboxError("unsupported")
     if env is not None and not (
@@ -340,6 +401,9 @@ def launch(spec, env=None):  # pragma: no cover - Linux production path
     # traverse or read it. A mount namespace alone does NOT hide a sibling
     # tenant's directory on the shared filesystem.
     _secure_own_workdir(spec.workdir, spec.run_uid, spec.run_gid)
+    if bind_source is not None:
+        _validate_workdir(bind_source)
+        _create_bind_mountpoint(spec.workdir, spec.run_uid, spec.run_gid)
 
     egress_plan = None
     egress_runner = None
@@ -354,7 +418,7 @@ def launch(spec, env=None):  # pragma: no cover - Linux production path
         egress.apply(egress_plan, egress_runner)  # rolls back on any failure
         join_netns = egress_plan.netns
 
-    argv = build_launch_argv(spec, join_netns=join_netns)
+    argv = build_launch_argv(spec, join_netns=join_netns, bind_source=bind_source)
     try:
         process = subprocess.Popen(
             argv,

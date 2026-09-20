@@ -113,8 +113,14 @@ def provider_env(home: str, provider: str) -> Dict[str, str]:
 
 @dataclass(frozen=True)
 class Delivery:
+    # `home` is the path the PROVIDER sees (its HOME); `mount` is the PHYSICAL mount
+    # the credentials live on (under the 0700 secret store). They differ when the
+    # sandbox bind-mounts `mount` onto a lane-traversable `home` in its private mount
+    # namespace: ownership transfer operates on `mount` (same inodes), the provider
+    # env points at `home`.
     home: str
     env: Dict[str, str]
+    mount: str = None
 
 
 def _chown_tree(root: str, uid: int, gid: int) -> None:
@@ -181,6 +187,7 @@ def deliver(
     run_gid: int,
     *,
     lock_dir: str = None,
+    home_as: str = None,
     chown_tree: Callable[[str, int, int], None] = _chown_tree,
     stat_fn: Callable[..., os.stat_result] = os.stat,
 ) -> Iterator[Delivery]:
@@ -190,13 +197,21 @@ def deliver(
     unauthorized delivery.
 
     `volumes` is a `neev_credential_volumes.CredentialVolumes` (or a test double with
-    `open(scope, handle) -> path`). `chown_tree`/`stat_fn`/`lock_dir` are injectable
-    for tests (chown needs root in production)."""
+    `open(scope, handle) -> path`). Ownership transfer always operates on the physical
+    mount. `home_as`, when given, is the path the PROVIDER will see its HOME at (the
+    sandbox bind-mounts the physical mount there in its private namespace, so the
+    0700 secret store need not be made traversable); the yielded env points at it
+    while `mount` carries the physical path for the bind. `chown_tree`/`stat_fn`/
+    `lock_dir`/`home_as` are injectable for tests (chown needs root in production)."""
     if not isinstance(handle, str) or not handle:
         raise CredentialError("handle")
     for identity in (run_uid, run_gid):
         if not isinstance(identity, int) or identity <= 0:
             raise CredentialError("uid")
+    if home_as is not None and (
+        not isinstance(home_as, str) or not home_as.startswith("/") or "\x00" in home_as
+    ):
+        raise CredentialError("home")
     scope = scope_of(tenant, provider)
     # Resolve the lock dir at call time so a test (or a future config) can override
     # RUN_LOCK_DIR; production passes nothing and uses the provisioned default.
@@ -224,8 +239,11 @@ def deliver(
         # chown race and refresh writes cannot interleave.
         chown_tree(home, CANONICAL_OWNER_UID, CANONICAL_OWNER_GID)
         chown_tree(home, run_uid, run_gid)
+        seen_home = home if home_as is None else home_as
         try:
-            yield Delivery(home=home, env=provider_env(home, provider))
+            yield Delivery(
+                home=seen_home, env=provider_env(seen_home, provider), mount=home
+            )
         finally:
             # Restore the canonical owner so refresh tokens written during the run
             # (now this lane uid's) become owner-readable again and the store

@@ -198,8 +198,9 @@ class CredentialWiringTests(unittest.TestCase):
                 env={"HOME": "/mnt/vol", "CODEX_HOME": "/mnt/vol/.codex"},
             )
 
-        def fake_launch(spec, env=None):
+        def fake_launch(spec, env=None, bind_source=None):
             captured["env"] = env
+            captured["bind_source"] = bind_source
             return FakeHandle()
 
         with tempfile.TemporaryDirectory() as root:

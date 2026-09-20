@@ -119,6 +119,37 @@ class DeliverTests(unittest.TestCase):
         self.assertEqual(chown.calls[-1], ("/mnt/vol-h1", C, C))
         self.assertEqual(volumes.closed, [])
 
+    def test_home_as_sets_seen_home_while_chown_targets_the_physical_mount(self):
+        # With a bind delivery, the provider's HOME is the lane-traversable path,
+        # but ownership transfer (and the bind source) must be the physical mount.
+        volumes, chown = self._volumes(), RecordingChown()
+        C = credentials.CANONICAL_OWNER_UID
+        with deliver(
+            volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+            self.lock_dir, home_as="/data/agents/run-x/home",
+            chown_tree=chown, stat_fn=fake_stat(),
+        ) as delivery:
+            self.assertEqual(delivery.home, "/data/agents/run-x/home")
+            self.assertEqual(delivery.mount, "/mnt/vol-h1")
+            self.assertEqual(delivery.env["HOME"], "/data/agents/run-x/home")
+            self.assertEqual(
+                delivery.env["CLAUDE_CONFIG_DIR"], "/data/agents/run-x/home/.claude"
+            )
+            # chown still operates on the physical mount, not the seen HOME.
+            self.assertEqual(chown.calls, [("/mnt/vol-h1", C, C), ("/mnt/vol-h1", 61000, 61000)])
+        self.assertEqual(chown.calls[-1], ("/mnt/vol-h1", C, C))
+
+    def test_malformed_home_as_is_refused(self):
+        for bad in ("relative/home", "/home\x00x", 5):
+            with self.assertRaises(credentials.CredentialError) as caught:
+                with deliver(
+                    self._volumes(), "org:3/user:7", "claude", "h1", 61000, 61000,
+                    self.lock_dir, home_as=bad,
+                    chown_tree=RecordingChown(), stat_fn=fake_stat(),
+                ):
+                    pass
+            self.assertEqual(caught.exception.category, "home")
+
     def test_ownership_restored_even_when_child_raises(self):
         volumes, chown = self._volumes(), RecordingChown()
         C = credentials.CANONICAL_OWNER_UID
