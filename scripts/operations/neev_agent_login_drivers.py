@@ -25,6 +25,7 @@ account/read; Claude checks the stored credential's presence in the volume.
 from __future__ import annotations
 
 import abc
+import json
 import os
 import time
 from typing import Optional
@@ -37,6 +38,7 @@ import neev_claude_login_protocol as claude_proto
 _READ_CHUNK = 65536
 _PROBE_DEADLINE_SECONDS = 30.0
 _PROBE_POLL_SECONDS = 0.05
+_MAX_STATUS_BYTES = 65536
 
 
 # --------------------------------------------------------------------------- #
@@ -299,12 +301,43 @@ class CodexAccountProbe(sup.AccountProbe):
 
 
 class ClaudeAccountProbe(sup.AccountProbe):
-    """Probe the stored Claude credential's presence in the volume. (A stronger,
-    network-backed status probe awaits a confirmed non-interactive `claude` status
-    command; presence of the credential file is the current honest signal.)"""
+    """Probe the stored Claude credential by running the pinned CLI's native
+    `claude auth status --json` (verified present at 2.1.267) against the volume — NOT
+    a mere file-presence check. Parses the native outcome: {"loggedIn": bool,
+    "authMethod": str, ...}. loggedIn true -> supported (label = authMethod);
+    loggedIn false -> disconnected; any non-JSON / missing field / timeout -> raises
+    (check reports UNAVAILABLE, fail-closed)."""
 
-    def __init__(self, credential_present):
-        self._credential_present = credential_present
+    def __init__(self, channel: Channel, *, now=time.monotonic):
+        self._channel = channel
+        self._now = now
 
     def probe(self):
-        return "supported" if self._credential_present() else "disconnected"
+        self._channel.start()
+        try:
+            buffer = bytearray()
+            deadline = self._now() + _PROBE_DEADLINE_SECONDS
+            while self._now() < deadline:
+                chunk = self._channel.read()
+                if chunk:
+                    buffer.extend(chunk)
+                    if len(buffer) > _MAX_STATUS_BYTES:
+                        raise RuntimeError("claude status output too large")
+                    continue
+                if self._channel.returncode() is not None:
+                    break  # process exited; parse what it printed
+                time.sleep(_PROBE_POLL_SECONDS)
+            else:
+                raise RuntimeError("claude status probe timed out")
+            try:
+                data = json.loads(bytes(buffer).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as error:
+                raise RuntimeError("claude status not JSON") from error
+            if not isinstance(data, dict) or "loggedIn" not in data:
+                raise RuntimeError("claude status missing loggedIn")
+            if data.get("loggedIn") is True:
+                method = data.get("authMethod")
+                return ("supported", method if isinstance(method, str) and method else "account")
+            return "disconnected"
+        finally:
+            self._channel.terminate()

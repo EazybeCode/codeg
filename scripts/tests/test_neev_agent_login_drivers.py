@@ -151,9 +151,24 @@ class AccountProbeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             probe.probe()
 
-    def test_claude_probe_presence(self):
-        self.assertEqual(drivers.ClaudeAccountProbe(lambda: True).probe(), "supported")
-        self.assertEqual(drivers.ClaudeAccountProbe(lambda: False).probe(), "disconnected")
+    def test_claude_probe_uses_native_auth_status_json(self):
+        logged_in = FakeChannel([b'{"loggedIn": true, "authMethod": "oauth"}'])
+        logged_in.exit(0)
+        self.assertEqual(drivers.ClaudeAccountProbe(logged_in).probe(), ("supported", "oauth"))
+
+        logged_out = FakeChannel([b'{"loggedIn": false, "authMethod": "none"}'])
+        logged_out.exit(1)
+        self.assertEqual(drivers.ClaudeAccountProbe(logged_out).probe(), "disconnected")
+
+        not_json = FakeChannel([b"boom not json"])
+        not_json.exit(0)
+        with self.assertRaises(RuntimeError):
+            drivers.ClaudeAccountProbe(not_json).probe()
+
+        missing_field = FakeChannel([b'{"authMethod": "oauth"}'])
+        missing_field.exit(0)
+        with self.assertRaises(RuntimeError):
+            drivers.ClaudeAccountProbe(missing_field).probe()
 
 
 if __name__ == "__main__":
