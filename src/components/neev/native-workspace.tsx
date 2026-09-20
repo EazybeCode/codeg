@@ -56,6 +56,7 @@ import {
   type ContentCreation,
   type ContentNavigationGuard,
 } from "./native-content"
+import { NativeAgentChats } from "./native-agent-chats"
 import {
   listNativeResources,
   type NativeResource,
@@ -712,33 +713,15 @@ function WorkspaceContent() {
         )}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {section === "agents" ? (
-            <div className="mx-auto w-full max-w-xl space-y-5 overflow-y-auto px-6 py-12 sm:py-16">
-              <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
-                <Bot aria-hidden className="size-5 text-muted-foreground" />
-              </div>
-              <h1 className="text-2xl font-semibold tracking-tight">
-                {c("agentChats")}
-              </h1>
-              <p className="text-sm leading-6 text-muted-foreground">
-                {c("agentChatsUnavailable")}
-              </p>
-              <section className="space-y-2 rounded-xl border p-5">
-                <h2 className="text-sm font-medium">{t("agentUnavailable")}</h2>
-                <p className="text-sm leading-6 text-muted-foreground">
-                  {t("agentDescription")}
-                </p>
-                <Link
-                  href="/settings"
-                  className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-                  onClick={(event) => {
-                    event.preventDefault()
-                    navigationGuard.current(() => router.push("/settings"))
-                  }}
-                >
-                  {t("personalAgents")}
-                </Link>
-              </section>
-            </div>
+            // Saved, server-owned agent sessions (spec §5). They are private to
+            // the owner and are not filed under a project/folder, so this
+            // surface is available whatever the rail has selected.
+            <NativeAgentChats
+              onRequestNavigationGuard={registerGuard}
+              onRequestSettings={() =>
+                navigationGuard.current(() => router.push("/settings"))
+              }
+            />
           ) : selectedNode && (open || creation) ? (
             <NativeContent
               node={selectedNode}

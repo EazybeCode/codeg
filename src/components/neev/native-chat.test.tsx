@@ -419,6 +419,13 @@ it("keeps Ask agent disabled while the runtime is unavailable", async () => {
   expect(screen.getByRole("button", { name: "Ask agent" })).toBeDisabled()
   // Honest disabled state — no faked "Connected".
   expect(screen.getByText("Agents are turned off.")).toBeVisible()
+  // This panel's reply is one-shot and never written to the team thread, so it
+  // must not imply a shared transcript the server does not store.
+  expect(
+    screen.getByText(
+      "Only you see this reply. It is not posted to the conversation."
+    )
+  ).toBeVisible()
 })
 
 it("enables Ask agent and renders a streamed agent reply when the runtime is available", async () => {
