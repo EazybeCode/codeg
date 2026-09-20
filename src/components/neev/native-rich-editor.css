@@ -43,3 +43,11 @@
   ) {
   max-width: none;
 }
+
+/* Width is not a persisted image property yet. Hide the upstream drag handles
+ * so ordinary editing cannot enter an unsupported, unsavable image state.
+ * BlockNote sets inline display on hover, hence the scoped important override. */
+.neev-writing-canvas .bn-resize-handle {
+  display: none !important;
+  pointer-events: none;
+}
