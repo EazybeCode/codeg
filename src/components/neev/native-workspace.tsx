@@ -95,6 +95,7 @@ function NativeWorkspaceTree({
 }) {
   const t = useTranslations("Native")
   const c = useTranslations("NativeContent")
+  const contentOpener = useRef<number | null>(null)
   const ItemIcon = kind === "document" ? FileText : MessagesSquare
   return (
     <ul
@@ -155,14 +156,28 @@ function NativeWorkspaceTree({
                       <MoreHorizontal aria-hidden className="size-4" />
                     </button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start">
+                  <DropdownMenuContent
+                    align="start"
+                    onCloseAutoFocus={(event) => {
+                      if (contentOpener.current === node.id) {
+                        event.preventDefault()
+                        contentOpener.current = null
+                      }
+                    }}
+                  >
                     <DropdownMenuItem
-                      onSelect={() => createContent(node, "document")}
+                      onSelect={() => {
+                        contentOpener.current = node.id
+                        createContent(node, "document")
+                      }}
                     >
                       {c("newDocument")}
                     </DropdownMenuItem>
                     <DropdownMenuItem
-                      onSelect={() => createContent(node, "chat")}
+                      onSelect={() => {
+                        contentOpener.current = node.id
+                        createContent(node, "chat")
+                      }}
                     >
                       {c("newChat")}
                     </DropdownMenuItem>
@@ -347,6 +362,14 @@ function WorkspaceContent() {
     },
     [org, sectionKind, auth]
   )
+  // A section switch keeps containers expanded but invalidates their lists.
+  // Fetch missing lists after invalidation as well as on first expansion.
+  useEffect(() => {
+    if (section === "agents") return
+    for (const id of expanded) {
+      if (!itemsByNode[id]) void loadItems(id)
+    }
+  }, [expanded, itemsByNode, loadItems, section])
   const openResource = useCallback(
     (node: NativeNode, resource: NativeResource) =>
       navigationGuard.current(() => {
@@ -528,7 +551,6 @@ function WorkspaceContent() {
                 if (next.has(id)) next.delete(id)
                 else {
                   next.add(id)
-                  if (!itemsByNode[id]) void loadItems(id)
                 }
                 return next
               })

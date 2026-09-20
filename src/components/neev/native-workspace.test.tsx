@@ -155,6 +155,8 @@ it("supports keyboard project creation, nested placement and dialog focus restor
     "GET /api/neev/nodes/1/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/3/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/1/documents": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/2/documents": () => json({ items: [], nextAfter: null }),
     "POST /api/neev/nodes": (init) => {
       const body = JSON.parse(init.body as string)
       bodies.push(body)
@@ -465,5 +467,45 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
     "button",
     { name: "Gamma" }
   )
+  expect(mock.unknown).toEqual([])
+})
+
+it("reloads expanded containers when switching documents and team chat", async () => {
+  const document = { ...resource, kind: "document", title: "Brief" }
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({ items: [document], nextAfter: null }),
+    "GET /api/neev/nodes/7/chats": () =>
+      json({ items: [resource], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  await user.click(await screen.findByRole("button", { name: "Documents" }))
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  await screen.findByRole("button", { name: "Brief" })
+  await user.click(screen.getByRole("button", { name: "Team chat" }))
+  await screen.findByRole("button", { name: "Alpha" })
+  expect(screen.queryByRole("button", { name: "Brief" })).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Documents" }))
+  await screen.findByRole("button", { name: "Brief" })
+  expect(screen.queryByRole("button", { name: "Alpha" })).toBeNull()
   expect(mock.unknown).toEqual([])
 })
