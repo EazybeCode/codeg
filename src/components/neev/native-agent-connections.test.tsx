@@ -457,3 +457,144 @@ it("names the provider on every action so two rows are distinguishable", async (
   expect(screen.getByRole("button", { name: "Disconnect codex" })).toBeEnabled()
   expect(screen.queryByRole("button", { name: "Connect codex" })).toBeNull()
 })
+
+const DEVICE_APPROVAL = {
+  kind: "device",
+  verificationUrl: "https://auth.openai.com/codex/device",
+  userCode: "ABCD-EFGH",
+  needsCode: false,
+}
+const CODE_APPROVAL = {
+  kind: "authorization_code",
+  verificationUrl: "https://claude.ai/oauth/authorize?x=1",
+  userCode: null,
+  needsCode: true,
+}
+const SUBMIT = `POST /api/neev/agent/connections/claude/attempts/${ATTEMPT_ID}/code`
+
+function pendingConnect() {
+  return json(
+    {
+      outcome: "pending",
+      attemptId: ATTEMPT_ID,
+      expiresAt: FAR_FUTURE,
+      connection: null,
+    },
+    202
+  )
+}
+
+it("shows a device code and the page to approve it on", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [CONNECT]: () => pendingConnect(),
+    [ATTEMPT]: () =>
+      json({
+        state: "pending",
+        expiresAt: FAR_FUTURE,
+        approval: DEVICE_APPROVAL,
+      }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  expect(await screen.findByText("ABCD-EFGH")).toBeVisible()
+  const link = screen.getByRole("link", { name: "Open the sign-in page" })
+  expect(link).toHaveAttribute("href", "https://auth.openai.com/codex/device")
+  // A device flow needs nothing back from the user.
+  expect(screen.queryByRole("textbox")).toBeNull()
+})
+
+it("takes a pasted authorization code and forwards it without keeping it", async () => {
+  const submitted: Record<string, unknown>[] = []
+  let approved = false
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () =>
+      json(wiring(approved ? "connected" : "not_signed_in")),
+    [CONNECT]: () => pendingConnect(),
+    [ATTEMPT]: () =>
+      json({
+        state: "pending",
+        expiresAt: FAR_FUTURE,
+        approval: CODE_APPROVAL,
+      }),
+    [SUBMIT]: (init) => {
+      submitted.push(JSON.parse(init.body as string))
+      approved = true
+      return json({ state: "completed" }, 202)
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  const field = await screen.findByRole("textbox", {
+    name: "Paste the authorization code",
+  })
+  await user.type(field, "  ac_abc123  ")
+  await user.click(screen.getByRole("button", { name: "Submit code" }))
+  await waitFor(() => expect(submitted).toEqual([{ code: "ac_abc123" }]))
+  // The code is forwarded, never kept — and the settled attempt stops the wait.
+  expect(await screen.findByText("Connected")).toBeVisible()
+  expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+})
+
+it("surfaces a rejected code submission and keeps the prompt usable", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [CONNECT]: () => pendingConnect(),
+    [ATTEMPT]: () =>
+      json({
+        state: "pending",
+        expiresAt: FAR_FUTURE,
+        approval: CODE_APPROVAL,
+      }),
+    // 429: the per-attempt submit cap.
+    [SUBMIT]: () => json({ code: "limited" }, 429),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  await user.type(
+    await screen.findByRole("textbox", {
+      name: "Paste the authorization code",
+    }),
+    "ac_bad"
+  )
+  await user.click(screen.getByRole("button", { name: "Submit code" }))
+  expect(await screen.findByRole("alert")).toBeVisible()
+  // Still waiting, still cancellable — a rejected paste is not a dead end.
+  expect(screen.getByText("Waiting for sign-in…")).toBeVisible()
+  expect(
+    screen.getByRole("button", { name: "Cancel claude sign-in" })
+  ).toBeEnabled()
+})
+
+it("shows no approval prompt until the server has produced one", async () => {
+  let approval: unknown = null
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [CONNECT]: () => pendingConnect(),
+    [ATTEMPT]: () =>
+      json({ state: "pending", expiresAt: FAR_FUTURE, approval }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  await screen.findByText("Waiting for sign-in…")
+  // Nothing invented while the supervisor has not spoken.
+  expect(
+    screen.queryByRole("link", { name: "Open the sign-in page" })
+  ).toBeNull()
+  approval = DEVICE_APPROVAL
+  expect(
+    await screen.findByRole("link", { name: "Open the sign-in page" })
+  ).toBeVisible()
+})

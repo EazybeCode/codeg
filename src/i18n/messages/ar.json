@@ -147,7 +147,13 @@
     "connectProviderNamed": "الاتصال بـ {name}",
     "reconnectProviderNamed": "إعادة الاتصال بـ {name}",
     "disconnectProviderNamed": "قطع الاتصال بـ {name}",
-    "cancelSignInNamed": "إلغاء تسجيل الدخول إلى {name}"
+    "cancelSignInNamed": "إلغاء تسجيل الدخول إلى {name}",
+    "openSignInPage": "افتح صفحة تسجيل الدخول",
+    "signInCodeLabel": "رمزك:",
+    "pasteCodeLabel": "الصق رمز التفويض",
+    "submitCode": "إرسال الرمز",
+    "signInDeviceHint": "افتح الصفحة وأدخل هذا الرمز ووافق هناك. سيُكمل Neev الباقي.",
+    "signInCodeHint": "افتح الصفحة ووافق، ثم الصق الرمز الذي تحصل عليه هنا."
   },
   "Native": {
     "callbackConflict": "تتعارض طريقة تسجيل الدخول هذه مع حساب موجود. استخدم طريقة تسجيل الدخول الأصلية، ثم افتح الإعدادات لربط طريقة أخرى. لا تُدمج الحسابات تلقائيًا أبدًا.",

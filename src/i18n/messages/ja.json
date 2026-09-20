@@ -147,7 +147,13 @@
     "connectProviderNamed": "{name} に接続",
     "reconnectProviderNamed": "{name} に再接続",
     "disconnectProviderNamed": "{name} の接続を解除",
-    "cancelSignInNamed": "{name} のサインインをキャンセル"
+    "cancelSignInNamed": "{name} のサインインをキャンセル",
+    "openSignInPage": "サインインページを開く",
+    "signInCodeLabel": "あなたのコード:",
+    "pasteCodeLabel": "認証コードを貼り付け",
+    "submitCode": "コードを送信",
+    "signInDeviceHint": "ページを開いてこのコードを入力し、そこで承認してください。あとは Neev が完了させます。",
+    "signInCodeHint": "ページを開いて承認し、受け取ったコードをここに貼り付けてください。"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

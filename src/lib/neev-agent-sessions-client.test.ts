@@ -6,6 +6,8 @@ import {
   followAgentRun,
   invokeTeamAgent,
   isSupportedModel,
+  parseConnectAttempt,
+  submitConnectCode,
   createAgentSession,
   listAgentSessions,
   listAgentTurns,
@@ -487,6 +489,126 @@ describe("team invocation", () => {
     expect(isSupportedModel("")).toBe(false)
     expect(isSupportedModel("has space")).toBe(false)
     expect(isSupportedModel("x".repeat(81))).toBe(false)
+  })
+})
+
+describe("sign-in approval", () => {
+  const device = {
+    kind: "device",
+    verificationUrl: "https://auth.openai.com/codex/device",
+    userCode: "ABCD-EFGH",
+    needsCode: false,
+  }
+  const pasted = {
+    kind: "authorization_code",
+    verificationUrl: "https://claude.ai/oauth/authorize",
+    userCode: null,
+    needsCode: true,
+  }
+
+  it("accepts both approval kinds and the pre-rollout attempt shape", () => {
+    // `approval` lands with the supervisor binding; until then an attempt
+    // simply has none.
+    expect(
+      parseConnectAttempt({ state: "pending", expiresAt: 1_700_000_600 })
+    ).toEqual({ state: "pending", expiresAt: 1_700_000_600, approval: null })
+    expect(
+      parseConnectAttempt({
+        state: "pending",
+        expiresAt: 1_700_000_600,
+        approval: device,
+      }).approval
+    ).toEqual({
+      kind: "device",
+      verificationUrl: device.verificationUrl,
+      userCode: "ABCD-EFGH",
+    })
+    expect(
+      parseConnectAttempt({
+        state: "pending",
+        expiresAt: 1_700_000_600,
+        approval: pasted,
+      }).approval
+    ).toEqual({
+      kind: "authorization_code",
+      verificationUrl: pasted.verificationUrl,
+      needsCode: true,
+    })
+  })
+
+  it("refuses an approval that could mislead or be unsafe to render", () => {
+    const attempt = (approval: unknown) => () =>
+      parseConnectAttempt({
+        state: "pending",
+        expiresAt: 1_700_000_600,
+        approval,
+      })
+    for (const bad of [
+      // The URL is rendered as a link the user is told to open.
+      { ...device, verificationUrl: "javascript:alert(1)" },
+      { ...device, verificationUrl: "http://auth.openai.com/device" },
+      { ...device, verificationUrl: "/relative" },
+      // A device flow with no code is not actionable …
+      { ...device, userCode: null },
+      // … and never asks for one back.
+      { ...device, needsCode: true },
+      // A pasted-code flow must not also claim a device code.
+      { ...pasted, userCode: "ABCD-EFGH" },
+      { ...device, kind: "magic" },
+      // A secret must never reach the browser; an extra field means the
+      // contract moved and we refuse rather than render it.
+      { ...device, codeVerifier: "x" },
+    ])
+      expect(attempt(bad)).toThrow(NativeClientError)
+    // Approval on a settled attempt would invite the user to complete
+    // something that can no longer succeed.
+    expect(
+      attempt(device) &&
+        (() =>
+          parseConnectAttempt({
+            state: "expired",
+            expiresAt: 1_700_000_600,
+            approval: device,
+          }))
+    ).toBeTruthy()
+    expect(() =>
+      parseConnectAttempt({
+        state: "expired",
+        expiresAt: 1_700_000_600,
+        approval: device,
+      })
+    ).toThrow(NativeClientError)
+  })
+
+  it("posts a bounded code to the attempt that asked for it", async () => {
+    const calls: { url: string; init: RequestInit }[] = []
+    const fetcher = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return json({ state: "completed" }, 202)
+    })
+    vi.stubGlobal("fetch", fetcher)
+    expect(await submitConnectCode("claude", RUN_ID, "ac_abc", "csrf")).toEqual(
+      { state: "completed" }
+    )
+    expect(calls[0].url).toBe(
+      `/api/neev/agent/connections/claude/attempts/${RUN_ID}/code`
+    )
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ code: "ac_abc" })
+  })
+
+  it("refuses an empty, oversized or misrouted code before any request", async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal("fetch", fetcher)
+    for (const [provider, attempt, code] of [
+      ["claude", RUN_ID, ""],
+      ["claude", RUN_ID, "x".repeat(513)],
+      ["claude", "../cancel", "ac_abc"],
+      ["gemini", RUN_ID, "ac_abc"],
+    ] as const)
+      await expect(
+        submitConnectCode(provider, attempt, code, "csrf")
+      ).rejects.toBeInstanceOf(NativeClientError)
+    expect(fetcher).not.toHaveBeenCalled()
   })
 })
 

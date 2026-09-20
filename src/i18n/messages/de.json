@@ -147,7 +147,13 @@
     "connectProviderNamed": "{name} verbinden",
     "reconnectProviderNamed": "{name} neu verbinden",
     "disconnectProviderNamed": "{name} trennen",
-    "cancelSignInNamed": "Anmeldung bei {name} abbrechen"
+    "cancelSignInNamed": "Anmeldung bei {name} abbrechen",
+    "openSignInPage": "Anmeldeseite öffnen",
+    "signInCodeLabel": "Dein Code:",
+    "pasteCodeLabel": "Autorisierungscode einfügen",
+    "submitCode": "Code senden",
+    "signInDeviceHint": "Öffne die Seite, gib diesen Code ein und bestätige dort. Neev erledigt den Rest.",
+    "signInCodeHint": "Öffne die Seite und bestätige, füge dann den erhaltenen Code hier ein."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

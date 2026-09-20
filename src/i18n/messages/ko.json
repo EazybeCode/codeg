@@ -147,7 +147,13 @@
     "connectProviderNamed": "{name} 연결",
     "reconnectProviderNamed": "{name} 다시 연결",
     "disconnectProviderNamed": "{name} 연결 해제",
-    "cancelSignInNamed": "{name} 로그인 취소"
+    "cancelSignInNamed": "{name} 로그인 취소",
+    "openSignInPage": "로그인 페이지 열기",
+    "signInCodeLabel": "내 코드:",
+    "pasteCodeLabel": "인증 코드 붙여넣기",
+    "submitCode": "코드 제출",
+    "signInDeviceHint": "페이지를 열고 이 코드를 입력해 승인하세요. 나머지는 Neev가 처리합니다.",
+    "signInCodeHint": "페이지를 열어 승인한 뒤, 받은 코드를 여기에 붙여넣으세요."
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",
