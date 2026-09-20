@@ -143,8 +143,10 @@ fn literal_fixture_covers_every_request_response_and_error() {
     let fixture = fixture();
     assert!(fixture.format == "neev-control-dto-v1");
     assert!(fixture.synthetic);
-    assert!(fixture.requests.len() == 6);
-    assert!(fixture.responses.len() == 40);
+    // +1 request (`submit_code`) and +1 response (the Claude
+    // authorization-code challenge) over the original six-operation vector.
+    assert!(fixture.requests.len() == 7);
+    assert!(fixture.responses.len() == 42);
     let requests: Vec<(String, dto::Request)> = fixture
         .requests
         .iter()
@@ -710,7 +712,13 @@ fn typed_values_are_revalidated_at_channel_boundaries() {
     match invalid_snapshot.body.as_mut() {
         Some(dto::ResultBody::ObserveLogin(dto::LoginSnapshot::AwaitingUser {
             challenge, ..
-        })) => challenge.verification_url = "SYNTHETIC-INVALID-URL".into(),
+        })) => {
+            *challenge = dto::LoginChallenge::Device {
+                verification_url: "SYNTHETIC-INVALID-URL".into(),
+                user_code: dto::UserCode::new("ABCD-EFGH".into()).unwrap(),
+                expires_at: challenge.expires_at().clone(),
+            }
+        }
         _ => panic!("awaiting-user fixture decoded to another closed result variant"),
     }
     assert_error(
@@ -732,4 +740,91 @@ fn typed_values_are_revalidated_at_channel_boundaries() {
     assert!(client.begin(&observe).is_ok());
     assert_error(client.finish(&invalid_snapshot), dto::DtoError::Invalid);
     assert_error(client.begin(&observe), dto::DtoError::State);
+}
+
+/// The two providers' approval flows are genuinely different shapes, and the
+/// wire must keep them apart rather than forcing Claude into a device flow it
+/// does not have. Root's offline probe of the pinned Claude 2.1.267 binary
+/// showed an authorize URL plus a pasted code, never a user code.
+#[test]
+fn a_login_challenge_is_provider_shaped_and_origin_pinned() {
+    let device = dto::decode_response(&response_bytes("observe_awaiting_user")).unwrap();
+    match device.body.as_ref() {
+        Some(dto::ResultBody::ObserveLogin(dto::LoginSnapshot::AwaitingUser {
+            challenge, ..
+        })) => {
+            assert_eq!(
+                challenge.verification_url(),
+                "https://auth.openai.com/codex/device"
+            );
+            assert!(
+                challenge.user_code().is_some(),
+                "a device flow has a user code"
+            );
+        }
+        _ => panic!("device fixture decoded to another variant"),
+    }
+
+    let claude = dto::decode_response(&response_bytes("observe_awaiting_user_claude")).unwrap();
+    match claude.body.as_ref() {
+        Some(dto::ResultBody::ObserveLogin(dto::LoginSnapshot::AwaitingUser {
+            challenge, ..
+        })) => {
+            assert!(challenge
+                .verification_url()
+                .starts_with("https://claude.com/cai/oauth/authorize"));
+            // No invented user code: the user pastes a code back instead.
+            assert!(challenge.user_code().is_none());
+        }
+        _ => panic!("claude fixture decoded to another variant"),
+    }
+    // Both round-trip.
+    assert!(dto::encode_response(&claude).is_ok());
+}
+
+#[test]
+fn a_challenge_pointing_at_an_unexpected_origin_is_refused() {
+    let mut response =
+        dto::decode_response(&response_bytes("observe_awaiting_user_claude")).unwrap();
+    match response.body.as_mut() {
+        Some(dto::ResultBody::ObserveLogin(dto::LoginSnapshot::AwaitingUser {
+            challenge, ..
+        })) => {
+            *challenge = dto::LoginChallenge::AuthorizationCode {
+                // The legacy origin is NOT the one the pinned binary uses, and
+                // a supervisor must not be able to redirect the user to it.
+                verification_url: "https://claude.ai/oauth/authorize".into(),
+                expires_at: challenge.expires_at().clone(),
+            }
+        }
+        _ => panic!("claude fixture decoded to another variant"),
+    }
+    assert_error(dto::encode_response(&response), dto::DtoError::Invalid);
+}
+
+#[test]
+fn a_submitted_authorization_code_round_trips_and_is_bounded() {
+    let request = dto::decode_request(&request_bytes("submit_code")).unwrap();
+    assert!(matches!(request.op(), dto::Op::SubmitCode));
+    // It carries the login binding, so a code cannot be applied to another
+    // user's attempt.
+    assert!(request.login_binding().is_some());
+    let encoded = dto::encode_request(&request).unwrap();
+    assert!(dto::decode_request(&encoded).is_ok());
+
+    // The code itself is bounded and single-line; anything else is a paste
+    // accident or an injection attempt.
+    assert!(dto::AuthorizationCode::new("abc-123".into()).is_ok());
+    for bad in [
+        String::new(),
+        "x".repeat(513),
+        "has space".to_owned(),
+        "has\nnewline".to_owned(),
+        "has\ttab".to_owned(),
+    ] {
+        assert!(
+            dto::AuthorizationCode::new(bad.clone()).is_err(),
+            "accepted {bad:?}"
+        );
+    }
 }

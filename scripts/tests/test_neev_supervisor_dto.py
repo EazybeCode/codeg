@@ -163,7 +163,7 @@ class SupervisorDtoTests(unittest.TestCase):
     def test_submit_code_op_and_provider_tagged_challenges(self):
         # The seventh op: submit_code carries a login binding + an authorization code
         # and answers with a login snapshot (same state machine as observe_login).
-        submit = self.request("submit")
+        submit = self.request("submit_code")
         self.assertIs(submit.op(), self.dto.Op.SUBMIT_CODE)
         self.assertEqual(submit.body.code.value, "abcd-1234-ABCD-EFGH")
         self.assertEqual(self.dto.decode_request(self.dto.encode_request(submit)), submit)
@@ -176,7 +176,7 @@ class SupervisorDtoTests(unittest.TestCase):
         device = self.response("observe_awaiting_user").body.challenge
         self.assertIsInstance(device, self.dto.DeviceChallenge)
         self.assertEqual(device.user_code.value, "ABCD-EFGH")
-        claude = self.response("observe_awaiting_user_authorization_code").body.challenge
+        claude = self.response("observe_awaiting_user_claude").body.challenge
         self.assertIsInstance(claude, self.dto.AuthorizationCodeChallenge)
         self.assertTrue(claude.verification_url.startswith("https://claude.com/cai/oauth/authorize"))
 
