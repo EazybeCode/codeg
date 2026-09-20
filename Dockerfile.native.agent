@@ -53,8 +53,11 @@ RUN setcap 'cap_chown,cap_dac_override,cap_setgid,cap_setuid,cap_setpcap,cap_net
     # deploy, either would be a direct escalation path for uid 65532.
     && test -z "$(getcap -r / 2>/dev/null | grep -v '^/usr/local/bin/neev-agent-caplaunch ')" \
     && test -z "$(find / -xdev -perm /6000 -type f 2>/dev/null)" \
-    && echo "cap/setuid assertions passed" \
-    && apt-get purge -y libcap2-bin && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    && echo "cap/setuid assertions passed"
+# libcap2-bin (setcap/getcap) is intentionally KEPT: purging it cascades and
+# removes iproute2 (which the launcher needs for /usr/sbin/ip), and setcap is
+# harmless at runtime — it requires CAP_SETFCAP, which no process in the container
+# holds (not in the cap_add set, and uid 65532 has no caps).
 
 # The launcher composes the sandbox + provider-egress; ship the whole operations
 # set it imports (sandbox, egress, login profile, codex login egress).
