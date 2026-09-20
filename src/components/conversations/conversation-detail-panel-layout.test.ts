@@ -29,7 +29,9 @@ const globalsCssSource = readFileSync(
   "utf8"
 )
 const workspaceLayoutSource = readFileSync(
-  resolve(process.cwd(), "src/app/workspace/layout.tsx"),
+  // The operator shell moved out of `layout.tsx` so native mode stops
+  // downloading it; the assertions below are about that shell.
+  resolve(process.cwd(), "src/app/workspace/operator-workspace-layout.tsx"),
   "utf8"
 )
 const tabBarSource = readFileSync(

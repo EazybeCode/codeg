@@ -1,27 +1,21 @@
 "use client"
 
-import { ConversationDetailPanel } from "@/components/conversations/conversation-detail-panel"
-import { useWorkspaceCatalogContext } from "@/components/workspace/workspace-catalog-provider"
-import { WorkspaceChatLauncher } from "@/components/workspace/workspace-chat-launcher"
-import { WorkspaceCatalogWelcome } from "@/components/workspace/workspace-catalog-welcome"
-import { useTabStore } from "@/stores/tab-store"
-import { useWorkspacePresentationTabs } from "@/hooks/use-workspace-presentation-tabs"
+import dynamic from "next/dynamic"
+
+/**
+ * Loaded only when it is about to render.
+ *
+ * This page is the operator surface, and `layout.tsx` only renders `children`
+ * on the operator branch — native and team return their own shells first. So
+ * the mode gate already exists one level up; what was missing is that the page
+ * MODULE still shipped in the route's initial script regardless. Deferring it
+ * here is what actually keeps it out of a native start.
+ */
+const OperatorWorkspacePage = dynamic(
+  () => import("./operator-workspace-page"),
+  { ssr: false, loading: () => null }
+)
 
 export default function WorkspacePage() {
-  const catalog = useWorkspaceCatalogContext()
-  const tabs = useWorkspacePresentationTabs()
-  const activeTabId = useTabStore((state) => state.activeTabId)
-  if (catalog?.enabled) {
-    if (!catalog.scope) return <WorkspaceCatalogWelcome />
-    if (catalog.chatId != null && !catalog.ready.has(catalog.chatId))
-      return (
-        <WorkspaceChatLauncher
-          key={`${catalog.scope}:${catalog.chatId}`}
-          draftId={catalog.chatId}
-        />
-      )
-    if (!tabs.some((tab) => tab.id === activeTabId))
-      return <WorkspaceCatalogWelcome />
-  }
-  return <ConversationDetailPanel />
+  return <OperatorWorkspacePage />
 }
