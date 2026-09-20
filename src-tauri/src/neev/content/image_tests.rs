@@ -38,13 +38,35 @@ fn image_block(id: &str, key: &str) -> RichDocument {
 
 #[tokio::test]
 async fn image_serve_enforces_the_bound_documents_private_acl() {
-    let harness = Harness::new(h::database().await).await;
+    private_image_contract(h::database().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires guarded PostgreSQL"]
+async fn postgres_image_upload_decodes_empty_and_populated_quota_totals() {
+    use futures_util::FutureExt;
+    let (db, admin, schema) = h::postgres_database().await;
+    let outcome = std::panic::AssertUnwindSafe(private_image_contract(db.clone()))
+        .catch_unwind()
+        .await;
+    h::cleanup_postgres(db, admin, schema).await;
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+}
+
+async fn private_image_contract(db: sea_orm::DatabaseConnection) {
+    let harness = Harness::new(db).await;
     let doc = document(&harness).await;
     assert_eq!(doc.visibility, Visibility::Private);
     let stored = image::store(&harness.state, &harness.creator, &doc.id, &png())
         .await
         .unwrap();
     assert_eq!(stored.content_type, "image/png");
+    // Exercise both the empty and nonempty aggregate types on PostgreSQL.
+    image::store(&harness.state, &harness.creator, &doc.id, &png())
+        .await
+        .unwrap();
     // The creator (authorized for the private document) can read the image.
     let (bytes, content_type) = image::load(&harness.state, &harness.creator, &stored.key)
         .await
@@ -150,10 +172,9 @@ async fn backup_verification_includes_and_checks_document_images() {
         .unwrap();
     // The snapshot verifier reaches the image blob, confirms its bytes/sha, and
     // accounts for it in the manifest (backup/restore completeness).
-    let manifest =
-        super::backup::verify_snapshot(&harness.state.database, &harness.state.blobs)
-            .await
-            .unwrap();
+    let manifest = super::backup::verify_snapshot(&harness.state.database, &harness.state.blobs)
+        .await
+        .unwrap();
     assert_eq!(manifest.schema_version, 11);
     assert!(manifest.blobs.iter().any(|blob| blob.key == stored.key));
 }

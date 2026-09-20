@@ -67,7 +67,9 @@ pub(crate) async fn store(
     }
     let usage = db::one(
         &tx,
-        "SELECT COUNT(*) AS c, COALESCE(SUM(byte_length),0) AS b FROM neev_image_blobs WHERE org_id=$1",
+        // PostgreSQL SUM(bigint) returns numeric, including the empty-table
+        // COALESCE result. Decode the bounded quota total as bigint on both DBs.
+        "SELECT COUNT(*) AS c, CAST(COALESCE(SUM(byte_length),0) AS BIGINT) AS b FROM neev_image_blobs WHERE org_id=$1",
         vec![actor.org_id.into()],
     )
     .await?
@@ -159,7 +161,9 @@ pub(crate) async fn verify_document_images(
     }
     sql.push(')');
     let tx = db::begin(&state.database).await?;
-    let row = db::one(&tx, &sql, args).await?.ok_or(ContentError::Storage)?;
+    let row = db::one(&tx, &sql, args)
+        .await?
+        .ok_or(ContentError::Storage)?;
     let matched: i64 = row.try_get("", "c").map_err(database_error)?;
     tx.commit().await.map_err(database_error)?;
     if matched as usize != keys.len() {
