@@ -182,7 +182,9 @@
     "provider_email": "メール",
     "provider_github": "GitHub",
     "removeDescription": "このメンバーは組織にアクセスできなくなり、組織での有効なセッションが取り消されます。",
-    "confirmRemove": "削除を確定"
+    "confirmRemove": "削除を確定",
+    "sections": "セクション",
+    "sectionEmpty": "サイドバーから項目を選択するか、新規作成してください。"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "ワークスペースのチャット情報を利用できません。",

@@ -5,10 +5,13 @@ import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import {
+  Bot,
   ChevronRight,
+  FileText,
   Folder,
   Layers3,
   Menu,
+  MessagesSquare,
   MoreHorizontal,
   PanelLeft,
   Plus,
@@ -30,6 +33,12 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile"
 import { cn } from "@/lib/utils"
 import {
+  DEFAULT_SECTION,
+  getActiveSection,
+  setActiveSection,
+  type Section,
+} from "@/lib/neev-workspace-prefs"
+import {
   loadNodes,
   nativeMutation,
   parseNode,
@@ -47,33 +56,46 @@ import {
   type ContentCreation,
   type ContentNavigationGuard,
 } from "./native-content"
-import type { NativeResourceKind } from "@/lib/neev-content-client"
+import {
+  listNativeResources,
+  type NativeResource,
+  type NativeResourceKind,
+} from "@/lib/neev-content-client"
 
-// Native adapter of TeamWorkspaceTree's compact nested rows and focusable menus.
-// Content creation always carries the native node selected in this menu.
+// Compact nested containers that reveal their real, directly-selectable resources
+// (documents or team conversations) inline — navigation happens here, not behind a
+// separate index page. Creation always carries the container selected in this menu.
 function NativeWorkspaceTree({
   nodes,
   parentId = null,
   expanded,
-  selected,
+  kind,
+  itemsByNode,
+  openResourceId,
   toggle,
-  select,
   create,
   edit,
   createContent,
+  selectResource,
 }: {
   nodes: NativeNode[]
   parentId?: number | null
   expanded: Set<number>
-  selected: number | null
+  kind: NativeResourceKind
+  itemsByNode: Record<
+    number,
+    { loading: boolean; items: NativeResource[]; error: unknown }
+  >
+  openResourceId: string | null
   toggle: (id: number) => void
-  select: (id: number) => void
   create: (node: NativeNode) => void
   edit: (node: NativeNode) => void
   createContent: (node: NativeNode, kind: NativeResourceKind) => void
+  selectResource: (node: NativeNode, resource: NativeResource) => void
 }) {
   const t = useTranslations("Native")
   const c = useTranslations("NativeContent")
+  const ItemIcon = kind === "document" ? FileText : MessagesSquare
   return (
     <ul
       className={cn(
@@ -83,94 +105,138 @@ function NativeWorkspaceTree({
     >
       {nodes
         .filter((node) => node.parentId === parentId)
-        .map((node) => (
-          <li key={node.id}>
-            <div
-              className={cn(
-                "group flex min-h-9 min-w-0 items-center rounded-lg pe-1 hover:bg-sidebar-accent",
-                selected === node.id && "bg-sidebar-accent"
-              )}
-            >
-              <button
-                aria-label={t(expanded.has(node.id) ? "collapse" : "expand", {
-                  name: node.name,
-                })}
-                aria-expanded={expanded.has(node.id)}
-                onClick={() => toggle(node.id)}
-                className="flex size-8 shrink-0 items-center justify-center rounded focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <ChevronRight
-                  aria-hidden
-                  className={cn(
-                    "size-3.5 text-muted-foreground rtl:rotate-180",
-                    expanded.has(node.id) && "rotate-90 rtl:rotate-90"
+        .map((node) => {
+          const list = itemsByNode[node.id]
+          const isOpen = expanded.has(node.id)
+          return (
+            <li key={node.id}>
+              <div className="group flex min-h-9 min-w-0 items-center rounded-lg pe-1 hover:bg-sidebar-accent">
+                <button
+                  aria-label={t(isOpen ? "collapse" : "expand", {
+                    name: node.name,
+                  })}
+                  aria-expanded={isOpen}
+                  onClick={() => toggle(node.id)}
+                  className="flex size-8 shrink-0 items-center justify-center rounded focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <ChevronRight
+                    aria-hidden
+                    className={cn(
+                      "size-3.5 text-muted-foreground rtl:rotate-180",
+                      isOpen && "rotate-90 rtl:rotate-90"
+                    )}
+                  />
+                </button>
+                <button
+                  onClick={() => toggle(node.id)}
+                  className="flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {node.kind === "project" ? (
+                    <Layers3
+                      aria-hidden
+                      className="size-4 shrink-0 text-muted-foreground"
+                    />
+                  ) : (
+                    <Folder
+                      aria-hidden
+                      className="size-4 shrink-0 text-muted-foreground"
+                    />
                   )}
-                />
-              </button>
-              <button
-                onClick={() => select(node.id)}
-                aria-current={selected === node.id ? "page" : undefined}
-                className="flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {node.kind === "project" ? (
-                  <Layers3
-                    aria-hidden
-                    className="size-4 shrink-0 text-muted-foreground"
+                  <span className="truncate" title={node.name}>
+                    {node.name}
+                  </span>
+                </button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      aria-label={t("actions", { name: node.name })}
+                      className="flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <MoreHorizontal aria-hidden className="size-4" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start">
+                    <DropdownMenuItem
+                      onSelect={() => createContent(node, kind)}
+                    >
+                      {c(kind === "document" ? "newDocument" : "newChat")}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => create(node)}>
+                      {t("newSubfolder")}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => edit(node)}>
+                      {t("editDetails")}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+              {isOpen && (
+                <>
+                  <NativeWorkspaceTree
+                    nodes={nodes}
+                    parentId={node.id}
+                    expanded={expanded}
+                    kind={kind}
+                    itemsByNode={itemsByNode}
+                    openResourceId={openResourceId}
+                    toggle={toggle}
+                    create={create}
+                    edit={edit}
+                    createContent={createContent}
+                    selectResource={selectResource}
                   />
-                ) : (
-                  <Folder
-                    aria-hidden
-                    className="size-4 shrink-0 text-muted-foreground"
-                  />
-                )}
-                <span className="truncate" title={node.name}>
-                  {node.name}
-                </span>
-              </button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    aria-label={t("actions", { name: node.name })}
-                    className="flex size-8 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <MoreHorizontal aria-hidden className="size-4" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start">
-                  <DropdownMenuItem onSelect={() => create(node)}>
-                    {t("newSubfolder")}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onSelect={() => createContent(node, "chat")}
-                  >
-                    {c("newChat")}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onSelect={() => createContent(node, "document")}
-                  >
-                    {c("newDocument")}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => edit(node)}>
-                    {t("editDetails")}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-            {expanded.has(node.id) && (
-              <NativeWorkspaceTree
-                nodes={nodes}
-                parentId={node.id}
-                expanded={expanded}
-                selected={selected}
-                toggle={toggle}
-                select={select}
-                create={create}
-                edit={edit}
-                createContent={createContent}
-              />
-            )}
-          </li>
-        ))}
+                  <ul className="ms-3 space-y-0.5 border-s border-sidebar-border/60 ps-1.5">
+                    {(list?.items ?? []).map((resource) => (
+                      <li key={resource.id}>
+                        <button
+                          onClick={() => selectResource(node, resource)}
+                          aria-current={
+                            openResourceId === resource.id ? "page" : undefined
+                          }
+                          className={cn(
+                            "flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring",
+                            openResourceId === resource.id
+                              ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+                              : "text-muted-foreground hover:bg-sidebar-accent/60"
+                          )}
+                        >
+                          <ItemIcon aria-hidden className="size-3.5 shrink-0" />
+                          <span className="truncate" title={resource.title}>
+                            {resource.title}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                    {list?.loading && (
+                      <li
+                        role="status"
+                        className="px-2 py-1 text-xs text-muted-foreground"
+                      >
+                        {t("loading")}
+                      </li>
+                    )}
+                    {list && !list.loading && list.items.length === 0 && (
+                      <li className="px-2 py-1 text-xs text-muted-foreground">
+                        {c(
+                          kind === "document" ? "emptyDocuments" : "emptyChats"
+                        )}
+                      </li>
+                    )}
+                    <li>
+                      <button
+                        onClick={() => createContent(node, kind)}
+                        className="flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-xs text-muted-foreground hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <Plus aria-hidden className="size-3.5 shrink-0" />
+                        {c(kind === "document" ? "newDocument" : "newChat")}
+                      </button>
+                    </li>
+                  </ul>
+                </>
+              )}
+            </li>
+          )
+        })}
     </ul>
   )
 }
@@ -191,6 +257,8 @@ function WorkspaceContent() {
   }, [])
   const [creation, setCreation] = useState<ContentCreation | undefined>()
   const creationNumber = useRef(0)
+  const org = auth.session?.organization
+  const { handleError } = auth
   const [nodes, setNodes] = useState<NativeNode[]>([]),
     [nextAfter, setNextAfter] = useState<number | null>(null),
     [loading, setLoading] = useState(true),
@@ -198,15 +266,96 @@ function WorkspaceContent() {
   const [expanded, setExpanded] = useState(new Set<number>()),
     [selected, setSelected] = useState<number | null>(null),
     [drawer, setDrawer] = useState(false),
-    [sidebarOpen, setSidebarOpen] = useState(true)
+    [sidebarOpen, setSidebarOpen] = useState(true),
+    // The primary workspace section (Agent Chats / Team Chat / Documents) lives in
+    // the left rail and drives the center surface. Persisted per user; SSR-safe
+    // default until the effect reads localStorage.
+    [section, setSectionState] = useState<Section>(DEFAULT_SECTION)
+  useEffect(() => setSectionState(getActiveSection()), [])
+  const changeSection = useCallback((next: Section) => {
+    navigationGuard.current(() => {
+      setSectionState(next)
+      setActiveSection(next)
+      setDrawer(false)
+    })
+  }, [])
+  // The resource kind shown for the active section. Agent Chats has no backend
+  // resources yet (§5) — the center renders an honest connect/setup surface.
+  const sectionKind: NativeResourceKind =
+    section === "docs" ? "document" : "chat"
+  // Lazily-loaded, section-scoped resource lists shown directly under each
+  // expanded container in the sidebar (Notion/Slack-style direct navigation).
+  type ItemList = { loading: boolean; items: NativeResource[]; error: unknown }
+  const [itemsByNode, setItemsByNode] = useState<Record<number, ItemList>>({})
+  const [open, setOpen] = useState<{
+    resource: NativeResource
+    request: number
+  } | null>(null)
+  const openNumber = useRef(0)
+  const itemsRequest = useRef(0)
+  // Section switches change the resource kind: drop cached lists + any open item.
+  useEffect(() => {
+    itemsRequest.current += 1
+    setItemsByNode({})
+    setOpen(null)
+  }, [section])
+  const loadItems = useCallback(
+    async (nodeId: number) => {
+      if (!org) return
+      const stamp = itemsRequest.current
+      setItemsByNode((old) => ({
+        ...old,
+        [nodeId]: {
+          loading: true,
+          items: old[nodeId]?.items ?? [],
+          error: null,
+        },
+      }))
+      try {
+        const page = await listNativeResources(
+          org.id,
+          nodeId,
+          sectionKind,
+          false,
+          null,
+          auth.signal
+        )
+        if (stamp !== itemsRequest.current) return
+        setItemsByNode((old) => ({
+          ...old,
+          [nodeId]: { loading: false, items: page.items, error: null },
+        }))
+      } catch (e) {
+        if (stamp !== itemsRequest.current) return
+        setItemsByNode((old) => ({
+          ...old,
+          [nodeId]: {
+            loading: false,
+            items: old[nodeId]?.items ?? [],
+            error: e,
+          },
+        }))
+        auth.handleError(e)
+      }
+    },
+    [org, sectionKind, auth]
+  )
+  const openResource = useCallback(
+    (node: NativeNode, resource: NativeResource) =>
+      navigationGuard.current(() => {
+        setSelected(node.id)
+        setCreation(undefined)
+        setOpen({ resource, request: ++openNumber.current })
+        setDrawer(false)
+      }),
+    []
+  )
   const [editor, setEditor] = useState<Editor | null>(null),
     [name, setName] = useState(""),
     [parent, setParent] = useState<number | null>(null),
     [saving, setSaving] = useState(false),
     [editError, setEditError] = useState<unknown>(null)
   const opener = useRef<HTMLElement | null>(null)
-  const org = auth.session?.organization
-  const { handleError } = auth
   useEffect(() => {
     if (!org) return
     const controller = new AbortController()
@@ -230,12 +379,6 @@ function WorkspaceContent() {
   }, [org, handleError])
   if (!org || !auth.session) return null
   const selectedNode = nodes.find((node) => node.id === selected)
-  const breadcrumbs: NativeNode[] = []
-  let ancestor = selectedNode
-  while (ancestor && !breadcrumbs.some((node) => node.id === ancestor?.id)) {
-    breadcrumbs.unshift(ancestor)
-    ancestor = nodes.find((node) => node.id === ancestor?.parentId)
-  }
   function openEditor(value: Editor) {
     const active = document.activeElement as HTMLElement | null
     const menu = active?.closest('[role="menu"]')
@@ -319,95 +462,120 @@ function WorkspaceContent() {
       setLoading(false)
     }
   }
+  const sectionItems: { id: Section; label: string; icon: typeof Bot }[] = [
+    { id: "agents", label: c("agentChats"), icon: Bot },
+    { id: "team", label: c("teamChat"), icon: MessagesSquare },
+    { id: "docs", label: c("documents"), icon: FileText },
+  ]
   const sidebar = (
-    <nav
-      aria-label={t("projects")}
-      className="flex h-full min-w-0 flex-col gap-4 p-3"
-    >
-      <div className="flex items-center justify-between gap-2 px-2 pt-2">
-        <h2 className="text-xs font-medium text-muted-foreground">
-          {t("projects")}
-        </h2>
-      </div>
-      <Button
-        variant="ghost"
-        className="justify-start gap-2"
-        onClick={() =>
-          navigationGuard.current(() =>
-            openEditor({ kind: "project", parentId: null })
-          )
-        }
-      >
-        <Plus aria-hidden className="size-4" />
-        {t("newProject")}
-      </Button>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <NativeWorkspaceTree
-          nodes={nodes}
-          expanded={expanded}
-          selected={selected}
-          toggle={(id) =>
-            setExpanded((old) => {
-              const next = new Set(old)
-              if (next.has(id)) next.delete(id)
-              else next.add(id)
-              return next
-            })
-          }
-          select={(id) =>
-            navigationGuard.current(() => {
-              setSelected(id)
-              setCreation(undefined)
-              setDrawer(false)
-            })
-          }
-          create={(node) =>
-            navigationGuard.current(() =>
-              openEditor({ kind: "folder", parentId: node.id })
-            )
-          }
-          edit={(node) =>
-            navigationGuard.current(() =>
-              openEditor({ kind: node.kind, parentId: node.parentId, node })
-            )
-          }
-          createContent={(node, kind) => {
-            const active = document.activeElement as HTMLElement | null
-            const menu = active?.closest('[role="menu"]')
-            const returnFocus =
-              document.getElementById(
-                menu?.getAttribute("aria-labelledby") ?? ""
-              ) ?? active
-            navigationGuard.current(() => {
-              setSelected(node.id)
-              setCreation({
-                kind,
-                request: ++creationNumber.current,
-                returnFocus,
-              })
-              setDrawer(false)
-            })
-          }}
-        />
-        {!loading && nodes.length === 0 && (
-          <p className="px-2 text-sm text-muted-foreground">
-            {t("emptyProjects")}
-          </p>
-        )}
-        {nextAfter !== null && (
-          <Button
-            variant="ghost"
-            disabled={loading}
-            onClick={() => void more()}
+    <div className="flex h-full min-w-0 flex-col gap-4 p-3">
+      <nav aria-label={t("sections")} className="space-y-1">
+        {sectionItems.map((item) => (
+          <button
+            key={item.id}
+            onClick={() => changeSection(item.id)}
+            aria-current={section === item.id ? "page" : undefined}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium focus-visible:ring-2 focus-visible:ring-ring",
+              section === item.id
+                ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                : "text-muted-foreground hover:bg-sidebar-accent/60"
+            )}
           >
-            {t("loadMore")}
-          </Button>
-        )}
-        <p role="status" className="px-2 text-xs text-muted-foreground">
-          {loading ? t("loading") : ""}
-        </p>
-        <NativeError error={error} />
-      </div>
+            <item.icon aria-hidden className="size-4 shrink-0" />
+            {item.label}
+          </button>
+        ))}
+      </nav>
+      <nav
+        aria-label={t("projects")}
+        className="flex min-h-0 flex-1 flex-col gap-2"
+      >
+        <div className="flex items-center justify-between gap-2 px-2 pt-1">
+          <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            {t("projects")}
+          </h2>
+        </div>
+        <Button
+          variant="ghost"
+          className="justify-start gap-2"
+          onClick={() =>
+            navigationGuard.current(() =>
+              openEditor({ kind: "project", parentId: null })
+            )
+          }
+        >
+          <Plus aria-hidden className="size-4" />
+          {t("newProject")}
+        </Button>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <NativeWorkspaceTree
+            nodes={nodes}
+            expanded={expanded}
+            kind={sectionKind}
+            itemsByNode={itemsByNode}
+            openResourceId={open?.resource.id ?? null}
+            toggle={(id) =>
+              setExpanded((old) => {
+                const next = new Set(old)
+                if (next.has(id)) next.delete(id)
+                else {
+                  next.add(id)
+                  if (!itemsByNode[id]) void loadItems(id)
+                }
+                return next
+              })
+            }
+            create={(node) =>
+              navigationGuard.current(() =>
+                openEditor({ kind: "folder", parentId: node.id })
+              )
+            }
+            edit={(node) =>
+              navigationGuard.current(() =>
+                openEditor({ kind: node.kind, parentId: node.parentId, node })
+              )
+            }
+            createContent={(node, kind) => {
+              const active = document.activeElement as HTMLElement | null
+              const menu = active?.closest('[role="menu"]')
+              const returnFocus =
+                document.getElementById(
+                  menu?.getAttribute("aria-labelledby") ?? ""
+                ) ?? active
+              navigationGuard.current(() => {
+                setSelected(node.id)
+                setOpen(null)
+                setCreation({
+                  kind,
+                  request: ++creationNumber.current,
+                  returnFocus,
+                })
+                setDrawer(false)
+              })
+            }}
+            selectResource={openResource}
+          />
+          {!loading && nodes.length === 0 && (
+            <p className="px-2 text-sm text-muted-foreground">
+              {t("emptyProjects")}
+            </p>
+          )}
+          {nextAfter !== null && (
+            <Button
+              variant="ghost"
+              disabled={loading}
+              onClick={() => void more()}
+            >
+              {t("loadMore")}
+            </Button>
+          )}
+          <p role="status" className="px-2 text-xs text-muted-foreground">
+            {loading ? t("loading") : ""}
+          </p>
+          <NativeError error={error} />
+        </div>
+      </nav>
       <div className="space-y-1 border-t border-sidebar-border pt-3">
         <Button asChild variant="ghost" className="w-full justify-start gap-2">
           <Link
@@ -429,7 +597,7 @@ function WorkspaceContent() {
           {t("signOut")}
         </Button>
       </div>
-    </nav>
+    </div>
   )
   return (
     <div className="flex h-dvh min-w-0 flex-col overflow-hidden">
@@ -508,52 +676,16 @@ function WorkspaceContent() {
           </aside>
         )}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <nav
-            aria-label={t("breadcrumbs")}
-            className="flex shrink-0 flex-wrap items-center gap-1 border-b px-5 py-3 text-xs text-muted-foreground sm:px-8"
-          >
-            {breadcrumbs.map((node, index) => (
-              <span
-                className="flex min-w-0 max-w-full items-center gap-1"
-                key={node.id}
-              >
-                {index > 0 && (
-                  <ChevronRight
-                    aria-hidden
-                    className="size-3 shrink-0 rtl:rotate-180"
-                  />
-                )}
-                <button
-                  className="truncate rounded px-1 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
-                  title={node.name}
-                  onClick={() =>
-                    navigationGuard.current(() => {
-                      setSelected(node.id)
-                      setCreation(undefined)
-                    })
-                  }
-                >
-                  {node.name}
-                </button>
-              </span>
-            ))}
-          </nav>
-          {selectedNode ? (
-            <NativeContent
-              node={selectedNode}
-              creation={creation}
-              onRequestNavigationGuard={registerGuard}
-            />
-          ) : (
-            <div className="mx-auto w-full max-w-xl space-y-5 overflow-y-auto px-5 py-12 sm:py-20">
+          {section === "agents" ? (
+            <div className="mx-auto w-full max-w-xl space-y-5 overflow-y-auto px-6 py-12 sm:py-16">
               <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
-                <Layers3 aria-hidden className="size-5 text-muted-foreground" />
+                <Bot aria-hidden className="size-5 text-muted-foreground" />
               </div>
-              <h1 className="break-words text-3xl font-semibold tracking-tight">
-                {t("workspaceTitle")}
+              <h1 className="text-2xl font-semibold tracking-tight">
+                {c("agentChats")}
               </h1>
               <p className="text-sm leading-6 text-muted-foreground">
-                {c("noSelection")}
+                {c("agentChatsUnavailable")}
               </p>
               <section className="space-y-2 rounded-xl border p-5">
                 <h2 className="text-sm font-medium">{t("agentUnavailable")}</h2>
@@ -563,10 +695,49 @@ function WorkspaceContent() {
                 <Link
                   href="/settings"
                   className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={(event) => {
+                    event.preventDefault()
+                    navigationGuard.current(() => router.push("/settings"))
+                  }}
                 >
                   {t("personalAgents")}
                 </Link>
               </section>
+            </div>
+          ) : selectedNode && (open || creation) ? (
+            <NativeContent
+              node={selectedNode}
+              open={open ?? undefined}
+              creation={creation}
+              onRequestNavigationGuard={registerGuard}
+              onOpened={(resource) => {
+                setOpen({ resource, request: ++openNumber.current })
+                setCreation(undefined)
+                setExpanded((old) => new Set([...old, resource.nodeId]))
+                void loadItems(resource.nodeId)
+              }}
+            />
+          ) : (
+            <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 px-6 py-24 text-center">
+              <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
+                {section === "docs" ? (
+                  <FileText
+                    aria-hidden
+                    className="size-5 text-muted-foreground"
+                  />
+                ) : (
+                  <MessagesSquare
+                    aria-hidden
+                    className="size-5 text-muted-foreground"
+                  />
+                )}
+              </div>
+              <h1 className="text-xl font-semibold tracking-tight">
+                {section === "docs" ? c("documents") : c("teamChat")}
+              </h1>
+              <p className="max-w-sm text-sm leading-6 text-muted-foreground">
+                {t("sectionEmpty")}
+              </p>
             </div>
           )}
         </main>

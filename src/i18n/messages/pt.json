@@ -182,7 +182,9 @@
     "provider_email": "E-mail",
     "provider_github": "GitHub",
     "removeDescription": "Esta pessoa perderá o acesso à organização e suas sessões ativas nela serão revogadas.",
-    "confirmRemove": "Confirmar remoção"
+    "confirmRemove": "Confirmar remoção",
+    "sections": "Seções",
+    "sectionEmpty": "Selecione um item na barra lateral ou crie um."
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "O contexto do chat do espaço de trabalho não está disponível.",

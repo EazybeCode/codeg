@@ -182,7 +182,9 @@
     "provider_email": "邮箱",
     "provider_github": "GitHub",
     "removeDescription": "此人将失去该组织的访问权限，其在此组织中的活动会话将被撤销。",
-    "confirmRemove": "确认移除"
+    "confirmRemove": "确认移除",
+    "sections": "板块",
+    "sectionEmpty": "从边栏选择一项，或新建一项。"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作区聊天上下文不可用。",

@@ -182,7 +182,9 @@
     "provider_email": "E-Mail",
     "provider_github": "GitHub",
     "removeDescription": "Diese Person verliert den Zugang zur Organisation. Ihre aktiven Organisationssitzungen werden widerrufen.",
-    "confirmRemove": "Entfernung bestätigen"
+    "confirmRemove": "Entfernung bestätigen",
+    "sections": "Bereiche",
+    "sectionEmpty": "Wähle links ein Element aus oder erstelle eines."
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Der Chat-Kontext des Arbeitsbereichs ist nicht verfügbar.",

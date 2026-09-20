@@ -182,7 +182,9 @@
     "provider_email": "البريد الإلكتروني",
     "provider_github": "GitHub",
     "removeDescription": "سيفقد هذا الشخص الوصول إلى المؤسسة وسيتم إلغاء جلساته النشطة فيها.",
-    "confirmRemove": "تأكيد الإزالة"
+    "confirmRemove": "تأكيد الإزالة",
+    "sections": "الأقسام",
+    "sectionEmpty": "اختر عنصرًا من الشريط الجانبي أو أنشئ عنصرًا جديدًا."
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "سياق محادثة مساحة العمل غير متاح.",

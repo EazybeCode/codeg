@@ -182,7 +182,9 @@
     "provider_email": "電子郵件",
     "provider_github": "GitHub",
     "removeDescription": "此人將失去該組織的存取權，其在此組織中的有效工作階段將被撤銷。",
-    "confirmRemove": "確認移除"
+    "confirmRemove": "確認移除",
+    "sections": "區段",
+    "sectionEmpty": "從側邊欄選擇一項，或建立一項。"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作區聊天內容無法使用。",

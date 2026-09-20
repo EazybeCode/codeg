@@ -182,7 +182,9 @@
     "provider_email": "이메일",
     "provider_github": "GitHub",
     "removeDescription": "이 사람은 조직에 접근할 수 없게 되며 조직의 활성 세션이 취소됩니다.",
-    "confirmRemove": "제거 확인"
+    "confirmRemove": "제거 확인",
+    "sections": "섹션",
+    "sectionEmpty": "사이드바에서 항목을 선택하거나 새로 만드세요."
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "워크스페이스 채팅 정보를 사용할 수 없습니다.",

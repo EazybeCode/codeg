@@ -35,10 +35,17 @@ export type ContentCreation = {
   request: number
   returnFocus?: HTMLElement | null
 }
+export type ContentOpen = { resource: NativeResource; request: number }
 type Props = {
   node: NativeNode
   onRequestNavigationGuard: (guard: ContentNavigationGuard) => void
   creation?: ContentCreation
+  /** The resource selected in the sidebar. Navigation lives in the left rail; this
+   *  surface renders the open document/conversation directly. */
+  open?: ContentOpen
+  /** Bubbled when this surface selects/creates a resource so the shell can keep the
+   *  sidebar list and selection in sync. */
+  onOpened?: (resource: NativeResource) => void
 }
 export function NativeContent(props: Props) {
   const auth = useNativeAuth()
@@ -49,7 +56,13 @@ export function NativeContent(props: Props) {
     return null
   return <Content key={`${auth.scopeKey}:${props.node.id}`} {...props} />
 }
-function Content({ node, onRequestNavigationGuard, creation }: Props) {
+function Content({
+  node,
+  onRequestNavigationGuard,
+  creation,
+  open: openTarget,
+  onOpened,
+}: Props) {
   const auth = useNativeAuth(),
     router = useRouter(),
     t = useTranslations("NativeContent"),
@@ -57,9 +70,9 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
   const [kind, setKind] = useState<NativeResourceKind>(
       creation?.kind ?? "chat"
     ),
-    [archived, setArchived] = useState(false),
-    [items, setItems] = useState<NativeResource[]>([]),
-    [nextAfter, setNextAfter] = useState<string | null>(null),
+    [archived] = useState(false),
+    [, setItems] = useState<NativeResource[]>([]),
+    [, setNextAfter] = useState<string | null>(null),
     [selected, setSelected] = useState<NativeResource | null>(null),
     [loading, setLoading] = useState(true),
     [error, setError] = useState<unknown>(null),
@@ -73,13 +86,7 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
     [destination, setDestination] = useState(node.id),
     [pending, setPending] = useState<(() => void) | null>(null),
     [dirty, setDirty] = useState(false),
-    [draftGeneration, setDraftGeneration] = useState(0),
-    // Which of the three workspace sections is shown in the folder view. Team
-    // chat and Documents map to the backend resource `kind`; Agent chats is a
-    // truthful placeholder with no backend until agent sessions ship (Phase 1).
-    [section, setSection] = useState<"team" | "agents" | "docs">(
-      creation?.kind === "document" ? "docs" : "team"
-    )
+    [draftGeneration, setDraftGeneration] = useState(0)
   const [authorizedSignal, setAuthorizedSignal] = useState(auth.signal)
   const dirtyRef = useRef(false),
     mutationBusy = useRef(false),
@@ -129,21 +136,20 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       setPending(() => action)
     } else action()
   }, [])
-  const changeSection = (
-    next: "team" | "agents" | "docs",
-    focusTab?: HTMLElement | null
-  ) =>
+  // The left rail owns navigation. When it opens a resource, select it directly
+  // (guarded against an unsaved draft) and mirror its kind for follow-on actions.
+  const openSeen = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    if (!openTarget || openTarget.request === openSeen.current) return
+    openSeen.current = openTarget.request
     guard(() => {
       onDirtyChange(false)
-      selectResource(null)
-      setSection(next)
-      // Team chat and Documents drive the backend list; Agent chats does not.
-      if (next !== "agents") setKind(next === "docs" ? "document" : "chat")
-      if (focusTab) {
-        opener.current = focusTab
-        focusTab.focus()
-      }
+      setKind(openTarget.resource.kind)
+      setError(null)
+      setDialog(null)
+      selectResource(openTarget.resource)
     })
+  }, [openTarget, guard, onDirtyChange, selectResource])
   useEffect(() => {
     onRequestNavigationGuard(guard)
     return () => onRequestNavigationGuard((action) => action())
@@ -350,6 +356,7 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       )
       if (!current()) return
       selectResource(resource)
+      onOpened?.(resource)
       setDialog(null)
       request.current = null
       setTitle("")
@@ -417,6 +424,7 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       if (!current()) return
       setDialog(null)
       setSelected(resource)
+      onOpened?.(resource)
       if (resource.nodeId !== node.id) back()
     } catch (e) {
       if (current()) fail(e)
@@ -442,132 +450,9 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       )}
       <NativeSuspendedSurface
         hidden={authorizedSignal !== auth.signal}
-        className={
-          selected
-            ? "flex min-h-0 flex-1 flex-col"
-            : "mx-auto w-full max-w-4xl space-y-6 overflow-y-auto px-5 py-10 sm:px-10"
-        }
+        className="flex min-h-0 flex-1 flex-col"
       >
-        {!selected && (
-          <>
-            <h1 className="break-words text-3xl font-semibold tracking-tight">
-              {node.name}
-            </h1>
-            <div
-              role="tablist"
-              aria-label={node.name}
-              className="flex gap-4 border-b"
-            >
-              {(
-                [
-                  { id: "team", label: t("teamChat") },
-                  { id: "agents", label: t("agentChats") },
-                  { id: "docs", label: t("documents") },
-                ] as const
-              ).map((tab, index, all) => (
-                <button
-                  key={tab.id}
-                  role="tab"
-                  aria-selected={section === tab.id}
-                  tabIndex={section === tab.id ? 0 : -1}
-                  onClick={() => changeSection(tab.id)}
-                  onKeyDown={(event) => {
-                    if (
-                      ["ArrowLeft", "ArrowRight", "Home", "End"].includes(
-                        event.key
-                      )
-                    ) {
-                      event.preventDefault()
-                      const next =
-                        event.key === "Home"
-                          ? 0
-                          : event.key === "End"
-                            ? all.length - 1
-                            : event.key === "ArrowRight"
-                              ? (index + 1) % all.length
-                              : (index - 1 + all.length) % all.length
-                      const element =
-                        event.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
-                          '[role="tab"]'
-                        )[next]
-                      changeSection(all[next].id, element)
-                    }
-                  }}
-                  className={`rounded-t px-1 py-3 text-sm focus-visible:ring-2 focus-visible:ring-ring ${section === tab.id ? "border-b-2 border-foreground font-medium" : "text-muted-foreground"}`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-        {!selected ? (
-          section === "agents" ? (
-            <section
-              role="tabpanel"
-              aria-label={t("agentChats")}
-              className="space-y-4"
-            >
-              <p className="py-8 text-sm text-muted-foreground">
-                {t("agentChatsUnavailable")}
-              </p>
-            </section>
-          ) : (
-            <section
-              role="tabpanel"
-              aria-label={t(kind === "chat" ? "chats" : "documents")}
-              className="space-y-4"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <Button disabled={unavailable} onClick={() => open("create")}>
-                  {t(kind === "chat" ? "newChat" : "newDocument")}
-                </Button>
-                <label className="flex items-center gap-2 text-xs">
-                  <input
-                    type="checkbox"
-                    checked={archived}
-                    onChange={(event) => setArchived(event.target.checked)}
-                  />
-                  {t("showArchived")}
-                </label>
-              </div>
-              {loading ? (
-                <p role="status">{n("loading")}</p>
-              ) : items.length === 0 && !unavailable ? (
-                <p className="py-8 text-sm text-muted-foreground">
-                  {t(kind === "chat" ? "emptyChats" : "emptyDocuments")}
-                </p>
-              ) : (
-                <ul className="divide-y">
-                  {items.map((resource) => (
-                    <li key={resource.id}>
-                      <button
-                        onClick={() => {
-                          selectResource(resource)
-                          setError(null)
-                        }}
-                        className="flex w-full min-w-0 flex-wrap items-center justify-between gap-2 rounded py-4 text-start hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        <span className="min-w-0 break-words text-sm font-medium">
-                          {resource.title}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          {t(resource.visibility)}
-                          {resource.archived ? ` · ${t("archived")}` : ""}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {nextAfter && (
-                <Button disabled={loading} onClick={() => void load(nextAfter)}>
-                  {n("loadMore")}
-                </Button>
-              )}
-            </section>
-          )
-        ) : (
+        {selected && (
           <>
             {selected.creatorId === auth.session?.user.id && (
               <div className="shrink-0 space-y-1 border-b px-5 py-2 sm:px-8">
