@@ -20,6 +20,7 @@ import {
   listNativeDocumentRevisions,
   saveNativeDocument,
   restoreNativeDocument,
+  uploadNativeImage,
   NativeContentNotFoundError,
   type NativeResource,
   type NativeRevision,
@@ -781,6 +782,17 @@ function Document({
               document={draft.document}
               readOnly={saving || latest.archived}
               onChange={(document) => edit({ format: "blocks", document })}
+              uploadImage={
+                saving || latest.archived
+                  ? undefined
+                  : (file) =>
+                      uploadNativeImage(
+                        resource.id,
+                        file,
+                        auth.session?.csrf ?? "",
+                        auth.signal
+                      )
+              }
             />
           ) : (
             <label className="block space-y-2">

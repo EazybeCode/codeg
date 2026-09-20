@@ -88,6 +88,21 @@ function block(value: RichBlock): ReactNode {
         </div>
       )
       break
+    case "divider":
+      content = <hr className="my-4 border-t" />
+      break
+    case "image":
+      content = (
+        // Internal, ACL-served source only (validated on parse). Same-origin so
+        // the serve endpoint re-checks the bound document's audience.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={value.url}
+          alt={value.caption}
+          className="max-w-full rounded"
+        />
+      )
+      break
     default:
       content = <p className="min-h-6">{runs(value.content)}</p>
   }

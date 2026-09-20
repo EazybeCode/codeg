@@ -17,6 +17,8 @@ export type RichBlock = BlockBase &
     | { type: "checkListItem"; content: RichInlineRun[]; checked: boolean }
     | { type: "codeBlock"; text: string; language: string }
     | { type: "table"; rows: RichInlineRun[][][] }
+    | { type: "divider" }
+    | { type: "image"; url: string; caption: string }
   )
 export interface RichDocument {
   version: 1
@@ -91,6 +93,17 @@ function safeLink(value: unknown): string {
   return href
 }
 
+/** An image URL must be an internal, ACL-served reference — never external or
+ *  data:. Mirrors the native `image_url_valid`. */
+function internalImageUrl(value: unknown): string {
+  const url = string(value)
+  const prefix = "/api/neev/images/"
+  const key = url.startsWith(prefix) ? url.slice(prefix.length) : ""
+  if (key.length < 1 || key.length > 64 || !/^[A-Za-z0-9_-]+$/.test(key))
+    return invalid()
+  return url
+}
+
 /** Validate untrusted JSON and rebuild it in the native canonical field order. */
 export function parseRichDocument(value: unknown): RichDocument {
   const object = exact(value, ["version", "blocks"])
@@ -147,7 +160,11 @@ export function parseRichDocument(value: unknown): RichDocument {
             ? ["content", "level"]
             : type === "checkListItem"
               ? ["content", "checked"]
-              : ["content"]
+              : type === "divider"
+                ? []
+                : type === "image"
+                  ? ["url", "caption"]
+                  : ["content"]
     const block = exact(value, ["type", "id", "children", ...extras])
     const id = string(block.id)
     if (
@@ -160,7 +177,13 @@ export function parseRichDocument(value: unknown): RichDocument {
     ids.add(id)
     if (!Array.isArray(block.children) || block.children.length > 1000 - blocks)
       return invalid()
-    if ((type === "codeBlock" || type === "table") && block.children.length)
+    if (
+      (type === "codeBlock" ||
+        type === "table" ||
+        type === "divider" ||
+        type === "image") &&
+      block.children.length
+    )
       return invalid()
     const children = block.children.map((child) => parseBlock(child, depth + 1))
     switch (type) {
@@ -209,6 +232,16 @@ export function parseRichDocument(value: unknown): RichDocument {
           return row.map((cell) => parseRuns(cell, true))
         })
         return { type, id, children, rows }
+      }
+      case "divider":
+        return { type, id, children }
+      case "image": {
+        const url = internalImageUrl(block.url)
+        const caption = text(block.caption)
+        account(url)
+        account(caption)
+        if (caption.length > 2000) return invalid()
+        return { type, id, children, url, caption }
       }
       default:
         return invalid()

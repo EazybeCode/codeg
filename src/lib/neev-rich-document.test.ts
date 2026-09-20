@@ -9,7 +9,44 @@ const block = {
   children: [],
 }
 const doc = (value: unknown = block) => ({ version: 1, blocks: [value] })
+const uuid = "11111111-1111-4111-8111-111111111111"
 describe("bounded rich document parsing", () => {
+  it("accepts a divider and an internal-image block", () => {
+    expect(
+      parseRichDocument(doc({ type: "divider", id: uuid, children: [] }))
+        .blocks[0]
+    ).toEqual({ type: "divider", id: uuid, children: [] })
+    const image = {
+      type: "image",
+      id: uuid,
+      url: "/api/neev/images/22222222-2222-4222-8222-222222222222",
+      caption: "A chart",
+      children: [],
+    }
+    expect(parseRichDocument(doc(image)).blocks[0]).toEqual(image)
+  })
+  it("refuses external, data, and traversal image URLs and non-empty children", () => {
+    const image = (extra: Record<string, unknown>) => ({
+      type: "image",
+      id: uuid,
+      url: "/api/neev/images/22222222-2222-4222-8222-222222222222",
+      caption: "",
+      children: [],
+      ...extra,
+    })
+    for (const url of [
+      "https://evil.example/x.png",
+      "data:image/png;base64,AAAA",
+      "/api/neev/images/../secret",
+      "/other/x",
+    ])
+      expect(() => parseRichDocument(doc(image({ url })))).toThrow()
+    expect(() => parseRichDocument(doc(image({ children: [block] })))).toThrow()
+    // A divider carries no children.
+    expect(() =>
+      parseRichDocument(doc({ type: "divider", id: uuid, children: [block] }))
+    ).toThrow()
+  })
   it("accepts all native shapes and returns canonical field order", () => {
     expect(
       JSON.stringify(

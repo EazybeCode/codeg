@@ -753,3 +753,40 @@ export async function cancelNativeAgent(
   )
   return object.canceled === true
 }
+
+/** Upload an image bound to a document; resolves to its internal serve URL. The
+ *  raw file is the body (the server sniffs the bytes; the declared type is
+ *  advisory). CSRF-guarded. The returned URL is re-checked to be internal. */
+export async function uploadNativeImage(
+  documentId: string,
+  file: File,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<string> {
+  if (!csrf) throw new NativeClientError("invalid_request")
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      documentId
+    )
+  )
+    throw new NativeClientError("invalid_request")
+  const result = await nativeRequest(
+    `/api/neev/documents/${documentId}/images`,
+    {
+      method: "POST",
+      headers: {
+        "x-neev-csrf": csrf,
+        "Content-Type": file.type || "application/octet-stream",
+      },
+      body: file,
+    },
+    signal
+  )
+  const url = (result as { url?: unknown } | null)?.url
+  if (
+    typeof url !== "string" ||
+    !/^\/api\/neev\/images\/[A-Za-z0-9_-]{1,64}$/.test(url)
+  )
+    throw new NativeClientError("invalid_response")
+  return url
+}
