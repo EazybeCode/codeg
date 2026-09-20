@@ -131,7 +131,8 @@
     "agentError_unknown": "Der Lauf ist fehlgeschlagen.",
     "agentModelHint": "Nutze default für das Standardmodell des Anbieters oder gib eine unterstützte Modellkennung ein.",
     "agentPostsToTeam": "Deine Frage und die Antwort des Agenten werden beide in diesem Gespräch gepostet.",
-    "agentAuthored": "Agent · gefragt von {name}"
+    "agentAuthored": "Agent · gefragt von {name}",
+    "agentConnectActionsPending": "Anmelden, neu verbinden und trennen sind hier noch nicht verfügbar."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

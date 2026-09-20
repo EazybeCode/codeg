@@ -131,7 +131,8 @@
     "agentError_unknown": "執行失敗。",
     "agentModelHint": "使用 default 表示提供者的預設模型，或輸入它支援的模型識別碼。",
     "agentPostsToTeam": "你的提問和智能體的回覆都會發佈到此對話中。",
-    "agentAuthored": "智能體 · 由 {name} 提問"
+    "agentAuthored": "智能體 · 由 {name} 提問",
+    "agentConnectActionsPending": "此處暫不支援登入、重新連線和中斷連線。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

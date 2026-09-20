@@ -131,7 +131,8 @@
     "agentError_unknown": "실행에 실패했습니다.",
     "agentModelHint": "제공자의 기본 모델은 default를 사용하거나, 지원되는 모델 식별자를 입력하세요.",
     "agentPostsToTeam": "질문과 에이전트의 답변이 모두 이 대화에 게시됩니다.",
-    "agentAuthored": "에이전트 · {name} 님이 질문"
+    "agentAuthored": "에이전트 · {name} 님이 질문",
+    "agentConnectActionsPending": "로그인, 다시 연결, 연결 해제는 아직 여기서 할 수 없습니다."
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

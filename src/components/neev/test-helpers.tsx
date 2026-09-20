@@ -51,6 +51,21 @@ export function mockNativeSession(
     // yet" so unrelated Settings tests need not mock it (tests can still override).
     if (key === "GET /api/neev/organization/join-code")
       return json({ code: null, disabled: false })
+    // Settings always mounts the per-user agent connection panel; default to
+    // "no runtime bound" so unrelated Settings tests need not mock it.
+    if (key === "GET /api/neev/agent/connections")
+      return json({
+        runtimeEnabled: false,
+        connections: [
+          {
+            provider: "claude",
+            state: "disabled",
+            accountLabel: null,
+            checkedAt: null,
+            errorCode: null,
+          },
+        ],
+      })
     unknown.push(key)
     throw new Error(`Unexpected fetch: ${key}`)
   })
