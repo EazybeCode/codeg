@@ -275,6 +275,41 @@ gates persistence (`rich.rs:278-284`, `rich_export.rs`).
    app confirm full-canvas docs, primary team thread, agent panel, and responsive
    drawers — the source audit did not validate deployed layouts.
 
+## 12. Organization code + join/invite (added 2026-09-20; scope: membership)
+User addition: a visible **organization code**, an authorized **Invite people**
+action, and **Join organization by code** (with org preview/confirmation), from
+Settings. **Docmost frozen; native org module only.**
+
+Reuse (audited, exists — do NOT rebuild): token invites `invites::send` /
+`preview` / `accept(token, confirmed_org_id)` / `revoke`
+(`src-tauri/src/neev/org/invites.rs`); membership + roles `org::members` /
+`set_role` / `remove` (`org/service.rs`); the Settings members/invite UI
+(`native-settings.tsx`); the existing role/admission/reactivation/audit rules.
+- **Invite people [reuse]:** the Invite action reuses `invites::send` (emailed
+  token) with the current role rules — no new admission path. Already largely
+  present in Settings; surface it clearly.
+- **Join by code [new artifact]:** a per-org **code** that, entered by a signed-in
+  user, resolves to an **org preview** and an explicit **confirm** step (mirroring
+  `preview` + `accept(..., confirmed_org_id)` so the user never joins the wrong
+  org and there is no silent switch).
+- **Code security (server-enforced):** unguessable (≥128-bit random, not
+  sequential); validated server-side; **rate-limited** per IP/user; **rotatable
+  and disable-able by authorized org admins**; never placed in URLs, query
+  strings, or logs; shown only to authorized members in Settings. Clear
+  **invalid / expired / disabled / already-member** states.
+- **Guarantees:** no role escalation (joiners get the default member role, not
+  admin), no duplicate memberships (idempotent; already-member is a distinct
+  state), no silent org switching or data loss; reuse the existing audit trail.
+- **PENDING DECISION (do NOT implement the dependent admission yet):** does a
+  valid code grant **immediate membership** (code → `accept`-equivalent) OR create
+  an **admin-approved join request** (code → pending request → admin approves,
+  a new admission path)? Awaiting the user's answer. Independent parts (the code
+  artifact: generate/rotate/disable/validate/rate-limit; the visible code in
+  Settings; Invite reuse; the join preview/confirm UI + states) can be designed
+  and built without it; the final admission step branches on this answer.
+- Phasing: an independent **membership stage** (its own plan) after Phase 0; the
+  admission-dependent step is gated on the pending decision.
+
 ## 11. Self-review (contradictions / placeholders)
 Review-round fixes (2026-09-20):
 1. **Paste truthfulness (§6):** current behavior rejects unsupported paste and
