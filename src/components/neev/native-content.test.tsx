@@ -1017,6 +1017,8 @@ it("auth invalidation clears a private draft even while its Settings guard is op
     await screen.findByRole("textbox", { name: "Message" }),
     "secret pending draft"
   )
+  // The personal-agents link now lives in the collapsible agent context panel.
+  await user.click(screen.getByRole("button", { name: "Agent panel" }))
   await user.click(
     screen.getByRole("link", { name: "Personal AI connections" })
   )
