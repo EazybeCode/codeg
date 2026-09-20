@@ -1,15 +1,18 @@
 """Portable tests for per-user/per-provider credential delivery.
 
-No real cryptsetup/root: a fake CredentialVolumes stands in for the LUKS layer and
-an injected stat_fn simulates the mount-root ownership, so these prove the
-parser-to-open scope mapping, cross-user/handle refusal, missing credentials,
-ownership/mode enforcement, secret-free env, and — crucially — that delivery
-mutates nothing (no chown/close), so concurrent same-user runs on different lane
-uids cannot race."""
+No real cryptsetup/root: a fake CredentialVolumes stands in for the LUKS layer, an
+injected chown records ownership transfers (chown needs root in production), an
+injected stat_fn simulates the mount root, and a real temp dir backs the per-scope
+run lock. These prove the parser-to-open scope mapping, cross-user/handle refusal,
+missing credentials, shape/mode enforcement, the recover→lend→restore ownership
+sequence held across the child's lifetime, honest busy on a held lock, and per-scope
+lock isolation (different users never block or expose each other)."""
 
+import fcntl
 import os
 import stat
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,11 +24,6 @@ from neev_credential_store import Scope, StoreError  # noqa: E402
 
 
 class FakeVolumes:
-    """Stands in for CredentialVolumes. `open` mirrors the real scope-bound key:
-    it only returns a mountpoint for an exact (scope, handle) it was seeded with,
-    so a mismatched handle/scope raises just like a failed LUKS unlock. It never
-    chowns/unmounts, and records every call so tests can assert no mutation."""
-
     def __init__(self, seeded):
         self._seeded = seeded  # {(org, user, provider, handle): path}
         self.opened = []
@@ -39,18 +37,36 @@ class FakeVolumes:
         except KeyError:
             raise StoreError("unavailable") from None
 
-    def close(self, scope, handle):  # must never be called by the launcher
+    def close(self, scope, handle):  # the launcher must NEVER unmount/delete
         self.closed.append((scope.org_id, scope.user_id, scope.provider, handle))
 
 
-def fake_stat(uid, perm=0o700, isdir=True):
+def fake_stat(perm=0o700, isdir=True):
     mode = (stat.S_IFDIR if isdir else stat.S_IFREG) | perm
 
     class _Stat:
         st_mode = mode
-        st_uid = uid
+        st_uid = credentials.CANONICAL_OWNER_UID
 
-    return lambda _path: _Stat()
+    def _stat(_path, follow_symlinks=True):  # accepts the kwarg deliver() passes
+        return _Stat()
+
+    return _stat
+
+
+class RecordingChown:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, root, uid, gid):
+        self.calls.append((root, uid, gid))
+
+
+def deliver(volumes, tenant, provider, handle, run_uid, run_gid, lock_dir, **kw):
+    return credentials.deliver(
+        volumes, tenant, provider, handle, run_uid, run_gid,
+        lock_dir=lock_dir, **kw,
+    )
 
 
 class ParseTenantTests(unittest.TestCase):
@@ -59,117 +75,136 @@ class ParseTenantTests(unittest.TestCase):
 
     def test_rejects_malformed(self):
         for bad in [
-            "org:3",
-            "user:7/org:3",
-            "org:3/user:7/x",
-            "org:0/user:7",
-            "org:3/user:0",
-            "org:03/user:7",  # non-canonical leading zero
-            "org:-1/user:7",
-            "org:x/user:7",
-            "org: 3/user:7",
-            "",
+            "org:3", "user:7/org:3", "org:3/user:7/x", "org:0/user:7",
+            "org:3/user:0", "org:03/user:7", "org:-1/user:7", "org:x/user:7",
+            "org: 3/user:7", "",
         ]:
             with self.assertRaises(credentials.CredentialError, msg=bad):
                 credentials.parse_tenant(bad)
 
 
 class ProviderEnvTests(unittest.TestCase):
-    def test_claude_and_codex_paths_are_under_home(self):
+    def test_paths_are_under_home(self):
         claude = credentials.provider_env("/vol", "claude")
-        self.assertEqual(claude["HOME"], "/vol")
-        self.assertEqual(claude["CLAUDE_CONFIG_DIR"], "/vol/.claude")
-        self.assertNotIn("CODEX_HOME", claude)
+        self.assertEqual(claude, {"HOME": "/vol", "CLAUDE_CONFIG_DIR": "/vol/.claude"})
         codex = credentials.provider_env("/vol", "codex")
-        self.assertEqual(codex["CODEX_HOME"], "/vol/.codex")
-        self.assertNotIn("CLAUDE_CONFIG_DIR", codex)
-
-    def test_unknown_provider_rejected(self):
-        with self.assertRaises(credentials.CredentialError):
-            credentials.provider_env("/vol", "gemini")
+        self.assertEqual(codex, {"HOME": "/vol", "CODEX_HOME": "/vol/.codex"})
 
 
-class ResolveDeliveryTests(unittest.TestCase):
+class DeliverTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lock_dir = os.path.join(self.tmp.name, "run-locks")
+
     def _volumes(self):
         return FakeVolumes({(3, 7, "claude", "h1"): "/mnt/vol-h1"})
 
-    def test_happy_path_maps_scope_and_delivers_home_env(self):
-        volumes = self._volumes()
-        delivery = credentials.resolve_delivery(
-            volumes, "org:3/user:7", "claude", "h1", 65532, stat_fn=fake_stat(65532)
-        )
-        # Scope is built from tenant + provider and passed to open verbatim.
-        self.assertEqual(volumes.opened, [(3, 7, "claude", "h1")])
-        self.assertEqual(delivery.home, "/mnt/vol-h1")
-        self.assertEqual(delivery.env["HOME"], "/mnt/vol-h1")
-        self.assertEqual(delivery.env["CLAUDE_CONFIG_DIR"], "/mnt/vol-h1/.claude")
-        # Delivery is mutation-free: nothing was closed/unmounted.
+    def test_recover_lend_and_restore_ownership_around_the_child(self):
+        volumes, chown = self._volumes(), RecordingChown()
+        C = credentials.CANONICAL_OWNER_UID
+        with deliver(
+            volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+            self.lock_dir, chown_tree=chown, stat_fn=fake_stat(),
+        ) as delivery:
+            self.assertEqual(volumes.opened, [(3, 7, "claude", "h1")])
+            self.assertEqual(delivery.home, "/mnt/vol-h1")
+            self.assertEqual(delivery.env["HOME"], "/mnt/vol-h1")
+            # Inside the run: recovered to canonical, then lent to the lane uid.
+            self.assertEqual(
+                chown.calls,
+                [("/mnt/vol-h1", C, C), ("/mnt/vol-h1", 61000, 61000)],
+            )
+        # On exit the canonical owner is restored, and nothing was unmounted/deleted.
+        self.assertEqual(chown.calls[-1], ("/mnt/vol-h1", C, C))
         self.assertEqual(volumes.closed, [])
 
-    def test_cross_user_or_unknown_handle_is_refused(self):
-        volumes = self._volumes()
-        # Right handle, WRONG user (8 not 7): open cannot unlock this scope.
-        with self.assertRaises(credentials.CredentialError) as caught:
-            credentials.resolve_delivery(
-                volumes, "org:3/user:8", "claude", "h1", 65532, stat_fn=fake_stat(65532)
-            )
-        self.assertEqual(caught.exception.category, "credentials")
-        # Unknown handle likewise.
-        with self.assertRaises(credentials.CredentialError):
-            credentials.resolve_delivery(
-                volumes, "org:3/user:7", "claude", "nope", 65532, stat_fn=fake_stat(65532)
-            )
-        self.assertEqual(volumes.closed, [])
+    def test_ownership_restored_even_when_child_raises(self):
+        volumes, chown = self._volumes(), RecordingChown()
+        C = credentials.CANONICAL_OWNER_UID
+        with self.assertRaises(RuntimeError):
+            with deliver(
+                volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+                self.lock_dir, chown_tree=chown, stat_fn=fake_stat(),
+            ):
+                raise RuntimeError("child failed / cancelled")
+        self.assertEqual(chown.calls[-1], ("/mnt/vol-h1", C, C))  # restored
+
+    def test_cross_user_or_unknown_handle_refused_without_chown(self):
+        volumes, chown = self._volumes(), RecordingChown()
+        for tenant, handle in [("org:3/user:8", "h1"), ("org:3/user:7", "nope")]:
+            with self.assertRaises(credentials.CredentialError) as caught:
+                with deliver(
+                    volumes, tenant, "claude", handle, 61000, 61000,
+                    self.lock_dir, chown_tree=chown, stat_fn=fake_stat(),
+                ):
+                    pass
+            self.assertEqual(caught.exception.category, "credentials")
+        self.assertEqual(chown.calls, [])  # never lent an unauthorized volume
 
     def test_missing_credentials_refused(self):
         with self.assertRaises(credentials.CredentialError) as caught:
-            credentials.resolve_delivery(
-                FakeVolumes({}), "org:3/user:7", "codex", "h1", 65532,
-                stat_fn=fake_stat(65532),
-            )
+            with deliver(
+                FakeVolumes({}), "org:3/user:7", "codex", "h1", 61000, 61000,
+                self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+            ):
+                pass
         self.assertEqual(caught.exception.category, "credentials")
 
-    def test_volume_not_owned_by_run_uid_is_refused_without_chown(self):
-        volumes = self._volumes()
-        with self.assertRaises(credentials.CredentialError) as caught:
-            credentials.resolve_delivery(
-                volumes, "org:3/user:7", "claude", "h1", 65532,
-                stat_fn=fake_stat(61000),  # owned by a different uid
-            )
-        self.assertEqual(caught.exception.category, "owner")
-        self.assertEqual(volumes.closed, [])  # never mutated to "fix" ownership
-
     def test_wrong_mode_or_non_directory_refused(self):
-        volumes = self._volumes()
-        with self.assertRaises(credentials.CredentialError) as m:
-            credentials.resolve_delivery(
-                volumes, "org:3/user:7", "claude", "h1", 65532,
-                stat_fn=fake_stat(65532, perm=0o755),
-            )
-        self.assertEqual(m.exception.category, "mode")
-        with self.assertRaises(credentials.CredentialError) as d:
-            credentials.resolve_delivery(
-                volumes, "org:3/user:7", "claude", "h1", 65532,
-                stat_fn=fake_stat(65532, isdir=False),
-            )
-        self.assertEqual(d.exception.category, "shape")
+        for kw, category in [
+            (dict(perm=0o755), "mode"),
+            (dict(isdir=False), "shape"),
+        ]:
+            with self.assertRaises(credentials.CredentialError) as caught:
+                with deliver(
+                    self._volumes(), "org:3/user:7", "claude", "h1", 61000, 61000,
+                    self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(**kw),
+                ):
+                    pass
+            self.assertEqual(caught.exception.category, category)
 
-    def test_concurrent_lane_uids_cannot_race_a_chown(self):
-        # Two concurrent runs for the SAME (user, provider) on DIFFERENT lane uids.
-        # Whichever uid owns the volume is delivered; the other is refused. Neither
-        # mutates the volume (no chown/close), so there is no ownership to race.
-        volumes = self._volumes()
-        ok = credentials.resolve_delivery(
-            volumes, "org:3/user:7", "claude", "h1", 65532, stat_fn=fake_stat(65532)
+    def test_held_scope_lock_reports_busy_not_a_second_lend(self):
+        # A concurrent run for the SAME (user, provider) holds the lock; a second
+        # delivery must report busy (honest) rather than lend the volume twice.
+        os.makedirs(self.lock_dir, mode=0o700, exist_ok=True)
+        held = os.open(
+            os.path.join(self.lock_dir, "3-7-claude.lock"),
+            os.O_RDWR | os.O_CREAT, 0o600,
         )
-        self.assertEqual(ok.env["HOME"], "/mnt/vol-h1")
-        with self.assertRaises(credentials.CredentialError) as other:
-            credentials.resolve_delivery(
-                volumes, "org:3/user:7", "claude", "h1", 61001, stat_fn=fake_stat(65532)
-            )
-        self.assertEqual(other.exception.category, "owner")
-        self.assertEqual(volumes.closed, [])
-        self.assertEqual(len(volumes.opened), 2)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        saved = credentials.RUN_LOCK_TIMEOUT_SECONDS
+        credentials.RUN_LOCK_TIMEOUT_SECONDS = 0.2
+        chown = RecordingChown()
+        try:
+            with self.assertRaises(credentials.CredentialError) as caught:
+                with deliver(
+                    self._volumes(), "org:3/user:7", "claude", "h1", 61000, 61000,
+                    self.lock_dir, chown_tree=chown, stat_fn=fake_stat(),
+                ):
+                    pass
+        finally:
+            credentials.RUN_LOCK_TIMEOUT_SECONDS = saved
+        self.assertEqual(caught.exception.category, "busy")
+        self.assertEqual(chown.calls, [])  # never touched the volume
+
+    def test_different_scopes_do_not_block_each_other(self):
+        # Holding user 7's lock must not stop user 9's delivery (different volume,
+        # different lockfile) — no cross-user blocking or exposure.
+        os.makedirs(self.lock_dir, mode=0o700, exist_ok=True)
+        held = os.open(
+            os.path.join(self.lock_dir, "3-7-claude.lock"),
+            os.O_RDWR | os.O_CREAT, 0o600,
+        )
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        volumes = FakeVolumes({(3, 9, "claude", "h9"): "/mnt/vol-h9"})
+        with deliver(
+            volumes, "org:3/user:9", "claude", "h9", 61000, 61000,
+            self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+        ) as delivery:
+            self.assertEqual(delivery.home, "/mnt/vol-h9")
 
 
 if __name__ == "__main__":

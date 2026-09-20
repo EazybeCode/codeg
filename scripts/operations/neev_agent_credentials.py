@@ -1,51 +1,65 @@
 #!/usr/bin/env python3
 """Resolve and deliver ONE run's per-user, per-provider credential volume into its
-sandbox HOME — safely, without ever mutating the persistent volume.
+sandbox HOME so the provider — running as its isolation-lane uid, which is NOT the
+canonical volume owner — can read its credentials AND persist refreshed tokens,
+without ever racing a concurrent run for the same volume.
 
 The native runtime spawns `neev_agent_launch.py` with a server-authoritative
 `--tenant org:<org>/user:<user>`, a `--provider`, and a `--credential-handle`. This
 module turns those into a `neev_credential_store.Scope` and opens the caller's own
 LUKS-encrypted credential volume via `neev_credential_volumes.CredentialVolumes`.
 
-Isolation + concurrency invariants (why this cannot race a chown or corrupt refresh
-state — the two failures called out in review):
+Ownership model (why owner-uid vs lane-uid works end-to-end):
 
-* **Scope is server-authoritative, never the request.** The `(org_id, user_id)`
-  come from `--tenant` (stamped by the runtime from the authenticated actor) and the
-  provider from `--provider`; the volume key is derived from that scope + handle
-  (`CredentialStore.volume_key`). A handle that belongs to another user/provider
-  therefore cannot unlock this scope's volume — `open` fails. One tenant can never
-  reach another's volume.
-* **This module never writes to the volume — no chown, no unmount, no delete.** It
-  `open`s (idempotent + serialized by the store's own exclusive `.lock`) and then
-  only *reads* the mount root's identity to verify delivery is safe. Because it
-  mutates nothing, two concurrent runs for the SAME (user, provider) — even on
-  different isolation-lane uids — cannot race a chown or leave the credentials in a
-  half-owned/corrupt state. Refresh tokens the provider writes go straight to the
-  one live volume; the volume's own lifecycle (create/refresh/revoke/close) stays
-  owned by the supervisor + `neev_credential_volumes`, not by a per-run launcher.
-* **Ownership is required, not imposed.** The live volume is delivered as the run's
-  HOME so refresh writes persist. For the dropped, unprivileged provider process to
-  read AND write it, the volume's mount root must already be owned by the run's uid
-  at mode 0700. We *verify* that and refuse otherwise — we do not chown a shared
-  volume to a per-run lane uid (that is precisely the race). See the report:
-  credential-bearing runs must execute as the volume-owner uid.
+* The volume is created + kept by the supervisor and owned at rest by the canonical
+  service uid (`_secure_filesystem_root` → 65532). A run's provider drops to a
+  distinct lane uid, so it cannot read a 0700 65532-owned tree as-is.
+* `deliver()` therefore, **while holding a per-scope run lock**, chowns the volume
+  tree to the run's lane uid for the duration of the run, then chowns it BACK to the
+  canonical owner on exit. Because the lock is per (org, user, provider), two
+  concurrent runs for the SAME volume are serialized — they can never race the
+  chown or interleave refresh writes — while different users/providers (different
+  locks, different volumes) run concurrently and never see each other's volume.
+* The run lock is a dedicated lockfile, NOT the credential store's global metadata
+  lock (which is non-blocking and must stay free for create/open/close), so holding
+  it for a run's lifetime does not stall unrelated credential operations.
 
-Both providers resolve their config strictly within the sandbox HOME: Claude reads
-`$HOME/.claude.json` + `$CLAUDE_CONFIG_DIR`; Codex reads `$CODEX_HOME` — all set
-under HOME here, so neither can escape to a host login.
+Isolation invariants preserved: the scope is server-authoritative (from `--tenant`
++ `--provider`); the volume key is derived from that scope + handle, so a handle for
+another user/provider cannot unlock this scope. Both providers resolve config only
+under HOME (Claude `$HOME/.claude`, Codex `$HOME/.codex`), so neither can escape to
+a host login, and the provider env is a strict secret-free allowlist (see
+`neev_agent_launch.child_env`).
 """
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
 import os
 import stat
+import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Iterator, Tuple
 
 from neev_credential_store import Scope, StoreError
 
 PROVIDERS: Tuple[str, ...] = ("claude", "codex")
+# Canonical at-rest owner of every credential volume (matches
+# neev_credential_volumes._secure_filesystem_root). A run temporarily borrows
+# ownership under the run lock and restores this on exit.
+CANONICAL_OWNER_UID = 65532
+CANONICAL_OWNER_GID = 65532
+# Bound on a volume's entry count so a corrupt/hostile tree cannot make the chown
+# walk unbounded. A credential volume holds a handful of small files.
+MAX_TREE_ENTRIES = 4096
+# Where per-scope run locks live. Root provisions this 0700 root-owned directory
+# (see the report); it is NOT the credential store's metadata lock.
+RUN_LOCK_DIR = "/var/lib/neev-supervisor/run-locks"
+# Bounded wait for the per-scope run lock before giving up (another run for the same
+# user+provider is holding it). Keeps a stuck peer from wedging a slot forever.
+RUN_LOCK_TIMEOUT_SECONDS = 120.0
 
 
 class CredentialError(Exception):
@@ -57,18 +71,15 @@ class CredentialError(Exception):
 
 
 def parse_tenant(tenant: str) -> Tuple[int, int]:
-    """Parse the runtime's `org:<int>/user:<int>` tenant string. Rejects anything
-    else — no negatives, no leading zeros, no extra segments."""
+    """Parse the runtime's `org:<int>/user:<int>` tenant string (canonical decimals,
+    no sign, no leading zero, no extra segments)."""
     if not isinstance(tenant, str):
         raise CredentialError("tenant")
     parts = tenant.split("/")
     if len(parts) != 2 or not parts[0].startswith("org:") or not parts[1].startswith("user:"):
         raise CredentialError("tenant")
-    org_text = parts[0][len("org:") :]
-    user_text = parts[1][len("user:") :]
 
     def _positive(text: str) -> int:
-        # ASCII digits only; no sign, no whitespace, no leading zero (canonical).
         if not text.isascii() or not text.isdigit():
             raise CredentialError("tenant")
         if len(text) > 1 and text[0] == "0":
@@ -78,7 +89,7 @@ def parse_tenant(tenant: str) -> Tuple[int, int]:
             raise CredentialError("tenant")
         return value
 
-    return _positive(org_text), _positive(user_text)
+    return _positive(parts[0][len("org:") :]), _positive(parts[1][len("user:") :])
 
 
 def scope_of(tenant: str, provider: str) -> Scope:
@@ -89,74 +100,136 @@ def scope_of(tenant: str, provider: str) -> Scope:
 
 
 def provider_env(home: str, provider: str) -> Dict[str, str]:
-    """The environment that binds the provider's config to the sandbox HOME.
-
-    Every path is under HOME, so a provider can only ever read/write the mounted
-    per-user volume — never a host login or another tenant's config."""
+    """The environment binding the provider's config strictly to the sandbox HOME."""
     if provider not in PROVIDERS:
         raise CredentialError("provider")
     env = {"HOME": home}
     if provider == "claude":
-        # Claude reads $HOME/.claude.json and $CLAUDE_CONFIG_DIR (its state dir).
         env["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude")
     else:
-        # Codex reads $CODEX_HOME (default $HOME/.codex).
         env["CODEX_HOME"] = os.path.join(home, ".codex")
     return env
 
 
 @dataclass(frozen=True)
 class Delivery:
-    """A resolved, ready-to-run credential delivery for one run."""
-
     home: str
     env: Dict[str, str]
 
 
-def resolve_delivery(
+def _chown_tree(root: str, uid: int, gid: int) -> None:
+    """Recursively chown a trusted credential volume to (uid, gid), symlink-safe and
+    bounded. Never follows a symlink (chowns the link itself), never descends into a
+    symlinked directory, and refuses a tree larger than MAX_TREE_ENTRIES."""
+    seen = 0
+    os.chown(root, uid, gid, follow_symlinks=False)
+    for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        for name in dirs + files:
+            seen += 1
+            if seen > MAX_TREE_ENTRIES:
+                raise CredentialError("tree")
+            os.chown(os.path.join(current, name), uid, gid, follow_symlinks=False)
+
+
+@contextlib.contextmanager
+def _scope_run_lock(scope: Scope, lock_dir: str) -> Iterator[None]:
+    """Hold a blocking exclusive lock for exactly this (org, user, provider) so
+    concurrent runs for the SAME volume serialize (no chown/refresh race). A stale
+    peer cannot wedge us forever: we bound the wait."""
+    try:
+        os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+    except OSError as error:
+        raise CredentialError("lockdir") from error
+    path = os.path.join(
+        lock_dir, f"{scope.org_id}-{scope.user_id}-{scope.provider}.lock"
+    )
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        deadline = time.monotonic() + RUN_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                    raise CredentialError("lock") from error
+                if time.monotonic() >= deadline:
+                    raise CredentialError("busy") from None
+                time.sleep(0.1)
+        yield
+    except CredentialError:
+        raise
+    except OSError as error:
+        raise CredentialError("lock") from error
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+
+
+@contextlib.contextmanager
+def deliver(
     volumes,
     tenant: str,
     provider: str,
     handle: str,
     run_uid: int,
+    run_gid: int,
     *,
-    stat_fn: Callable[[str], os.stat_result] = os.stat,
-) -> Delivery:
-    """Open the caller's own credential volume and return the HOME + env to run its
-    provider with. Raises `CredentialError` (never leaks a path or secret) on any
-    unsafe or unauthorized delivery. Mutates nothing.
+    lock_dir: str = None,
+    chown_tree: Callable[[str, int, int], None] = _chown_tree,
+    stat_fn: Callable[..., os.stat_result] = os.stat,
+) -> Iterator[Delivery]:
+    """Open the caller's own credential volume, lend it to the run's lane uid under a
+    per-scope lock, yield the HOME + env to run with, and restore the canonical owner
+    on exit. Raises `CredentialError` (never leaks a path or secret) on any unsafe or
+    unauthorized delivery.
 
-    `volumes` is a `neev_credential_volumes.CredentialVolumes` (or a test double
-    exposing `open(scope, handle) -> path`). `stat_fn` is injectable for tests."""
+    `volumes` is a `neev_credential_volumes.CredentialVolumes` (or a test double with
+    `open(scope, handle) -> path`). `chown_tree`/`stat_fn`/`lock_dir` are injectable
+    for tests (chown needs root in production)."""
     if not isinstance(handle, str) or not handle:
         raise CredentialError("handle")
-    if not isinstance(run_uid, int) or run_uid <= 0:
-        raise CredentialError("uid")
+    for identity in (run_uid, run_gid):
+        if not isinstance(identity, int) or identity <= 0:
+            raise CredentialError("uid")
     scope = scope_of(tenant, provider)
-    try:
-        mountpoint = volumes.open(scope, handle)
-    except StoreError as error:
-        # Unknown handle, scope/handle mismatch (another user's handle), a volume
-        # that is not ready, or the store is busy — all map to a single opaque
-        # refusal so probing cannot distinguish them.
-        raise CredentialError("credentials") from error
-    home = os.fspath(mountpoint)
-    # No chown, no mkdir, no write. Verify the LIVE volume is already owned by the
-    # run's uid at 0700 so the dropped provider can read + refresh it. Refusing here
-    # (rather than chowning a shared volume to a transient lane uid) is what makes
-    # concurrent same-user runs unable to race.
-    try:
-        info = stat_fn(home)
-    except OSError as error:
-        raise CredentialError("credentials") from error
-    if not stat.S_ISDIR(info.st_mode):
-        raise CredentialError("shape")
-    if stat.S_IMODE(info.st_mode) != 0o700:
-        raise CredentialError("mode")
-    if info.st_uid != run_uid:
-        # The volume is owned by a different uid than the run will drop to; running
-        # anyway would leave the provider unable to read its own credentials, and
-        # chowning a shared per-user volume to a per-run lane uid is the race we
-        # refuse to introduce. See the report's uid-ownership contract.
-        raise CredentialError("owner")
-    return Delivery(home=home, env=provider_env(home, provider))
+    # Resolve the lock dir at call time so a test (or a future config) can override
+    # RUN_LOCK_DIR; production passes nothing and uses the provisioned default.
+    with _scope_run_lock(scope, lock_dir if lock_dir is not None else RUN_LOCK_DIR):
+        try:
+            mountpoint = volumes.open(scope, handle)
+        except StoreError as error:
+            raise CredentialError("credentials") from error
+        home = os.fspath(mountpoint)
+        # The mount root must be a real directory (not a symlink) at 0700 before we
+        # touch it — refuse to chown through a swapped-in link.
+        try:
+            info = stat_fn(home, follow_symlinks=False)
+        except OSError as error:
+            raise CredentialError("credentials") from error
+        if not stat.S_ISDIR(info.st_mode):
+            raise CredentialError("shape")
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            raise CredentialError("mode")
+        # Recover first, under the lock: if a prior run crashed mid-lend the tree may
+        # still be owned by a lane uid. Restoring the canonical owner here is safe —
+        # the lock guarantees no other run for this volume — and idempotent when it
+        # is already canonical. Then lend to THIS run's lane uid; the lock means no
+        # other lane can ever hold or read the volume concurrently, so there is no
+        # chown race and refresh writes cannot interleave.
+        chown_tree(home, CANONICAL_OWNER_UID, CANONICAL_OWNER_GID)
+        chown_tree(home, run_uid, run_gid)
+        try:
+            yield Delivery(home=home, env=provider_env(home, provider))
+        finally:
+            # Restore the canonical owner so refresh tokens written during the run
+            # (now this lane uid's) become owner-readable again and the store
+            # invariant holds at rest. Best-effort: a failure does not mask the run's
+            # result; the next lend (or the supervisor's reconcile) re-recovers it.
+            with contextlib.suppress(Exception):
+                chown_tree(home, CANONICAL_OWNER_UID, CANONICAL_OWNER_GID)

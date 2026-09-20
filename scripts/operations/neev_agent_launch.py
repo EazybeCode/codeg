@@ -142,31 +142,46 @@ def main(argv=None, volumes=None):
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: invalid spec: {error.category}", file=sys.stderr)
         return 2
-    # Open the caller's OWN per-user/per-provider credential volume and deliver it
-    # as the run's HOME. A handle for another user/provider cannot unlock this
-    # scope's volume; a volume not owned by the run's uid is refused (never
-    # chowned). Nothing agent-runs without its own valid credentials.
+    # Open the caller's OWN per-user/per-provider credential volume and lend it to
+    # this run's lane uid for the CHILD'S ENTIRE LIFETIME (a per-scope run lock is
+    # held across the whole `with`, incl. cancel/teardown), then restored to the
+    # canonical owner on exit. A handle for another user/provider cannot unlock this
+    # scope; the lock means no other lane can access the volume concurrently.
     if volumes is None:  # pragma: no cover - production wiring
         volumes = _production_volumes()
     try:
-        delivery = credentials.resolve_delivery(
-            volumes, args.tenant, args.provider, args.credential_handle, args.uid
-        )
+        with credentials.deliver(
+            volumes,
+            args.tenant,
+            args.provider,
+            args.credential_handle,
+            args.uid,
+            args.gid,
+        ) as delivery:
+            return _run_child(spec, child_env(delivery))
     except credentials.CredentialError as error:
+        # Honest, non-sensitive reason ("busy" = another run for this user+provider
+        # holds the volume). Rust surfaces waiting/busy; nothing runs unauthorized.
         print(
             f"neev_agent_launch: credential delivery refused: {error.category}",
             file=sys.stderr,
         )
         return 5
+
+
+def _run_child(spec, env):
+    """Launch the provider in the sandbox, forward its stream, and always tear the
+    sandbox down. Runs while the credential volume is lent to this run's uid."""
     try:
-        handle = sandbox.launch(spec, env=child_env(delivery))
+        handle = sandbox.launch(spec, env=env)
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: launch failed: {error.category}", file=sys.stderr)
         return 3
 
     # Keep the signal handler async-signal-safe: do ONLY a fast process-group
     # kill (single syscall) to unblock the stdout read; the heavy teardown
-    # (reap + egress `ip`/`nft` commands) runs in the `finally` on the main flow.
+    # (reap + egress `ip`/`nft` commands) runs in the `finally`, and the credential
+    # ownership is restored + the run lock released by the enclosing `with` after.
     def _terminate(*_unused):
         try:
             os.killpg(os.getpgid(handle.pid), signal.SIGKILL)

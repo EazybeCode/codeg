@@ -159,9 +159,12 @@ class CredentialWiringTests(unittest.TestCase):
             ]
             saved = os.environ.get("NEEV_AGENT_WORKSPACE_ROOT")
             os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = root
+            saved_lock = credentials.RUN_LOCK_DIR
+            credentials.RUN_LOCK_DIR = os.path.join(root, "run-locks")
             try:
                 rc = launch.main(argv, volumes=RaisingVolumes())
             finally:
+                credentials.RUN_LOCK_DIR = saved_lock
                 if saved is None:
                     os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
                 else:
