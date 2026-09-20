@@ -100,6 +100,7 @@ class SupervisorDtoTests(unittest.TestCase):
                 "check_connection",
                 "cleanup_connection",
                 "reconcile_page",
+                "submit_code",
             },
         )
         required_names = {
@@ -158,6 +159,49 @@ class SupervisorDtoTests(unittest.TestCase):
                 self.dto.validate_response(
                     requests[item["request_name"]], value, self.dto.Id("3" * 32)
                 )
+
+    def test_submit_code_op_and_provider_tagged_challenges(self):
+        # The seventh op: submit_code carries a login binding + an authorization code
+        # and answers with a login snapshot (same state machine as observe_login).
+        submit = self.request("submit")
+        self.assertIs(submit.op(), self.dto.Op.SUBMIT_CODE)
+        self.assertEqual(submit.body.code.value, "abcd-1234-ABCD-EFGH")
+        self.assertEqual(self.dto.decode_request(self.dto.encode_request(submit)), submit)
+        answer = self.response("submit_verifying")
+        self.assertIs(answer.op(), self.dto.Op.SUBMIT_CODE)
+        self.assertEqual(answer.tag(), "verifying")
+        self.dto.validate_response(submit, answer, self.dto.Id("3" * 32))
+
+        # Codex device challenge vs Claude authorization-code challenge.
+        device = self.response("observe_awaiting_user").body.challenge
+        self.assertIsInstance(device, self.dto.DeviceChallenge)
+        self.assertEqual(device.user_code.value, "ABCD-EFGH")
+        claude = self.response("observe_awaiting_user_authorization_code").body.challenge
+        self.assertIsInstance(claude, self.dto.AuthorizationCodeChallenge)
+        self.assertTrue(claude.verification_url.startswith("https://claude.com/cai/oauth/authorize"))
+
+        # Each URL is pinned to its provider's origin.
+        self.assert_dto_error(
+            "invalid",
+            lambda: self.dto.DeviceChallenge(
+                "https://claude.com/cai/oauth/authorize",
+                self.dto.UserCode("A-9"),
+                self.dto.UnixSec(1),
+            ),
+        )
+        self.assert_dto_error(
+            "invalid",
+            lambda: self.dto.AuthorizationCodeChallenge(
+                "https://auth.openai.com/codex/device", self.dto.UnixSec(1)
+            ),
+        )
+        # The authorization code is a secret: bounded, no whitespace/control, and
+        # never reflected in repr/str.
+        for bad in ("", "x" * 513, "has space", "tab\tx", "ctrl\x01x"):
+            self.assert_dto_error("invalid", lambda bad=bad: self.dto.AuthorizationCode(bad))
+        code = self.dto.AuthorizationCode("SECRET-CODE-1234")
+        self.assertNotIn("SECRET-CODE-1234", repr(code) + str(code))
+        self.assertNotIn("abcd-1234-ABCD-EFGH", repr(submit) + str(submit))
 
     def test_scalar_exact_boundaries_and_types(self):
         valid = (
@@ -292,11 +336,22 @@ class SupervisorDtoTests(unittest.TestCase):
         self.assert_dto_error("invalid", lambda: self.dto.decode_request(bytearray(raw)))
         self.assert_dto_error("invalid", lambda: self.dto.decode_request(BytesSubclass(raw)))
         self.assert_dto_error("invalid", lambda: self.dto.decode_request(b"\xff"))
+        # Claude is now a first-class provider on the control plane (control_dto.rs
+        # added it alongside codex), so a claude-scoped request DECODES.
+        claude_start = self.dto.decode_request(
+            self.requests["start"].replace(
+                b'"provider":"codex"', b'"provider":"claude"'
+            )
+        )
+        self.assertIs(
+            claude_start.body.ticket.binding.scope.provider, self.dto.Provider.CLAUDE
+        )
+        # An unknown provider is still rejected.
         self.assert_dto_error(
             "invalid",
             lambda: self.dto.decode_request(
                 self.requests["start"].replace(
-                    b'"provider":"codex"', b'"provider":"claude"'
+                    b'"provider":"codex"', b'"provider":"gemini"'
                 )
             ),
         )
