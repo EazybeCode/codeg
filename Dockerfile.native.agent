@@ -81,12 +81,17 @@ RUN setcap 'cap_chown,cap_dac_override,cap_setgid,cap_setuid,cap_setpcap,cap_net
 # set it imports (sandbox, egress, login profile, codex login egress).
 COPY --chown=0:0 scripts/operations/neev_agent_launch.py \
      scripts/operations/neev_agent_sandbox.py \
+     scripts/operations/neev_agent_ns_prelude.py \
      scripts/operations/neev_agent_credentials.py \
      scripts/operations/neev_credential_store.py \
      scripts/operations/neev_credential_volumes.py \
      scripts/operations/neev_agent_egress.py \
      scripts/operations/neev_login_network_profile.py \
      scripts/operations/neev_codex_login_egress.py \
+     scripts/operations/neev_provider_endpoints.py \
+     scripts/operations/neev_provider_egress.py \
+     scripts/operations/neev_claude_login_protocol.py \
+     scripts/operations/neev_codex_login_protocol.py \
      /opt/neev/scripts/operations/
 RUN chmod 0555 /opt/neev/scripts/operations/*.py
 
