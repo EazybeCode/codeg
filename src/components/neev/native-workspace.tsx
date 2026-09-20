@@ -35,7 +35,9 @@ import { cn } from "@/lib/utils"
 import {
   DEFAULT_SECTION,
   getActiveSection,
+  getOpenResource,
   setActiveSection,
+  setOpenResource,
   type Section,
 } from "@/lib/neev-workspace-prefs"
 import {
@@ -59,6 +61,7 @@ import {
 import { NativeAgentChats } from "./native-agent-chats"
 import {
   listNativeResources,
+  loadNativeResource,
   type NativeResource,
   type NativeResourceKind,
 } from "@/lib/neev-content-client"
@@ -314,6 +317,10 @@ function WorkspaceContent() {
   } | null>(null)
   const openNumber = useRef(0)
   const itemsRequest = useRef(0)
+  // Restoration is attempted once per mount. Until it has run, the persist
+  // effect below stays quiet — the section effect nulls `open` on mount, and
+  // writing that through would erase the very pointer we are about to read.
+  const restored = useRef(false)
   // Section switches change the resource kind: drop cached lists + any open item.
   useEffect(() => {
     itemsRequest.current += 1
@@ -381,6 +388,74 @@ function WorkspaceContent() {
       }),
     []
   )
+  const user = auth.session?.user.id
+  const orgId = org?.id
+  // Remember only WHICH resource is open, scoped to this user and org. The
+  // pointer confers nothing: it is re-fetched and re-authorized on restore.
+  useEffect(() => {
+    if (!restored.current || user === undefined || orgId === undefined) return
+    setOpenResource(
+      user,
+      orgId,
+      open
+        ? { resourceId: open.resource.id, nodeId: open.resource.nodeId }
+        : null
+    )
+  }, [open, user, orgId])
+  // Bring the reader back to what they were looking at after a reload or a
+  // dropped connection. Runs once, after the tree has loaded so the node the
+  // resource hangs under is known.
+  useEffect(() => {
+    if (
+      restored.current ||
+      loading ||
+      user === undefined ||
+      orgId === undefined
+    )
+      return
+    const stored = getOpenResource(user, orgId)
+    if (!stored) {
+      restored.current = true
+      return
+    }
+    const controller = new AbortController()
+    const restore = async () => {
+      try {
+        // The server is the authority: this 404s for a deleted resource and for
+        // one this member may no longer see, and `loadNativeResource` refuses a
+        // row belonging to another organization.
+        const resource = await loadNativeResource(
+          orgId,
+          stored.resourceId,
+          controller.signal
+        )
+        if (controller.signal.aborted) return
+        const kind: NativeResourceKind =
+          section === "docs" ? "document" : "chat"
+        // Only restore into the section that actually shows this kind, and only
+        // when its container is on screen; anything else would land the reader
+        // somewhere they did not leave.
+        if (
+          resource.kind === kind &&
+          resource.nodeId === stored.nodeId &&
+          nodes.some((node) => node.id === resource.nodeId)
+        ) {
+          setSelected(resource.nodeId)
+          setExpanded((old) => new Set([...old, resource.nodeId]))
+          setOpen({ resource, request: ++openNumber.current })
+          void loadItems(resource.nodeId)
+        }
+      } catch {
+        // Missing, deleted or no longer permitted: restore nothing and leave
+        // the reader in the section they chose. Never surfaced as an error —
+        // they did not ask for this fetch.
+      } finally {
+        if (!controller.signal.aborted) restored.current = true
+      }
+    }
+    void restore()
+    return () => controller.abort()
+  }, [loading, user, orgId, section, nodes, loadItems])
   const [editor, setEditor] = useState<Editor | null>(null),
     [name, setName] = useState(""),
     [parent, setParent] = useState<number | null>(null),

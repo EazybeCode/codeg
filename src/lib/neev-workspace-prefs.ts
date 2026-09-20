@@ -95,3 +95,62 @@ export function setActiveSection(value: Section): void {
     /* ignore */
   }
 }
+
+/**
+ * Which resource the reader had open, so a reload or a dropped connection
+ * returns them to it instead of an empty section.
+ *
+ * This is a POINTER, not content: an id plus the node it hangs under, scoped to
+ * the signed-in user AND organization so one browser profile cannot carry a
+ * selection across accounts or tenants. It confers nothing — the resource is
+ * re-fetched and re-authorized on restore, so a stale, deleted or
+ * no-longer-permitted id simply restores nothing. Unsaved drafts are
+ * deliberately not persisted.
+ */
+export type OpenResourceRef = { resourceId: string; nodeId: number }
+
+const OPEN_RESOURCE_PREFIX = "neev.ws.open"
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+function openResourceKey(userId: number, orgId: number): string {
+  return `${OPEN_RESOURCE_PREFIX}.${userId}:${orgId}`
+}
+
+export function getOpenResource(
+  userId: number,
+  orgId: number
+): OpenResourceRef | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = localStorage.getItem(openResourceKey(userId, orgId))
+    if (!raw) return null
+    const value = JSON.parse(raw) as Partial<OpenResourceRef>
+    if (
+      typeof value.resourceId !== "string" ||
+      !UUID.test(value.resourceId) ||
+      typeof value.nodeId !== "number" ||
+      !Number.isInteger(value.nodeId) ||
+      value.nodeId <= 0
+    )
+      return null
+    return { resourceId: value.resourceId, nodeId: value.nodeId }
+  } catch {
+    return null
+  }
+}
+
+export function setOpenResource(
+  userId: number,
+  orgId: number,
+  value: OpenResourceRef | null
+): void {
+  if (typeof window === "undefined") return
+  try {
+    const key = openResourceKey(userId, orgId)
+    if (value === null) localStorage.removeItem(key)
+    else localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    /* ignore */
+  }
+}
