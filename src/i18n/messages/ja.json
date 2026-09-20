@@ -143,7 +143,11 @@
     "attemptState_canceled": "サインインをキャンセルしました。",
     "attemptState_expired": "サインインは完了前に期限切れになりました。",
     "attemptState_failed": "サインインに失敗しました。",
-    "agentTestUnavailable": "接続のテストはまだ利用できません。"
+    "agentTestUnavailable": "接続のテストはまだ利用できません。",
+    "connectProviderNamed": "{name} に接続",
+    "reconnectProviderNamed": "{name} に再接続",
+    "disconnectProviderNamed": "{name} の接続を解除",
+    "cancelSignInNamed": "{name} のサインインをキャンセル"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

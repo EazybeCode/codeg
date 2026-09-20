@@ -143,7 +143,11 @@
     "attemptState_canceled": "Sign-in canceled.",
     "attemptState_expired": "Sign-in expired before it completed.",
     "attemptState_failed": "Sign-in failed.",
-    "agentTestUnavailable": "Testing a connection is not available yet."
+    "agentTestUnavailable": "Testing a connection is not available yet.",
+    "connectProviderNamed": "Connect {name}",
+    "reconnectProviderNamed": "Reconnect {name}",
+    "disconnectProviderNamed": "Disconnect {name}",
+    "cancelSignInNamed": "Cancel {name} sign-in"
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

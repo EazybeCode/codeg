@@ -23,10 +23,12 @@ import { Button } from "@/components/ui/button"
 import {
   cancelProviderConnect,
   disconnectProvider,
+  isValidRequestKey,
   loadAgentConnections,
   loadConnectAttempt,
   newRequestKey,
   startProviderConnect,
+  NEEV_AGENT_PROVIDERS,
   type NeevAgentConnection,
   type NeevAgentConnections,
   type NeevAgentProvider,
@@ -35,8 +37,11 @@ import {
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeError } from "./native-boundary"
 
-/** How often a pending sign-in is polled. */
+/** How often a pending sign-in is polled while the tab is visible. */
 const ATTEMPT_POLL_MS = 3_000
+/** Transient poll failures tolerated before the wait is reported as failed. */
+const POLL_RETRIES = 3
+const RUN_ID = /^[0-9a-f]{32}$/
 
 type Attempt = {
   provider: NeevAgentProvider
@@ -44,6 +49,56 @@ type Attempt = {
   expiresAt: number
   /** Kept so a retried cancel replays instead of queueing a second one. */
   cancelKey: string
+  /** The connect key that produced it, so a resumed wait can still clear it. */
+  connectKey: string
+}
+
+/**
+ * A sign-in outlives the page that started it, so the ids needed to *resume
+ * watching* it are remembered per user. These are ids and an idempotency key —
+ * never a credential, never connection state, which always comes from the
+ * server. A stale or malformed entry degrades to "no attempt in flight".
+ */
+function attemptStorageKey(userId: number, orgId: number): string {
+  return `neev.agent.attempt.${userId}:${orgId}`
+}
+
+function readStoredAttempt(key: string, now: number): Attempt | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return null
+    const value = JSON.parse(raw) as Partial<Attempt>
+    if (
+      !NEEV_AGENT_PROVIDERS.includes(value.provider as NeevAgentProvider) ||
+      typeof value.attemptId !== "string" ||
+      !RUN_ID.test(value.attemptId) ||
+      typeof value.expiresAt !== "number" ||
+      !Number.isSafeInteger(value.expiresAt) ||
+      typeof value.cancelKey !== "string" ||
+      !isValidRequestKey(value.cancelKey) ||
+      typeof value.connectKey !== "string" ||
+      !isValidRequestKey(value.connectKey) ||
+      // Already lapsed: there is nothing left to watch or cancel.
+      value.expiresAt * 1000 <= now
+    ) {
+      window.localStorage.removeItem(key)
+      return null
+    }
+    return value as Attempt
+  } catch {
+    return null
+  }
+}
+
+function writeStoredAttempt(key: string, attempt: Attempt | null): void {
+  if (typeof window === "undefined") return
+  try {
+    if (attempt === null) window.localStorage.removeItem(key)
+    else window.localStorage.setItem(key, JSON.stringify(attempt))
+  } catch {
+    /* ignore */
+  }
 }
 
 export function NativeAgentConnectionsPanel({
@@ -73,14 +128,40 @@ export function NativeAgentConnectionsPanel({
   const [busy, setBusy] = useState<NeevAgentProvider | null>(null)
   const [attempt, setAttempt] = useState<Attempt | null>(null)
   const [outcome, setOutcome] = useState<NeevAttemptState | null>(null)
-  // Per-provider connect keys: a retry after a lost response replays the same
-  // attempt rather than starting a second sign-in.
-  const connectKeys = useRef(new Map<NeevAgentProvider, string>())
+  // Per-provider connect keys for the current page. A resumed attempt carries
+  // its own key, so a reload never loses the ability to replay rather than
+  // start a second sign-in.
+  const pendingKeys = useRef(new Map<NeevAgentProvider, string>())
+
+  const user = auth.session?.user.id
+  const org = auth.session?.organization?.id
+  const storageKey =
+    user !== undefined && org !== undefined
+      ? attemptStorageKey(user, org)
+      : null
 
   const refresh = useCallback(() => {
     setRefreshToken((value) => value + 1)
     onRefresh?.()
   }, [onRefresh])
+
+  // A sign-in survives a reload: pick the attempt back up so the wait is still
+  // visible and — crucially — still cancellable.
+  useEffect(() => {
+    if (!storageKey) return
+    const resumed = readStoredAttempt(storageKey, Date.now())
+    if (!resumed) return
+    pendingKeys.current.set(resumed.provider, resumed.connectKey)
+    setAttempt(resumed)
+  }, [storageKey])
+
+  const remember = useCallback(
+    (next: Attempt | null) => {
+      setAttempt(next)
+      if (storageKey) writeStoredAttempt(storageKey, next)
+    },
+    [storageKey]
+  )
 
   useEffect(() => {
     if (!owned) return
@@ -104,11 +185,29 @@ export function NativeAgentConnectionsPanel({
   // Poll the pending sign-in until the server settles it. Nothing here decides
   // the outcome; it only reports the state the server returns.
   useEffect(() => {
-    if (!attempt) return
+    if (!attempt || !auth.session) return
     const controller = new AbortController()
     let timer = 0
+    let failures = 0
+    const settle = (state: NeevAttemptState) => {
+      setOutcome(state)
+      remember(null)
+      // Whatever happened, the connection row is the truth now.
+      refresh()
+    }
     const poll = async () => {
       if (controller.signal.aborted) return
+      // The server reclaims a lapsed attempt; stop waiting on it either way
+      // rather than polling something that can no longer settle.
+      if (attempt.expiresAt * 1000 <= Date.now()) {
+        settle("expired")
+        return
+      }
+      // A hidden tab has nobody watching: keep the loop alive, skip the work.
+      if (document.visibilityState !== "visible") {
+        timer = window.setTimeout(() => void poll(), pollMs)
+        return
+      }
       try {
         const state = await loadConnectAttempt(
           attempt.provider,
@@ -116,18 +215,23 @@ export function NativeAgentConnectionsPanel({
           controller.signal
         )
         if (controller.signal.aborted) return
+        failures = 0
         if (state.state !== "pending") {
-          setOutcome(state.state)
-          setAttempt(null)
-          // Whatever happened, the connection row is the truth now.
-          refresh()
+          settle(state.state)
           return
         }
       } catch (cause) {
         if (controller.signal.aborted) return
-        setError(cause)
-        setAttempt(null)
         auth.handleAuthorityError(cause)
+        failures += 1
+        // A blip should not abandon a live sign-in, but an endpoint that keeps
+        // failing must not be hammered forever either.
+        if (failures > POLL_RETRIES) {
+          setError(cause)
+          settle("failed")
+          return
+        }
+        timer = window.setTimeout(() => void poll(), pollMs * 2 ** failures)
         return
       }
       timer = window.setTimeout(() => void poll(), pollMs)
@@ -137,32 +241,35 @@ export function NativeAgentConnectionsPanel({
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [attempt, pollMs, refresh, auth])
+  }, [attempt, pollMs, refresh, remember, auth])
 
   async function connect(provider: NeevAgentProvider) {
     if (busy || !auth.session) return
     setBusy(provider)
     setError(null)
     setOutcome(null)
-    const keys = connectKeys.current
-    if (!keys.has(provider)) keys.set(provider, newRequestKey())
+    // One key per in-flight sign-in: a retry after a lost response replays the
+    // SAME attempt instead of starting a second one.
+    const connectKey = pendingKeys.current.get(provider) ?? newRequestKey()
+    pendingKeys.current.set(provider, connectKey)
     try {
       const started = await startProviderConnect(
         provider,
-        keys.get(provider) as string,
+        connectKey,
         auth.session.csrf,
         auth.signal
       )
       if (started.outcome === "pending")
-        setAttempt({
+        remember({
           provider,
           attemptId: started.attemptId,
           expiresAt: started.expiresAt,
           cancelKey: newRequestKey(),
+          connectKey,
         })
       else {
         // Already in its final state; the returned row is the truth.
-        keys.delete(provider)
+        pendingKeys.current.delete(provider)
         refresh()
       }
     } catch (cause) {
@@ -185,8 +292,8 @@ export function NativeAgentConnectionsPanel({
         auth.session.csrf,
         auth.signal
       )
-      connectKeys.current.delete(attempt.provider)
-      setAttempt(null)
+      pendingKeys.current.delete(attempt.provider)
+      remember(null)
       setOutcome("canceled")
       refresh()
     } catch (cause) {
@@ -209,7 +316,7 @@ export function NativeAgentConnectionsPanel({
         auth.session.csrf,
         auth.signal
       )
-      connectKeys.current.delete(provider)
+      pendingKeys.current.delete(provider)
       // The teardown is queued: the row moves to `disconnecting` and only the
       // server moves it on from there.
       refresh()
@@ -224,7 +331,7 @@ export function NativeAgentConnectionsPanel({
   const state = owned ? loaded : connections
   return (
     <section className="space-y-3 rounded-xl border p-5">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-medium">
           {heading ?? t("agentConnections")}
         </h2>
@@ -249,7 +356,7 @@ export function NativeAgentConnectionsPanel({
           )}
           <ul className="space-y-3">
             {state.connections.map((connection) => (
-              <li key={connection.provider} className="space-y-1">
+              <li key={connection.provider} className="space-y-2">
                 <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
                   <span className="font-medium">{connection.provider}</span>
                   <span className="text-muted-foreground">
@@ -258,7 +365,7 @@ export function NativeAgentConnectionsPanel({
                       : t(`connectionState_${connection.state}`)}
                   </span>
                   {connection.accountLabel && (
-                    <span className="truncate text-xs text-muted-foreground">
+                    <span className="min-w-0 truncate text-xs text-muted-foreground">
                       {connection.accountLabel}
                     </span>
                   )}
@@ -323,12 +430,23 @@ export function NativeAgentConnectionsPanel({
   function actionsFor(connection: NeevAgentConnection) {
     const provider = connection.provider
     const working = busy === provider
+    // Every provider renders the same verbs, so the accessible name has to say
+    // which one — otherwise two identical "Connect" buttons are ambiguous to a
+    // screen reader and to keyboard navigation.
+    const named = (
+      key:
+        | "connectProvider"
+        | "reconnectProvider"
+        | "disconnectProvider"
+        | "cancelSignIn"
+    ) => t(`${key}Named`, { name: provider })
     if (attempt?.provider === provider)
       return (
         <Button
           size="sm"
           variant="outline"
           disabled={working}
+          aria-label={named("cancelSignIn")}
           onClick={() => void cancel()}
         >
           {t("cancelSignIn")}
@@ -343,19 +461,19 @@ export function NativeAgentConnectionsPanel({
       connection.state === "unavailable"
     )
       return null
+    const reconnecting = connection.state === "reconnect_required"
     return (
       <>
         {connection.state !== "connected" && (
           <Button
             size="sm"
             disabled={working}
+            aria-label={named(
+              reconnecting ? "reconnectProvider" : "connectProvider"
+            )}
             onClick={() => void connect(provider)}
           >
-            {t(
-              connection.state === "reconnect_required"
-                ? "reconnectProvider"
-                : "connectProvider"
-            )}
+            {t(reconnecting ? "reconnectProvider" : "connectProvider")}
           </Button>
         )}
         {connection.state !== "not_signed_in" && (
@@ -363,6 +481,7 @@ export function NativeAgentConnectionsPanel({
             size="sm"
             variant="outline"
             disabled={working}
+            aria-label={named("disconnectProvider")}
             onClick={() => void disconnect(provider)}
           >
             {t("disconnectProvider")}

@@ -361,8 +361,8 @@ it("shows the caller's real provider connections instead of a static notice", as
   expect(screen.getByText("Reconnect needed")).toBeVisible()
   expect(screen.getByText("codex")).toBeVisible()
   // Real per-provider actions, matched to the state the server reports.
-  expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled()
-  expect(screen.getByRole("button", { name: "Reconnect" })).toBeEnabled()
+  expect(screen.getByRole("button", { name: "Connect claude" })).toBeEnabled()
+  expect(screen.getByRole("button", { name: "Reconnect codex" })).toBeEnabled()
   // No "Test connection": the server ships no route that could settle one.
   expect(
     screen.getByText("Testing a connection is not available yet.")

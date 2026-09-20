@@ -143,7 +143,11 @@
     "attemptState_canceled": "登入已取消。",
     "attemptState_expired": "登入在完成前已過期。",
     "attemptState_failed": "登入失敗。",
-    "agentTestUnavailable": "暫不支援測試連線。"
+    "agentTestUnavailable": "暫不支援測試連線。",
+    "connectProviderNamed": "連線 {name}",
+    "reconnectProviderNamed": "重新連線 {name}",
+    "disconnectProviderNamed": "中斷 {name}",
+    "cancelSignInNamed": "取消 {name} 登入"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

@@ -143,7 +143,11 @@
     "attemptState_canceled": "Anmeldung abgebrochen.",
     "attemptState_expired": "Die Anmeldung ist abgelaufen, bevor sie abgeschlossen war.",
     "attemptState_failed": "Die Anmeldung ist fehlgeschlagen.",
-    "agentTestUnavailable": "Eine Verbindung zu testen ist noch nicht verfügbar."
+    "agentTestUnavailable": "Eine Verbindung zu testen ist noch nicht verfügbar.",
+    "connectProviderNamed": "{name} verbinden",
+    "reconnectProviderNamed": "{name} neu verbinden",
+    "disconnectProviderNamed": "{name} trennen",
+    "cancelSignInNamed": "Anmeldung bei {name} abbrechen"
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",
