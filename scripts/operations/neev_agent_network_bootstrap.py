@@ -138,10 +138,24 @@ def setup_commands(plan_obj):
     commands += [
         [IP, "-n", PROXY_NETNS, "link", "set", "lo", "up"],
         [IP, "-n", PROXY_NETNS, "route", "add", "default", "via", _OUT_GATEWAY],
-        [SYSCTL, "-w", "net.ipv4.ip_forward=1"],
     ]
+    # NOTE: we do NOT write net.ipv4.ip_forward here. The scoped AppArmor profile
+    # denies /proc/sys writes and Docker may mount /proc/sys read-only; the deployment
+    # provisions the namespaced sysctl via `docker --sysctl net.ipv4.ip_forward=1`
+    # and `apply()` VERIFIES it is already 1 (fail-closed) instead of setting it.
     commands += _nft_ruleset(plan_obj.uplink)
     return commands
+
+
+_IP_FORWARD_PATH = "/proc/sys/net/ipv4/ip_forward"
+
+
+def _forwarding_enabled():  # pragma: no cover - reads the live procfs
+    try:
+        with open(_IP_FORWARD_PATH, "r", encoding="ascii") as handle:
+            return handle.read().strip() == "1"
+    except OSError:
+        return False
 
 
 def teardown_commands(plan_obj):
@@ -185,6 +199,11 @@ def assert_fail_closed(commands):
 def apply(plan_obj, runner):  # pragma: no cover - Linux execution path
     if platform.system() != "Linux":
         raise BootstrapError("unsupported")
+    # IP forwarding must be provisioned by the deployment (docker --sysctl
+    # net.ipv4.ip_forward=1); we verify rather than write it (the scoped profile
+    # denies /proc/sys writes and /proc/sys may be read-only). Fail closed if absent.
+    if not _forwarding_enabled():
+        raise BootstrapError("apply")
     commands = setup_commands(plan_obj)
     assert_fail_closed(commands)
     done = []
