@@ -157,9 +157,14 @@ function NativeWorkspaceTree({
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start">
                     <DropdownMenuItem
-                      onSelect={() => createContent(node, kind)}
+                      onSelect={() => createContent(node, "document")}
                     >
-                      {c(kind === "document" ? "newDocument" : "newChat")}
+                      {c("newDocument")}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() => createContent(node, "chat")}
+                    >
+                      {c("newChat")}
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => create(node)}>
                       {t("newSubfolder")}
@@ -546,8 +551,14 @@ function WorkspaceContent() {
                   menu?.getAttribute("aria-labelledby") ?? ""
                 ) ?? active
               navigationGuard.current(() => {
+                // Cross-section creation: switch to the created kind's section so the
+                // new item lands and appears under this container in the right list.
+                const nextSection = kind === "document" ? "docs" : "team"
+                setSectionState(nextSection)
+                setActiveSection(nextSection)
                 setSelected(node.id)
                 setOpen(null)
+                setExpanded((old) => new Set([...old, node.id]))
                 setCreation({
                   kind,
                   request: ++creationNumber.current,

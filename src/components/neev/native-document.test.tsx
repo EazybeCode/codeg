@@ -79,6 +79,10 @@ function LogoutControl() {
     <button onClick={() => void auth.logout()}>Log out test session</button>
   )
 }
+// The compact header collects history/reload/width/convert/export in one menu.
+async function openMenu(user: ReturnType<typeof userEvent.setup> = userEvent) {
+  await user.click(screen.getByRole("button", { name: "Content actions" }))
+}
 it("places document toolbar before the editor in keyboard order", async () => {
   const empty = { ...resource, contentRevision: "0" }
   mockNativeSession(undefined, {
@@ -93,7 +97,7 @@ it("places document toolbar before the editor in keyboard order", async () => {
   )
   expect(
     screen
-      .getByRole("button", { name: "History" })
+      .getByRole("button", { name: "Content actions" })
       .compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING
   ).toBeTruthy()
   expect(screen.queryByRole("region", { name: "Preview" })).toBeNull()
@@ -115,15 +119,15 @@ it("toggles the per-user document width and persists it (default full canvas)", 
   const section = screen.getByRole("region", { name: "Design document" })
   // Default is full canvas: the section does not impose the narrow 3xl column.
   expect(section).toHaveAttribute("data-doc-width", "full")
-  const toggle = screen.getByRole("button", { name: "Focus width" })
-  expect(toggle).toHaveAttribute("aria-pressed", "true")
-  // Toggling to Focus restores the narrow reading column and persists per user.
-  await userEvent.click(toggle)
+  // The width control lives in the compact header's Content actions menu.
+  await openMenu()
+  await userEvent.click(screen.getByRole("menuitem", { name: "Focus width" }))
   expect(section).toHaveAttribute("data-doc-width", "focus")
-  expect(
-    screen.getByRole("button", { name: "Full width" })
-  ).toHaveAttribute("aria-pressed", "false")
   expect(localStorage.getItem("neev.ws.doc-width")).toBe("focus")
+  await openMenu()
+  await userEvent.click(screen.getByRole("menuitem", { name: "Full width" }))
+  expect(section).toHaveAttribute("data-doc-width", "full")
+  expect(localStorage.getItem("neev.ws.doc-width")).toBe("full")
 })
 
 async function editRich(text: string) {
@@ -193,7 +197,8 @@ it("opens an unsaved document as rich and saves/reloads its canonical body with 
   expect(
     await screen.findByRole("textbox", { name: "Document content" })
   ).toHaveTextContent("Fresh rich")
-  await user.click(screen.getByRole("button", { name: "History" }))
+  await openMenu(user)
+  await user.click(await screen.findByRole("menuitem", { name: "History" }))
   expect(mock.unknown).toEqual([])
 })
 
@@ -266,8 +271,9 @@ it.each([false, true])(
     const user = userEvent.setup()
     mount()
     await screen.findByRole("textbox", { name: "Document content" })
+    await openMenu(user)
     await user.click(
-      screen.getByRole("button", { name: "Convert to rich document" })
+      screen.getByRole("menuitem", { name: "Convert to rich document" })
     )
     if (unsupported) {
       expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -312,12 +318,16 @@ it("copies the dirty rich JSON separately from explicitly labeled saved-only Mar
   const copy = vi.spyOn(navigator.clipboard, "writeText")
   mount()
   await editRich("Unsaved rich")
-  await user.click(screen.getByRole("button", { name: "Copy structured JSON" }))
+  await openMenu(user)
+  await user.click(
+    screen.getByRole("menuitem", { name: "Copy structured JSON" })
+  )
   expect(JSON.parse(copy.mock.lastCall![0])).toMatchObject({
     blocks: [{ content: [{ text: "Unsaved rich" }] }],
   })
+  await openMenu(user)
   await user.click(
-    screen.getByRole("button", {
+    screen.getByRole("menuitem", {
       name: /Export saved Markdown.*revision 1.*unsaved changes excluded/i,
     })
   )
@@ -336,7 +346,10 @@ it("copies a boundary-size dirty rich draft as bounded, valid recovery JSON", as
   // One paragraph/run with a 36-character UUID has 151 bytes of JSON overhead.
   const text = "x".repeat(1_048_576 - 151)
   await editRich(text)
-  await user.click(screen.getByRole("button", { name: "Copy structured JSON" }))
+  await openMenu(user)
+  await user.click(
+    screen.getByRole("menuitem", { name: "Copy structured JSON" })
+  )
   const copied = copy.mock.lastCall![0]
   expect(new TextEncoder().encode(copied).length).toBe(1_048_576)
   expect(parseRichDocument(JSON.parse(copied)).blocks).toMatchObject([
@@ -382,7 +395,8 @@ it("renders mixed history and restores the selected Markdown format while preser
   mount(current)
   await screen.findByRole("textbox", { name: "Document content" })
   expect(screen.getByText(/Audience follows source chat/)).toBeVisible()
-  await user.click(screen.getByRole("button", { name: "History" }))
+  await openMenu(user)
+  await user.click(await screen.findByRole("menuitem", { name: "History" }))
   const history = screen.getByRole("region", { name: "History" })
   expect(history).toHaveTextContent("Rich document")
   expect(history).toHaveTextContent("Markdown")
@@ -679,7 +693,8 @@ it("compares escaped historical text and restores it as a new revision with retr
   const user = userEvent.setup()
   mount()
   await screen.findByRole("textbox", { name: "Document content" })
-  await user.click(screen.getByRole("button", { name: "History" }))
+  await openMenu(user)
+  await user.click(await screen.findByRole("menuitem", { name: "History" }))
   expect(document.querySelector("time")).toHaveAttribute(
     "datetime",
     "2023-11-14T22:13:20.000Z"
@@ -730,7 +745,8 @@ it("returns focus to the revision trigger when Escape closes comparison", async 
   const user = userEvent.setup()
   mount()
   await screen.findByRole("textbox", { name: "Document content" })
-  await user.click(screen.getByRole("button", { name: "History" }))
+  await openMenu(user)
+  await user.click(await screen.findByRole("menuitem", { name: "History" }))
   const trigger = screen.getByRole("button", { name: "Compare revision 2" })
   trigger.focus()
   await user.keyboard("{Enter}")
@@ -796,7 +812,8 @@ it.each([
           }) as HTMLElement & { editor: Editor }
         ).editor
       : null
-    await user.click(screen.getByRole("button", { name: "History" }))
+    await openMenu(user)
+    await user.click(await screen.findByRole("menuitem", { name: "History" }))
     const comparisonTrigger = screen.getByRole("button", {
       name: "Compare revision 1",
     })
@@ -1036,7 +1053,8 @@ it("reuses unchanged body and history pages while polling authority, then merges
   const user = userEvent.setup()
   mount()
   await screen.findByRole("textbox", { name: "Document content" })
-  await user.click(screen.getByRole("button", { name: "History" }))
+  await openMenu(user)
+  await user.click(await screen.findByRole("menuitem", { name: "History" }))
   await user.click(screen.getByRole("button", { name: "Load more" }))
   expect(
     await screen.findByRole("button", { name: "Compare revision 101" })
@@ -1090,13 +1108,12 @@ it("keeps a dirty draft and recovery controls when foreground Compare has unavai
   )
   expect(await screen.findByRole("alert")).toBeVisible()
   expect(editor).toHaveValue("seed private draft")
-  for (const name of [
-    "Save",
-    "Copy draft",
-    "Reload latest",
-    "Compare with latest",
-  ])
+  // Save + Compare stay visible; Copy draft + Reload latest live in the header menu.
+  for (const name of ["Save", "Compare with latest"])
     expect(screen.getByRole("button", { name })).toBeEnabled()
   expect(screen.queryByRole("dialog")).toBeNull()
+  await openMenu(user)
+  for (const name of ["Copy draft", "Reload latest"])
+    expect(screen.getByRole("menuitem", { name })).toBeEnabled()
   expect(mock.unknown).toEqual([])
 })

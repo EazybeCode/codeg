@@ -1,12 +1,18 @@
 "use client"
 
-import { ArrowLeft, Maximize2, Minimize2 } from "lucide-react"
+import { ArrowLeft, MoreHorizontal } from "lucide-react"
 
 import { useEffect, useRef, useState } from "react"
 import dynamic from "next/dynamic"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { NativeClientError } from "@/lib/neev-client"
 import {
   loadNativeResource,
@@ -23,7 +29,10 @@ import {
 } from "@/lib/neev-content-client"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNativeAuth } from "./native-auth-provider"
-import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
+import {
+  NativeDialogContent as DialogContent,
+  NativeDropdownMenuContent as DropdownMenuContent,
+} from "./native-suspended-surface"
 import { NativeError } from "./native-boundary"
 import { NativeMarkdown } from "./native-markdown"
 import { NativeRichView } from "./native-rich-view"
@@ -67,11 +76,26 @@ function BodyView({ body, source = false }: { body: Body; source?: boolean }) {
   )
 }
 
+/** Creator actions bubbled from NativeContent so the document renders ONE header
+ *  (no separate action strip). All handlers keep NativeContent's dialogs/guards. */
+export type ResourceActions = {
+  isCreator: boolean
+  archived: boolean
+  visibility: "private" | "organization"
+  shareable: boolean
+  disabled: boolean
+  onRename: () => void
+  onShare: () => void
+  onMakePrivate: () => void
+  onArchiveToggle: () => void
+  onMove: () => void
+}
 type Props = {
   resource: NativeResource
   onBack: () => void
   onChanged: (resource: NativeResource) => void
   onDirtyChange: (dirty: boolean) => void
+  actions?: ResourceActions
 }
 type Comparison = {
   resource: NativeResource
@@ -99,7 +123,13 @@ export function NativeDocument(props: Props) {
     return null
   return <Document key={`${auth.scopeKey}:${props.resource.id}`} {...props} />
 }
-function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
+function Document({
+  resource,
+  onBack,
+  onChanged,
+  onDirtyChange,
+  actions,
+}: Props) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
@@ -551,7 +581,9 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         }
       }}
     >
-      <div className="flex items-center justify-between">
+      {/* One compact header: context + truthful status + Save/Share + a More menu
+          (rename/archive/move/history/reload/width/export) — no stacked rows. */}
+      <header className="sticky top-0 z-10 -mx-7 flex items-center gap-2 border-b bg-background px-7 py-2 sm:-mx-12 sm:px-12">
         <Button
           variant="ghost"
           size="icon"
@@ -561,25 +593,148 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         >
           <ArrowLeft aria-hidden />
         </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={docWidth === "full" ? t("focusWidth") : t("fullWidth")}
-          title={docWidth === "full" ? t("focusWidth") : t("fullWidth")}
-          aria-pressed={docWidth === "full"}
-          onClick={toggleDocWidth}
+        <span
+          className="min-w-0 flex-1 truncate text-sm font-medium"
+          title={latest.title}
         >
-          {docWidth === "full" ? (
-            <Minimize2 aria-hidden />
-          ) : (
-            <Maximize2 aria-hidden />
-          )}
-        </Button>
-      </div>
-      <div className="space-y-3 pb-5 pt-8 sm:pt-12">
-        <h2 className="break-words text-4xl font-semibold leading-tight">
           {latest.title}
-        </h2>
+        </span>
+        <span
+          role="status"
+          className="hidden text-xs text-muted-foreground sm:inline"
+        >
+          {saving
+            ? n("working")
+            : saved
+              ? t("saved")
+              : dirty.current
+                ? t("unsaved")
+                : ""}
+        </span>
+        {loaded && (
+          <Button
+            size="sm"
+            disabled={saving || latest.archived || !dirty.current}
+            onClick={() => void save()}
+          >
+            {saving ? n("working") : n("save")}
+          </Button>
+        )}
+        {actions?.isCreator && actions.shareable && (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={actions.disabled}
+            onClick={
+              actions.visibility === "private"
+                ? actions.onShare
+                : actions.onMakePrivate
+            }
+          >
+            {t(actions.visibility === "private" ? "share" : "makePrivate")}
+          </Button>
+        )}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={t("resourceActions")}
+            >
+              <MoreHorizontal aria-hidden />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            {actions?.isCreator && (
+              <DropdownMenuItem
+                disabled={actions.disabled}
+                onSelect={actions.onRename}
+              >
+                {t("rename")}
+              </DropdownMenuItem>
+            )}
+            {actions?.isCreator && (
+              <DropdownMenuItem
+                disabled={actions.disabled}
+                onSelect={actions.onArchiveToggle}
+              >
+                {t(actions.archived ? "reopen" : "archive")}
+              </DropdownMenuItem>
+            )}
+            {actions?.isCreator && (
+              <DropdownMenuItem
+                disabled={actions.disabled}
+                onSelect={actions.onMove}
+              >
+                {t("move")}
+              </DropdownMenuItem>
+            )}
+            {actions?.isCreator && <DropdownMenuSeparator />}
+            <DropdownMenuItem
+              disabled={!loaded || busy || saving}
+              onSelect={() => setHistory(!history)}
+            >
+              {t("history")}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={!loaded || busy || saving}
+              onSelect={() => setReload(true)}
+            >
+              {t("reloadLatest")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={toggleDocWidth}>
+              {docWidth === "full" ? t("focusWidth") : t("fullWidth")}
+            </DropdownMenuItem>
+            {loaded && draft.format === "markdown" && (
+              <DropdownMenuItem
+                disabled={saving || latest.archived}
+                onSelect={() => {
+                  try {
+                    setConversion(importMarkdown(draft.markdown))
+                    setConversionFailed(false)
+                  } catch {
+                    setConversionFailed(true)
+                  }
+                }}
+              >
+                {t("convertRich")}
+              </DropdownMenuItem>
+            )}
+            {loaded && draft.format === "blocks" && savedExport?.document && (
+              <DropdownMenuItem
+                onSelect={() => {
+                  void navigator.clipboard
+                    .writeText(savedExport.markdown)
+                    .catch(fail)
+                }}
+              >
+                {t("exportSavedMarkdown", {
+                  revision: savedExport.revision.revision,
+                })}
+              </DropdownMenuItem>
+            )}
+            {loaded && dirty.current && (
+              <DropdownMenuItem
+                onSelect={() => {
+                  void navigator.clipboard
+                    .writeText(
+                      draftRef.current.format === "blocks"
+                        ? JSON.stringify(draftRef.current.document)
+                        : draftRef.current.markdown
+                    )
+                    .catch(fail)
+                }}
+              >
+                {t(draft.format === "blocks" ? "copyRichDraft" : "copyDraft")}
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </header>
+      <div className="space-y-2 pb-4 pt-6">
+        <h1 className="break-words text-3xl font-semibold leading-tight sm:text-4xl">
+          {latest.title}
+        </h1>
         <p className="text-xs text-muted-foreground">
           {t(latest.visibility)}
           {latest.originChatId ? ` · ${t("sourceAudience")}` : ""}
@@ -607,79 +762,7 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
       ) : loading ? (
         <p role="status">{n("loading")}</p>
       ) : (
-        <div className="flex flex-col gap-5">
-          <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b bg-background py-2">
-            <Button
-              disabled={saving || latest.archived || !dirty.current}
-              onClick={() => void save()}
-            >
-              {saving ? n("working") : n("save")}
-            </Button>
-            <Button
-              variant="ghost"
-              disabled={busy || saving}
-              onClick={() => setHistory(!history)}
-            >
-              {t("history")}
-            </Button>
-            <Button
-              variant="ghost"
-              disabled={busy || saving}
-              onClick={() => setReload(true)}
-            >
-              {t("reloadLatest")}
-            </Button>
-            {dirty.current && (
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  void navigator.clipboard
-                    .writeText(
-                      draftRef.current.format === "blocks"
-                        ? JSON.stringify(draftRef.current.document)
-                        : draftRef.current.markdown
-                    )
-                    .catch(fail)
-                }}
-              >
-                {t(draft.format === "blocks" ? "copyRichDraft" : "copyDraft")}
-              </Button>
-            )}
-            {draft.format === "markdown" && (
-              <Button
-                variant="ghost"
-                disabled={saving || latest.archived}
-                onClick={() => {
-                  try {
-                    setConversion(importMarkdown(draft.markdown))
-                    setConversionFailed(false)
-                  } catch {
-                    setConversionFailed(true)
-                  }
-                }}
-              >
-                {t("convertRich")}
-              </Button>
-            )}
-            {draft.format === "blocks" && savedExport?.document && (
-              <Button
-                variant="ghost"
-                className="h-auto min-w-0 max-w-full shrink whitespace-normal text-left"
-                onClick={() => {
-                  void navigator.clipboard
-                    .writeText(savedExport.markdown)
-                    .catch(fail)
-                }}
-              >
-                {t("exportSavedMarkdown", {
-                  revision: savedExport.revision.revision,
-                })}
-              </Button>
-            )}
-            <span role="status" className="text-xs text-muted-foreground">
-              {saved ? t("saved") : dirty.current ? t("unsaved") : ""}
-            </span>
-          </div>
+        <div className="flex flex-col gap-4">
           {draft.format === "blocks" ? (
             <NativeRichEditor
               key={`${auth.scopeKey}:${resource.id}:${visibleEditorGeneration}`}
