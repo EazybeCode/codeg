@@ -1,6 +1,6 @@
 "use client"
 
-import { ArrowLeft, MoreHorizontal } from "lucide-react"
+import { ArrowLeft, Lock, MoreHorizontal, Users } from "lucide-react"
 
 import { useEffect, useRef, useState } from "react"
 import dynamic from "next/dynamic"
@@ -627,6 +627,11 @@ function Document({
               variant="ghost"
               size="sm"
               disabled={actions.disabled}
+              // Icon-only on narrow viewports so the title keeps its room; the
+              // accessible name is the full sentence at every width.
+              aria-label={t(
+                actions.visibility === "private" ? "share" : "makePrivate"
+              )}
               aria-describedby={
                 actions.visibility === "organization"
                   ? "neev-make-private-warning"
@@ -638,7 +643,14 @@ function Document({
                   : actions.onMakePrivate
               }
             >
-              {t(actions.visibility === "private" ? "share" : "makePrivate")}
+              {actions.visibility === "private" ? (
+                <Users aria-hidden />
+              ) : (
+                <Lock aria-hidden />
+              )}
+              <span className="hidden sm:inline">
+                {t(actions.visibility === "private" ? "share" : "makePrivate")}
+              </span>
             </Button>
             {actions.visibility === "organization" && (
               <p id="neev-make-private-warning" className="sr-only">

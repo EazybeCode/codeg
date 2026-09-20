@@ -588,7 +588,7 @@ function AgentSessionView({
       className="flex min-h-0 flex-1 flex-col"
       aria-label={session.title}
     >
-      <div className="flex shrink-0 items-start gap-3 px-5 py-5 sm:px-8">
+      <div className="flex shrink-0 items-start gap-2 px-4 py-3 sm:gap-3 sm:px-8 sm:py-5">
         <Button
           variant="ghost"
           size="icon"
@@ -598,14 +598,17 @@ function AgentSessionView({
         >
           <ArrowLeft aria-hidden />
         </Button>
-        <div className="min-w-0 flex-1 space-y-1">
-          <h2 className="break-words text-lg font-semibold">{session.title}</h2>
-          <p className="text-xs text-muted-foreground">
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <h2
+            className="truncate text-base font-semibold sm:text-lg"
+            title={session.title}
+          >
+            {session.title}
+          </h2>
+          <p className="truncate text-xs text-muted-foreground">
             {session.provider} · {session.model} · {t("private")}
-            {session.archived ? ` · ${t("archived")}` : ""}
-          </p>
-          <p role="status" className="text-xs text-muted-foreground">
-            {runStatusLabel()}
+            {session.archived ? ` · ${t("archived")}` : ""} ·{" "}
+            <span role="status">{runStatusLabel()}</span>
           </p>
         </div>
         <DropdownMenu>
@@ -639,7 +642,7 @@ function AgentSessionView({
         <ol
           ref={history}
           aria-label={t("agentTurns")}
-          className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-5 py-6 sm:px-8"
+          className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 py-4 sm:px-8 sm:py-6"
         >
           {turns.map((turn) => (
             <li key={turn.id} className="mx-auto w-full max-w-3xl space-y-3">
@@ -676,7 +679,7 @@ function AgentSessionView({
           event.preventDefault()
           void send()
         }}
-        className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-5 pb-5 pt-3 sm:px-8"
+        className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-4 pb-3 pt-2 sm:px-8 sm:pb-5 sm:pt-3"
       >
         <div className="rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring">
           <label className="block">
