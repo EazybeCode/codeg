@@ -360,12 +360,12 @@ it("shows the caller's real provider connections instead of a static notice", as
   expect(await screen.findByText("Not signed in")).toBeVisible()
   expect(screen.getByText("Reconnect needed")).toBeVisible()
   expect(screen.getByText("codex")).toBeVisible()
-  // Honest about the actions the server does not expose yet, rather than
-  // rendering buttons that would do nothing.
+  // Real per-provider actions, matched to the state the server reports.
+  expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled()
+  expect(screen.getByRole("button", { name: "Reconnect" })).toBeEnabled()
+  // No "Test connection": the server ships no route that could settle one.
   expect(
-    screen.getByText(
-      "Signing in, reconnecting and disconnecting are not available here yet."
-    )
+    screen.getByText("Testing a connection is not available yet.")
   ).toBeVisible()
   // Refresh genuinely re-reads the server's view.
   await user.click(screen.getByRole("button", { name: "Refresh status" }))

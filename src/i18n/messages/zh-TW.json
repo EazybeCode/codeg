@@ -132,7 +132,18 @@
     "agentModelHint": "使用 default 表示提供者的預設模型，或輸入它支援的模型識別碼。",
     "agentPostsToTeam": "你的提問和智能體的回覆都會發佈到此對話中。",
     "agentAuthored": "智能體 · 由 {name} 提問",
-    "agentConnectActionsPending": "此處暫不支援登入、重新連線和中斷連線。"
+    "connectProvider": "連線",
+    "reconnectProvider": "重新連線",
+    "disconnectProvider": "中斷連線",
+    "cancelSignIn": "取消登入",
+    "awaitingSignIn": "正在等待登入…",
+    "signInExpires": "到期時間",
+    "attemptState_pending": "登入進行中。",
+    "attemptState_completed": "已登入。",
+    "attemptState_canceled": "登入已取消。",
+    "attemptState_expired": "登入在完成前已過期。",
+    "attemptState_failed": "登入失敗。",
+    "agentTestUnavailable": "暫不支援測試連線。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",
