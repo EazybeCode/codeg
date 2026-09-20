@@ -81,6 +81,33 @@ existing member idempotent, non-admin denial, rate-limit, owner/admin authz).
 Frontend vitest for the settings controls + join preview/confirm + error states +
 locale parity.
 
+## EXACT migration wiring (reverse-engineered from db/mod.rs::initialize)
+The live prod DB is at `gateway_migration::SCHEMA_VERSION = 8`. Current design:
+each intermediate arm (v2..v7) advances to the status7 state then FALLS THROUGH to
+a shared tail that runs `gateway_migration::upgrade` + sets version 8; the v8 arm is
+TERMINAL (`validate…; return Ok`). To add v9 without breaking the v8 prod DB:
+1. `org_code_migration.rs`: `SCHEMA_VERSION = 9`, `TABLE_NAMES=["neev_org_join_codes"]`,
+   `upgrade(tx)` (CREATE TABLE + unique index on code_hash), `validate(tx)` (bounded
+   scalar/type scan like the others; simpler — no authority store).
+2. `mod org_code_migration;` in db/mod.rs.
+3. Add `v9_expected = v8_expected ∪ org_code TABLE_NAMES`; add `&& names != v9_expected`
+   to the inventory guard.
+4. Fresh-install branch: after `gateway_migration::upgrade`, add
+   `org_code_migration::upgrade(&tx)`; change the marker insert to
+   `org_code_migration::SCHEMA_VERSION`.
+5. Move `gateway_migration::upgrade` OUT of the shared tail and INTO the END of each
+   v2..v7 arm (so after any intermediate arm, gateway tables exist). The v8 arm keeps
+   its validates but DROPS `return Ok` (falls through). New shared tail becomes
+   `org_code_migration::upgrade(&tx)` + `UPDATE neev_schema_version SET version =
+   org_code_migration::SCHEMA_VERSION`. Add a TERMINAL v9 arm:
+   `org_code_migration::SCHEMA_VERSION if names == v9_expected => { …validate all incl
+   org_code; return Ok }`.
+6. Update `validate_content_snapshot` chain if it must recognize v9 (check its callers).
+GUARDRAIL: the db migration tests (search `initialize` / version-upgrade tests in
+`db/*_tests.rs`) MUST cover fresh→v9 AND v8→v9. Run
+`cargo test --no-default-features --bin codeg-server --lib` green before shipping; a
+mistake here breaks prod startup on next deploy.
+
 ## Status
 NOT STARTED beyond this plan. Backend compiles locally
 (`cargo check --no-default-features --bin codeg-server` = clean baseline). Implement
