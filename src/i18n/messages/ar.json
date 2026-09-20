@@ -132,7 +132,18 @@
     "agentModelHint": "استخدم default للنموذج الافتراضي للمزود، أو اكتب معرّف نموذج يدعمه.",
     "agentPostsToTeam": "يتم نشر سؤالك ورد الوكيل كليهما في هذه المحادثة.",
     "agentAuthored": "وكيل · سأله {name}",
-    "agentConnectActionsPending": "تسجيل الدخول وإعادة الاتصال وقطع الاتصال غير متاحة هنا بعد."
+    "connectProvider": "اتصال",
+    "reconnectProvider": "إعادة الاتصال",
+    "disconnectProvider": "قطع الاتصال",
+    "cancelSignIn": "إلغاء تسجيل الدخول",
+    "awaitingSignIn": "في انتظار تسجيل الدخول…",
+    "signInExpires": "ينتهي في",
+    "attemptState_pending": "تسجيل الدخول قيد التنفيذ.",
+    "attemptState_completed": "تم تسجيل الدخول.",
+    "attemptState_canceled": "تم إلغاء تسجيل الدخول.",
+    "attemptState_expired": "انتهت صلاحية تسجيل الدخول قبل اكتماله.",
+    "attemptState_failed": "فشل تسجيل الدخول.",
+    "agentTestUnavailable": "اختبار الاتصال غير متاح بعد."
   },
   "Native": {
     "callbackConflict": "تتعارض طريقة تسجيل الدخول هذه مع حساب موجود. استخدم طريقة تسجيل الدخول الأصلية، ثم افتح الإعدادات لربط طريقة أخرى. لا تُدمج الحسابات تلقائيًا أبدًا.",

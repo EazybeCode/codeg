@@ -316,6 +316,30 @@ export function parseAgentTurn(value: unknown): NeevAgentTurn {
   }
 }
 
+export function parseConnection(value: unknown): NeevAgentConnection {
+  const entry = exact(value, [
+    "provider",
+    "state",
+    "accountLabel",
+    "checkedAt",
+    "errorCode",
+  ])
+  const provider = text(entry.provider)
+  const state = text(entry.state)
+  if (
+    !NEEV_AGENT_PROVIDERS.includes(provider as NeevAgentProvider) ||
+    !CONNECTION_STATES.includes(state as NeevConnectionState)
+  )
+    return invalid()
+  return {
+    provider: provider as NeevAgentProvider,
+    state: state as NeevConnectionState,
+    accountLabel: entry.accountLabel === null ? null : text(entry.accountLabel),
+    checkedAt: nullableTimestamp(entry.checkedAt),
+    errorCode: nullableCode(entry.errorCode),
+  }
+}
+
 export function parseAgentConnections(value: unknown): NeevAgentConnections {
   const object = exact(value, ["runtimeEnabled", "connections"])
   if (
@@ -324,30 +348,7 @@ export function parseAgentConnections(value: unknown): NeevAgentConnections {
     object.connections.length > NEEV_AGENT_PROVIDERS.length
   )
     return invalid()
-  const connections = object.connections.map((item) => {
-    const entry = exact(item, [
-      "provider",
-      "state",
-      "accountLabel",
-      "checkedAt",
-      "errorCode",
-    ])
-    const provider = text(entry.provider)
-    const state = text(entry.state)
-    if (
-      !NEEV_AGENT_PROVIDERS.includes(provider as NeevAgentProvider) ||
-      !CONNECTION_STATES.includes(state as NeevConnectionState)
-    )
-      return invalid()
-    return {
-      provider: provider as NeevAgentProvider,
-      state: state as NeevConnectionState,
-      accountLabel:
-        entry.accountLabel === null ? null : text(entry.accountLabel),
-      checkedAt: nullableTimestamp(entry.checkedAt),
-      errorCode: nullableCode(entry.errorCode),
-    }
-  })
+  const connections = object.connections.map(parseConnection)
   // With no runtime bound nothing can be exercised, so the server must not have
   // reported a usable connection. Refuse rather than render a false "Connected".
   if (
@@ -695,6 +696,204 @@ export async function invokeTeamAgent(
   // echoed back as agent-authored would mean the wrong row came back.
   if (invocation.message.authorKind !== "human") invalid()
   return invocation
+}
+
+/**
+ * Per-user provider sign-in (spec §5.4).
+ *
+ * `connect` records the intent and hands back an attempt to poll; completion is
+ * performed server-side by the supervisor, so nothing here may report
+ * "connected" on its own — the attempt's own state, and then the connection
+ * itself, are the only sources of truth.
+ */
+export type NeevAttemptState =
+  | "pending"
+  | "completed"
+  | "canceled"
+  | "expired"
+  | "failed"
+
+const ATTEMPT_STATES: readonly NeevAttemptState[] = [
+  "pending",
+  "completed",
+  "canceled",
+  "expired",
+  "failed",
+]
+
+export type NeevConnectOutcome =
+  | { outcome: "pending"; attemptId: string; expiresAt: number }
+  | { outcome: "settled"; connection: NeevAgentConnection }
+
+export interface NeevConnectAttempt {
+  state: NeevAttemptState
+  expiresAt: number
+}
+
+export interface NeevOperationReceipt {
+  operationId: string
+  generation: string
+}
+
+/**
+ * The server's idempotency-key rule. Replaying a key returns the SAME attempt
+ * rather than starting a second sign-in, so a retry after a lost response can
+ * never leave two logins in flight.
+ */
+export function isValidRequestKey(value: string): boolean {
+  return (
+    value.length >= 1 &&
+    value.length <= 64 &&
+    /^[A-Za-z0-9_-]+$/.test(value) &&
+    !value.startsWith("__neev_")
+  )
+}
+
+/** A request key that satisfies the server's rule and is safe to retry with. */
+export function newRequestKey(): string {
+  return crypto.randomUUID()
+}
+
+function assertProvider(value: string): asserts value is NeevAgentProvider {
+  if (!NEEV_AGENT_PROVIDERS.includes(value as NeevAgentProvider))
+    invalidRequest()
+}
+
+function assertRequestKey(value: string): void {
+  if (!isValidRequestKey(value)) invalidRequest()
+}
+
+/** Server-side ids are 32 lowercase hex, the same shape as a run id. */
+function hexId(value: unknown): string {
+  const parsed = text(value)
+  if (!RUN_ID.test(parsed)) return invalid()
+  return parsed
+}
+
+function nonNegativeInteger(value: unknown): string {
+  const parsed = text(value)
+  if (!/^(0|[1-9]\d{0,18})$/.test(parsed)) return invalid()
+  return parsed
+}
+
+export function parseConnectOutcome(value: unknown): NeevConnectOutcome {
+  const object = exact(value, [
+    "outcome",
+    "attemptId",
+    "expiresAt",
+    "connection",
+  ])
+  if (object.outcome === "pending") {
+    // A pending attempt must identify itself and say when it lapses, or the UI
+    // could show an indefinite "waiting" it can never resolve or cancel.
+    if (object.connection !== null) return invalid()
+    return {
+      outcome: "pending",
+      attemptId: hexId(object.attemptId),
+      expiresAt: timestamp(object.expiresAt),
+    }
+  }
+  if (object.outcome === "settled") {
+    if (object.attemptId !== null || object.expiresAt !== null) return invalid()
+    return {
+      outcome: "settled",
+      connection: parseConnection(object.connection),
+    }
+  }
+  return invalid()
+}
+
+export function parseConnectAttempt(value: unknown): NeevConnectAttempt {
+  const object = exact(value, ["state", "expiresAt"])
+  const state = text(object.state)
+  if (!ATTEMPT_STATES.includes(state as NeevAttemptState)) return invalid()
+  return {
+    state: state as NeevAttemptState,
+    expiresAt: timestamp(object.expiresAt),
+  }
+}
+
+export function parseOperationReceipt(value: unknown): NeevOperationReceipt {
+  const object = exact(value, ["operationId", "generation"])
+  return {
+    operationId: hexId(object.operationId),
+    generation: nonNegativeInteger(object.generation),
+  }
+}
+
+/** Begin (or replay) a sign-in for one provider. */
+export async function startProviderConnect(
+  provider: string,
+  requestKey: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevConnectOutcome> {
+  assertProvider(provider)
+  assertRequestKey(requestKey)
+  return parseConnectOutcome(
+    await contentMutation(
+      `/api/neev/agent/connections/${provider}/connect`,
+      { requestKey },
+      csrf,
+      signal
+    )
+  )
+}
+
+/** Poll a sign-in. Side-effect free, and visible only to its own session. */
+export async function loadConnectAttempt(
+  provider: string,
+  attemptId: string,
+  signal?: AbortSignal
+): Promise<NeevConnectAttempt> {
+  assertProvider(provider)
+  if (!RUN_ID.test(attemptId)) invalidRequest()
+  return parseConnectAttempt(
+    await contentGet(
+      `/api/neev/agent/connections/${provider}/attempts/${attemptId}`,
+      signal
+    )
+  )
+}
+
+/** Abandon an in-flight sign-in; the server queues the same cleanup a crash would. */
+export async function cancelProviderConnect(
+  provider: string,
+  attemptId: string,
+  requestKey: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevOperationReceipt> {
+  assertProvider(provider)
+  assertRequestKey(requestKey)
+  if (!RUN_ID.test(attemptId)) invalidRequest()
+  return parseOperationReceipt(
+    await contentMutation(
+      `/api/neev/agent/connections/${provider}/cancel`,
+      { attemptId, requestKey },
+      csrf,
+      signal
+    )
+  )
+}
+
+/** Sign this user out of this provider; credential teardown is a queued cleanup. */
+export async function disconnectProvider(
+  provider: string,
+  requestKey: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevOperationReceipt> {
+  assertProvider(provider)
+  assertRequestKey(requestKey)
+  return parseOperationReceipt(
+    await contentMutation(
+      `/api/neev/agent/connections/${provider}/disconnect`,
+      { requestKey },
+      csrf,
+      signal
+    )
+  )
 }
 
 export type NeevRunPhase = "streaming" | "reconnecting" | "lost"

@@ -132,7 +132,18 @@
     "agentModelHint": "Nutze default für das Standardmodell des Anbieters oder gib eine unterstützte Modellkennung ein.",
     "agentPostsToTeam": "Deine Frage und die Antwort des Agenten werden beide in diesem Gespräch gepostet.",
     "agentAuthored": "Agent · gefragt von {name}",
-    "agentConnectActionsPending": "Anmelden, neu verbinden und trennen sind hier noch nicht verfügbar."
+    "connectProvider": "Verbinden",
+    "reconnectProvider": "Neu verbinden",
+    "disconnectProvider": "Trennen",
+    "cancelSignIn": "Anmeldung abbrechen",
+    "awaitingSignIn": "Warten auf die Anmeldung…",
+    "signInExpires": "Läuft ab",
+    "attemptState_pending": "Anmeldung läuft.",
+    "attemptState_completed": "Angemeldet.",
+    "attemptState_canceled": "Anmeldung abgebrochen.",
+    "attemptState_expired": "Die Anmeldung ist abgelaufen, bevor sie abgeschlossen war.",
+    "attemptState_failed": "Die Anmeldung ist fehlgeschlagen.",
+    "agentTestUnavailable": "Eine Verbindung zu testen ist noch nicht verfügbar."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

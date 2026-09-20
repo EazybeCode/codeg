@@ -132,7 +132,18 @@
     "agentModelHint": "Use default for the provider's own default, or type a model identifier it supports.",
     "agentPostsToTeam": "Your question and the agent's reply are both posted to this conversation.",
     "agentAuthored": "agent · asked by {name}",
-    "agentConnectActionsPending": "Signing in, reconnecting and disconnecting are not available here yet."
+    "connectProvider": "Connect",
+    "reconnectProvider": "Reconnect",
+    "disconnectProvider": "Disconnect",
+    "cancelSignIn": "Cancel sign-in",
+    "awaitingSignIn": "Waiting for sign-in…",
+    "signInExpires": "Expires",
+    "attemptState_pending": "Sign-in in progress.",
+    "attemptState_completed": "Signed in.",
+    "attemptState_canceled": "Sign-in canceled.",
+    "attemptState_expired": "Sign-in expired before it completed.",
+    "attemptState_failed": "Sign-in failed.",
+    "agentTestUnavailable": "Testing a connection is not available yet."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

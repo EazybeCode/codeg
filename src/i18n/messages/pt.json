@@ -132,7 +132,18 @@
     "agentModelHint": "Use default para o modelo padrão do provedor, ou digite um identificador compatível.",
     "agentPostsToTeam": "Sua pergunta e a resposta do agente são publicadas nesta conversa.",
     "agentAuthored": "agente · perguntado por {name}",
-    "agentConnectActionsPending": "Entrar, reconectar e desconectar ainda não estão disponíveis aqui."
+    "connectProvider": "Conectar",
+    "reconnectProvider": "Reconectar",
+    "disconnectProvider": "Desconectar",
+    "cancelSignIn": "Cancelar login",
+    "awaitingSignIn": "Aguardando o login…",
+    "signInExpires": "Expira",
+    "attemptState_pending": "Login em andamento.",
+    "attemptState_completed": "Login feito.",
+    "attemptState_canceled": "Login cancelado.",
+    "attemptState_expired": "O login expirou antes de concluir.",
+    "attemptState_failed": "O login falhou.",
+    "agentTestUnavailable": "Testar uma conexão ainda não está disponível."
   },
   "Native": {
     "callbackConflict": "Este método de acesso entra em conflito com uma conta existente. Use seu método de acesso original e abra Configurações para vincular outro método. As contas nunca são mescladas automaticamente.",
