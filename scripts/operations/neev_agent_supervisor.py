@@ -32,8 +32,12 @@ is repr-suppressed and is handed straight to the driver.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+import contextlib
+import json
+import os
+import tempfile
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional, Tuple
 
 import neev_supervisor_dto as dto
 
@@ -125,7 +129,7 @@ _LOGIN_STATE = {
 @dataclass
 class _Attempt:
     binding: dto.LoginBinding
-    ticket: dto.LoginTicketDto
+    ticket: Optional[dto.LoginTicketDto]  # None for attempts rebuilt at recovery
     provider: dto.Provider
     storage_handle: str  # 32-hex volume handle
     start_request_id: str
@@ -157,19 +161,48 @@ class Supervisor:
         *,
         now: Callable[[], int],
         mint_id: Callable[[], str],
+        durable=None,
     ):
         self._boot_id = boot_id
         self._volumes = volumes
         self._driver_for = driver_for
         self._now = now
         self._mint_id = mint_id
+        self._durable = durable
+        self._reconciled = False
         self._attempts: Dict[Tuple[str, str], _Attempt] = {}
         self._entries: Dict[str, _Entry] = {}
         self._revision = 1
 
+    # -- recovery gate ---------------------------------------------------- #
+
+    def recover(self) -> None:
+        """Rebuild in-memory state from the durable registry BEFORE serving. Until
+        this runs, `handle()` refuses every request (UNAVAILABLE): a supervisor that
+        forgot its committed connections on restart would strand live credentials and
+        orphan volume files. In-flight logins (their subprocess is gone) come back
+        INTERRUPTED; committed connections come back usable; quarantined cleanups come
+        back for retry; disposed entries are dropped."""
+        if self._reconciled:
+            return
+        if self._durable is not None:
+            highest = self._revision
+            for record in self._durable.load():
+                entry = self._entry_from_record(record)
+                if entry.phase is dto.RegistryPhase.DISPOSED:
+                    continue
+                self._entries[entry.entry_id] = entry
+                self._rebuild_attempt(entry)
+                highest += 1
+            self._revision = highest
+        self._reconciled = True
+
     # -- public dispatch -------------------------------------------------- #
 
     def handle(self, request: dto.Request) -> dto.Response:
+        if not self._reconciled:
+            # Never serve effects against un-recovered state.
+            return self._error(request, dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
         handler = self._DISPATCH.get(request.op())
         if handler is None:  # unreachable: op() is exhaustive over the enum
             return self._error(request, dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
@@ -178,6 +211,50 @@ class Supervisor:
         except Reject as reject:
             return self._error(request, reject.code, reject.retry_after_ms)
         return self._ok(request, body)
+
+    # -- durability ------------------------------------------------------- #
+
+    @staticmethod
+    def _record(entry: _Entry) -> dict:
+        return {
+            "entry_id": entry.entry_id,
+            "binding": dto._encode_login_binding(entry.binding),
+            "phase": entry.phase.value,
+            "storage_handle": entry.storage_handle,
+            "receipt_id": entry.receipt_id,
+            "cleanup_operation_id": entry.cleanup_operation_id,
+        }
+
+    @staticmethod
+    def _entry_from_record(record: dict) -> _Entry:
+        return _Entry(
+            record["entry_id"],
+            dto._login_binding(record["binding"]),
+            dto.RegistryPhase(record["phase"]),
+            record.get("storage_handle"),
+            record.get("receipt_id"),
+            record.get("cleanup_operation_id"),
+        )
+
+    def _persist(self, entry: _Entry) -> None:
+        if self._durable is None:
+            return
+        if entry.phase is dto.RegistryPhase.DISPOSED:
+            self._durable.delete(entry.entry_id)
+        else:
+            self._durable.put(self._record(entry))
+
+    def _rebuild_attempt(self, entry: _Entry) -> None:
+        phase = entry.phase
+        committed = phase is dto.RegistryPhase.COMMITTED
+        # No live driver survives a restart; the login process is gone.
+        state = "committed" if committed else "interrupted"
+        self._attempts[self._key(entry.binding)] = _Attempt(
+            binding=entry.binding, ticket=None, provider=entry.binding.scope.provider,
+            storage_handle=entry.storage_handle, start_request_id="", state=state,
+            receipt_id=entry.receipt_id, committed=committed, entry_id=entry.entry_id,
+            driver=None,
+        )
 
     # -- response builders ------------------------------------------------ #
 
@@ -201,6 +278,17 @@ class Supervisor:
     @staticmethod
     def _key(binding: dto.LoginBinding) -> Tuple[str, str]:
         return (binding.connection_id.value, binding.attempt_id.value)
+
+    def _lookup(self, binding: dto.LoginBinding) -> _Attempt:
+        """Find the attempt for this binding, requiring the FULL stored binding to
+        equal the incoming one (scope, generation, session, attempt, operation) —
+        not just connection+attempt ids. A request that collides on those ids but
+        differs anywhere else (another tenant/generation) must NOT reach this
+        attempt; it is reported NOT_FOUND without leaking that a near-match exists."""
+        attempt = self._attempts.get(self._key(binding))
+        if attempt is None or attempt.binding != binding:
+            raise Reject(dto.ErrorCode.NOT_FOUND)
+        return attempt
 
     @staticmethod
     def _store_scope(scope: dto.Scope):
@@ -247,14 +335,18 @@ class Supervisor:
         return phase
 
     def _snapshot(self, attempt: _Attempt, phase: str):
-        expires_at = dto.UnixSec(attempt.ticket.expires_at.value)
         poll = dto.RetryMs(_DEFAULT_POLL_MS)
+        # Only the non-terminal states carry an expiry; rebuilt (recovered) attempts
+        # have no ticket and only ever render committed/interrupted, so access the
+        # ticket lazily.
         if phase in ("queued", "starting", "verifying"):
+            expires_at = dto.UnixSec(attempt.ticket.expires_at.value)
             return dto.LoginProgress(_LOGIN_STATE[phase], expires_at, poll)
         if phase == "awaiting_user":
             state = getattr(attempt, "_last", None)
             if state is None or state.challenge is None:
                 raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
+            expires_at = dto.UnixSec(attempt.ticket.expires_at.value)
             return dto.LoginAwaitingUser(
                 dto.LoginState.AWAITING_USER, expires_at, poll,
                 self._challenge_dto(attempt.provider, state.challenge),
@@ -291,6 +383,7 @@ class Supervisor:
             storage_handle=attempt.storage_handle, receipt_id=receipt,
             cleanup_operation_id=(entry.cleanup_operation_id if entry else None),
         )
+        self._persist(self._entries[attempt.entry_id])
         self._bump()
 
     # -- operation handlers ---------------------------------------------- #
@@ -309,32 +402,28 @@ class Supervisor:
             handle = self._volumes.create(store_scope)
         except Exception:
             raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
-        driver = self._driver_for(binding.scope.provider, store_scope, handle)
+        # From here the volume EXISTS; any failure building/starting the driver must
+        # tear it down durably (revoke), never leak a half-provisioned volume.
+        try:
+            driver = self._driver_for(binding.scope.provider, store_scope, handle)
+            driver.start()
+        except Exception:
+            self._revoke_volume(binding.scope, handle)
+            raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
         attempt = _Attempt(
             binding=binding, ticket=ticket, provider=binding.scope.provider,
             storage_handle=handle, start_request_id=request.request_id, driver=driver,
         )
-        try:
-            driver.start()
-        except Exception:
-            self._safe_close(store_scope, handle)
-            raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
         self._attempts[key] = attempt
         self._promote_entry(attempt, dto.RegistryPhase.PENDING_LOGIN)
         return dto.StartLoginResult(dto.Disposition.ACCEPTED, dto.RetryMs(_DEFAULT_POLL_MS))
 
     def _observe_login(self, request: dto.Request):
-        binding = request.body.binding
-        attempt = self._attempts.get(self._key(binding))
-        if attempt is None:
-            raise Reject(dto.ErrorCode.NOT_FOUND)
+        attempt = self._lookup(request.body.binding)
         return self._snapshot(attempt, self._advance(attempt))
 
     def _submit_code(self, request: dto.Request):
-        binding = request.body.binding
-        attempt = self._attempts.get(self._key(binding))
-        if attempt is None:
-            raise Reject(dto.ErrorCode.NOT_FOUND)
+        attempt = self._lookup(request.body.binding)
         if attempt.provider is not dto.Provider.CLAUDE:
             # Codex device logins never submit a code.
             raise Reject(dto.ErrorCode.CONFLICT)
@@ -349,9 +438,7 @@ class Supervisor:
 
     def _settle_login(self, request: dto.Request):
         witness = request.body.witness
-        attempt = self._attempts.get(self._key(witness.binding))
-        if attempt is None:
-            raise Reject(dto.ErrorCode.NOT_FOUND)
+        attempt = self._lookup(witness.binding)
         phase = "committed" if attempt.committed else self._advance(attempt)
         if not attempt.committed:
             if phase != "prepared":
@@ -382,7 +469,14 @@ class Supervisor:
             return dto.CheckUnavailable(
                 dto.CheckState.UNAVAILABLE, check_id, dto.CheckFailure.PROVIDER_UNAVAILABLE
             )
-        state = attempt.driver.poll() if attempt.driver is not None else DriverState("prepared")
+        if attempt.driver is None:
+            # A committed connection recovered after a restart has no live driver; we
+            # cannot truthfully report its account status, so we say so honestly
+            # rather than fabricate a "finished" result.
+            return dto.CheckUnavailable(
+                dto.CheckState.UNAVAILABLE, check_id, dto.CheckFailure.INTERRUPTED
+            )
+        state = attempt.driver.poll()
         account = self._account_status(state)
         return dto.CheckFinished(
             dto.CheckState.FINISHED, check_id, dto.UnixSec(self._now()), account
@@ -399,71 +493,127 @@ class Supervisor:
     def _cleanup_connection(self, request: dto.Request):
         ticket = request.body.ticket
         target = ticket.target
+        generation = ticket.target_generation.value
+        op_id = ticket.operation_id.value
         if target.kind is dto.CleanupKind.CANCEL:
             attempt = self._attempts.get(
                 (ticket.connection_id.value, target.attempt_id.value)
             )
-            logout = "not_needed"
-            if attempt is not None:
-                if attempt.driver is not None:
-                    try:
-                        attempt.driver.cancel()
-                    except Exception:
-                        pass
-                self._dispose(attempt, ticket.operation_id.value)
+            if attempt is None or not self._cleanup_matches(
+                attempt, ticket.scope, ticket.connection_id.value, generation
+            ):
+                # Already gone (idempotent) or not ours — nothing to tear down.
+                return dto.CleanupCompleted(
+                    dto.CleanupState.COMPLETED, dto.LogoutResult.NOT_NEEDED
+                )
+            ok, logout = self._teardown(attempt, op_id, do_logout=False)
         else:  # disconnect
-            attempt = self._connection_attempt(ticket.connection_id.value)
-            logout = "not_needed"
-            if attempt is not None:
-                if attempt.driver is not None:
-                    try:
-                        logout = attempt.driver.logout()
-                    except Exception:
-                        return dto.CleanupFailed(
-                            dto.CleanupState.FAILED,
-                            dto.CleanupFailedReason.CLEANUP_FAILED,
-                            dto.RetryMs(_DEFAULT_POLL_MS),
-                        )
-                self._dispose(attempt, ticket.operation_id.value)
+            attempt = self._find_connection(
+                ticket.scope, ticket.connection_id.value, generation
+            )
+            if attempt is None:
+                return dto.CleanupCompleted(
+                    dto.CleanupState.COMPLETED, dto.LogoutResult.NOT_NEEDED
+                )
+            ok, logout = self._teardown(attempt, op_id, do_logout=True)
+        if not ok:
+            # Persistent state was NOT fully torn down; never report a false success.
+            return dto.CleanupFailed(
+                dto.CleanupState.FAILED, dto.CleanupFailedReason.CLEANUP_FAILED,
+                dto.RetryMs(_DEFAULT_POLL_MS),
+            )
         return dto.CleanupCompleted(dto.CleanupState.COMPLETED, dto.LogoutResult(logout))
 
-    def _dispose(self, attempt: _Attempt, cleanup_operation_id: str) -> None:
+    def _teardown(self, attempt: _Attempt, cleanup_operation_id: str, *, do_logout: bool):
+        """Stop the active run and DURABLY revoke the credential state. Returns
+        (True, logout_result) only when every step actually completed; on any failure
+        the attempt is QUARANTINED (kept for retry) and (False, None) is returned so
+        the caller reports CleanupFailed — never a false COMPLETED."""
+        logout = "not_needed"
         try:
-            self._safe_close(self._store_scope(attempt.binding.scope), attempt.storage_handle)
-        except Reject:
-            pass
-        key = self._key(attempt.binding)
-        self._attempts.pop(key, None)
-        if attempt.entry_id is not None:
-            self._entries[attempt.entry_id] = _Entry(
-                attempt.entry_id, attempt.binding, dto.RegistryPhase.DISPOSED,
-                storage_handle=attempt.storage_handle,
-                cleanup_operation_id=cleanup_operation_id,
-            )
-            self._bump()
-
-    def _safe_close(self, store_scope, handle: str) -> None:
-        closer = getattr(self._volumes, "close", None)
-        if closer is None:
-            return
-        try:
-            closer(store_scope, handle)
+            if attempt.driver is not None:
+                if do_logout:
+                    # Confirm the provider session is logged out BEFORE deleting creds.
+                    logout = attempt.driver.logout()
+                else:
+                    # Cancel + wait for an in-flight login run to actually stop.
+                    attempt.driver.cancel()
         except Exception:
-            pass
+            self._quarantine(attempt, cleanup_operation_id)
+            return (False, None)
+        if not self._revoke_volume(attempt.binding.scope, attempt.storage_handle):
+            self._quarantine(attempt, cleanup_operation_id)
+            return (False, None)
+        self._finalize_disposed(attempt, cleanup_operation_id)
+        return (True, logout)
 
-    def _find_committed(self, binding: dto.ConnectionBinding, storage_handle: str):
+    def _revoke_volume(self, scope: dto.Scope, handle: str) -> bool:
+        """Unmount AND durably revoke (delete) the persistent credential volume.
+        Requires the volumes dependency to expose `revoke`; without a proven durable
+        delete we return False so cleanup is honestly reported as failed."""
+        try:
+            store_scope = self._store_scope(scope)
+        except Exception:
+            return False
+        revoke = getattr(self._volumes, "revoke", None)
+        if revoke is None:
+            return False
+        close = getattr(self._volumes, "close", None)
+        try:
+            if close is not None:
+                close(store_scope, handle)  # unmount (idempotent)
+            revoke(store_scope, handle)  # durable delete of persistent creds
+        except Exception:
+            return False
+        return True
+
+    def _quarantine(self, attempt: _Attempt, cleanup_operation_id: str) -> None:
+        if attempt.entry_id is None:
+            attempt.entry_id = self._mint_id()
+        self._entries[attempt.entry_id] = _Entry(
+            attempt.entry_id, attempt.binding, dto.RegistryPhase.QUARANTINED,
+            storage_handle=attempt.storage_handle,
+            cleanup_operation_id=cleanup_operation_id,
+        )
+        self._persist(self._entries[attempt.entry_id])
+        self._bump()
+
+    def _finalize_disposed(self, attempt: _Attempt, cleanup_operation_id: str) -> None:
+        self._attempts.pop(self._key(attempt.binding), None)
+        if attempt.entry_id is None:
+            attempt.entry_id = self._mint_id()
+        self._entries[attempt.entry_id] = _Entry(
+            attempt.entry_id, attempt.binding, dto.RegistryPhase.DISPOSED,
+            storage_handle=attempt.storage_handle,
+            cleanup_operation_id=cleanup_operation_id,
+        )
+        self._persist(self._entries[attempt.entry_id])
+        self._bump()
+
+    def _cleanup_matches(self, attempt: _Attempt, scope, connection_id, generation) -> bool:
+        b = attempt.binding
+        return (
+            b.scope == scope
+            and b.connection_id.value == connection_id
+            and b.generation.value == generation
+        )
+
+    def _find_connection(self, scope, connection_id, generation):
         for attempt in self._attempts.values():
-            if (
-                attempt.committed
-                and attempt.binding.connection_id == binding.connection_id
-                and attempt.storage_handle == storage_handle
-            ):
+            if self._cleanup_matches(attempt, scope, connection_id, generation):
                 return attempt
         return None
 
-    def _connection_attempt(self, connection_id: str):
+    def _find_committed(self, binding: dto.ConnectionBinding, storage_handle: str):
         for attempt in self._attempts.values():
-            if attempt.binding.connection_id.value == connection_id:
+            b = attempt.binding
+            if (
+                attempt.committed
+                and b.scope == binding.scope
+                and b.connection_id == binding.connection_id
+                and b.generation == binding.generation
+                and attempt.storage_handle == storage_handle
+            ):
                 return attempt
         return None
 
@@ -506,3 +656,52 @@ class Supervisor:
         dto.Op.CLEANUP_CONNECTION: _cleanup_connection,
         dto.Op.RECONCILE_PAGE: _reconcile_page,
     }
+
+
+class FileRegistry:
+    """Durable, crash-safe registry backend for `Supervisor(durable=...)`.
+
+    One JSON object `{entry_id: record}` rewritten ATOMICALLY (temp file + fsync +
+    os.replace) on every mutation, so a restart reloads exactly the last committed
+    state and never a torn write. Records carry no secret — only bindings, phases,
+    handles and receipt ids — so this file is safe at the supervisor's own 0600."""
+
+    def __init__(self, path: str):
+        self._path = path
+        self._records: Dict[str, dict] = {}
+
+    def load(self) -> list:
+        try:
+            with open(self._path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            data = {}
+        except (ValueError, OSError):
+            data = {}
+        self._records = {
+            key: value for key, value in data.items()
+            if isinstance(data, dict) and isinstance(value, dict)
+        } if isinstance(data, dict) else {}
+        return list(self._records.values())
+
+    def put(self, record: dict) -> None:
+        self._records[record["entry_id"]] = record
+        self._flush()
+
+    def delete(self, entry_id: str) -> None:
+        if self._records.pop(entry_id, None) is not None:
+            self._flush()
+
+    def _flush(self) -> None:
+        directory = os.path.dirname(self._path) or "."
+        descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".neev-registry.")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(self._records, handle, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+            raise

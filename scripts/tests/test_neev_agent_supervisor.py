@@ -83,9 +83,11 @@ class FakeDriver(sup.LoginDriver):
 
 
 class FakeVolumes:
-    def __init__(self):
+    def __init__(self, revoke_ok=True):
         self.created = []
         self.closed = []
+        self.revoked = []
+        self.revoke_ok = revoke_ok
         self._n = 0
 
     def create(self, store_scope):
@@ -96,6 +98,11 @@ class FakeVolumes:
 
     def close(self, store_scope, handle):
         self.closed.append((store_scope, handle))
+
+    def revoke(self, store_scope, handle):
+        if not self.revoke_ok:
+            raise RuntimeError("durable revoke failed")
+        self.revoked.append((store_scope, handle))
 
 
 class SupervisorTestBase(unittest.TestCase):
@@ -114,10 +121,13 @@ class SupervisorTestBase(unittest.TestCase):
             self._ids += 1
             return format(0xF0000000 + self._ids, "032x")
 
+        self.driver_for = driver_for
+        self.mint_id = mint_id
         self.sup = sup.Supervisor(
             BOOT, self.volumes, driver_for,
             now=lambda: self.clock[0], mint_id=mint_id,
         )
+        self.sup.recover()  # in-memory mode: no durable backend, just open the gate
 
     def ok(self, request):
         response = self.sup.handle(request)
@@ -289,7 +299,9 @@ class ConnectionLifecycleTests(SupervisorTestBase):
         ))
         self.assertIs(response.body.state, dto.CleanupState.COMPLETED)
         self.assertIs(response.body.provider_logout, dto.LogoutResult.CONFIRMED)
+        # Disconnect DURABLY revokes (deletes) the credential volume, not just close.
         self.assertEqual(self.volumes.closed, [(self.volumes.created[0][0], handle)])
+        self.assertEqual(self.volumes.revoked, [(self.volumes.created[0][0], handle)])
 
     def test_cleanup_cancel_closes_volume_and_disposes_entry(self):
         self.ok(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
@@ -305,6 +317,7 @@ class ConnectionLifecycleTests(SupervisorTestBase):
         self.assertIs(response.body.state, dto.CleanupState.COMPLETED)
         self.assertTrue(self.drivers[handle].canceled)
         self.assertEqual(self.volumes.closed, [(self.volumes.created[0][0], handle)])
+        self.assertEqual(self.volumes.revoked, [(self.volumes.created[0][0], handle)])
         # The disposed entry surfaces in reconcile.
         page = self.ok(request(dto.ReconcilePageRequest(None, None, 32), seq="3", rid="c" * 32))
         self.assertIn(
@@ -346,6 +359,189 @@ class ReconcilePagingTests(SupervisorTestBase):
             seq="10", rid="f" * 32,
         )
         self.assertIs(self.err(stale), dto.ErrorCode.STALE)
+
+
+def _mint_factory():
+    counter = [0]
+
+    def mint():
+        counter[0] += 1
+        return format(0xF0000000 + counter[0], "032x")
+
+    return mint
+
+
+def _drivers_sink():
+    drivers = {}
+
+    def driver_for(provider, store_scope, handle):
+        driver = FakeDriver(provider)
+        drivers[handle] = driver
+        return driver
+
+    return drivers, driver_for
+
+
+class RecoveryAndFaultTests(unittest.TestCase):
+    def _check_ticket(self, handle):
+        b = binding(dto.Provider.CODEX)
+        return dto.CheckTicketDto(
+            dto.ConnectionBinding(b.scope, b.connection_id, b.generation),
+            dto.SessionId(SESSION), dto.Id(handle), dto.Id("a" * 32), dto.UnixSec(2000000000),
+        )
+
+    def _disconnect_ticket(self):
+        return dto.CleanupTicketDto(
+            scope(dto.Provider.CODEX), dto.Id("4" * 32), dto.Id("7" * 32),
+            dto.CleanupTarget(dto.CleanupKind.DISCONNECT, None),
+            dto.Counter("1"), dto.Counter("2"), dto.Id("8" * 32), dto.UnixSec(2000000000),
+        )
+
+    def test_handle_is_refused_until_recovered(self):
+        volumes = FakeVolumes()
+        _drivers, driver_for = _drivers_sink()
+        supervisor = sup.Supervisor(
+            BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory()
+        )
+        start = request(dto.StartLoginRequest(ticket(dto.Provider.CODEX)))
+        refused = supervisor.handle(start)
+        self.assertIs(refused.outcome, dto.Outcome.ERROR)
+        self.assertIs(refused.error.code, dto.ErrorCode.UNAVAILABLE)
+        self.assertEqual(volumes.created, [])  # no effect before recovery
+        supervisor.recover()
+        self.assertIs(supervisor.handle(start).outcome, dto.Outcome.OK)
+
+    def test_wrong_binding_same_ids_other_scope_is_not_found(self):
+        volumes = FakeVolumes()
+        _drivers, driver_for = _drivers_sink()
+        supervisor = sup.Supervisor(
+            BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory()
+        )
+        supervisor.recover()
+        supervisor.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+        # Same connection + attempt ids, DIFFERENT tenant scope -> must not resolve.
+        impostor = dto.LoginBinding(
+            dto.Scope(dto.OwnerId(9), dto.OwnerId(9), dto.Provider.CODEX),
+            dto.Id("4" * 32), dto.Counter("1"), dto.SessionId(SESSION),
+            dto.Id("5" * 32), dto.Id("6" * 32),
+        )
+        response = supervisor.handle(
+            request(dto.ObserveLoginRequest(impostor), seq="2", rid="b" * 32)
+        )
+        self.assertIs(response.error.code, dto.ErrorCode.NOT_FOUND)
+
+    def test_driver_start_failure_revokes_the_leaked_volume(self):
+        volumes = FakeVolumes()
+
+        def exploding_driver_for(provider, store_scope, handle):
+            raise RuntimeError("driver init failed")
+
+        supervisor = sup.Supervisor(
+            BOOT, volumes, exploding_driver_for, now=lambda: 1000, mint_id=_mint_factory()
+        )
+        supervisor.recover()
+        response = supervisor.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+        self.assertIs(response.error.code, dto.ErrorCode.UNAVAILABLE)
+        self.assertEqual(len(volumes.created), 1)
+        self.assertEqual(len(volumes.revoked), 1)  # the half-provisioned volume was revoked
+
+    def test_cleanup_revoke_failure_reports_failed_and_quarantines(self):
+        volumes = FakeVolumes(revoke_ok=False)
+        drivers, driver_for = _drivers_sink()
+        supervisor = sup.Supervisor(
+            BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory()
+        )
+        supervisor.recover()
+        supervisor.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+        cancel_ticket = dto.CleanupTicketDto(
+            scope(dto.Provider.CODEX), dto.Id("4" * 32), dto.Id("7" * 32),
+            dto.CleanupTarget(dto.CleanupKind.CANCEL, dto.Id("5" * 32)),
+            dto.Counter("1"), dto.Counter("2"), dto.Id("8" * 32), dto.UnixSec(2000000000),
+        )
+        req = request(dto.CleanupConnectionRequest(cancel_ticket), seq="2", rid="b" * 32)
+        failed = supervisor.handle(req)
+        self.assertIs(failed.outcome, dto.Outcome.OK)
+        self.assertIs(failed.body.state, dto.CleanupState.FAILED)  # no false COMPLETED
+        # The attempt is quarantined (kept) so a later retry can finish it.
+        page = supervisor.handle(request(dto.ReconcilePageRequest(None, None, 32), seq="3", rid="c" * 32))
+        self.assertIn(dto.RegistryPhase.QUARANTINED, {e.phase for e in page.body.entries})
+        # Once durable revoke works, the retry completes and disposes.
+        volumes.revoke_ok = True
+        retry = supervisor.handle(request(dto.CleanupConnectionRequest(cancel_ticket), seq="4", rid="d" * 32))
+        self.assertIs(retry.body.state, dto.CleanupState.COMPLETED)
+
+    def test_committed_connection_survives_restart_and_is_honestly_uncheckable(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "registry.json")
+            volumes = FakeVolumes()
+            drivers, driver_for = _drivers_sink()
+            mint = _mint_factory()
+
+            first = sup.Supervisor(
+                BOOT, volumes, driver_for, now=lambda: 1000, mint_id=mint,
+                durable=sup.FileRegistry(path),
+            )
+            first.recover()
+            first.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+            handle = volumes.created[0][1]
+            drivers[handle].phase = "prepared"
+            observe = request(dto.ObserveLoginRequest(binding(dto.Provider.CODEX)), seq="2", rid="b" * 32)
+            prepared = first.handle(observe).body
+            witness = dto.CommittedLoginWitnessDto(
+                dto.WitnessKind.COMPLETED_CONNECT, binding(dto.Provider.CODEX),
+                dto.Id(handle), dto.UnixSec(1500),
+            )
+            first.handle(request(dto.SettleLoginRequest(prepared.receipt_id, witness), seq="3", rid="c" * 32))
+
+            # Restart: a fresh supervisor over the SAME durable registry.
+            second = sup.Supervisor(
+                BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory(),
+                durable=sup.FileRegistry(path),
+            )
+            second.recover()
+            recovered = second.handle(observe).body
+            self.assertIs(recovered.state, dto.LoginState.COMMITTED)
+            self.assertEqual(recovered.storage_handle.value, handle)
+            # No live driver after restart -> a check is honestly UNAVAILABLE, not faked.
+            check = second.handle(
+                request(dto.CheckConnectionRequest(self._check_ticket(handle)), seq="4", rid="d" * 32)
+            ).body
+            self.assertIs(check.state, dto.CheckState.UNAVAILABLE)
+            self.assertIs(check.reason, dto.CheckFailure.INTERRUPTED)
+            # Disconnect after restart still DURABLY revokes the persisted volume.
+            cleanup = second.handle(
+                request(dto.CleanupConnectionRequest(self._disconnect_ticket()), seq="5", rid="e" * 32)
+            ).body
+            self.assertIs(cleanup.state, dto.CleanupState.COMPLETED)
+            self.assertIn((volumes.created[0][0], handle), volumes.revoked)
+
+    def test_in_flight_login_recovers_as_interrupted(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "registry.json")
+            volumes = FakeVolumes()
+            _drivers, driver_for = _drivers_sink()
+            first = sup.Supervisor(
+                BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory(),
+                durable=sup.FileRegistry(path),
+            )
+            first.recover()
+            first.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+
+            second = sup.Supervisor(
+                BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory(),
+                durable=sup.FileRegistry(path),
+            )
+            second.recover()
+            snap = second.handle(
+                request(dto.ObserveLoginRequest(binding(dto.Provider.CODEX)), seq="2", rid="b" * 32)
+            ).body
+            self.assertIs(snap.state, dto.LoginState.INTERRUPTED)
 
 
 if __name__ == "__main__":
