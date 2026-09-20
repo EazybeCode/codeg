@@ -26,13 +26,19 @@ import {
   appendNativeMessage,
   listNativeMessages,
   loadNativeResource,
-  runNativeAgent,
-  cancelNativeAgent,
   NativeContentNotFoundError,
   type NativeResource,
   type NativeMessage,
   type AppendNativeMessageInput,
 } from "@/lib/neev-content-client"
+import {
+  cancelAgentRun,
+  followAgentRun,
+  invokeTeamAgent,
+  NEEV_AGENT_PROVIDERS,
+  NEEV_DEFAULT_MODEL,
+  type NeevAgentProvider,
+} from "@/lib/neev-agent-sessions-client"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNeevMessageStream } from "@/hooks/use-neev-message-stream"
 import { useNativeAuth } from "./native-auth-provider"
@@ -84,6 +90,7 @@ function Chat({
     [review, setReview] = useState(false),
     [agentText, setAgentText] = useState(""),
     [agentBusy, setAgentBusy] = useState(false),
+    [agentProvider, setAgentProvider] = useState<NeevAgentProvider>("claude"),
     [agentRunId, setAgentRunId] = useState<string | null>(null)
   // The agent lives in a collapsible right context panel so the human team
   // thread is the primary surface (view-only pref; SSR default then read on mount).
@@ -112,7 +119,10 @@ function Chat({
     draftRef = useRef(""),
     sequence = useRef<string | null>(null),
     retry = useRef<AppendNativeMessageInput | null>(null),
-    sending = useRef(false)
+    sending = useRef(false),
+    // A retry after a lost response reuses the id, so one ask cannot post two
+    // prompts — the same idempotency the plain composer uses.
+    invokeRequest = useRef<string | null>(null)
   // Push delivery replaces the interval while it is genuinely live; every other
   // state keeps polling, so a dropped or unavailable stream still delivers.
   const stream = useNeevMessageStream({
@@ -133,6 +143,23 @@ function Chat({
     if (!draftRef.current && !retry.current)
       pinned.current = resource.authRevision
   }, [resource])
+  // Merge server rows into the thread by id, ordered by sequence. Callers never
+  // invent a message: everything here came back from the server.
+  function absorb(incoming: NativeMessage[]) {
+    setMessages((old) =>
+      [
+        ...new Map(
+          [...old, ...incoming].map((item) => [item.id, item])
+        ).values(),
+      ].sort((a, b) =>
+        BigInt(a.sequence) < BigInt(b.sequence)
+          ? -1
+          : BigInt(a.sequence) > BigInt(b.sequence)
+            ? 1
+            : 0
+      )
+    )
+  }
   function fail(e: unknown) {
     if (!scope.isCurrent()) return
     if (
@@ -172,19 +199,7 @@ function Chat({
       do {
         const page = await listNativeMessages(resource.id, after, scope.signal)
         if (!scope.isCurrent()) return
-        setMessages((old) =>
-          [
-            ...new Map(
-              [...old, ...page.items].map((item) => [item.id, item])
-            ).values(),
-          ].sort((a, b) =>
-            BigInt(a.sequence) < BigInt(b.sequence)
-              ? -1
-              : BigInt(a.sequence) > BigInt(b.sequence)
-                ? 1
-                : 0
-          )
-        )
+        absorb(page.items)
         if (page.items.length)
           sequence.current = page.items[page.items.length - 1].sequence
         after = page.nextAfter
@@ -201,35 +216,76 @@ function Chat({
     void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope])
+  // Explicit team invocation (spec §5.3). The prompt is posted as an ordinary
+  // human message by the server, the reply is written by the run driver as an
+  // agent-authored message, and this view re-reads the thread once the run
+  // settles — so what everyone sees is what was actually persisted. No private
+  // Agent Chat history travels with the prompt; only this prompt does.
   async function askAgent() {
     if (
       !runtimeEnabled ||
       !draft.trim() ||
       agentBusy ||
       latest.archived ||
-      !auth.session
+      !auth.session ||
+      !scope.isCurrent()
     )
       return
-    const prompt = draft
+    const prompt = draft.trim()
     setAgentBusy(true)
     setAgentText("")
     setError(null)
+    invokeRequest.current ??= crypto.randomUUID()
     try {
-      await runNativeAgent(
-        { chatId: latest.id, prompt, provider: "claude", model: "default" },
-        auth.session.csrf,
-        (event) => {
-          if (!scope.isCurrent()) return
-          if (event.type === "started") setAgentRunId(event.runId)
-          else if (event.type === "chunk")
-            setAgentText((current) => current + event.text)
-          else if (event.type === "failed")
-            setError(new NativeClientError("unavailable"))
+      const invocation = await invokeTeamAgent(
+        latest.id,
+        {
+          prompt,
+          provider: agentProvider,
+          model: NEEV_DEFAULT_MODEL,
+          requestId: invokeRequest.current,
+          expectedAuthRevision: pinned.current,
         },
+        auth.session.csrf,
         auth.signal
       )
+      if (!scope.isCurrent()) return
+      // The ask is durable now: clear the composer and show it immediately.
+      invokeRequest.current = null
+      setDraft("")
+      draftRef.current = ""
+      retry.current = null
+      onDirtyChange?.(false)
+      followHistory.current = true
+      absorb([invocation.message])
+      if (invocation.turn.status !== "running") {
+        // Refused before it ever ran; the ask stays visible and the reason is
+        // named rather than left as a fake pending state.
+        setAgentBusy(false)
+        setError(new NativeClientError("unavailable"))
+        await refresh()
+        return
+      }
+      setAgentRunId(invocation.runId)
+      await followAgentRun({
+        runId: invocation.runId,
+        signal: scope.signal,
+        onPhase: () => {},
+        onEvent: (event) => {
+          if (!scope.isCurrent()) return
+          if (event.type === "started") setAgentText("")
+          else if (event.type === "chunk")
+            setAgentText((current) => current + event.text)
+          else if (event.status !== "completed")
+            setError(new NativeClientError("unavailable"))
+        },
+      })
+      if (!scope.isCurrent()) return
+      // The reply the team keeps is the persisted one, not this preview.
+      setAgentText("")
+      await refresh()
     } catch (cause) {
-      if (scope.isCurrent()) setError(cause)
+      if (scope.isCurrent()) fail(cause)
     } finally {
       if (scope.isCurrent()) {
         setAgentBusy(false)
@@ -241,9 +297,9 @@ function Chat({
     const runId = agentRunId
     if (!runId || !auth.session) return
     try {
-      await cancelNativeAgent(runId, auth.session.csrf, auth.signal)
+      await cancelAgentRun(runId, auth.session.csrf, auth.signal)
     } catch {
-      // Best-effort: the run stream ends with a failed(canceled) event.
+      // Best-effort: the run stream ends with a canceled `finished` event.
     }
   }
   async function send() {
@@ -276,17 +332,7 @@ function Chat({
       )
       if (!scope.isCurrent()) return
       followHistory.current = true
-      setMessages((old) =>
-        [
-          ...new Map([...old, message].map((item) => [item.id, item])).values(),
-        ].sort((a, b) =>
-          BigInt(a.sequence) < BigInt(b.sequence)
-            ? -1
-            : BigInt(a.sequence) > BigInt(b.sequence)
-              ? 1
-              : 0
-        )
-      )
+      absorb([message])
       // Leave the incremental cursor unchanged: another author's intervening messages may exist.
       setDraft("")
       draftRef.current = ""
@@ -437,13 +483,27 @@ function Chat({
                     aria-hidden
                     className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium"
                   >
-                    {message.authorName.slice(0, 1)}
+                    {message.authorKind === "agent" ? (
+                      <Sparkles className="size-4" />
+                    ) : (
+                      message.authorName.slice(0, 1)
+                    )}
                   </span>
                   <div className="min-w-0 flex-1 space-y-2">
                     <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
+                      {/* An agent reply names the provider that wrote it and the
+                          human who invoked it. `authorId` is still the invoker,
+                          so the agent never impersonates a teammate. */}
                       <span className="font-medium text-foreground">
-                        {message.authorName}
+                        {message.authorKind === "agent"
+                          ? message.agentLabel
+                          : message.authorName}
                       </span>
+                      {message.authorKind === "agent" && (
+                        <span className="rounded bg-muted px-1.5 py-0.5">
+                          {t("agentAuthored", { name: message.authorName })}
+                        </span>
+                      )}
                       <time
                         dateTime={new Date(
                           message.createdAt * 1000
@@ -536,12 +596,28 @@ function Chat({
                 {t("agentsOff")}
               </p>
             )}
-            {/* This one-shot reply is not persisted and not team-visible.
-                Saying so keeps the panel from implying a shared transcript the
-                server does not store (spec §5.3). */}
+            {/* Both the ask and the reply become team-visible messages, so the
+                panel must say so unmistakably before send (spec §5.3). */}
             <p className="text-xs text-muted-foreground">
-              {t("agentReplyPrivate")}
+              {t("agentPostsToTeam")}
             </p>
+            <label className="block space-y-1">
+              <span className="text-xs font-medium">{t("agentProvider")}</span>
+              <select
+                value={agentProvider}
+                disabled={agentBusy}
+                onChange={(event) =>
+                  setAgentProvider(event.target.value as NeevAgentProvider)
+                }
+                className="w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+              >
+                {NEEV_AGENT_PROVIDERS.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
             {(agentBusy || agentText) && (
               <div
                 role="status"

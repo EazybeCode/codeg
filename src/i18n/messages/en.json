@@ -129,7 +129,9 @@
     "agentError_io": "The run was interrupted.",
     "agentError_interrupted": "The run was interrupted before it finished.",
     "agentError_unknown": "The run failed.",
-    "agentReplyPrivate": "Only you see this reply. It is not posted to the conversation."
+    "agentModelHint": "Use default for the provider's own default, or type a model identifier it supports.",
+    "agentPostsToTeam": "Your question and the agent's reply are both posted to this conversation.",
+    "agentAuthored": "agent · asked by {name}"
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

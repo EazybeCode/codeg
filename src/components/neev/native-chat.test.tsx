@@ -419,109 +419,209 @@ it("keeps Ask agent disabled while the runtime is unavailable", async () => {
   expect(screen.getByRole("button", { name: "Ask agent" })).toBeDisabled()
   // Honest disabled state — no faked "Connected".
   expect(screen.getByText("Agents are turned off.")).toBeVisible()
-  // This panel's reply is one-shot and never written to the team thread, so it
-  // must not imply a shared transcript the server does not store.
+  // Both the ask and the reply become team-visible, so the panel must say so
+  // unmistakably before anyone can send (spec §5.3).
   expect(
     screen.getByText(
-      "Only you see this reply. It is not posted to the conversation."
+      "Your question and the agent's reply are both posted to this conversation."
     )
   ).toBeVisible()
 })
 
-it("enables Ask agent and renders a streamed agent reply when the runtime is available", async () => {
-  const sse =
-    'data: {"type":"started","run_id":"r1"}\n\n' +
-    'data: {"type":"chunk","text":"do "}\n\n' +
-    'data: {"type":"chunk","text":"X"}\n\n' +
-    'data: {"type":"completed"}\n\n'
-  mockNativeSession(undefined, {
-    "GET /api/workos/capabilities": capable,
-    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
-    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
-    "POST /api/neev/agent/run": () =>
-      new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(sse))
-            controller.close()
-          },
-        }),
-        { status: 200 }
-      ),
+const RUN_ID = "0123456789abcdef0123456789abcdef"
+const AGENT_PATH = `POST /api/neev/chats/${resource.id}/agent`
+const RUN_EVENTS = `GET /api/neev/agent/runs/${RUN_ID}/events`
+const askMessage = {
+  ...message,
+  id: "44444444-4444-4444-8444-444444444444",
+  sequence: "1",
+  body: "help",
+  authorKind: "human",
+  agentLabel: null,
+}
+const replyMessage = {
+  ...message,
+  id: "55555555-5555-4555-8555-555555555555",
+  sequence: "2",
+  body: "do X",
+  // The invoker stays the author of record; the label names the provider.
+  authorKind: "agent",
+  agentLabel: "claude",
+}
+const runningTurn = {
+  id: "66666666-6666-4666-8666-666666666666",
+  sessionId: "77777777-7777-4777-8777-777777777777",
+  sequence: "1",
+  runId: RUN_ID,
+  prompt: "help",
+  response: "",
+  status: "running",
+  errorCode: null,
+  provider: "claude",
+  model: "default",
+  createdAt: 1_700_000_000,
+  updatedAt: 1_700_000_000,
+  completedAt: null,
+}
+
+function sseBody(...frames: string[]) {
+  return new Response(frames.map((frame) => `data: ${frame}\n\n`).join(""), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
   })
-  const user = userEvent.setup()
-  mount()
+}
+
+async function openAgentPanel(user: ReturnType<typeof userEvent.setup>) {
   await user.type(
     await screen.findByRole("textbox", { name: "Message" }),
     "help"
   )
   // The agent lives in the collapsible right context panel; open it first.
   await user.click(screen.getByRole("button", { name: "Agent panel" }))
+}
+
+it("posts the ask and the persisted agent reply to the conversation", async () => {
+  const invocations: Record<string, unknown>[] = []
+  let replied = false
+  const mock = mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({
+        items: replied ? [askMessage, replyMessage] : [],
+        nextAfter: null,
+      }),
+    [`GET ${path}?after=1`]: () =>
+      json({ items: replied ? [replyMessage] : [], nextAfter: null }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    [AGENT_PATH]: (init) => {
+      invocations.push(JSON.parse(init.body as string))
+      return json(
+        { message: askMessage, turn: runningTurn, runId: RUN_ID },
+        201
+      )
+    },
+    [RUN_EVENTS]: () => {
+      // The driver persists the reply as the run completes.
+      replied = true
+      return sseBody(
+        `{"type":"started","runId":"${RUN_ID}","turnId":"${runningTurn.id}"}`,
+        '{"type":"chunk","text":"do "}',
+        '{"type":"chunk","text":"X"}',
+        '{"type":"finished","status":"completed","errorCode":null}'
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await openAgentPanel(user)
   const ask = screen.getByRole("button", { name: "Ask agent" })
   expect(ask).toBeEnabled()
   await user.click(ask)
-  expect(await screen.findByText("do X")).toBeVisible()
+  // The ask carries the audience the composer was pinned to and an idempotent
+  // request id, exactly like posting a message.
+  await waitFor(() => expect(invocations).toHaveLength(1))
+  expect(invocations[0]).toEqual({
+    prompt: "help",
+    provider: "claude",
+    model: "default",
+    requestId: expect.any(String),
+    expectedAuthRevision: "1",
+  })
+  // Both rows land in the thread, and the reply is labelled as agent-authored
+  // by provider, attributed to the human who invoked it.
+  const thread = await screen.findByRole("list", { name: "Messages" })
+  expect(await within(thread).findByText("do X")).toBeVisible()
+  expect(within(thread).getByText("help")).toBeVisible()
+  expect(within(thread).getByText("claude")).toBeVisible()
+  expect(within(thread).getByText("agent · asked by Sagar")).toBeVisible()
+  expect(mock.unknown).toEqual([])
 })
 
-it("surfaces an error when the runtime reports unavailable (503)", async () => {
+it("keeps a refused invocation's ask visible and names the reason", async () => {
+  const refusedTurn = {
+    ...runningTurn,
+    status: "failed",
+    errorCode: "disabled",
+    completedAt: 1_700_000_001,
+  }
+  let posted = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({ items: posted ? [askMessage] : [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    [AGENT_PATH]: () => {
+      posted = true
+      return json(
+        { message: askMessage, turn: refusedTurn, runId: RUN_ID },
+        201
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await openAgentPanel(user)
+  await user.click(screen.getByRole("button", { name: "Ask agent" }))
+  // The question stays team-visible even though no reply came …
+  const thread = await screen.findByRole("list", { name: "Messages" })
+  expect(await within(thread).findByText("help")).toBeVisible()
+  // … and the refusal is surfaced rather than left as a pending state.
+  expect(await screen.findByRole("alert")).toBeVisible()
+  expect(within(thread).queryByText(/asked by/)).toBeNull()
+})
+
+it("surfaces an error when the invocation is refused outright (503)", async () => {
   mockNativeSession(undefined, {
     "GET /api/workos/capabilities": capable,
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
-    "POST /api/neev/agent/run": () =>
-      json({ error: "agent_runtime_disabled" }, 503),
+    [AGENT_PATH]: () => json({ code: "unavailable" }, 503),
   })
   const user = userEvent.setup()
   mount()
-  await user.type(
-    await screen.findByRole("textbox", { name: "Message" }),
-    "help"
-  )
-  // The agent lives in the collapsible right context panel; open it first.
-  await user.click(screen.getByRole("button", { name: "Agent panel" }))
+  await openAgentPanel(user)
   await user.click(screen.getByRole("button", { name: "Ask agent" }))
   expect(await screen.findByRole("alert")).toBeVisible()
 })
 
-it("shows Cancel while streaming and cancels the run", async () => {
+it("shows Cancel while the invoked run streams and cancels it by run id", async () => {
   let controller!: ReadableStreamDefaultController<Uint8Array>
-  let canceled = false
+  let canceled: unknown = null
   mockNativeSession(undefined, {
     "GET /api/workos/capabilities": capable,
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
-    "POST /api/neev/agent/run": () =>
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () =>
       new Response(
         new ReadableStream<Uint8Array>({
           start(c) {
             controller = c
             c.enqueue(
               new TextEncoder().encode(
-                'data: {"type":"started","run_id":"r1"}\n\ndata: {"type":"chunk","text":"partial"}\n\n'
+                'data: {"type":"chunk","text":"partial"}\n\n'
               )
             )
           },
         }),
-        { status: 200 }
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
       ),
-    "POST /api/neev/agent/cancel": (init) => {
-      canceled = JSON.parse(init.body as string).run_id === "r1"
-      return json({ canceled: true })
+    "POST /api/neev/agent/runs/cancel": (init) => {
+      canceled = JSON.parse(init.body as string)
+      return json({ canceled: true, status: "running" })
     },
   })
   const user = userEvent.setup()
   mount()
-  await user.type(
-    await screen.findByRole("textbox", { name: "Message" }),
-    "help"
-  )
-  // The agent lives in the collapsible right context panel; open it first.
-  await user.click(screen.getByRole("button", { name: "Agent panel" }))
+  await openAgentPanel(user)
   await user.click(screen.getByRole("button", { name: "Ask agent" }))
-  // Wait for streamed output so the run id from the started event is registered.
   await screen.findByText("partial")
   await user.click(screen.getByRole("button", { name: "Cancel" }))
-  await waitFor(() => expect(canceled).toBe(true))
+  await waitFor(() => expect(canceled).toEqual({ runId: RUN_ID }))
   act(() => controller.close())
 })
 

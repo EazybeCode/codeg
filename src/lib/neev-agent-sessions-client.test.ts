@@ -4,6 +4,8 @@ import { NativeContentNotFoundError } from "./neev-content-client"
 import {
   cancelAgentRun,
   followAgentRun,
+  invokeTeamAgent,
+  isSupportedModel,
   createAgentSession,
   listAgentSessions,
   listAgentTurns,
@@ -373,6 +375,118 @@ describe("agent session requests", () => {
     }
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(json(payload)))
     expect(await loadAgentConnections()).toEqual(payload)
+  })
+})
+
+describe("team invocation", () => {
+  const CHAT_ID = "423e4567-e89b-42d3-a456-426614174003"
+  const ask = {
+    id: "523e4567-e89b-42d3-a456-426614174004",
+    sequence: "1",
+    authorId: 9,
+    authorName: "Sagar",
+    body: "summarise the incident",
+    createdAt: 1_700_000_000,
+    authorKind: "human",
+    agentLabel: null,
+  }
+
+  it("posts the prompt with its audience guard and idempotent request id", async () => {
+    const calls: { url: string; init: RequestInit }[] = []
+    const fetcher = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return json({ message: ask, turn, runId: RUN_ID }, 201)
+    })
+    vi.stubGlobal("fetch", fetcher)
+    const invocation = await invokeTeamAgent(
+      CHAT_ID,
+      {
+        prompt: "summarise the incident",
+        provider: "claude",
+        model: "default",
+        requestId: SESSION_ID,
+        expectedAuthRevision: "2",
+      },
+      "csrf"
+    )
+    expect(calls[0].url).toBe(`/api/neev/chats/${CHAT_ID}/agent`)
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      prompt: "summarise the incident",
+      provider: "claude",
+      model: "default",
+      requestId: SESSION_ID,
+      expectedAuthRevision: "2",
+    })
+    // The ask comes back already persisted as an ordinary human message, and
+    // the run id is the turn's, so the caller streams the run it just started.
+    expect(invocation.message.authorKind).toBe("human")
+    expect(invocation.runId).toBe(turn.runId)
+  })
+
+  it("refuses an unsupported provider, model or revision before any request", async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal("fetch", fetcher)
+    const valid = {
+      prompt: "hi",
+      provider: "claude" as const,
+      model: "default",
+      requestId: SESSION_ID,
+      expectedAuthRevision: "2",
+    }
+    for (const bad of [
+      { ...valid, provider: "gemini" as "claude" },
+      // A model that could be read as a flag is refused by the runtime too.
+      { ...valid, model: "--dangerous" },
+      { ...valid, model: "" },
+      { ...valid, expectedAuthRevision: "0" },
+      { ...valid, prompt: "" },
+    ])
+      await expect(
+        invokeTeamAgent(CHAT_ID, bad, "csrf")
+      ).rejects.toBeInstanceOf(NativeClientError)
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it("refuses a reply echoed back as the invoker's own ask", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json(
+          {
+            message: { ...ask, authorKind: "agent", agentLabel: "claude" },
+            turn,
+            runId: RUN_ID,
+          },
+          201
+        )
+      )
+    )
+    // The prompt row must be human; an agent-authored one means the wrong
+    // message came back and the thread would be mislabelled.
+    await expect(
+      invokeTeamAgent(
+        CHAT_ID,
+        {
+          prompt: "hi",
+          provider: "claude",
+          model: "default",
+          requestId: SESSION_ID,
+          expectedAuthRevision: "2",
+        },
+        "csrf"
+      )
+    ).rejects.toBeInstanceOf(NativeClientError)
+  })
+
+  it("accepts exactly the models the runtime would accept", () => {
+    // Mirrors `safe_model` in execution.rs: `default` means no --model at all.
+    expect(isSupportedModel("default")).toBe(true)
+    expect(isSupportedModel("claude-opus-4-1")).toBe(true)
+    expect(isSupportedModel("gpt-5.1_codex")).toBe(true)
+    expect(isSupportedModel("--model")).toBe(false)
+    expect(isSupportedModel("")).toBe(false)
+    expect(isSupportedModel("has space")).toBe(false)
+    expect(isSupportedModel("x".repeat(81))).toBe(false)
   })
 })
 

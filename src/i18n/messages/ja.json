@@ -129,7 +129,9 @@
     "agentError_io": "実行が中断されました。",
     "agentError_interrupted": "実行は完了前に中断されました。",
     "agentError_unknown": "実行に失敗しました。",
-    "agentReplyPrivate": "この返信はあなたにだけ表示され、会話には投稿されません。"
+    "agentModelHint": "プロバイダー既定のモデルには default を、それ以外は対応するモデル識別子を入力します。",
+    "agentPostsToTeam": "あなたの質問とエージェントの返信は、どちらもこの会話に投稿されます。",
+    "agentAuthored": "エージェント · {name} が質問"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

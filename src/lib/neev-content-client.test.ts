@@ -210,6 +210,43 @@ describe("native content wire validation", () => {
     expect(() => parseResource(value)).toThrow()
   })
 
+  it("labels agent-authored messages and tolerates pre-rollout human rows", () => {
+    const base = {
+      id: "f4713f49-d18b-4d49-a586-aab9d4eedba6",
+      sequence: "1",
+      authorId: 9,
+      authorName: "Sagar",
+      body: "hello",
+      createdAt: 1_700_000_000,
+    }
+    // A server that has not shipped §5.3 yet sends six keys; that is a human
+    // message, unambiguously.
+    expect(parseMessage(base)).toMatchObject({
+      authorKind: "human",
+      agentLabel: null,
+    })
+    expect(
+      parseMessage({ ...base, authorKind: "human", agentLabel: null })
+    ).toMatchObject({ authorKind: "human", agentLabel: null })
+    // An agent reply keeps the invoker as author of record and names the
+    // provider that wrote it.
+    expect(
+      parseMessage({ ...base, authorKind: "agent", agentLabel: "claude" })
+    ).toMatchObject({ authorKind: "agent", agentLabel: "claude", authorId: 9 })
+    for (const bad of [
+      // The pair must agree: a kind without its label cannot be rendered
+      // truthfully, and neither can a label on a human row.
+      { ...base, authorKind: "agent", agentLabel: null },
+      { ...base, authorKind: "human", agentLabel: "claude" },
+      { ...base, authorKind: "robot", agentLabel: "claude" },
+      { ...base, authorKind: "agent", agentLabel: "Claude Opus!" },
+      // Half-present authorship is a broken contract, not a legacy row.
+      { ...base, authorKind: "agent" },
+      { ...base, agentLabel: "claude" },
+    ])
+      expect(() => parseMessage(bad)).toThrow(NativeClientError)
+  })
+
   it("validates message and revision integers as canonical strings", () => {
     expect(
       parseMessage({

@@ -129,7 +129,9 @@
     "agentError_io": "A execução foi interrompida.",
     "agentError_interrupted": "A execução foi interrompida antes de terminar.",
     "agentError_unknown": "A execução falhou.",
-    "agentReplyPrivate": "Só você vê esta resposta. Ela não é publicada na conversa."
+    "agentModelHint": "Use default para o modelo padrão do provedor, ou digite um identificador compatível.",
+    "agentPostsToTeam": "Sua pergunta e a resposta do agente são publicadas nesta conversa.",
+    "agentAuthored": "agente · perguntado por {name}"
   },
   "Native": {
     "callbackConflict": "Este método de acesso entra em conflito com uma conta existente. Use seu método de acesso original e abra Configurações para vincular outro método. As contas nunca são mescladas automaticamente.",
