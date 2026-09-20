@@ -28,6 +28,15 @@ ADD --checksum=sha256:0399c793ff571d5946ef923d80b4f330d05ac4b6842a6b0775468f5d38
     https://downloads.claude.ai/claude-code-releases/2.1.267/linux-x64/claude \
     /usr/local/bin/claude
 RUN /usr/local/bin/claude --version
+# Keep the official package layout so Codex can locate its bundled helpers.
+ADD --checksum=sha256:a65b895c6ac1a73629bbe4b864640c86133e94a43b4d67b3103044e1a306d5a2 \
+    https://github.com/openai/codex/releases/download/rust-v0.155.1/codex-package-x86_64-unknown-linux-musl.tar.gz \
+    /tmp/neev-codex-package.tar.gz
+RUN install -d -o 0 -g 0 -m 0755 /opt/neev/codex \
+    && tar -xzf /tmp/neev-codex-package.tar.gz -C /opt/neev/codex \
+    && rm /tmp/neev-codex-package.tar.gz \
+    && ln -s /opt/neev/codex/bin/codex /usr/local/bin/codex \
+    && /usr/local/bin/codex --version
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
       python3 \
@@ -79,7 +88,8 @@ RUN chmod 0555 /opt/neev/scripts/operations/*.py
 ENV NEEV_AGENT_LAUNCHER=/opt/neev/scripts/operations/neev_agent_launch.py \
     NEEV_AGENT_CAP_HELPER=/usr/local/bin/neev-agent-caplaunch \
     NEEV_AGENT_WORKSPACE_ROOT=/data/agents \
-    NEEV_AGENT_BINARY=/usr/local/bin/claude
+    NEEV_AGENT_BINARY=/usr/local/bin/claude \
+    NEEV_AGENT_CODEX_BINARY=/usr/local/bin/codex
 
 # Fail-closed defaults preserved: runtime OFF, non-root. Enabling is a deploy-time
 # decision (see NEEV-PRODUCTION-RELEASE-RUNBOOK.md STEP 3/4): set
