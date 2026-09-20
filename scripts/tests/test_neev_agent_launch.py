@@ -234,6 +234,33 @@ class CredentialWiringTests(unittest.TestCase):
         self.assertEqual(env["NO_PROXY"], "")
         self.assertEqual(env["HOME"], "/mnt/vol")
 
+    def test_cleanup_run_workdir_removes_tree_and_refuses_outside_root(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            saved = os.environ.get("NEEV_AGENT_WORKSPACE_ROOT")
+            os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = root
+            try:
+                run = os.path.join(root, "run-x")
+                os.makedirs(os.path.join(run, "home"))
+                with open(os.path.join(run, "leak"), "w") as sink:
+                    sink.write("lane-cwd-file")
+                with open(os.path.join(run, "home", "cred"), "w") as sink:
+                    sink.write("y")
+                os.symlink("/etc/passwd", os.path.join(run, "evil-link"))
+                # Removes the whole run tree (incl. a symlink, without following it).
+                self.assertTrue(launch._cleanup_run_workdir(run))
+                self.assertFalse(os.path.exists(run))
+                self.assertTrue(os.path.exists("/etc/passwd"))  # symlink target untouched
+                # Refuses anything not a validated run dir under the trusted root.
+                self.assertFalse(launch._cleanup_run_workdir("/etc"))
+                self.assertFalse(launch._cleanup_run_workdir(os.path.join(root, "notrun")))
+            finally:
+                if saved is None:
+                    os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
+                else:
+                    os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = saved
+
     def test_main_refuses_when_credentials_cannot_be_delivered(self):
         import tempfile
 

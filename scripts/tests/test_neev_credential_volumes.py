@@ -210,8 +210,8 @@ class CredentialVolumeTests(unittest.TestCase):
                 "--key-file", "-", image,
             ],
             [
-                self.module.CRYPTSETUP, "open", "--type", "luks2", "--key-file", "-",
-                image, mapping,
+                self.module.CRYPTSETUP, "open", "--type", "luks2", "--disable-keyring",
+                "--key-file", "-", image, mapping,
             ],
             [
                 self.module.MKFS, "-q", "-b", "4096", "-m", "0",
@@ -807,10 +807,10 @@ class SecureFilesystemRootTests(unittest.TestCase):
         load_module("neev_credential_store", STORE_PATH)
         self.module = load_module("neev_credential_volumes", VOLUMES_PATH)
 
-    def test_chmod_precedes_chown_so_no_fowner_capability_is_required(self):
-        # At euid 0 the caplaunch helper has no CAP_FOWNER; chmod must run while the
-        # fresh ext4 root is still owned by euid 0 (chmod as owner), THEN chown to
-        # 65532 (CAP_CHOWN). The reverse order would demand FOWNER for the chmod.
+    def test_chown_to_root_then_chmod_then_canonical_needs_no_fowner(self):
+        # No CAP_FOWNER in the helper profile: take ownership to root (CAP_CHOWN),
+        # chmod as owner 0 (no FOWNER), then hand to 65532 (CAP_CHOWN). This is
+        # FOWNER-free on BOTH a fresh mount and a reopen (already 65532-owned).
         order = []
         with mock.patch.object(self.module.os, "open", return_value=7), mock.patch.object(
             self.module.os, "fchmod",
@@ -823,9 +823,10 @@ class SecureFilesystemRootTests(unittest.TestCase):
             side_effect=lambda fd: order.append(("fsync", fd)),
         ), mock.patch.object(self.module.os, "close"):
             self.module._secure_filesystem_root(self.module.Path("/mnt/x"))
-        self.assertEqual([step[0] for step in order], ["chmod", "chown", "fsync"])
-        self.assertEqual(order[0], ("chmod", 7, 0o700))
-        self.assertEqual(order[1], ("chown", 7, 65532, 65532))
+        self.assertEqual(
+            order,
+            [("chown", 7, 0, 0), ("chmod", 7, 0o700), ("chown", 7, 65532, 65532), ("fsync", 7)],
+        )
 
 
 class ToolLayoutTests(unittest.TestCase):

@@ -133,27 +133,30 @@ def child_env(delivery, proxy_env=None):
 
 
 def _become_credential_owner():  # pragma: no cover - requires the cap helper (euid 0)
-    """Elevate to euid 0 for the credential/mount phase.
+    """Elevate to euid 0 AND egid 0 for the credential/mount phase.
 
-    The caplaunch helper execs us with euid 65532 (the web-server uid) plus ambient
-    caps (incl. CAP_SETUID). But the credential store, master key and volume images
-    are ROOT-owned, and their validators require owner == geteuid(); mount/cryptsetup
-    also want euid 0. So the trusted, fixed launcher raises euid to 0 here — AFTER its
-    args/workdir are validated, BEFORE any credential effect. The provider child is
-    still dropped to its DISTINCT unprivileged lane uid with an empty capability set
-    by the sandbox's setpriv, so nothing untrusted ever runs as root. Fail closed if
-    elevation is impossible (e.g. the helper profile lacks CAP_SETUID)."""
+    The caplaunch helper execs us with euid/egid 65532 (the web-server uid/gid) plus
+    ambient caps (incl. CAP_SETUID/CAP_SETGID). The credential store, master key and
+    volume images are ROOT-owned (uid 0, gid 0) and their validators check BOTH
+    owner == geteuid() and group == getegid(); mount/cryptsetup also want euid 0. So
+    the trusted, fixed launcher raises BOTH euid and egid to 0 here — AFTER its
+    args/workdir are validated, BEFORE any credential effect. (Raising only the uid
+    left egid at 65532, so a root-owned mountpoint failed the gid check.) The provider
+    child is still dropped to its DISTINCT unprivileged lane uid/gid with an empty
+    capability set by the sandbox's setpriv, so nothing untrusted runs as root. Fail
+    closed if elevation is impossible (e.g. the profile lacks CAP_SETUID/CAP_SETGID)."""
     import platform
 
     if platform.system() != "Linux":
         raise sandbox.SandboxError("unsupported")
-    if os.geteuid() == 0:
+    if os.geteuid() == 0 and os.getegid() == 0:
         return
     try:
-        os.setresuid(0, 0, 0)
+        os.setresgid(0, 0, 0)  # CAP_SETGID
+        os.setresuid(0, 0, 0)  # CAP_SETUID (after gid: still privileged here)
     except OSError as error:
         raise sandbox.SandboxError("launch") from error
-    if os.geteuid() != 0:
+    if os.geteuid() != 0 or os.getegid() != 0:
         raise sandbox.SandboxError("launch")
 
 
@@ -212,7 +215,7 @@ def main(argv=None, volumes=None):
             args.gid,
             home_as=home_as,
         ) as delivery:
-            return _run_child(
+            rc = _run_child(
                 spec, child_env(delivery, proxy_env), bind_source=delivery.mount
             )
     except credentials.CredentialError as error:
@@ -223,6 +226,59 @@ def main(argv=None, volumes=None):
             file=sys.stderr,
         )
         return 5
+    # The child has terminated and the sandbox is torn down. Remove THIS run's workdir
+    # tree ourselves (we are the privileged, euid-0 launcher) BEFORE returning: the
+    # provider ran as the lane uid and may have left files in its CWD owned by that
+    # uid, which a later run REUSING the same lane uid could otherwise read. The Rust
+    # LaneGuard runs as 65532 and cannot traverse a 0700 lane-owned run dir, so it
+    # cannot do this. If cleanup fails we return a distinct code so the lane is
+    # QUARANTINED (not reused) rather than leaking leftovers.
+    if not _cleanup_run_workdir(args.workdir):
+        print(
+            "neev_agent_launch: run workdir cleanup failed (lane must be quarantined)",
+            file=sys.stderr,
+        )
+        return 6
+    return rc
+
+
+_MAX_RUN_ENTRIES = 8192
+
+
+def _cleanup_run_workdir(workdir):
+    """Remove the run workdir tree as the euid-0 launcher. Symlink-safe, bounded, and
+    ONLY the validated run dir under the trusted root — so a later run reusing the
+    lane uid cannot read leftover CWD files. Returns True iff fully removed; refuses
+    (False) to delete through a mount or an unexpected/oversized tree (fail closed)."""
+    try:
+        _validate_workdir_under_trusted_root(workdir)
+    except sandbox.SandboxError:
+        return False
+    try:
+        if os.path.islink(workdir) or not os.path.isdir(workdir):
+            return False
+        seen = 0
+        for current, dirs, files in os.walk(workdir, topdown=False, followlinks=False):
+            for name in files:
+                seen += 1
+                if seen > _MAX_RUN_ENTRIES:
+                    return False
+                os.unlink(os.path.join(current, name))
+            for name in dirs:
+                seen += 1
+                if seen > _MAX_RUN_ENTRIES:
+                    return False
+                path = os.path.join(current, name)
+                if os.path.islink(path):
+                    os.unlink(path)
+                elif os.path.ismount(path):
+                    return False  # never delete through a mount
+                else:
+                    os.rmdir(path)
+        os.rmdir(workdir)
+        return True
+    except OSError:
+        return False
 
 
 def _run_child(spec, env, bind_source=None):

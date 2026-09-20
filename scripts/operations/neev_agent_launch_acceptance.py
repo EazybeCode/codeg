@@ -64,10 +64,24 @@ def _drop_to_web(argv):
     ]
 
 
-def _via_helper(args, handle, run_dir, provider_argv):
+_run_counter = 0
+
+
+def _fresh_run_dir(args):
+    global _run_counter
+    _run_counter += 1
+    run_dir = os.path.join(args.workspace_root, "run-acc-%d-%d" % (os.getpid(), _run_counter))
+    os.mkdir(run_dir)
+    return run_dir
+
+
+def _via_helper(args, tenant, handle, provider_argv):
+    """Create a fresh run workdir, invoke the REAL caphelper (dropped to the web uid),
+    and return (result, run_dir). The launcher removes run_dir on success."""
+    run_dir = _fresh_run_dir(args)
     launcher_args = [
         args.caphelper,
-        "--tenant", "org:%d/user:%d" % (_TEST_ORG, _TEST_USER),
+        "--tenant", tenant,
         "--slot", "a",
         "--workdir", run_dir,
         "--uid", str(args.uid),
@@ -76,7 +90,8 @@ def _via_helper(args, handle, run_dir, provider_argv):
         "--credential-handle", handle,
         "--", *provider_argv,
     ]
-    return subprocess.run(_drop_to_web(launcher_args), capture_output=True, timeout=180)
+    result = subprocess.run(_drop_to_web(launcher_args), capture_output=True, timeout=180)
+    return result, run_dir
 
 
 def run(args):
@@ -102,43 +117,61 @@ def run(args):
     if not args.key_path.exists():
         store.initialize()
     volumes = volumes_module.CredentialVolumes(store, volumes_module.FixedToolRunner())
-    scope = store_module.Scope(_TEST_ORG, _TEST_USER, args.provider)
+    tenant_a = "org:%d/user:%d" % (_TEST_ORG, _TEST_USER)
+    tenant_b = "org:%d/user:%d" % (_TEST_ORG, _TEST_USER + 1)
+    scope_a = store_module.Scope(_TEST_ORG, _TEST_USER, args.provider)
+    scope_b = store_module.Scope(_TEST_ORG, _TEST_USER + 1, args.provider)
 
-    handle = None
-    run_dir = None
+    handles = {}
     try:
-        handle = volumes.create(scope)
-        mountpoint = volumes.open(scope, handle)
-        marker = os.path.join(str(mountpoint), _SENTINEL_NAME)
+        # Provision two volumes (two tenants) + seed a sentinel in A's.
+        for scope in (scope_a, scope_b):
+            handles[scope] = volumes.create(scope)
+        mp = volumes.open(scope_a, handles[scope_a])
+        marker = os.path.join(str(mp), _SENTINEL_NAME)
         with open(marker, "wb") as sink:
             sink.write(_SENTINEL_BODY)
         os.chmod(marker, 0o600)
-        volumes.close(scope, handle)
-
-        run_dir = os.path.join(args.workspace_root, "run-acceptance-%d" % os.getpid())
-        os.mkdir(run_dir)
+        volumes.close(scope_a, handles[scope_a])
 
         # 1. The lane uid reaches its bound HOME (euid0 -> open -> bind -> drop).
-        read = _via_helper(args, handle, run_dir, ["sh", "-c", 'cat "$HOME/%s"' % _SENTINEL_NAME])
+        read, _rd = _via_helper(args, tenant_a, handles[scope_a],
+                                ["sh", "-c", 'cat "$HOME/%s"' % _SENTINEL_NAME])
         check(
             "bound HOME readable by the lane uid via the real caphelper",
             read.returncode == 0 and _SENTINEL_BODY in read.stdout,
             "rc=%d stderr=%r" % (read.returncode, read.stderr[-300:]),
         )
         # 2. The pinned provider binary runs inside the sandbox (network none).
-        version = _via_helper(args, handle, run_dir, [args.provider, "--version"])
+        version, _rd = _via_helper(args, tenant_a, handles[scope_a], [args.provider, "--version"])
         check(
             "pinned %s --version runs inside the sandbox" % args.provider,
             version.returncode == 0,
             "rc=%d stderr=%r" % (version.returncode, version.stderr[-300:]),
         )
+        # 3. No CWD leak across two tenants sharing the SAME lane uid: tenant A writes
+        #    a sentinel into its run CWD; the launcher must remove A's run dir, so a
+        #    later run reusing the uid cannot read it. Then tenant B (same uid, other
+        #    volume) must NOT see A's file.
+        leak_body = "LEAK-%d" % os.getpid()
+        a_run, a_dir = _via_helper(args, tenant_a, handles[scope_a],
+                                   ["sh", "-c", 'printf %s "%s" > "$PWD/leak.txt"' % ("%s", leak_body)])
+        check(
+            "run A completes and its run dir is removed by the launcher (no CWD leftover)",
+            a_run.returncode == 0 and not os.path.exists(a_dir),
+            "rc=%d exists=%s" % (a_run.returncode, os.path.exists(a_dir)),
+        )
+        b_run, b_dir = _via_helper(args, tenant_b, handles[scope_b],
+                                   ["sh", "-c", 'ls -a "$PWD"; test ! -e "$PWD/leak.txt"'])
+        check(
+            "tenant B (same lane uid) sees no leftover CWD file from tenant A",
+            b_run.returncode == 0 and b"leak.txt" not in b_run.stdout,
+            "rc=%d stdout=%r" % (b_run.returncode, b_run.stdout[-200:]),
+        )
     finally:
-        if handle is not None:
-            with_suppress(lambda: volumes.close(scope, handle))
-            # Revoke the test volume: remove its store entry entirely.
-            with_suppress(lambda: shutil.rmtree(store.entry_path(handle)))
-        if run_dir is not None:
-            with_suppress(lambda: shutil.rmtree(run_dir))
+        for scope, handle in handles.items():
+            with_suppress(lambda h=handle: volumes.close(scope, h))
+            with_suppress(lambda h=handle: shutil.rmtree(store.entry_path(h)))
     return failures
 
 

@@ -271,8 +271,8 @@ class CredentialVolumes:
                     str(image),
                 ], key)
                 self._run([
-                    CRYPTSETUP, "open", "--type", "luks2", "--key-file", "-",
-                    str(image), mapping,
+                    CRYPTSETUP, "open", "--type", "luks2", "--disable-keyring",
+                    "--key-file", "-", str(image), mapping,
                 ], key)
                 opened = True
                 self._run([
@@ -310,8 +310,8 @@ class CredentialVolumes:
             else:
                 key = self._store.volume_key(scope, handle)
                 self._run([
-                    CRYPTSETUP, "open", "--type", "luks2", "--key-file", "-",
-                    str(image), mapping,
+                    CRYPTSETUP, "open", "--type", "luks2", "--disable-keyring",
+                    "--key-file", "-", str(image), mapping,
                 ], key)
                 opened = True
                 self._validate_mapping(mapping, image)
@@ -614,11 +614,13 @@ def _secure_filesystem_root(path: Path) -> None:
     directory_fd = None
     try:
         directory_fd = os.open(str(path), flags)
-        # chmod BEFORE chown: a freshly mkfs'd+mounted ext4 root is owned by the
-        # euid-0 launcher, so fchmod succeeds as the owner — needing no CAP_FOWNER.
-        # If we chowned to 65532 first, the subsequent fchmod would be on an inode
-        # this process no longer owns and would demand CAP_FOWNER, which the caplaunch
-        # helper profile deliberately does NOT grant. Final state is identical.
+        # Take ownership to root (CAP_CHOWN) BEFORE chmod, then hand to the canonical
+        # 65532 owner. chmod is thus always performed as the owning uid (0), so it
+        # never needs CAP_FOWNER — which the caplaunch profile deliberately omits.
+        # This holds on a FRESH mount (root-owned) AND on REOPEN (already 65532-owned,
+        # where a chmod-first would demand FOWNER). Final state is identical; the brief
+        # root-owned 0700 window is safe under the held store lock.
+        os.fchown(directory_fd, 0, 0)
         os.fchmod(directory_fd, 0o700)
         os.fchown(directory_fd, 65532, 65532)
         os.fsync(directory_fd)
