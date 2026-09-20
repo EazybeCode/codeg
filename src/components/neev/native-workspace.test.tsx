@@ -18,6 +18,7 @@ vi.mock("next/navigation", () => ({
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.clearAllMocks()
+  localStorage.clear()
   viewport.mobile = false
 })
 it("collapses desktop navigation without leaving the workspace", async () => {
@@ -86,6 +87,7 @@ it("shows the person and organization without GitHub or chat controls", async ()
   const mock = mockNativeSession(undefined, {
     "GET /api/neev/nodes": () => json({ nodes: [], nextAfter: null }),
   })
+  const user = userEvent.setup()
   render(
     <NativeTestRoot>
       <NativeBoundary>
@@ -99,6 +101,8 @@ it("shows the person and organization without GitHub or chat controls", async ()
   expect(
     screen.queryByRole("button", { name: "New chat" })
   ).not.toBeInTheDocument()
+  // The Agent Chats destination shows an honest connect surface, never fake controls.
+  await user.click(screen.getByRole("button", { name: "Agent chats" }))
   expect(screen.getByText("Agent chats are being enabled")).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
@@ -124,7 +128,7 @@ it("clears the organization tree when a foreground content 403 exposes revoked m
         ],
         nextAfter: null,
       }),
-    "GET /api/neev/nodes/4/chats": () => json({ code: "forbidden" }, 403),
+    "GET /api/neev/nodes/4/documents": () => json({ code: "forbidden" }, 403),
   })
   const user = userEvent.setup()
   render(
@@ -132,6 +136,7 @@ it("clears the organization tree when a foreground content 403 exposes revoked m
       <NativeWorkspace />
     </NativeTestRoot>
   )
+  // Expanding the container lists its items; a 403 there reveals revoked access.
   await user.click(
     await screen.findByRole("button", { name: "Revoked project" })
   )
@@ -191,9 +196,6 @@ it("supports keyboard project creation, nested placement and dialog focus restor
     { kind: "project", name: "Launch", parentId: null },
     { kind: "folder", name: "Research", parentId: 1 },
   ])
-  expect(
-    screen.getByRole("navigation", { name: "Folder path" })
-  ).toHaveTextContent("LaunchResearch")
   await user.click(screen.getByRole("button", { name: "Actions for Research" }))
   await user.click(
     await screen.findByRole("menuitem", { name: "New subfolder" })
@@ -202,9 +204,6 @@ it("supports keyboard project creation, nested placement and dialog focus restor
   await user.click(screen.getByRole("button", { name: "Save" }))
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
   expect(bodies[2]).toEqual({ kind: "folder", name: "Interviews", parentId: 2 })
-  expect(
-    screen.getByRole("navigation", { name: "Folder path" })
-  ).toHaveTextContent("LaunchResearchInterviews")
   expect(mock.unknown).toEqual([])
 })
 
@@ -327,6 +326,8 @@ it("moves a nested folder with its wire revision and retains the draft on confli
   let body: unknown
   const mock = mockNativeSession(undefined, {
     "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
+    "GET /api/neev/nodes/1/documents": () =>
+      json({ items: [], nextAfter: null }),
     "PATCH /api/neev/nodes/2": (init) => {
       body = JSON.parse(init.body as string)
       return json({ code: "conflict" }, 409)
@@ -360,5 +361,103 @@ it("moves a nested folder with its wire revision and retains the draft on confli
     parentId: 4,
     expectedRevision: "7",
   })
+  expect(mock.unknown).toEqual([])
+})
+
+const resource = {
+  id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  orgId: 3,
+  nodeId: 7,
+  kind: "chat" as const,
+  creatorId: 1,
+  title: "Alpha",
+  visibility: "organization" as const,
+  originChatId: null,
+  authRevision: "1",
+  contentRevision: "0",
+  archived: false,
+  createdAt: 0,
+  updatedAt: 0,
+}
+it("opens conversations from the sidebar, guards switching items, and reveals a created one", async () => {
+  const chatA = resource
+  const chatB = {
+    ...resource,
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    title: "Beta",
+  }
+  const created = {
+    ...resource,
+    id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    title: "Gamma",
+  }
+  let items = [chatA, chatB]
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/chats": () => json({ items, nextAfter: null }),
+    [`GET /api/neev/resources/${chatA.id}`]: () => json(chatA),
+    [`GET /api/neev/resources/${chatB.id}`]: () => json(chatB),
+    [`GET /api/neev/resources/${created.id}`]: () => json(created),
+    [`GET /api/neev/chats/${chatA.id}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+    [`GET /api/neev/chats/${chatB.id}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+    [`GET /api/neev/chats/${created.id}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+    "POST /api/neev/nodes/7/chats": (init) => {
+      const body = JSON.parse(init.body as string)
+      const row = { ...created, title: body.title }
+      items = [...items, row]
+      return json(row, 201)
+    },
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  await user.click(await screen.findByRole("button", { name: "Team chat" }))
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  // Direct selection of a real conversation from the sidebar.
+  await user.click(await screen.findByRole("button", { name: "Alpha" }))
+  await user.type(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "wip"
+  )
+  // Switching to another item guards the unsaved draft.
+  await user.click(screen.getByRole("button", { name: "Beta" }))
+  expect(screen.getByRole("dialog")).toHaveTextContent(
+    "Discard unsaved changes?"
+  )
+  await user.click(screen.getByRole("button", { name: "Keep editing" }))
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("wip")
+  // Discarding opens the other conversation.
+  await user.click(screen.getByRole("button", { name: "Beta" }))
+  await user.click(screen.getByRole("button", { name: "Discard changes" }))
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("")
+  )
+  // Creating a conversation reveals it in the sidebar and opens it.
+  await user.click(screen.getByRole("button", { name: "New chat" }))
+  await user.type(screen.getByRole("textbox", { name: "Title" }), "Gamma")
+  await user.click(screen.getByRole("button", { name: "Create" }))
+  await within(screen.getByRole("navigation", { name: "Projects" })).findByRole(
+    "button",
+    { name: "Gamma" }
+  )
   expect(mock.unknown).toEqual([])
 })

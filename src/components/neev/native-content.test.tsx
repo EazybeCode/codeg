@@ -48,6 +48,7 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   push.mockClear()
+  localStorage.clear()
 })
 function mount() {
   return render(
@@ -783,9 +784,12 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
   }
   const mock = mockNativeSession(undefined, {
     "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
-    "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/2/documents": () =>
+      json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [doc], nextAfter: null }),
+    "GET /api/neev/nodes/5/documents": () =>
+      json({ items: [], nextAfter: null }),
     [`GET /api/neev/resources/${chat.id}`]: () => json(doc),
     [`GET /api/neev/documents/${chat.id}/revisions`]: () =>
       json({ items: [], nextAfter: null }),
@@ -797,9 +801,11 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
       <NativeWorkspace />
     </NativeTestRoot>
   )
+  // Documents is the default section; open the doc directly from the sidebar tree.
   await user.click(await screen.findByRole("button", { name: "Expand Launch" }))
-  await user.click(screen.getByRole("button", { name: "Research" }))
-  await user.click(await screen.findByRole("tab", { name: "Documents" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Expand Research" })
+  )
   await user.click(
     await screen.findByRole("button", { name: /Draft document/ })
   )
@@ -815,7 +821,8 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
   const unload = new Event("beforeunload", { cancelable: true })
   window.dispatchEvent(unload)
   expect(unload.defaultPrevented).toBe(true)
-  await user.click(screen.getByRole("button", { name: "Other" }))
+  // Switching the primary section guards the unsaved draft.
+  await user.click(screen.getByRole("button", { name: "Team chat" }))
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "Discard unsaved changes?"
   )
@@ -828,7 +835,9 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
   expect(push).not.toHaveBeenCalled()
   await user.click(screen.getByRole("button", { name: "Keep editing" }))
   await user.click(screen.getByRole("button", { name: "Actions for Other" }))
-  await user.click(await screen.findByRole("menuitem", { name: "New chat" }))
+  await user.click(
+    await screen.findByRole("menuitem", { name: "New document" })
+  )
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "Discard unsaved changes?"
   )

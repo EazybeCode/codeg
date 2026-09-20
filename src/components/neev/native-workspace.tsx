@@ -335,7 +335,9 @@ function WorkspaceContent() {
             error: e,
           },
         }))
-        auth.handleError(e)
+        // A 403/401 on listing a container's items reveals revoked access —
+        // route through the authority handler so membership loss re-bootstraps.
+        auth.handleAuthorityError(e)
       }
     },
     [org, sectionKind, auth]
@@ -707,6 +709,7 @@ function WorkspaceContent() {
           ) : selectedNode && (open || creation) ? (
             <NativeContent
               node={selectedNode}
+              chromeless
               open={open ?? undefined}
               creation={creation}
               onRequestNavigationGuard={registerGuard}
