@@ -354,7 +354,9 @@ pub(super) async fn start_turn(
             .map_err(super::agent_error)?,
         None => None,
     };
-    let turn = sessions::begin_turn(&state, &actor, &session_id, &input.prompt, None).await?;
+    // A saved-session turn carries no request id, so this caller is always
+    // its creator.
+    let (turn, _created) = sessions::begin_turn(&state, &actor, &session_id, &input.prompt, None).await?;
     let composed = sessions::conversation_prompt(&history, &turn.prompt);
     let run_request = RunRequest {
         // Server-authoritative identity: never a client-supplied user/org.
@@ -914,7 +916,7 @@ pub(super) async fn team_invoke(
     // `requestId` makes the whole invocation idempotent — a retry (racing or
     // long after the fact) resolves to the SAME turn and run, so the provider
     // never executes one ask twice and no duplicate reply can be published.
-    let turn = sessions::begin_turn(
+    let (turn, created) = sessions::begin_turn(
         &state,
         &actor,
         &session.id,
@@ -922,19 +924,15 @@ pub(super) async fn team_invoke(
         Some(&input.request_id),
     )
     .await?;
-    // A replay whose original run already settled has nothing left to start.
-    if turn.status != TurnStatus::Running {
-        let mut response = private_json(TeamInvokeDto {
-            message: super::content::message_dto(prompt_message)?,
-            run_id: turn.run_id.clone(),
-            turn: turn_dto(turn),
-        });
-        *response.status_mut() = StatusCode::CREATED;
-        return Ok(response);
-    }
-    // A replay that arrived while the original run is still live must not start
-    // a second one: it is already registered under this very run id.
-    if runs::find(&state.agent_runs, &turn.run_id).is_some() {
+    // ONLY the caller that created the turn executes it.
+    //
+    // This is decided inside `begin_turn`'s transaction, arbitrated by the
+    // unique `(org_id, session_id, request_id)` index — not by looking the run
+    // up in the registry. A registry check here would be a race: two truly
+    // simultaneous retries can both miss it while the first is still awaiting
+    // the runtime, and the loser could then start a second provider execution
+    // (or settle the shared turn as `busy` while the winner is still running).
+    if !created {
         let mut response = private_json(TeamInvokeDto {
             message: super::content::message_dto(prompt_message)?,
             run_id: turn.run_id.clone(),

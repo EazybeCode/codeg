@@ -322,7 +322,7 @@ async fn an_interrupted_run_replays_as_failed_and_is_never_auto_rerun() {
     .try_get::<i32>("", "owner_id")
     .unwrap();
     let actor = h::scoped_context(&database, user, org, NOW).await;
-    let turn = crate::neev::agents::sessions::begin_turn(&state, &actor, &id, "long task", None)
+    let (turn, _) = crate::neev::agents::sessions::begin_turn(&state, &actor, &id, "long task", None)
         .await
         .unwrap();
     let run_id = turn.run_id.clone();
@@ -476,7 +476,7 @@ async fn a_stream_stops_the_moment_its_browser_session_is_revoked() {
     let actor = crate::neev::auth::session::organization(&database, &scoped.session, NOW)
         .await
         .unwrap();
-    let turn = crate::neev::agents::sessions::begin_turn(&state, &actor, &id, "long task", None)
+    let (turn, _) = crate::neev::agents::sessions::begin_turn(&state, &actor, &id, "long task", None)
         .await
         .unwrap();
 
@@ -819,9 +819,21 @@ async fn a_retried_team_invocation_runs_once_and_posts_one_reply() {
     assert_eq!(turns.items.len(), 1);
 }
 
-#[tokio::test]
-async fn a_concurrent_team_invocation_retry_resolves_to_the_same_run() {
-    let (state, client, database, _org) = fixture(fake(&["slow answer"])).await;
+/// Two genuinely OVERLAPPING retries of the same `requestId`.
+///
+/// The requests are driven with `tokio::join!` so both are in flight at once —
+/// a sequential pair would not exercise the race at all. The window that used
+/// to be open: both requests miss the run registry while the first is still
+/// awaiting the runtime, so both start a provider execution, and the loser can
+/// settle the shared turn as failed while the winner is still streaming. The
+/// claim is now made inside `begin_turn`'s transaction, so exactly one caller
+/// is ever told it created the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_team_invocation_retries_run_the_provider_exactly_once() {
+    // Enough chunks that the first run is unquestionably still executing while
+    // the second request is being handled.
+    let chunks: Vec<&str> = std::iter::repeat("tick ").take(4_000).collect();
+    let (state, client, database, _org) = fixture(fake(&chunks)).await;
     let actor = owner_context(&database, "owner@example.test").await;
     let (chat_id, revision) = make_chat(&state, &actor).await;
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -832,37 +844,78 @@ async fn a_concurrent_team_invocation_retry_resolves_to_the_same_run() {
         "requestId": request_id,
         "expectedAuthRevision": revision,
     });
-    let first = client
-        .post(&format!("/api/neev/chats/{chat_id}/agent"))
-        .json(&payload)
-        .await
-        .json::<Value>();
-    // Retry immediately, without draining: the first run may well still be live.
-    let second = client
-        .post(&format!("/api/neev/chats/{chat_id}/agent"))
-        .json(&payload)
-        .await;
-    second.assert_status(axum::http::StatusCode::CREATED);
-    let second = second.json::<Value>();
-    assert_eq!(second["runId"], first["runId"]);
-    assert_eq!(second["turn"]["id"], first["turn"]["id"]);
+    let path = format!("/api/neev/chats/{chat_id}/agent");
 
-    client
-        .get(&format!(
-            "/api/neev/agent/runs/{}/events",
-            first["runId"].as_str().unwrap()
-        ))
-        .await;
+    let (first, second) = tokio::join!(
+        client.post(&path).json(&payload),
+        client.post(&path).json(&payload),
+    );
+    first.assert_status(axum::http::StatusCode::CREATED);
+    second.assert_status(axum::http::StatusCode::CREATED);
+    let first = first.json::<Value>();
+    let second = second.json::<Value>();
+
+    // Both callers are given the SAME turn and run...
+    assert_eq!(second["turn"]["id"], first["turn"]["id"]);
+    assert_eq!(second["runId"], first["runId"]);
+    // ...and neither is handed a failure: the loser must not settle the shared
+    // turn out from under the winner.
+    for response in [&first, &second] {
+        assert_eq!(
+            response["turn"]["status"], "running",
+            "a simultaneous retry settled the shared turn: {response}"
+        );
+    }
+
+    let run_id = first["runId"].as_str().unwrap().to_owned();
+    let events = sse_events(
+        &client
+            .get(&format!("/api/neev/agent/runs/{run_id}/events"))
+            .await
+            .text(),
+    );
+    // The single run reaches a real completion, not a `busy`/`unavailable`
+    // failure caused by its own duplicate.
+    let last = events.last().unwrap();
+    assert_eq!(
+        last["status"], "completed",
+        "the surviving run did not complete: {last}"
+    );
+
+    // Exactly one provider execution: one turn, at sequence 1.
+    let team_session = crate::neev::agents::sessions::team_session_id(
+        actor.org_id,
+        actor.identity.user_id,
+        &chat_id,
+        "claude",
+    );
+    let turns = crate::neev::agents::sessions::turns(&state, &actor, &team_session, None)
+        .await
+        .unwrap();
+    assert_eq!(turns.items.len(), 1, "a second provider run was started");
+    assert_eq!(turns.items[0].sequence, 1);
+    assert_eq!(
+        turns.items[0].status,
+        crate::neev::agents::sessions::TurnStatus::Completed
+    );
+
+    // Exactly one ask and one agent reply reached the team.
     let items = crate::neev::content::messages::list(&state, &actor, &chat_id, None)
         .await
         .unwrap();
+    assert_eq!(
+        items.items.iter().filter(|m| m.body == "race me").count(),
+        1,
+        "the ask was posted twice"
+    );
     assert_eq!(
         items
             .items
             .iter()
             .filter(|m| m.author_kind == crate::neev::content::types::AuthorKind::Agent)
             .count(),
-        1
+        1,
+        "the agent replied twice to one ask"
     );
 }
 

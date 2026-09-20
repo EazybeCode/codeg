@@ -53,7 +53,7 @@ impl Harness {
 
     /// Begin a turn and drive it with a fake runtime producing `chunks`.
     async fn run(&self, prompt: &str, chunks: Vec<String>) -> (String, Arc<LiveRun>) {
-        let turn = sessions::begin_turn(&self.state, &self.actor, &self.session.id, prompt, None)
+        let (turn, _) = sessions::begin_turn(&self.state, &self.actor, &self.session.id, prompt, None)
             .await
             .unwrap();
         let handle = FakeRuntime::new(chunks)
@@ -213,7 +213,7 @@ async fn an_oversized_reply_fails_the_turn_instead_of_silently_truncating() {
 #[tokio::test]
 async fn a_refusal_before_any_stream_is_recorded_on_the_durable_turn() {
     let h = Harness::new().await;
-    let turn = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "q", None)
+    let (turn, _) = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "q", None)
         .await
         .unwrap();
     // The production default runtime refuses; the prompt must not vanish.
@@ -362,7 +362,7 @@ async fn a_transient_storage_outage_does_not_wedge_the_session() {
 async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
     let h = Harness::new().await;
     let request_id = uuid::Uuid::new_v4().to_string();
-    let first = sessions::begin_turn(
+    let (first, created) = sessions::begin_turn(
         &h.state,
         &h.actor,
         &h.session.id,
@@ -371,8 +371,9 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
     )
     .await
     .unwrap();
+    assert!(created, "the first caller must own the turn it created");
     // Replay while the first turn is still live.
-    let concurrent = sessions::begin_turn(
+    let (concurrent, created) = sessions::begin_turn(
         &h.state,
         &h.actor,
         &h.session.id,
@@ -381,6 +382,8 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
     )
     .await
     .unwrap();
+    // The replay is told it created NOTHING, so it never executes.
+    assert!(!created, "a replay must not be told it created the turn");
     assert_eq!(concurrent.id, first.id);
     assert_eq!(concurrent.run_id, first.run_id);
 
@@ -396,7 +399,7 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
     .unwrap();
 
     // Replay AFTER it completed — the case a live-turn guard cannot catch.
-    let sequential = sessions::begin_turn(
+    let (sequential, created) = sessions::begin_turn(
         &h.state,
         &h.actor,
         &h.session.id,
@@ -405,6 +408,7 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
     )
     .await
     .unwrap();
+    assert!(!created, "a late replay must not be told it created the turn");
     assert_eq!(sequential.id, first.id);
     assert_eq!(sequential.run_id, first.run_id);
     assert_eq!(sequential.status, sessions::TurnStatus::Completed);
@@ -417,7 +421,7 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
     assert_eq!(turns.items.len(), 1);
 
     // A DIFFERENT request id is a genuinely new ask and is allowed.
-    let fresh = sessions::begin_turn(
+    let (fresh, created) = sessions::begin_turn(
         &h.state,
         &h.actor,
         &h.session.id,
@@ -426,6 +430,7 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
     )
     .await
     .unwrap();
+    assert!(created, "a genuinely new ask is created, not replayed");
     assert_ne!(fresh.id, first.id);
 }
 
@@ -433,7 +438,7 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
 async fn a_replay_is_answered_even_after_the_session_is_archived() {
     let h = Harness::new().await;
     let request_id = uuid::Uuid::new_v4().to_string();
-    let first = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "ask", Some(&request_id))
+    let (first, _) = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "ask", Some(&request_id))
         .await
         .unwrap();
     sessions::finish(
@@ -452,9 +457,10 @@ async fn a_replay_is_answered_even_after_the_session_is_archived() {
         .unwrap();
     // Retrying a request that already succeeded returns its result rather than
     // a late objection about the session's current state.
-    let replay = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "ask", Some(&request_id))
+    let (replay, created) = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "ask", Some(&request_id))
         .await
         .unwrap();
+    assert!(!created);
     assert_eq!(replay.id, first.id);
 }
 

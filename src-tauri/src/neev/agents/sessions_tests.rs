@@ -236,7 +236,7 @@ async fn rename_rejects_empty_and_control_characters() {
 async fn a_turn_is_durable_before_the_runtime_is_asked() {
     let h = Harness::new().await;
     let session = h.session().await;
-    let turn = begin_turn(&h.state, &h.owner, &session.id, "draft the memo", None)
+    let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "draft the memo", None)
         .await
         .unwrap();
     assert_eq!(turn.status, TurnStatus::Running);
@@ -270,7 +270,7 @@ async fn a_session_runs_one_turn_at_a_time() {
 async fn finishing_a_turn_settles_it_and_is_not_replayable() {
     let h = Harness::new().await;
     let session = h.session().await;
-    let turn = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
+    let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
     persist_response(&h.database, &turn.run_id, "partial", NOW + 1)
         .await
         .unwrap();
@@ -314,7 +314,7 @@ async fn finishing_a_turn_settles_it_and_is_not_replayable() {
 async fn a_failure_always_carries_a_reason() {
     let h = Harness::new().await;
     let session = h.session().await;
-    let turn = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
+    let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
     // Even with no code supplied, the stored row is a well-formed failure — the
     // schema refuses a failed turn without one.
     finish(&h.database, &turn.run_id, "", TurnStatus::Failed, None, NOW + 1)
@@ -329,7 +329,7 @@ async fn a_failure_always_carries_a_reason() {
 async fn finish_refuses_to_mark_a_turn_running() {
     let h = Harness::new().await;
     let session = h.session().await;
-    let turn = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
+    let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
     assert_eq!(
         finish(
             &h.database,
@@ -349,7 +349,7 @@ async fn finish_refuses_to_mark_a_turn_running() {
 async fn startup_reconciliation_settles_turns_left_running_by_a_dead_process() {
     let h = Harness::new().await;
     let session = h.session().await;
-    let turn = begin_turn(&h.state, &h.owner, &session.id, "long task", None)
+    let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "long task", None)
         .await
         .unwrap();
     persist_response(&h.database, &turn.run_id, "half an answer", NOW + 1)
@@ -373,7 +373,7 @@ async fn startup_reconciliation_settles_turns_left_running_by_a_dead_process() {
 async fn turn_by_run_is_scoped_to_the_owner() {
     let h = Harness::new().await;
     let session = h.session().await;
-    let turn = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
+    let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
     let peer = h.peer().await;
     // Knowing a run id is not authority.
     assert_eq!(
@@ -526,7 +526,7 @@ async fn turn_history_pages_in_order() {
     let h = Harness::new().await;
     let session = h.session().await;
     for index in 1..=5 {
-        let turn = begin_turn(&h.state, &h.owner, &session.id, &format!("q{index}"), None)
+        let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, &format!("q{index}"), None)
             .await
             .unwrap();
         finish(

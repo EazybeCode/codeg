@@ -207,6 +207,7 @@ async fn downgrade_five(db: &DatabaseConnection, version: i64) {
         // session11 (turns reference sessions), then org9, then gateway8.
         "neev_agent_turns",
         "neev_agent_sessions",
+        "neev_image_blobs",
         "neev_org_join_codes",
         "neev_gateway_revoke_intents",
         "neev_gateway_redemptions",
@@ -277,7 +278,7 @@ async fn seed_preserved_data(db: &DatabaseConnection, with_content: bool) {
 }
 
 async fn assert_preserved_data(db: &DatabaseConnection, with_content: bool) {
-    assert_eq!(schema_version(db).await, 10);
+    assert_eq!(schema_version(db).await, 11);
     assert_eq!(h::count(db, "neev_accounts").await, 1);
     assert_eq!(h::count(db, "neev_organizations").await, 1);
     assert_eq!(h::count(db, "neev_memberships").await, 1);
@@ -352,7 +353,7 @@ async fn native_initialization_creates_empty_personal_agent_metadata() {
         .await
         .expect("native personal metadata table exists");
     assert!(rows.is_empty());
-    assert_eq!(schema_version(&database).await, 10);
+    assert_eq!(schema_version(&database).await, 11);
 }
 
 async fn connection_contract(db: &DatabaseConnection) {

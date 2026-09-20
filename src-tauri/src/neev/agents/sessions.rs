@@ -595,7 +595,7 @@ pub(crate) async fn begin_turn(
     session_id: &str,
     text: &str,
     request_id: Option<&str>,
-) -> Result<AgentTurn, ContentError> {
+) -> Result<(AgentTurn, bool), ContentError> {
     let text = prompt(text)?;
     let request_id = request_id
         .map(|value| org::normalize_request_id(value).map_err(|_| ContentError::Invalid))
@@ -609,7 +609,12 @@ pub(crate) async fn begin_turn(
         if let Some(existing) = turn_by_request(&tx, actor.org_id, session_id, request).await? {
             session::recheck(&tx, actor, state.clock.now_unix()).await?;
             tx.commit().await.map_err(database_error)?;
-            return Ok(existing);
+            // `false` = this caller did NOT create the turn, so it must not
+            // execute anything. Deciding that here, inside the transaction that
+            // the unique `(org_id, session_id, request_id)` index arbitrates, is
+            // what makes two simultaneous retries safe: exactly one caller can
+            // ever be told it created the turn.
+            return Ok((existing, false));
         }
     }
     if found.archived {
@@ -669,7 +674,7 @@ pub(crate) async fn begin_turn(
     .await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
-    Ok(AgentTurn {
+    Ok((AgentTurn {
         id,
         session_id: session_id.to_owned(),
         sequence,
@@ -683,7 +688,7 @@ pub(crate) async fn begin_turn(
         created_at: now,
         updated_at: now,
         completed_at: None,
-    })
+    }, true))
 }
 
 /// How many earlier turns may be replayed to the provider as context.
