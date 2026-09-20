@@ -93,7 +93,10 @@
     "newDocumentBodyHint": "Name your document, then create it to start writing with headings, lists, tables and more.",
     "newChatBodyHint": "Name this conversation, then create it to start the team thread.",
     "dividerBlock": "Divider",
-    "imageBlock": "Image"
+    "imageBlock": "Image",
+    "liveUpdates": "Live updates",
+    "reconnectingUpdates": "Reconnecting…",
+    "polledUpdates": "Updates every few seconds"
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

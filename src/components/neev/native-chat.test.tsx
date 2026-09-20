@@ -517,3 +517,83 @@ it("shows Cancel while streaming and cancels the run", async () => {
   await waitFor(() => expect(canceled).toBe(true))
   act(() => controller.close())
 })
+
+const pushing = () => json({ ...nativeCapabilities, realtime: true })
+const streamPath = `GET /api/neev/chats/${resource.id}/stream`
+
+it("renders a teammate's message from a push notice and says updates are live", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const encoder = new TextEncoder()
+  const teammate = {
+    ...message,
+    id: "33333333-3333-4333-8333-333333333333",
+    sequence: "1",
+    authorId: 2,
+    authorName: "Riya",
+    body: "Deploying now",
+  }
+  let published = false
+  const mock = mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": pushing,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    // The push notice carries no content, so the thread only fills in once the
+    // authorized list endpoint hands the message over.
+    [`GET ${path}`]: () =>
+      json({ items: published ? [teammate] : [], nextAfter: null }),
+    [streamPath]: () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            controller = c
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      ),
+  })
+  mount()
+  await screen.findByRole("textbox", { name: "Message" })
+  act(() =>
+    controller.enqueue(
+      encoder.encode('data: {"type":"sync",' + '"sequence":"0"}\n\n')
+    )
+  )
+  expect(await screen.findByText("Live updates")).toBeVisible()
+  expect(screen.queryByText("Deploying now")).toBeNull()
+  published = true
+  act(() =>
+    controller.enqueue(
+      encoder.encode('data: {"type":"message","sequence":"1"}\n\n')
+    )
+  )
+  expect(await screen.findByText("Deploying now")).toBeVisible()
+  act(() => controller.close())
+  expect(mock.unknown).toEqual([])
+})
+
+it("keeps polling and says so when the server does not push", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  let published = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": pushing,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({
+        items: published
+          ? [{ ...message, authorName: "Riya", body: "Posted later" }]
+          : [],
+        nextAfter: null,
+      }),
+    // Push advertised but not actually served here (rolled back deployment).
+    [streamPath]: () => json({ code: "not_found" }, 404),
+  })
+  mount()
+  await screen.findByRole("textbox", { name: "Message" })
+  // No "Live updates" claim when nothing is actually streaming.
+  expect(await screen.findByText("Updates every few seconds")).toBeVisible()
+  published = true
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5200)
+  })
+  expect(await screen.findByText("Posted later")).toBeVisible()
+  expect(screen.queryByText("Live updates")).toBeNull()
+})

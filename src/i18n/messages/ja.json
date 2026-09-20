@@ -93,7 +93,10 @@
     "newDocumentBodyHint": "ドキュメントに名前を付けて作成すると、見出し・リスト・表などで書き始められます。",
     "newChatBodyHint": "この会話に名前を付けて作成すると、チームスレッドを開始できます。",
     "dividerBlock": "区切り線",
-    "imageBlock": "画像"
+    "imageBlock": "画像",
+    "liveUpdates": "リアルタイム更新",
+    "reconnectingUpdates": "再接続しています…",
+    "polledUpdates": "数秒ごとに更新"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

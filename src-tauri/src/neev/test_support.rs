@@ -818,6 +818,7 @@ pub(super) fn preview_config() -> super::config::Config {
         },
         gateway_events: false,
         runtime_enabled: false,
+        realtime_enabled: true,
         _document_root_guard: Some(document_root),
     }
 }

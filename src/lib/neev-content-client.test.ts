@@ -12,6 +12,8 @@ import {
   saveNativeDocument,
   runNativeAgent,
   cancelNativeAgent,
+  openNativeMessageStream,
+  parseMessageStreamEvent,
   type NativeAgentEvent,
 } from "./neev-content-client"
 
@@ -401,5 +403,100 @@ describe("agent runtime client", () => {
       "/api/neev/agent/cancel",
       expect.objectContaining({ method: "POST" })
     )
+  })
+})
+
+describe("team message stream client", () => {
+  const chatId = "123e4567-e89b-42d3-a456-426614174000"
+  afterEach(() => vi.unstubAllGlobals())
+
+  function sse(...frames: string[]) {
+    return new Response(frames.map((frame) => `data: ${frame}\n\n`).join(""), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    })
+  }
+
+  it("accepts only the four content-free notice shapes", () => {
+    expect(parseMessageStreamEvent('{"type":"sync","sequence":"0"}')).toEqual({
+      type: "sync",
+      sequence: "0",
+    })
+    expect(
+      parseMessageStreamEvent('{"type":"message","sequence":"12"}')
+    ).toEqual({ type: "message", sequence: "12" })
+    expect(parseMessageStreamEvent('{"type":"resync"}')).toEqual({
+      type: "resync",
+    })
+    expect(parseMessageStreamEvent('{"type":"revoked"}')).toEqual({
+      type: "revoked",
+    })
+  })
+
+  it("rejects malformed, unknown, and out-of-range notices", () => {
+    for (const frame of [
+      "not json",
+      "[]",
+      '{"type":"chunk","text":"hi"}',
+      '{"type":"message"}',
+      // A message sequence is always a positive canonical integer.
+      '{"type":"message","sequence":"0"}',
+      '{"type":"message","sequence":1}',
+      '{"type":"message","sequence":"01"}',
+      '{"type":"sync","sequence":"-1"}',
+    ])
+      expect(parseMessageStreamEvent(frame)).toBeNull()
+  })
+
+  it("streams notices and never carries message content", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(
+        sse(
+          '{"type":"sync","sequence":"2"}',
+          '{"type":"message","sequence":"3"}',
+          '{"type":"chunk","text":"secret"}',
+          '{"type":"revoked"}'
+        )
+      )
+    vi.stubGlobal("fetch", fetcher)
+    const events: unknown[] = []
+    await openNativeMessageStream(chatId, (event) => events.push(event))
+    // The unknown "chunk" frame is dropped rather than surfaced as content.
+    expect(events).toEqual([
+      { type: "sync", sequence: "2" },
+      { type: "message", sequence: "3" },
+      { type: "revoked" },
+    ])
+    expect(fetcher).toHaveBeenCalledWith(
+      `/api/neev/chats/${chatId}/stream`,
+      expect.objectContaining({ credentials: "same-origin" })
+    )
+  })
+
+  it("refuses a non-canonical chat id before any request", async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal("fetch", fetcher)
+    await expect(
+      openNativeMessageStream("../agent/run", () => {})
+    ).rejects.toBeInstanceOf(NativeClientError)
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it("reports push as unavailable for capacity, denial, and rollback", async () => {
+    for (const [status, kind] of [
+      [503, "unavailable"],
+      [401, "unauthorized"],
+      [403, "forbidden"],
+      [404, "not_found"],
+    ] as const) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response("{}", { status }))
+      )
+      await expect(
+        openNativeMessageStream(chatId, () => {})
+      ).rejects.toMatchObject({ kind })
+    }
   })
 })

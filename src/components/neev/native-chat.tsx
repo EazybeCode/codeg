@@ -34,6 +34,7 @@ import {
   type AppendNativeMessageInput,
 } from "@/lib/neev-content-client"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
+import { useNeevMessageStream } from "@/hooks/use-neev-message-stream"
 import { useNativeAuth } from "./native-auth-provider"
 import {
   NativeDialogContent as DialogContent,
@@ -98,6 +99,8 @@ function Chat({
     })
   }
   const runtimeEnabled = auth.capabilities?.runtimeEnabled ?? false
+  // Absent capability reads as "no push": the client then polls and says so.
+  const pushAdvertised = auth.capabilities?.realtime ?? false
   const historyElement = useRef<HTMLOListElement>(null)
   const followHistory = useRef(true)
   useLayoutEffect(() => {
@@ -110,11 +113,19 @@ function Chat({
     sequence = useRef<string | null>(null),
     retry = useRef<AppendNativeMessageInput | null>(null),
     sending = useRef(false)
+  // Push delivery replaces the interval while it is genuinely live; every other
+  // state keeps polling, so a dropped or unavailable stream still delivers.
+  const stream = useNeevMessageStream({
+    chatId: resource.id,
+    enabled: pushAdvertised && !revoked && !loading,
+    signal: auth.signal,
+    onNotify: () => void refresh(),
+  })
   const scope = useNeevContentPoll({
     signal: auth.signal,
     scopeKey: auth.scopeKey,
     resourceScope: resource.id,
-    enabled: !revoked && !loading,
+    enabled: !revoked && !loading && stream.status !== "live",
     onPoll: refresh,
   })
   useEffect(() => {
@@ -318,6 +329,15 @@ function Chat({
           <p className="text-xs text-muted-foreground">
             {t(latest.visibility)}
             {latest.archived ? ` · ${t("archived")}` : ""}
+          </p>
+          <p role="status" className="text-xs text-muted-foreground">
+            {t(
+              stream.status === "live"
+                ? "liveUpdates"
+                : stream.status === "reconnecting"
+                  ? "reconnectingUpdates"
+                  : "polledUpdates"
+            )}
           </p>
         </div>
         {actions?.isCreator && actions.shareable && (

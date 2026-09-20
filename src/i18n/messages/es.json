@@ -93,7 +93,10 @@
     "newDocumentBodyHint": "Nombra tu documento y créalo para empezar a escribir con encabezados, listas, tablas y más.",
     "newChatBodyHint": "Nombra esta conversación y créala para iniciar el hilo del equipo.",
     "dividerBlock": "Separador",
-    "imageBlock": "Imagen"
+    "imageBlock": "Imagen",
+    "liveUpdates": "Actualizaciones en vivo",
+    "reconnectingUpdates": "Reconectando…",
+    "polledUpdates": "Se actualiza cada pocos segundos"
   },
   "Native": {
     "callbackConflict": "Este método de acceso entra en conflicto con una cuenta existente. Usa tu método de acceso original y luego abre Configuración para vincular otro método. Las cuentas nunca se fusionan automáticamente.",

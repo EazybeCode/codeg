@@ -19,6 +19,7 @@ mod content;
 mod content_tests;
 pub(crate) mod cookies;
 mod org;
+mod realtime;
 mod static_files;
 #[cfg(test)]
 mod tests;
@@ -80,6 +81,9 @@ struct Capabilities {
     version: u8,
     identity_mode: &'static str,
     runtime_enabled: bool,
+    /// True when team messages are pushed (SSE). False is the honest signal that
+    /// the client must fall back to polling; it never implies an access change.
+    realtime: bool,
     providers: Providers,
     catalog: CatalogCapabilities,
 }
@@ -214,6 +218,11 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
     }
     // Gateway browser exchange-issue is mounted only when the integration is
     // enabled (schema8 + `NEEV_GATEWAY_EVENTS_ENABLED`); otherwise it 404s.
+    // Phase-2 push delivery. Rolled back by `NEEV_REALTIME_DISABLED=true`: the
+    // route disappears, the capability reports false, clients poll. No data change.
+    if state.config.realtime_enabled {
+        router = router.route("/api/neev/chats/{id}/stream", get(realtime::stream));
+    }
     if state.config.gateway_events {
         router = router.route(
             "/api/neev/collaboration/issue",
@@ -235,6 +244,7 @@ async fn capabilities(State(state): State<Arc<ServerState>>) -> Response {
         // config layer refuses `NEEV_RUNTIME_ENABLED`); a test/isolated harness
         // that injects a runtime reports true, which enables the chat control.
         runtime_enabled: state.agents.is_available(),
+        realtime: state.config.realtime_enabled,
         providers: Providers {
             google: state.oauth.google_available(),
             email: state.magic.is_some(),
