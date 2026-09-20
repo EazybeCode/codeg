@@ -76,13 +76,23 @@ class Endpoint:
         return ("%s:%d" % (self.host, self.port)).encode("ascii")
 
 
+# Anthropic's official network-access docs (code.claude.com/docs/en/network-config):
+# platform.claude.com performs the OAuth token EXCHANGE/REFRESH/REVOKE for BOTH the
+# claude.ai and Console flows, so it is required for login AND run (api.anthropic.com
+# alone cannot refresh). claude.ai authentication is also officially required
+# (claude.com redirects to it). These are doc-confirmed.
 _ENDPOINTS = {
     ("codex", "login"): (Endpoint("auth.openai.com", 443, True),),
     ("claude", "login"): (
-        Endpoint("claude.com", 443, True),
-        Endpoint("console.anthropic.com", 443, False),
+        Endpoint("claude.com", 443, True),            # observed authorize origin
+        Endpoint("claude.ai", 443, True),             # official auth (redirect target)
+        Endpoint("console.anthropic.com", 443, True),  # official --console flow
+        Endpoint("platform.claude.com", 443, True),   # official OAuth token exchange
     ),
-    ("claude", "run"): (Endpoint("api.anthropic.com", 443, False),),
+    ("claude", "run"): (
+        Endpoint("api.anthropic.com", 443, True),     # official Messages API
+        Endpoint("platform.claude.com", 443, True),   # official OAuth token refresh
+    ),
     ("codex", "run"): (
         Endpoint("chatgpt.com", 443, False),
         Endpoint("api.openai.com", 443, False),

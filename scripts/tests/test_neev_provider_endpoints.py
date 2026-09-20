@@ -21,9 +21,15 @@ class EndpointTableTests(unittest.TestCase):
 
     def test_observed_login_hosts(self):
         self.assertEqual(endpoints.hosts("codex", "login"), {"auth.openai.com"})
-        self.assertIn("claude.com", endpoints.hosts("claude", "login"))
-        # The disproven guess must not be present.
-        self.assertNotIn("claude.ai", endpoints.hosts("claude", "login"))
+        claude_login = endpoints.hosts("claude", "login")
+        # Observed authorize origin + officially-required auth/token hosts.
+        self.assertEqual(
+            claude_login,
+            {"claude.com", "claude.ai", "console.anthropic.com", "platform.claude.com"},
+        )
+        # platform.claude.com is required for token refresh at runtime too.
+        self.assertIn("platform.claude.com", endpoints.hosts("claude", "run"))
+        self.assertIn("api.anthropic.com", endpoints.hosts("claude", "run"))
 
     def test_authorities_are_exact_host_port_bytes(self):
         self.assertEqual(
@@ -42,12 +48,12 @@ class EndpointTableTests(unittest.TestCase):
                 endpoints.endpoints(provider, purpose)
 
     def test_confirmed_flags_match_probe_status(self):
-        # claude.com and codex login are probe/doc CONFIRMED; runtime hosts pending.
-        confirmed_login = {e.host for e in endpoints.endpoints("claude", "login") if e.confirmed}
-        self.assertIn("claude.com", confirmed_login)
-        self.assertTrue(endpoints.unconfirmed("claude", "run"))
-        self.assertTrue(endpoints.unconfirmed("codex", "run"))
+        # Claude login/run + codex login are doc/probe CONFIRMED; only codex runtime
+        # hosts remain pending an isolated probe.
+        self.assertEqual(endpoints.unconfirmed("claude", "login"), ())
+        self.assertEqual(endpoints.unconfirmed("claude", "run"), ())
         self.assertEqual(endpoints.unconfirmed("codex", "login"), ())
+        self.assertTrue(endpoints.unconfirmed("codex", "run"))
 
     def test_endpoint_rejects_malformed_host_or_port(self):
         for host, port in (
