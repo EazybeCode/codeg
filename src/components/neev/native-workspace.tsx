@@ -745,6 +745,7 @@ function WorkspaceContent() {
               chromeless
               open={open ?? undefined}
               creation={creation}
+              onCreationCancelled={() => setCreation(undefined)}
               onRequestNavigationGuard={registerGuard}
               onOpened={(resource) => {
                 setOpen({ resource, request: ++openNumber.current })
