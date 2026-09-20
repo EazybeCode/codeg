@@ -43,10 +43,13 @@ MAX_BUFFER_BYTES = 65_536
 MAX_URL_BYTES = 2_048
 MAX_CODE_BYTES = 512
 
-# The only hosts the Claude CLI's OAuth URL may point at: the default ``--claudeai``
-# flow (claude.ai) and the ``--console`` flow (console.anthropic.com). A validated
-# https URL to any OTHER host is a downgrade/redirect we refuse to surface.
-ALLOWED_HOSTS = frozenset(("claude.ai", "console.anthropic.com"))
+# The only hosts the Claude CLI's OAuth URL may point at. The default ``--claudeai``
+# flow was PROBED at pinned 2.1.267 and emits https://claude.com/cai/oauth/authorize
+# (root's probe strips the query so no secrets are logged) — the observed host is
+# claude.com, NOT the earlier-guessed claude.ai. console.anthropic.com is retained
+# for the documented ``--console`` flow. A validated https URL to any OTHER host is a
+# downgrade/redirect we refuse to surface.
+ALLOWED_HOSTS = frozenset(("claude.com", "console.anthropic.com"))
 
 _ERROR_CODES = frozenset(
     ("invalid", "overflow", "denied", "conflict", "unsupported")

@@ -15,7 +15,7 @@ import neev_claude_login_protocol as proto  # noqa: E402
 
 
 _URL = (
-    "https://claude.ai/oauth/authorize?code_challenge=abc123"
+    "https://claude.com/cai/oauth/authorize?code_challenge=abc123"
     "&client_id=cid&redirect_uri=https://console.anthropic.com/oauth/code/callback"
     "&response_type=code&scope=org"
 )
@@ -62,8 +62,8 @@ class UrlExtractionTests(unittest.TestCase):
 
     def test_url_with_explicit_port_or_userinfo_is_denied(self):
         for url in (
-            "https://claude.ai:8443/oauth/authorize?x=y",
-            "https://user@claude.ai/oauth/authorize?x=y",
+            "https://claude.com:8443/cai/oauth/authorize?x=y",
+            "https://user@claude.com/cai/oauth/authorize?x=y",
         ):
             with self.subTest(url=url):
                 session = proto.ClaudeLoginProtocol()
