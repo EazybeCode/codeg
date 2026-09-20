@@ -21,6 +21,13 @@ ARG BASE_IMAGE=neev-native:latest
 FROM ${BASE_IMAGE} AS agent
 
 USER 0:0
+# Pinned official native CLI; provider credentials are supplied per user at run
+# time, never baked into this image. Update version and checksum together.
+ADD --checksum=sha256:0399c793ff571d5946ef923d80b4f330d05ac4b6842a6b0775468f5d389403c0 \
+    --chmod=0555 \
+    https://downloads.claude.ai/claude-code-releases/2.1.267/linux-x64/claude \
+    /usr/local/bin/claude
+RUN /usr/local/bin/claude --version
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
       python3 \
