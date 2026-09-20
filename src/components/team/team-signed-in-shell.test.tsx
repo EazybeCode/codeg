@@ -51,9 +51,11 @@ beforeEach(() => {
 })
 
 describe("TeamSignedInShell", () => {
-  it("mounts the team catalog workspace by default without legacy workspace data", () => {
+  it("mounts the team catalog workspace by default without legacy workspace data", async () => {
     showShell()
-    expect(screen.getByText("team catalog workspace")).toBeVisible()
+    // The workspace is loaded on demand now, so await it rather than asserting
+    // on the frame before its chunk resolves.
+    expect(await screen.findByText("team catalog workspace")).toBeVisible()
   })
 
   it("keeps a fixed browser return to workspace", () => {

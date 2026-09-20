@@ -5,7 +5,17 @@ import { Building2, Github, Loader2 } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { useTeamAuth } from "./team-auth-provider"
-import { TeamWorkspace } from "./team-workspace"
+import dynamic from "next/dynamic"
+
+/**
+ * The team workspace is only reached once team auth has resolved, which is
+ * already a network round trip, so deferring it costs nothing there — and it
+ * keeps the team surface out of the native and operator initial scripts.
+ */
+const TeamWorkspace = dynamic(
+  () => import("./team-workspace").then((module) => module.TeamWorkspace),
+  { ssr: false, loading: () => null }
+)
 
 export function TeamSignedInShell({
   children,
