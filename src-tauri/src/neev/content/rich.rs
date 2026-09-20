@@ -76,6 +76,28 @@ pub(crate) enum RichBlock {
         id: String,
         children: Vec<RichBlock>,
     },
+    #[serde(rename = "image")]
+    Image {
+        id: String,
+        children: Vec<RichBlock>,
+        /// Internal, ACL-served reference only (`/api/neev/images/{key}`); never an
+        /// external or `data:` URL, so the editor cannot leak views or embed
+        /// arbitrary remote content.
+        url: String,
+        caption: String,
+    },
+}
+
+/// An image URL must be an internal, authenticated serve reference — never an
+/// external/`data:`/`javascript:` URL. The key is the opaque per-org blob id.
+fn image_url_valid(url: &str) -> bool {
+    let Some(key) = url.strip_prefix("/api/neev/images/") else {
+        return false;
+    };
+    (1..=64).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
 fn required_href<'de, D: serde::Deserializer<'de>>(
@@ -97,7 +119,8 @@ impl RichBlock {
             | Self::Quote { id, children, .. }
             | Self::CodeBlock { id, children, .. }
             | Self::Table { id, children, .. }
-            | Self::Divider { id, children, .. } => (id, children),
+            | Self::Divider { id, children, .. }
+            | Self::Image { id, children, .. } => (id, children),
         }
     }
 }
@@ -264,6 +287,19 @@ pub(super) fn validate(document: &RichDocument) -> Result<(), ContentError> {
             RichBlock::Divider { .. } => {
                 // A horizontal divider carries no content and no children.
                 if !children.is_empty() {
+                    return Err(ContentError::Invalid);
+                }
+            }
+            RichBlock::Image { url, caption, .. } => {
+                bytes = bytes
+                    .checked_add(url.len() + caption.len())
+                    .ok_or(ContentError::Invalid)?;
+                if !children.is_empty()
+                    || bytes > LIMIT
+                    || !image_url_valid(url)
+                    || caption.len() > 2000
+                    || !text_valid(caption)
+                {
                     return Err(ContentError::Invalid);
                 }
             }
