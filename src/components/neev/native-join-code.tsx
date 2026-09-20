@@ -40,18 +40,18 @@ export function NativeJoinCode() {
 
   useEffect(() => {
     alive.current = true
-    if (!isAdmin) return
     const controller = new AbortController()
-    void loadJoinCode(controller.signal)
-      .then((value) => {
-        if (!controller.signal.aborted) setCode(value)
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) {
-          setAdminError(e)
-          handleError(e)
-        }
-      })
+    if (isAdmin)
+      void loadJoinCode(controller.signal)
+        .then((value) => {
+          if (!controller.signal.aborted) setCode(value)
+        })
+        .catch((e) => {
+          if (!controller.signal.aborted) {
+            setAdminError(e)
+            handleError(e)
+          }
+        })
     return () => {
       alive.current = false
       controller.abort()
@@ -146,8 +146,7 @@ export function NativeJoinCode() {
   }
 
   const joinErrorMessage =
-    joinError instanceof NativeClientError &&
-    (joinError.kind === "forbidden" || joinError.kind === "unavailable")
+    joinError instanceof NativeClientError && joinError.kind === "forbidden"
       ? t("invalidJoinCode")
       : null
 

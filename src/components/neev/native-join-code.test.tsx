@@ -1,8 +1,14 @@
-import { render, screen } from "@testing-library/react"
+import { act, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
+import { useNativeAuth } from "./native-auth-provider"
 import { NativeJoinCode } from "./native-join-code"
-import { json, mockNativeSession, NativeTestRoot, orgSession } from "./test-helpers"
+import {
+  json,
+  mockNativeSession,
+  NativeTestRoot,
+  orgSession,
+} from "./test-helpers"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
@@ -91,4 +97,80 @@ it("shows a truthful message for an invalid or disabled code", async () => {
   expect(
     await screen.findByText("That code is invalid, disabled, or unavailable.")
   ).toBeVisible()
+})
+
+it.each([
+  [
+    503,
+    "unavailable",
+    "This service is temporarily unavailable. Please try again.",
+  ],
+  [
+    429,
+    "limited",
+    "The request limit has been reached. Please try again later.",
+  ],
+])(
+  "reports HTTP %s without blaming the organization code",
+  async (status, code, message) => {
+    mockNativeSession(orgSession, {
+      "POST /api/neev/join/preview": () => json({ code }, Number(status)),
+    })
+    const user = userEvent.setup()
+    render(
+      <NativeTestRoot>
+        <NativeJoinCode />
+      </NativeTestRoot>
+    )
+    await user.type(
+      await screen.findByPlaceholderText("Join code"),
+      "ABCD2345EFGH"
+    )
+    await user.click(screen.getByRole("button", { name: "Preview" }))
+    expect(await screen.findByRole("alert")).toHaveTextContent(String(message))
+  }
+)
+
+it("ignores a member's late preview failure after leaving the panel", async () => {
+  let settle!: (value: Response) => void
+  const response = new Promise<Response>((resolve) => {
+    settle = resolve
+  })
+  let bootstraps = 0
+  mockNativeSession(
+    { ...orgSession, role: "member" },
+    {
+      "GET /api/neev/session": () =>
+        ++bootstraps === 1
+          ? json({ ...orgSession, role: "member" })
+          : json({ code: "unauthorized" }, 401),
+      "POST /api/neev/join/preview": () => response,
+    }
+  )
+  function SessionStatus() {
+    return <p role="status">{useNativeAuth().status}</p>
+  }
+  const user = userEvent.setup()
+  const { rerender } = render(
+    <NativeTestRoot>
+      <SessionStatus />
+      <NativeJoinCode />
+    </NativeTestRoot>
+  )
+  await user.type(
+    await screen.findByPlaceholderText("Join code"),
+    "ABCD2345EFGH"
+  )
+  await user.click(screen.getByRole("button", { name: "Preview" }))
+  rerender(
+    <NativeTestRoot>
+      <SessionStatus />
+    </NativeTestRoot>
+  )
+  await act(async () => {
+    settle(json({ code: "unauthorized" }, 401))
+    await response
+  })
+  expect(screen.getByRole("status")).toHaveTextContent("authenticated")
+  expect(screen.getByRole("status")).not.toHaveTextContent("unauthenticated")
 })
