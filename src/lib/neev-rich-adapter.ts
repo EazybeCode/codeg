@@ -218,6 +218,23 @@ export function toNeev(value: unknown): RichDocument {
       case "divider":
         return { ...common }
       case "image": {
+        // We persist only url + caption. Resize (previewWidth), alignment, name and
+        // colors are refused rather than silently dropped, so a user's formatting
+        // can never be lost on save/reopen (a visible "unsupported" notice fires).
+        // neutralProps enforces the exact prop set + default colors/alignment.
+        neutralProps(props, [
+          "name",
+          "url",
+          "caption",
+          "showPreview",
+          "previewWidth",
+        ])
+        if (
+          (props.name !== undefined && props.name !== "") ||
+          (props.showPreview !== undefined && props.showPreview !== true) ||
+          props.previewWidth !== undefined
+        )
+          return unsupported()
         const url = props.url
         const prefix = "/api/neev/images/"
         const key =

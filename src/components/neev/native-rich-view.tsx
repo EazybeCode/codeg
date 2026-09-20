@@ -93,14 +93,21 @@ function block(value: RichBlock): ReactNode {
       break
     case "image":
       content = (
-        // Internal, ACL-served source only (validated on parse). Same-origin so
-        // the serve endpoint re-checks the bound document's audience.
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={value.url}
-          alt={value.caption}
-          className="max-w-full rounded"
-        />
+        <figure className="space-y-1">
+          {/* Internal, ACL-served source only (validated on parse). Same-origin so
+              the serve endpoint re-checks the bound document's audience. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={value.url}
+            alt={value.caption}
+            className="max-w-full rounded"
+          />
+          {value.caption !== "" && (
+            <figcaption className="text-sm text-muted-foreground">
+              {value.caption}
+            </figcaption>
+          )}
+        </figure>
       )
       break
     default:

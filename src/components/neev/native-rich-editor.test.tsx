@@ -340,6 +340,52 @@ it("renders rich history as React content without an editor or injected HTML", (
   expect(container.querySelector("[contenteditable]")).toBeNull()
 })
 
+it("refuses a resized/aligned image so formatting is never silently dropped", () => {
+  const image = (extra: Record<string, unknown>) => [
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      type: "image",
+      props: {
+        textColor: "default",
+        backgroundColor: "default",
+        textAlignment: "left",
+        name: "",
+        url: "/api/neev/images/22222222-2222-4222-8222-222222222222",
+        caption: "C",
+        showPreview: true,
+        previewWidth: undefined,
+        ...extra,
+      },
+      content: undefined,
+      children: [],
+    },
+  ]
+  // Default (un-resized) image round-trips.
+  expect(toNeev(image({}))).toBeTruthy()
+  // A user resize or alignment is a visible refusal, not a silent reset.
+  expect(() => toNeev(image({ previewWidth: 200 }))).toThrow()
+  expect(() => toNeev(image({ textAlignment: "center" }))).toThrow()
+})
+
+it("shows an image caption as a visible figcaption in read mode", () => {
+  const document = parseRichDocument({
+    version: 1,
+    blocks: [
+      {
+        type: "image",
+        id: "11111111-1111-4111-8111-111111111111",
+        url: "/api/neev/images/22222222-2222-4222-8222-222222222222",
+        caption: "My chart",
+        children: [],
+      },
+    ],
+  })
+  render(<NativeRichView document={document} />)
+  const caption = screen.getByText("My chart")
+  expect(caption.tagName).toBe("FIGCAPTION")
+  expect(screen.getByRole("img")).toHaveAttribute("alt", "My chart")
+})
+
 it("refuses externally supplied blocknote HTML drops before parsing attachments", async () => {
   render(
     <NativeTestRoot>
