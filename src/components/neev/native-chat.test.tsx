@@ -173,7 +173,9 @@ it("pins a dirty message audience across polling and explicitly accepts the late
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000)
   })
-  expect(screen.getByText("Organization")).toBeVisible()
+  // Visibility and delivery status share one meta line so the composer stays
+  // above the fold on a phone.
+  expect(screen.getByText(/^Organization ·/)).toBeVisible()
   await user.click(screen.getByRole("button", { name: "Send" }))
   expect(bodies[0].expectedAuthRevision).toBe("1")
   await user.click(
@@ -703,4 +705,58 @@ it("keeps polling and says so when the server does not push", async () => {
   })
   expect(await screen.findByText("Posted later")).toBeVisible()
   expect(screen.queryByText("Live updates")).toBeNull()
+})
+
+/**
+ * A layout contract, not a pixel test: jsdom has no layout, so these assert the
+ * exact mechanisms whose absence produced the 390x844 bug — a title that wrapped
+ * one character per line while a long action label held the row open, pushing
+ * the composer off-screen.
+ */
+it("keeps the chat header on one row with a title that can give way", async () => {
+  // The view adopts the server's copy after its first load, so the long title
+  // has to come back from the resource route too.
+  const longTitled = { ...resource, title: "Nested team review [test]" }
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(longTitled),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+  })
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeChat
+          resource={longTitled}
+          onBack={() => {}}
+          onChanged={() => {}}
+          actions={{
+            isCreator: true,
+            archived: false,
+            visibility: "private",
+            shareable: true,
+            disabled: false,
+            onRename: () => {},
+            onShare: () => {},
+            onMakePrivate: () => {},
+            onArchiveToggle: () => {},
+            onMove: () => {},
+          }}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  const title = await screen.findByRole("heading", {
+    name: "Nested team review [test]",
+  })
+  // `break-words` on a squeezed box is what produced one character per line.
+  expect(title).toHaveClass("truncate")
+  expect(title).not.toHaveClass("break-words")
+  // The title's box must be allowed to shrink below its content width.
+  expect(title.parentElement).toHaveClass("min-w-0", "flex-1")
+  // The actions never compress it, and never wrap into a second row.
+  const share = screen.getByRole("button", { name: "Share with organization" })
+  expect(share.parentElement).toHaveClass("shrink-0")
+  expect(share.parentElement).not.toHaveClass("flex-wrap")
+  // The visible label collapses on a phone; the accessible name never does —
+  // `getByRole` above already proves that.
+  expect(share.querySelector("span")).toHaveClass("hidden", "sm:inline")
 })

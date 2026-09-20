@@ -3,9 +3,11 @@
 import {
   ArrowLeft,
   ArrowUp,
+  Lock,
   MoreHorizontal,
   PanelRight,
   Sparkles,
+  Users,
   X,
 } from "lucide-react"
 import { NativeMarkdown } from "./native-markdown"
@@ -360,7 +362,7 @@ function Chat({
   if (loading) return <p role="status">{n("loading")}</p>
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
-      <div className="flex shrink-0 items-start gap-3 px-5 py-5 sm:px-8">
+      <div className="flex shrink-0 items-start gap-2 px-4 py-3 sm:gap-3 sm:px-8 sm:py-5">
         <Button
           variant="ghost"
           size="icon"
@@ -370,91 +372,114 @@ function Chat({
         >
           <ArrowLeft aria-hidden />
         </Button>
-        <div className="min-w-0 flex-1 space-y-1">
-          <h2 className="break-words text-lg font-semibold">{latest.title}</h2>
-          <p className="text-xs text-muted-foreground">
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <h2
+            className="truncate text-base font-semibold sm:text-lg"
+            title={latest.title}
+          >
+            {latest.title}
+          </h2>
+          {/* One meta line, not three stacked ones: on a short viewport the
+              composer has to stay above the fold. */}
+          <p className="truncate text-xs text-muted-foreground">
             {t(latest.visibility)}
-            {latest.archived ? ` · ${t("archived")}` : ""}
-          </p>
-          <p role="status" className="text-xs text-muted-foreground">
-            {t(
-              stream.status === "live"
-                ? "liveUpdates"
-                : stream.status === "reconnecting"
-                  ? "reconnectingUpdates"
-                  : "polledUpdates"
-            )}
+            {latest.archived ? ` · ${t("archived")}` : ""} ·{" "}
+            <span role="status">
+              {t(
+                stream.status === "live"
+                  ? "liveUpdates"
+                  : stream.status === "reconnecting"
+                    ? "reconnectingUpdates"
+                    : "polledUpdates"
+              )}
+            </span>
           </p>
         </div>
-        {actions?.isCreator && actions.shareable && (
-          <>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={actions.disabled}
-              aria-describedby={
-                actions.visibility === "organization"
-                  ? "neev-make-private-warning"
-                  : undefined
-              }
-              onClick={
-                actions.visibility === "private"
-                  ? actions.onShare
-                  : actions.onMakePrivate
-              }
-            >
-              {t(actions.visibility === "private" ? "share" : "makePrivate")}
-            </Button>
-            {actions.visibility === "organization" && (
-              <p id="neev-make-private-warning" className="sr-only">
-                {t("makePrivateWarning")}
-              </p>
-            )}
-          </>
-        )}
-        {actions?.isCreator && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+        <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
+          {actions?.isCreator && actions.shareable && (
+            <>
               <Button
                 variant="ghost"
-                size="icon"
-                aria-label={t("resourceActions")}
+                size="sm"
+                disabled={actions.disabled}
+                // The label collapses to its icon on narrow viewports; the
+                // accessible name stays the full sentence either way.
+                aria-label={t(
+                  actions.visibility === "private" ? "share" : "makePrivate"
+                )}
+                aria-describedby={
+                  actions.visibility === "organization"
+                    ? "neev-make-private-warning"
+                    : undefined
+                }
+                onClick={
+                  actions.visibility === "private"
+                    ? actions.onShare
+                    : actions.onMakePrivate
+                }
               >
-                <MoreHorizontal aria-hidden />
+                {actions.visibility === "private" ? (
+                  <Users aria-hidden />
+                ) : (
+                  <Lock aria-hidden />
+                )}
+                <span className="hidden sm:inline">
+                  {t(
+                    actions.visibility === "private" ? "share" : "makePrivate"
+                  )}
+                </span>
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onRename}
-              >
-                {t("rename")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onArchiveToggle}
-              >
-                {t(actions.archived ? "reopen" : "archive")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onMove}
-              >
-                {t("move")}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={t("agentPanel")}
-          title={t("agentPanel")}
-          aria-pressed={agentPanel}
-          onClick={toggleAgentPanel}
-        >
-          <PanelRight aria-hidden />
-        </Button>
+              {actions.visibility === "organization" && (
+                <p id="neev-make-private-warning" className="sr-only">
+                  {t("makePrivateWarning")}
+                </p>
+              )}
+            </>
+          )}
+          {actions?.isCreator && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t("resourceActions")}
+                >
+                  <MoreHorizontal aria-hidden />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onRename}
+                >
+                  {t("rename")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onArchiveToggle}
+                >
+                  {t(actions.archived ? "reopen" : "archive")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onMove}
+                >
+                  {t("move")}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("agentPanel")}
+            title={t("agentPanel")}
+            aria-pressed={agentPanel}
+            onClick={toggleAgentPanel}
+          >
+            <PanelRight aria-hidden />
+          </Button>
+        </div>
       </div>
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -472,7 +497,7 @@ function Chat({
                   48
               }}
               aria-label={t("messages")}
-              className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-5 py-6 sm:px-8"
+              className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 py-4 sm:px-8 sm:py-6"
             >
               {messages.map((message) => (
                 <li
@@ -523,7 +548,7 @@ function Chat({
               event.preventDefault()
               void send()
             }}
-            className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-5 pb-5 pt-3 sm:px-8"
+            className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-4 pb-3 pt-2 sm:px-8 sm:pb-5 sm:pt-3"
           >
             <div className="rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring">
               <label className="block">
