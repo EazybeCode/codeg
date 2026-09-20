@@ -143,7 +143,11 @@
     "attemptState_canceled": "تم إلغاء تسجيل الدخول.",
     "attemptState_expired": "انتهت صلاحية تسجيل الدخول قبل اكتماله.",
     "attemptState_failed": "فشل تسجيل الدخول.",
-    "agentTestUnavailable": "اختبار الاتصال غير متاح بعد."
+    "agentTestUnavailable": "اختبار الاتصال غير متاح بعد.",
+    "connectProviderNamed": "الاتصال بـ {name}",
+    "reconnectProviderNamed": "إعادة الاتصال بـ {name}",
+    "disconnectProviderNamed": "قطع الاتصال بـ {name}",
+    "cancelSignInNamed": "إلغاء تسجيل الدخول إلى {name}"
   },
   "Native": {
     "callbackConflict": "تتعارض طريقة تسجيل الدخول هذه مع حساب موجود. استخدم طريقة تسجيل الدخول الأصلية، ثم افتح الإعدادات لربط طريقة أخرى. لا تُدمج الحسابات تلقائيًا أبدًا.",

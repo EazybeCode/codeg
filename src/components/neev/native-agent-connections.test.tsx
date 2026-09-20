@@ -44,7 +44,11 @@ function mount() {
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
+  localStorage.clear()
 })
+
+const STORAGE_KEY = "neev.agent.attempt.1:3"
+const FAR_FUTURE = Math.floor(Date.now() / 1000) + 600
 
 it("waits for the sign-in it started instead of claiming it connected", async () => {
   const bodies: Record<string, unknown>[] = []
@@ -59,7 +63,7 @@ it("waits for the sign-in it started instead of claiming it connected", async ()
         {
           outcome: "pending",
           attemptId: ATTEMPT_ID,
-          expiresAt: 1_700_000_600,
+          expiresAt: FAR_FUTURE,
           connection: null,
         },
         202
@@ -69,19 +73,23 @@ it("waits for the sign-in it started instead of claiming it connected", async ()
       polls += 1
       // Settles only once the server says so; the client never decides.
       return polls < 3
-        ? json({ state: "pending", expiresAt: 1_700_000_600 })
+        ? json({ state: "pending", expiresAt: FAR_FUTURE })
         : (() => {
             state = "connected"
-            return json({ state: "completed", expiresAt: 1_700_000_600 })
+            return json({ state: "completed", expiresAt: FAR_FUTURE })
           })()
     },
   })
   const user = userEvent.setup()
   mount()
-  await user.click(await screen.findByRole("button", { name: "Connect" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
   // A pending attempt is "waiting", never "Connected", and can be cancelled.
   expect(await screen.findByText("Waiting for sign-in…")).toBeVisible()
-  expect(screen.getByRole("button", { name: "Cancel sign-in" })).toBeEnabled()
+  expect(
+    screen.getByRole("button", { name: "Cancel claude sign-in" })
+  ).toBeEnabled()
   expect(bodies[0]).toEqual({ requestKey: expect.any(String) })
   // Only the server flipping the connection makes it read Connected.
   expect(await screen.findByText("Connected")).toBeVisible()
@@ -97,17 +105,19 @@ it("reports an attempt that lapses rather than leaving it spinning", async () =>
         {
           outcome: "pending",
           attemptId: ATTEMPT_ID,
-          expiresAt: 1_700_000_600,
+          expiresAt: FAR_FUTURE,
           connection: null,
         },
         202
       ),
     // With no supervisor bound this is what actually happens today.
-    [ATTEMPT]: () => json({ state: "expired", expiresAt: 1_700_000_600 }),
+    [ATTEMPT]: () => json({ state: "expired", expiresAt: FAR_FUTURE }),
   })
   const user = userEvent.setup()
   mount()
-  await user.click(await screen.findByRole("button", { name: "Connect" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
   expect(
     await screen.findByText("Sign-in expired before it completed.")
   ).toBeVisible()
@@ -125,13 +135,13 @@ it("cancels an in-flight sign-in with the attempt it is actually waiting on", as
         {
           outcome: "pending",
           attemptId: ATTEMPT_ID,
-          expiresAt: 1_700_000_600,
+          expiresAt: FAR_FUTURE,
           connection: null,
         },
         202
       )
     },
-    [ATTEMPT]: () => json({ state: "pending", expiresAt: 1_700_000_600 }),
+    [ATTEMPT]: () => json({ state: "pending", expiresAt: FAR_FUTURE }),
     [CANCEL]: (init) => {
       canceled = JSON.parse(init.body as string)
       state = "not_signed_in"
@@ -140,9 +150,11 @@ it("cancels an in-flight sign-in with the attempt it is actually waiting on", as
   })
   const user = userEvent.setup()
   mount()
-  await user.click(await screen.findByRole("button", { name: "Connect" }))
   await user.click(
-    await screen.findByRole("button", { name: "Cancel sign-in" })
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  await user.click(
+    await screen.findByRole("button", { name: "Cancel claude sign-in" })
   )
   await waitFor(() =>
     expect(canceled).toEqual({
@@ -166,19 +178,21 @@ it("replays one request key so a retried connect cannot start two sign-ins", asy
         {
           outcome: "pending",
           attemptId: ATTEMPT_ID,
-          expiresAt: 1_700_000_600,
+          expiresAt: FAR_FUTURE,
           connection: null,
         },
         202
       )
     },
-    [ATTEMPT]: () => json({ state: "pending", expiresAt: 1_700_000_600 }),
+    [ATTEMPT]: () => json({ state: "pending", expiresAt: FAR_FUTURE }),
   })
   const user = userEvent.setup()
   mount()
-  await user.click(await screen.findByRole("button", { name: "Connect" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
   expect(await screen.findByRole("alert")).toBeVisible()
-  await user.click(screen.getByRole("button", { name: "Connect" }))
+  await user.click(screen.getByRole("button", { name: "Connect claude" }))
   await waitFor(() => expect(keys).toHaveLength(2))
   // The same key means the server returns the SAME attempt.
   expect(keys[0]).toBe(keys[1])
@@ -209,12 +223,12 @@ it("offers reconnect and disconnect for a connection that needs attention", asyn
   const user = userEvent.setup()
   mount()
   expect(await screen.findByText("Reconnect needed")).toBeVisible()
-  expect(screen.getByRole("button", { name: "Reconnect" })).toBeEnabled()
-  await user.click(screen.getByRole("button", { name: "Disconnect" }))
+  expect(screen.getByRole("button", { name: "Reconnect claude" })).toBeEnabled()
+  await user.click(screen.getByRole("button", { name: "Disconnect claude" }))
   await waitFor(() => expect(body).toEqual({ requestKey: expect.any(String) }))
   expect(await screen.findByText("Disconnecting…")).toBeVisible()
   // Nothing is offered while the server is mid-teardown.
-  expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "Disconnect claude" })).toBeNull()
 })
 
 it("offers no action at all when no runtime is bound", async () => {
@@ -224,7 +238,7 @@ it("offers no action at all when no runtime is bound", async () => {
   mount()
   expect(await screen.findByText("Agents are turned off.")).toBeVisible()
   for (const name of ["Connect", "Reconnect", "Disconnect"])
-    expect(screen.queryByRole("button", { name })).toBeNull()
+    expect(screen.queryByRole("button", { name: `${name} claude` })).toBeNull()
 })
 
 it("does not offer a connection test the server could never settle", async () => {
@@ -247,7 +261,199 @@ it("surfaces a sign-in already in flight rather than queueing another", async ()
   })
   const user = userEvent.setup()
   mount()
-  await user.click(await screen.findByRole("button", { name: "Connect" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
   expect(await screen.findByRole("alert")).toBeVisible()
   expect(screen.queryByText("Waiting for sign-in…")).toBeNull()
+})
+
+it("picks a sign-in back up after a reload so it stays cancellable", async () => {
+  // A sign-in outlives the page that started it. Without this the user is
+  // stranded on a "connecting" row with no way to abandon it.
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      provider: "claude",
+      attemptId: ATTEMPT_ID,
+      expiresAt: FAR_FUTURE,
+      cancelKey: "cancel-key-1",
+      connectKey: "connect-key-1",
+    })
+  )
+  let canceled: Record<string, unknown> | null = null
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("connecting")),
+    [ATTEMPT]: () => json({ state: "pending", expiresAt: FAR_FUTURE }),
+    [CANCEL]: (init) => {
+      canceled = JSON.parse(init.body as string)
+      return json({ operationId: OPERATION_ID, generation: "3" })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  expect(await screen.findByText("Waiting for sign-in…")).toBeVisible()
+  await user.click(
+    await screen.findByRole("button", { name: "Cancel claude sign-in" })
+  )
+  // The resumed attempt cancels with the key it was started under.
+  await waitFor(() =>
+    expect(canceled).toEqual({
+      attemptId: ATTEMPT_ID,
+      requestKey: "cancel-key-1",
+    })
+  )
+  expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+})
+
+it("discards a stored attempt that has already lapsed", async () => {
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      provider: "claude",
+      attemptId: ATTEMPT_ID,
+      expiresAt: Math.floor(Date.now() / 1000) - 1,
+      cancelKey: "cancel-key-1",
+      connectKey: "connect-key-1",
+    })
+  )
+  let polls = 0
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [ATTEMPT]: () => {
+      polls += 1
+      return json({ state: "pending", expiresAt: FAR_FUTURE })
+    },
+  })
+  mount()
+  // Nothing to watch: it offers a fresh Connect and never polls the dead id.
+  expect(
+    await screen.findByRole("button", { name: "Connect claude" })
+  ).toBeEnabled()
+  expect(polls).toBe(0)
+  expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
+})
+
+it("stops polling once the attempt's own deadline passes", async () => {
+  let polls = 0
+  const soon = Math.floor(Date.now() / 1000) + 1
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [CONNECT]: () =>
+      json(
+        {
+          outcome: "pending",
+          attemptId: ATTEMPT_ID,
+          expiresAt: soon,
+          connection: null,
+        },
+        202
+      ),
+    // A server that keeps saying "pending" past the deadline must not be
+    // polled forever.
+    [ATTEMPT]: () => {
+      polls += 1
+      return json({ state: "pending", expiresAt: soon })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  expect(
+    await screen.findByText("Sign-in expired before it completed.")
+  ).toBeVisible()
+  const settled = polls
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  expect(polls).toBe(settled)
+})
+
+it("skips polling while the tab is hidden and resumes when it returns", async () => {
+  let polls = 0
+  const hidden = vi
+    .spyOn(document, "visibilityState", "get")
+    .mockReturnValue("hidden")
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [CONNECT]: () =>
+      json(
+        {
+          outcome: "pending",
+          attemptId: ATTEMPT_ID,
+          expiresAt: FAR_FUTURE,
+          connection: null,
+        },
+        202
+      ),
+    [ATTEMPT]: () => {
+      polls += 1
+      return json({ state: "completed", expiresAt: FAR_FUTURE })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  await screen.findByText("Waiting for sign-in…")
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  // Nobody is watching a hidden tab; the loop stays alive but does no work.
+  expect(polls).toBe(0)
+  hidden.mockReturnValue("visible")
+  await waitFor(() => expect(polls).toBeGreaterThan(0))
+})
+
+it("rides out a transient poll failure and then reports the wait as failed", async () => {
+  let polls = 0
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [CONNECT]: () =>
+      json(
+        {
+          outcome: "pending",
+          attemptId: ATTEMPT_ID,
+          expiresAt: FAR_FUTURE,
+          connection: null,
+        },
+        202
+      ),
+    [ATTEMPT]: () => {
+      polls += 1
+      throw new TypeError("network down")
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  // One blip must not abandon a live sign-in, but a dead endpoint must not be
+  // hammered forever either.
+  expect(await screen.findByText("Sign-in failed.")).toBeVisible()
+  const settled = polls
+  expect(settled).toBeGreaterThan(1)
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  expect(polls).toBe(settled)
+})
+
+it("names the provider on every action so two rows are distinguishable", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [
+          connection("not_signed_in"),
+          { ...connection("connected"), provider: "codex" },
+        ],
+      }),
+  })
+  mount()
+  // Identical verbs on two rows would otherwise be ambiguous to a screen
+  // reader and to keyboard navigation.
+  expect(
+    await screen.findByRole("button", { name: "Connect claude" })
+  ).toBeEnabled()
+  expect(screen.getByRole("button", { name: "Disconnect codex" })).toBeEnabled()
+  expect(screen.queryByRole("button", { name: "Connect codex" })).toBeNull()
 })

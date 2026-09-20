@@ -143,7 +143,11 @@
     "attemptState_canceled": "登录已取消。",
     "attemptState_expired": "登录在完成前已过期。",
     "attemptState_failed": "登录失败。",
-    "agentTestUnavailable": "暂不支持测试连接。"
+    "agentTestUnavailable": "暂不支持测试连接。",
+    "connectProviderNamed": "连接 {name}",
+    "reconnectProviderNamed": "重新连接 {name}",
+    "disconnectProviderNamed": "断开 {name}",
+    "cancelSignInNamed": "取消 {name} 登录"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

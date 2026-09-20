@@ -143,7 +143,11 @@
     "attemptState_canceled": "Inicio de sesión cancelado.",
     "attemptState_expired": "El inicio de sesión caducó antes de completarse.",
     "attemptState_failed": "El inicio de sesión falló.",
-    "agentTestUnavailable": "Probar una conexión aún no está disponible."
+    "agentTestUnavailable": "Probar una conexión aún no está disponible.",
+    "connectProviderNamed": "Conectar {name}",
+    "reconnectProviderNamed": "Reconectar {name}",
+    "disconnectProviderNamed": "Desconectar {name}",
+    "cancelSignInNamed": "Cancelar el inicio de sesión de {name}"
   },
   "Native": {
     "callbackConflict": "Este método de acceso entra en conflicto con una cuenta existente. Usa tu método de acceso original y luego abre Configuración para vincular otro método. Las cuentas nunca se fusionan automáticamente.",

@@ -143,7 +143,11 @@
     "attemptState_canceled": "로그인을 취소했습니다.",
     "attemptState_expired": "로그인이 완료되기 전에 만료되었습니다.",
     "attemptState_failed": "로그인에 실패했습니다.",
-    "agentTestUnavailable": "연결 테스트는 아직 사용할 수 없습니다."
+    "agentTestUnavailable": "연결 테스트는 아직 사용할 수 없습니다.",
+    "connectProviderNamed": "{name} 연결",
+    "reconnectProviderNamed": "{name} 다시 연결",
+    "disconnectProviderNamed": "{name} 연결 해제",
+    "cancelSignInNamed": "{name} 로그인 취소"
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",
