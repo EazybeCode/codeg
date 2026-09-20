@@ -131,7 +131,8 @@
     "agentError_unknown": "运行失败。",
     "agentModelHint": "使用 default 表示提供方的默认模型，或输入它支持的模型标识符。",
     "agentPostsToTeam": "你的提问和智能体的回复都会发布到此对话中。",
-    "agentAuthored": "智能体 · 由 {name} 提问"
+    "agentAuthored": "智能体 · 由 {name} 提问",
+    "agentConnectActionsPending": "此处暂不支持登录、重新连接和断开连接。"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

@@ -131,7 +131,8 @@
     "agentError_unknown": "実行に失敗しました。",
     "agentModelHint": "プロバイダー既定のモデルには default を、それ以外は対応するモデル識別子を入力します。",
     "agentPostsToTeam": "あなたの質問とエージェントの返信は、どちらもこの会話に投稿されます。",
-    "agentAuthored": "エージェント · {name} が質問"
+    "agentAuthored": "エージェント · {name} が質問",
+    "agentConnectActionsPending": "サインイン、再接続、接続解除はまだここでは利用できません。"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

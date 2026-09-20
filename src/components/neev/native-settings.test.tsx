@@ -321,3 +321,81 @@ it("keeps the logo draft when a native file picker returns window focus", async 
   expect(body?.logo?.data).toMatch(/^data:image\/png;base64,/)
   expect(mock.unknown).toEqual([])
 })
+
+it("shows the caller's real provider connections instead of a static notice", async () => {
+  let checks = 0
+  const mock = mockNativeSession(orgSession, {
+    ...fixtures(),
+    "GET /api/neev/agent/connections": () => {
+      checks += 1
+      return json({
+        runtimeEnabled: true,
+        connections: [
+          {
+            provider: "claude",
+            state: checks === 1 ? "not_signed_in" : "connected",
+            accountLabel: checks === 1 ? null : "sagar@example.test",
+            checkedAt: checks === 1 ? null : 1_700_000_000,
+            errorCode: null,
+          },
+          {
+            provider: "codex",
+            state: "reconnect_required",
+            accountLabel: "sagar@example.test",
+            checkedAt: 1_700_000_000,
+            errorCode: "unauthorized",
+          },
+        ],
+      })
+    },
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  // Per-user, per-provider state straight from the server — not a fixed
+  // "agents are unavailable" paragraph.
+  expect(await screen.findByText("Not signed in")).toBeVisible()
+  expect(screen.getByText("Reconnect needed")).toBeVisible()
+  expect(screen.getByText("codex")).toBeVisible()
+  // Honest about the actions the server does not expose yet, rather than
+  // rendering buttons that would do nothing.
+  expect(
+    screen.getByText(
+      "Signing in, reconnecting and disconnecting are not available here yet."
+    )
+  ).toBeVisible()
+  // Refresh genuinely re-reads the server's view.
+  await user.click(screen.getByRole("button", { name: "Refresh status" }))
+  expect(await screen.findByText("Connected")).toBeVisible()
+  expect(checks).toBe(2)
+  expect(mock.unknown).toEqual([])
+})
+
+it("never reports a usable connection over a runtime that is not bound", async () => {
+  mockNativeSession(orgSession, {
+    ...fixtures(),
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: false,
+        connections: [
+          {
+            provider: "claude",
+            state: "disabled",
+            accountLabel: null,
+            checkedAt: null,
+            errorCode: null,
+          },
+        ],
+      }),
+  })
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  expect(await screen.findByText("Agents are turned off.")).toBeVisible()
+  expect(screen.queryByText("Connected")).toBeNull()
+})

@@ -22,6 +22,7 @@ import { NativeBoundary, NativeError } from "./native-boundary"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeSignInMethods } from "./native-login"
+import { NativeAgentConnectionsPanel } from "./native-agent-connections"
 import { NativeJoinCode } from "./native-join-code"
 
 type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
@@ -467,13 +468,12 @@ function SettingsContent() {
         </p>
         {!loading && <NativeSignInMethods linking linked={methods} />}
       </section>
-      <section className="space-y-3 rounded-xl border p-5">
-        <h2 className="font-medium">{t("personalAgents")}</h2>
-        <p className="text-sm font-medium">{t("agentUnavailable")}</p>
-        <p className="text-sm leading-6 text-muted-foreground">
-          {t("agentDescription")}
-        </p>
-      </section>
+      {/* The caller's own provider connections, read live from the server
+          (spec §5.4). Credentials never reach the browser. */}
+      <NativeAgentConnectionsPanel
+        heading={t("personalAgents")}
+        showSettingsLink={false}
+      />
       <Button variant="outline" onClick={() => void auth.logout()}>
         {t("signOut")}
       </Button>

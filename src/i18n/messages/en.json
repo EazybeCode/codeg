@@ -131,7 +131,8 @@
     "agentError_unknown": "The run failed.",
     "agentModelHint": "Use default for the provider's own default, or type a model identifier it supports.",
     "agentPostsToTeam": "Your question and the agent's reply are both posted to this conversation.",
-    "agentAuthored": "agent · asked by {name}"
+    "agentAuthored": "agent · asked by {name}",
+    "agentConnectActionsPending": "Signing in, reconnecting and disconnecting are not available here yet."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

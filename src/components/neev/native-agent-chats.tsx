@@ -50,6 +50,7 @@ import type { ContentNavigationGuard } from "./native-content"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeError } from "./native-boundary"
 import { NativeMarkdown } from "./native-markdown"
+import { NativeAgentConnectionsPanel } from "./native-agent-connections"
 import {
   NativeDialogContent as DialogContent,
   NativeDropdownMenuContent as DropdownMenuContent,
@@ -170,7 +171,7 @@ function AgentChats({ onRequestSettings, onRequestNavigationGuard }: Props) {
         </Button>
       </div>
 
-      <ConnectionPanel
+      <NativeAgentConnectionsPanel
         connections={connections}
         onRefresh={reload}
         onRequestSettings={onRequestSettings}
@@ -230,75 +231,6 @@ function AgentChats({ onRequestSettings, onRequestNavigationGuard }: Props) {
         }}
       />
     </div>
-  )
-}
-
-function ConnectionPanel({
-  connections,
-  onRefresh,
-  onRequestSettings,
-}: {
-  connections: NeevAgentConnections | null
-  onRefresh: () => void
-  onRequestSettings?: () => void
-}) {
-  const t = useTranslations("NativeContent"),
-    n = useTranslations("Native")
-  if (!connections) return null
-  return (
-    <section className="space-y-3 rounded-xl border p-5">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm font-medium">{t("agentConnections")}</h2>
-        <Button variant="outline" size="sm" onClick={onRefresh}>
-          {t("refreshConnections")}
-        </Button>
-      </div>
-      {!connections.runtimeEnabled && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {t("agentsOff")}
-        </p>
-      )}
-      <ul className="space-y-2">
-        {connections.connections.map((connection) => (
-          <li
-            key={connection.provider}
-            className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm"
-          >
-            <span className="font-medium">{connection.provider}</span>
-            <span className="text-muted-foreground">
-              {t(`connectionState_${connection.state}`)}
-            </span>
-            {connection.accountLabel && (
-              <span className="truncate text-xs text-muted-foreground">
-                {connection.accountLabel}
-              </span>
-            )}
-            {connection.checkedAt !== null && (
-              <span className="text-xs text-muted-foreground">
-                {t("lastChecked")}{" "}
-                <time
-                  dateTime={new Date(connection.checkedAt * 1000).toISOString()}
-                >
-                  {new Date(connection.checkedAt * 1000).toLocaleString()}
-                </time>
-              </span>
-            )}
-          </li>
-        ))}
-      </ul>
-      <Link
-        href="/settings"
-        onClick={(event) => {
-          if (onRequestSettings) {
-            event.preventDefault()
-            onRequestSettings()
-          }
-        }}
-        className="inline-block rounded text-xs underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        {n("personalAgents")}
-      </Link>
-    </section>
   )
 }
 
