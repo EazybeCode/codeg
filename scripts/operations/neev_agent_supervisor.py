@@ -311,17 +311,23 @@ class Supervisor:
     def _connection_binding(self, binding: dto.LoginBinding) -> dto.ConnectionBinding:
         return dto.ConnectionBinding(binding.scope, binding.connection_id, binding.generation)
 
-    def _challenge_dto(self, provider: dto.Provider, challenge: Challenge):
+    def _challenge_dto(self, provider: dto.Provider, challenge: Challenge, expires_at: int):
+        # The challenge expiry is the attempt's own deadline (the ticket's), so a
+        # driver need not surface a provider expiry it may not know. If the driver DID
+        # report a tighter one, honor the sooner of the two.
+        deadline = expires_at
+        if challenge.expires_at and 0 < challenge.expires_at < deadline:
+            deadline = challenge.expires_at
         if provider is dto.Provider.CODEX:
             if challenge.user_code is None:
                 raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
             return dto.DeviceChallenge(
                 challenge.verification_url,
                 dto.UserCode(challenge.user_code),
-                dto.UnixSec(challenge.expires_at),
+                dto.UnixSec(deadline),
             )
         return dto.AuthorizationCodeChallenge(
-            challenge.verification_url, dto.UnixSec(challenge.expires_at)
+            challenge.verification_url, dto.UnixSec(deadline)
         )
 
     def _advance(self, attempt: _Attempt) -> str:
@@ -354,10 +360,10 @@ class Supervisor:
             state = getattr(attempt, "_last", None)
             if state is None or state.challenge is None:
                 raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
-            expires_at = dto.UnixSec(attempt.ticket.expires_at.value)
+            ticket_expires = attempt.ticket.expires_at.value
             return dto.LoginAwaitingUser(
-                dto.LoginState.AWAITING_USER, expires_at, poll,
-                self._challenge_dto(attempt.provider, state.challenge),
+                dto.LoginState.AWAITING_USER, dto.UnixSec(ticket_expires), poll,
+                self._challenge_dto(attempt.provider, state.challenge, ticket_expires),
             )
         if phase == "prepared":
             state = getattr(attempt, "_last", None)
