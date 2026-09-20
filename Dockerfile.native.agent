@@ -48,7 +48,9 @@ RUN apt-get update \
       libcap2-bin \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -o 0 -g 0 -m 0755 /opt/neev/scripts/operations \
-    && install -d -o 65532 -g 65532 -m 0700 /data/agents
+    # Lanes need search access to their own absolute HOME below this directory.
+    # They cannot list it; each run directory remains private at mode 0700.
+    && install -d -o 65532 -g 65532 -m 0711 /data/agents
 
 # Grant the FIXED-command launch helper exactly the caps the sandbox setup needs
 # (and no more): chown the per-run workdir, drop to the tenant uid/gid, drop the
