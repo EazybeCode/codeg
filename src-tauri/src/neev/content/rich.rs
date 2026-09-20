@@ -71,6 +71,11 @@ pub(crate) enum RichBlock {
         children: Vec<RichBlock>,
         rows: Vec<Vec<Vec<InlineRun>>>,
     },
+    #[serde(rename = "divider")]
+    Divider {
+        id: String,
+        children: Vec<RichBlock>,
+    },
 }
 
 fn required_href<'de, D: serde::Deserializer<'de>>(
@@ -91,7 +96,8 @@ impl RichBlock {
             | Self::CheckListItem { id, children, .. }
             | Self::Quote { id, children, .. }
             | Self::CodeBlock { id, children, .. }
-            | Self::Table { id, children, .. } => (id, children),
+            | Self::Table { id, children, .. }
+            | Self::Divider { id, children, .. } => (id, children),
         }
     }
 }
@@ -253,6 +259,12 @@ pub(super) fn validate(document: &RichDocument) -> Result<(), ContentError> {
                     for cell in row {
                         validate_runs(cell, &mut runs, &mut bytes, true)?;
                     }
+                }
+            }
+            RichBlock::Divider { .. } => {
+                // A horizontal divider carries no content and no children.
+                if !children.is_empty() {
+                    return Err(ContentError::Invalid);
                 }
             }
         }

@@ -28,6 +28,41 @@ fn rich_canonical_roundtrip_and_export() {
     assert_eq!(rich::export_markdown(&document()).unwrap(), "Hello\n");
 }
 #[test]
+fn rich_supports_divider_blocks() {
+    let para = |id: &str, text: &str| RichBlock::Paragraph {
+        id: id.into(),
+        content: vec![InlineRun {
+            text: text.into(),
+            styles: vec![],
+            href: None,
+        }],
+        children: vec![],
+    };
+    let doc = RichDocument {
+        version: 1,
+        blocks: vec![
+            para("11111111-1111-4111-8111-111111111111", "Above"),
+            RichBlock::Divider {
+                id: "22222222-2222-4222-8222-222222222222".into(),
+                children: vec![],
+            },
+            para("33333333-3333-4333-8333-333333333333", "Below"),
+        ],
+    };
+    let bytes = rich::encode(&doc).unwrap();
+    assert_eq!(rich::decode(&bytes).unwrap(), doc);
+    assert_eq!(
+        rich::export_markdown(&doc).unwrap(),
+        "Above\n\n---\n\nBelow\n"
+    );
+    // A divider carries no children.
+    let mut bad = doc.clone();
+    if let RichBlock::Divider { children, .. } = &mut bad.blocks[1] {
+        children.push(para("44444444-4444-4444-8444-444444444444", "x"));
+    }
+    assert_eq!(rich::encode(&bad), Err(ContentError::Invalid));
+}
+#[test]
 fn rich_rejects_unknown_or_unsafe_contracts() {
     let base = String::from_utf8(SOURCE.to_vec()).unwrap();
     for (from, to) in [

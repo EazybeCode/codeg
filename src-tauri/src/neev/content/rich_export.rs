@@ -243,6 +243,7 @@ impl Output {
                     // The table already ended its last row.
                     continue;
                 }
+                RichBlock::Divider { .. } => self.push("---")?,
             }
             self.push("\n")?;
             self.blocks(block.identity_children().1, depth + 1)?;
