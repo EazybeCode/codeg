@@ -29,6 +29,7 @@ import {
   loadConnectAttempt,
   newRequestKey,
   startProviderConnect,
+  testProviderConnection,
   submitConnectCode,
   NEEV_MAX_AUTH_CODE_CHARS,
   NEEV_AGENT_PROVIDERS,
@@ -135,6 +136,9 @@ export function NativeAgentConnectionsPanel({
   // What the user must do to approve, once the supervisor has produced it.
   // Never persisted: it is re-read from the attempt on every poll.
   const [approval, setApproval] = useState<NeevApproval | null>(null)
+  // The provider whose check is in flight, and the row the server returned.
+  const [testing, setTesting] = useState<NeevAgentProvider | null>(null)
+  const [tested, setTested] = useState<NeevAgentConnection | null>(null)
   const [code, setCode] = useState("")
   const [submitting, setSubmitting] = useState(false)
   // Per-provider connect keys for the current page. A resumed attempt carries
@@ -350,6 +354,30 @@ export function NativeAgentConnectionsPanel({
     }
   }
 
+  async function test(provider: NeevAgentProvider) {
+    if (busy || testing || !auth.session) return
+    setTesting(provider)
+    setError(null)
+    setTested(null)
+    try {
+      // What comes back IS the outcome; nothing here decides the state.
+      setTested(
+        await testProviderConnection(
+          provider,
+          newRequestKey(),
+          auth.session.csrf,
+          auth.signal
+        )
+      )
+      refresh()
+    } catch (cause) {
+      setError(cause)
+      auth.handleAuthorityError(cause)
+    } finally {
+      setTesting(null)
+    }
+  }
+
   async function disconnect(provider: NeevAgentProvider) {
     if (busy || !auth.session) return
     setBusy(provider)
@@ -408,7 +436,15 @@ export function NativeAgentConnectionsPanel({
                   <span className="text-muted-foreground">
                     {attempt?.provider === connection.provider
                       ? t("awaitingSignIn")
-                      : t(`connectionState_${connection.state}`)}
+                      : testing === connection.provider
+                        ? t("testingConnection")
+                        : t(
+                            `connectionState_${
+                              tested?.provider === connection.provider
+                                ? tested.state
+                                : connection.state
+                            }`
+                          )}
                   </span>
                   {connection.accountLabel && (
                     <span className="min-w-0 truncate text-xs text-muted-foreground">
@@ -459,11 +495,6 @@ export function NativeAgentConnectionsPanel({
               </li>
             ))}
           </ul>
-          {/* The server ships no route that could settle a connection test, so
-              no such control is offered (§A of the published contract). */}
-          <p className="text-xs text-muted-foreground">
-            {t("agentTestUnavailable")}
-          </p>
         </>
       )}
       {showSettingsLink && (
@@ -495,6 +526,7 @@ export function NativeAgentConnectionsPanel({
         | "reconnectProvider"
         | "disconnectProvider"
         | "cancelSignIn"
+        | "testConnection"
     ) => t(`${key}Named`, { name: provider })
     if (attempt?.provider === provider)
       return (
@@ -520,6 +552,21 @@ export function NativeAgentConnectionsPanel({
     const reconnecting = connection.state === "reconnect_required"
     return (
       <>
+        {/* Only a connection that exists can be checked; `not_signed_in` has
+            nothing to test yet. */}
+        {connection.state !== "not_signed_in" && (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={working || testing !== null}
+            aria-label={named("testConnection")}
+            onClick={() => void test(provider)}
+          >
+            {testing === provider
+              ? t("testingConnection")
+              : t("testConnection")}
+          </Button>
+        )}
         {connection.state !== "connected" && (
           <Button
             size="sm"

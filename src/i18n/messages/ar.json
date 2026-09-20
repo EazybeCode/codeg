@@ -143,7 +143,6 @@
     "attemptState_canceled": "تم إلغاء تسجيل الدخول.",
     "attemptState_expired": "انتهت صلاحية تسجيل الدخول قبل اكتماله.",
     "attemptState_failed": "فشل تسجيل الدخول.",
-    "agentTestUnavailable": "اختبار الاتصال غير متاح بعد.",
     "connectProviderNamed": "الاتصال بـ {name}",
     "reconnectProviderNamed": "إعادة الاتصال بـ {name}",
     "disconnectProviderNamed": "قطع الاتصال بـ {name}",
@@ -153,7 +152,10 @@
     "pasteCodeLabel": "الصق رمز التفويض",
     "submitCode": "إرسال الرمز",
     "signInDeviceHint": "افتح الصفحة وأدخل هذا الرمز ووافق هناك. سيُكمل Neev الباقي.",
-    "signInCodeHint": "افتح الصفحة ووافق، ثم الصق الرمز الذي تحصل عليه هنا."
+    "signInCodeHint": "افتح الصفحة ووافق، ثم الصق الرمز الذي تحصل عليه هنا.",
+    "testConnection": "اختبار",
+    "testConnectionNamed": "اختبار اتصال {name}",
+    "testingConnection": "جارٍ الاختبار…"
   },
   "Native": {
     "callbackConflict": "تتعارض طريقة تسجيل الدخول هذه مع حساب موجود. استخدم طريقة تسجيل الدخول الأصلية، ثم افتح الإعدادات لربط طريقة أخرى. لا تُدمج الحسابات تلقائيًا أبدًا.",

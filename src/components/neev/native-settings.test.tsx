@@ -363,10 +363,13 @@ it("shows the caller's real provider connections instead of a static notice", as
   // Real per-provider actions, matched to the state the server reports.
   expect(screen.getByRole("button", { name: "Connect claude" })).toBeEnabled()
   expect(screen.getByRole("button", { name: "Reconnect codex" })).toBeEnabled()
-  // No "Test connection": the server ships no route that could settle one.
+  // An existing connection can be checked; one that was never signed in cannot.
   expect(
-    screen.getByText("Testing a connection is not available yet.")
-  ).toBeVisible()
+    screen.getByRole("button", { name: "Test the codex connection" })
+  ).toBeEnabled()
+  expect(
+    screen.queryByRole("button", { name: "Test the claude connection" })
+  ).toBeNull()
   // Refresh genuinely re-reads the server's view.
   await user.click(screen.getByRole("button", { name: "Refresh status" }))
   expect(await screen.findByText("Connected")).toBeVisible()

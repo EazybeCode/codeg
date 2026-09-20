@@ -1042,6 +1042,40 @@ export async function disconnectProvider(
   )
 }
 
+/**
+ * Run a bounded, side-effect-free check of an existing connection and return
+ * what the server decided.
+ *
+ * The result is the server's own connection row after the check settled — the
+ * caller replaces its view with it rather than inferring anything. There is no
+ * optimistic "connected": if the server cannot settle the check it says so, and
+ * `409` (busy or stale), `503` (unavailable) and `429` (rate limited) all
+ * surface as themselves.
+ */
+export async function testProviderConnection(
+  provider: string,
+  requestKey: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevAgentConnection> {
+  assertProvider(provider)
+  assertRequestKey(requestKey)
+  const object = exact(
+    await contentMutation(
+      `/api/neev/agent/connections/${provider}/test`,
+      { requestKey },
+      csrf,
+      signal
+    ),
+    ["connection"]
+  )
+  const connection = parseConnection(object.connection)
+  // A check settles the provider it was asked about; anything else means the
+  // wrong row came back and the panel would mislabel it.
+  if (connection.provider !== provider) return invalid()
+  return connection
+}
+
 export type NeevRunPhase = "streaming" | "reconnecting" | "lost"
 
 /** Backoff between reattach attempts; exhausting it reports the run as lost. */

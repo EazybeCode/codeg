@@ -66,6 +66,31 @@ import {
   type NativeResourceKind,
 } from "@/lib/neev-content-client"
 
+/**
+ * The container and every ancestor above it, so revealing a nested resource
+ * actually reveals it: expanding only its own folder leaves it inside a
+ * collapsed project and therefore invisible.
+ *
+ * Bounded by the node count and cycle-guarded — a corrupt `parentId` chain must
+ * not spin here.
+ */
+function ancestry(nodes: NativeNode[], nodeId: number): number[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const chain: number[] = []
+  const seen = new Set<number>()
+  let current: number | null = nodeId
+  while (
+    current !== null &&
+    !seen.has(current) &&
+    chain.length < nodes.length
+  ) {
+    seen.add(current)
+    chain.push(current)
+    current = byId.get(current)?.parentId ?? null
+  }
+  return chain
+}
+
 // Compact nested containers that reveal their real, directly-selectable resources
 // (documents or team conversations) inline — navigation happens here, not behind a
 // separate index page. Creation always carries the container selected in this menu.
@@ -441,7 +466,9 @@ function WorkspaceContent() {
           nodes.some((node) => node.id === resource.nodeId)
         ) {
           setSelected(resource.nodeId)
-          setExpanded((old) => new Set([...old, resource.nodeId]))
+          setExpanded(
+            (old) => new Set([...old, ...ancestry(nodes, resource.nodeId)])
+          )
           setOpen({ resource, request: ++openNumber.current })
           void loadItems(resource.nodeId)
         }

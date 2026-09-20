@@ -143,7 +143,6 @@
     "attemptState_canceled": "登入已取消。",
     "attemptState_expired": "登入在完成前已過期。",
     "attemptState_failed": "登入失敗。",
-    "agentTestUnavailable": "暫不支援測試連線。",
     "connectProviderNamed": "連線 {name}",
     "reconnectProviderNamed": "重新連線 {name}",
     "disconnectProviderNamed": "中斷 {name}",
@@ -153,7 +152,10 @@
     "pasteCodeLabel": "貼上授權碼",
     "submitCode": "提交代碼",
     "signInDeviceHint": "開啟頁面，輸入此代碼並在那裡核准。Neev 會自動完成。",
-    "signInCodeHint": "開啟頁面並核准，然後把取得的代碼貼回這裡。"
+    "signInCodeHint": "開啟頁面並核准，然後把取得的代碼貼回這裡。",
+    "testConnection": "測試",
+    "testConnectionNamed": "測試 {name} 連線",
+    "testingConnection": "正在測試…"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

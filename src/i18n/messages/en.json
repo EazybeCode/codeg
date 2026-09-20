@@ -143,7 +143,6 @@
     "attemptState_canceled": "Sign-in canceled.",
     "attemptState_expired": "Sign-in expired before it completed.",
     "attemptState_failed": "Sign-in failed.",
-    "agentTestUnavailable": "Testing a connection is not available yet.",
     "connectProviderNamed": "Connect {name}",
     "reconnectProviderNamed": "Reconnect {name}",
     "disconnectProviderNamed": "Disconnect {name}",
@@ -153,7 +152,10 @@
     "pasteCodeLabel": "Paste the authorization code",
     "submitCode": "Submit code",
     "signInDeviceHint": "Open the page, enter this code and approve there. Neev finishes on its own.",
-    "signInCodeHint": "Open the page and approve, then paste the code you are given back here."
+    "signInCodeHint": "Open the page and approve, then paste the code you are given back here.",
+    "testConnection": "Test",
+    "testConnectionNamed": "Test the {name} connection",
+    "testingConnection": "Testing…"
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

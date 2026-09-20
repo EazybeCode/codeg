@@ -143,7 +143,6 @@
     "attemptState_canceled": "Login cancelado.",
     "attemptState_expired": "O login expirou antes de concluir.",
     "attemptState_failed": "O login falhou.",
-    "agentTestUnavailable": "Testar uma conexão ainda não está disponível.",
     "connectProviderNamed": "Conectar {name}",
     "reconnectProviderNamed": "Reconectar {name}",
     "disconnectProviderNamed": "Desconectar {name}",
@@ -153,7 +152,10 @@
     "pasteCodeLabel": "Cole o código de autorização",
     "submitCode": "Enviar código",
     "signInDeviceHint": "Abra a página, digite este código e aprove por lá. O Neev conclui sozinho.",
-    "signInCodeHint": "Abra a página e aprove, depois cole aqui o código que você receber."
+    "signInCodeHint": "Abra a página e aprove, depois cole aqui o código que você receber.",
+    "testConnection": "Testar",
+    "testConnectionNamed": "Testar a conexão de {name}",
+    "testingConnection": "Testando…"
   },
   "Native": {
     "callbackConflict": "Este método de acesso entra em conflito com uma conta existente. Use seu método de acesso original e abra Configurações para vincular outro método. As contas nunca são mescladas automaticamente.",
