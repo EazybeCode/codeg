@@ -17,3 +17,29 @@
 .neev-writing-canvas .bn-inline-content {
   overflow-wrap: anywhere;
 }
+
+/*
+ * Full-canvas readability: when a document is in full-width mode
+ * (`[data-doc-width="full"]`, set on the document section), the workspace and
+ * wide blocks (tables, images, code) expand to the available width, but running
+ * text keeps a comfortable reading MEASURE rather than stretching edge to edge.
+ * Focus mode is unaffected (the section already caps the whole column at 3xl).
+ */
+[data-doc-width="full"] .neev-writing-canvas .bn-block-content:where(
+    [data-content-type="paragraph"],
+    [data-content-type="heading"],
+    [data-content-type="bulletListItem"],
+    [data-content-type="numberedListItem"],
+    [data-content-type="checkListItem"],
+    [data-content-type="quote"]
+  ) {
+  max-width: 80ch;
+}
+
+/* Wide blocks intentionally ignore the prose measure and use the full canvas. */
+[data-doc-width="full"] .neev-writing-canvas .bn-block-content:where(
+    [data-content-type="table"],
+    [data-content-type="codeBlock"]
+  ) {
+  max-width: none;
+}

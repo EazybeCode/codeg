@@ -99,6 +99,33 @@ it("places document toolbar before the editor in keyboard order", async () => {
   expect(screen.queryByRole("region", { name: "Preview" })).toBeNull()
 })
 
+it("toggles the per-user document width and persists it (default full canvas)", async () => {
+  localStorage.clear()
+  const empty = { ...resource, contentRevision: "0" }
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(empty),
+    [`GET ${path}/revisions`]: () => json({ items: [], nextAfter: null }),
+  })
+  mount(empty)
+  await screen.findByRole(
+    "textbox",
+    { name: "Document content" },
+    { timeout: 5000 }
+  )
+  const section = screen.getByRole("region", { name: "Design document" })
+  // Default is full canvas: the section does not impose the narrow 3xl column.
+  expect(section).toHaveAttribute("data-doc-width", "full")
+  const toggle = screen.getByRole("button", { name: "Focus width" })
+  expect(toggle).toHaveAttribute("aria-pressed", "true")
+  // Toggling to Focus restores the narrow reading column and persists per user.
+  await userEvent.click(toggle)
+  expect(section).toHaveAttribute("data-doc-width", "focus")
+  expect(
+    screen.getByRole("button", { name: "Full width" })
+  ).toHaveAttribute("aria-pressed", "false")
+  expect(localStorage.getItem("neev.ws.doc-width")).toBe("focus")
+})
+
 async function editRich(text: string) {
   // The real editor is code-split; cold transformation in the full suite can
   // exceed Testing Library's one-second default. Still wait for the actual UI.

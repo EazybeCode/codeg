@@ -1,6 +1,6 @@
 "use client"
 
-import { ArrowLeft } from "lucide-react"
+import { ArrowLeft, Maximize2, Minimize2 } from "lucide-react"
 
 import { useEffect, useRef, useState } from "react"
 import dynamic from "next/dynamic"
@@ -29,6 +29,12 @@ import { NativeMarkdown } from "./native-markdown"
 import { NativeRichView } from "./native-rich-view"
 import { importMarkdown } from "@/lib/neev-rich-adapter"
 import type { RichDocument } from "@/lib/neev-rich-document"
+import {
+  DEFAULT_DOC_WIDTH,
+  getDocWidth,
+  setDocWidth,
+  type DocWidth,
+} from "@/lib/neev-workspace-prefs"
 
 const NativeRichEditor = dynamic(
   () =>
@@ -97,6 +103,17 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
+  // Per-user viewer width preference (never document state). Start at the SSR
+  // default and read the stored value after mount to avoid a hydration mismatch.
+  const [docWidth, setDocWidthState] = useState<DocWidth>(DEFAULT_DOC_WIDTH)
+  useEffect(() => {
+    setDocWidthState(getDocWidth())
+  }, [])
+  function toggleDocWidth() {
+    const next: DocWidth = docWidth === "full" ? "focus" : "full"
+    setDocWidthState(next)
+    setDocWidth(next)
+  }
   const [latest, setLatest] = useState(resource),
     [draft, setDraft] = useState<Body>(emptyBody),
     [conversion, setConversion] = useState<RichDocument | null>(null),
@@ -518,7 +535,11 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
     )
   return (
     <section
-      className="min-h-0 min-w-0 flex-1 overflow-y-auto px-7 pb-16 pt-4 sm:px-12 [&>div]:mx-auto [&>div]:max-w-3xl"
+      data-doc-width={docWidth}
+      className={
+        "min-h-0 min-w-0 flex-1 overflow-y-auto px-7 pb-16 pt-4 sm:px-12 [&>div]:mx-auto " +
+        (docWidth === "focus" ? "[&>div]:max-w-3xl" : "[&>div]:max-w-none")
+      }
       aria-label={latest.title}
       onKeyDown={(event) => {
         if (
@@ -530,15 +551,31 @@ function Document({ resource, onBack, onChanged, onDirtyChange }: Props) {
         }
       }}
     >
-      <Button
-        variant="ghost"
-        size="icon"
-        aria-label={t("back")}
-        title={t("back")}
-        onClick={onBack}
-      >
-        <ArrowLeft aria-hidden />
-      </Button>
+      <div className="flex items-center justify-between">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={t("back")}
+          title={t("back")}
+          onClick={onBack}
+        >
+          <ArrowLeft aria-hidden />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={docWidth === "full" ? t("focusWidth") : t("fullWidth")}
+          title={docWidth === "full" ? t("focusWidth") : t("fullWidth")}
+          aria-pressed={docWidth === "full"}
+          onClick={toggleDocWidth}
+        >
+          {docWidth === "full" ? (
+            <Minimize2 aria-hidden />
+          ) : (
+            <Maximize2 aria-hidden />
+          )}
+        </Button>
+      </div>
       <div className="space-y-3 pb-5 pt-8 sm:pt-12">
         <h2 className="break-words text-4xl font-semibold leading-tight">
           {latest.title}

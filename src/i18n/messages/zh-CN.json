@@ -30,6 +30,8 @@
     "archived": "已归档",
     "showArchived": "显示已归档",
     "back": "返回文件夹",
+    "fullWidth": "全宽",
+    "focusWidth": "聚焦宽度",
     "title": "标题",
     "create": "创建",
     "message": "消息",
