@@ -46,6 +46,8 @@ export const richSchema = BlockNoteSchema.create({
     quote: defaultBlockSpecs.quote,
     codeBlock: createCodeBlockSpec({ defaultLanguage: "" }),
     table: defaultBlockSpecs.table,
+    divider: defaultBlockSpecs.divider,
+    image: defaultBlockSpecs.image,
   },
   inlineContentSpecs: {
     text: defaultInlineContentSpecs.text,
@@ -62,6 +64,9 @@ export type NativeRichEditorProps = {
   document: RichDocument
   readOnly: boolean
   onChange: (next: RichDocument) => void
+  /** Upload an image bound to this document; resolves to its internal serve URL.
+   *  Absent in read-only mode. */
+  uploadImage?: (file: File) => Promise<string>
 }
 
 /** The parent owns load generations. Incoming props never overwrite this instance. */
@@ -69,6 +74,7 @@ export function NativeRichEditor({
   document,
   readOnly,
   onChange,
+  uploadImage,
 }: NativeRichEditorProps) {
   const t = useTranslations("NativeContent")
   const { resolvedTheme } = useTheme()
@@ -80,6 +86,7 @@ export function NativeRichEditor({
   )
   const localDrag = useRef(false)
   const callback = useRef(onChange)
+  const fileInput = useRef<HTMLInputElement>(null)
   // Keep the latest onChange without re-creating the editor; sync after render
   // (a ref must not be written during render).
   useEffect(() => {
@@ -208,7 +215,24 @@ export function NativeRichEditor({
       }),
     [editor]
   )
-  const choices: { title: string; block: PartialBlock }[] = [
+  const insertImage = async (file: File) => {
+    if (!uploadImage) return
+    try {
+      const url = await uploadImage(file)
+      editor.insertBlocks(
+        [{ type: "image", props: { url } }],
+        editor.getTextCursorPosition().block,
+        "after"
+      )
+    } catch {
+      setNotice("unsupported")
+    }
+  }
+  const choices: {
+    title: string
+    block?: PartialBlock
+    action?: () => void
+  }[] = [
     { title: t("paragraphBlock"), block: { type: "paragraph" } },
     ...([1, 2, 3] as const).map((level) => ({
       title: t("headingBlock", { level }),
@@ -229,6 +253,15 @@ export function NativeRichEditor({
         },
       },
     },
+    { title: t("dividerBlock"), block: { type: "divider" } },
+    ...(uploadImage
+      ? [
+          {
+            title: t("imageBlock"),
+            action: () => fileInput.current?.click(),
+          },
+        ]
+      : []),
   ]
   return (
     <div
@@ -245,6 +278,19 @@ export function NativeRichEditor({
           {t("pastedPlainText")}
         </p>
       )}
+      <input
+        ref={fileInput}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        className="hidden"
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ""
+          if (file) void insertImage(file)
+        }}
+      />
       <BlockNoteView
         editor={editor}
         theme={resolvedTheme === "dark" ? "dark" : "light"}
@@ -312,10 +358,12 @@ export function NativeRichEditor({
               .map((choice) => ({
                 title: choice.title,
                 onItemClick: () =>
-                  editor.updateBlock(
-                    editor.getTextCursorPosition().block,
-                    choice.block as Parameters<typeof editor.updateBlock>[1]
-                  ),
+                  choice.action
+                    ? choice.action()
+                    : editor.updateBlock(
+                        editor.getTextCursorPosition().block,
+                        choice.block as Parameters<typeof editor.updateBlock>[1]
+                      ),
               }))
           }
         />

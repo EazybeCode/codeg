@@ -28,6 +28,88 @@ fn rich_canonical_roundtrip_and_export() {
     assert_eq!(rich::export_markdown(&document()).unwrap(), "Hello\n");
 }
 #[test]
+fn rich_supports_divider_blocks() {
+    let para = |id: &str, text: &str| RichBlock::Paragraph {
+        id: id.into(),
+        content: vec![InlineRun {
+            text: text.into(),
+            styles: vec![],
+            href: None,
+        }],
+        children: vec![],
+    };
+    let doc = RichDocument {
+        version: 1,
+        blocks: vec![
+            para("11111111-1111-4111-8111-111111111111", "Above"),
+            RichBlock::Divider {
+                id: "22222222-2222-4222-8222-222222222222".into(),
+                children: vec![],
+            },
+            para("33333333-3333-4333-8333-333333333333", "Below"),
+        ],
+    };
+    let bytes = rich::encode(&doc).unwrap();
+    assert_eq!(rich::decode(&bytes).unwrap(), doc);
+    assert_eq!(
+        rich::export_markdown(&doc).unwrap(),
+        "Above\n\n---\n\nBelow\n"
+    );
+    // A divider carries no children.
+    let mut bad = doc.clone();
+    if let RichBlock::Divider { children, .. } = &mut bad.blocks[1] {
+        children.push(para("44444444-4444-4444-8444-444444444444", "x"));
+    }
+    assert_eq!(rich::encode(&bad), Err(ContentError::Invalid));
+}
+#[test]
+fn rich_supports_image_blocks_only_with_internal_urls() {
+    let image = |url: &str, caption: &str| RichDocument {
+        version: 1,
+        blocks: vec![RichBlock::Image {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            children: vec![],
+            url: url.into(),
+            caption: caption.into(),
+        }],
+    };
+    let ok = image("/api/neev/images/AbC0-_9zZ", "A [test] chart");
+    let bytes = rich::encode(&ok).unwrap();
+    assert_eq!(rich::decode(&bytes).unwrap(), ok);
+    assert_eq!(
+        rich::export_markdown(&ok).unwrap(),
+        "![A \\[test\\] chart](/api/neev/images/AbC0-_9zZ)\n"
+    );
+    // External / data / traversal / empty / foreign-path urls are refused.
+    for bad in [
+        "https://evil.example/x.png",
+        "data:image/png;base64,AAAA",
+        "/api/neev/images/",
+        "/api/neev/images/../secret",
+        "/other/AbC",
+    ] {
+        assert_eq!(
+            rich::encode(&image(bad, "")),
+            Err(ContentError::Invalid),
+            "{bad}"
+        );
+    }
+    // A control char in the caption is refused.
+    assert_eq!(
+        rich::encode(&image("/api/neev/images/k", "bad\u{0}")),
+        Err(ContentError::Invalid)
+    );
+    // An image carries no children.
+    let mut with_child = image("/api/neev/images/k", "");
+    if let RichBlock::Image { children, .. } = &mut with_child.blocks[0] {
+        children.push(RichBlock::Divider {
+            id: "22222222-2222-4222-8222-222222222222".into(),
+            children: vec![],
+        });
+    }
+    assert_eq!(rich::encode(&with_child), Err(ContentError::Invalid));
+}
+#[test]
 fn rich_rejects_unknown_or_unsafe_contracts() {
     let base = String::from_utf8(SOURCE.to_vec()).unwrap();
     for (from, to) in [

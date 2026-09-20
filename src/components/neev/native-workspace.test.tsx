@@ -252,51 +252,59 @@ it("uses an accessible drawer at the mobile breakpoint with Escape focus return"
   expect(mock.unknown).toEqual([])
 })
 
-it("opens content creation for the context-menu node and returns focus after cancellation", async () => {
-  const mock = mockNativeSession(undefined, {
-    "GET /api/neev/nodes": () =>
-      json({
-        nodes: [
-          {
-            id: 4,
-            orgId: 3,
-            kind: "project",
-            parentId: null,
-            name: "Menu project",
-            revision: "1",
-          },
-        ],
-        nextAfter: null,
-      }),
-    "GET /api/neev/nodes/4/documents": () =>
-      json({ items: [], nextAfter: null }),
-  })
-  const user = userEvent.setup()
-  render(
-    <NativeTestRoot>
-      <NativeWorkspace />
-    </NativeTestRoot>
-  )
-  const trigger = await screen.findByRole("button", {
-    name: "Actions for Menu project",
-  })
-  trigger.focus()
-  await user.keyboard("{Enter}")
-  await user.click(
-    await screen.findByRole("menuitem", { name: "New document" })
-  )
-  // Full-page draft with an inline title (no small modal), focused for naming.
-  const draft = await screen.findByRole("region", { name: "New document" })
-  expect(draft).toHaveTextContent("Inside Menu project")
-  await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "Title" })).toHaveFocus()
-  )
-  await user.click(screen.getByRole("button", { name: "Cancel" }))
-  await waitFor(() =>
-    expect(screen.queryByRole("region", { name: "New document" })).toBeNull()
-  )
-  expect(mock.unknown).toEqual([])
-})
+it.each(["Cancel", "Escape"])(
+  "returns to the workspace and restores focus after draft %s",
+  async (action) => {
+    const mock = mockNativeSession(undefined, {
+      "GET /api/neev/nodes": () =>
+        json({
+          nodes: [
+            {
+              id: 4,
+              orgId: 3,
+              kind: "project",
+              parentId: null,
+              name: "Menu project",
+              revision: "1",
+            },
+          ],
+          nextAfter: null,
+        }),
+      "GET /api/neev/nodes/4/documents": () =>
+        json({ items: [], nextAfter: null }),
+    })
+    const user = userEvent.setup()
+    render(
+      <NativeTestRoot>
+        <NativeWorkspace />
+      </NativeTestRoot>
+    )
+    const trigger = await screen.findByRole("button", {
+      name: "Actions for Menu project",
+    })
+    trigger.focus()
+    await user.keyboard("{Enter}")
+    await user.click(
+      await screen.findByRole("menuitem", { name: "New document" })
+    )
+    // Full-page draft with an inline title (no small modal), focused for naming.
+    const draft = await screen.findByRole("region", { name: "New document" })
+    expect(draft).toHaveTextContent("Inside Menu project")
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Title" })).toHaveFocus()
+    )
+    if (action === "Escape") await user.keyboard("{Escape}")
+    else await user.click(screen.getByRole("button", { name: "Cancel" }))
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "New document" })).toBeNull()
+    )
+    expect(trigger).toHaveFocus()
+    expect(
+      screen.getByText("Select an item from the sidebar, or create one.")
+    ).toBeVisible()
+    expect(mock.unknown).toEqual([])
+  }
+)
 
 it("moves a nested folder with its wire revision and retains the draft on conflict", async () => {
   const nodes = [

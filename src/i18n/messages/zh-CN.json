@@ -92,6 +92,8 @@
     "newChatTitle": "无标题对话",
     "newDocumentBodyHint": "为文档命名，然后创建即可使用标题、列表、表格等开始写作。",
     "newChatBodyHint": "为该对话命名，然后创建即可开始团队讨论串。",
+    "dividerBlock": "分隔线",
+    "imageBlock": "图片",
     "liveUpdates": "实时更新",
     "reconnectingUpdates": "正在重新连接…",
     "polledUpdates": "每几秒更新一次"

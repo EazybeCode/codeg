@@ -92,6 +92,8 @@
     "newChatTitle": "Conversation sans titre",
     "newDocumentBodyHint": "Nommez votre document, puis créez-le pour écrire avec des titres, des listes, des tableaux et plus.",
     "newChatBodyHint": "Nommez cette conversation, puis créez-la pour démarrer le fil d’équipe.",
+    "dividerBlock": "Séparateur",
+    "imageBlock": "Image",
     "liveUpdates": "Mises à jour en direct",
     "reconnectingUpdates": "Reconnexion…",
     "polledUpdates": "Mise à jour toutes les quelques secondes"

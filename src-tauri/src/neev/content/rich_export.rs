@@ -243,6 +243,22 @@ impl Output {
                     // The table already ended its last row.
                     continue;
                 }
+                RichBlock::Divider { .. } => self.push("---")?,
+                RichBlock::Image { url, caption, .. } => {
+                    self.push("![")?;
+                    for c in caption.chars() {
+                        match c {
+                            '[' => self.push("\\[")?,
+                            ']' => self.push("\\]")?,
+                            '\n' | '\r' => self.push(" ")?,
+                            _ => self.character(c)?,
+                        }
+                    }
+                    // The url is a validated internal path (safe URL characters).
+                    self.push("](")?;
+                    self.push(url)?;
+                    self.push(")")?;
+                }
             }
             self.push("\n")?;
             self.blocks(block.identity_children().1, depth + 1)?;

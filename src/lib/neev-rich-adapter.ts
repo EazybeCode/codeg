@@ -75,6 +75,14 @@ export function fromNeev(document: RichDocument): PartialBlock[] {
           props: { checked: value.checked },
           content: fromRuns(value.content),
         }
+      case "divider":
+        return { ...common, type: value.type }
+      case "image":
+        return {
+          ...common,
+          type: value.type,
+          props: { url: value.url, caption: value.caption },
+        }
       default:
         return { ...common, type: value.type, content: fromRuns(value.content) }
     }
@@ -207,6 +215,20 @@ export function toNeev(value: unknown): RichDocument {
       case "quote":
         neutralProps(props)
         return { ...common, content: toRuns(item.content) }
+      case "divider":
+        return { ...common }
+      case "image": {
+        const url = props.url
+        const prefix = "/api/neev/images/"
+        const key =
+          typeof url === "string" && url.startsWith(prefix)
+            ? url.slice(prefix.length)
+            : ""
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(key)) return unsupported()
+        const caption = props.caption === undefined ? "" : props.caption
+        if (typeof caption !== "string") return unsupported()
+        return { ...common, url: url as string, caption }
+      }
       default:
         return unsupported()
     }

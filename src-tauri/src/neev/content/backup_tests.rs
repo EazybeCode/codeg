@@ -292,7 +292,7 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
-    if schema_version == 8 {
+    if schema_version == 10 {
         return;
     }
     let sqlite_rebuild =
@@ -303,10 +303,22 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
             .unwrap();
     }
     let tx = database.begin().await.unwrap();
-    for table in GATEWAY_TABLES {
-        db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
+    // Fresh install is v10; every lower target removes the additive tables it
+    // predates. v10 added image blobs, v9 added join codes.
+    db::execute(&tx, "DROP TABLE neev_image_blobs", vec![])
+        .await
+        .unwrap();
+    if schema_version < 9 {
+        db::execute(&tx, "DROP TABLE neev_org_join_codes", vec![])
             .await
             .unwrap();
+    }
+    if schema_version < 8 {
+        for table in GATEWAY_TABLES {
+            db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
     }
     if schema_version < 7 {
         for table in STATUS_TABLES.iter().rev() {
@@ -575,7 +587,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 8);
+    assert_eq!(manifest.schema_version, 10);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -602,6 +614,12 @@ async fn snapshot_schema_is_exact_and_read_only() {
         );
     }
     db::execute(&db, "UPDATE neev_schema_version SET version=5", vec![])
+        .await
+        .unwrap();
+    db::execute(&db, "DROP TABLE neev_image_blobs", vec![])
+        .await
+        .unwrap();
+    db::execute(&db, "DROP TABLE neev_org_join_codes", vec![])
         .await
         .unwrap();
     for table in GATEWAY_TABLES {

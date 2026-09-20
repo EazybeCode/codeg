@@ -92,6 +92,8 @@
     "newChatTitle": "محادثة بدون عنوان",
     "newDocumentBodyHint": "سمِّ مستندك ثم أنشئه لبدء الكتابة بعناوين وقوائم وجداول وغيرها.",
     "newChatBodyHint": "سمِّ هذه المحادثة ثم أنشئها لبدء سلسلة الفريق.",
+    "dividerBlock": "فاصل",
+    "imageBlock": "صورة",
     "liveUpdates": "تحديثات مباشرة",
     "reconnectingUpdates": "جارٍ إعادة الاتصال…",
     "polledUpdates": "يتم التحديث كل بضع ثوانٍ"

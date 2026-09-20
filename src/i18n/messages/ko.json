@@ -92,6 +92,8 @@
     "newChatTitle": "제목 없는 대화",
     "newDocumentBodyHint": "문서 이름을 지정하고 만들면 제목, 목록, 표 등으로 작성을 시작할 수 있습니다.",
     "newChatBodyHint": "이 대화의 이름을 지정하고 만들면 팀 스레드를 시작할 수 있습니다.",
+    "dividerBlock": "구분선",
+    "imageBlock": "이미지",
     "liveUpdates": "실시간 업데이트",
     "reconnectingUpdates": "다시 연결하는 중…",
     "polledUpdates": "몇 초마다 업데이트"

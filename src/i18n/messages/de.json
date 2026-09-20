@@ -92,6 +92,8 @@
     "newChatTitle": "Unbenannte Unterhaltung",
     "newDocumentBodyHint": "Benenne dein Dokument und erstelle es, um mit Überschriften, Listen, Tabellen und mehr zu schreiben.",
     "newChatBodyHint": "Benenne diese Unterhaltung und erstelle sie, um den Team-Thread zu starten.",
+    "dividerBlock": "Trennlinie",
+    "imageBlock": "Bild",
     "liveUpdates": "Live-Updates",
     "reconnectingUpdates": "Verbindung wird wiederhergestellt…",
     "polledUpdates": "Aktualisierung alle paar Sekunden"

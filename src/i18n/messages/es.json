@@ -92,6 +92,8 @@
     "newChatTitle": "Conversación sin título",
     "newDocumentBodyHint": "Nombra tu documento y créalo para empezar a escribir con encabezados, listas, tablas y más.",
     "newChatBodyHint": "Nombra esta conversación y créala para iniciar el hilo del equipo.",
+    "dividerBlock": "Separador",
+    "imageBlock": "Imagen",
     "liveUpdates": "Actualizaciones en vivo",
     "reconnectingUpdates": "Reconectando…",
     "polledUpdates": "Se actualiza cada pocos segundos"

@@ -48,6 +48,7 @@ type Props = {
   /** Bubbled when this surface selects/creates a resource so the shell can keep the
    *  sidebar list + selection in sync. */
   onOpened?: (resource: NativeResource) => void
+  onCreationCancelled?: () => void
 }
 export function NativeContent(props: Props) {
   const auth = useNativeAuth()
@@ -65,6 +66,7 @@ function Content({
   chromeless,
   open: openTarget,
   onOpened,
+  onCreationCancelled,
 }: Props) {
   const auth = useNativeAuth(),
     router = useRouter(),
@@ -190,6 +192,15 @@ function Content({
     window.addEventListener("beforeunload", unload)
     return () => window.removeEventListener("beforeunload", unload)
   }, [dirty])
+  function cancelCreation() {
+    if (saving) return
+    setDialog(null)
+    setTitle("")
+    setError(null)
+    onCreationCancelled?.()
+    opener.current?.focus()
+  }
+
   // Focus the full-page draft title after the menu that opened it closes (Radix
   // returns focus to the trigger on close, so defer past that with rAF).
   useEffect(() => {
@@ -556,6 +567,12 @@ function Content({
             dialog === "create" ? (
               <section
                 aria-label={t(kind === "chat" ? "newChat" : "newDocument")}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault()
+                    cancelCreation()
+                  }
+                }}
                 className="mx-auto w-full max-w-3xl px-7 pb-16 pt-10 sm:px-12"
               >
                 <p className="text-xs text-muted-foreground">
@@ -603,12 +620,7 @@ function Content({
                       type="button"
                       variant="ghost"
                       disabled={saving}
-                      onClick={() => {
-                        setDialog(null)
-                        setTitle("")
-                        setError(null)
-                        opener.current?.focus()
-                      }}
+                      onClick={cancelCreation}
                     >
                       {n("cancel")}
                     </Button>

@@ -1,4 +1,4 @@
-use super::{access, resources, rich, types::*};
+use super::{access, image, resources, rich, types::*};
 use crate::neev::{
     auth::session, db, error::database_error, org, startup::ServerState, types::OrgContext,
 };
@@ -12,6 +12,10 @@ pub(crate) async fn save_rich(
     input: RichSaveInput,
 ) -> Result<Revision, ContentError> {
     let bytes = rich::encode(&input.document)?;
+    // Every embedded image must have been uploaded for THIS document; a key bound
+    // to another document (or unknown) is refused so a private image cannot be
+    // re-embedded into a broader-audience document.
+    image::verify_document_images(state, actor, id, &input.document).await?;
     save_revision(
         state,
         actor,

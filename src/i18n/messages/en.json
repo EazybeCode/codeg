@@ -92,6 +92,8 @@
     "newChatTitle": "Untitled conversation",
     "newDocumentBodyHint": "Name your document, then create it to start writing with headings, lists, tables and more.",
     "newChatBodyHint": "Name this conversation, then create it to start the team thread.",
+    "dividerBlock": "Divider",
+    "imageBlock": "Image",
     "liveUpdates": "Live updates",
     "reconnectingUpdates": "Reconnecting…",
     "polledUpdates": "Updates every few seconds"

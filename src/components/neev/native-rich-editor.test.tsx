@@ -12,6 +12,7 @@ import { NativeRichEditor, richSchema } from "./native-rich-editor"
 import { NativeRichView } from "./native-rich-view"
 import { NativeSuspendedSurface } from "./native-suspended-surface"
 import { fromNeev, importMarkdown, toNeev } from "@/lib/neev-rich-adapter"
+import { parseRichDocument } from "@/lib/neev-rich-document"
 document.elementsFromPoint ??= () => []
 
 function NativeTestRoot({ children }: { children: React.ReactNode }) {
@@ -185,9 +186,44 @@ it("round-trips canonical content through the actual pinned editor schema", () =
     trailingBlock: false,
   })
   expect(toNeev(editor.document)).toEqual(original)
+  // The schema stays pinned: a BlockNote default we deliberately exclude (audio)
+  // is still rejected.
   expect(() =>
-    editor.updateBlock(editor.document[0], { type: "image" } as never)
+    editor.updateBlock(editor.document[0], { type: "audio" } as never)
   ).toThrow()
+})
+
+it("round-trips divider and internal-image blocks through the pinned schema", () => {
+  const url = "/api/neev/images/11111111-1111-4111-8111-111111111111"
+  const original = parseRichDocument({
+    version: 1,
+    blocks: [
+      {
+        type: "paragraph",
+        id: "22222222-2222-4222-8222-222222222222",
+        content: [{ text: "Above", styles: [], href: null }],
+        children: [],
+      },
+      {
+        type: "divider",
+        id: "33333333-3333-4333-8333-333333333333",
+        children: [],
+      },
+      {
+        type: "image",
+        id: "44444444-4444-4444-8444-444444444444",
+        url,
+        caption: "A chart",
+        children: [],
+      },
+    ],
+  })
+  const editor = BlockNoteEditor.create({
+    schema: richSchema,
+    initialContent: fromNeev(original) as never,
+    trailingBlock: false,
+  })
+  expect(toNeev(editor.document)).toEqual(original)
 })
 
 it("keeps a controlled-lifetime draft across prop updates and emits actual text edits", async () => {

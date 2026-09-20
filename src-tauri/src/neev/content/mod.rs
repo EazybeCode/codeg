@@ -8,6 +8,9 @@ mod blob_tests;
 #[cfg(test)]
 mod document_tests;
 pub(crate) mod documents;
+pub(crate) mod image;
+#[cfg(all(test, unix))]
+mod image_tests;
 #[cfg(test)]
 mod message_tests;
 pub(crate) mod messages;
