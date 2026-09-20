@@ -16,6 +16,7 @@ mod gateway_migration;
 #[cfg(test)]
 mod gateway_migration_tests;
 mod migration;
+mod org_code_migration;
 
 pub(crate) fn statement<C: ConnectionTrait>(db: &C, sql: &str, values: Vec<Value>) -> Statement {
     Statement::from_sql_and_values(db.get_database_backend(), sql, values)
@@ -147,6 +148,15 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                     .map(|name| (*name).to_owned()),
             )
             .collect();
+        let v9_expected: std::collections::BTreeSet<String> = v8_expected
+            .iter()
+            .cloned()
+            .chain(
+                org_code_migration::TABLE_NAMES
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            )
+            .collect();
 
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
@@ -166,10 +176,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             document_format_migration::upgrade(&tx).await?;
             agent_status_migration::upgrade(&tx).await?;
             gateway_migration::upgrade(&tx).await?;
+            org_code_migration::upgrade(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![gateway_migration::SCHEMA_VERSION.into()],
+                vec![org_code_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -180,6 +191,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             && names != v6_expected
             && names != v7_expected
             && names != v8_expected
+            && names != v9_expected
         {
             return Err(AuthError::Unavailable);
         }
@@ -242,15 +254,26 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
                 gateway_migration::validate(&tx).await?;
+            }
+            org_code_migration::SCHEMA_VERSION if names == v9_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
         }
-        gateway_migration::upgrade(&tx).await?;
+        // Older inventories (v2..v7) still need the additive gateway8 tables; a v8
+        // inventory already has them. Every path then applies the additive org9
+        // storage and publishes marker9 exactly once.
+        if names != v8_expected {
+            gateway_migration::upgrade(&tx).await?;
+        }
+        org_code_migration::upgrade(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![gateway_migration::SCHEMA_VERSION.into()],
+            vec![org_code_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -332,6 +355,15 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
                 .map(|name| (*name).to_owned()),
         )
         .collect();
+    let org_code_expected: std::collections::BTreeSet<String> = gateway_expected
+        .iter()
+        .cloned()
+        .chain(
+            org_code_migration::TABLE_NAMES
+                .iter()
+                .map(|name| (*name).to_owned()),
+        )
+        .collect();
     let markers = db
         .query_all(statement(
             db,
@@ -359,18 +391,19 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         document_format_migration::SCHEMA_VERSION => names == format_expected,
         agent_status_migration::SCHEMA_VERSION => names == status_expected,
         gateway_migration::SCHEMA_VERSION => names == gateway_expected,
+        org_code_migration::SCHEMA_VERSION => names == org_code_expected,
         _ => false,
     };
     if !valid {
         return Err(AuthError::Unavailable);
     }
-    if matches!(version, 6 | 7 | 8) {
+    if matches!(version, 6 | 7 | 8 | 9) {
         document_format_migration::validate(db).await?;
     }
-    if matches!(version, 7 | 8) {
+    if matches!(version, 7 | 8 | 9) {
         agent_status_migration::validate(db).await?;
     }
-    if version == 8 {
+    if matches!(version, 8 | 9) {
         gateway_migration::validate(db).await?;
     }
     Ok(version)

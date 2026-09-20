@@ -237,6 +237,10 @@ async fn seed_history(db: &DatabaseConnection) {
 }
 
 async fn exact_seven_fixture(db: &DatabaseConnection) {
+    // Fresh schema is now v9; drop the additive org9 table to reach a v7 inventory.
+    execute(db, "DROP TABLE neev_org_join_codes", vec![])
+        .await
+        .unwrap();
     for table in DROP_ORDER {
         execute(db, &format!("DROP TABLE {table}"), vec![])
             .await
@@ -303,7 +307,7 @@ async fn snapshot_gateway8_rows(db: &DatabaseConnection) -> Vec<Vec<String>> {
 async fn sqlite_gateway8_fresh_inventory_and_seed() {
     let database = h::empty_database().await;
     initialize(&database).await.unwrap();
-    assert_eq!(validate_content_snapshot(&database).await, Ok(8));
+    assert_eq!(validate_content_snapshot(&database).await, Ok(9));
     let row = one(
         &database,
         "SELECT audience,issuer,last_cursor,fetched_through,acknowledged_cursor,writer_epoch FROM neev_gateway_audience",
@@ -330,7 +334,7 @@ async fn sqlite_gateway8_fresh_inventory_and_seed() {
 async fn postgres_gateway8_fresh_inventory_and_seed() {
     let (db, admin, schema) = h::postgres_database().await;
     eprintln!("gateway8 fresh owned schema: {schema}");
-    assert_eq!(validate_content_snapshot(&db).await, Ok(8));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(9));
     let row = one(
         &db,
         "SELECT audience,issuer FROM neev_gateway_audience",
@@ -740,10 +744,16 @@ async fn sqlite_gateway8_keyset_history_crosses_pages() {
 // ---- Task C: atomic version chain and read-only history ----
 
 async fn downgrade_to(db: &DatabaseConnection, target: i64) {
-    for table in DROP_ORDER {
-        execute(db, &format!("DROP TABLE {table}"), vec![])
-            .await
-            .unwrap();
+    // Fresh schema is now v9; drop the additive org9 table for any lower target.
+    execute(db, "DROP TABLE neev_org_join_codes", vec![])
+        .await
+        .unwrap();
+    if target < 8 {
+        for table in DROP_ORDER {
+            execute(db, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
     }
     if target < 7 {
         for table in ["neev_agent_status_checks", "neev_agent_status_owner"] {
@@ -794,7 +804,7 @@ async fn sqlite_gateway8_populated_seven_upgrade_preserves_rows() {
     );
 
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(8));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(9));
     let after = one(&db, "SELECT r.blob_key,r.sha256,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE r.document_id=$1", vec![doc.into()]).await.unwrap().unwrap();
     assert_eq!(
         (
@@ -826,7 +836,7 @@ async fn sqlite_gateway8_reinitialize_preserves_history() {
     .unwrap();
     let before = snapshot_gateway8_rows(&db).await;
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(8));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(9));
     assert_eq!(
         snapshot_gateway8_rows(&db).await,
         before,
@@ -840,7 +850,7 @@ async fn sqlite_gateway8_initializer_marker_failure_rolls_back() {
     seed_native(&db).await;
     let account_before = h::count(&db, "neev_accounts").await;
     exact_seven_fixture(&db).await;
-    execute(&db, "CREATE TRIGGER fixture_reject_gateway8_marker BEFORE UPDATE OF version ON neev_schema_version WHEN NEW.version=8 BEGIN SELECT RAISE(ABORT,'fixture marker rejection'); END", vec![]).await.unwrap();
+    execute(&db, "CREATE TRIGGER fixture_reject_gateway8_marker BEFORE UPDATE OF version ON neev_schema_version WHEN NEW.version=9 BEGIN SELECT RAISE(ABORT,'fixture marker rejection'); END", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(
         one(&db, "SELECT version FROM neev_schema_version WHERE id=1", vec![])
@@ -877,9 +887,9 @@ async fn sqlite_gateway8_initializer_marker_failure_rolls_back() {
 
 #[tokio::test]
 async fn sqlite_gateway8_exact_historical_three_through_eight_read_only() {
-    for target in [8_i64, 7, 6, 5, 4, 3] {
+    for target in [9_i64, 8, 7, 6, 5, 4, 3] {
         let db = h::database().await;
-        if target < 8 {
+        if target < 9 {
             downgrade_to(&db, target).await;
         }
         execute(&db, "PRAGMA query_only=ON", vec![]).await.unwrap();
@@ -1041,7 +1051,7 @@ async fn postgres_gateway8_populated_seven_upgrade_preserves_rows() {
         );
         exact_seven_fixture(&db).await;
         assert_eq!(initialize(&db).await, Ok(()));
-        assert_eq!(validate_content_snapshot(&db).await, Ok(8));
+        assert_eq!(validate_content_snapshot(&db).await, Ok(9));
         // Content revision/format preserved unchanged.
         let after = one(&db, "SELECT r.blob_key,r.sha256,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE r.document_id=$1", vec![doc.into()]).await.unwrap().unwrap();
         assert_eq!(
@@ -1081,7 +1091,7 @@ async fn postgres_gateway8_reinitialize_preserves_history() {
             .unwrap();
         let before = snapshot_gateway8_rows(&db).await;
         assert_eq!(initialize(&db).await, Ok(()));
-        assert_eq!(validate_content_snapshot(&db).await, Ok(8));
+        assert_eq!(validate_content_snapshot(&db).await, Ok(9));
         assert_eq!(snapshot_gateway8_rows(&db).await, before);
     })
     .catch_unwind()
@@ -1101,7 +1111,7 @@ async fn postgres_gateway8_initializer_marker_failure_rolls_back() {
         let inventory_before = h::count(&db, "neev_document_formats").await; // status7 content present
         execute(
             &db,
-            "ALTER TABLE neev_schema_version ADD CONSTRAINT ck_fixture_reject_gateway8_marker CHECK (version<>8)",
+            "ALTER TABLE neev_schema_version ADD CONSTRAINT ck_fixture_reject_gateway8_marker CHECK (version<>9)",
             vec![],
         )
         .await
@@ -1158,11 +1168,11 @@ async fn postgres_gateway8_initializer_marker_failure_rolls_back() {
 #[tokio::test]
 #[ignore = "requires guarded PostgreSQL"]
 async fn postgres_gateway8_exact_historical_three_through_eight_read_only() {
-    for target in [8_i64, 7, 6, 5, 4, 3] {
+    for target in [9_i64, 8, 7, 6, 5, 4, 3] {
         let (db, admin, schema) = h::postgres_database().await;
         eprintln!("gateway8 read-only {target} owned schema: {schema}");
         let outcome = std::panic::AssertUnwindSafe(async {
-            if target < 8 {
+            if target < 9 {
                 downgrade_to(&db, target).await;
             }
             let tx = db.begin().await.unwrap();
