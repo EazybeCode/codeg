@@ -78,9 +78,16 @@ def run(uid_a, uid_b):
             failures.append(name)
 
     tmp = tempfile.mkdtemp()
+    # mkdtemp is 0700 root-owned; a lane uid could not even TRAVERSE it to reach the
+    # volume, masking the real test. The isolation boundary is the volume's own 0700,
+    # not the scratch parent, so make the parent world-traversable (0755) and keep
+    # the volume 0700 (exactly as the production document/credential roots are laid
+    # out: 0755 ancestry, 0700 tenant dir).
+    os.chmod(tmp, 0o755)
     lock_dir = os.path.join(tmp, "locks")
     vol = os.path.join(tmp, "vol")
     os.mkdir(vol, 0o700)
+    os.chmod(vol, 0o700)  # exact, independent of umask
     token = os.path.join(vol, "token")
     with open(token, "w") as handle:
         handle.write("SECRET-CRED")
@@ -138,16 +145,26 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="neev_agent_credentials_acceptance")
     parser.add_argument("--uid-a", type=int, default=61000)
     parser.add_argument("--uid-b", type=int, default=61001)
+    parser.add_argument(
+        "--allow-skip",
+        action="store_true",
+        help="exit 0 (not an acceptance) when Linux/root/setpriv are absent; without"
+        " this, an unmet prerequisite is a FAILURE so a skip can never look like a pass",
+    )
     args = parser.parse_args(argv)
+    # This is an acceptance run, not a portable unit test: an unmet prerequisite is
+    # reported as UNMET and exits NONZERO so it can never masquerade as ACCEPTED.
+    unmet = None
     if platform.system() != "Linux":
-        print("SKIP: Linux only")
-        return 0
-    if os.geteuid() != 0:
-        print("SKIP: must run as root (chown + setpriv to spare uids)")
-        return 0
-    if not os.path.exists(SETPRIV):
-        print("SKIP: setpriv not present")
-        return 0
+        unmet = "Linux required"
+    elif os.geteuid() != 0:
+        unmet = "must run as root (chown + setpriv to spare uids; grant DAC_OVERRIDE"
+        unmet += " to match helper caps)"
+    elif not os.path.exists(SETPRIV):
+        unmet = "setpriv (util-linux) required"
+    if unmet is not None:
+        print("UNMET:", unmet)
+        return 0 if args.allow_skip else 2
     failures = run(args.uid_a, args.uid_b)
     print("RESULT:", "ACCEPTED" if not failures else "FAILED %d" % len(failures))
     return 0 if not failures else 1
