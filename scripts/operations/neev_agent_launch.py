@@ -132,6 +132,31 @@ def child_env(delivery, proxy_env=None):
     return env
 
 
+def _become_credential_owner():  # pragma: no cover - requires the cap helper (euid 0)
+    """Elevate to euid 0 for the credential/mount phase.
+
+    The caplaunch helper execs us with euid 65532 (the web-server uid) plus ambient
+    caps (incl. CAP_SETUID). But the credential store, master key and volume images
+    are ROOT-owned, and their validators require owner == geteuid(); mount/cryptsetup
+    also want euid 0. So the trusted, fixed launcher raises euid to 0 here — AFTER its
+    args/workdir are validated, BEFORE any credential effect. The provider child is
+    still dropped to its DISTINCT unprivileged lane uid with an empty capability set
+    by the sandbox's setpriv, so nothing untrusted ever runs as root. Fail closed if
+    elevation is impossible (e.g. the helper profile lacks CAP_SETUID)."""
+    import platform
+
+    if platform.system() != "Linux":
+        raise sandbox.SandboxError("unsupported")
+    if os.geteuid() == 0:
+        return
+    try:
+        os.setresuid(0, 0, 0)
+    except OSError as error:
+        raise sandbox.SandboxError("launch") from error
+    if os.geteuid() != 0:
+        raise sandbox.SandboxError("launch")
+
+
 def _production_volumes():  # pragma: no cover - requires the real store
     import neev_credential_store as store_module
     import neev_credential_volumes as volumes_module
@@ -156,6 +181,14 @@ def main(argv=None, volumes=None):
     # canonical owner on exit. A handle for another user/provider cannot unlock this
     # scope; the lock means no other lane can access the volume concurrently.
     if volumes is None:  # pragma: no cover - production wiring
+        try:
+            _become_credential_owner()
+        except sandbox.SandboxError as error:
+            print(
+                f"neev_agent_launch: cannot assume credential owner: {error.category}",
+                file=sys.stderr,
+            )
+            return 2
         volumes = _production_volumes()
     # A run with provider egress must route the provider's TLS through its slot
     # CONNECT proxy — the netns has no other path out. deny_all runs have no proxy

@@ -802,6 +802,32 @@ class LinuxCredentialVolumeAcceptance(unittest.TestCase):
                 self.fail("cleanup failed; retained safe resource: %s" % cleanup_error)
 
 
+class SecureFilesystemRootTests(unittest.TestCase):
+    def setUp(self):
+        load_module("neev_credential_store", STORE_PATH)
+        self.module = load_module("neev_credential_volumes", VOLUMES_PATH)
+
+    def test_chmod_precedes_chown_so_no_fowner_capability_is_required(self):
+        # At euid 0 the caplaunch helper has no CAP_FOWNER; chmod must run while the
+        # fresh ext4 root is still owned by euid 0 (chmod as owner), THEN chown to
+        # 65532 (CAP_CHOWN). The reverse order would demand FOWNER for the chmod.
+        order = []
+        with mock.patch.object(self.module.os, "open", return_value=7), mock.patch.object(
+            self.module.os, "fchmod",
+            side_effect=lambda fd, mode: order.append(("chmod", fd, mode)),
+        ), mock.patch.object(
+            self.module.os, "fchown",
+            side_effect=lambda fd, uid, gid: order.append(("chown", fd, uid, gid)),
+        ), mock.patch.object(
+            self.module.os, "fsync",
+            side_effect=lambda fd: order.append(("fsync", fd)),
+        ), mock.patch.object(self.module.os, "close"):
+            self.module._secure_filesystem_root(self.module.Path("/mnt/x"))
+        self.assertEqual([step[0] for step in order], ["chmod", "chown", "fsync"])
+        self.assertEqual(order[0], ("chmod", 7, 0o700))
+        self.assertEqual(order[1], ("chown", 7, 65532, 65532))
+
+
 class ToolLayoutTests(unittest.TestCase):
     def test_privileged_tools_are_non_setuid(self):
         # The native agent image (Dockerfile.native.agent) strips ALL setuid/setgid;

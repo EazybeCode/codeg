@@ -614,8 +614,13 @@ def _secure_filesystem_root(path: Path) -> None:
     directory_fd = None
     try:
         directory_fd = os.open(str(path), flags)
-        os.fchown(directory_fd, 65532, 65532)
+        # chmod BEFORE chown: a freshly mkfs'd+mounted ext4 root is owned by the
+        # euid-0 launcher, so fchmod succeeds as the owner — needing no CAP_FOWNER.
+        # If we chowned to 65532 first, the subsequent fchmod would be on an inode
+        # this process no longer owns and would demand CAP_FOWNER, which the caplaunch
+        # helper profile deliberately does NOT grant. Final state is identical.
         os.fchmod(directory_fd, 0o700)
+        os.fchown(directory_fd, 65532, 65532)
         os.fsync(directory_fd)
     except (OSError, ValueError, TypeError):
         raise StoreError("unavailable") from None
