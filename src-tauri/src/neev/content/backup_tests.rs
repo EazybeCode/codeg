@@ -169,6 +169,15 @@ async fn sqlite_gateway8_rich_format_six_seven_eight() {
 }
 
 #[tokio::test]
+async fn sqlite_schema_nine_ten_decode_rich_bodies_and_catch_corruption() {
+    // Regression: a v9/v10 snapshot must decode block documents (not read them as
+    // markdown) and reject a corrupt rich body at the rich-decode stage.
+    for schema_version in [9, 10] {
+        rich_snapshot_contract(h::database().await, schema_version).await;
+    }
+}
+
+#[tokio::test]
 #[ignore = "requires guarded PostgreSQL"]
 async fn postgres_gateway8_rich_format_six_seven_eight() {
     for schema_version in [6, 7, 8] {

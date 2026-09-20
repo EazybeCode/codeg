@@ -271,3 +271,128 @@ async fn validate_rows<C: ConnectionTrait>(db: &C, sqlite: bool) -> Result<(), A
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::neev::test_support as h;
+    use sea_orm::DatabaseConnection;
+
+    const DOC: &str = "11111111-1111-4111-8111-111111111111";
+    const KEY: &str = "22222222-2222-4222-8222-222222222222";
+    fn hex64() -> String {
+        "a".repeat(64)
+    }
+
+    // Fresh v10 DB with one org and one private document images can bind to.
+    async fn fixture() -> (DatabaseConnection, i32, i32) {
+        let db = h::database().await;
+        let owner = h::native_account(&db, "img-owner", "img@example.test").await;
+        let (org, _) = h::organization(&db, owner, "admin").await;
+        h::execute(
+            &db,
+            "INSERT INTO neev_nodes(id,org_id,parent_id,kind,name,revision,created_by) VALUES(1,$1,NULL,'project','P',1,$2)",
+            vec![org.into(), owner.into()],
+        )
+        .await;
+        h::execute(
+            &db,
+            "INSERT INTO neev_resources(org_id,id,kind,node_id,creator_id,title,visibility,origin_chat_id,origin_kind,auth_revision,content_revision,archived,created_at,updated_at) VALUES($1,$2,'document',1,$3,'D','private',NULL,NULL,1,0,false,1000,1000)",
+            vec![org.into(), DOC.into(), owner.into()],
+        )
+        .await;
+        (db, org, owner)
+    }
+
+    // Replace the real table with a same-typed replica carrying no CHECK/PK/FK —
+    // exactly the imported-dump / hand-edited state the validator exists for.
+    async fn unconstrained(db: &DatabaseConnection) {
+        h::execute(db, "DROP TABLE neev_image_blobs", vec![]).await;
+        h::execute(
+            db,
+            "CREATE TABLE neev_image_blobs (org_id INTEGER, key TEXT, document_id TEXT, content_type TEXT, byte_length BIGINT, sha256 TEXT, created_by INTEGER, created_at BIGINT)",
+            vec![],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fresh_and_empty_table_validate() {
+        let (db, _, _) = fixture().await;
+        assert_eq!(h::count(&db, "neev_image_blobs").await, 0);
+        assert_eq!(validate(&db).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_well_formed_bound_image_validates() {
+        let (db, org, owner) = fixture().await;
+        h::execute(
+            &db,
+            "INSERT INTO neev_image_blobs(org_id,key,document_id,content_type,byte_length,sha256,created_by,created_at) VALUES($1,$2,$3,'image/png',10,$4,$5,1000)",
+            vec![org.into(), KEY.into(), DOC.into(), hex64().into(), owner.into()],
+        )
+        .await;
+        assert_eq!(validate(&db).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn corrupt_rows_refuse_the_database() {
+        // (content_type, byte_length, sha256, key, document_id, created_by) — each
+        // case is valid except one poisoned column (or a dangling reference).
+        let cases: &[(&str, i64, String, &str, &str, i64)] = &[
+            ("image/svg+xml", 10, hex64(), KEY, DOC, 1), // disallowed type
+            ("image/png", 0, hex64(), KEY, DOC, 1),      // zero length
+            ("image/png", MAX_IMAGE_BYTES + 1, hex64(), KEY, DOC, 1), // too big
+            ("image/png", 10, "z".repeat(64), KEY, DOC, 1), // non-hex sha
+            ("image/png", 10, hex64(), "not-a-uuid", DOC, 1), // bad key
+            (
+                "image/png",
+                10,
+                hex64(),
+                KEY,
+                "33333333-3333-4333-8333-333333333333",
+                1,
+            ), // dangling document_id
+            ("image/png", 10, hex64(), KEY, DOC, 999999), // dangling created_by
+        ];
+        for (content_type, byte_length, sha, key, doc, by) in cases {
+            let (db, org, owner) = fixture().await;
+            unconstrained(&db).await;
+            let created_by = if *by == 1 { owner } else { *by as i32 };
+            h::execute(
+                &db,
+                "INSERT INTO neev_image_blobs(org_id,key,document_id,content_type,byte_length,sha256,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,1000)",
+                vec![
+                    org.into(),
+                    (*key).into(),
+                    (*doc).into(),
+                    (*content_type).into(),
+                    (*byte_length).into(),
+                    sha.clone().into(),
+                    created_by.into(),
+                ],
+            )
+            .await;
+            assert_eq!(
+                validate(&db).await,
+                Err(AuthError::Unavailable),
+                "content_type={content_type} len={byte_length} key={key} doc={doc} by={by}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_primary_key_is_refused() {
+        let (db, org, owner) = fixture().await;
+        unconstrained(&db).await;
+        for _ in 0..2 {
+            h::execute(
+                &db,
+                "INSERT INTO neev_image_blobs(org_id,key,document_id,content_type,byte_length,sha256,created_by,created_at) VALUES($1,$2,$3,'image/png',10,$4,$5,1000)",
+                vec![org.into(), KEY.into(), DOC.into(), hex64().into(), owner.into()],
+            )
+            .await;
+        }
+        assert_eq!(validate(&db).await, Err(AuthError::Unavailable));
+    }
+}
