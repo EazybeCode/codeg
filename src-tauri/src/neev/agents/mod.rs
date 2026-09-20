@@ -9,6 +9,7 @@ pub(crate) mod recovery;
 pub(crate) mod runs;
 pub(crate) mod sessions;
 pub(crate) mod status;
+pub(crate) mod supervisor;
 pub(super) mod store;
 pub(crate) mod types;
 

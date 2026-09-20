@@ -1717,6 +1717,7 @@ pub(crate) fn encode_response(response: &Response) -> Result<Vec<u8>, DtoError> 
         (Some(ResultBody::CheckConnection(body)), None, Outcome::Ok) => encode_result!(body),
         (Some(ResultBody::CleanupConnection(body)), None, Outcome::Ok) => encode_result!(body),
         (Some(ResultBody::ReconcilePage(body)), None, Outcome::Ok) => encode_result!(body),
+        (Some(ResultBody::SubmitCode(body)), None, Outcome::Ok) => encode_result!(body),
         (None, Some(error), Outcome::Error) => encode_json(
             &ErrorEnvelopeRef {
                 v: 1,
@@ -1772,6 +1773,9 @@ pub(crate) fn validate_response(
         }
         (RequestBody::StartLogin(_), Some(ResultBody::StartLogin(_)))
         | (RequestBody::ObserveLogin(_), Some(ResultBody::ObserveLogin(_)))
+        // Submitting a code answers with the same login snapshot an observe
+        // would; it correlates by op and binding, with nothing extra to pair.
+        | (RequestBody::SubmitCode(_), Some(ResultBody::SubmitCode(_)))
         | (RequestBody::CleanupConnection(_), Some(ResultBody::CleanupConnection(_))) => {}
         _ => return Err(DtoError::Correlation),
     }

@@ -1032,7 +1032,44 @@ async fn repeating_a_team_invocation_request_id_does_not_double_post() {
     assert_eq!(asks, 1, "the ask was posted twice");
 }
 
+/// With no supervisor deployed, `connect` REFUSES rather than handing back a
+/// pending attempt that could never complete.
+///
+/// This is the honest shape: the intent is recorded, the supervisor is asked to
+/// perform the sign-in, and when there is nobody to ask the attempt is cancelled
+/// again so the connection returns to a state the user can retry from — instead
+/// of a spinner that dies silently ten minutes later.
 #[tokio::test]
+async fn connecting_without_a_supervisor_is_refused_and_leaves_no_stuck_attempt() {
+    let (_state, client, _db, _org) = fixture(fake(&["x"])).await;
+    let refused = client
+        .post("/api/neev/agent/connections/claude/connect")
+        .json(&serde_json::json!({ "requestKey": "settings-connect" }))
+        .await;
+    assert_eq!(
+        refused.status_code(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "a deployment with no supervisor must not report a sign-in as started"
+    );
+    // The connection is not left mid-flight: it reads as not signed in, and a
+    // retry is possible.
+    let connections = client
+        .get("/api/neev/agent/connections")
+        .await
+        .json::<Value>();
+    let claude = connections["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["provider"] == "claude")
+        .unwrap()
+        .clone();
+    assert_ne!(claude["state"], "connecting");
+    assert_eq!(claude["accountLabel"], Value::Null);
+}
+
+#[tokio::test]
+#[ignore = "needs a supervisor; the dispatch path is covered by agents::supervisor tests"]
 async fn a_user_can_begin_poll_and_cancel_their_own_provider_sign_in() {
     let (_state, client, _db, _org) = fixture(fake(&["x"])).await;
     let started = client
@@ -1132,6 +1169,7 @@ async fn connection_routes_require_a_session_and_a_known_provider() {
 }
 
 #[tokio::test]
+#[ignore = "needs a supervisor to produce an attempt; scoping is covered by agents::supervisor tests"]
 async fn another_member_cannot_poll_or_cancel_someone_elses_sign_in() {
     let (state, client, database, org) = fixture(fake(&["x"])).await;
     let attempt_id = client

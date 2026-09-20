@@ -253,6 +253,10 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             get(agent_sessions::connect_attempt),
         )
         .route(
+            "/api/neev/agent/connections/{provider}/attempts/{attempt_id}/code",
+            post(agent_sessions::submit_attempt_code),
+        )
+        .route(
             "/api/neev/agent/connections/{provider}/cancel",
             post(agent_sessions::cancel_connect),
         )

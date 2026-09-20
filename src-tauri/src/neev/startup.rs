@@ -16,6 +16,11 @@ use super::{
 /// attempt deadline, so an abandoned login frees its connection promptly.
 const PENDING_SWEEP_SECS: u64 = 60;
 
+/// How often live logins are advanced and queued cleanups drained. Short enough
+/// that a user who approves in their browser is connected promptly even with
+/// nothing polling, and that a disconnect finishes while they watch.
+const SUPERVISOR_SWEEP_SECS: u64 = 3;
+
 pub(crate) struct ServerState {
     pub(crate) database: DatabaseConnection,
     pub(crate) config: Config,
@@ -38,6 +43,12 @@ pub(crate) struct ServerState {
     /// here for its lifetime so a dropped stream can REATTACH to it and replay
     /// what was already produced, instead of re-executing the prompt (§5.2).
     pub(crate) agent_runs: super::agents::runs::RunRegistry,
+    /// The local supervisor that performs provider sign-in effects. Production
+    /// default is `Unavailable`, so a deployment without one refuses every
+    /// effect instead of appearing to sign users in.
+    pub(crate) supervisor: std::sync::Arc<super::agents::supervisor::Supervisor>,
+    /// Sign-ins this process started, by attempt id.
+    pub(crate) agent_logins: super::agents::supervisor::LoginRegistry,
 }
 
 impl ServerState {
@@ -79,6 +90,8 @@ impl ServerState {
             agent_jobs: super::agents::execution::new_job_registry(),
             realtime: Arc::new(MessageHub::default()),
             agent_runs: super::agents::runs::new_registry(),
+            supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
+            agent_logins: super::agents::supervisor::new_login_registry(),
             oauth,
             magic,
             mail,
@@ -103,6 +116,8 @@ impl ServerState {
             agent_jobs: super::agents::execution::new_job_registry(),
             realtime: Arc::new(MessageHub::default()),
             agent_runs: super::agents::runs::new_registry(),
+            supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
+            agent_logins: super::agents::supervisor::new_login_registry(),
             oauth,
             magic: None,
             mail: None,
@@ -128,6 +143,8 @@ impl ServerState {
             agent_jobs: super::agents::execution::new_job_registry(),
             realtime: Arc::new(MessageHub::default()),
             agent_runs: super::agents::runs::new_registry(),
+            supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
+            agent_logins: super::agents::supervisor::new_login_registry(),
             oauth,
             magic: Some(magic),
             mail: None,
@@ -153,6 +170,8 @@ impl ServerState {
             agent_jobs: super::agents::execution::new_job_registry(),
             realtime: Arc::new(MessageHub::default()),
             agent_runs: super::agents::runs::new_registry(),
+            supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
+            agent_logins: super::agents::supervisor::new_login_registry(),
             oauth,
             magic: None,
             mail: Some(mail),
@@ -168,6 +187,147 @@ impl ServerState {
     pub(crate) fn set_agent_runtime(&mut self, runtime: super::agents::execution::AgentRuntime) {
         self.agents = Arc::new(runtime);
     }
+}
+
+/// The device + inode of a path, for the coordinator's own identity type.
+/// The transport and the coordinator each declare their own, so the raw pair is
+/// read once and mapped to whichever the caller needs.
+#[cfg(unix)]
+fn coordinator_identity(
+    path: &std::path::Path,
+) -> Result<super::agents::control_coordinator::FileIdentity, ()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).map_err(|_| ())?;
+    Ok(super::agents::control_coordinator::FileIdentity {
+        device: meta.dev(),
+        inode: meta.ino(),
+    })
+}
+
+/// The identity (device + inode) of a path, pinned so the file cannot be
+/// swapped for another under the same name after we validated it.
+#[cfg(unix)]
+fn file_identity(
+    path: &std::path::Path,
+) -> Result<super::agents::control_transport::FileIdentity, ()> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).map_err(|_| ())?;
+    Ok(super::agents::control_transport::FileIdentity {
+        device: meta.dev(),
+        inode: meta.ino(),
+    })
+}
+
+#[cfg(unix)]
+fn protected_parent(
+    parent: &std::path::Path,
+) -> Result<super::agents::control_transport::ProtectedParent, ()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    super::agents::control_transport::validate_parent_path(parent).map_err(|_| ())?;
+    if no_symlink_component(parent).is_err() {
+        return Err(());
+    }
+    let meta = std::fs::metadata(parent).map_err(|_| ())?;
+    Ok(super::agents::control_transport::ProtectedParent {
+        absolute_path: parent.to_path_buf(),
+        identity: file_identity(parent)?,
+        gid: meta.gid(),
+        mode: meta.permissions().mode() & 0o7777,
+    })
+}
+
+/// Build the supervisor binding from the environment.
+///
+/// `Ok(None)` means "no supervisor deployed here" — the honest default, under
+/// which every provider effect is refused. `Err(())` means one WAS configured
+/// but something about it is missing, which aborts startup rather than leaving
+/// an operator believing sign-in works.
+///
+/// Deliberately NO permission judgement here. The transport's own acceptance
+/// gate (`control_transport::connect`) is the authority on ownership and modes:
+/// it requires the key to be `root:control` with no world access and no group
+/// *write* — i.e. exactly the `0640` the deployment provisions. Re-deciding
+/// those rules here risked a stricter second opinion; an earlier draft rejected
+/// any group bit at all, which would have refused the very key the gate
+/// expects. This function resolves paths and identities; the gate judges them.
+#[cfg(unix)]
+fn bind_supervisor() -> Result<Option<super::agents::supervisor::Supervisor>, ()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let socket = match std::env::var("NEEV_SUPERVISOR_SOCKET") {
+        Ok(value) => value,
+        // Nothing configured at all.
+        Err(_) => return Ok(None),
+    };
+    let key_path = std::env::var("NEEV_SUPERVISOR_KEY").map_err(|_| ())?;
+    let epoch_dir = std::env::var("NEEV_SUPERVISOR_EPOCH_DIR").map_err(|_| ())?;
+    // Three DISTINCT identities, and conflating them breaks the gate:
+    //  - `peer_uid`/`peer_gid` are the supervisor process itself, which must be
+    //    0:0 because the credential store requires real root for the volume
+    //    tooling;
+    //  - `control_gid` owns the socket and pre-shared key (the unprivileged web
+    //    server's group, so it can reach them without being root).
+    // An earlier draft used one value for both, which made every unprivileged
+    // server fail the peer check against a root supervisor.
+    let peer_uid: u32 = std::env::var("NEEV_SUPERVISOR_UID")
+        .map_err(|_| ())?
+        .parse()
+        .map_err(|_| ())?;
+    let peer_gid: u32 = std::env::var("NEEV_SUPERVISOR_GID")
+        .map_err(|_| ())?
+        .parse()
+        .map_err(|_| ())?;
+    let control_gid: u32 = std::env::var("NEEV_SUPERVISOR_CONTROL_GID")
+        .map_err(|_| ())?
+        .parse()
+        .map_err(|_| ())?;
+
+    let socket_path = std::path::Path::new(&socket).to_path_buf();
+    let key = std::path::Path::new(&key_path).to_path_buf();
+    // The gate requires each file to be a direct child of its protected parent.
+    let socket_parent = protected_parent(socket_path.parent().ok_or(())?)?;
+    let key_parent = protected_parent(key.parent().ok_or(())?)?;
+    let socket_meta = std::fs::metadata(&socket_path).map_err(|_| ())?;
+    let deployment = super::agents::control_transport::ControlDeployment {
+        socket_identity: file_identity(&socket_path)?,
+        key_identity: file_identity(&key)?,
+        socket_path,
+        key_path: key,
+        socket_parent,
+        key_parent,
+        control_gid,
+        self_uid: unsafe { libc::getuid() },
+        self_gid: unsafe { libc::getgid() },
+        peer_uid,
+        peer_gid,
+        socket_owner_uid: socket_meta.uid(),
+    };
+
+    // One coordinator owns the epoch at a time; the supervisor fences on it.
+    let epoch_parent = std::path::Path::new(&epoch_dir);
+    super::agents::control_transport::validate_parent_path(epoch_parent).map_err(|_| ())?;
+    let epoch_meta = std::fs::metadata(epoch_parent).map_err(|_| ())?;
+    let spec = super::agents::control_coordinator::CoordinatorFileSpec {
+        parent: epoch_parent.to_path_buf(),
+        parent_identity: coordinator_identity(epoch_parent)?,
+        parent_gid: epoch_meta.gid(),
+        parent_mode: epoch_meta.permissions().mode() & 0o7777,
+        service_uid: unsafe { libc::getuid() },
+        service_gid: unsafe { libc::getgid() },
+        lock_identity: coordinator_identity(&epoch_parent.join("coordinator.lock"))?,
+        epoch_identity: coordinator_identity(&epoch_parent.join("coordinator.epoch"))?,
+    };
+    let lease =
+        super::agents::control_coordinator::CoordinatorLease::try_acquire(spec).map_err(|_| ())?;
+    let live = super::agents::supervisor::LiveSupervisor::new(deployment, lease).map_err(|_| ())?;
+    Ok(Some(super::agents::supervisor::Supervisor::Live(live)))
+}
+
+#[cfg(not(unix))]
+fn bind_supervisor() -> Result<Option<super::agents::supervisor::Supervisor>, ()> {
+    // The transport is Linux-only by design; a non-unix host simply has none.
+    Ok(None)
 }
 
 /// Reject any path component that is a symlink: the root process later
@@ -328,6 +488,19 @@ async fn serve() -> Result<(), ()> {
             Some(cap_helper),
         );
     }
+    // Bind the local supervisor when one is deployed. Every part is REQUIRED
+    // together and validated before use, so a half-configured host fails to
+    // start rather than running with a connection surface that silently cannot
+    // complete a sign-in.
+    match bind_supervisor() {
+        Ok(Some(supervisor)) => state.supervisor = Arc::new(supervisor),
+        // Nothing configured: connections stay honestly unavailable.
+        Ok(None) => {}
+        Err(()) => {
+            eprintln!("Neev supervisor is configured but unusable; refusing to start");
+            return Err(());
+        }
+    }
     let state = Arc::new(state);
     // Connection recovery, wired into the real lifecycle.
     //
@@ -358,6 +531,19 @@ async fn serve() -> Result<(), ()> {
             tokio::time::sleep(std::time::Duration::from_secs(PENDING_SWEEP_SECS)).await;
             // Only EXPIRED attempts; an in-progress login is untouched.
             let _ = crate::neev::agents::recovery::expire_pending(&sweeper).await;
+        }
+    });
+    // The supervisor lifecycle must not depend on anyone polling.
+    //
+    // Without this, a user who approves a sign-in and closes the tab is never
+    // committed, and a cancelled or disconnected connection stays
+    // `disconnecting` forever because nothing drains its queued cleanup — which
+    // then blocks every future sign-in for that provider.
+    let progress = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(SUPERVISOR_SWEEP_SECS)).await;
+            crate::neev::agents::supervisor::sweep(&progress).await;
         }
     });
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;

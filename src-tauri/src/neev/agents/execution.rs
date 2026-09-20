@@ -352,10 +352,18 @@ impl SlotPool {
     }
 }
 
-/// RAII guard: releases the lane back to the pool AND removes the ephemeral
-/// per-run workdir, on every exit path including a panic (fixes the slot-leak and
-/// residual-workdir issues). Removing the workdir means a later run that reuses
-/// the same uid finds nothing to read.
+/// RAII guard: removes the ephemeral per-run workdir and — **only if that
+/// succeeded** — returns the lane to the pool, on every exit path including a
+/// panic.
+///
+/// The conditional release is the isolation guarantee. The launcher chowns the
+/// run directory to the dropped run uid at mode 0700, so the unprivileged web
+/// server frequently CANNOT delete it. Releasing the lane anyway would hand the
+/// same uid to the next tenant while the previous tenant's private files were
+/// still sitting in a directory that uid owns — a cross-tenant read. So a lane
+/// whose workdir could not be removed is **quarantined**: it never re-enters the
+/// pool, the run count simply drops, and a privileged sweep (startup, or the
+/// supervisor's own teardown) is what reclaims it.
 struct LaneGuard {
     slots: SlotPool,
     lane: Lane,
@@ -364,8 +372,22 @@ struct LaneGuard {
 
 impl Drop for LaneGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.workdir);
-        self.slots.release(self.lane);
+        if workdir_is_clear(&self.workdir) {
+            self.slots.release(self.lane);
+        }
+        // Otherwise: quarantined. Losing a lane costs throughput; reusing a uid
+        // over another tenant's readable files costs isolation.
+    }
+}
+
+/// Whether the run directory is genuinely gone. Removal succeeding and the
+/// directory never having existed are both fine; anything else (permission
+/// denied because the run uid owns it, a busy mount) is not.
+fn workdir_is_clear(workdir: &Path) -> bool {
+    match std::fs::remove_dir_all(workdir) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => !workdir.exists(),
     }
 }
 
@@ -1060,6 +1082,70 @@ mod tests {
                 "accepted model {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_lane_whose_workdir_survives_is_quarantined_rather_than_reused() {
+        let pool = SlotPool::new();
+        let root = tempfile::tempdir().unwrap();
+        let clean = root.path().join("run-clean");
+        let stuck = root.path().join("run-stuck");
+        std::fs::create_dir_all(&clean).unwrap();
+        std::fs::create_dir_all(&stuck).unwrap();
+
+        let first = pool.acquire().expect("first lane");
+        let second = pool.acquire().expect("second lane");
+        assert!(pool.acquire().is_none(), "only two lanes exist");
+
+        // A run whose directory really is gone returns its lane.
+        drop(LaneGuard {
+            slots: pool.clone(),
+            lane: first,
+            workdir: clean.clone(),
+        });
+        assert!(!clean.exists());
+        assert_eq!(pool.acquire(), Some(first), "a cleaned lane is reusable");
+        pool.release(first);
+
+        // Simulate what production looks like when the run uid owns the
+        // directory at 0700 and the unprivileged server cannot remove it: the
+        // path is still there after the guard drops.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(stuck.join("credentials"), b"tenant secret").unwrap();
+            // Make the PARENT unwritable so the child cannot be unlinked.
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        drop(LaneGuard {
+            slots: pool.clone(),
+            lane: second,
+            workdir: stuck.clone(),
+        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let blocked = stuck.exists();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            if blocked {
+                // The lane must NOT come back: handing this uid to another
+                // tenant would give them a directory still holding the previous
+                // tenant's files.
+                assert_ne!(
+                    pool.acquire(),
+                    Some(second),
+                    "a lane with a surviving workdir was reused"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_workdir_counts_as_clear() {
+        // Nothing to remove is not a failure: the run never wrote anything, or
+        // a privileged sweep already reclaimed it.
+        let root = tempfile::tempdir().unwrap();
+        assert!(workdir_is_clear(&root.path().join("never-existed")));
     }
 
     #[test]

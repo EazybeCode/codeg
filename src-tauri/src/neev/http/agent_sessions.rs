@@ -31,7 +31,7 @@ use super::{catalog, private_json, ApiError};
 use crate::neev::agents::execution::RunRequest;
 use crate::neev::agents::runs::{self, RunSignal};
 use crate::neev::agents::sessions::{self, AgentSession, AgentTurn, SessionInput, TurnStatus};
-use crate::neev::agents::{intents, types::Provider};
+use crate::neev::agents::{intents, supervisor, types::Provider};
 use crate::neev::content::types::Page;
 use crate::neev::startup::ServerState;
 use crate::neev::types::OrgContext;
@@ -1054,6 +1054,42 @@ struct ConnectStartedDto {
 struct AttemptDto {
     state: String,
     expires_at: i64,
+    /// What the user must do to approve, once the supervisor has told us.
+    /// `null` until then. Carries only display data — never a client secret,
+    /// PKCE verifier or cookie.
+    approval: Option<ApprovalDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalDto {
+    /// `"device"` (Codex: enter `userCode` at `verificationUrl`) or
+    /// `"authorizationCode"` (Claude: approve at `verificationUrl`, then paste
+    /// the resulting code back through the `/code` route).
+    kind: &'static str,
+    verification_url: String,
+    user_code: Option<String>,
+    needs_code: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SubmitCodeInput {
+    code: String,
+}
+
+fn approval_dto(challenge: &crate::neev::agents::control_dto::LoginChallenge) -> ApprovalDto {
+    let user_code = challenge.user_code().map(|code| code.as_str().to_owned());
+    ApprovalDto {
+        kind: if user_code.is_some() {
+            "device"
+        } else {
+            "authorizationCode"
+        },
+        verification_url: challenge.verification_url().to_owned(),
+        needs_code: user_code.is_none(),
+        user_code,
+    }
 }
 
 #[derive(Serialize)]
@@ -1061,6 +1097,32 @@ struct AttemptDto {
 struct ReceiptDto {
     operation_id: String,
     generation: String,
+    /// The connection AFTER the teardown attempt.
+    ///
+    /// A `200` here means the request was accepted, not that the credential is
+    /// already gone: if the supervisor could not be reached the connection is
+    /// still `disconnecting` and the background sweep will retry. Returning the
+    /// real state stops the UI showing "Disconnected" over a connection that is
+    /// still tearing down.
+    connection: ConnectionDto,
+}
+
+/// Re-read one provider's connection so a mutation can report what it actually
+/// achieved rather than what it asked for.
+async fn connection_now(
+    state: &ServerState,
+    actor: &OrgContext,
+    provider: Provider,
+) -> Result<ConnectionDto, ApiError> {
+    let runtime_enabled = state.agents.is_available();
+    let views = intents::list(state, actor)
+        .await
+        .map_err(super::agent_error)?;
+    views
+        .into_iter()
+        .find(|view| view.provider == provider)
+        .map(|view| connection_dto(view, runtime_enabled))
+        .ok_or(ApiError::NotFound)
 }
 
 /// The provider named by a path segment, or `NotFound` — an unknown provider
@@ -1095,12 +1157,29 @@ pub(super) async fn connect(
         .await
         .map_err(super::agent_error)?;
     let dto = match outcome {
-        crate::neev::agents::types::BeginOutcome::Pending(ticket) => ConnectStartedDto {
-            outcome: "pending",
-            attempt_id: Some(ticket.attempt_id),
-            expires_at: Some(ticket.expires_at),
-            connection: None,
-        },
+        crate::neev::agents::types::BeginOutcome::Pending(ticket) => {
+            // Hand the recorded intent to the supervisor, which performs the
+            // actual provider sign-in. If it refuses, the attempt is cancelled
+            // rather than left pending for ten minutes over a login that was
+            // never started.
+            if let Err(error) = supervisor::start_login(&state, &actor, &ticket).await {
+                let _ = intents::cancel(
+                    &state,
+                    &actor,
+                    provider,
+                    &ticket.attempt_id,
+                    &format!("{}-abort", input.request_key),
+                )
+                .await;
+                return Err(super::agent_error(error.into()));
+            }
+            ConnectStartedDto {
+                outcome: "pending",
+                attempt_id: Some(ticket.attempt_id),
+                expires_at: Some(ticket.expires_at),
+                connection: None,
+            }
+        }
         crate::neev::agents::types::BeginOutcome::Settled(view) => ConnectStartedDto {
             outcome: "settled",
             attempt_id: None,
@@ -1127,10 +1206,106 @@ pub(super) async fn connect_attempt(
     let attempt = intents::attempt(&state, &actor, provider, &attempt_id)
         .await
         .map_err(super::agent_error)?;
+    // Only a still-pending attempt is worth asking the supervisor about; a
+    // settled one already has its answer in storage.
+    //
+    // A poll is also where a sign-in FINISHES: `advance_login` commits a
+    // prepared login through `completion::complete` (storing the user's own
+    // credential handle and marking the connection `connected`) and settles a
+    // terminal failure, so the state below is re-read afterwards rather than
+    // reported from before the step.
+    let approval = if attempt.state == "pending" {
+        match supervisor::find_login(
+            &state.agent_logins,
+            &attempt_id,
+            actor.org_id,
+            actor.identity.user_id,
+        ) {
+            Some(session) => match supervisor::advance_login(&state, &actor, &session).await {
+                Ok(supervisor::LoginProgress::Pending) => supervisor::find_login(
+                    &state.agent_logins,
+                    &attempt_id,
+                    actor.org_id,
+                    actor.identity.user_id,
+                )
+                .and_then(|session| session.approval),
+                // Connected or settled: the stored attempt now carries the
+                // answer, and there is nothing left for the user to approve.
+                Ok(_) => None,
+                // The supervisor is briefly unreachable. Serve the cached
+                // instructions rather than erasing ones the user is following.
+                Err(_) => session.approval,
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+    // Re-read: `advance_login` may just have moved this attempt to its final
+    // state, and reporting the pre-step value would be a lie.
+    let attempt = intents::attempt(&state, &actor, provider, &attempt_id)
+        .await
+        .map_err(super::agent_error)?;
     Ok(private_json(AttemptDto {
         state: attempt.state,
         expires_at: attempt.expires_at,
+        approval: approval.as_ref().map(approval_dto),
     }))
+}
+
+/// `POST /api/neev/agent/connections/{provider}/attempts/{attemptId}/code` —
+/// deliver the authorization code a Claude-style login asked the user to paste
+/// back.
+///
+/// The code is forwarded straight to the supervisor, bound to THIS login, and
+/// is never stored or logged here.
+pub(super) async fn submit_attempt_code(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let (provider, attempt_id) = safe_path(path)?;
+    let provider = path_provider(&provider)?;
+    let _permit = catalog::permit(&state)?;
+    let (input, actor) =
+        catalog::organization_mutation::<SubmitCodeInput>(&state, request, SESSION_BODY_LIMIT)
+            .await?;
+    let code = crate::neev::agents::control_dto::AuthorizationCode::new(input.code)
+        .map_err(|_| ApiError::Invalid)?;
+    // The attempt must still be this caller's, and still pending.
+    let attempt = intents::attempt(&state, &actor, provider, &attempt_id)
+        .await
+        .map_err(super::agent_error)?;
+    if attempt.state != "pending" {
+        return Err(ApiError::Conflict);
+    }
+    let session = supervisor::find_login(
+        &state.agent_logins,
+        &attempt_id,
+        actor.org_id,
+        actor.identity.user_id,
+    )
+    .ok_or(ApiError::NotFound)?;
+    // Per-ATTEMPT budget, distinct from the connect quota: a pasted-code field
+    // must not become an unbounded lever on the provider.
+    supervisor::charge_code_attempt(&state.agent_logins, &attempt_id)
+        .map_err(|_| ApiError::Limited)?;
+    let snapshot = supervisor::submit_code(&state, &session, code)
+        .await
+        .map_err(|error| super::agent_error(error.into()))?;
+    let approval = match &snapshot {
+        crate::neev::agents::control_dto::LoginSnapshot::AwaitingUser { challenge, .. } => {
+            Some(approval_dto(challenge))
+        }
+        _ => None,
+    };
+    let mut response = private_json(AttemptDto {
+        state: attempt.state,
+        expires_at: attempt.expires_at,
+        approval,
+    });
+    *response.status_mut() = StatusCode::ACCEPTED;
+    Ok(response)
 }
 
 /// `POST /api/neev/agent/connections/{provider}/cancel` — abandon an in-flight
@@ -1154,10 +1329,20 @@ pub(super) async fn cancel_connect(
     )
     .await
     .map_err(super::agent_error)?;
+    // Cancelling QUEUES a cleanup; without draining it the connection stays
+    // `disconnecting` and a fresh sign-in is refused. Best effort here, and the
+    // periodic sweep retries whatever this misses.
+    supervisor::drain_cleanups(&state, std::slice::from_ref(&receipt.operation_id)).await;
+    forget_login_for(&state, &input.attempt_id);
     Ok(private_json(ReceiptDto {
         operation_id: receipt.operation_id,
         generation: receipt.generation.to_string(),
+        connection: connection_now(&state, &actor, provider).await?,
     }))
+}
+
+fn forget_login_for(state: &ServerState, attempt_id: &str) {
+    supervisor::forget_login(&state.agent_logins, attempt_id);
 }
 
 /// `POST /api/neev/agent/connections/{provider}/disconnect` — sign this user
@@ -1174,9 +1359,13 @@ pub(super) async fn disconnect(
     let receipt = intents::disconnect(&state, &actor, provider, &input.request_key)
         .await
         .map_err(super::agent_error)?;
+    // The credential volume is torn down by the supervisor; draining here is
+    // what actually returns the connection to `disconnected`.
+    supervisor::drain_cleanups(&state, std::slice::from_ref(&receipt.operation_id)).await;
     Ok(private_json(ReceiptDto {
         operation_id: receipt.operation_id,
         generation: receipt.generation.to_string(),
+        connection: connection_now(&state, &actor, provider).await?,
     }))
 }
 
