@@ -21,6 +21,8 @@ pub(crate) enum Bucket {
     InvitationActor(i32),
     InvitationOrganization(i32),
     OrganizationCreation(i32),
+    JoinCodeSourceIp(IpAddr),
+    JoinCodeActor(i32),
 }
 
 pub(crate) async fn reserve(
@@ -156,6 +158,12 @@ impl Descriptor {
             }
             Bucket::OrganizationCreation(id) if *id > 0 => {
                 ("organization_creation_day", id.to_string(), 24 * 60 * 60, 3)
+            }
+            Bucket::JoinCodeSourceIp(ip) => {
+                ("join_code_ip_15m", ip.to_string(), 15 * 60, 30)
+            }
+            Bucket::JoinCodeActor(id) if *id > 0 => {
+                ("join_code_actor_15m", id.to_string(), 15 * 60, 10)
             }
             _ => return Err(AuthError::Invalid),
         };

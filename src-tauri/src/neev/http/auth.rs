@@ -516,7 +516,7 @@ pub(super) async fn email_confirm(
     }
 }
 
-fn source_ip(
+pub(super) fn source_ip(
     headers: &HeaderMap,
     peer: SocketAddr,
     trusted_proxies: &[IpAddr],

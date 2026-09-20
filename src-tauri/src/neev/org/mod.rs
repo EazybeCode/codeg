@@ -1,4 +1,5 @@
 pub(crate) mod invites;
+pub(crate) mod join_code;
 mod service;
 pub(crate) use service::{digest_parts, normalize_request_id};
 
@@ -7,5 +8,7 @@ pub(crate) use service::{
     BrandingLogo, OrganizationDetails,
 };
 
+#[cfg(test)]
+mod join_code_tests;
 #[cfg(test)]
 mod tests;

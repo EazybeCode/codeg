@@ -170,6 +170,20 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             post(org::preview_invitation),
         )
         .route("/api/neev/invitations/accept", post(org::accept_invitation))
+        .route(
+            "/api/neev/organization/join-code",
+            get(org::view_join_code),
+        )
+        .route(
+            "/api/neev/organization/join-code/rotate",
+            post(org::rotate_join_code),
+        )
+        .route(
+            "/api/neev/organization/join-code/enabled",
+            post(org::set_join_code_enabled),
+        )
+        .route("/api/neev/join/preview", post(org::preview_join))
+        .route("/api/neev/join", post(org::accept_join))
         .route("/api/neev/agent/run", post(agent::run))
         .route("/api/neev/agent/cancel", post(agent::cancel))
         .route("/api/neev/logout", post(auth::logout))

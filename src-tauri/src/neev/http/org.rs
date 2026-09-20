@@ -1,8 +1,9 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, Request, StatusCode},
     response::Response,
 };
@@ -10,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::neev::{
     auth::session,
-    org::{self, invites, BrandingLogo, OrganizationDetails},
+    org::{self, invites, join_code, BrandingLogo, OrganizationDetails},
     startup::ServerState,
-    types::{IdentityContext, OrgContext, Role},
+    types::{IdentityContext, OrgContext, OrgId, Role},
 };
 
 use super::{auth, cookies, private_json, ApiError};
@@ -413,6 +414,140 @@ pub(super) async fn accept_invitation(
     let organization_id =
         invites::accept(&state, &identity, &input.token, input.confirmed_org_id).await?;
     Ok(private_json(InvitationAcceptedDto { organization_id }))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinCodeDto {
+    code: Option<String>,
+    disabled: bool,
+    created_at: i64,
+    revision: i64,
+}
+fn join_code_dto(view: join_code::CodeView) -> JoinCodeDto {
+    JoinCodeDto {
+        code: Some(view.code),
+        disabled: view.disabled,
+        created_at: view.created_at,
+        revision: view.revision,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EnabledInput {
+    enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JoinPreviewInput {
+    code: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JoinInput {
+    code: String,
+    confirmed_org_id: OrgId,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinPreviewDto {
+    organization: InvitationOrganizationDto,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JoinedDto {
+    organization_id: OrgId,
+}
+
+pub(super) async fn view_join_code(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = permit(&state)?;
+    let actor = organization_get(&state, &headers).await?;
+    Ok(match join_code::view(&state, &actor).await? {
+        Some(view) => private_json(join_code_dto(view)),
+        None => private_json(JoinCodeDto {
+            code: None,
+            disabled: false,
+            created_at: 0,
+            revision: 0,
+        }),
+    })
+}
+
+pub(super) async fn rotate_join_code(
+    State(state): State<Arc<ServerState>>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = permit(&state)?;
+    let (_input, _, token) = identity_mutation::<EmptyInput>(&state, request, 1024).await?;
+    let actor = session::organization(&state.database, &token, state.clock.now_unix()).await?;
+    let view = join_code::rotate(&state, &actor).await?;
+    Ok(private_json(join_code_dto(view)))
+}
+
+pub(super) async fn set_join_code_enabled(
+    State(state): State<Arc<ServerState>>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = permit(&state)?;
+    let (input, _, token) = identity_mutation::<EnabledInput>(&state, request, 1024).await?;
+    let actor = session::organization(&state.database, &token, state.clock.now_unix()).await?;
+    join_code::set_enabled(&state, &actor, input.enabled).await?;
+    Ok(no_content())
+}
+
+pub(super) async fn preview_join(
+    State(state): State<Arc<ServerState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = permit(&state)?;
+    let (identity, source, input) =
+        join_identity::<JoinPreviewInput>(&state, peer, request).await?;
+    let preview = join_code::preview(&state, &identity, &input.code, source).await?;
+    Ok(private_json(JoinPreviewDto {
+        organization: InvitationOrganizationDto {
+            id: preview.org_id,
+            name: preview.organization_name,
+        },
+    }))
+}
+
+pub(super) async fn accept_join(
+    State(state): State<Arc<ServerState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = permit(&state)?;
+    let (identity, source, input) = join_identity::<JoinInput>(&state, peer, request).await?;
+    let organization_id =
+        join_code::join(&state, &identity, &input.code, input.confirmed_org_id, source).await?;
+    Ok(private_json(JoinedDto { organization_id }))
+}
+
+/// Parse a CSRF-guarded identity mutation that also needs the source IP (join
+/// preview/accept are rate-limited per IP + per user).
+async fn join_identity<T: for<'de> Deserialize<'de>>(
+    state: &ServerState,
+    peer: SocketAddr,
+    request: Request<Body>,
+) -> Result<(IdentityContext, std::net::IpAddr, T), ApiError> {
+    let (headers, input) =
+        auth::json_request_limited::<T>(request, &state.config.origin_header, 1024).await?;
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let token = cookies::required(&headers, names.session)?;
+    let cookie_csrf = cookies::required(&headers, names.csrf)?;
+    if cookie_csrf != cookies::csrf_header(&headers)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let now = state.clock.now_unix();
+    let identity = session::identity(&state.database, token, now).await?;
+    session::validate_csrf(&state.database, &identity, cookie_csrf, now).await?;
+    let source = auth::source_ip(&headers, peer, &state.config.trusted_proxy_ips)?;
+    Ok((identity, source, input))
 }
 
 async fn identity_get(
