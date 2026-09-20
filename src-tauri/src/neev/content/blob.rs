@@ -4,6 +4,9 @@ use std::path::Path;
 use super::types::ContentError;
 
 const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+/// Uploaded images are larger than text documents but still bounded well below a
+/// photo-library scale; the editor embeds diagrams/screenshots, not galleries.
+pub(crate) const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BlobInfo {
@@ -33,7 +36,7 @@ mod unix {
 
     use sha2::{Digest, Sha256};
 
-    use super::{BlobInfo, ContentError, MAX_DOCUMENT_BYTES};
+    use super::{BlobInfo, ContentError, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES};
 
     #[cfg(test)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +196,73 @@ mod unix {
             if bytes.len() as i64 != expected_size
                 || format!("{:x}", Sha256::digest(&bytes)) != expected_sha256
             {
+                return Err(ContentError::Storage);
+            }
+            Ok(bytes)
+        }
+
+        /// Store an uploaded image blob under `{key}.img` (distinct namespace from
+        /// document `.md` blobs), mode 0600, in the tenant's 0700 directory. Same
+        /// atomic temp→fsync→publish→dir-sync sequence as `put`; no create-replace
+        /// so a fresh key never clobbers an existing blob.
+        pub(crate) async fn put_image(
+            &self,
+            org_id: i32,
+            key: &str,
+            bytes: &[u8],
+        ) -> Result<BlobInfo, ContentError> {
+            validate_location(org_id, key)?;
+            if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+                return Err(ContentError::Invalid);
+            }
+            let directory = self.open_org_directory(org_id, true)?;
+            let temporary_name = c_string(&format!("{key}.img.tmp"))?;
+            let final_name = c_string(&format!("{key}.img"))?;
+            let mut temporary = create_file_at(directory.as_raw_fd(), &temporary_name)?;
+            let mut cleanup = TemporaryEntry::new(directory.as_raw_fd(), temporary_name);
+            temporary
+                .write_all(bytes)
+                .map_err(|_| ContentError::Storage)?;
+            temporary.sync_all().map_err(|_| ContentError::Storage)?;
+            verify_file(&temporary, bytes.len() as i64)?;
+            publish_without_replace(
+                directory.as_raw_fd(),
+                cleanup.name(),
+                directory.as_raw_fd(),
+                &final_name,
+            )?;
+            cleanup.remove()?;
+            directory.sync_all().map_err(|_| ContentError::Storage)?;
+            Ok(BlobInfo {
+                key: key.to_owned(),
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                byte_length: bytes.len() as i64,
+            })
+        }
+
+        /// Read a stored image blob for the tenant. Ownership is the 0700 org
+        /// directory; a missing blob is `NotFound`. Bounded by `MAX_IMAGE_BYTES`.
+        pub(crate) async fn read_image(
+            &self,
+            org_id: i32,
+            key: &str,
+        ) -> Result<Vec<u8>, ContentError> {
+            validate_location(org_id, key)?;
+            let directory = self.open_org_directory(org_id, false)?;
+            let final_name = c_string(&format!("{key}.img"))?;
+            let mut file = open_file_at(directory.as_raw_fd(), &final_name).map_err(|error| {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                    ContentError::NotFound
+                } else {
+                    error
+                }
+            })?;
+            let mut bytes = Vec::new();
+            (&mut file)
+                .take(MAX_IMAGE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ContentError::Storage)?;
+            if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
                 return Err(ContentError::Storage);
             }
             Ok(bytes)
@@ -442,6 +512,23 @@ impl BlobStore {
         _key: &str,
         _expected_size: i64,
         _expected_sha256: &str,
+    ) -> Result<Vec<u8>, ContentError> {
+        Err(ContentError::Storage)
+    }
+
+    pub(crate) async fn put_image(
+        &self,
+        _org_id: i32,
+        _key: &str,
+        _bytes: &[u8],
+    ) -> Result<BlobInfo, ContentError> {
+        Err(ContentError::Storage)
+    }
+
+    pub(crate) async fn read_image(
+        &self,
+        _org_id: i32,
+        _key: &str,
     ) -> Result<Vec<u8>, ContentError> {
         Err(ContentError::Storage)
     }

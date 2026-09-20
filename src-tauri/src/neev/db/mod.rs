@@ -13,6 +13,7 @@ mod document_format_migration;
 mod document_format_tests;
 pub(crate) mod entities;
 mod gateway_migration;
+mod image_blob_migration;
 #[cfg(test)]
 mod gateway_migration_tests;
 mod migration;
@@ -157,6 +158,15 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                     .map(|name| (*name).to_owned()),
             )
             .collect();
+        let v10_expected: std::collections::BTreeSet<String> = v9_expected
+            .iter()
+            .cloned()
+            .chain(
+                image_blob_migration::TABLE_NAMES
+                    .iter()
+                    .map(|name| (*name).to_owned()),
+            )
+            .collect();
 
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
@@ -177,10 +187,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             agent_status_migration::upgrade(&tx).await?;
             gateway_migration::upgrade(&tx).await?;
             org_code_migration::upgrade(&tx).await?;
+            image_blob_migration::upgrade(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![org_code_migration::SCHEMA_VERSION.into()],
+                vec![image_blob_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -192,6 +203,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             && names != v7_expected
             && names != v8_expected
             && names != v9_expected
+            && names != v10_expected
         {
             return Err(AuthError::Unavailable);
         }
@@ -260,6 +272,13 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 agent_status_migration::validate(&tx).await?;
                 gateway_migration::validate(&tx).await?;
                 org_code_migration::validate(&tx).await?;
+            }
+            image_blob_migration::SCHEMA_VERSION if names == v10_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
@@ -267,14 +286,20 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         // Older inventories (v2..v7) still need the additive gateway8 tables; a v8
         // inventory already has them. Every path then applies the additive org9
         // storage and publishes marker9 exactly once.
-        if names != v8_expected {
+        // Older inventories still need the additive tables they predate; an
+        // inventory that already contains a given table skips its upgrade. Every
+        // path then publishes marker10 exactly once.
+        if names != v8_expected && names != v9_expected && names != v10_expected {
             gateway_migration::upgrade(&tx).await?;
         }
-        org_code_migration::upgrade(&tx).await?;
+        if names != v9_expected && names != v10_expected {
+            org_code_migration::upgrade(&tx).await?;
+        }
+        image_blob_migration::upgrade(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![org_code_migration::SCHEMA_VERSION.into()],
+            vec![image_blob_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -365,6 +390,15 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
                 .map(|name| (*name).to_owned()),
         )
         .collect();
+    let image_expected: std::collections::BTreeSet<String> = org_code_expected
+        .iter()
+        .cloned()
+        .chain(
+            image_blob_migration::TABLE_NAMES
+                .iter()
+                .map(|name| (*name).to_owned()),
+        )
+        .collect();
     let markers = db
         .query_all(statement(
             db,
@@ -393,22 +427,26 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         agent_status_migration::SCHEMA_VERSION => names == status_expected,
         gateway_migration::SCHEMA_VERSION => names == gateway_expected,
         org_code_migration::SCHEMA_VERSION => names == org_code_expected,
+        image_blob_migration::SCHEMA_VERSION => names == image_expected,
         _ => false,
     };
     if !valid {
         return Err(AuthError::Unavailable);
     }
-    if matches!(version, 6 | 7 | 8 | 9) {
+    if matches!(version, 6 | 7 | 8 | 9 | 10) {
         document_format_migration::validate(db).await?;
     }
-    if matches!(version, 7 | 8 | 9) {
+    if matches!(version, 7 | 8 | 9 | 10) {
         agent_status_migration::validate(db).await?;
     }
-    if matches!(version, 8 | 9) {
+    if matches!(version, 8 | 9 | 10) {
         gateway_migration::validate(db).await?;
     }
-    if version == org_code_migration::SCHEMA_VERSION {
+    if matches!(version, 9 | 10) {
         org_code_migration::validate(db).await?;
+    }
+    if version == image_blob_migration::SCHEMA_VERSION {
+        image_blob_migration::validate(db).await?;
     }
     Ok(version)
 }

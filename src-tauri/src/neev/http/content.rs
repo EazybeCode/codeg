@@ -12,8 +12,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::neev::{
+    auth::session,
     content::{
-        documents, messages, resources, rich,
+        documents, image, messages, resources, rich,
         types::{
             ContentError, DocumentFormat, Message, Page, Resource, ResourceInput, ResourceKind,
             ResourcePatch, Revision, RichSaveInput, SaveInput, Visibility,
@@ -22,11 +23,13 @@ use crate::neev::{
     startup::ServerState,
 };
 
-use super::{catalog, private_json, ApiError};
+use super::{catalog, cookies, private_json, ApiError};
 
 const SMALL_BODY_LIMIT: usize = 4096;
 const MESSAGE_BODY_LIMIT: usize = 6 * 32768 + 4096;
 const DOCUMENT_BODY_LIMIT: usize = 6 * 1048576 + 4096;
+// Matches content::blob::MAX_IMAGE_BYTES; a larger body is rejected before storage.
+const IMAGE_BODY_LIMIT: usize = 5 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -518,6 +521,77 @@ pub(super) async fn restore_revision(
     .await?;
     let mut response = private_json(revision_dto(revision)?);
     *response.status_mut() = StatusCode::CREATED;
+    Ok(response)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageUploadedDto {
+    key: String,
+    url: String,
+    content_type: &'static str,
+}
+
+/// Upload an image bound to a document. Raw image bytes in the body (the declared
+/// Content-Type is ignored; the server sniffs the bytes). CSRF + origin guarded.
+pub(super) async fn upload_document_image(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (parts, body) = request.into_parts();
+    if !cookies::exact_origin(&parts.headers, &state.config.origin_header) {
+        return Err(ApiError::Forbidden);
+    }
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let token = cookies::required(&parts.headers, names.session)?;
+    let cookie_csrf = cookies::required(&parts.headers, names.csrf)?;
+    if cookie_csrf != cookies::csrf_header(&parts.headers)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let now = state.clock.now_unix();
+    let actor = session::organization(&state.database, token, now).await?;
+    session::validate_csrf(&state.database, &actor.identity, cookie_csrf, now).await?;
+    let bytes = axum::body::to_bytes(body, IMAGE_BODY_LIMIT)
+        .await
+        .map_err(|_| ApiError::Invalid)?;
+    let stored = image::store(&state, &actor, &id, bytes.as_ref()).await?;
+    let mut response = private_json(ImageUploadedDto {
+        url: format!("/api/neev/images/{}", stored.key),
+        key: stored.key,
+        content_type: stored.content_type,
+    });
+    *response.status_mut() = StatusCode::CREATED;
+    Ok(response)
+}
+
+/// Serve an image, enforcing the bound document's CURRENT read ACL. Not cached
+/// across the client so a revoked reader stops seeing it immediately.
+pub(super) async fn serve_image(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let key = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let (bytes, content_type) = image::load(&state, &actor, &key).await?;
+    let mut response = Body::from(bytes).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline"),
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    super::add_private_headers(&mut response);
     Ok(response)
 }
 

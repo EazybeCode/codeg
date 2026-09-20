@@ -142,6 +142,11 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             "/api/neev/documents/{id}/restore",
             post(content::restore_revision),
         )
+        .route(
+            "/api/neev/documents/{id}/images",
+            post(content::upload_document_image),
+        )
+        .route("/api/neev/images/{key}", get(content::serve_image))
         .route("/api/neev/organizations", get(org::list).post(org::create))
         .route("/api/neev/organizations/select", post(org::select))
         .route(
