@@ -391,7 +391,9 @@ export function loadFolderSortModes(): Record<number, FolderSortMode> {
   }
 }
 
-export function saveFolderSortModes(state: Record<number, FolderSortMode>): void {
+export function saveFolderSortModes(
+  state: Record<number, FolderSortMode>
+): void {
   if (typeof window === "undefined") return
   try {
     localStorage.setItem(FOLDER_SORT_MODES_KEY, JSON.stringify(state))
