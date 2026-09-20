@@ -91,7 +91,10 @@
     "newDocumentTitle": "无标题文档",
     "newChatTitle": "无标题对话",
     "newDocumentBodyHint": "为文档命名，然后创建即可使用标题、列表、表格等开始写作。",
-    "newChatBodyHint": "为该对话命名，然后创建即可开始团队讨论串。"
+    "newChatBodyHint": "为该对话命名，然后创建即可开始团队讨论串。",
+    "liveUpdates": "实时更新",
+    "reconnectingUpdates": "正在重新连接…",
+    "polledUpdates": "每几秒更新一次"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

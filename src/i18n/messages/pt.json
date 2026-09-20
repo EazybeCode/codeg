@@ -91,7 +91,10 @@
     "newDocumentTitle": "Documento sem título",
     "newChatTitle": "Conversa sem título",
     "newDocumentBodyHint": "Dê um nome ao documento e crie-o para começar a escrever com títulos, listas, tabelas e mais.",
-    "newChatBodyHint": "Dê um nome a esta conversa e crie-a para iniciar a thread da equipe."
+    "newChatBodyHint": "Dê um nome a esta conversa e crie-a para iniciar a thread da equipe.",
+    "liveUpdates": "Atualizações ao vivo",
+    "reconnectingUpdates": "Reconectando…",
+    "polledUpdates": "Atualiza a cada poucos segundos"
   },
   "Native": {
     "callbackConflict": "Este método de acesso entra em conflito com uma conta existente. Use seu método de acesso original e abra Configurações para vincular outro método. As contas nunca são mescladas automaticamente.",

@@ -91,7 +91,10 @@
     "newDocumentTitle": "제목 없는 문서",
     "newChatTitle": "제목 없는 대화",
     "newDocumentBodyHint": "문서 이름을 지정하고 만들면 제목, 목록, 표 등으로 작성을 시작할 수 있습니다.",
-    "newChatBodyHint": "이 대화의 이름을 지정하고 만들면 팀 스레드를 시작할 수 있습니다."
+    "newChatBodyHint": "이 대화의 이름을 지정하고 만들면 팀 스레드를 시작할 수 있습니다.",
+    "liveUpdates": "실시간 업데이트",
+    "reconnectingUpdates": "다시 연결하는 중…",
+    "polledUpdates": "몇 초마다 업데이트"
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

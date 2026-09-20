@@ -657,7 +657,7 @@ fn revision_dto(revision: Revision) -> Result<RevisionDto, ApiError> {
     })
 }
 
-fn canonical_uuid(value: &str) -> Result<(), ApiError> {
+pub(super) fn canonical_uuid(value: &str) -> Result<(), ApiError> {
     if uuid::Uuid::parse_str(value).is_ok_and(|parsed| parsed.to_string() == value) {
         Ok(())
     } else {
@@ -694,7 +694,7 @@ fn document_read_error(error: ContentError) -> ApiError {
     }
 }
 
-fn safe_path<T>(value: Result<Path<T>, PathRejection>) -> Result<T, ApiError> {
+pub(super) fn safe_path<T>(value: Result<Path<T>, PathRejection>) -> Result<T, ApiError> {
     value
         .map(|Path(value)| value)
         .map_err(|_| ApiError::Invalid)

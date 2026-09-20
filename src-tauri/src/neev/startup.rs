@@ -7,7 +7,7 @@ use super::{
     auth::{magic, oauth},
     clock::{Clock, SystemClock},
     config::Config,
-    content::{types::ContentError, BlobStore},
+    content::{realtime::MessageHub, types::ContentError, BlobStore},
     db, http,
     mail::{self, resend::Resend},
 };
@@ -27,6 +27,9 @@ pub(crate) struct ServerState {
     pub(crate) agents: Arc<super::agents::execution::AgentRuntime>,
     /// Cancel handles for in-flight runs, so a separate request can cancel/restart.
     pub(crate) agent_jobs: super::agents::execution::JobRegistry,
+    /// Content-free fan-out for team-message push delivery. In-memory only: a
+    /// subscriber never holds a database connection.
+    pub(crate) realtime: Arc<MessageHub>,
 }
 
 impl ServerState {
@@ -66,6 +69,7 @@ impl ServerState {
             auth_limit: Arc::new(Semaphore::new(32)),
             agents: super::agents::execution::disabled_runtime(),
             agent_jobs: super::agents::execution::new_job_registry(),
+            realtime: Arc::new(MessageHub::default()),
             oauth,
             magic,
             mail,
@@ -88,6 +92,7 @@ impl ServerState {
             auth_limit: Arc::new(Semaphore::new(32)),
             agents: super::agents::execution::disabled_runtime(),
             agent_jobs: super::agents::execution::new_job_registry(),
+            realtime: Arc::new(MessageHub::default()),
             oauth,
             magic: None,
             mail: None,
@@ -111,6 +116,7 @@ impl ServerState {
             auth_limit: Arc::new(Semaphore::new(32)),
             agents: super::agents::execution::disabled_runtime(),
             agent_jobs: super::agents::execution::new_job_registry(),
+            realtime: Arc::new(MessageHub::default()),
             oauth,
             magic: Some(magic),
             mail: None,
@@ -134,10 +140,16 @@ impl ServerState {
             auth_limit: Arc::new(Semaphore::new(32)),
             agents: super::agents::execution::disabled_runtime(),
             agent_jobs: super::agents::execution::new_job_registry(),
+            realtime: Arc::new(MessageHub::default()),
             oauth,
             magic: None,
             mail: Some(mail),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_realtime_policy(&mut self, policy: super::content::realtime::StreamPolicy) {
+        self.realtime = Arc::new(MessageHub::new(policy));
     }
 
     #[cfg(any(test, feature = "dev-agent"))]

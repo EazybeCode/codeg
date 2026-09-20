@@ -23,6 +23,8 @@ export interface NativeCapabilities {
   version: 1
   identityMode: "native"
   runtimeEnabled: boolean
+  /** Server pushes team messages (SSE). False means the client must poll. */
+  realtime: boolean
   providers: Record<NativeProvider, boolean>
   catalog: {
     nodeKinds: readonly ["project", "folder"]
@@ -207,6 +209,9 @@ export function parseCapabilities(value: unknown): ServerCapabilities {
       mode: "native",
       identityMode: "native",
       runtimeEnabled: o.runtimeEnabled as boolean,
+      // Absent or non-true reads as "no push": an older or rolled-back server
+      // must make the client poll, never assume delivery it will not get.
+      realtime: o.realtime === true,
       providers: {
         google: p.google as boolean,
         email: p.email as boolean,

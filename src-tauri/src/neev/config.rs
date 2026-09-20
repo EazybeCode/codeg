@@ -61,13 +61,17 @@ pub(crate) struct Config {
     /// startup binds the sandboxed provider runtime; the config layer accepts
     /// only "true"/"false"/absent so agents can never be enabled by a typo.
     pub(crate) runtime_enabled: bool,
+    /// Team-message push delivery (default ON). `NEEV_REALTIME_DISABLED=true` is
+    /// the phase-2 rollback switch: the stream route is not mounted and the
+    /// capability reports false, so clients fall back to polling. No data change.
+    pub(crate) realtime_enabled: bool,
     #[cfg(test)]
     pub(crate) _document_root_guard: Option<tempfile::TempDir>,
 }
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 16] = [
+        const KEYS: [&str; 17] = [
             "NEEV_APP_ORIGIN",
             "NEEV_DATABASE_URL",
             "NEEV_ENC_KEY",
@@ -84,6 +88,7 @@ impl Config {
             "NEEV_MAIL_FROM",
             "NEEV_RUNTIME_ENABLED",
             "NEEV_GATEWAY_EVENTS_ENABLED",
+            "NEEV_REALTIME_DISABLED",
         ];
         let mut values = HashMap::new();
         for key in KEYS {
@@ -181,6 +186,10 @@ impl Config {
         };
         let gateway_events = optional_bool(values.get("NEEV_GATEWAY_EVENTS_ENABLED"))
             .map_err(|_| ConfigError::Provider)?;
+        // Push delivery is on unless explicitly disabled; a typo is rejected
+        // rather than silently leaving the rollback switch half-applied.
+        let realtime_enabled = !optional_bool(values.get("NEEV_REALTIME_DISABLED"))
+            .map_err(|_| ConfigError::Provider)?;
         Ok(Self {
             origin,
             origin_header,
@@ -196,6 +205,7 @@ impl Config {
             providers,
             gateway_events,
             runtime_enabled,
+            realtime_enabled,
             #[cfg(test)]
             _document_root_guard: None,
         })
@@ -648,6 +658,23 @@ mod tests {
         assert!(Config::from_values(&enabled).unwrap().gateway_events);
         let mut invalid = values();
         invalid.insert("NEEV_GATEWAY_EVENTS_ENABLED".into(), "maybe".into());
+        assert_eq!(
+            Config::from_values(&invalid).err(),
+            Some(ConfigError::Provider)
+        );
+    }
+
+    #[test]
+    fn realtime_defaults_on_and_only_an_explicit_disable_rolls_it_back() {
+        assert!(Config::from_values(&values()).unwrap().realtime_enabled);
+        let mut kept = values();
+        kept.insert("NEEV_REALTIME_DISABLED".into(), "false".into());
+        assert!(Config::from_values(&kept).unwrap().realtime_enabled);
+        let mut disabled = values();
+        disabled.insert("NEEV_REALTIME_DISABLED".into(), "true".into());
+        assert!(!Config::from_values(&disabled).unwrap().realtime_enabled);
+        let mut invalid = values();
+        invalid.insert("NEEV_REALTIME_DISABLED".into(), "yes".into());
         assert_eq!(
             Config::from_values(&invalid).err(),
             Some(ConfigError::Provider)

@@ -281,6 +281,7 @@ async fn capabilities_are_native_disabled_and_old_routes_do_not_exist() {
         "version": 1,
         "identityMode": "native",
         "runtimeEnabled": false,
+        "realtime": true,
         "providers": {"google":false,"email":false,"github":false},
         "catalog": {
             "nodeKinds":["project","folder"],

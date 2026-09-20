@@ -714,8 +714,19 @@ export async function runNativeAgent(
   if (response.status === 503) throw new NativeClientError("unavailable")
   if (response.status === 401) throw new NativeClientError("unauthorized")
   if (response.status === 403) throw new NativeClientError("forbidden")
-  if (!response.ok || !response.body)
-    throw new NativeClientError("invalid_response")
+  await readEventStream(response, (data) => {
+    const event = parseAgentEvent(data)
+    if (event) onEvent(event)
+  })
+}
+
+// Reads an SSE body frame by frame, handing each `data:` payload to `onData`.
+// Shared by the agent run stream and the team-message stream.
+async function readEventStream(
+  response: Response,
+  onData: (data: string) => void
+): Promise<void> {
+  if (!response.body) throw new NativeClientError("invalid_response")
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ""
@@ -726,16 +737,85 @@ export async function runNativeAgent(
     while (boundary >= 0) {
       const frame = buffer.slice(0, boundary)
       buffer = buffer.slice(boundary + 2)
-      for (const line of frame.split("\n")) {
-        if (line.startsWith("data:")) {
-          const event = parseAgentEvent(line.slice(5).trim())
-          if (event) onEvent(event)
-        }
-      }
+      for (const line of frame.split("\n"))
+        if (line.startsWith("data:")) onData(line.slice(5).trim())
       boundary = buffer.indexOf("\n\n")
     }
     if (done) break
   }
+}
+
+// A team-message push notice. Deliberately content-free: the server sends a
+// cursor, the client re-reads the conversation through the authorized list
+// endpoint. Never trust a body that arrives on this channel — there isn't one.
+export type NativeMessageStreamEvent =
+  | { type: "sync"; sequence: string }
+  | { type: "message"; sequence: string }
+  | { type: "resync" }
+  | { type: "revoked" }
+
+export function parseMessageStreamEvent(
+  json: string
+): NativeMessageStreamEvent | null {
+  let value: unknown
+  try {
+    value = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const object = value as Record<string, unknown>
+  try {
+    switch (object.type) {
+      case "sync":
+        // An empty conversation legitimately reports sequence "0".
+        return { type: "sync", sequence: integerString(object.sequence, true) }
+      case "message":
+        return {
+          type: "message",
+          sequence: integerString(object.sequence, false),
+        }
+      case "resync":
+        return { type: "resync" }
+      case "revoked":
+        return { type: "revoked" }
+      default:
+        return null
+    }
+  } catch {
+    return null
+  }
+}
+
+// Opens the team-message push stream for a chat. Resolves when the server ends
+// the stream (its bounded lifetime, or access revoked); rejects when push is
+// unavailable, so the caller can fall back to polling with an honest status.
+export async function openNativeMessageStream(
+  chatId: string,
+  onEvent: (event: NativeMessageStreamEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  assertUuid(chatId)
+  const response = await fetch(`/api/neev/chats/${chatId}/stream`, {
+    credentials: "same-origin",
+    cache: "no-store",
+    referrerPolicy: "no-referrer",
+    redirect: "error",
+    headers: { Accept: "text/event-stream" },
+    signal,
+  })
+  if (response.status === 401) throw new NativeClientError("unauthorized")
+  if (response.status === 403) throw new NativeClientError("forbidden")
+  if (response.status === 404) throw new NativeContentNotFoundError()
+  if (!response.ok) throw new NativeClientError("unavailable", response.status)
+  // A rolled-back deployment can serve the SPA shell from the fallback route;
+  // treat anything that is not an event stream as "push unavailable".
+  if (!response.headers.get("Content-Type")?.includes("text/event-stream"))
+    throw new NativeClientError("unavailable", response.status)
+  await readEventStream(response, (data) => {
+    const event = parseMessageStreamEvent(data)
+    if (event) onEvent(event)
+  })
 }
 
 export async function cancelNativeAgent(

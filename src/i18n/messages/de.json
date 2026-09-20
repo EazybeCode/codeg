@@ -91,7 +91,10 @@
     "newDocumentTitle": "Unbenanntes Dokument",
     "newChatTitle": "Unbenannte Unterhaltung",
     "newDocumentBodyHint": "Benenne dein Dokument und erstelle es, um mit Überschriften, Listen, Tabellen und mehr zu schreiben.",
-    "newChatBodyHint": "Benenne diese Unterhaltung und erstelle sie, um den Team-Thread zu starten."
+    "newChatBodyHint": "Benenne diese Unterhaltung und erstelle sie, um den Team-Thread zu starten.",
+    "liveUpdates": "Live-Updates",
+    "reconnectingUpdates": "Verbindung wird wiederhergestellt…",
+    "polledUpdates": "Aktualisierung alle paar Sekunden"
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

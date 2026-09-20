@@ -95,6 +95,10 @@ pub(crate) async fn append(
     let result = load(&tx, actor.org_id, chat_id, &id).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
+    // Only after the row is durable: a rolled-back append must never wake a
+    // reader. The notice carries the sequence alone — subscribers re-read the
+    // conversation through `list`, which re-runs this same ACL.
+    state.realtime.publish(actor.org_id, chat_id, sequence);
     Ok(result)
 }
 

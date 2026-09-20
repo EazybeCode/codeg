@@ -11,6 +11,7 @@ pub(crate) mod documents;
 #[cfg(test)]
 mod message_tests;
 pub(crate) mod messages;
+pub(crate) mod realtime;
 #[cfg(test)]
 mod resource_tests;
 pub(crate) mod resources;
