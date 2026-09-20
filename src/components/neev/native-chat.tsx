@@ -1,6 +1,13 @@
 "use client"
 
-import { ArrowLeft, ArrowUp, PanelRight, Sparkles, X } from "lucide-react"
+import {
+  ArrowLeft,
+  ArrowUp,
+  MoreHorizontal,
+  PanelRight,
+  Sparkles,
+  X,
+} from "lucide-react"
 import { NativeMarkdown } from "./native-markdown"
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
@@ -8,7 +15,13 @@ import Link from "next/link"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { NativeClientError } from "@/lib/neev-client"
+import type { ResourceActions } from "./native-document"
 import {
   appendNativeMessage,
   listNativeMessages,
@@ -22,7 +35,10 @@ import {
 } from "@/lib/neev-content-client"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNativeAuth } from "./native-auth-provider"
-import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
+import {
+  NativeDialogContent as DialogContent,
+  NativeDropdownMenuContent as DropdownMenuContent,
+} from "./native-suspended-surface"
 import { NativeError } from "./native-boundary"
 import {
   getRightPanelOpen,
@@ -35,6 +51,7 @@ type Props = {
   onChanged: (resource: NativeResource) => void
   onDirtyChange?: (dirty: boolean) => void
   onRequestSettings?: () => void
+  actions?: ResourceActions
 }
 export function NativeChat(props: Props) {
   const auth = useNativeAuth()
@@ -51,6 +68,7 @@ function Chat({
   onChanged,
   onDirtyChange,
   onRequestSettings,
+  actions,
 }: Props) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
@@ -302,13 +320,71 @@ function Chat({
             {latest.archived ? ` · ${t("archived")}` : ""}
           </p>
         </div>
+        {actions?.isCreator && actions.shareable && (
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={actions.disabled}
+              aria-describedby={
+                actions.visibility === "organization"
+                  ? "neev-make-private-warning"
+                  : undefined
+              }
+              onClick={
+                actions.visibility === "private"
+                  ? actions.onShare
+                  : actions.onMakePrivate
+              }
+            >
+              {t(actions.visibility === "private" ? "share" : "makePrivate")}
+            </Button>
+            {actions.visibility === "organization" && (
+              <p id="neev-make-private-warning" className="sr-only">
+                {t("makePrivateWarning")}
+              </p>
+            )}
+          </>
+        )}
+        {actions?.isCreator && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={t("resourceActions")}
+              >
+                <MoreHorizontal aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                disabled={actions.disabled}
+                onSelect={actions.onRename}
+              >
+                {t("rename")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={actions.disabled}
+                onSelect={actions.onArchiveToggle}
+              >
+                {t(actions.archived ? "reopen" : "archive")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={actions.disabled}
+                onSelect={actions.onMove}
+              >
+                {t("move")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         <Button
           variant="ghost"
           size="icon"
           aria-label={t("agentPanel")}
           title={t("agentPanel")}
           aria-pressed={agentPanel}
-          className="ms-auto"
           onClick={toggleAgentPanel}
         >
           <PanelRight aria-hidden />

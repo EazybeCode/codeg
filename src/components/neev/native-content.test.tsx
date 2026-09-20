@@ -59,6 +59,33 @@ function mount() {
     </NativeTestRoot>
   )
 }
+// Open the compact "Content actions" header menu via keyboard so it works for both
+// userEvent and the fireEvent-based visibility harness (Radix opens on pointer/keys,
+// not a bare fireEvent.click).
+async function openContentMenu() {
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole("button", { name: "Content actions" }), {
+      key: "Enter",
+    })
+  })
+  return screen.findByRole("menu")
+}
+// Rename/Archive/Reopen/Move live in that menu; Share/Make private stay visible
+// header buttons.
+async function triggerAction(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string
+) {
+  if (name === "Make private" || name === "Share with organization") {
+    await user.click(screen.getByRole("button", { name }))
+    return
+  }
+  await openContentMenu()
+  const item = await screen.findByRole("menuitem", { name })
+  await act(async () => {
+    fireEvent.click(item)
+  })
+}
 it("opens a chat as a page and restores the folder listing on Back", async () => {
   mockNativeSession(undefined, {
     "GET /api/neev/nodes/4/chats": () =>
@@ -214,7 +241,7 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
         "Making this private blocks future access, but copies that people already downloaded cannot be recalled."
       )
     }
-    await visibilityActions.click(screen.getByRole("button", { name: action }))
+    await triggerAction(visibilityActions, action)
     const dialog = screen.getByRole("dialog")
     revalidating = true
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
@@ -246,13 +273,18 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
       screen.getByRole("button", { name: "Share with organization" })
     ).toBeVisible()
     if (action === "Archive") {
-      expect(screen.getByRole("button", { name: "Reopen" })).toBeVisible()
       expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
     } else {
-      expect(screen.getByRole("button", { name: "Archive" })).toBeVisible()
       expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled()
     }
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("")
+    // The opposite action is now offered in the Content actions menu.
+    await openContentMenu()
+    expect(
+      await screen.findByRole("menuitem", {
+        name: action === "Archive" ? "Reopen" : "Archive",
+      })
+    ).toBeVisible()
     expect(mock.unknown).toEqual([])
   }
 )
@@ -876,14 +908,18 @@ it("immediately applies creator archive/reopen actions and moves with the curren
   mount()
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
   await screen.findByRole("textbox", { name: "Message" })
-  await user.click(screen.getByRole("button", { name: "Archive" }))
-  expect(await screen.findByRole("button", { name: "Reopen" })).toBeEnabled()
-  expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
-  await user.click(screen.getByRole("button", { name: "Reopen" }))
+  await triggerAction(user, "Archive")
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+  )
+  await user.click(screen.getByRole("button", { name: "Content actions" }))
+  const reopen = await screen.findByRole("menuitem", { name: "Reopen" })
+  expect(reopen).toBeEnabled()
+  await user.click(reopen)
   await waitFor(() =>
     expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled()
   )
-  await user.click(screen.getByRole("button", { name: "Move" }))
+  await triggerAction(user, "Move")
   await screen.findByRole("option", { name: "Destination · #5" })
   await user.selectOptions(
     screen.getByRole("combobox", { name: "Destination folder" }),
@@ -1105,7 +1141,7 @@ it("ignores a delayed PATCH for A after navigating to B and writing a draft", as
   mount()
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
   await screen.findByRole("textbox", { name: "Message" })
-  await user.click(screen.getByRole("button", { name: "Archive" }))
+  await triggerAction(user, "Archive")
   await user.click(screen.getByRole("button", { name: "Back to folder" }))
   await user.click(await screen.findByRole("button", { name: /Chat B/ }))
   await user.type(
@@ -1157,12 +1193,12 @@ it("rejects delayed move destinations from a previously selected resource", asyn
   const user = userEvent.setup()
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
   await screen.findByRole("textbox", { name: "Message" })
-  await user.click(screen.getByRole("button", { name: "Move" }))
+  await triggerAction(user, "Move")
   await user.click(screen.getByRole("button", { name: "Cancel" }))
   await user.click(screen.getByRole("button", { name: "Back to folder" }))
   await user.click(await screen.findByRole("button", { name: /Other chat/ }))
   await screen.findByRole("textbox", { name: "Message" })
-  await user.click(screen.getByRole("button", { name: "Move" }))
+  await triggerAction(user, "Move")
   await screen.findByRole("option", { name: "Current destination · #6" })
   await act(async () =>
     release(

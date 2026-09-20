@@ -621,18 +621,30 @@ function Document({
           </Button>
         )}
         {actions?.isCreator && actions.shareable && (
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={actions.disabled}
-            onClick={
-              actions.visibility === "private"
-                ? actions.onShare
-                : actions.onMakePrivate
-            }
-          >
-            {t(actions.visibility === "private" ? "share" : "makePrivate")}
-          </Button>
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={actions.disabled}
+              aria-describedby={
+                actions.visibility === "organization"
+                  ? "neev-make-private-warning"
+                  : undefined
+              }
+              onClick={
+                actions.visibility === "private"
+                  ? actions.onShare
+                  : actions.onMakePrivate
+              }
+            >
+              {t(actions.visibility === "private" ? "share" : "makePrivate")}
+            </Button>
+            {actions.visibility === "organization" && (
+              <p id="neev-make-private-warning" className="sr-only">
+                {t("makePrivateWarning")}
+              </p>
+            )}
+          </>
         )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

@@ -611,74 +611,6 @@ function Content({
           )
         ) : (
           <>
-            {selected.kind === "chat" &&
-              selected.creatorId === auth.session?.user.id && (
-                <div className="shrink-0 space-y-1 border-b px-5 py-2 sm:px-8">
-                  <div
-                    aria-label={t("resourceActions")}
-                    className="flex flex-wrap gap-2"
-                  >
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={saving}
-                      onClick={() => open("rename")}
-                    >
-                      {t("rename")}
-                    </Button>
-                    {!selected.originChatId && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled={saving}
-                        aria-describedby={
-                          selected.visibility === "organization"
-                            ? "native-make-private-warning"
-                            : undefined
-                        }
-                        onClick={() =>
-                          selected.visibility === "private"
-                            ? open("share")
-                            : guardUpdate({ visibility: "private" })
-                        }
-                      >
-                        {t(
-                          selected.visibility === "private"
-                            ? "share"
-                            : "makePrivate"
-                        )}
-                      </Button>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={saving}
-                      onClick={() =>
-                        guardUpdate({ archived: !selected.archived })
-                      }
-                    >
-                      {t(selected.archived ? "reopen" : "archive")}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={saving}
-                      onClick={() => open("move")}
-                    >
-                      {t("move")}
-                    </Button>
-                  </div>
-                  {!selected.originChatId &&
-                    selected.visibility === "organization" && (
-                      <p
-                        id="native-make-private-warning"
-                        className="text-xs text-muted-foreground"
-                      >
-                        {t("makePrivateWarning")}
-                      </p>
-                    )}
-                </div>
-              )}
             {selected.kind === "chat" ? (
               <NativeChat
                 key={`${selected.id}:${draftGeneration}`}
@@ -687,6 +619,19 @@ function Content({
                 onChanged={changed}
                 onDirtyChange={onDirtyChange}
                 onRequestSettings={() => guard(() => router.push("/settings"))}
+                actions={{
+                  isCreator: selected.creatorId === auth.session?.user.id,
+                  archived: selected.archived,
+                  visibility: selected.visibility,
+                  shareable: !selected.originChatId,
+                  disabled: saving,
+                  onRename: () => open("rename"),
+                  onShare: () => open("share"),
+                  onMakePrivate: () => guardUpdate({ visibility: "private" }),
+                  onArchiveToggle: () =>
+                    guardUpdate({ archived: !selected.archived }),
+                  onMove: () => open("move"),
+                }}
               />
             ) : (
               <NativeDocument
