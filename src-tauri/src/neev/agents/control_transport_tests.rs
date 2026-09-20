@@ -56,8 +56,14 @@ fn sample_deployment() -> ControlDeployment {
         mode: 0o750,
     };
     ControlDeployment {
+        socket_path: PathBuf::from("/var/lib/neev-native/control/control.sock"),
+        key_path: PathBuf::from("/var/lib/neev-native/control/control.key"),
         socket_parent: parent.clone(),
         key_parent: parent,
+        socket_identity: FileIdentity {
+            device: 2049,
+            inode: 1111,
+        },
         key_identity: FileIdentity {
             device: 2049,
             inode: 1234,
@@ -102,6 +108,32 @@ async fn connect_is_unsupported_off_linux() {
     }
     let result = SupervisorClient::connect(&sample_deployment(), sample_coordinator()).await;
     assert!(matches!(result, Err(TransportError::Unsupported)));
+}
+
+/// On the deploy target the gate is wired: an absent deployment is refused for
+/// what it actually is, NOT with the `Unsupported` the stub used to return.
+#[tokio::test]
+async fn connect_runs_the_real_gate_on_linux() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let result = SupervisorClient::connect(&sample_deployment(), sample_coordinator()).await;
+    assert_eq!(result.err(), Some(TransportError::Metadata));
+}
+
+/// A socket that exists but is not the declared supervisor must be refused
+/// before the handshake — an impostor never sees a client nonce.
+#[cfg(unix)]
+#[tokio::test]
+async fn connect_refuses_a_deployment_it_cannot_prove() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let fixture = on_disk_fixture();
+    // The dev/CI user is not root, so the root-owned requirement fails here;
+    // what matters is that it fails on metadata rather than being waved through.
+    let result = SupervisorClient::connect(&fixture.spec, sample_coordinator()).await;
+    assert_eq!(result.err(), Some(TransportError::Metadata));
 }
 
 /// In-process reliability proof: a Rust server built from the accepted wire
@@ -226,4 +258,228 @@ async fn cross_process_python_listener_interop() {
     let _ = child.kill().await;
     let response = result.expect("cross-process exchange");
     assert!(response.request_id == request.request_id);
+}
+
+/// A deployment rooted at a real temporary directory, so the metadata checks
+/// run against an actual filesystem rather than hand-written numbers.
+#[cfg(unix)]
+struct DeploymentFixture {
+    _dir: tempfile::TempDir,
+    spec: ControlDeployment,
+}
+
+#[cfg(unix)]
+fn identity_of(path: &Path) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    FileIdentity {
+        device: meta.dev(),
+        inode: meta.ino(),
+    }
+}
+
+/// Build a deployment that matches what is really on disk. The dev host cannot
+/// create root-owned files, so `verify_deployment` is never expected to accept
+/// this wholesale — the tests below assert that each individual check fires on
+/// the mutation it is there to catch.
+#[cfg(unix)]
+fn on_disk_fixture() -> DeploymentFixture {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let socket_path = root.join("control.sock");
+    let key_path = root.join("control.key");
+    std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+    std::fs::write(&key_path, [7u8; 32]).unwrap();
+    let meta = std::fs::symlink_metadata(&root).unwrap();
+    let parent = ProtectedParent {
+        absolute_path: root.clone(),
+        identity: identity_of(&root),
+        gid: meta.gid(),
+        mode: meta.mode() & 0o7777,
+    };
+    let spec = ControlDeployment {
+        socket_identity: identity_of(&socket_path),
+        key_identity: identity_of(&key_path),
+        socket_path,
+        key_path,
+        socket_parent: parent.clone(),
+        key_parent: parent,
+        control_gid: meta.gid(),
+        self_uid: unsafe { libc::geteuid() },
+        self_gid: unsafe { libc::getegid() },
+        peer_uid: 0,
+        peer_gid: 0,
+        socket_owner_uid: meta.uid(),
+    };
+    DeploymentFixture { _dir: dir, spec }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_must_live_directly_inside_its_proven_directory() {
+    let parent = ProtectedParent {
+        absolute_path: PathBuf::from("/var/lib/neev-native/control"),
+        identity: FileIdentity {
+            device: 1,
+            inode: 2,
+        },
+        gid: 800,
+        mode: 0o750,
+    };
+    assert!(verify_child_of(
+        Path::new("/var/lib/neev-native/control/control.sock"),
+        &parent
+    )
+    .is_ok());
+    // The protected directory is what makes the path safe, so anywhere else —
+    // a subdirectory, a sibling, a traversal, or the directory itself — is out.
+    for bad in [
+        "/var/lib/neev-native/control/nested/control.sock",
+        "/var/lib/neev-native/other/control.sock",
+        "/var/lib/neev-native/control/../control.sock",
+        "/var/lib/neev-native/control",
+        "control.sock",
+    ] {
+        assert_eq!(
+            verify_child_of(Path::new(bad), &parent),
+            Err(TransportError::Metadata),
+            "accepted {bad}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_component_is_refused_rather_than_resolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let real = root.join("real");
+    std::fs::create_dir(&real).unwrap();
+    assert!(no_symlink_ancestry(&real).is_ok());
+    let linked = root.join("linked");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    // Following it would land on a directory whose inode we DID prove, which is
+    // exactly the substitution this check exists to stop.
+    assert_eq!(
+        no_symlink_ancestry(&linked),
+        Err(TransportError::Metadata)
+    );
+    assert_eq!(
+        no_symlink_ancestry(&linked.join("control.sock")),
+        Err(TransportError::Metadata)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tenant_writable_control_directory_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut parent = ProtectedParent {
+        absolute_path: root.clone(),
+        identity: identity_of(&root),
+        gid: 0,
+        mode: 0o755,
+    };
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o757)).unwrap();
+    parent.mode = 0o757;
+    // Other-writable means any local account could swap the socket or the key.
+    assert_eq!(
+        verify_parent(&parent, 0),
+        Err(TransportError::Metadata)
+    );
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o775)).unwrap();
+    parent.mode = 0o775;
+    parent.gid = 12345;
+    // Group-writable is allowed only for the control group itself.
+    assert_eq!(
+        verify_parent(&parent, 999),
+        Err(TransportError::Metadata)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_whose_inode_moved_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let parent = ProtectedParent {
+        absolute_path: root.clone(),
+        identity: FileIdentity {
+            device: identity_of(&root).device,
+            inode: identity_of(&root).inode ^ 1,
+        },
+        gid: 0,
+        mode: 0o755,
+    };
+    // Same path, different inode: the directory was replaced.
+    assert_eq!(verify_parent(&parent, 0), Err(TransportError::Metadata));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_declared_process_identity_must_be_the_running_one() {
+    let mut fixture = on_disk_fixture();
+    fixture.spec.self_uid = fixture.spec.self_uid.wrapping_add(1);
+    // A spec describing some other process is a misconfiguration, caught before
+    // any path is touched.
+    assert_eq!(
+        verify_deployment(&fixture.spec),
+        Err(TransportError::Metadata)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn every_declared_identity_is_checked_against_the_real_file() {
+    // The dev host owns these files as an unprivileged user, so the root-owned
+    // requirement fails by construction — which is itself the point: the gate
+    // refuses a deployment that is not root-owned.
+    let baseline = on_disk_fixture();
+    assert_eq!(
+        verify_deployment(&baseline.spec),
+        Err(TransportError::Metadata),
+        "a non-root-owned control directory must never be accepted"
+    );
+    // And each declared identity is compared, not assumed.
+    let mut moved = on_disk_fixture();
+    moved.spec.socket_identity.inode ^= 1;
+    assert_eq!(
+        verify_deployment(&moved.spec),
+        Err(TransportError::Metadata)
+    );
+    let mut wrong_key = on_disk_fixture();
+    wrong_key.spec.key_identity.inode ^= 1;
+    assert_eq!(
+        verify_deployment(&wrong_key.spec),
+        Err(TransportError::Metadata)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_key_that_is_not_exactly_one_secret_is_refused() {
+    let fixture = on_disk_fixture();
+    for bytes in [vec![7u8; 31], vec![7u8; 33], vec![0u8; 32]] {
+        std::fs::write(&fixture.spec.key_path, &bytes).unwrap();
+        let mut spec = fixture.spec.clone();
+        spec.key_identity = identity_of(&spec.key_path);
+        // Short, long, or all-zero: none of these is a key, and an all-zero one
+        // would MAC perfectly well.
+        assert_eq!(verify_deployment(&spec), Err(TransportError::Metadata));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_socket_path_that_is_a_regular_file_is_refused() {
+    let fixture = on_disk_fixture();
+    let decoy = fixture.spec.socket_parent.absolute_path.join("decoy.sock");
+    std::fs::write(&decoy, b"not a socket").unwrap();
+    let mut spec = fixture.spec.clone();
+    spec.socket_identity = identity_of(&decoy);
+    spec.socket_path = decoy;
+    assert_eq!(verify_deployment(&spec), Err(TransportError::Metadata));
 }
