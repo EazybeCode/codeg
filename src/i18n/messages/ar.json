@@ -39,6 +39,8 @@
     "messages": "الرسائل",
     "send": "إرسال",
     "askAgent": "اسأل الوكيل",
+    "agentPanel": "لوحة الوكيل",
+    "agentsOff": "الوكلاء متوقفون.",
     "reviewAudience": "مراجعة الجمهور الحالي",
     "useAudience": "استخدام الجمهور الحالي",
     "audienceReview": "الجمهور الحالي في {organization}: {audience}. راجع قبل المتابعة.",

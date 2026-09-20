@@ -39,6 +39,8 @@
     "messages": "訊息清單",
     "send": "傳送",
     "askAgent": "詢問代理",
+    "agentPanel": "智慧代理面板",
+    "agentsOff": "智慧代理已關閉。",
     "reviewAudience": "檢視最新可見範圍",
     "useAudience": "使用最新可見範圍",
     "audienceReview": "{organization} 中的目前可見範圍：{audience}。請在繼續前確認。",

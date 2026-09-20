@@ -39,6 +39,8 @@
     "messages": "메시지 목록",
     "send": "보내기",
     "askAgent": "에이전트에게 질문",
+    "agentPanel": "에이전트 패널",
+    "agentsOff": "에이전트가 꺼져 있습니다.",
     "reviewAudience": "현재 공개 범위 검토",
     "useAudience": "현재 공개 범위 사용",
     "audienceReview": "{organization}의 현재 공개 범위: {audience}. 계속하기 전에 검토하세요.",

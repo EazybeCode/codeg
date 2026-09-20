@@ -39,6 +39,8 @@
     "messages": "消息列表",
     "send": "发送",
     "askAgent": "询问智能体",
+    "agentPanel": "智能体面板",
+    "agentsOff": "智能体已关闭。",
     "reviewAudience": "查看最新可见范围",
     "useAudience": "使用最新可见范围",
     "audienceReview": "{organization} 中的当前可见范围：{audience}。请在继续前确认。",

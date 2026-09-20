@@ -39,6 +39,8 @@
     "messages": "Mensagens",
     "send": "Enviar",
     "askAgent": "Perguntar ao agente",
+    "agentPanel": "Painel do agente",
+    "agentsOff": "Os agentes estão desativados.",
     "reviewAudience": "Revisar público atual",
     "useAudience": "Usar público atual",
     "audienceReview": "Público atual em {organization}: {audience}. Revise antes de continuar.",

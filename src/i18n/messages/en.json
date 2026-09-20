@@ -39,6 +39,8 @@
     "messages": "Messages",
     "send": "Send",
     "askAgent": "Ask agent",
+    "agentPanel": "Agent panel",
+    "agentsOff": "Agents are turned off.",
     "reviewAudience": "Review latest audience",
     "useAudience": "Use latest audience",
     "audienceReview": "Current audience in {organization}: {audience}. Review before continuing.",

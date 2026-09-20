@@ -39,6 +39,8 @@
     "messages": "Nachrichten",
     "send": "Senden",
     "askAgent": "Agent fragen",
+    "agentPanel": "Agent-Panel",
+    "agentsOff": "Agenten sind deaktiviert.",
     "reviewAudience": "Aktuellen Zugriff prüfen",
     "useAudience": "Aktuellen Zugriff übernehmen",
     "audienceReview": "Aktueller Zugriff in {organization}: {audience}. Vor dem Fortfahren prüfen.",

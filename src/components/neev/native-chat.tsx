@@ -1,6 +1,6 @@
 "use client"
 
-import { ArrowLeft, ArrowUp, Sparkles } from "lucide-react"
+import { ArrowLeft, ArrowUp, PanelRight, Sparkles, X } from "lucide-react"
 import { NativeMarkdown } from "./native-markdown"
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
@@ -24,6 +24,10 @@ import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeError } from "./native-boundary"
+import {
+  getRightPanelOpen,
+  setRightPanelOpen,
+} from "@/lib/neev-workspace-prefs"
 
 type Props = {
   resource: NativeResource
@@ -62,6 +66,19 @@ function Chat({
     [agentText, setAgentText] = useState(""),
     [agentBusy, setAgentBusy] = useState(false),
     [agentRunId, setAgentRunId] = useState<string | null>(null)
+  // The agent lives in a collapsible right context panel so the human team
+  // thread is the primary surface (view-only pref; SSR default then read on mount).
+  const [agentPanel, setAgentPanel] = useState(false)
+  useEffect(() => {
+    setAgentPanel(getRightPanelOpen())
+  }, [])
+  function toggleAgentPanel() {
+    setAgentPanel((open) => {
+      const next = !open
+      setRightPanelOpen(next)
+      return next
+    })
+  }
   const runtimeEnabled = auth.capabilities?.runtimeEnabled ?? false
   const historyElement = useRef<HTMLOListElement>(null)
   const followHistory = useRef(true)
@@ -285,138 +302,184 @@ function Chat({
             {latest.archived ? ` · ${t("archived")}` : ""}
           </p>
         </div>
-      </div>
-      {loading ? (
-        <p role="status">{n("loading")}</p>
-      ) : (
-        <ol
-          ref={historyElement}
-          onScroll={(event) => {
-            const history = event.currentTarget
-            followHistory.current =
-              history.scrollHeight - history.scrollTop - history.clientHeight <
-              48
-          }}
-          aria-label={t("messages")}
-          className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-5 py-6 sm:px-8"
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={t("agentPanel")}
+          title={t("agentPanel")}
+          aria-pressed={agentPanel}
+          className="ms-auto"
+          onClick={toggleAgentPanel}
         >
-          {messages.map((message) => (
-            <li
-              key={message.id}
-              className="mx-auto flex w-full max-w-3xl gap-3"
+          <PanelRight aria-hidden />
+        </Button>
+      </div>
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {loading ? (
+            <p role="status">{n("loading")}</p>
+          ) : (
+            <ol
+              ref={historyElement}
+              onScroll={(event) => {
+                const history = event.currentTarget
+                followHistory.current =
+                  history.scrollHeight -
+                    history.scrollTop -
+                    history.clientHeight <
+                  48
+              }}
+              aria-label={t("messages")}
+              className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-5 py-6 sm:px-8"
             >
-              <span
-                aria-hidden
-                className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium"
-              >
-                {message.authorName.slice(0, 1)}
-              </span>
-              <div className="min-w-0 flex-1 space-y-2">
-                <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
-                  <span className="font-medium text-foreground">
-                    {message.authorName}
-                  </span>
-                  <time
-                    dateTime={new Date(message.createdAt * 1000).toISOString()}
+              {messages.map((message) => (
+                <li
+                  key={message.id}
+                  className="mx-auto flex w-full max-w-3xl gap-3"
+                >
+                  <span
+                    aria-hidden
+                    className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium"
                   >
-                    {new Date(message.createdAt * 1000).toLocaleString()}
-                  </time>
-                </div>
-                <NativeMarkdown markdown={message.body} />
-              </div>
-            </li>
-          ))}
-        </ol>
-      )}
-      <form
-        onSubmit={(event) => {
-          event.preventDefault()
-          void send()
-        }}
-        className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-5 pb-5 pt-3 sm:px-8"
-      >
-        <div className="rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring">
-          <label className="block">
-            <span className="sr-only">{t("message")}</span>
-            <textarea
-              placeholder={t("message")}
-              value={draft}
-              disabled={loading || saving || latest.archived}
-              onChange={(event) => {
-                if (!draftRef.current) pinned.current = latest.authRevision
-                draftRef.current = event.target.value
-                setDraft(event.target.value)
-                retry.current = null
-                onDirtyChange?.(!!event.target.value)
-              }}
-              className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none sm:text-sm"
-            />
-          </label>
-          <NativeError error={error} />
-          {(agentBusy || agentText) && (
-            <div
-              role="status"
-              aria-live="polite"
-              aria-label={t("askAgent")}
-              className="rounded-md border bg-muted/40 px-3 py-2 text-sm"
-            >
-              {agentText ? (
-                <NativeMarkdown markdown={agentText} />
-              ) : (
-                <span className="text-muted-foreground">{n("working")}</span>
+                    {message.authorName.slice(0, 1)}
+                  </span>
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">
+                        {message.authorName}
+                      </span>
+                      <time
+                        dateTime={new Date(
+                          message.createdAt * 1000
+                        ).toISOString()}
+                      >
+                        {new Date(message.createdAt * 1000).toLocaleString()}
+                      </time>
+                    </div>
+                    <NativeMarkdown markdown={message.body} />
+                  </div>
+                </li>
+              ))}
+            </ol>
+          )}
+          <form
+            onSubmit={(event) => {
+              event.preventDefault()
+              void send()
+            }}
+            className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-5 pb-5 pt-3 sm:px-8"
+          >
+            <div className="rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+              <label className="block">
+                <span className="sr-only">{t("message")}</span>
+                <textarea
+                  placeholder={t("message")}
+                  value={draft}
+                  disabled={loading || saving || latest.archived}
+                  onChange={(event) => {
+                    if (!draftRef.current) pinned.current = latest.authRevision
+                    draftRef.current = event.target.value
+                    setDraft(event.target.value)
+                    retry.current = null
+                    onDirtyChange?.(!!event.target.value)
+                  }}
+                  className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none sm:text-sm"
+                />
+              </label>
+              <NativeError error={error} />
+              {(latest.authRevision !== pinned.current ||
+                (error instanceof NativeClientError &&
+                  error.kind === "conflict")) && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={async () => {
+                    await refresh()
+                    if (scope.isCurrent()) setReview(true)
+                  }}
+                >
+                  {t("reviewAudience")}
+                </Button>
               )}
+              <div className="flex items-center">
+                <Button
+                  type="submit"
+                  size="icon"
+                  className="ms-auto rounded-md"
+                  aria-label={saving ? n("working") : t("send")}
+                  title={saving ? n("working") : t("send")}
+                  disabled={
+                    loading || saving || latest.archived || !draft.trim()
+                  }
+                >
+                  <ArrowUp aria-hidden />
+                </Button>
+              </div>
             </div>
-          )}
-          {(latest.authRevision !== pinned.current ||
-            (error instanceof NativeClientError &&
-              error.kind === "conflict")) && (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={async () => {
-                await refresh()
-                if (scope.isCurrent()) setReview(true)
-              }}
-            >
-              {t("reviewAudience")}
-            </Button>
-          )}
-          <div className="flex flex-wrap items-center gap-3">
-            <Button
-              type="submit"
-              size="icon"
-              className="order-last ms-auto rounded-md"
-              aria-label={saving ? n("working") : t("send")}
-              title={saving ? n("working") : t("send")}
-              disabled={loading || saving || latest.archived || !draft.trim()}
-            >
-              <ArrowUp aria-hidden />
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => void askAgent()}
-              disabled={
-                !runtimeEnabled ||
-                loading ||
-                saving ||
-                latest.archived ||
-                !draft.trim() ||
-                agentBusy
-              }
-            >
-              <Sparkles aria-hidden />
-              {t("askAgent")}
-            </Button>
-            {agentBusy && (
+          </form>
+        </div>
+        {agentPanel && (
+          <aside
+            aria-label={t("askAgent")}
+            className="flex w-full max-w-sm shrink-0 flex-col gap-3 overflow-y-auto border-s bg-sidebar/30 p-4 sm:w-80"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold">{t("askAgent")}</h3>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={n("close")}
+                title={n("close")}
+                onClick={toggleAgentPanel}
+              >
+                <X aria-hidden />
+              </Button>
+            </div>
+            {!runtimeEnabled && (
+              <p role="status" className="text-sm text-muted-foreground">
+                {t("agentsOff")}
+              </p>
+            )}
+            {(agentBusy || agentText) && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="rounded-md border bg-muted/40 px-3 py-2 text-sm"
+              >
+                {agentText ? (
+                  <NativeMarkdown markdown={agentText} />
+                ) : (
+                  <span className="text-muted-foreground">{n("working")}</span>
+                )}
+              </div>
+            )}
+            <div className="mt-auto flex flex-wrap items-center gap-2">
               <Button
                 type="button"
-                variant="ghost"
-                onClick={() => void cancelAgent()}
+                variant="outline"
+                onClick={() => void askAgent()}
+                disabled={
+                  !runtimeEnabled ||
+                  loading ||
+                  saving ||
+                  latest.archived ||
+                  !draft.trim() ||
+                  agentBusy
+                }
               >
-                {n("cancel")}
+                <Sparkles aria-hidden />
+                {t("askAgent")}
               </Button>
-            )}
+              {agentBusy && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => void cancelAgent()}
+                >
+                  {n("cancel")}
+                </Button>
+              )}
+            </div>
             <Link
               href="/settings"
               onClick={(event) => {
@@ -429,9 +492,9 @@ function Chat({
             >
               {n("personalAgents")}
             </Link>
-          </div>
-        </div>
-      </form>
+          </aside>
+        )}
+      </div>
       <Dialog open={review} onOpenChange={setReview}>
         <DialogContent>
           <DialogTitle>{t("reviewAudience")}</DialogTitle>

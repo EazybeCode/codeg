@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { afterEach, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { NativeChat } from "./native-chat"
 import { NativeBoundary } from "./native-boundary"
 import {
@@ -46,6 +46,11 @@ const message = {
   createdAt: 1_700_000_000,
 }
 const path = `/api/neev/chats/${resource.id}/messages`
+beforeEach(() => {
+  // The agent context panel remembers open/closed per user in localStorage;
+  // start every test from the default (closed) so panel interactions are stable.
+  localStorage.clear()
+})
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
@@ -135,6 +140,8 @@ it("retries a committed message with the same request ID and displays its human 
     expectedAuthRevision: "1",
   })
   expect(bodies[1]).toEqual(bodies[0])
+  // Agent controls now live in the collapsible right context panel.
+  await user.click(screen.getByRole("button", { name: "Agent panel" }))
   expect(screen.getByRole("button", { name: "Ask agent" })).toBeDisabled()
   expect(
     screen.getByRole("link", { name: "Personal AI connections" })
@@ -379,6 +386,23 @@ it.each(["1", "9007199254740992"])(
 
 const capable = () => json({ ...nativeCapabilities, runtimeEnabled: true })
 
+it("keeps the human thread primary with the agent in a collapsible panel", async () => {
+  localStorage.clear()
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount()
+  // Human composer is present; the agent controls are NOT in the main column.
+  await screen.findByRole("textbox", { name: "Message" })
+  expect(screen.getByRole("button", { name: "Send" })).toBeVisible()
+  expect(screen.queryByRole("button", { name: "Ask agent" })).toBeNull()
+  // Opening the context panel reveals the agent controls.
+  await user.click(screen.getByRole("button", { name: "Agent panel" }))
+  expect(screen.getByRole("button", { name: "Ask agent" })).toBeVisible()
+})
+
 it("keeps Ask agent disabled while the runtime is unavailable", async () => {
   mockNativeSession(undefined, {
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
@@ -386,8 +410,15 @@ it("keeps Ask agent disabled while the runtime is unavailable", async () => {
   })
   const user = userEvent.setup()
   mount()
-  await user.type(await screen.findByRole("textbox", { name: "Message" }), "help")
+  await user.type(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "help"
+  )
+  // The agent lives in the collapsible right context panel; open it first.
+  await user.click(screen.getByRole("button", { name: "Agent panel" }))
   expect(screen.getByRole("button", { name: "Ask agent" })).toBeDisabled()
+  // Honest disabled state — no faked "Connected".
+  expect(screen.getByText("Agents are turned off.")).toBeVisible()
 })
 
 it("enables Ask agent and renders a streamed agent reply when the runtime is available", async () => {
@@ -413,7 +444,12 @@ it("enables Ask agent and renders a streamed agent reply when the runtime is ava
   })
   const user = userEvent.setup()
   mount()
-  await user.type(await screen.findByRole("textbox", { name: "Message" }), "help")
+  await user.type(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "help"
+  )
+  // The agent lives in the collapsible right context panel; open it first.
+  await user.click(screen.getByRole("button", { name: "Agent panel" }))
   const ask = screen.getByRole("button", { name: "Ask agent" })
   expect(ask).toBeEnabled()
   await user.click(ask)
@@ -425,11 +461,17 @@ it("surfaces an error when the runtime reports unavailable (503)", async () => {
     "GET /api/workos/capabilities": capable,
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
-    "POST /api/neev/agent/run": () => json({ error: "agent_runtime_disabled" }, 503),
+    "POST /api/neev/agent/run": () =>
+      json({ error: "agent_runtime_disabled" }, 503),
   })
   const user = userEvent.setup()
   mount()
-  await user.type(await screen.findByRole("textbox", { name: "Message" }), "help")
+  await user.type(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "help"
+  )
+  // The agent lives in the collapsible right context panel; open it first.
+  await user.click(screen.getByRole("button", { name: "Agent panel" }))
   await user.click(screen.getByRole("button", { name: "Ask agent" }))
   expect(await screen.findByRole("alert")).toBeVisible()
 })
@@ -462,7 +504,12 @@ it("shows Cancel while streaming and cancels the run", async () => {
   })
   const user = userEvent.setup()
   mount()
-  await user.type(await screen.findByRole("textbox", { name: "Message" }), "help")
+  await user.type(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "help"
+  )
+  // The agent lives in the collapsible right context panel; open it first.
+  await user.click(screen.getByRole("button", { name: "Agent panel" }))
   await user.click(screen.getByRole("button", { name: "Ask agent" }))
   // Wait for streamed output so the run id from the started event is registered.
   await screen.findByText("partial")

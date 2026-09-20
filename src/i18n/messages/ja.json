@@ -39,6 +39,8 @@
     "messages": "メッセージ一覧",
     "send": "送信",
     "askAgent": "エージェントに質問",
+    "agentPanel": "エージェントパネル",
+    "agentsOff": "エージェントは無効です。",
     "reviewAudience": "現在の公開範囲を確認",
     "useAudience": "現在の公開範囲を使用",
     "audienceReview": "{organization} の現在の公開範囲：{audience}。続行する前に確認してください。",
