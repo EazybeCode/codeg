@@ -87,7 +87,11 @@
     "noSelection": "Select a project or folder to open its chats and documents.",
     "teamChat": "Team chat",
     "agentChats": "Agent chats",
-    "agentChatsUnavailable": "Agent chats aren't available yet. They'll appear here once agent sessions ship."
+    "agentChatsUnavailable": "Agent chats aren't available yet. They'll appear here once agent sessions ship.",
+    "newDocumentTitle": "Untitled document",
+    "newChatTitle": "Untitled conversation",
+    "newDocumentBodyHint": "Name your document, then create it to start writing with headings, lists, tables and more.",
+    "newChatBodyHint": "Name this conversation, then create it to start the team thread."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

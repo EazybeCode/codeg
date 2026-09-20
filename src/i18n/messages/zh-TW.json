@@ -87,7 +87,11 @@
     "noSelection": "選取專案或資料夾以開啟其中的聊天和文件。",
     "teamChat": "團隊聊天",
     "agentChats": "智慧代理聊天",
-    "agentChatsUnavailable": "智慧代理聊天尚未提供。代理工作階段上線後會顯示於此。"
+    "agentChatsUnavailable": "智慧代理聊天尚未提供。代理工作階段上線後會顯示於此。",
+    "newDocumentTitle": "無標題文件",
+    "newChatTitle": "無標題對話",
+    "newDocumentBodyHint": "為文件命名，然後建立即可使用標題、清單、表格等開始撰寫。",
+    "newChatBodyHint": "為該對話命名，然後建立即可開始團隊討論串。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

@@ -87,7 +87,11 @@
     "noSelection": "选择项目或文件夹以打开其中的聊天和文档。",
     "teamChat": "团队聊天",
     "agentChats": "智能体聊天",
-    "agentChatsUnavailable": "智能体聊天尚不可用。智能体会话上线后会显示在这里。"
+    "agentChatsUnavailable": "智能体聊天尚不可用。智能体会话上线后会显示在这里。",
+    "newDocumentTitle": "无标题文档",
+    "newChatTitle": "无标题对话",
+    "newDocumentBodyHint": "为文档命名，然后创建即可使用标题、列表、表格等开始写作。",
+    "newChatBodyHint": "为该对话命名，然后创建即可开始团队讨论串。"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

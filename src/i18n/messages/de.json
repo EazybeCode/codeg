@@ -87,7 +87,11 @@
     "noSelection": "Wählen Sie ein Projekt oder einen Ordner aus, um Chats und Dokumente zu öffnen.",
     "teamChat": "Team-Chat",
     "agentChats": "Agent-Chats",
-    "agentChatsUnavailable": "Agent-Chats sind noch nicht verfügbar. Sie erscheinen hier, sobald Agent-Sitzungen verfügbar sind."
+    "agentChatsUnavailable": "Agent-Chats sind noch nicht verfügbar. Sie erscheinen hier, sobald Agent-Sitzungen verfügbar sind.",
+    "newDocumentTitle": "Unbenanntes Dokument",
+    "newChatTitle": "Unbenannte Unterhaltung",
+    "newDocumentBodyHint": "Benenne dein Dokument und erstelle es, um mit Überschriften, Listen, Tabellen und mehr zu schreiben.",
+    "newChatBodyHint": "Benenne diese Unterhaltung und erstelle sie, um den Team-Thread zu starten."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

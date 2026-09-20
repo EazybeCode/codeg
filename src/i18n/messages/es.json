@@ -87,7 +87,11 @@
     "noSelection": "Selecciona un proyecto o carpeta para abrir sus chats y documentos.",
     "teamChat": "Chat de equipo",
     "agentChats": "Chats de agente",
-    "agentChatsUnavailable": "Los chats de agente aún no están disponibles. Aparecerán aquí cuando se lancen las sesiones de agente."
+    "agentChatsUnavailable": "Los chats de agente aún no están disponibles. Aparecerán aquí cuando se lancen las sesiones de agente.",
+    "newDocumentTitle": "Documento sin título",
+    "newChatTitle": "Conversación sin título",
+    "newDocumentBodyHint": "Nombra tu documento y créalo para empezar a escribir con encabezados, listas, tablas y más.",
+    "newChatBodyHint": "Nombra esta conversación y créala para iniciar el hilo del equipo."
   },
   "Native": {
     "callbackConflict": "Este método de acceso entra en conflicto con una cuenta existente. Usa tu método de acceso original y luego abre Configuración para vincular otro método. Las cuentas nunca se fusionan automáticamente.",

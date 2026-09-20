@@ -281,10 +281,16 @@ it("opens content creation for the context-menu node and returns focus after can
   await user.click(
     await screen.findByRole("menuitem", { name: "New document" })
   )
-  expect(screen.getByRole("dialog")).toHaveTextContent("Inside Menu project")
-  expect(screen.getByRole("textbox", { name: "Title" })).toHaveFocus()
-  await user.keyboard("{Escape}")
-  expect(trigger).toHaveFocus()
+  // Full-page draft with an inline title (no small modal), focused for naming.
+  const draft = await screen.findByRole("region", { name: "New document" })
+  expect(draft).toHaveTextContent("Inside Menu project")
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Title" })).toHaveFocus()
+  )
+  await user.click(screen.getByRole("button", { name: "Cancel" }))
+  await waitFor(() =>
+    expect(screen.queryByRole("region", { name: "New document" })).toBeNull()
+  )
   expect(mock.unknown).toEqual([])
 })
 

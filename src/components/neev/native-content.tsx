@@ -107,6 +107,7 @@ function Content({
     windowScope = useRef(`${node.id}:${kind}:${archived}`),
     opener = useRef<HTMLElement | null>(creation?.returnFocus ?? null),
     creationSeen = useRef(creation?.request),
+    createTitleRef = useRef<HTMLInputElement>(null),
     request = useRef<{
       title: string
       kind: NativeResourceKind
@@ -189,6 +190,13 @@ function Content({
     window.addEventListener("beforeunload", unload)
     return () => window.removeEventListener("beforeunload", unload)
   }, [dirty])
+  // Focus the full-page draft title after the menu that opened it closes (Radix
+  // returns focus to the trigger on close, so defer past that with rAF).
+  useEffect(() => {
+    if (!chromeless || dialog !== "create") return
+    const frame = requestAnimationFrame(() => createTitleRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [chromeless, dialog])
   useEffect(() => {
     if (!creation || creation.request === creationSeen.current) return
     creationSeen.current = creation.request
@@ -544,7 +552,71 @@ function Content({
           </>
         )}
         {!selected ? (
-          chromeless ? null : section === "agents" ? (
+          chromeless ? (
+            dialog === "create" ? (
+              <section
+                aria-label={t(kind === "chat" ? "newChat" : "newDocument")}
+                className="mx-auto w-full max-w-3xl px-7 pb-16 pt-10 sm:px-12"
+              >
+                <p className="text-xs text-muted-foreground">
+                  {n("insideFolder", { name: node.name })}
+                </p>
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    void create()
+                  }}
+                >
+                  <input
+                    ref={createTitleRef}
+                    aria-label={t("title")}
+                    placeholder={t(
+                      kind === "chat" ? "newChatTitle" : "newDocumentTitle"
+                    )}
+                    value={title}
+                    disabled={saving}
+                    maxLength={100}
+                    onChange={(event) => setTitle(event.target.value)}
+                    className="mt-3 w-full border-0 bg-transparent p-0 text-3xl font-semibold leading-tight outline-none placeholder:text-muted-foreground/50 sm:text-4xl"
+                  />
+                  <p className="mt-4 text-sm leading-6 text-muted-foreground">
+                    {t(
+                      kind === "chat"
+                        ? "newChatBodyHint"
+                        : "newDocumentBodyHint"
+                    )}
+                  </p>
+                  <NativeError error={error} />
+                  <div className="mt-6 flex gap-2">
+                    <Button
+                      type="submit"
+                      disabled={
+                        saving ||
+                        !title.trim() ||
+                        [...title.trim()].length > 100 ||
+                        /\p{Cc}/u.test(title)
+                      }
+                    >
+                      {saving ? n("working") : t("create")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={saving}
+                      onClick={() => {
+                        setDialog(null)
+                        setTitle("")
+                        setError(null)
+                        opener.current?.focus()
+                      }}
+                    >
+                      {n("cancel")}
+                    </Button>
+                  </div>
+                </form>
+              </section>
+            ) : null
+          ) : section === "agents" ? (
             <section
               role="tabpanel"
               aria-label={t("agentChats")}
@@ -663,7 +735,7 @@ function Content({
           <NativeError error={error} />
         )}
         <Dialog
-          open={!!dialog}
+          open={!!dialog && !(chromeless && dialog === "create")}
           onOpenChange={(value) => {
             if (!value && !saving) {
               destinationRequest.current += 1
