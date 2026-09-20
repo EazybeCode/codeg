@@ -986,7 +986,6 @@ async fn validate_intent_rows<C: ConnectionTrait>(
                 || !(1..=NATIVE_MAX).contains(&org_id)
                 || !canonical_uuid(&event_id)
                 || event_cursor <= 0
-                || event_cursor > BIGINT_MAX
                 || !(0..=TIME_MAX).contains(&created_at)
             {
                 return Err(AuthError::Unavailable);
