@@ -84,7 +84,10 @@
     "destination": "대상 폴더",
     "resourceActions": "콘텐츠 작업",
     "rename": "이름 바꾸기",
-    "noSelection": "프로젝트나 폴더를 선택하여 채팅과 문서를 여세요."
+    "noSelection": "프로젝트나 폴더를 선택하여 채팅과 문서를 여세요.",
+    "teamChat": "팀 채팅",
+    "agentChats": "에이전트 채팅",
+    "agentChatsUnavailable": "에이전트 채팅은 아직 사용할 수 없습니다. 에이전트 세션이 출시되면 여기에 표시됩니다."
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

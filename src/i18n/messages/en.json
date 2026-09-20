@@ -84,7 +84,10 @@
     "destination": "Destination folder",
     "resourceActions": "Content actions",
     "rename": "Rename",
-    "noSelection": "Select a project or folder to open its chats and documents."
+    "noSelection": "Select a project or folder to open its chats and documents.",
+    "teamChat": "Team chat",
+    "agentChats": "Agent chats",
+    "agentChatsUnavailable": "Agent chats aren't available yet. They'll appear here once agent sessions ship."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

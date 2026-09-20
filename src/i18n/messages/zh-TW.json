@@ -84,7 +84,10 @@
     "destination": "目的地資料夾",
     "resourceActions": "內容操作",
     "rename": "重新命名",
-    "noSelection": "選取專案或資料夾以開啟其中的聊天和文件。"
+    "noSelection": "選取專案或資料夾以開啟其中的聊天和文件。",
+    "teamChat": "團隊聊天",
+    "agentChats": "智慧代理聊天",
+    "agentChatsUnavailable": "智慧代理聊天尚未提供。代理工作階段上線後會顯示於此。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

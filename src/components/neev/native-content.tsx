@@ -73,7 +73,13 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
     [destination, setDestination] = useState(node.id),
     [pending, setPending] = useState<(() => void) | null>(null),
     [dirty, setDirty] = useState(false),
-    [draftGeneration, setDraftGeneration] = useState(0)
+    [draftGeneration, setDraftGeneration] = useState(0),
+    // Which of the three workspace sections is shown in the folder view. Team
+    // chat and Documents map to the backend resource `kind`; Agent chats is a
+    // truthful placeholder with no backend until agent sessions ship (Phase 1).
+    [section, setSection] = useState<"team" | "agents" | "docs">(
+      creation?.kind === "document" ? "docs" : "team"
+    )
   const [authorizedSignal, setAuthorizedSignal] = useState(auth.signal)
   const dirtyRef = useRef(false),
     mutationBusy = useRef(false),
@@ -123,6 +129,21 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
       setPending(() => action)
     } else action()
   }, [])
+  const changeSection = (
+    next: "team" | "agents" | "docs",
+    focusTab?: HTMLElement | null
+  ) =>
+    guard(() => {
+      onDirtyChange(false)
+      selectResource(null)
+      setSection(next)
+      // Team chat and Documents drive the backend list; Agent chats does not.
+      if (next !== "agents") setKind(next === "docs" ? "document" : "chat")
+      if (focusTab) {
+        opener.current = focusTab
+        focusTab.focus()
+      }
+    })
   useEffect(() => {
     onRequestNavigationGuard(guard)
     return () => onRequestNavigationGuard((action) => action())
@@ -437,19 +458,19 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
               aria-label={node.name}
               className="flex gap-4 border-b"
             >
-              {(["chat", "document"] as const).map((value) => (
+              {(
+                [
+                  { id: "team", label: t("teamChat") },
+                  { id: "agents", label: t("agentChats") },
+                  { id: "docs", label: t("documents") },
+                ] as const
+              ).map((tab, index, all) => (
                 <button
-                  key={value}
+                  key={tab.id}
                   role="tab"
-                  aria-selected={kind === value}
-                  tabIndex={kind === value ? 0 : -1}
-                  onClick={() =>
-                    guard(() => {
-                      onDirtyChange(false)
-                      selectResource(null)
-                      setKind(value)
-                    })
-                  }
+                  aria-selected={section === tab.id}
+                  tabIndex={section === tab.id ? 0 : -1}
+                  onClick={() => changeSection(tab.id)}
                   onKeyDown={(event) => {
                     if (
                       ["ArrowLeft", "ArrowRight", "Home", "End"].includes(
@@ -457,89 +478,95 @@ function Content({ node, onRequestNavigationGuard, creation }: Props) {
                       )
                     ) {
                       event.preventDefault()
-                      const target =
+                      const next =
                         event.key === "Home"
-                          ? "chat"
+                          ? 0
                           : event.key === "End"
-                            ? "document"
-                            : value === "chat"
-                              ? "document"
-                              : "chat"
-                      const tab =
+                            ? all.length - 1
+                            : event.key === "ArrowRight"
+                              ? (index + 1) % all.length
+                              : (index - 1 + all.length) % all.length
+                      const element =
                         event.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
                           '[role="tab"]'
-                        )[target === "chat" ? 0 : 1]
-                      guard(() => {
-                        onDirtyChange(false)
-                        selectResource(null)
-                        setKind(target)
-                        opener.current = tab ?? null
-                        tab?.focus()
-                      })
+                        )[next]
+                      changeSection(all[next].id, element)
                     }
                   }}
-                  className={`rounded-t px-1 py-3 text-sm focus-visible:ring-2 focus-visible:ring-ring ${kind === value ? "border-b-2 border-foreground font-medium" : "text-muted-foreground"}`}
+                  className={`rounded-t px-1 py-3 text-sm focus-visible:ring-2 focus-visible:ring-ring ${section === tab.id ? "border-b-2 border-foreground font-medium" : "text-muted-foreground"}`}
                 >
-                  {t(value === "chat" ? "chats" : "documents")}
+                  {tab.label}
                 </button>
               ))}
             </div>
           </>
         )}
         {!selected ? (
-          <section
-            role="tabpanel"
-            aria-label={t(kind === "chat" ? "chats" : "documents")}
-            className="space-y-4"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <Button disabled={unavailable} onClick={() => open("create")}>
-                {t(kind === "chat" ? "newChat" : "newDocument")}
-              </Button>
-              <label className="flex items-center gap-2 text-xs">
-                <input
-                  type="checkbox"
-                  checked={archived}
-                  onChange={(event) => setArchived(event.target.checked)}
-                />
-                {t("showArchived")}
-              </label>
-            </div>
-            {loading ? (
-              <p role="status">{n("loading")}</p>
-            ) : items.length === 0 && !unavailable ? (
+          section === "agents" ? (
+            <section
+              role="tabpanel"
+              aria-label={t("agentChats")}
+              className="space-y-4"
+            >
               <p className="py-8 text-sm text-muted-foreground">
-                {t(kind === "chat" ? "emptyChats" : "emptyDocuments")}
+                {t("agentChatsUnavailable")}
               </p>
-            ) : (
-              <ul className="divide-y">
-                {items.map((resource) => (
-                  <li key={resource.id}>
-                    <button
-                      onClick={() => {
-                        selectResource(resource)
-                        setError(null)
-                      }}
-                      className="flex w-full min-w-0 flex-wrap items-center justify-between gap-2 rounded py-4 text-start hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <span className="min-w-0 break-words text-sm font-medium">
-                        {resource.title}
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        {t(resource.visibility)}
-                        {resource.archived ? ` · ${t("archived")}` : ""}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {nextAfter && (
-              <Button disabled={loading} onClick={() => void load(nextAfter)}>
-                {n("loadMore")}
-              </Button>
-            )}
-          </section>
+            </section>
+          ) : (
+            <section
+              role="tabpanel"
+              aria-label={t(kind === "chat" ? "chats" : "documents")}
+              className="space-y-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <Button disabled={unavailable} onClick={() => open("create")}>
+                  {t(kind === "chat" ? "newChat" : "newDocument")}
+                </Button>
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={archived}
+                    onChange={(event) => setArchived(event.target.checked)}
+                  />
+                  {t("showArchived")}
+                </label>
+              </div>
+              {loading ? (
+                <p role="status">{n("loading")}</p>
+              ) : items.length === 0 && !unavailable ? (
+                <p className="py-8 text-sm text-muted-foreground">
+                  {t(kind === "chat" ? "emptyChats" : "emptyDocuments")}
+                </p>
+              ) : (
+                <ul className="divide-y">
+                  {items.map((resource) => (
+                    <li key={resource.id}>
+                      <button
+                        onClick={() => {
+                          selectResource(resource)
+                          setError(null)
+                        }}
+                        className="flex w-full min-w-0 flex-wrap items-center justify-between gap-2 rounded py-4 text-start hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <span className="min-w-0 break-words text-sm font-medium">
+                          {resource.title}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {t(resource.visibility)}
+                          {resource.archived ? ` · ${t("archived")}` : ""}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {nextAfter && (
+                <Button disabled={loading} onClick={() => void load(nextAfter)}>
+                  {n("loadMore")}
+                </Button>
+              )}
+            </section>
+          )
         ) : (
           <>
             {selected.creatorId === auth.session?.user.id && (

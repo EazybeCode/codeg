@@ -84,7 +84,10 @@
     "destination": "Dossier de destination",
     "resourceActions": "Actions sur le contenu",
     "rename": "Renommer",
-    "noSelection": "Sélectionnez un projet ou un dossier pour ouvrir ses discussions et documents."
+    "noSelection": "Sélectionnez un projet ou un dossier pour ouvrir ses discussions et documents.",
+    "teamChat": "Discussion d’équipe",
+    "agentChats": "Discussions d’agent",
+    "agentChatsUnavailable": "Les discussions d’agent ne sont pas encore disponibles. Elles apparaîtront ici dès le lancement des sessions d’agent."
   },
   "Native": {
     "callbackConflict": "Cette méthode de connexion entre en conflit avec un compte existant. Utilisez votre méthode de connexion initiale, puis ouvrez les paramètres pour en associer une autre. Les comptes ne sont jamais fusionnés automatiquement.",

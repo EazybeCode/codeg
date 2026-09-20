@@ -974,8 +974,16 @@ it("guards leaving a dirty page before keyboard switching folder tabs", async ()
   await user.click(screen.getByRole("button", { name: "Back to folder" }))
   await user.click(screen.getByRole("button", { name: "Discard changes" }))
   expect(screen.queryByDisplayValue("dirty")).toBeNull()
-  screen.getByRole("tab", { name: "Chats" }).focus()
+  screen.getByRole("tab", { name: "Team chat" }).focus()
   await user.keyboard("{ArrowRight}")
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Agent chats" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    )
+  )
+  expect(screen.getByRole("tab", { name: "Agent chats" })).toHaveFocus()
+  await user.keyboard("{End}")
   await waitFor(() =>
     expect(screen.getByRole("tab", { name: "Documents" })).toHaveAttribute(
       "aria-selected",
@@ -983,6 +991,26 @@ it("guards leaving a dirty page before keyboard switching folder tabs", async ()
     )
   )
   expect(screen.getByRole("tab", { name: "Documents" })).toHaveFocus()
+  expect(mock.unknown).toEqual([])
+})
+
+it("shows a truthful Agent chats placeholder without faking a list or fetching", async () => {
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/session": () => json(orgSession),
+    "GET /api/neev/nodes/4/chats": () =>
+      json({ items: [chat], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByRole("tab", { name: "Agent chats" }))
+  expect(
+    screen.getByRole("tabpanel", { name: "Agent chats" })
+  ).toHaveTextContent(
+    "Agent chats aren't available yet. They'll appear here once agent sessions ship."
+  )
+  // No faked session list and no create affordance while unavailable.
+  expect(screen.queryByRole("button", { name: "New chat" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "New document" })).toBeNull()
   expect(mock.unknown).toEqual([])
 })
 
@@ -1211,7 +1239,7 @@ it("rejects a late private list response after auth generation changes even when
       </NativeBoundary>
     </NativeTestRoot>
   )
-  await screen.findByRole("tab", { name: "Chats" })
+  await screen.findByRole("tab", { name: "Team chat" })
   await waitFor(() => expect(release).toBeDefined())
   switched = true
   await user.click(screen.getByRole("button", { name: "Switch scope" }))
