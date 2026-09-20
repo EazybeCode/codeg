@@ -28,6 +28,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import neev_agent_sandbox as sandbox
+import neev_agent_credentials as credentials
 
 
 def _parse(argv):
@@ -37,6 +38,11 @@ def _parse(argv):
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--uid", type=int, required=True)
     parser.add_argument("--gid", type=int, required=True)
+    # The runtime (execution.rs) always passes these: which per-user credential
+    # volume to open (scope = --tenant + --provider) and the opaque handle naming
+    # it. The launcher opens the caller's OWN volume and delivers it as HOME.
+    parser.add_argument("--provider", required=True, choices=sorted(credentials.PROVIDERS))
+    parser.add_argument("--credential-handle", required=True, dest="credential_handle")
     parser.add_argument("--provider-ipv4", action="append", default=[], dest="provider_ipv4")
     parser.add_argument("--cpu-seconds", type=int, default=120)
     parser.add_argument("--address-space-bytes", type=int, default=2 * 1024 * 1024 * 1024)
@@ -100,7 +106,35 @@ def _validate_workdir_under_trusted_root(workdir):
         raise sandbox.SandboxError("invalid")
 
 
-def main(argv=None):
+# The provider inherits ONLY this allowlist plus the credential env — never the
+# server's environment (DB URL, encryption key, ...). HOME/CLAUDE_CONFIG_DIR/
+# CODEX_HOME come from the delivery and point strictly inside the sandbox volume.
+_ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ")
+_DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def child_env(delivery):
+    """Minimal, secret-free environment for the sandboxed provider (pure)."""
+    env = {"PATH": _DEFAULT_PATH}
+    for key in _ENV_ALLOWLIST:
+        value = os.environ.get(key)
+        if value is not None and "\x00" not in value:
+            env[key] = value
+    env.update(delivery.env)  # HOME + provider config dir (authoritative)
+    return env
+
+
+def _production_volumes():  # pragma: no cover - requires the real store
+    import neev_credential_store as store_module
+    import neev_credential_volumes as volumes_module
+
+    store = store_module.CredentialStore(
+        volumes_module._STORE_ROOT, volumes_module._KEY_PATH
+    )
+    return volumes_module.CredentialVolumes(store, volumes_module.FixedToolRunner())
+
+
+def main(argv=None, volumes=None):
     args = _parse(sys.argv[1:] if argv is None else argv)
     try:
         _validate_workdir_under_trusted_root(args.workdir)
@@ -108,8 +142,24 @@ def main(argv=None):
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: invalid spec: {error.category}", file=sys.stderr)
         return 2
+    # Open the caller's OWN per-user/per-provider credential volume and deliver it
+    # as the run's HOME. A handle for another user/provider cannot unlock this
+    # scope's volume; a volume not owned by the run's uid is refused (never
+    # chowned). Nothing agent-runs without its own valid credentials.
+    if volumes is None:  # pragma: no cover - production wiring
+        volumes = _production_volumes()
     try:
-        handle = sandbox.launch(spec)
+        delivery = credentials.resolve_delivery(
+            volumes, args.tenant, args.provider, args.credential_handle, args.uid
+        )
+    except credentials.CredentialError as error:
+        print(
+            f"neev_agent_launch: credential delivery refused: {error.category}",
+            file=sys.stderr,
+        )
+        return 5
+    try:
+        handle = sandbox.launch(spec, env=child_env(delivery))
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: launch failed: {error.category}", file=sys.stderr)
         return 3

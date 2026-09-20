@@ -42,8 +42,13 @@ _ALLOWED_TOOLS = frozenset((CRYPTSETUP, MKFS, MOUNT, UMOUNT, FINDMNT, LOSETUP))
 _TOOL_TARGETS = {
     CRYPTSETUP: (Path(CRYPTSETUP), 0o755),
     MKFS: (Path("/usr/sbin/mke2fs"), 0o755),
-    MOUNT: (Path(MOUNT), 0o4755),
-    UMOUNT: (Path(UMOUNT), 0o4755),
+    # Non-setuid on the native agent image (Dockerfile.native.agent strips ALL
+    # setuid/setgid bits); the privileged mount/umount syscalls are authorized by
+    # the caplaunch helper's scoped file capabilities, not by a setuid bit. Require
+    # exactly 0755 so a re-introduced setuid binary (04755) is REJECTED, not
+    # silently trusted.
+    MOUNT: (Path(MOUNT), 0o755),
+    UMOUNT: (Path(UMOUNT), 0o755),
     FINDMNT: (Path(FINDMNT), 0o755),
     LOSETUP: (Path(LOSETUP), 0o755),
 }

@@ -311,14 +311,27 @@ class _CommandRunner:  # pragma: no cover - Linux path
         subprocess.run(argv, check=True, capture_output=True, timeout=15)
 
 
-def launch(spec):  # pragma: no cover - Linux production path
+def launch(spec, env=None):  # pragma: no cover - Linux production path
     """Launch the agent inside the sandbox. Linux only.
 
     For a `provider_allowlist` egress policy this wires (and later tears down) a
     named per-tenant egress netns via `neev_agent_egress` and JOINS the agent to
-    it; for `deny_all` the agent gets a fresh empty netns (no egress at all)."""
+    it; for `deny_all` the agent gets a fresh empty netns (no egress at all).
+
+    `env`, when given, is the COMPLETE environment for the provider process — the
+    caller (neev_agent_launch) builds a minimal allowlist (HOME + provider config +
+    PATH/locale) so the server's own environment (DB URL, keys) is never inherited
+    by the sandboxed provider. `None` keeps the inherited environment (dev/tests)."""
     if platform.system() != "Linux":
         raise SandboxError("unsupported")
+    if env is not None and not (
+        isinstance(env, dict)
+        and all(
+            isinstance(k, str) and isinstance(v, str) and "\x00" not in k and "\x00" not in v
+            for k, v in env.items()
+        )
+    ):
+        raise SandboxError("invalid")
     validate_spec(spec)
     if not os.path.isdir(spec.workdir):
         raise SandboxError("invalid")
@@ -351,6 +364,7 @@ def launch(spec):  # pragma: no cover - Linux production path
             stderr=subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
+            env=env,
         )
     except OSError as error:
         # Don't leak the egress wiring if the process failed to spawn.

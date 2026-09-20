@@ -766,5 +766,20 @@ class LinuxCredentialVolumeAcceptance(unittest.TestCase):
                 self.fail("cleanup failed; retained safe resource: %s" % cleanup_error)
 
 
+class ToolLayoutTests(unittest.TestCase):
+    def test_privileged_tools_are_non_setuid(self):
+        # The native agent image (Dockerfile.native.agent) strips ALL setuid/setgid;
+        # mount/umount run privileged via the caplaunch helper's capabilities, not a
+        # setuid bit. Guard against re-introducing 04755.
+        sys.path.insert(0, str(OPERATIONS))
+        module = load_module("neev_credential_volumes_layout", VOLUMES_PATH)
+        targets = module._TOOL_TARGETS
+        self.assertEqual(targets[module.MOUNT][1], 0o755)
+        self.assertEqual(targets[module.UMOUNT][1], 0o755)
+        for program, (_target, mode) in targets.items():
+            self.assertFalse(mode & stat.S_ISUID, program)
+            self.assertFalse(mode & stat.S_ISGID, program)
+
+
 if __name__ == "__main__":
     unittest.main()
