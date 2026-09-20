@@ -259,6 +259,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
                 gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
@@ -405,6 +406,9 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     }
     if matches!(version, 8 | 9) {
         gateway_migration::validate(db).await?;
+    }
+    if version == org_code_migration::SCHEMA_VERSION {
+        org_code_migration::validate(db).await?;
     }
     Ok(version)
 }
