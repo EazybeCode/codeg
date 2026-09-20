@@ -218,9 +218,11 @@ async fn prepare_starts_joins_without_extending_and_hides_other_session() {
             .await,
         Err(StatusError::Busy)
     ));
+    // Claude is checkable too; this account just has no Claude connection yet,
+    // which is a plain NotFound rather than "that provider is unsupported".
     assert!(matches!(
         prepare_connection_check(&h.state, &h.alice_a, &epoch(), Provider::Claude).await,
-        Err(StatusError::Agent(AgentError::Unavailable))
+        Err(StatusError::Agent(AgentError::NotFound))
     ));
     for actor in [&h.alice_b, &h.bob_a, &h.admin_a] {
         assert!(matches!(
@@ -444,10 +446,9 @@ async fn every_ticket_field_is_compared_and_foreign_scope_is_not_found() {
         if matches!(field, 2 | 3 | 7) {
             assert!(matches!(r, Err(StatusError::Agent(AgentError::NotFound))));
         } else if field == 4 {
-            assert!(matches!(
-                r,
-                Err(StatusError::Agent(AgentError::Unavailable))
-            ));
+            // Naming the other provider reaches that provider's connection —
+            // which does not exist here — so the ticket is simply stale.
+            assert!(matches!(r, Ok(CheckFinalized::Stale)));
         } else if matches!(field, 10 | 11) {
             assert!(matches!(r, Err(StatusError::Invalid)));
         } else {
@@ -1200,4 +1201,175 @@ async fn postgres_expiry_after_blocking_and_cancellation_leave_observed_marker_s
             h::cleanup_postgres(database, admin, schema).await;
         }
     }
+}
+
+/// Connect Claude alongside the fixture's Codex account, returning a ticket for
+/// the Claude connection.
+async fn with_claude(h: &Harness) -> StatusTicket {
+    let login = a::begin(h, &h.alice_a, Provider::Claude, "status-login-claude").await;
+    let account = a::account();
+    let handle = account.storage_handle.clone();
+    completion::complete(&h.state, &h.alice_a, &login, account)
+        .await
+        .unwrap();
+    StatusTicket {
+        epoch: 1,
+        boot_id: BOOT.into(),
+        org_id: h.alice_a.org_id,
+        user_id: h.alice_a.identity.user_id,
+        provider: Provider::Claude,
+        connection_id: login.connection_id,
+        generation: login.generation,
+        session_id: h.alice_a.identity.session_id.clone(),
+        storage_handle: handle,
+        check_id: "cccccccccccccccccccccccccccccccc".into(),
+        issued_at: NOW,
+        expires_at: NOW + 60,
+    }
+}
+
+async fn claude_is_checkable_like_codex(db: DatabaseConnection) {
+    let (h, codex) = fixture(db).await;
+    let claude = with_claude(&h).await;
+    // A Claude connection admits a check on its own terms …
+    let ticket = admission(
+        prepare_connection_check(&h.state, &h.alice_a, &epoch(), Provider::Claude)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(ticket.provider, Provider::Claude);
+    assert_eq!(ticket.connection_id, claude.connection_id);
+    // … and publishes against Claude, naming Claude in the result.
+    // `CheckFinalized` is deliberately not Debug (it can carry an account
+    // label), so match rather than unwrap it.
+    let view = match finalize_connection_check(&h.state, &h.alice_a, &ticket, supported())
+        .await
+        .unwrap()
+    {
+        CheckFinalized::Applied(view) => view,
+        _ => panic!("expected an applied check"),
+    };
+    assert_eq!(view.provider, Provider::Claude);
+    assert_eq!(view.state, ConnectionState::Connected);
+    assert_eq!(view.account_label.as_deref(), Some("checked synthetic"));
+    // The Codex connection is untouched: a check publishes its own label, so
+    // the login's is proof nothing was written there.
+    let (_, codex_label, ..) = metadata(&h, &codex).await;
+    assert_eq!(codex_label.as_deref(), Some("synthetic account"));
+    assert_eq!(count(&h).await, 0);
+}
+
+async fn each_provider_holds_its_own_check(db: DatabaseConnection) {
+    let (h, _codex) = fixture(db).await;
+    with_claude(&h).await;
+    let codex_ticket = admission(
+        prepare_connection_check(&h.state, &h.alice_a, &epoch(), Provider::Codex)
+            .await
+            .unwrap(),
+    );
+    // One provider being mid-check must not make the other look busy.
+    let claude_ticket = admission(
+        prepare_connection_check(&h.state, &h.alice_a, &epoch(), Provider::Claude)
+            .await
+            .unwrap(),
+    );
+    assert_ne!(codex_ticket.connection_id, claude_ticket.connection_id);
+    assert_eq!(count(&h).await, 2);
+    // Each rejoins its own slot rather than stealing the other's.
+    assert_eq!(
+        admission(
+            prepare_connection_check(&h.state, &h.alice_a, &epoch(), Provider::Claude)
+                .await
+                .unwrap()
+        )
+        .check_id,
+        claude_ticket.check_id
+    );
+    // Finalising one leaves the other's ticket live.
+    finalize_connection_check(&h.state, &h.alice_a, &claude_ticket, supported())
+        .await
+        .unwrap();
+    assert_eq!(count(&h).await, 1);
+    assert!(matches!(
+        finalize_connection_check(&h.state, &h.alice_a, &codex_ticket, supported()).await,
+        Ok(CheckFinalized::Applied(view)) if view.provider == Provider::Codex
+    ));
+    assert_eq!(count(&h).await, 0);
+}
+
+async fn a_ticket_cannot_cross_providers(db: DatabaseConnection) {
+    let (h, _codex) = fixture(db).await;
+    let claude = with_claude(&h).await;
+    let codex_ticket = admission(
+        prepare_connection_check(&h.state, &h.alice_a, &epoch(), Provider::Codex)
+            .await
+            .unwrap(),
+    );
+    // A real Codex ticket relabelled as Claude must not settle the Claude
+    // connection: the provider is part of what the ticket proves.
+    let mut forged = codex_ticket.clone();
+    forged.provider = Provider::Claude;
+    assert!(matches!(
+        finalize_connection_check(&h.state, &h.alice_a, &forged, supported()).await,
+        Ok(CheckFinalized::Stale)
+    ));
+    // Nor may it clear the other provider's bookkeeping.
+    clear_connection_check(&h.state, &epoch(), &forged)
+        .await
+        .unwrap_err();
+    assert_eq!(count(&h).await, 1);
+    // And the Claude connection never moved.
+    let (state_name, label, ..) = metadata(&h, &claude).await;
+    assert_eq!(state_name, "connected");
+    assert_eq!(label.as_deref(), Some("synthetic account"));
+    // The genuine Codex ticket still settles.
+    assert!(matches!(
+        finalize_connection_check(&h.state, &h.alice_a, &codex_ticket, supported()).await,
+        Ok(CheckFinalized::Applied(view)) if view.provider == Provider::Codex
+    ));
+}
+
+async fn a_claude_check_goes_stale_when_its_connection_moves(db: DatabaseConnection) {
+    let (h, _codex) = fixture(db).await;
+    with_claude(&h).await;
+    let ticket = admission(
+        prepare_connection_check(&h.state, &h.alice_a, &epoch(), Provider::Claude)
+            .await
+            .unwrap(),
+    );
+    // A disconnect between issue and finalize moves the generation on.
+    db::execute(
+        &h.state.database,
+        "UPDATE neev_agent_connections SET generation=generation+1 WHERE id=$1",
+        vec![ticket.connection_id.clone().into()],
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        finalize_connection_check(&h.state, &h.alice_a, &ticket, supported()).await,
+        Ok(CheckFinalized::Stale)
+    ));
+    // Stale is not a licence to publish: the row keeps the login's own label.
+    let (_, label, ..) = metadata(&h, &ticket).await;
+    assert_eq!(label.as_deref(), Some("synthetic account"));
+}
+
+#[tokio::test]
+async fn sqlite_claude_is_checkable_like_codex() {
+    claude_is_checkable_like_codex(h::database().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_each_provider_holds_its_own_check() {
+    each_provider_holds_its_own_check(h::database().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_a_ticket_cannot_cross_providers() {
+    a_ticket_cannot_cross_providers(h::database().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_a_claude_check_goes_stale_when_its_connection_moves() {
+    a_claude_check_goes_stale_when_its_connection_moves(h::database().await).await;
 }
