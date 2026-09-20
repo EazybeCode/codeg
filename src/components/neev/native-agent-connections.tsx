@@ -20,6 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
+import { BrowserLink } from "@/components/ui/browser-link"
 import {
   cancelProviderConnect,
   disconnectProvider,
@@ -28,7 +29,10 @@ import {
   loadConnectAttempt,
   newRequestKey,
   startProviderConnect,
+  submitConnectCode,
+  NEEV_MAX_AUTH_CODE_CHARS,
   NEEV_AGENT_PROVIDERS,
+  type NeevApproval,
   type NeevAgentConnection,
   type NeevAgentConnections,
   type NeevAgentProvider,
@@ -128,6 +132,11 @@ export function NativeAgentConnectionsPanel({
   const [busy, setBusy] = useState<NeevAgentProvider | null>(null)
   const [attempt, setAttempt] = useState<Attempt | null>(null)
   const [outcome, setOutcome] = useState<NeevAttemptState | null>(null)
+  // What the user must do to approve, once the supervisor has produced it.
+  // Never persisted: it is re-read from the attempt on every poll.
+  const [approval, setApproval] = useState<NeevApproval | null>(null)
+  const [code, setCode] = useState("")
+  const [submitting, setSubmitting] = useState(false)
   // Per-provider connect keys for the current page. A resumed attempt carries
   // its own key, so a reload never loses the ability to replay rather than
   // start a second sign-in.
@@ -191,6 +200,8 @@ export function NativeAgentConnectionsPanel({
     let failures = 0
     const settle = (state: NeevAttemptState) => {
       setOutcome(state)
+      setApproval(null)
+      setCode("")
       remember(null)
       // Whatever happened, the connection row is the truth now.
       refresh()
@@ -220,6 +231,7 @@ export function NativeAgentConnectionsPanel({
           settle(state.state)
           return
         }
+        setApproval(state.approval)
       } catch (cause) {
         if (controller.signal.aborted) return
         auth.handleAuthorityError(cause)
@@ -248,6 +260,8 @@ export function NativeAgentConnectionsPanel({
     setBusy(provider)
     setError(null)
     setOutcome(null)
+    setApproval(null)
+    setCode("")
     // One key per in-flight sign-in: a retry after a lost response replays the
     // SAME attempt instead of starting a second one.
     const connectKey = pendingKeys.current.get(provider) ?? newRequestKey()
@@ -294,6 +308,8 @@ export function NativeAgentConnectionsPanel({
       )
       pendingKeys.current.delete(attempt.provider)
       remember(null)
+      setApproval(null)
+      setCode("")
       setOutcome("canceled")
       refresh()
     } catch (cause) {
@@ -301,6 +317,36 @@ export function NativeAgentConnectionsPanel({
       auth.handleAuthorityError(cause)
     } finally {
       setBusy(null)
+    }
+  }
+
+  async function submitCode() {
+    if (!attempt || !approval || submitting || !auth.session) return
+    const trimmed = code.trim()
+    if (!trimmed) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const result = await submitConnectCode(
+        attempt.provider,
+        attempt.attemptId,
+        trimmed,
+        auth.session.csrf,
+        auth.signal
+      )
+      // The code is forwarded, never kept — here or on the server.
+      setCode("")
+      if (result.state !== "pending") {
+        setOutcome(result.state)
+        setApproval(null)
+        remember(null)
+        refresh()
+      }
+    } catch (cause) {
+      setError(cause)
+      auth.handleAuthorityError(cause)
+    } finally {
+      setSubmitting(false)
     }
   }
 
@@ -397,6 +443,16 @@ export function NativeAgentConnectionsPanel({
                     )
                   )}
                 </div>
+                {attempt?.provider === connection.provider &&
+                  approval !== null && (
+                    <ApprovalPrompt
+                      approval={approval}
+                      code={code}
+                      submitting={submitting}
+                      onCode={setCode}
+                      onSubmit={() => void submitCode()}
+                    />
+                  )}
                 <div className="flex flex-wrap gap-2">
                   {actionsFor(connection)}
                 </div>
@@ -490,4 +546,82 @@ export function NativeAgentConnectionsPanel({
       </>
     )
   }
+}
+
+/**
+ * What the user actually does to approve. The verification URL is opened in
+ * their own browser — Neev never drives the provider's sign-in page and never
+ * sees the credential, only the code the user chooses to paste back.
+ */
+function ApprovalPrompt({
+  approval,
+  code,
+  submitting,
+  onCode,
+  onSubmit,
+}: {
+  approval: NeevApproval
+  code: string
+  submitting: boolean
+  onCode: (value: string) => void
+  onSubmit: () => void
+}) {
+  const t = useTranslations("NativeContent"),
+    n = useTranslations("Native")
+  return (
+    <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
+      <p className="text-xs text-muted-foreground">
+        {t(approval.kind === "device" ? "signInDeviceHint" : "signInCodeHint")}
+      </p>
+      {/* The user approves in their OWN browser; Neev never drives the
+          provider's sign-in page. `BrowserLink` is the only link form that
+          actually opens in the desktop webview. */}
+      <BrowserLink
+        href={approval.verificationUrl}
+        className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {t("openSignInPage")}
+      </BrowserLink>
+      {approval.kind === "device" ? (
+        <p className="text-sm">
+          <span className="text-muted-foreground">{t("signInCodeLabel")} </span>
+          <code className="rounded bg-background px-1.5 py-0.5 font-mono tracking-widest">
+            {approval.userCode}
+          </code>
+        </p>
+      ) : (
+        approval.needsCode && (
+          <form
+            className="flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault()
+              onSubmit()
+            }}
+          >
+            <label className="min-w-0 flex-1 space-y-1">
+              <span className="block text-xs font-medium">
+                {t("pasteCodeLabel")}
+              </span>
+              <input
+                value={code}
+                autoComplete="off"
+                spellCheck={false}
+                maxLength={NEEV_MAX_AUTH_CODE_CHARS}
+                disabled={submitting}
+                onChange={(event) => onCode(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 font-mono text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              />
+            </label>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={submitting || !code.trim()}
+            >
+              {submitting ? n("working") : t("submitCode")}
+            </Button>
+          </form>
+        )
+      )}
+    </div>
+  )
 }

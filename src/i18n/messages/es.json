@@ -147,7 +147,13 @@
     "connectProviderNamed": "Conectar {name}",
     "reconnectProviderNamed": "Reconectar {name}",
     "disconnectProviderNamed": "Desconectar {name}",
-    "cancelSignInNamed": "Cancelar el inicio de sesión de {name}"
+    "cancelSignInNamed": "Cancelar el inicio de sesión de {name}",
+    "openSignInPage": "Abrir la página de inicio de sesión",
+    "signInCodeLabel": "Tu código:",
+    "pasteCodeLabel": "Pega el código de autorización",
+    "submitCode": "Enviar código",
+    "signInDeviceHint": "Abre la página, introduce este código y apruébalo allí. Neev termina solo.",
+    "signInCodeHint": "Abre la página y aprueba, luego pega aquí el código que te den."
   },
   "Native": {
     "callbackConflict": "Este método de acceso entra en conflicto con una cuenta existente. Usa tu método de acceso original y luego abre Configuración para vincular otro método. Las cuentas nunca se fusionan automáticamente.",

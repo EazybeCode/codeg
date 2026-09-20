@@ -147,7 +147,13 @@
     "connectProviderNamed": "连接 {name}",
     "reconnectProviderNamed": "重新连接 {name}",
     "disconnectProviderNamed": "断开 {name}",
-    "cancelSignInNamed": "取消 {name} 登录"
+    "cancelSignInNamed": "取消 {name} 登录",
+    "openSignInPage": "打开登录页面",
+    "signInCodeLabel": "你的代码：",
+    "pasteCodeLabel": "粘贴授权码",
+    "submitCode": "提交代码",
+    "signInDeviceHint": "打开页面，输入此代码并在那里批准。Neev 会自动完成。",
+    "signInCodeHint": "打开页面并批准，然后把拿到的代码粘贴回这里。"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

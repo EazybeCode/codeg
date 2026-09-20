@@ -725,9 +725,76 @@ export type NeevConnectOutcome =
   | { outcome: "pending"; attemptId: string; expiresAt: number }
   | { outcome: "settled"; connection: NeevAgentConnection }
 
+/**
+ * What the user must do to approve a sign-in, once the supervisor has produced
+ * it. Display data ONLY — never a client secret, token, PKCE verifier or
+ * cookie; those stay supervisor-side, keyed by attempt.
+ *
+ * `device` (Codex): show the code, the user approves in their own browser and
+ * the supervisor polls — Neev needs nothing further.
+ * `authorization_code` (Claude): the user approves in their own browser and
+ * pastes the code they are given back into Neev.
+ */
+export type NeevApproval =
+  | { kind: "device"; verificationUrl: string; userCode: string }
+  | {
+      kind: "authorization_code"
+      verificationUrl: string
+      needsCode: boolean
+    }
+
 export interface NeevConnectAttempt {
   state: NeevAttemptState
   expiresAt: number
+  approval: NeevApproval | null
+}
+
+/** A code the user pasted back: bounded, and never stored by the server. */
+export const NEEV_MAX_AUTH_CODE_CHARS = 512
+
+/**
+ * The verification URL is rendered as a link the user is told to open, so it
+ * must be an absolute `https:` URL and nothing else — a relative, `http:` or
+ * `javascript:` value would turn an approval prompt into an attack surface.
+ */
+function verificationUrl(value: unknown): string {
+  const raw = text(value)
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return invalid()
+  }
+  if (parsed.protocol !== "https:" || !parsed.hostname) return invalid()
+  return raw
+}
+
+export function parseApproval(value: unknown): NeevApproval {
+  const object = exact(value, [
+    "kind",
+    "verificationUrl",
+    "userCode",
+    "needsCode",
+  ])
+  const url = verificationUrl(object.verificationUrl)
+  if (typeof object.needsCode !== "boolean") return invalid()
+  if (object.kind === "device") {
+    // A device flow is only actionable with a code to type; and it never asks
+    // for one back, so a `needsCode` device payload is self-contradictory.
+    const userCode = text(object.userCode)
+    if (userCode.length === 0 || userCode.length > 64 || object.needsCode)
+      return invalid()
+    return { kind: "device", verificationUrl: url, userCode }
+  }
+  if (object.kind === "authorization_code") {
+    if (object.userCode !== null) return invalid()
+    return {
+      kind: "authorization_code",
+      verificationUrl: url,
+      needsCode: object.needsCode,
+    }
+  }
+  return invalid()
 }
 
 export interface NeevOperationReceipt {
@@ -804,13 +871,62 @@ export function parseConnectOutcome(value: unknown): NeevConnectOutcome {
 }
 
 export function parseConnectAttempt(value: unknown): NeevConnectAttempt {
-  const object = exact(value, ["state", "expiresAt"])
+  // `approval` is designed and lands with the supervisor binding; a server that
+  // does not send it yet simply has no approval to show. Once present it is
+  // validated strictly.
+  const labelled = record(value).approval !== undefined
+  const object = exact(
+    value,
+    labelled ? ["state", "expiresAt", "approval"] : ["state", "expiresAt"]
+  )
   const state = text(object.state)
   if (!ATTEMPT_STATES.includes(state as NeevAttemptState)) return invalid()
+  const approval =
+    !labelled || object.approval === null
+      ? null
+      : parseApproval(object.approval)
+  // Only a live attempt can be approved; approval data on a settled one would
+  // invite the user to complete something that can no longer succeed.
+  if (approval !== null && state !== "pending") return invalid()
   return {
     state: state as NeevAttemptState,
     expiresAt: timestamp(object.expiresAt),
+    approval,
   }
+}
+
+/**
+ * Forward the authorization code the user pasted. It is handed straight to the
+ * supervisor and never stored by the server, so this client keeps no copy
+ * either — the caller clears its field on success.
+ */
+export async function submitConnectCode(
+  provider: string,
+  attemptId: string,
+  code: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<{ state: NeevAttemptState }> {
+  assertProvider(provider)
+  if (!RUN_ID.test(attemptId)) invalidRequest()
+  if (
+    typeof code !== "string" ||
+    code.length === 0 ||
+    code.length > NEEV_MAX_AUTH_CODE_CHARS
+  )
+    invalidRequest()
+  const object = exact(
+    await contentMutation(
+      `/api/neev/agent/connections/${provider}/attempts/${attemptId}/code`,
+      { code },
+      csrf,
+      signal
+    ),
+    ["state"]
+  )
+  const state = text(object.state)
+  if (!ATTEMPT_STATES.includes(state as NeevAttemptState)) return invalid()
+  return { state: state as NeevAttemptState }
 }
 
 export function parseOperationReceipt(value: unknown): NeevOperationReceipt {

@@ -147,7 +147,13 @@
     "connectProviderNamed": "Connect {name}",
     "reconnectProviderNamed": "Reconnect {name}",
     "disconnectProviderNamed": "Disconnect {name}",
-    "cancelSignInNamed": "Cancel {name} sign-in"
+    "cancelSignInNamed": "Cancel {name} sign-in",
+    "openSignInPage": "Open the sign-in page",
+    "signInCodeLabel": "Your code:",
+    "pasteCodeLabel": "Paste the authorization code",
+    "submitCode": "Submit code",
+    "signInDeviceHint": "Open the page, enter this code and approve there. Neev finishes on its own.",
+    "signInCodeHint": "Open the page and approve, then paste the code you are given back here."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",
