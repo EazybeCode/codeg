@@ -105,27 +105,44 @@ class FakeVolumes:
         self.revoked.append((store_scope, handle))
 
 
+class FakeProbe(sup.AccountProbe):
+    def __init__(self, result="supported", fail=False):
+        self._result = result
+        self._fail = fail
+
+    def probe(self):
+        if self._fail:
+            raise RuntimeError("probe failed")
+        return (self._result, "Acct") if self._result == "supported" else self._result
+
+
 class SupervisorTestBase(unittest.TestCase):
     def setUp(self):
         self.volumes = FakeVolumes()
         self.drivers = {}
         self._ids = 0
         self.clock = [1000]
+        self.probe_result = "supported"
+        self.probe_fail = False
 
         def driver_for(provider, store_scope, handle):
             driver = FakeDriver(provider)
             self.drivers[handle] = driver
             return driver
 
+        def probe_for(provider, store_scope, handle):
+            return FakeProbe(self.probe_result, self.probe_fail)
+
         def mint_id():
             self._ids += 1
             return format(0xF0000000 + self._ids, "032x")
 
         self.driver_for = driver_for
+        self.probe_for = probe_for
         self.mint_id = mint_id
         self.sup = sup.Supervisor(
             BOOT, self.volumes, driver_for,
-            now=lambda: self.clock[0], mint_id=mint_id,
+            now=lambda: self.clock[0], mint_id=mint_id, probe_for=probe_for,
         )
         self.sup.recover()  # in-memory mode: no durable backend, just open the gate
 
@@ -541,9 +558,15 @@ class RecoveryAndFaultTests(unittest.TestCase):
         retry = supervisor.handle(request(dto.CleanupConnectionRequest(cancel_ticket), seq="4", rid="d" * 32))
         self.assertIs(retry.body.state, dto.CleanupState.COMPLETED)
 
-    def test_committed_connection_survives_restart_and_is_honestly_uncheckable(self):
+    def test_committed_connection_survives_restart_probe_and_disconnect(self):
         import os
         import tempfile
+
+        probe_calls = []
+
+        def probe_for(provider, store_scope, handle):
+            probe_calls.append(handle)
+            return FakeProbe("supported")
 
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "registry.json")
@@ -553,7 +576,7 @@ class RecoveryAndFaultTests(unittest.TestCase):
 
             first = sup.Supervisor(
                 BOOT, volumes, driver_for, now=lambda: 1000, mint_id=mint,
-                durable=sup.FileRegistry(path),
+                probe_for=probe_for, durable=sup.FileRegistry(path),
             )
             first.recover()
             first.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
@@ -567,27 +590,108 @@ class RecoveryAndFaultTests(unittest.TestCase):
             )
             first.handle(request(dto.SettleLoginRequest(prepared.receipt_id, witness), seq="3", rid="c" * 32))
 
-            # Restart: a fresh supervisor over the SAME durable registry.
+            # Restart: a fresh supervisor over the SAME durable registry, no cached driver.
             second = sup.Supervisor(
                 BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory(),
-                durable=sup.FileRegistry(path),
+                probe_for=probe_for, durable=sup.FileRegistry(path),
             )
             second.recover()
             recovered = second.handle(observe).body
             self.assertIs(recovered.state, dto.LoginState.COMMITTED)
             self.assertEqual(recovered.storage_handle.value, handle)
-            # No live driver after restart -> a check is honestly UNAVAILABLE, not faked.
+            # A check post-restart runs an ACTUAL credential probe (no cached driver).
             check = second.handle(
                 request(dto.CheckConnectionRequest(self._check_ticket(handle)), seq="4", rid="d" * 32)
             ).body
-            self.assertIs(check.state, dto.CheckState.UNAVAILABLE)
-            self.assertIs(check.reason, dto.CheckFailure.INTERRUPTED)
+            self.assertIs(check.state, dto.CheckState.FINISHED)
+            self.assertIsInstance(check.account, dto.SupportedAccount)
+            self.assertEqual(probe_calls[-1], handle)  # probed THIS connection's volume
             # Disconnect after restart still DURABLY revokes the persisted volume.
             cleanup = second.handle(
                 request(dto.CleanupConnectionRequest(self._disconnect_ticket()), seq="5", rid="e" * 32)
             ).body
             self.assertIs(cleanup.state, dto.CleanupState.COMPLETED)
             self.assertIn((volumes.created[0][0], handle), volumes.revoked)
+
+    def test_check_connection_probe_failure_is_unavailable(self):
+        volumes = FakeVolumes()
+        drivers, driver_for = _drivers_sink()
+
+        def failing_probe(provider, store_scope, handle):
+            return FakeProbe(fail=True)
+
+        supervisor = sup.Supervisor(
+            BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory(),
+            probe_for=failing_probe,
+        )
+        supervisor.recover()
+        # Commit a connection.
+        supervisor.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+        handle = volumes.created[0][1]
+        drivers[handle].phase = "prepared"
+        prepared = supervisor.handle(
+            request(dto.ObserveLoginRequest(binding(dto.Provider.CODEX)), seq="2", rid="b" * 32)
+        ).body
+        witness = dto.CommittedLoginWitnessDto(
+            dto.WitnessKind.COMPLETED_CONNECT, binding(dto.Provider.CODEX),
+            dto.Id(handle), dto.UnixSec(1500),
+        )
+        supervisor.handle(request(dto.SettleLoginRequest(prepared.receipt_id, witness), seq="3", rid="c" * 32))
+        b = binding(dto.Provider.CODEX)
+        ticket_dto = dto.CheckTicketDto(
+            dto.ConnectionBinding(b.scope, b.connection_id, b.generation),
+            dto.SessionId(SESSION), dto.Id(handle), dto.Id("a" * 32), dto.UnixSec(2000000000),
+        )
+        check = supervisor.handle(
+            request(dto.CheckConnectionRequest(ticket_dto), seq="4", rid="d" * 32)
+        ).body
+        self.assertIs(check.state, dto.CheckState.UNAVAILABLE)  # fail-closed, not faked
+
+    def test_corrupt_registry_fails_closed_missing_is_clean(self):
+        import os
+        import tempfile
+
+        # A PRESENT-but-corrupt registry aborts recovery (fail-closed) and the daemon
+        # keeps refusing — never silently resets to empty (which would drop connections).
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "registry.json")
+            with open(path, "w") as sink:
+                sink.write("{ this is not valid json")
+            volumes = FakeVolumes()
+            _drivers, driver_for = _drivers_sink()
+            supervisor = sup.Supervisor(
+                BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory(),
+                durable=sup.FileRegistry(path),
+            )
+            with self.assertRaises(sup.RegistryError):
+                supervisor.recover()
+            refused = supervisor.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+            self.assertIs(refused.error.code, dto.ErrorCode.UNAVAILABLE)
+
+        # A valid-JSON registry with a corrupt RECORD also aborts (not skipped).
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "registry.json")
+            with open(path, "w") as sink:
+                sink.write('{"e": {"entry_id": "not-32-hex", "phase": "committed"}}')
+            supervisor = sup.Supervisor(
+                BOOT, FakeVolumes(), _drivers_sink()[1], now=lambda: 1000,
+                mint_id=_mint_factory(), durable=sup.FileRegistry(path),
+            )
+            with self.assertRaises(sup.RegistryError):
+                supervisor.recover()
+
+        # A MISSING registry is a clean first boot (empty, recovers fine).
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "absent.json")
+            supervisor = sup.Supervisor(
+                BOOT, FakeVolumes(), _drivers_sink()[1], now=lambda: 1000,
+                mint_id=_mint_factory(), durable=sup.FileRegistry(path),
+            )
+            supervisor.recover()
+            self.assertIs(
+                supervisor.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX)))).outcome,
+                dto.Outcome.OK,
+            )
 
     def test_in_flight_login_recovers_as_interrupted(self):
         import os

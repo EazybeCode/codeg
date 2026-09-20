@@ -65,6 +65,15 @@ class Reject(Exception):
         super().__init__(code.value)
 
 
+class RegistryError(Exception):
+    """A durable-registry failure that must ABORT recovery (fail-closed): the daemon
+    refuses to serve rather than lose or corrupt committed connection state."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 # --------------------------------------------------------------------------- #
 # Login driver seam
 # --------------------------------------------------------------------------- #
@@ -112,6 +121,19 @@ class LoginDriver(abc.ABC):
     @abc.abstractmethod
     def logout(self) -> str:
         """Return a `dto.LogoutResult` value (confirmed|not_confirmed|not_needed)."""
+
+
+class AccountProbe(abc.ABC):
+    """A fresh, login-driver-INDEPENDENT probe of a committed connection's stored
+    credentials — used by check_connection so a check works after a restart (no
+    cached login driver) and reflects the ACTUAL credential state, not a login poll.
+    Production probes spawn the provider against the credential volume and read the
+    account; a probe that cannot run raises (check reports UNAVAILABLE, fail-closed)."""
+
+    @abc.abstractmethod
+    def probe(self) -> str:
+        """Return an account state: 'supported' | 'disconnected' | 'unsupported'.
+        Optionally a (state, account_label) tuple for 'supported'."""
 
 
 # --------------------------------------------------------------------------- #
@@ -164,11 +186,16 @@ class Supervisor:
         *,
         now: Callable[[], int],
         mint_id: Callable[[], str],
+        probe_for: Optional[Callable[[dto.Provider, "StoreScope", str], "AccountProbe"]] = None,
         durable=None,
     ):
         self._boot_id = boot_id
         self._volumes = volumes
         self._driver_for = driver_for
+        # probe_for builds a fresh, driver-INDEPENDENT account probe against a
+        # committed connection's credential volume (used by check_connection, which
+        # must work after a restart when no login driver is cached).
+        self._probe_for = probe_for
         self._now = now
         self._mint_id = mint_id
         self._durable = durable
@@ -190,8 +217,13 @@ class Supervisor:
             return
         if self._durable is not None:
             highest = self._revision
-            for record in self._durable.load():
-                entry = self._entry_from_record(record)
+            for record in self._durable.load():  # RegistryError propagates (fail-closed)
+                try:
+                    entry = self._entry_from_record(record)
+                except (dto.DtoError, KeyError, TypeError, ValueError) as error:
+                    # A record that no longer decodes is corruption; abort rather than
+                    # skip it (skipping could silently drop a committed connection).
+                    raise RegistryError("corrupt") from error
                 if entry.phase is dto.RegistryPhase.DISPOSED:
                     continue
                 self._entries[entry.entry_id] = entry
@@ -479,28 +511,33 @@ class Supervisor:
         ticket = request.body.ticket
         check_id = ticket.check_id
         attempt = self._find_committed(ticket.binding, ticket.storage_handle.value)
-        if attempt is None:
+        if attempt is None or self._probe_for is None:
             return dto.CheckUnavailable(
                 dto.CheckState.UNAVAILABLE, check_id, dto.CheckFailure.PROVIDER_UNAVAILABLE
             )
-        if attempt.driver is None:
-            # A committed connection recovered after a restart has no live driver; we
-            # cannot truthfully report its account status, so we say so honestly
-            # rather than fabricate a "finished" result.
-            return dto.CheckUnavailable(
-                dto.CheckState.UNAVAILABLE, check_id, dto.CheckFailure.INTERRUPTED
+        # Run an ACTUAL credential probe (independent of any cached login driver, so it
+        # works post-restart) against this connection's own volume. Any probe failure
+        # is reported UNAVAILABLE — never a fabricated "finished".
+        try:
+            store_scope = self._store_scope(ticket.binding.scope)
+            probe = self._probe_for(
+                ticket.binding.scope.provider, store_scope, attempt.storage_handle
             )
-        state = attempt.driver.poll()
-        account = self._account_status(state)
+            result = probe.probe()
+        except Exception:
+            return dto.CheckUnavailable(
+                dto.CheckState.UNAVAILABLE, check_id, dto.CheckFailure.PROVIDER_UNAVAILABLE
+            )
         return dto.CheckFinished(
-            dto.CheckState.FINISHED, check_id, dto.UnixSec(self._now()), account
+            dto.CheckState.FINISHED, check_id, dto.UnixSec(self._now()),
+            self._account_status(result),
         )
 
-    def _account_status(self, state: DriverState):
-        if state.account_state == "supported":
-            label = state.account_label if state.account_label else "account"
-            return dto.SupportedAccount(dto.Label(label))
-        if state.account_state == "unsupported":
+    def _account_status(self, result):
+        state, label = result if isinstance(result, tuple) else (result, None)
+        if state == "supported":
+            return dto.SupportedAccount(dto.Label(label if label else "account"))
+        if state == "unsupported":
             return dto.UnsupportedAccount()
         return dto.DisconnectedAccount()
 
@@ -759,17 +796,27 @@ class FileRegistry:
         self._records: Dict[str, dict] = {}
 
     def load(self) -> list:
+        # A MISSING file is a clean first boot (empty). A PRESENT-but-unreadable or
+        # corrupt file is FAIL-CLOSED: raise so recover() aborts and the daemon
+        # refuses to serve, rather than silently discarding committed connections
+        # (which would strand live credentials and orphan volumes).
         try:
             with open(self._path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
+                raw = handle.read()
         except FileNotFoundError:
-            data = {}
-        except (ValueError, OSError):
-            data = {}
-        self._records = {
-            key: value for key, value in data.items()
-            if isinstance(data, dict) and isinstance(value, dict)
-        } if isinstance(data, dict) else {}
+            self._records = {}
+            return []
+        except OSError as error:
+            raise RegistryError("unreadable") from error
+        try:
+            data = json.loads(raw)
+        except ValueError as error:
+            raise RegistryError("corrupt") from error
+        if not isinstance(data, dict) or not all(
+            isinstance(key, str) and isinstance(value, dict) for key, value in data.items()
+        ):
+            raise RegistryError("corrupt")
+        self._records = dict(data)
         return list(self._records.values())
 
     def put(self, record: dict) -> None:
