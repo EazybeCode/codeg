@@ -314,6 +314,12 @@ class SandboxHandle:
         """The agent's piped stdout (provider stream-json), for forwarding."""
         return self._process.stdout
 
+    @property
+    def stdin(self):
+        """The agent's piped stdin, when launched with stdin_pipe=True (login flows
+        that drive the provider's stdio); None otherwise."""
+        return self._process.stdin
+
     def wait(self, timeout=None):
         return self._process.wait(timeout=timeout)
 
@@ -368,8 +374,11 @@ def _create_bind_mountpoint(workdir, run_uid, run_gid):  # pragma: no cover - Li
     return target
 
 
-def launch(spec, env=None, bind_source=None):  # pragma: no cover - Linux production path
+def launch(spec, env=None, bind_source=None, stdin_pipe=False):  # pragma: no cover - Linux production path
     """Launch the agent inside the sandbox. Linux only.
+
+    `stdin_pipe=True` opens a pipe to the provider's stdin (login flows that drive the
+    provider's stdio, e.g. Codex app-server / Claude paste-code); default DEVNULL.
 
     For a `provider_allowlist` egress policy this wires (and later tears down) a
     named per-tenant egress netns via `neev_agent_egress` and JOINS the agent to
@@ -423,7 +432,7 @@ def launch(spec, env=None, bind_source=None):  # pragma: no cover - Linux produc
         process = subprocess.Popen(
             argv,
             cwd=spec.workdir,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
