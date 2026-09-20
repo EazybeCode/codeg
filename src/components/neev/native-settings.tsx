@@ -22,6 +22,7 @@ import { NativeBoundary, NativeError } from "./native-boundary"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeSignInMethods } from "./native-login"
+import { NativeJoinCode } from "./native-join-code"
 
 type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
 function SettingsContent() {
@@ -453,6 +454,9 @@ function SettingsContent() {
           </section>
         </>
       )}
+      <div className="border-t pt-6">
+        <NativeJoinCode />
+      </div>
       <section className="space-y-4 border-t pt-6">
         <h2 className="text-lg font-medium">{t("yourProfile")}</h2>
         <p className="break-words text-sm">{auth.session?.user.displayName}</p>

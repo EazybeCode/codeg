@@ -425,6 +425,77 @@ export async function loadMembers(page: number, signal?: AbortSignal) {
     100
   )
 }
+export type NativeJoinCode = { code: string | null; disabled: boolean }
+export function parseJoinCode(value: unknown): NativeJoinCode {
+  const o = record(value)
+  return {
+    code: o.code === null || o.code === undefined ? null : string(o.code),
+    disabled: typeof o.disabled === "boolean" ? o.disabled : invalid(),
+  }
+}
+export type NativeJoinPreview = { orgId: number; name: string }
+export function parseJoinPreview(value: unknown): NativeJoinPreview {
+  const o = record(value)
+  const org = record(o.organization)
+  return { orgId: id(org.id), name: string(org.name) }
+}
+export async function loadJoinCode(
+  signal?: AbortSignal
+): Promise<NativeJoinCode> {
+  return parseJoinCode(
+    await nativeRequest("/api/neev/organization/join-code", {}, signal)
+  )
+}
+export async function rotateJoinCode(
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NativeJoinCode> {
+  return parseJoinCode(
+    await nativeMutation(
+      "/api/neev/organization/join-code/rotate",
+      {},
+      csrf,
+      signal
+    )
+  )
+}
+export function setJoinCodeEnabled(
+  enabled: boolean,
+  csrf: string,
+  signal?: AbortSignal
+) {
+  return nativeMutation(
+    "/api/neev/organization/join-code/enabled",
+    { enabled },
+    csrf,
+    signal
+  )
+}
+export async function previewJoinCode(
+  code: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NativeJoinPreview> {
+  return parseJoinPreview(
+    await nativeMutation("/api/neev/join/preview", { code }, csrf, signal)
+  )
+}
+export async function acceptJoinCode(
+  code: string,
+  confirmedOrgId: number,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<number> {
+  const result = record(
+    await nativeMutation(
+      "/api/neev/join",
+      { code, confirmedOrgId },
+      csrf,
+      signal
+    )
+  )
+  return id(result.organizationId)
+}
 export async function loadMethods(
   signal?: AbortSignal
 ): Promise<NativeProvider[]> {

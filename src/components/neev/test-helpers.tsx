@@ -47,6 +47,10 @@ export function mockNativeSession(
     if (key === "GET /api/workos/capabilities") return json(nativeCapabilities)
     if (key === "GET /api/neev/session")
       return json(session ?? { code: "unauthorized" }, session ? 200 : 401)
+    // The Settings page always mounts the join-code panel; default to "no code
+    // yet" so unrelated Settings tests need not mock it (tests can still override).
+    if (key === "GET /api/neev/organization/join-code")
+      return json({ code: null, disabled: false })
     unknown.push(key)
     throw new Error(`Unexpected fetch: ${key}`)
   })
