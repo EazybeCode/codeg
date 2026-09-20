@@ -753,11 +753,28 @@ export interface NeevConnectAttempt {
 export const NEEV_MAX_AUTH_CODE_CHARS = 512
 
 /**
- * The verification URL is rendered as a link the user is told to open, so it
- * must be an absolute `https:` URL and nothing else — a relative, `http:` or
- * `javascript:` value would turn an approval prompt into an attack surface.
+ * Where each provider's approval page really lives.
+ *
+ * Claude's is `claude.com` — confirmed by an offline probe of the pinned
+ * 2.1.267 binary, NOT the legacy `claude.ai`. Codex's is the device endpoint
+ * already pinned server-side in `control_dto.rs`.
+ *
+ * This is an allowlist, not a format check, because the verification URL is a
+ * link we actively tell the user to open and approve on. Accepting any https
+ * host would mean a buggy or compromised supervisor could aim that instruction
+ * at a phishing page. Keep in sync with the server-side allowlist.
  */
-function verificationUrl(value: unknown): string {
+const APPROVAL_ORIGINS: Record<NeevAgentProvider, readonly string[]> = {
+  claude: ["claude.com"],
+  codex: ["auth.openai.com"],
+}
+
+/**
+ * The verification URL must be an absolute `https:` URL on the provider's own
+ * approval host. A relative, `http:` or `javascript:` value — or a valid https
+ * URL somewhere else entirely — is refused rather than rendered.
+ */
+function verificationUrl(value: unknown, provider: NeevAgentProvider): string {
   const raw = text(value)
   let parsed: URL
   try {
@@ -765,18 +782,27 @@ function verificationUrl(value: unknown): string {
   } catch {
     return invalid()
   }
-  if (parsed.protocol !== "https:" || !parsed.hostname) return invalid()
+  if (
+    parsed.protocol !== "https:" ||
+    !APPROVAL_ORIGINS[provider].includes(parsed.hostname) ||
+    parsed.username !== "" ||
+    parsed.password !== ""
+  )
+    return invalid()
   return raw
 }
 
-export function parseApproval(value: unknown): NeevApproval {
+export function parseApproval(
+  value: unknown,
+  provider: NeevAgentProvider
+): NeevApproval {
   const object = exact(value, [
     "kind",
     "verificationUrl",
     "userCode",
     "needsCode",
   ])
-  const url = verificationUrl(object.verificationUrl)
+  const url = verificationUrl(object.verificationUrl, provider)
   if (typeof object.needsCode !== "boolean") return invalid()
   if (object.kind === "device") {
     // A device flow is only actionable with a code to type; and it never asks
@@ -870,7 +896,10 @@ export function parseConnectOutcome(value: unknown): NeevConnectOutcome {
   return invalid()
 }
 
-export function parseConnectAttempt(value: unknown): NeevConnectAttempt {
+export function parseConnectAttempt(
+  value: unknown,
+  provider: NeevAgentProvider
+): NeevConnectAttempt {
   // `approval` is designed and lands with the supervisor binding; a server that
   // does not send it yet simply has no approval to show. Once present it is
   // validated strictly.
@@ -884,7 +913,7 @@ export function parseConnectAttempt(value: unknown): NeevConnectAttempt {
   const approval =
     !labelled || object.approval === null
       ? null
-      : parseApproval(object.approval)
+      : parseApproval(object.approval, provider)
   // Only a live attempt can be approved; approval data on a settled one would
   // invite the user to complete something that can no longer succeed.
   if (approval !== null && state !== "pending") return invalid()
@@ -968,7 +997,8 @@ export async function loadConnectAttempt(
     await contentGet(
       `/api/neev/agent/connections/${provider}/attempts/${attemptId}`,
       signal
-    )
+    ),
+    provider
   )
 }
 

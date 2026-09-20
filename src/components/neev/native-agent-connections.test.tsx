@@ -466,11 +466,22 @@ const DEVICE_APPROVAL = {
 }
 const CODE_APPROVAL = {
   kind: "authorization_code",
-  verificationUrl: "https://claude.ai/oauth/authorize?x=1",
+  verificationUrl: "https://claude.com/cai/oauth/authorize?x=1",
   userCode: null,
   needsCode: true,
 }
 const SUBMIT = `POST /api/neev/agent/connections/claude/attempts/${ATTEMPT_ID}/code`
+// A device flow is Codex's; Claude's is the pasted authorization code. The
+// verification host is allowlisted per provider, so the two cannot be mixed.
+const CODEX_CONNECT = "POST /api/neev/agent/connections/codex/connect"
+const CODEX_ATTEMPT = `GET /api/neev/agent/connections/codex/attempts/${ATTEMPT_ID}`
+
+function codexWiring(state: string) {
+  return {
+    runtimeEnabled: true,
+    connections: [{ ...connection(state), provider: "codex" }],
+  }
+}
 
 function pendingConnect() {
   return json(
@@ -486,9 +497,9 @@ function pendingConnect() {
 
 it("shows a device code and the page to approve it on", async () => {
   mockNativeSession(undefined, {
-    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
-    [CONNECT]: () => pendingConnect(),
-    [ATTEMPT]: () =>
+    "GET /api/neev/agent/connections": () => json(codexWiring("not_signed_in")),
+    [CODEX_CONNECT]: () => pendingConnect(),
+    [CODEX_ATTEMPT]: () =>
       json({
         state: "pending",
         expiresAt: FAR_FUTURE,
@@ -497,9 +508,7 @@ it("shows a device code and the page to approve it on", async () => {
   })
   const user = userEvent.setup()
   mount()
-  await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
-  )
+  await user.click(await screen.findByRole("button", { name: "Connect codex" }))
   expect(await screen.findByText("ABCD-EFGH")).toBeVisible()
   const link = screen.getByRole("link", { name: "Open the sign-in page" })
   expect(link).toHaveAttribute("href", "https://auth.openai.com/codex/device")
@@ -578,16 +587,14 @@ it("surfaces a rejected code submission and keeps the prompt usable", async () =
 it("shows no approval prompt until the server has produced one", async () => {
   let approval: unknown = null
   mockNativeSession(undefined, {
-    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
-    [CONNECT]: () => pendingConnect(),
-    [ATTEMPT]: () =>
+    "GET /api/neev/agent/connections": () => json(codexWiring("not_signed_in")),
+    [CODEX_CONNECT]: () => pendingConnect(),
+    [CODEX_ATTEMPT]: () =>
       json({ state: "pending", expiresAt: FAR_FUTURE, approval }),
   })
   const user = userEvent.setup()
   mount()
-  await user.click(
-    await screen.findByRole("button", { name: "Connect claude" })
-  )
+  await user.click(await screen.findByRole("button", { name: "Connect codex" }))
   await screen.findByText("Waiting for sign-in…")
   // Nothing invented while the supervisor has not spoken.
   expect(

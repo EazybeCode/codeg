@@ -501,7 +501,7 @@ describe("sign-in approval", () => {
   }
   const pasted = {
     kind: "authorization_code",
-    verificationUrl: "https://claude.ai/oauth/authorize",
+    verificationUrl: "https://claude.com/cai/oauth/authorize",
     userCode: null,
     needsCode: true,
   }
@@ -510,25 +510,26 @@ describe("sign-in approval", () => {
     // `approval` lands with the supervisor binding; until then an attempt
     // simply has none.
     expect(
-      parseConnectAttempt({ state: "pending", expiresAt: 1_700_000_600 })
+      parseConnectAttempt(
+        { state: "pending", expiresAt: 1_700_000_600 },
+        "claude"
+      )
     ).toEqual({ state: "pending", expiresAt: 1_700_000_600, approval: null })
     expect(
-      parseConnectAttempt({
-        state: "pending",
-        expiresAt: 1_700_000_600,
-        approval: device,
-      }).approval
+      parseConnectAttempt(
+        { state: "pending", expiresAt: 1_700_000_600, approval: device },
+        "codex"
+      ).approval
     ).toEqual({
       kind: "device",
       verificationUrl: device.verificationUrl,
       userCode: "ABCD-EFGH",
     })
     expect(
-      parseConnectAttempt({
-        state: "pending",
-        expiresAt: 1_700_000_600,
-        approval: pasted,
-      }).approval
+      parseConnectAttempt(
+        { state: "pending", expiresAt: 1_700_000_600, approval: pasted },
+        "claude"
+      ).approval
     ).toEqual({
       kind: "authorization_code",
       verificationUrl: pasted.verificationUrl,
@@ -538,16 +539,18 @@ describe("sign-in approval", () => {
 
   it("refuses an approval that could mislead or be unsafe to render", () => {
     const attempt = (approval: unknown) => () =>
-      parseConnectAttempt({
-        state: "pending",
-        expiresAt: 1_700_000_600,
-        approval,
-      })
+      parseConnectAttempt(
+        { state: "pending", expiresAt: 1_700_000_600, approval },
+        "codex"
+      )
     for (const bad of [
       // The URL is rendered as a link the user is told to open.
       { ...device, verificationUrl: "javascript:alert(1)" },
       { ...device, verificationUrl: "http://auth.openai.com/device" },
       { ...device, verificationUrl: "/relative" },
+      // A valid https URL somewhere else entirely is still a phishing target.
+      { ...device, verificationUrl: "https://auth.openai.com.evil.test/x" },
+      { ...device, verificationUrl: "https://claude.com/cai/oauth/authorize" },
       // A device flow with no code is not actionable …
       { ...device, userCode: null },
       // … and never asks for one back.
@@ -562,21 +565,11 @@ describe("sign-in approval", () => {
       expect(attempt(bad)).toThrow(NativeClientError)
     // Approval on a settled attempt would invite the user to complete
     // something that can no longer succeed.
-    expect(
-      attempt(device) &&
-        (() =>
-          parseConnectAttempt({
-            state: "expired",
-            expiresAt: 1_700_000_600,
-            approval: device,
-          }))
-    ).toBeTruthy()
     expect(() =>
-      parseConnectAttempt({
-        state: "expired",
-        expiresAt: 1_700_000_600,
-        approval: device,
-      })
+      parseConnectAttempt(
+        { state: "expired", expiresAt: 1_700_000_600, approval: device },
+        "codex"
+      )
     ).toThrow(NativeClientError)
   })
 
