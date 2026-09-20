@@ -142,6 +142,23 @@ async fn save_refuses_an_image_bound_to_another_document_or_unknown() {
 }
 
 #[tokio::test]
+async fn backup_verification_includes_and_checks_document_images() {
+    let harness = Harness::new(h::database().await).await;
+    let doc = document(&harness).await;
+    let stored = image::store(&harness.state, &harness.creator, &doc.id, &png())
+        .await
+        .unwrap();
+    // The snapshot verifier reaches the image blob, confirms its bytes/sha, and
+    // accounts for it in the manifest (backup/restore completeness).
+    let manifest =
+        super::backup::verify_snapshot(&harness.state.database, &harness.state.blobs)
+            .await
+            .unwrap();
+    assert_eq!(manifest.schema_version, 10);
+    assert!(manifest.blobs.iter().any(|blob| blob.key == stored.key));
+}
+
+#[tokio::test]
 async fn store_refuses_non_images_and_unauthorized_documents() {
     let harness = Harness::new(h::database().await).await;
     let doc = document(&harness).await;
