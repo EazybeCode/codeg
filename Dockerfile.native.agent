@@ -1,4 +1,4 @@
-# Agent-capable Neev native image — the PRIVILEGED variant that can run the
+# Agent-capable Neev native image — the isolated runtime variant that can run the
 # sandboxed personal-agent runtime. Built ON TOP of the reviewed base image
 # (Dockerfile.native), adding only what the sandbox launcher needs:
 #   * python3            — runs scripts/operations/neev_agent_launch.py + sandbox
@@ -8,9 +8,9 @@
 #
 # Defaults stay FAIL-CLOSED and non-root (NEEV_RUNTIME_ENABLED unset, USER 65532):
 # this image only *enables* the runtime when the deployment sets
-# NEEV_RUNTIME_ENABLED=true AND runs it as root (USER 0) with CAP_NET_ADMIN +
-# CAP_SYS_ADMIN and the login-isolation slot bridges/proxies provisioned. Without
-# those the runtime stays Disabled exactly as in the base image.
+# NEEV_RUNTIME_ENABLED=true with the reviewed file-capability helper profile,
+# provisioned login-isolation slot bridges/proxies, and per-user provider
+# credentials. The web server remains USER 65532; do not run it as root.
 #
 # Build (two-step; base first):
 #   docker build -f Dockerfile.native       -t neev-native:<tag>       .
@@ -76,8 +76,9 @@ ENV NEEV_AGENT_LAUNCHER=/opt/neev/scripts/operations/neev_agent_launch.py \
 
 # Fail-closed defaults preserved: runtime OFF, non-root. Enabling is a deploy-time
 # decision (see NEEV-PRODUCTION-RELEASE-RUNBOOK.md STEP 3/4): set
-# NEEV_RUNTIME_ENABLED=true, run as USER 0 with NET_ADMIN+SYS_ADMIN, provision the
-# slot bridges/proxies, and authenticate the provider CLI on the host.
+# NEEV_RUNTIME_ENABLED=true with the scoped helper capabilities, provision the
+# slot bridges/proxies, and connect each user through the supported provider flow.
+# A shared host provider login is not supported; keep the server non-root.
 USER 65532:65532
 STOPSIGNAL SIGINT
 CMD ["/usr/local/bin/neev-server"]
