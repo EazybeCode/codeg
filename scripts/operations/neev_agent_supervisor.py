@@ -32,6 +32,7 @@ is repr-suppressed and is handed straight to the driver.
 from __future__ import annotations
 
 import abc
+import asyncio
 import contextlib
 import json
 import os
@@ -40,6 +41,8 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
 import neev_supervisor_dto as dto
+import neev_supervisor_fence as fence_mod
+import neev_supervisor_transport as transport
 
 try:
     from neev_credential_store import Scope as StoreScope
@@ -263,6 +266,11 @@ class Supervisor:
             request.coordinator, self._boot_id, request.sequence, request.request_id,
             request.op(), dto.Outcome.OK, body, None,
         )
+
+    def error_response(self, request, code, retry_after_ms=None) -> dto.Response:
+        """Public: build an Outcome.ERROR response (used by serve() for fence
+        rejections that happen outside a dispatch handler)."""
+        return self._error(request, code, retry_after_ms)
 
     def _error(self, request, code, retry_after_ms) -> dto.Response:
         hint = None
@@ -656,6 +664,80 @@ class Supervisor:
         dto.Op.CLEANUP_CONNECTION: _cleanup_connection,
         dto.Op.RECONCILE_PAGE: _reconcile_page,
     }
+
+
+_FENCE_ERROR_CODE = {
+    "Stale": dto.ErrorCode.STALE,
+    "Conflict": dto.ErrorCode.CONFLICT,
+    "Busy": dto.ErrorCode.BUSY,
+}
+
+
+def _fence_code(error) -> dto.ErrorCode:
+    return _FENCE_ERROR_CODE.get(getattr(error, "category", None), dto.ErrorCode.UNAVAILABLE)
+
+
+async def serve_session(session, fence, supervisor: Supervisor) -> None:
+    """Own one accepted, handshaken session: register its coordinator with the fence
+    on the first request, then dispatch each request UNDER a fresh fence admission
+    (the check-and-commit boundary) and answer it. A fence rejection (stale/conflict/
+    busy) becomes the matching error response; a transport failure ends the session.
+    """
+    registration = None
+    try:
+        while True:
+            try:
+                pending = await session.receive()
+            except transport.TransportError:
+                return
+            request = pending.request
+            if registration is None:
+                try:
+                    registration = fence.register(request.coordinator)
+                except fence_mod.FenceError as error:
+                    response = supervisor.error_response(request, _fence_code(error), _DEFAULT_POLL_MS)
+                    await _safe_respond(session, pending, response)
+                    continue
+            try:
+                with fence.admission(registration):
+                    response = supervisor.handle(request)
+            except fence_mod.FenceError as error:
+                response = supervisor.error_response(request, _fence_code(error), _DEFAULT_POLL_MS)
+            if not await _safe_respond(session, pending, response):
+                return
+    finally:
+        with contextlib.suppress(Exception):
+            session.close()
+
+
+async def _safe_respond(session, pending, response) -> bool:
+    try:
+        await session.respond(pending, response)
+        return True
+    except transport.TransportError:
+        return False
+
+
+async def serve(listener, fence, supervisor: Supervisor) -> None:  # pragma: no cover - Linux service loop
+    """Accept sessions forever, serving each concurrently. The supervisor MUST be
+    recovered first (its handle() refuses until then)."""
+    if not supervisor._reconciled:
+        raise RuntimeError("supervisor.recover() must run before serve()")
+    sessions = set()
+    try:
+        while True:
+            try:
+                session = await listener.accept()
+            except transport.TransportError:
+                continue
+            task = asyncio.ensure_future(serve_session(session, fence, supervisor))
+            sessions.add(task)
+            task.add_done_callback(sessions.discard)
+    finally:
+        for task in tuple(sessions):
+            task.cancel()
+        if sessions:
+            await asyncio.gather(*sessions, return_exceptions=True)
 
 
 class FileRegistry:

@@ -361,6 +361,77 @@ class ReconcilePagingTests(SupervisorTestBase):
         self.assertIs(self.err(stale), dto.ErrorCode.STALE)
 
 
+class _FakePending:
+    def __init__(self, req):
+        self.request = req
+
+
+class _FakeSession:
+    def __init__(self, pendings):
+        self._pendings = list(pendings)
+        self.responses = []
+        self.closed = False
+
+    async def receive(self):
+        if self._pendings:
+            return _FakePending(self._pendings.pop(0))
+        raise sup.transport.TransportError("closed")
+
+    async def respond(self, pending, response):
+        self.responses.append(response)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeFence:
+    def __init__(self, register_error=None):
+        self.registered = None
+        self._register_error = register_error
+
+    def register(self, coordinator):
+        if self._register_error is not None:
+            raise sup.fence_mod.FenceError(self._register_error)
+        self.registered = coordinator
+        return "registration"
+
+    def admission(self, registration):
+        import contextlib as _contextlib
+
+        return _contextlib.nullcontext()
+
+
+class ServeSessionTests(unittest.IsolatedAsyncioTestCase):
+    def _supervisor(self):
+        volumes = FakeVolumes()
+        _drivers, driver_for = _drivers_sink()
+        supervisor = sup.Supervisor(
+            BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory()
+        )
+        supervisor.recover()
+        return supervisor
+
+    async def test_dispatches_under_admission_then_closes(self):
+        supervisor = self._supervisor()
+        start = request(dto.StartLoginRequest(ticket(dto.Provider.CODEX)))
+        session = _FakeSession([start])
+        fence = _FakeFence()
+        await sup.serve_session(session, fence, supervisor)
+        self.assertEqual(len(session.responses), 1)
+        self.assertIs(session.responses[0].outcome, dto.Outcome.OK)
+        self.assertEqual(fence.registered, start.coordinator)
+        self.assertTrue(session.closed)
+
+    async def test_fence_stale_registration_becomes_stale_error(self):
+        supervisor = self._supervisor()
+        start = request(dto.StartLoginRequest(ticket(dto.Provider.CODEX)))
+        session = _FakeSession([start])
+        await sup.serve_session(session, _FakeFence(register_error="Stale"), supervisor)
+        self.assertEqual(len(session.responses), 1)
+        self.assertIs(session.responses[0].outcome, dto.Outcome.ERROR)
+        self.assertIs(session.responses[0].error.code, dto.ErrorCode.STALE)
+
+
 def _mint_factory():
     counter = [0]
 
