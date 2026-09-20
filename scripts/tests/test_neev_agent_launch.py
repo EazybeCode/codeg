@@ -141,6 +141,98 @@ class CredentialWiringTests(unittest.TestCase):
         for value in sentinels.values():
             self.assertNotIn(value, blob)
 
+    def test_child_env_injects_authoritative_slot_proxy_env(self):
+        import neev_login_network_profile as network_profile
+
+        delivery = credentials.Delivery(
+            home="/mnt/vol",
+            env={"HOME": "/mnt/vol", "CODEX_HOME": "/mnt/vol/.codex"},
+        )
+        proxy = network_profile.proxy_env("a")
+        saved = {k: os.environ.get(k) for k in ("HTTPS_PROXY", "NO_PROXY")}
+        try:
+            # An ambient (hostile) proxy value must NOT leak; the fixed slot wins.
+            os.environ["HTTPS_PROXY"] = "http://ambient-should-not-be-used:9"
+            os.environ["NO_PROXY"] = "ambient.example.com"
+            env = launch.child_env(delivery, proxy)
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            self.assertEqual(env[key], "http://10.203.0.2:3128")
+        self.assertEqual(env["NO_PROXY"], "")
+        self.assertEqual(env["no_proxy"], "")
+        self.assertEqual(env["HOME"], "/mnt/vol")
+        self.assertEqual(env["CODEX_HOME"], "/mnt/vol/.codex")
+
+    def test_child_env_without_proxy_has_no_proxy_vars(self):
+        delivery = credentials.Delivery(home="/mnt/vol", env={"HOME": "/mnt/vol"})
+        env = launch.child_env(delivery)
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                    "NO_PROXY", "no_proxy"):
+            self.assertNotIn(key, env)
+
+    def test_main_provider_allowlist_passes_slot_proxy_env_to_child(self):
+        import contextlib
+        import tempfile
+
+        captured = {}
+
+        class FakeHandle:
+            pid = os.getpid()
+            stdout = None
+
+            def wait(self):
+                return 0
+
+            def teardown(self):
+                pass
+
+        @contextlib.contextmanager
+        def fake_deliver(volumes, tenant, provider, handle, uid, gid, **kwargs):
+            yield credentials.Delivery(
+                home="/mnt/vol",
+                env={"HOME": "/mnt/vol", "CODEX_HOME": "/mnt/vol/.codex"},
+            )
+
+        def fake_launch(spec, env=None):
+            captured["env"] = env
+            return FakeHandle()
+
+        with tempfile.TemporaryDirectory() as root:
+            run_dir = os.path.join(root, "run-abc")
+            os.mkdir(run_dir)
+            argv = [
+                "--tenant", "org:3/user:7", "--slot", "b", "--workdir", run_dir,
+                "--uid", "61000", "--gid", "61000", "--provider", "codex",
+                "--credential-handle", "h1", "--provider-ipv4", "140.82.112.3",
+                "--", "codex", "-p", "hi",
+            ]
+            saved_root = os.environ.get("NEEV_AGENT_WORKSPACE_ROOT")
+            os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = root
+            saved_deliver = credentials.deliver
+            saved_launch = sandbox.launch
+            credentials.deliver = fake_deliver
+            sandbox.launch = fake_launch
+            try:
+                rc = launch.main(argv, volumes=object())
+            finally:
+                credentials.deliver = saved_deliver
+                sandbox.launch = saved_launch
+                if saved_root is None:
+                    os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
+                else:
+                    os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = saved_root
+        self.assertEqual(rc, 0)
+        env = captured["env"]
+        # Slot "b" proxy, routed through the fixed slot CONNECT proxy, all bypass off.
+        self.assertEqual(env["HTTPS_PROXY"], "http://10.203.0.10:3128")
+        self.assertEqual(env["NO_PROXY"], "")
+        self.assertEqual(env["HOME"], "/mnt/vol")
+
     def test_main_refuses_when_credentials_cannot_be_delivered(self):
         import tempfile
 

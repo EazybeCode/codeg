@@ -113,13 +113,21 @@ _ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ")
 _DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
-def child_env(delivery):
-    """Minimal, secret-free environment for the sandboxed provider (pure)."""
+def child_env(delivery, proxy_env=None):
+    """Minimal, secret-free environment for the sandboxed provider (pure).
+
+    When the run has provider egress, `proxy_env` is the authoritative fixed
+    slot-proxy environment (`neev_login_network_profile.proxy_env`): the guest's
+    netns only routes to the slot proxy IP, so without HTTP(S)_PROXY set the
+    provider's direct TLS would have no path out. The proxy vars come from the
+    server-owned profile, never inherited from the ambient environment."""
     env = {"PATH": _DEFAULT_PATH}
     for key in _ENV_ALLOWLIST:
         value = os.environ.get(key)
         if value is not None and "\x00" not in value:
             env[key] = value
+    if proxy_env:
+        env.update(proxy_env)  # HTTP(S)_PROXY + empty NO_PROXY (fixed, authoritative)
     env.update(delivery.env)  # HOME + provider config dir (authoritative)
     return env
 
@@ -149,6 +157,14 @@ def main(argv=None, volumes=None):
     # scope; the lock means no other lane can access the volume concurrently.
     if volumes is None:  # pragma: no cover - production wiring
         volumes = _production_volumes()
+    # A run with provider egress must route the provider's TLS through its slot
+    # CONNECT proxy — the netns has no other path out. deny_all runs have no proxy
+    # (and no network), so no proxy env is injected.
+    proxy_env = None
+    if spec.egress.mode == "provider_allowlist":
+        import neev_login_network_profile as network_profile
+
+        proxy_env = network_profile.proxy_env(args.slot)
     try:
         with credentials.deliver(
             volumes,
@@ -158,7 +174,7 @@ def main(argv=None, volumes=None):
             args.uid,
             args.gid,
         ) as delivery:
-            return _run_child(spec, child_env(delivery))
+            return _run_child(spec, child_env(delivery, proxy_env))
     except credentials.CredentialError as error:
         # Honest, non-sensitive reason ("busy" = another run for this user+provider
         # holds the volume). Rust surfaces waiting/busy; nothing runs unauthorized.
