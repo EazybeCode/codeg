@@ -189,6 +189,36 @@ impl ServerState {
     }
 }
 
+/// Remove every abandoned per-run workdir, refusing if any survives.
+///
+/// A run directory is chowned to its lane uid at 0700, so a survivor means the
+/// unprivileged server cannot clear it and a privileged sweep has not yet run.
+/// In that state we cannot prove a lane uid is clean, and `SlotPool` starts full
+/// on every boot and would hand it straight out — so the honest answer is to
+/// fail closed rather than risk one tenant reading another's leftovers.
+fn reclaim_agent_workdirs(root: &std::path::Path) -> Result<(), ()> {
+    let entries = std::fs::read_dir(root).map_err(|_| ())?;
+    let mut stranded = 0usize;
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("run-") {
+            continue;
+        }
+        let path = entry.path();
+        if std::fs::remove_dir_all(&path).is_err() && path.exists() {
+            stranded += 1;
+        }
+    }
+    if stranded == 0 {
+        Ok(())
+    } else {
+        eprintln!(
+            "Neev refuses to enable the agent runtime: {stranded} abandoned run workdir(s) under {} could not be removed; a privileged sweep must clear them before lane uids are reused",
+            root.display()
+        );
+        Err(())
+    }
+}
+
 /// The device + inode of a path, for the coordinator's own identity type.
 /// The transport and the coordinator each declare their own, so the raw pair is
 /// read once and mapped to whichever the caller needs.
@@ -437,6 +467,12 @@ async fn serve() -> Result<(), ()> {
         // The privileged fixed-command launch helper (`neev-agent-caplaunch`,
         // file-capped) is REQUIRED so the server itself stays unprivileged
         // (deploy review C1): it must be an absolute, existing, non-writable file.
+        // Boot-safe lane reuse. The isolation lane pool starts full on every
+        // restart, so a leftover `run-*` directory owned by a lane uid would be
+        // handed to the NEXT tenant running under that uid — with the previous
+        // tenant's private files still inside it. Refuse to enable the runtime
+        // until the workspace is clean.
+        reclaim_agent_workdirs(workspace_path)?;
         let cap_helper = std::env::var("NEEV_AGENT_CAP_HELPER").map_err(|_| ())?;
         let cap_helper_path = std::path::Path::new(&cap_helper);
         if !cap_helper_path.is_absolute()
@@ -562,5 +598,57 @@ async fn serve() -> Result<(), ()> {
             .map(|_| ())
         }
         None => public.await.map_err(|_| ()),
+    }
+}
+
+#[cfg(test)]
+mod workdir_reclaim_tests {
+    use super::reclaim_agent_workdirs;
+
+    #[test]
+    fn a_clean_workspace_and_a_removable_leftover_both_pass() {
+        let root = tempfile::tempdir().unwrap();
+        // Nothing to reclaim.
+        assert!(reclaim_agent_workdirs(root.path()).is_ok());
+
+        // A leftover the server CAN remove is reclaimed, not treated as a fault:
+        // the common case is a crash before teardown, with the directory still
+        // owned by the server.
+        let leftover = root.path().join("run-abandoned");
+        std::fs::create_dir_all(leftover.join("nested")).unwrap();
+        std::fs::write(leftover.join("nested/file"), b"x").unwrap();
+        assert!(reclaim_agent_workdirs(root.path()).is_ok());
+        assert!(!leftover.exists());
+
+        // Unrelated entries are left alone.
+        let other = root.path().join("not-a-run");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(reclaim_agent_workdirs(root.path()).is_ok());
+        assert!(other.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_surviving_run_workdir_refuses_to_enable_the_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let stuck = root.path().join("run-stuck");
+        std::fs::create_dir_all(&stuck).unwrap();
+        std::fs::write(stuck.join("credentials"), b"previous tenant").unwrap();
+        // Stand in for "chowned to the lane uid at 0700": the server cannot
+        // unlink the child because its parent is not writable.
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let verdict = reclaim_agent_workdirs(root.path());
+        let blocked = stuck.exists();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        if blocked {
+            // Fail closed: a lane uid whose private directory still holds
+            // another tenant's files must never be handed out, and the pool
+            // refills on every boot.
+            assert!(
+                verdict.is_err(),
+                "a surviving run workdir must refuse the runtime"
+            );
+        }
     }
 }

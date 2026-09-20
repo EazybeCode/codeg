@@ -394,12 +394,24 @@ async fn advance_live_logins(state: &ServerState) {
 const CLEANUP_BATCH: usize = 16;
 
 async fn drain_queued_cleanups(state: &ServerState) {
+    // Queued cleanups AND ones whose lease has run out.
+    //
+    // `claim_cleanup` will re-claim an expired lease, which is exactly the case
+    // a supervisor timeout leaves behind: it was claimed, the effect never
+    // finished, and the lease lapsed. Selecting only `queued` would exclude
+    // those from every future sweep, so a single timeout would wedge that
+    // connection permanently.
+    let now = state.clock.now_unix();
     let sql = format!(
-        "SELECT id FROM neev_agent_operations WHERE kind IN ('cancel','disconnect') AND state='queued' ORDER BY created_at LIMIT {CLEANUP_BATCH}"
+        "SELECT id FROM neev_agent_operations WHERE kind IN ('cancel','disconnect') AND (state='queued' OR (state='leased' AND lease_expires_at<=$1)) ORDER BY created_at LIMIT {CLEANUP_BATCH}"
     );
     let rows = match state
         .database
-        .query_all(crate::neev::db::statement(&state.database, &sql, vec![]))
+        .query_all(crate::neev::db::statement(
+            &state.database,
+            &sql,
+            vec![now.into()],
+        ))
         .await
     {
         Ok(rows) => rows,
