@@ -6,6 +6,7 @@ import argparse
 import errno
 import json
 import os
+import re
 from pathlib import Path
 import selectors
 import signal
@@ -450,14 +451,19 @@ class CredentialVolumes:
             raise StoreError("conflict")
         metadata = image.stat()
         expected_device = "%d:%d" % (os.major(metadata.st_dev), os.minor(metadata.st_dev))
+        # util-linux (e.g. Debian 2.38) space-pads the JSON MAJ:MIN columns; trim
+        # only these device-number fields (strict digits:digits) and keep every
+        # other field byte-exact. Normalizing "maj:min" also subsumes its old
+        # str-type check (a padded or malformed value is a conflict).
+        back_device = _normalized_device_number(item["back-maj:min"])
+        _normalized_device_number(item["maj:min"])
         if (
             item["name"] != loop_device
             or type(item["back-file"]) is not str
             or Path(item["back-file"]) != image
             or type(item["back-ino"]) is not int
             or item["back-ino"] != metadata.st_ino
-            or item["back-maj:min"] != expected_device
-            or type(item["maj:min"]) is not str
+            or back_device != expected_device
         ):
             raise StoreError("conflict")
 
@@ -491,7 +497,7 @@ class CredentialVolumes:
             or item["source"] != str(mapping_path)
             or item["fstype"] != "ext4"
             or not required.issubset(options)
-            or item["maj:min"] != _mapping_major_minor(mapping_path)
+            or _normalized_device_number(item["maj:min"]) != _mapping_major_minor(mapping_path)
         ):
             raise StoreError("conflict")
 
@@ -616,6 +622,25 @@ def _secure_filesystem_root(path: Path) -> None:
     finally:
         if directory_fd is not None:
             os.close(directory_fd)
+
+
+_DEVICE_NUMBER_RE = re.compile(r"[0-9]+:[0-9]+")
+
+
+def _normalized_device_number(value: object) -> str:
+    """Canonicalize one MAJ:MIN device-number field from ``losetup``/``findmnt``.
+
+    Debian util-linux (e.g. 2.38) pads the JSON MAJ:MIN string columns with spaces
+    (``"       0:93 "``, ``"  7:0  "``). Trim ONLY these validated device-number
+    fields and require a strict decimal ``digits:digits`` shape; anything else is a
+    conflict. Every other identity field (name/back-file/back-ino) is still compared
+    untrimmed and byte-exact, so no identity check is weakened."""
+    if type(value) is not str:
+        raise StoreError("conflict")
+    trimmed = value.strip()
+    if _DEVICE_NUMBER_RE.fullmatch(trimmed) is None:
+        raise StoreError("conflict")
+    return trimmed
 
 
 def _mapping_major_minor(path: Path) -> str:

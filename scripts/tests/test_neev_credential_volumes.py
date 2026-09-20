@@ -47,6 +47,9 @@ class FixtureRunner:
         self.replace_mapping_after_uuid = False
         self.busy_umount = False
         self.umount_error = None
+        # Debian util-linux (2.38) space-pads the JSON MAJ:MIN columns; when set the
+        # fixture reproduces that padding so the parser's normalization is exercised.
+        self.pad_device_numbers = False
 
     def run(self, argv, input_bytes=None):
         self.calls.append((list(argv), input_bytes))
@@ -83,15 +86,20 @@ class FixtureRunner:
         if program == self.module.LOSETUP:
             image_stat = self.image.stat()
             back_inode = image_stat.st_ino + (1 if self.foreign_loop else 0)
+            back_device = "%d:%d" % (
+                os.major(image_stat.st_dev), os.minor(image_stat.st_dev)
+            )
+            loop_device = "7:7"
+            if self.pad_device_numbers:
+                back_device = "       " + back_device + " "
+                loop_device = "  " + loop_device + "  "
             payload = {
                 "loopdevices": [{
                     "name": "/dev/loop7",
                     "back-file": str(self.image),
                     "back-ino": back_inode,
-                    "back-maj:min": "%d:%d" % (
-                        os.major(image_stat.st_dev), os.minor(image_stat.st_dev)
-                    ),
-                    "maj:min": "7:7",
+                    "back-maj:min": back_device,
+                    "maj:min": loop_device,
                 }]
             }
             return json.dumps(payload).encode("ascii")
@@ -109,7 +117,11 @@ class FixtureRunner:
                     ),
                     "fstype": "ext4",
                     "options": "rw,nosuid,nodev,noexec,relatime",
-                    "maj:min": "253:8" if self.foreign_mount else "253:7",
+                    "maj:min": (
+                        ("253:8" if self.foreign_mount else "253:7")
+                        if not self.pad_device_numbers
+                        else ("  253:8  " if self.foreign_mount else "  253:7  ")
+                    ),
                 })
             return json.dumps({"filesystems": filesystems}).encode("ascii")
         if program == self.module.MOUNT:
@@ -445,6 +457,30 @@ class CredentialVolumeTests(unittest.TestCase):
             self.volumes.open(self.scope, handle)
         self.assertEqual(caught.exception.code, "conflict")
         self.assertFalse(any(argv[1:2] == ["open"] for argv, unused in self.runner.calls))
+
+    def test_util_linux_padded_maj_min_columns_are_tolerated(self):
+        # Debian util-linux 2.38 space-pads losetup/findmnt JSON MAJ:MIN strings
+        # (e.g. "       0:93 ", "  7:0  "). create() (losetup back-maj:min +
+        # maj:min) and open() (findmnt maj:min) must still validate rather than
+        # fail conflict on the padding, while every identity check is preserved.
+        self.runner.pad_device_numbers = True
+        handle = self.create()
+        self.assertEqual(self.manifest(handle)["phase"], "ready")
+        mountpoint = self.volumes.open(self.scope, handle)
+        self.assertEqual(mountpoint, self.root / handle / "mount")
+        self.assertEqual(self.volumes.status(self.scope, handle), "open")
+        self.volumes.close(self.scope, handle)
+
+    def test_device_number_normalizer_trims_only_strict_digit_pairs(self):
+        normalize = self.module._normalized_device_number
+        self.assertEqual(normalize("  7:0  "), "7:0")
+        self.assertEqual(normalize("       0:93 "), "0:93")
+        self.assertEqual(normalize("253:8"), "253:8")
+        for bad in ("7:", ":0", "7", "7 0", "a:0", "7:0:1", "", "   ",
+                    "0x7:0", "-1:0", 70, None, b"7:0"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(self.store_module.StoreError):
+                    normalize(bad)
 
     def test_status_parsers_reject_malformed_duplicate_and_ambiguous_output(self):
         invalid_status = (
