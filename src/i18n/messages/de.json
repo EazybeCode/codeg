@@ -129,7 +129,9 @@
     "agentError_io": "Der Lauf wurde unterbrochen.",
     "agentError_interrupted": "Der Lauf wurde vor dem Ende unterbrochen.",
     "agentError_unknown": "Der Lauf ist fehlgeschlagen.",
-    "agentReplyPrivate": "Nur du siehst diese Antwort. Sie wird nicht im Gespräch gepostet."
+    "agentModelHint": "Nutze default für das Standardmodell des Anbieters oder gib eine unterstützte Modellkennung ein.",
+    "agentPostsToTeam": "Deine Frage und die Antwort des Agenten werden beide in diesem Gespräch gepostet.",
+    "agentAuthored": "Agent · gefragt von {name}"
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

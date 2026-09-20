@@ -20,6 +20,13 @@ export interface NativeResource {
   updatedAt: number
 }
 
+/**
+ * Who wrote a team message (spec §5.3). An `agent` message was produced by a
+ * provider answering an explicit invocation; `authorId`/`authorName` still
+ * identify the human who invoked it, so the agent never impersonates anyone.
+ */
+export type NativeAuthorKind = "human" | "agent"
+
 export interface NativeMessage {
   id: string
   sequence: string
@@ -27,6 +34,9 @@ export interface NativeMessage {
   authorName: string
   body: string
   createdAt: number
+  authorKind: NativeAuthorKind
+  /** The provider that produced an agent message; `null` for a human one. */
+  agentLabel: string | null
 }
 
 export interface NativeRevision {
@@ -239,18 +249,43 @@ export function parseResource(value: unknown): NativeResource {
   }
 }
 
+const MESSAGE_KEYS = [
+  "id",
+  "sequence",
+  "authorId",
+  "authorName",
+  "body",
+  "createdAt",
+] as const
+
 export function parseMessage(value: unknown): NativeMessage {
-  const object = exact(value, [
-    "id",
-    "sequence",
-    "authorId",
-    "authorName",
-    "body",
-    "createdAt",
-  ])
+  // Authorship arrived with §5.3. During the rollout a server may still send
+  // the older six-key shape; that is unambiguously a human message. Once the
+  // fields are present they are validated strictly — a half-present pair, or a
+  // label that does not match the kind, means the row cannot be labelled
+  // truthfully and must not be rendered.
+  const labelled =
+    record(value).authorKind !== undefined ||
+    record(value).agentLabel !== undefined
+  const object = exact(
+    value,
+    labelled ? [...MESSAGE_KEYS, "authorKind", "agentLabel"] : MESSAGE_KEYS
+  )
   const body = text(object.body)
   if (body.length === 0 || new TextEncoder().encode(body).length > 32768)
     return invalid()
+  let authorKind: NativeAuthorKind = "human"
+  let agentLabel: string | null = null
+  if (labelled) {
+    if (object.authorKind !== "human" && object.authorKind !== "agent")
+      return invalid()
+    authorKind = object.authorKind
+    agentLabel = object.agentLabel === null ? null : text(object.agentLabel)
+    // The server writes the pair together and enforces it in the schema.
+    if ((authorKind === "agent") !== (agentLabel !== null)) return invalid()
+    if (agentLabel !== null && !/^[a-z][a-z0-9_-]{0,31}$/.test(agentLabel))
+      return invalid()
+  }
   return {
     id: uuid(object.id),
     sequence: integerString(object.sequence, false),
@@ -258,6 +293,8 @@ export function parseMessage(value: unknown): NativeMessage {
     authorName: text(object.authorName),
     body,
     createdAt: timestamp(object.createdAt),
+    authorKind,
+    agentLabel,
   }
 }
 

@@ -34,8 +34,9 @@ import {
   loadAgentConnections,
   startAgentTurn,
   updateAgentSession,
-  NEEV_AGENT_MODELS,
   NEEV_AGENT_PROVIDERS,
+  NEEV_DEFAULT_MODEL,
+  isSupportedModel,
   NEEV_MAX_PROMPT_CHARS,
   type NeevAgentConnections,
   type NeevAgentProvider,
@@ -315,7 +316,7 @@ function CreateSessionDialog({
     n = useTranslations("Native")
   const [title, setTitle] = useState(""),
     [provider, setProvider] = useState<NeevAgentProvider>("claude"),
-    [model, setModel] = useState("default"),
+    [model, setModel] = useState(NEEV_DEFAULT_MODEL),
     [busy, setBusy] = useState(false),
     [error, setError] = useState<unknown>(null)
   const request = useRef<string | null>(null)
@@ -382,7 +383,7 @@ function CreateSessionDialog({
               onChange={(event) => {
                 const next = event.target.value as NeevAgentProvider
                 setProvider(next)
-                setModel(NEEV_AGENT_MODELS[next][0])
+                setModel(NEEV_DEFAULT_MODEL)
               }}
               className="w-full rounded-md border bg-background px-3 py-2 text-sm"
             >
@@ -396,24 +397,28 @@ function CreateSessionDialog({
           </label>
           <label className="block space-y-1">
             <span className="text-sm font-medium">{t("agentModel")}</span>
-            <select
+            <input
               value={model}
+              maxLength={80}
               onChange={(event) => setModel(event.target.value)}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-            >
-              {NEEV_AGENT_MODELS[provider].map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+            {/* `default` is the provider's own default (no --model at all). The
+                UI does not invent a model menu: the runtime passes any other
+                value straight through, so only the provider knows what exists. */}
+            <span className="block text-xs text-muted-foreground">
+              {t("agentModelHint")}
+            </span>
           </label>
           <NativeError error={error} />
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={onClose}>
               {n("cancel")}
             </Button>
-            <Button type="submit" disabled={busy || !title.trim()}>
+            <Button
+              type="submit"
+              disabled={busy || !title.trim() || !isSupportedModel(model)}
+            >
               {busy ? n("working") : t("create")}
             </Button>
           </div>

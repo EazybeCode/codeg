@@ -12,6 +12,8 @@ import {
   contentGet,
   contentMutation,
   NativeContentNotFoundError,
+  parseMessage,
+  type NativeMessage,
   type NativePage,
 } from "./neev-content-client"
 
@@ -20,13 +22,27 @@ export const NEEV_AGENT_PROVIDERS = ["claude", "codex"] as const
 export type NeevAgentProvider = (typeof NEEV_AGENT_PROVIDERS)[number]
 
 /**
- * Models offered per provider. The server validates only shape (1..=80 chars),
- * so this list is the UI's own promise about what it will send; it must not
- * grow past what the runtime can actually dispatch.
+ * `"default"` is the provider's own default: the runtime expresses it by passing
+ * no `--model` at all rather than by naming a model here. Any other value is
+ * passed through to the provider verbatim, so the UI must not invent names — it
+ * offers `default` and lets the operator type an identifier their provider
+ * actually has.
  */
-export const NEEV_AGENT_MODELS: Record<NeevAgentProvider, readonly string[]> = {
-  claude: ["default"],
-  codex: ["default"],
+export const NEEV_DEFAULT_MODEL = "default"
+
+/**
+ * Mirrors `safe_model` in `agents/execution.rs`: bounded, and free of anything
+ * that could be read as a flag or a separator. Checking it here means a model
+ * the runtime would refuse is caught before a turn is ever persisted.
+ */
+export function isSupportedModel(value: string): boolean {
+  return (
+    value === NEEV_DEFAULT_MODEL ||
+    (value.length >= 1 &&
+      value.length <= 80 &&
+      !value.startsWith("-") &&
+      /^[A-Za-z0-9._-]+$/.test(value))
+  )
 }
 
 export type NeevTurnStatus = "running" | "completed" | "failed" | "canceled"
@@ -404,8 +420,7 @@ export async function createAgentSession(
     !NEEV_AGENT_PROVIDERS.includes(input.provider) ||
     typeof input.title !== "string" ||
     typeof input.model !== "string" ||
-    input.model.length === 0 ||
-    [...input.model].length > 80
+    !isSupportedModel(input.model)
   )
     invalidRequest()
   if (input.boundChatId) assertUuid(input.boundChatId)
@@ -606,6 +621,82 @@ export function parseRunEvent(json: string): NeevRunEvent | null {
  * Resolves when the server ends the stream. Rejects when the run cannot be
  * followed, so the caller can fall back to reading the stored turn.
  */
+export interface NeevTeamInvocation {
+  /** The invoker's prompt, already persisted as an ordinary human message. */
+  message: NativeMessage
+  turn: NeevAgentTurn
+  runId: string
+}
+
+export interface InvokeTeamAgentInput {
+  prompt: string
+  provider: NeevAgentProvider
+  model: string
+  requestId: string
+  expectedAuthRevision: string
+}
+
+export function parseTeamInvocation(value: unknown): NeevTeamInvocation {
+  const object = exact(value, ["message", "turn", "runId"])
+  const turn = parseAgentTurn(object.turn)
+  const id = runId(object.runId)
+  if (id !== turn.runId) return invalid()
+  return { message: parseMessage(object.message), turn, runId: id }
+}
+
+/**
+ * Explicit team invocation (spec §5.3).
+ *
+ * The prompt is posted as an ordinary human message first — idempotent on
+ * `requestId` and guarded by `expectedAuthRevision` exactly like posting — so
+ * the team can see what was asked even before a reply lands. The reply is
+ * written by the run driver as an agent-authored message; the caller re-reads
+ * the thread once the run settles rather than rendering it from the stream.
+ *
+ * The run is sent only this prompt: no private Agent Chat history travels with
+ * it, and it executes under the invoker's own per-user credentials.
+ */
+export async function invokeTeamAgent(
+  chatId: string,
+  input: InvokeTeamAgentInput,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevTeamInvocation> {
+  assertUuid(chatId)
+  assertUuid(input.requestId)
+  if (
+    !NEEV_AGENT_PROVIDERS.includes(input.provider) ||
+    !isSupportedModel(input.model) ||
+    typeof input.prompt !== "string" ||
+    input.prompt.length === 0 ||
+    [...input.prompt].length > NEEV_MAX_PROMPT_CHARS
+  )
+    invalidRequest()
+  try {
+    integerString(input.expectedAuthRevision)
+  } catch {
+    invalidRequest()
+  }
+  const invocation = parseTeamInvocation(
+    await contentMutation(
+      `/api/neev/chats/${chatId}/agent`,
+      {
+        prompt: input.prompt,
+        provider: input.provider,
+        model: input.model,
+        requestId: input.requestId,
+        expectedAuthRevision: input.expectedAuthRevision,
+      },
+      csrf,
+      signal
+    )
+  )
+  // The reply is posted by the server under the invoker's account; a prompt
+  // echoed back as agent-authored would mean the wrong row came back.
+  if (invocation.message.authorKind !== "human") invalid()
+  return invocation
+}
+
 export type NeevRunPhase = "streaming" | "reconnecting" | "lost"
 
 /** Backoff between reattach attempts; exhausting it reports the run as lost. */
