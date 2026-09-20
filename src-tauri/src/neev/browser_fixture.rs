@@ -447,6 +447,7 @@ impl Fixture {
                 agents: crate::neev::agents::execution::disabled_runtime(),
                 agent_jobs: crate::neev::agents::execution::new_job_registry(),
                 realtime: Arc::new(crate::neev::content::realtime::MessageHub::default()),
+                agent_runs: crate::neev::agents::runs::new_registry(),
                 oauth,
                 magic: Some(magic),
                 mail: Some(mail),

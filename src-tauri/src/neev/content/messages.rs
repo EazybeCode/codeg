@@ -5,6 +5,15 @@ use crate::neev::{
 use sea_orm::{ConnectionTrait, DatabaseTransaction, QueryResult};
 
 fn message(row: &QueryResult) -> Result<Message, ContentError> {
+    let author_kind: String = row.try_get("", "author_kind").map_err(database_error)?;
+    let agent_label: Option<String> = row.try_get("", "agent_label").map_err(database_error)?;
+    let author_kind = AuthorKind::parse(&author_kind).ok_or(ContentError::Storage)?;
+    // The pairing SQLite cannot express as a table CHECK: an agent message names
+    // its provider and a human one never does. A row that breaks it is storage
+    // corruption, not something to render as "some agent".
+    if (author_kind == AuthorKind::Agent) != agent_label.is_some() {
+        return Err(ContentError::Storage);
+    }
     Ok(Message {
         id: row.try_get("", "id").map_err(database_error)?,
         sequence: row.try_get("", "sequence").map_err(database_error)?,
@@ -12,8 +21,14 @@ fn message(row: &QueryResult) -> Result<Message, ContentError> {
         author_name: row.try_get("", "author_name").map_err(database_error)?,
         body: row.try_get("", "body").map_err(database_error)?,
         created_at: row.try_get("", "created_at").map_err(database_error)?,
+        author_kind,
+        agent_label,
     })
 }
+
+/// Every message read selects the same projection, so a new column cannot be
+/// exposed on one path and silently missing on another.
+const MESSAGE_COLUMNS: &str = "m.id,m.sequence,m.author_id,a.display_name AS author_name,m.body,m.created_at,m.author_kind,m.agent_label";
 
 async fn load(
     tx: &DatabaseTransaction,
@@ -21,7 +36,7 @@ async fn load(
     chat_id: &str,
     id: &str,
 ) -> Result<Message, ContentError> {
-    let row=db::one(tx,"SELECT m.id,m.sequence,m.author_id,a.display_name AS author_name,m.body,m.created_at FROM neev_messages m JOIN neev_accounts a ON a.id=m.author_id WHERE m.org_id=$1 AND m.chat_id=$2 AND m.id=$3",vec![org_id.into(),chat_id.into(),id.into()]).await?.ok_or(ContentError::NotFound)?;
+    let row=db::one(tx,&format!("SELECT {MESSAGE_COLUMNS} FROM neev_messages m JOIN neev_accounts a ON a.id=m.author_id WHERE m.org_id=$1 AND m.chat_id=$2 AND m.id=$3"),vec![org_id.into(),chat_id.into(),id.into()]).await?.ok_or(ContentError::NotFound)?;
     message(&row)
 }
 
@@ -79,7 +94,7 @@ pub(crate) async fn append(
         return Err(ContentError::Invalid);
     }
     let id = uuid::Uuid::new_v4().to_string();
-    db::execute(&tx,"INSERT INTO neev_messages(org_id,chat_id,resource_kind,id,sequence,author_id,body,byte_length,created_at) VALUES($1,$2,'chat',$3,$4,$5,$6,$7,$8)",vec![actor.org_id.into(),chat_id.into(),id.clone().into(),sequence.into(),actor.identity.user_id.into(),body.into(),bytes.into(),now.into()]).await?;
+    db::execute(&tx,"INSERT INTO neev_messages(org_id,chat_id,resource_kind,id,sequence,author_id,body,byte_length,created_at,author_kind,agent_label) VALUES($1,$2,'chat',$3,$4,$5,$6,$7,$8,'human',NULL)",vec![actor.org_id.into(),chat_id.into(),id.clone().into(),sequence.into(),actor.identity.user_id.into(),body.into(),bytes.into(),now.into()]).await?;
     db::execute(
         &tx,
         "UPDATE neev_resources SET content_revision=$1,updated_at=$2 WHERE org_id=$3 AND id=$4",
@@ -99,6 +114,97 @@ pub(crate) async fn append(
     // reader. The notice carries the sequence alone — subscribers re-read the
     // conversation through `list`, which re-runs this same ACL.
     state.realtime.publish(actor.org_id, chat_id, sequence);
+    Ok(result)
+}
+
+/// Publish an agent-authored reply into a team chat (spec §5.3).
+///
+/// Called by the run driver *after* the run finished, not by the request that
+/// started it, so it deliberately does NOT recheck the browser session: the
+/// invocation was authorized when it was made, the run is server-owned, and the
+/// answer belongs to the team even if the invoker has since closed their tab.
+///
+/// What it does still re-prove, against current storage:
+/// - the invoker retains **write** authority over this chat (a member removed
+///   from the org, or a chat that became private to someone else, publishes
+///   nothing);
+/// - the chat is not archived;
+/// - the org's content quota admits the message.
+///
+/// The row is written with `author_kind='agent'` and `agent_label=<provider>`,
+/// while `author_id` stays the human invoker — the message is *attributable*
+/// ("Claude, invoked by Sam") without ever being *attributed* to a human.
+pub(crate) async fn publish_agent_reply(
+    state: &ServerState,
+    invoker: &OrgContext,
+    chat_id: &str,
+    body: &str,
+    agent_label: &str,
+    turn_id: &str,
+) -> Result<Message, ContentError> {
+    if body.is_empty() || body.len() > 32768 {
+        return Err(ContentError::Invalid);
+    }
+    if !matches!(agent_label, "claude" | "codex") {
+        return Err(ContentError::Invalid);
+    }
+    // The turn is the identity of this reply. Recording a receipt against it
+    // means a replay — a retried invocation, or a second settlement attempt
+    // after a partial failure — returns the message that already exists instead
+    // of posting the agent's answer twice.
+    let request = org::normalize_request_id(turn_id).map_err(|_| ContentError::Invalid)?;
+    let hash = org::digest_parts(&[
+        "agent.team.publish",
+        &invoker.org_id.to_string(),
+        chat_id,
+        agent_label,
+        body,
+    ]);
+    let tx = db::begin(&state.database).await?;
+    db::lock_admission_guard(&tx).await?;
+    if let Some(id) = resources::receipt(&tx, invoker, "agent.team.publish", &request, &hash).await?
+    {
+        let existing = load(&tx, invoker.org_id, chat_id, &id).await?;
+        tx.commit().await.map_err(database_error)?;
+        return Ok(existing);
+    }
+    access::lock_resources(&tx, invoker, chat_id, false).await?;
+    // `write = true`: publishing on someone's behalf requires that they could
+    // still post here themselves.
+    let chat = access::authorized(&tx, invoker, chat_id, true).await?;
+    if chat.kind != ResourceKind::Chat {
+        return Err(ContentError::NotFound);
+    }
+    let sequence = chat
+        .content_revision
+        .checked_add(1)
+        .ok_or(ContentError::Conflict)?;
+    let bytes = i64::try_from(body.len()).map_err(|_| ContentError::Invalid)?;
+    resources::initialize_usage(&tx, invoker.org_id).await?;
+    let charged=db::execute(&tx,"UPDATE neev_content_usage SET charged_bytes=charged_bytes+$1,messages=messages+1 WHERE org_id=$2 AND messages<100000 AND charged_bytes<=1073741824-$1",vec![bytes.into(),invoker.org_id.into()]).await?;
+    if charged.rows_affected() != 1 {
+        return Err(ContentError::Quota);
+    }
+    let now = state.clock.now_unix();
+    if now < 0 {
+        return Err(ContentError::Invalid);
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    db::execute(&tx,"INSERT INTO neev_messages(org_id,chat_id,resource_kind,id,sequence,author_id,body,byte_length,created_at,author_kind,agent_label) VALUES($1,$2,'chat',$3,$4,$5,$6,$7,$8,'agent',$9)",vec![invoker.org_id.into(),chat_id.into(),id.clone().into(),sequence.into(),invoker.identity.user_id.into(),body.into(),bytes.into(),now.into(),agent_label.into()]).await?;
+    db::execute(
+        &tx,
+        "UPDATE neev_resources SET content_revision=$1,updated_at=$2 WHERE org_id=$3 AND id=$4",
+        vec![
+            sequence.into(),
+            now.into(),
+            invoker.org_id.into(),
+            chat_id.into(),
+        ],
+    )
+    .await?;
+    resources::record_receipt(&tx, invoker, "agent.team.publish", &request, &hash, &id).await?;
+    let result = load(&tx, invoker.org_id, chat_id, &id).await?;
+    tx.commit().await.map_err(database_error)?;
     Ok(result)
 }
 
@@ -126,7 +232,7 @@ pub(crate) async fn list(
             return Err(ContentError::NotFound);
         }
     }
-    let rows=tx.query_all(db::statement(&tx,"SELECT m.id,m.sequence,m.author_id,a.display_name AS author_name,m.body,m.created_at FROM neev_messages m JOIN neev_accounts a ON a.id=m.author_id WHERE m.org_id=$1 AND m.chat_id=$2 AND m.sequence>$3 ORDER BY m.sequence LIMIT 101",vec![actor.org_id.into(),chat_id.into(),after.unwrap_or(0).into()])).await.map_err(database_error)?;
+    let rows=tx.query_all(db::statement(&tx,&format!("SELECT {MESSAGE_COLUMNS} FROM neev_messages m JOIN neev_accounts a ON a.id=m.author_id WHERE m.org_id=$1 AND m.chat_id=$2 AND m.sequence>$3 ORDER BY m.sequence LIMIT 101"),vec![actor.org_id.into(),chat_id.into(),after.unwrap_or(0).into()])).await.map_err(database_error)?;
     let has_more = rows.len() > 100;
     let items = rows
         .iter()

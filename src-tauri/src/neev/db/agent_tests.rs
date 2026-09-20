@@ -204,6 +204,10 @@ async fn initialize_historical(db: &DatabaseConnection, version: i64) {
 
 async fn downgrade_five(db: &DatabaseConnection, version: i64) {
     for table in [
+        // session11 (turns reference sessions), then org9, then gateway8.
+        "neev_agent_turns",
+        "neev_agent_sessions",
+        "neev_org_join_codes",
         "neev_gateway_revoke_intents",
         "neev_gateway_redemptions",
         "neev_gateway_relying_sessions",
@@ -1862,7 +1866,7 @@ async fn initializer_refuses_mismatched_partial_and_non_table_agent_schemas() {
         .await
         .unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
-    assert_eq!(schema_version(&db).await, 10);
+    assert_eq!(schema_version(&db).await, 11);
     assert!(!relation_exists(&db, "neev_agent_operations", "table").await);
 
     let db = h::database().await;

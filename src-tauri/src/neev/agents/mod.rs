@@ -6,6 +6,8 @@ pub(crate) mod control_wire;
 pub(crate) mod execution;
 pub(crate) mod intents;
 pub(crate) mod recovery;
+pub(crate) mod runs;
+pub(crate) mod sessions;
 pub(crate) mod status;
 pub(super) mod store;
 pub(crate) mod types;

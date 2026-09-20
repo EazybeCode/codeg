@@ -131,13 +131,20 @@ struct ResourceDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MessageDto {
+pub(super) struct MessageDto {
     id: String,
     sequence: String,
     author_id: i32,
     author_name: String,
     body: String,
     created_at: i64,
+    /// `"human"` or `"agent"` (spec §5.3). An agent message was produced by a
+    /// provider in answer to an explicit invocation; `authorId`/`authorName`
+    /// still identify the human who invoked it, so clients can render
+    /// "<provider> · via <name>" without the agent impersonating anyone.
+    author_kind: &'static str,
+    /// The provider that produced an agent message; `null` for a human one.
+    agent_label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -686,7 +693,7 @@ fn resource_dto(resource: Resource) -> Result<ResourceDto, ApiError> {
     })
 }
 
-fn message_dto(message: Message) -> Result<MessageDto, ApiError> {
+pub(super) fn message_dto(message: Message) -> Result<MessageDto, ApiError> {
     canonical_uuid(&message.id).map_err(|_| ApiError::StorageUnavailable)?;
     if message.sequence < 1 || message.author_id < 1 || message.created_at < 0 {
         return Err(ApiError::StorageUnavailable);
@@ -698,6 +705,8 @@ fn message_dto(message: Message) -> Result<MessageDto, ApiError> {
         author_name: message.author_name,
         body: message.body,
         created_at: message.created_at,
+        author_kind: message.author_kind.name(),
+        agent_label: message.agent_label,
     })
 }
 
@@ -774,7 +783,7 @@ pub(super) fn safe_path<T>(value: Result<Path<T>, PathRejection>) -> Result<T, A
         .map_err(|_| ApiError::Invalid)
 }
 
-fn safe_query<T>(value: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
+pub(super) fn safe_query<T>(value: Result<Query<T>, QueryRejection>) -> Result<T, ApiError> {
     value
         .map(|Query(value)| value)
         .map_err(|_| ApiError::Invalid)

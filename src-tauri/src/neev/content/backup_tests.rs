@@ -32,6 +32,8 @@ const AGENT_TABLES: [&str; 3] = [
     "neev_agent_operations",
 ];
 const STATUS_TABLES: [&str; 2] = ["neev_agent_status_owner", "neev_agent_status_checks"];
+// Declared parent-first; dropped in reverse so turns go before their sessions.
+const SESSION_TABLES: [&str; 2] = ["neev_agent_sessions", "neev_agent_turns"];
 // FK-safe drop order: children before their gateway parents (section 5).
 const GATEWAY_TABLES: [&str; 7] = [
     "neev_gateway_revoke_intents",
@@ -169,10 +171,10 @@ async fn sqlite_gateway8_rich_format_six_seven_eight() {
 }
 
 #[tokio::test]
-async fn sqlite_schema_nine_ten_decode_rich_bodies_and_catch_corruption() {
+async fn sqlite_schema_nine_through_eleven_decode_rich_bodies_and_catch_corruption() {
     // Regression: a v9/v10 snapshot must decode block documents (not read them as
     // markdown) and reject a corrupt rich body at the rich-decode stage.
-    for schema_version in [9, 10] {
+    for schema_version in [9, 10, 11] {
         rich_snapshot_contract(h::database().await, schema_version).await;
     }
 }
@@ -301,7 +303,7 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
-    if schema_version == 10 {
+    if schema_version == 11 {
         return;
     }
     let sqlite_rebuild =
@@ -312,12 +314,20 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
             .unwrap();
     }
     let tx = database.begin().await.unwrap();
-    // Fresh install is v10; every lower target removes the additive tables it
-    // predates. v10 added image blobs, v9 added join codes.
-    db::execute(&tx, "DROP TABLE neev_image_blobs", vec![])
-        .await
-        .unwrap();
+    // v11 added the agent-session tables on top of a fresh install; every lower
+    // target must remove them (turns first — they reference sessions).
+    for table in SESSION_TABLES.iter().rev() {
+        db::execute(&tx, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
+    if schema_version < 10 {
+        db::execute(&tx, "DROP TABLE neev_image_blobs", vec![])
+            .await
+            .unwrap();
+    }
     if schema_version < 9 {
+        // v9 added the join-code table; lower targets must remove it too.
         db::execute(&tx, "DROP TABLE neev_org_join_codes", vec![])
             .await
             .unwrap();
@@ -596,7 +606,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 10);
+    assert_eq!(manifest.schema_version, 11);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -628,6 +638,11 @@ async fn snapshot_schema_is_exact_and_read_only() {
     db::execute(&db, "DROP TABLE neev_image_blobs", vec![])
         .await
         .unwrap();
+    for table in SESSION_TABLES.iter().rev() {
+        db::execute(&db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     db::execute(&db, "DROP TABLE neev_org_join_codes", vec![])
         .await
         .unwrap();

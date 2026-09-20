@@ -55,6 +55,37 @@ pub(crate) struct Message {
     pub author_name: String,
     pub body: String,
     pub created_at: i64,
+    /// Who wrote the text. `Agent` means a provider produced it in answer to an
+    /// explicit team invocation; `author_id` still names the human who invoked
+    /// it, so the message stays attributable without impersonating them.
+    pub author_kind: AuthorKind,
+    /// The provider that produced an agent message (`claude`/`codex`); `None`
+    /// for a human one. The schema pairs these two exactly.
+    pub agent_label: Option<String>,
+}
+
+/// Distinguishes an agent-authored team message from a human one (spec §5.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuthorKind {
+    Human,
+    Agent,
+}
+
+impl AuthorKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "human" => Some(Self::Human),
+            "agent" => Some(Self::Agent),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +190,8 @@ mod tests {
             author_name: "Author".into(),
             body: "Hello".into(),
             created_at: 10,
+            author_kind: AuthorKind::Human,
+            agent_label: None,
         };
         let revision = Revision {
             format: DocumentFormat::Markdown,

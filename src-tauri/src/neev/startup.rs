@@ -12,6 +12,10 @@ use super::{
     mail::{self, resend::Resend},
 };
 
+/// How often expired provider-login attempts are swept. Well under the 600s
+/// attempt deadline, so an abandoned login frees its connection promptly.
+const PENDING_SWEEP_SECS: u64 = 60;
+
 pub(crate) struct ServerState {
     pub(crate) database: DatabaseConnection,
     pub(crate) config: Config,
@@ -30,6 +34,10 @@ pub(crate) struct ServerState {
     /// Content-free fan-out for team-message push delivery. In-memory only: a
     /// subscriber never holds a database connection.
     pub(crate) realtime: Arc<MessageHub>,
+    /// Server-owned live runs by durable run id. A session run is registered
+    /// here for its lifetime so a dropped stream can REATTACH to it and replay
+    /// what was already produced, instead of re-executing the prompt (§5.2).
+    pub(crate) agent_runs: super::agents::runs::RunRegistry,
 }
 
 impl ServerState {
@@ -70,6 +78,7 @@ impl ServerState {
             agents: super::agents::execution::disabled_runtime(),
             agent_jobs: super::agents::execution::new_job_registry(),
             realtime: Arc::new(MessageHub::default()),
+            agent_runs: super::agents::runs::new_registry(),
             oauth,
             magic,
             mail,
@@ -93,6 +102,7 @@ impl ServerState {
             agents: super::agents::execution::disabled_runtime(),
             agent_jobs: super::agents::execution::new_job_registry(),
             realtime: Arc::new(MessageHub::default()),
+            agent_runs: super::agents::runs::new_registry(),
             oauth,
             magic: None,
             mail: None,
@@ -117,6 +127,7 @@ impl ServerState {
             agents: super::agents::execution::disabled_runtime(),
             agent_jobs: super::agents::execution::new_job_registry(),
             realtime: Arc::new(MessageHub::default()),
+            agent_runs: super::agents::runs::new_registry(),
             oauth,
             magic: Some(magic),
             mail: None,
@@ -141,6 +152,7 @@ impl ServerState {
             agents: super::agents::execution::disabled_runtime(),
             agent_jobs: super::agents::execution::new_job_registry(),
             realtime: Arc::new(MessageHub::default()),
+            agent_runs: super::agents::runs::new_registry(),
             oauth,
             magic: None,
             mail: Some(mail),
@@ -153,10 +165,7 @@ impl ServerState {
     }
 
     #[cfg(any(test, feature = "dev-agent"))]
-    pub(crate) fn set_agent_runtime(
-        &mut self,
-        runtime: super::agents::execution::AgentRuntime,
-    ) {
+    pub(crate) fn set_agent_runtime(&mut self, runtime: super::agents::execution::AgentRuntime) {
         self.agents = Arc::new(runtime);
     }
 }
@@ -191,7 +200,9 @@ fn is_group_or_other_writable(path: &std::path::Path) -> bool {
 /// that is not root-owned could be replaced by the tenant uid.
 fn is_root_owned(path: &std::path::Path) -> bool {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).map(|m| m.uid() == 0).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.uid() == 0)
+        .unwrap_or(false)
 }
 
 pub(super) fn run_server() -> ExitCode {
@@ -223,6 +234,13 @@ async fn serve() -> Result<(), ()> {
     options.max_connections(32).sqlx_logging(false);
     let database = Database::connect(options).await.map_err(|_| ())?;
     db::initialize(&database).await.map_err(|_| ())?;
+    // Any turn still marked `running` belongs to a process that no longer
+    // exists — its stream died with it and it can never complete. Settle those
+    // before the HTTP surface opens, so no user is shown a reply that spins
+    // forever (§5.2: a truly gone run is Failed, never silently re-run).
+    super::agents::sessions::reconcile_interrupted(&database, SystemClock.now_unix())
+        .await
+        .map_err(|_| ())?;
     let bind = config.bind;
     let mut state = ServerState::new(database, config, Arc::new(SystemClock)).map_err(|_| ())?;
     // Production agent-runtime enablement: only when the config layer accepted
@@ -289,16 +307,59 @@ async fn serve() -> Result<(), ()> {
                 _ => return Err(()), // malformed/non-public allowlist entry: fail closed
             }
         }
+        // Only providers with a validated absolute binary are bound. A provider
+        // with none is refused as `Unsupported` at run time — never served by
+        // another provider's binary. `NEEV_AGENT_CODEX_BINARY` is optional and
+        // held to the same absolute/existing rule as the Claude one.
+        let mut binaries = super::agents::execution::ProviderBinaries::claude(binary);
+        if let Ok(codex) = std::env::var("NEEV_AGENT_CODEX_BINARY") {
+            let codex_path = std::path::Path::new(&codex);
+            if !codex_path.is_absolute() || !codex_path.is_file() {
+                return Err(());
+            }
+            binaries.codex = Some(codex);
+        }
         state.agents = super::agents::execution::sandboxed_runtime(
             python,
             launcher,
-            binary,
+            binaries,
             workspace_root,
             provider_ipv4,
             Some(cap_helper),
         );
     }
     let state = Arc::new(state);
+    // Connection recovery, wired into the real lifecycle.
+    //
+    // A provider sign-in interrupted by a crash leaves its connection
+    // `connecting` with a `pending` attempt, and `intents::begin` refuses a
+    // fresh login while the connection is not `disconnected` — so without this
+    // the user can never reconnect that provider, and therefore never obtain
+    // the per-user credential a run requires (§5.4).
+    //
+    // `recover_startup` is safe HERE and only here: this runs once, before the
+    // listener accepts anything, so no attempt owned by THIS process can be in
+    // flight, and every `pending` attempt it finds belongs to a process that no
+    // longer exists. It is deliberately not called again later — the periodic
+    // sweep below uses `expire_pending`, which only touches attempts whose own
+    // deadline has passed and therefore can never cancel a live login.
+    //
+    // NOTE for a future multi-instance deployment: `recover_startup` assumes a
+    // single server owns this database. A second instance booting while the
+    // first serves logins would reset those logins; gate it on a supervisor
+    // lease before scaling out.
+    if let Err(error) = crate::neev::agents::recovery::recover_startup(&state).await {
+        eprintln!("Neev agent connection recovery failed at startup: {error:?}");
+        return Err(());
+    }
+    let sweeper = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(PENDING_SWEEP_SECS)).await;
+            // Only EXPIRED attempts; an in-progress login is untouched.
+            let _ = crate::neev::agents::recovery::expire_pending(&sweeper).await;
+        }
+    });
     let listener = tokio::net::TcpListener::bind(bind).await.map_err(|_| ())?;
     let public = axum::serve(
         listener,
@@ -309,10 +370,9 @@ async fn serve() -> Result<(), ()> {
         // if either exits (bind failure, invalid TLS material) the server stops.
         Some(cfg) => {
             let private = crate::neev::gateway::transport::serve(cfg, state.clone());
-            tokio::try_join!(
-                async { public.await.map_err(|_| ()) },
-                async { private.await.map_err(|_| ()) },
-            )
+            tokio::try_join!(async { public.await.map_err(|_| ()) }, async {
+                private.await.map_err(|_| ())
+            },)
             .map(|_| ())
         }
         None => public.await.map_err(|_| ()),

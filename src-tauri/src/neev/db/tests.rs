@@ -40,7 +40,7 @@ async fn refuses_unknown_schema_version() {
 }
 
 #[tokio::test]
-async fn fresh_schema_is_version_nine_with_separate_branding_revision() {
+async fn fresh_schema_is_version_eleven_with_separate_branding_revision() {
     let db = h::database().await;
     let version = db
         .query_one(Statement::from_string(
@@ -52,7 +52,7 @@ async fn fresh_schema_is_version_nine_with_separate_branding_revision() {
         .unwrap()
         .try_get::<i64>("", "version")
         .unwrap();
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 
     let user = h::native_account(&db, "schema-owner", "schema@example.test").await;
     let row = db

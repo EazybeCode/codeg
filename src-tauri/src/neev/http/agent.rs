@@ -92,6 +92,20 @@ pub(super) async fn run(
         return Err(ApiError::Invalid);
     }
     let user_id = context.identity.user_id;
+    // The invoker's OWN per-user credential for the requested provider (§5.4);
+    // an unknown provider resolves to `None`, which the sandboxed runtime
+    // refuses rather than launching under a host identity.
+    let credential_handle = match payload.provider.as_str() {
+        "claude" => Some(crate::neev::agents::types::Provider::Claude),
+        "codex" => Some(crate::neev::agents::types::Provider::Codex),
+        _ => None,
+    };
+    let credential_handle = match credential_handle {
+        Some(provider) => crate::neev::agents::intents::credential(&state, &context, provider)
+            .await
+            .map_err(super::agent_error)?,
+        None => None,
+    };
     let request = RunRequest {
         // Server-authoritative identity: never trust a client-supplied user/org.
         user_id,
@@ -100,6 +114,7 @@ pub(super) async fn run(
         provider: payload.provider,
         model: payload.model,
         prompt: payload.prompt,
+        credential_handle,
     };
     let mut handle = match state.agents.run(request).await {
         Ok(handle) => handle,
