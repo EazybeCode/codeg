@@ -155,8 +155,10 @@ it("supports keyboard project creation, nested placement and dialog focus restor
     "GET /api/neev/nodes/1/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/3/chats": () => json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/1/documents": () => json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/2/documents": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/1/documents": () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/2/documents": () =>
+      json({ items: [], nextAfter: null }),
     "POST /api/neev/nodes": (init) => {
       const body = JSON.parse(init.body as string)
       bodies.push(body)
