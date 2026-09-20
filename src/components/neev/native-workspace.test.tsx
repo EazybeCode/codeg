@@ -538,3 +538,182 @@ it("reloads expanded containers when switching documents and team chat", async (
   expect(screen.queryByRole("button", { name: "Alpha" })).toBeNull()
   expect(mock.unknown).toEqual([])
 })
+
+const DOC_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+const NODE = {
+  id: 4,
+  orgId: 3,
+  parentId: null,
+  kind: "project",
+  name: "Roadmap",
+  revision: "1",
+}
+const DOC = {
+  id: DOC_ID,
+  orgId: 3,
+  nodeId: 4,
+  kind: "document",
+  creatorId: 1,
+  title: "Launch plan",
+  visibility: "private",
+  originChatId: null,
+  authRevision: "1",
+  contentRevision: "1",
+  archived: false,
+  createdAt: 0,
+  updatedAt: 0,
+}
+
+/** The pointer a previous visit would have left behind, for this user + org. */
+function rememberOpen(ref: unknown = { resourceId: DOC_ID, nodeId: 4 }) {
+  localStorage.setItem("neev.ws.section", "docs")
+  localStorage.setItem("neev.ws.open.1:3", JSON.stringify(ref))
+}
+
+function restoringRoutes(resource: () => Response) {
+  return {
+    "GET /api/neev/nodes": () => json({ nodes: [NODE], nextAfter: null }),
+    "GET /api/neev/nodes/4/documents": () =>
+      json({ items: [DOC], nextAfter: null }),
+    [`GET /api/neev/resources/${DOC_ID}`]: resource,
+    [`GET /api/neev/documents/${DOC_ID}/content`]: () =>
+      json({
+        revision: {
+          format: "markdown",
+          formatVersion: 1,
+          revision: "1",
+          authorId: 1,
+          authorName: "Sagar",
+          byteLength: "5",
+          sha256: "a".repeat(64),
+          createdAt: 0,
+          parentRevision: null,
+          restoredFrom: null,
+        },
+        markdown: "Hello",
+        document: null,
+      }),
+    [`GET /api/neev/documents/${DOC_ID}/revisions`]: () =>
+      json({ items: [], nextAfter: null }),
+  }
+}
+
+function mountWorkspace() {
+  return render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeWorkspace />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+}
+
+it("returns the reader to the resource they had open before a reload", async () => {
+  rememberOpen()
+  mockNativeSession(
+    undefined,
+    restoringRoutes(() => json(DOC))
+  )
+  mountWorkspace()
+  // The container is revealed and its items listed …
+  expect(await screen.findByText("Roadmap")).toBeVisible()
+  // … and the document is actually OPEN: its title shows both as the rail entry
+  // and in the open document's own header. The empty-section placeholder would
+  // give neither.
+  await waitFor(() =>
+    expect(screen.getAllByTitle("Launch plan")).toHaveLength(2)
+  )
+  expect(screen.queryByText("Pick a document to open")).toBeNull()
+})
+
+it("restores nothing when the resource is gone or no longer permitted", async () => {
+  for (const status of [404, 403]) {
+    localStorage.clear()
+    rememberOpen()
+    mockNativeSession(
+      undefined,
+      restoringRoutes(() => json({ code: "not_found" }, status))
+    )
+    const view = mountWorkspace()
+    // A deleted or newly-forbidden id lands the reader in their section, not on
+    // an error — they never asked for this fetch.
+    expect(await screen.findByText("Roadmap")).toBeVisible()
+    expect(screen.queryByTitle("Launch plan")).toBeNull()
+    expect(screen.queryByRole("alert")).toBeNull()
+    view.unmount()
+    vi.unstubAllGlobals()
+  }
+})
+
+it("ignores a pointer left by a different organization", async () => {
+  // The signed-in org is 3; this pointer belongs to another tenant's key.
+  localStorage.setItem("neev.ws.section", "docs")
+  localStorage.setItem(
+    "neev.ws.open.1:9",
+    JSON.stringify({ resourceId: DOC_ID, nodeId: 4 })
+  )
+  let fetched = 0
+  mockNativeSession(
+    undefined,
+    restoringRoutes(() => {
+      fetched += 1
+      return json(DOC)
+    })
+  )
+  mountWorkspace()
+  await screen.findByText("Roadmap")
+  expect(screen.queryByTitle("Launch plan")).toBeNull()
+  // Not even a lookup: a pointer from another tenant is never dereferenced.
+  expect(fetched).toBe(0)
+})
+
+it("ignores a pointer whose resource belongs to the other section", async () => {
+  rememberOpen()
+  // Stored while in Documents, but the server says it is a chat now.
+  mockNativeSession(
+    undefined,
+    restoringRoutes(() => json({ ...DOC, kind: "chat", originChatId: null }))
+  )
+  mountWorkspace()
+  await screen.findByText("Roadmap")
+  expect(screen.queryByTitle("Launch plan")).toBeNull()
+})
+
+it("discards a malformed pointer without a lookup", async () => {
+  rememberOpen({ resourceId: "not-a-uuid", nodeId: 4 })
+  let fetched = 0
+  mockNativeSession(
+    undefined,
+    restoringRoutes(() => {
+      fetched += 1
+      return json(DOC)
+    })
+  )
+  mountWorkspace()
+  await screen.findByText("Roadmap")
+  expect(fetched).toBe(0)
+})
+
+it("remembers the opened resource, and forgets it on the way back", async () => {
+  localStorage.setItem("neev.ws.section", "docs")
+  mockNativeSession(
+    undefined,
+    restoringRoutes(() => json(DOC))
+  )
+  const user = userEvent.setup()
+  mountWorkspace()
+  await user.click(await screen.findByRole("button", { name: "Roadmap" }))
+  await user.click(await screen.findByRole("button", { name: "Launch plan" }))
+  // A pointer, not content: just which resource, under which container.
+  await waitFor(() =>
+    expect(
+      JSON.parse(localStorage.getItem("neev.ws.open.1:3") as string)
+    ).toEqual({ resourceId: DOC_ID, nodeId: 4 })
+  )
+  await user.click(screen.getByRole("button", { name: "Team chat" }))
+  // Leaving the section closes the resource, so there is nothing to restore —
+  // the next reload should land where the reader actually left off.
+  await waitFor(() =>
+    expect(localStorage.getItem("neev.ws.open.1:3")).toBeNull()
+  )
+})

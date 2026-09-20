@@ -5,11 +5,15 @@ import {
   DEFAULT_SECTION,
   getActiveSection,
   getDocWidth,
+  getOpenResource,
   getRightPanelOpen,
   setActiveSection,
   setDocWidth,
+  setOpenResource,
   setRightPanelOpen,
 } from "./neev-workspace-prefs"
+
+const RESOURCE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 /**
  * These are per-user viewer preferences read at mount; a stale/absent/corrupt
@@ -64,5 +68,32 @@ describe("neev workspace prefs", () => {
   it("treats an unknown section as the default", () => {
     localStorage.setItem("neev.ws.section", "inbox")
     expect(getActiveSection()).toBe("docs")
+  })
+
+  it("scopes the open-resource pointer to one user in one organization", () => {
+    const ref = { resourceId: RESOURCE, nodeId: 4 }
+    expect(getOpenResource(1, 3)).toBeNull()
+    setOpenResource(1, 3, ref)
+    expect(getOpenResource(1, 3)).toEqual(ref)
+    // A different account, or the same account in another tenant, must not
+    // inherit a selection from a shared browser profile.
+    expect(getOpenResource(2, 3)).toBeNull()
+    expect(getOpenResource(1, 9)).toBeNull()
+    setOpenResource(1, 3, null)
+    expect(getOpenResource(1, 3)).toBeNull()
+  })
+
+  it("discards a pointer that could not have been written by this app", () => {
+    for (const bad of [
+      "{",
+      JSON.stringify({ resourceId: "not-a-uuid", nodeId: 4 }),
+      JSON.stringify({ resourceId: RESOURCE }),
+      JSON.stringify({ resourceId: RESOURCE, nodeId: 0 }),
+      JSON.stringify({ resourceId: RESOURCE, nodeId: 1.5 }),
+      JSON.stringify({ resourceId: RESOURCE, nodeId: "4" }),
+    ]) {
+      localStorage.setItem("neev.ws.open.1:3", bad)
+      expect(getOpenResource(1, 3)).toBeNull()
+    }
   })
 })
