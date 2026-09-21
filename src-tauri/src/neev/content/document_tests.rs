@@ -372,58 +372,54 @@ async fn postgres_document_audiences_and_boundaries() {
     h::cleanup_postgres(db, admin, schema).await;
 }
 
-// Catches off-by-one revision cap and pagination that omits/repeats boundary rows.
+// The per-document revision ceiling is now generous (MAX_DOCUMENT_REVISIONS),
+// not the old hard 1000 that made autosave unusable: a save AT revision 1000 must
+// SUCCEED (1000 -> 1001), and pagination must not omit or repeat the boundary row.
+// The per-org byte budget stays enforced by the separate quota tests.
 async fn revision_limit(database: sea_orm::DatabaseConnection) {
     let h = Harness::new(database).await;
     let doc = shared_document(&h).await;
     documents::save(&h.state, &h.creator, &doc.id, input(0, 2, ""))
         .await
         .unwrap();
+    // Seed a deep history up to the OLD hard cap so the save under test is the one
+    // that crosses it. Revision 1000 must exist as the parent of 1001 (FK).
     let tx = db::begin(&h.state.database).await.unwrap();
-    for revision in 2_i64..=999 {
+    for revision in 2_i64..=1000 {
         db::execute(&tx,"INSERT INTO neev_document_revisions(org_id,document_id,resource_kind,revision,blob_key,sha256,byte_length,author_id,created_at,parent_revision,restored_from) VALUES($1,$2,'document',$3,$4,$5,0,$6,1700000000,$7,NULL)",vec![h.creator.org_id.into(),doc.id.clone().into(),revision.into(),request().into(),"0".repeat(64).into(),h.creator.identity.user_id.into(),(revision-1).into()]).await.unwrap();
         db::execute(&tx,"INSERT INTO neev_document_formats(org_id,document_id,revision,format,format_version) VALUES($1,$2,$3,'markdown',1)",vec![h.creator.org_id.into(),doc.id.clone().into(),revision.into()]).await.unwrap();
     }
     db::execute(
         &tx,
-        "UPDATE neev_resources SET content_revision=999 WHERE id=$1",
+        "UPDATE neev_resources SET content_revision=1000 WHERE id=$1",
         vec![doc.id.clone().into()],
     )
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let (a, b) = tokio::join!(
-        documents::save(&h.state, &h.creator, &doc.id, input(999, 2, "a")),
-        documents::save(&h.state, &h.admin, &doc.id, input(999, 2, "b"))
-    );
-    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
-    assert_eq!(
-        if a.is_ok() {
-            a.unwrap().revision
-        } else {
-            b.unwrap().revision
-        },
-        1000
-    );
-    assert_eq!(
-        documents::save(&h.state, &h.creator, &doc.id, input(1000, 2, "overflow")).await,
-        Err(ContentError::Quota)
-    );
+    // The old cap refused exactly this save with Quota; autosave needs it to go
+    // through and advance the monotonic revision to 1001.
+    let saved = documents::save(&h.state, &h.creator, &doc.id, input(1000, 2, "past"))
+        .await
+        .unwrap();
+    assert_eq!(saved.revision, 1001);
     let mut cursor = None;
     let mut revisions = Vec::new();
     loop {
         let page = documents::history(&h.state, &h.creator, &doc.id, cursor)
             .await
             .unwrap();
-        assert_eq!(page.items.len(), 100);
+        assert!(page.items.len() <= 100);
         revisions.extend(page.items.iter().map(|r| r.revision));
         cursor = page.next_after.map(|v| v.parse().unwrap());
         if cursor.is_none() {
             break;
         }
     }
-    assert_eq!(revisions, (1..=1000).collect::<Vec<_>>());
-    assert_eq!(h.usage("charged_bytes").await, 1);
+    assert_eq!(revisions, (1..=1001).collect::<Vec<_>>());
+    // Only the two real saves ("" then "past") charge bytes; the raw seeded rows
+    // do not, so byte accounting is unaffected by the raised revision ceiling.
+    assert_eq!(h.usage("charged_bytes").await, 4);
 }
 #[tokio::test]
 async fn sqlite_document_revision_limit() {

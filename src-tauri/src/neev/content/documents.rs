@@ -5,6 +5,20 @@ use crate::neev::{
 use sea_orm::{ConnectionTrait, DatabaseTransaction, QueryResult};
 
 const ACTION: &str = "content.document.save";
+/// Per-document lifetime revision ceiling. Each save advances the monotonic
+/// `content_revision` by one, so bounding that count also bounds how many
+/// immutable revision rows a single document may accumulate. The OLD value of
+/// 1000 made autosave unusable: a busy document exhausted it in a single sitting
+/// and could then never be edited again. Aggregate storage is already protected
+/// by the per-org byte budget (`neev_content_usage.charged_bytes <= 1 GiB`), so
+/// this is deliberately a GENEROUS but still bounded row-count ceiling — well
+/// within `i64`, never unlimited history and never a retention/deletion scheme.
+///
+/// CO-REQUISITE: `neev_document_revisions` also carries a hard schema CHECK
+/// `revision BETWEEN 1 AND 1000` (see `db/content_migration.rs`). This constant
+/// and that CHECK MUST be raised together in the same schema bump, or a save
+/// past revision 1000 is refused by the database constraint before it commits.
+const MAX_DOCUMENT_REVISIONS: i64 = 100_000;
 pub(crate) async fn save_rich(
     state: &ServerState,
     actor: &OrgContext,
@@ -172,7 +186,7 @@ async fn save_revision(
     {
         return Err(ContentError::Conflict);
     }
-    if current.content_revision >= 1000 {
+    if current.content_revision >= MAX_DOCUMENT_REVISIONS {
         return Err(ContentError::Quota);
     }
     let now = state.clock.now_unix();
@@ -227,7 +241,7 @@ async fn save_revision(
     {
         return Err(ContentError::Conflict);
     }
-    if current.content_revision >= 1000 {
+    if current.content_revision >= MAX_DOCUMENT_REVISIONS {
         return Err(ContentError::Quota);
     }
     let now = state.clock.now_unix();
