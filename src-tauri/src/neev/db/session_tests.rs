@@ -118,16 +118,19 @@ async fn project_node(db: &DatabaseConnection, org: i32) -> i32 {
     .unwrap()
 }
 
-/// Return a v11 database: current in every way except the additive node column.
+/// Return a genuine v11 database: current except for the columns layers 12 and
+/// 13 add.
 ///
-/// Rebuilding the table without `node_id` is the only way to reach that shape
-/// once the column exists, and it is exactly what a server that has not yet run
-/// layer 12 has on disk.
+/// BOTH columns come off. Dropping only the node pointer would leave a database
+/// whose marker says 11 while `activity` is still there — a shape no server has
+/// ever written, which would test the upgrade against a fixture rather than
+/// against reality.
 async fn downgrade_to_eleven(db: &DatabaseConnection) {
-    // Drop the column rather than rebuilding the table: `neev_agent_turns`
-    // carries a foreign key to this one, so dropping and recreating it would
-    // fail against the turns a session under test owns.
+    // Drop the columns rather than rebuilding the tables: `neev_agent_turns`
+    // carries a foreign key to `neev_agent_sessions`, so dropping and
+    // recreating them would fail against the turns a session under test owns.
     for statement in [
+        "ALTER TABLE neev_agent_turns DROP COLUMN activity",
         "ALTER TABLE neev_agent_sessions DROP COLUMN node_id",
         "UPDATE neev_schema_version SET version=11",
     ] {
@@ -607,7 +610,7 @@ async fn validator_rejects_a_turn_stuck_running_with_a_completion() {
     with_unconstrained(
         "neev_agent_turns",
         TURN_COLS,
-        "INSERT INTO neev_agent_turns VALUES(1,'11111111-1111-4111-8111-111111111111',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-5',NULL,'ask','','running',NULL,'claude','default',1000,1000,1100)",
+        "INSERT INTO neev_agent_turns VALUES(1,'11111111-1111-4111-8111-111111111111',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-5',NULL,'ask','','running',NULL,'claude','default',1000,1000,1100,NULL)",
         vec![],
         with_session,
     )
@@ -619,7 +622,7 @@ async fn validator_rejects_a_turn_with_an_unknown_error_code() {
     with_unconstrained(
         "neev_agent_turns",
         TURN_COLS,
-        "INSERT INTO neev_agent_turns VALUES(1,'11111111-1111-4111-8111-111111111111',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-5',NULL,'ask','','failed','meltdown','claude','default',1000,1000,1100)",
+        "INSERT INTO neev_agent_turns VALUES(1,'11111111-1111-4111-8111-111111111111',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-5',NULL,'ask','','failed','meltdown','claude','default',1000,1000,1100,NULL)",
         vec![],
         with_session,
     )
@@ -631,7 +634,7 @@ async fn validator_rejects_a_turn_whose_session_is_gone() {
     with_unconstrained(
         "neev_agent_turns",
         TURN_COLS,
-        "INSERT INTO neev_agent_turns VALUES(1,'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-5',NULL,'ask','','completed',NULL,'claude','default',1000,1000,1100)",
+        "INSERT INTO neev_agent_turns VALUES(1,'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-5',NULL,'ask','','completed',NULL,'claude','default',1000,1000,1100,NULL)",
         vec![],
         with_session,
     )
@@ -643,7 +646,7 @@ async fn validator_rejects_a_turn_contradicting_its_session_provider() {
     with_unconstrained(
         "neev_agent_turns",
         TURN_COLS,
-        "INSERT INTO neev_agent_turns VALUES(1,'11111111-1111-4111-8111-111111111111',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-5',NULL,'ask','','completed',NULL,'codex','default',1000,1000,1100)",
+        "INSERT INTO neev_agent_turns VALUES(1,'11111111-1111-4111-8111-111111111111',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-5',NULL,'ask','','completed',NULL,'codex','default',1000,1000,1100,NULL)",
         vec![],
         with_session,
     )
@@ -655,7 +658,7 @@ async fn validator_rejects_a_duplicate_run_id() {
     with_unconstrained(
         "neev_agent_turns",
         TURN_COLS,
-        "INSERT INTO neev_agent_turns VALUES(1,'11111111-1111-4111-8111-111111111111',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-1',NULL,'ask','','completed',NULL,'claude','default',1000,1000,1100),(1,'11111111-1111-4111-8111-111111111111',6,'cccccccc-cccc-4ccc-8ccc-cccccccccccc','run-1',NULL,'ask','','completed',NULL,'claude','default',1000,1000,1100)",
+        "INSERT INTO neev_agent_turns VALUES(1,'11111111-1111-4111-8111-111111111111',5,'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','run-1',NULL,'ask','','completed',NULL,'claude','default',1000,1000,1100,NULL),(1,'11111111-1111-4111-8111-111111111111',6,'cccccccc-cccc-4ccc-8ccc-cccccccccccc','run-1',NULL,'ask','','completed',NULL,'claude','default',1000,1000,1100,NULL)",
         vec![],
         with_session,
     )

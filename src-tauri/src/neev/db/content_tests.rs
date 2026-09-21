@@ -409,7 +409,7 @@ async fn v3_forward_hardening(db: &DatabaseConnection, invalid: bool) {
         assert_eq!(validate_content_snapshot(db).await, Ok(3));
         assert_eq!(initialize(db).await, Ok(()));
         assert_eq!(schema_version(db).await, 13);
-        assert_eq!(validate_content_snapshot(db).await, Ok(11));
+        assert_eq!(validate_content_snapshot(db).await, Ok(13));
         assert_eq!(node_name(db, NODE_ID).await, "Marketing");
         assert_eq!(
             scalar(db, "SELECT title FROM neev_resources WHERE id='retained'")

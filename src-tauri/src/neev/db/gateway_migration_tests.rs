@@ -347,7 +347,7 @@ async fn sqlite_gateway8_fresh_inventory_and_seed() {
 async fn postgres_gateway8_fresh_inventory_and_seed() {
     let (db, admin, schema) = h::postgres_database().await;
     eprintln!("gateway8 fresh owned schema: {schema}");
-    assert_eq!(validate_content_snapshot(&db).await, Ok(11));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(13));
     let row = one(
         &db,
         "SELECT audience,issuer FROM neev_gateway_audience",
@@ -1154,7 +1154,7 @@ async fn postgres_gateway8_populated_seven_upgrade_preserves_rows() {
         );
         exact_seven_fixture(&db).await;
         assert_eq!(initialize(&db).await, Ok(()));
-        assert_eq!(validate_content_snapshot(&db).await, Ok(11));
+        assert_eq!(validate_content_snapshot(&db).await, Ok(13));
         // Content revision/format preserved unchanged.
         let after = one(&db, "SELECT r.blob_key,r.sha256,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE r.document_id=$1", vec![doc.into()]).await.unwrap().unwrap();
         assert_eq!(
@@ -1198,7 +1198,7 @@ async fn postgres_gateway8_reinitialize_preserves_history() {
         .unwrap();
         let before = snapshot_gateway8_rows(&db).await;
         assert_eq!(initialize(&db).await, Ok(()));
-        assert_eq!(validate_content_snapshot(&db).await, Ok(11));
+        assert_eq!(validate_content_snapshot(&db).await, Ok(13));
         assert_eq!(snapshot_gateway8_rows(&db).await, before);
     })
     .catch_unwind()

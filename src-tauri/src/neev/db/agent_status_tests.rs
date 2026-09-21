@@ -195,7 +195,7 @@ async fn status_upgrade_preserves_exact_six_and_ready_seven(db: &DatabaseConnect
         Some((1, 1, Some(BOOT_ID.to_owned()), "ready".to_owned()))
     );
     assert_eq!(h::count(db, "neev_agent_status_checks").await, 1);
-    assert_eq!(validate_content_snapshot(db).await, Ok(11));
+    assert_eq!(validate_content_snapshot(db).await, Ok(13));
 }
 
 #[tokio::test]
