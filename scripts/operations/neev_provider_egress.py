@@ -62,6 +62,13 @@ _DIAG_KNOWN_HOSTS = frozenset((
 _HOSTNAME_RE = re.compile(rb"^[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*$")
 _HTTP_VERSIONS = {b"HTTP/1.1": "http11", b"HTTP/1.0": "http10", b"HTTP/2": "http2"}
 _PROXY_CONN_TOKENS = {b"keep-alive": "keep-alive", b"close": "close"}
+# Header NAMES are reported as a FIXED enum: a name in this set is reported verbatim, any
+# other (including an attacker-controlled token) collapses to "other" — never echoed.
+_DIAG_KNOWN_HEADERS = frozenset((
+    b"host", b"user-agent", b"proxy-connection", b"connection", b"proxy-authorization",
+    b"content-length", b"transfer-encoding", b"accept", b"accept-encoding",
+    b"x-forwarded-for", b"authorization",
+))
 
 
 def _safe_authority(authority: bytes) -> str:
@@ -77,11 +84,16 @@ def _safe_authority(authority: bytes) -> str:
 
 
 def classify_connect_request(header) -> str:
-    """Fixed-vocabulary, SAFE one-line summary of a CONNECT for one-shot diagnosis:
-    method/version enums, the destination authority (validated host:port), whether Host
-    matches the authority, whether a bare `Connection` header is present, the
-    Proxy-Connection token class, and header NAMES only (bounded). No header VALUES except
-    the two connection directives; no auth, no TLS payload, no URLs, no bodies."""
+    """SAFE one-line summary of a CONNECT for one-shot diagnosis. Every field is a FIXED
+    enum/bool — method, HTTP version, host_matches, connection_present, proxy_connection
+    token, and header NAMES mapped to a known-name enum plus "other" — EXCEPT one
+    deliberate exception: `authority` is the validated destination host:port. That single
+    field is a validated free hostname (not an enum) because naming the actual host is the
+    whole point of host diagnosis; it is safe because a CONNECT authority is a bare
+    host:port destination that, for the official CLI, never carries a callback/token/state
+    (a value that is not a bare hostname:port is reported as "malformed", never echoed).
+    No header VALUES (except the two connection directives), no auth, no TLS payload, no
+    URLs, no bodies — an attacker-controlled header NAME collapses to "other"."""
     if not header:
         return "shape=no_header"
     try:
@@ -90,14 +102,13 @@ def classify_connect_request(header) -> str:
         method = "CONNECT" if parts[:1] == [b"CONNECT"] else "other"
         authority = parts[1] if len(parts) > 1 else b""
         version = _HTTP_VERSIONS.get(parts[2], "other") if len(parts) > 2 else "other"
-        names, host_value, proxy_conn, connection_present = [], None, "absent", False
+        names, host_value, proxy_conn, connection_present = set(), None, "absent", False
         for line in lines[1:]:
             if not line:
                 continue
             name, sep, value = line.partition(b":")
             lname = name.strip().lower()
-            if len(names) < 16:
-                names.append(name.strip().decode("ascii", "replace")[:32])
+            names.add(lname.decode("ascii") if lname in _DIAG_KNOWN_HEADERS else "other")
             if lname == b"host":
                 host_value = value.strip()
             elif lname == b"proxy-connection":
@@ -107,9 +118,9 @@ def classify_connect_request(header) -> str:
         host_matches = None if host_value is None else (host_value == authority)
         return (
             "method=%s version=%s authority=%s host_matches=%s connection_present=%s "
-            "proxy_connection=%s header_names=%r"
+            "proxy_connection=%s header_names=%s"
             % (method, version, _safe_authority(authority), host_matches,
-               connection_present, proxy_conn, names)
+               connection_present, proxy_conn, sorted(names))
         )
     except Exception:
         return "shape=unparseable"

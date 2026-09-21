@@ -137,8 +137,22 @@ class PolicyAndParseTests(unittest.TestCase):
         self.assertIn("host_matches=True", summary)
         self.assertIn("proxy_connection=close", summary)
         self.assertIn("connection_present=False", summary)
-        self.assertIn("Proxy-Authorization", summary)   # the NAME is fine to show
+        self.assertIn("proxy-authorization", summary)   # a KNOWN name is reported (enum)
         self.assertNotIn("c2VjcmV0", summary)           # the VALUE is never shown
+
+    def test_connect_classifier_collapses_unknown_header_names_to_other(self):
+        # An attacker-controlled header NAME (or a secret smuggled as a name) must NEVER be
+        # echoed — it collapses to the fixed "other" token.
+        header = (
+            b"CONNECT platform.claude.com:443 HTTP/1.1\r\n"
+            b"Host: platform.claude.com:443\r\n"
+            b"X-Secret-sk-live-DO-NOT-LEAK: 1\r\n\r\n"
+        )
+        summary = egress.classify_connect_request(header)
+        self.assertNotIn("sk-live", summary)
+        self.assertNotIn("X-Secret", summary)
+        self.assertIn("'other'", summary)               # the unknown name is enum'd to other
+        self.assertIn("'host'", summary)                # known names still reported
 
     def test_connect_classifier_flags_connection_header_and_unknown_host(self):
         header = (
