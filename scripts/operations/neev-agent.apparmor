@@ -1,7 +1,9 @@
 # Scoped AppArmor profile for the Neev native-agent container.
 #
 # Retains Docker's default hardening (no writes to sensitive /proc and /sys, no raw
-# firmware/kcore/sysrq, ptrace/signal confined to this profile) but — unlike the
+# firmware/kcore/sysrq, ptrace confined to this profile, signals intra-profile plus the
+# docker-default receive from the unconfined runtime so `docker stop` works) but —
+# unlike the
 # docker-default profile, which `deny mount,` — grants ONLY the four mount operations
 # the credential/sandbox path actually needs. Everything else about mount stays
 # denied by AppArmor default-deny (there is no blanket `mount,`).
@@ -71,4 +73,13 @@ profile neev-agent flags=(attach_disconnected,mediate_deleted) {
 
   ptrace (trace,read,tracedby,readby) peer=neev-agent,
   signal (receive,send) peer=neev-agent,
+  # The container runtime (dockerd/containerd/runc) runs UNCONFINED on the host and
+  # must be able to deliver termination signals to the container's init, or `docker
+  # stop` cannot reach the process and waits out the FULL grace period before the
+  # daemon resorts to SIGKILL (observed: a fixed ~15s stop). This is the docker-default
+  # allowance: RECEIVE only, and only from the unconfined runtime — it is NOT a blanket
+  # unconfine (the container still cannot SEND signals outside its own profile, and no
+  # other confined profile may signal it). AppArmor matches the peer by confinement, so
+  # this covers the runtime regardless of the comm shown in the audit log (e.g. "runc").
+  signal (receive) peer=unconfined,
 }
