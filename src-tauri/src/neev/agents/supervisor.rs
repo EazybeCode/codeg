@@ -178,6 +178,16 @@ pub(crate) struct LoginSession {
     pub(crate) provider: Provider,
     pub(crate) binding: LoginBinding,
     pub(crate) expires_at: i64,
+    /// The connect operation's lease owner, exactly as `intents::begin` minted
+    /// and PERSISTED it.
+    ///
+    /// Kept rather than reconstructed because it is unguessable by design:
+    /// `completion::lock_ticket` refuses any ticket whose `lease_owner` is not
+    /// the one stored on the operation row, which is what stops a second
+    /// coordinator from committing a login it does not hold the lease for. A
+    /// synthesised value here does not weaken that gate — it fails it, so the
+    /// credential the supervisor already stored would never be published.
+    pub(crate) lease_owner: String,
     /// What the user must do, once the supervisor has told us.
     pub(crate) approval: Option<LoginChallenge>,
     /// The invoker's authority, captured when they asked to sign in.
@@ -341,6 +351,7 @@ pub(crate) async fn start_login(
             provider: ticket.provider,
             binding,
             expires_at: ticket.expires_at,
+            lease_owner: ticket.lease_owner.clone(),
             approval: None,
             actor: actor.clone(),
             code_attempts: 0,
@@ -652,7 +663,7 @@ fn ticket_of(session: &LoginSession) -> Result<LoginTicket, SupervisorError> {
         session_id: session.binding.session_id.as_str().to_owned(),
         attempt_id: session.binding.attempt_id.as_str().to_owned(),
         operation_id: session.binding.operation_id.as_str().to_owned(),
-        lease_owner: String::new(),
+        lease_owner: session.lease_owner.clone(),
         expires_at: session.expires_at,
     })
 }

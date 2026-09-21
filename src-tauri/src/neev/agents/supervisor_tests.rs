@@ -271,6 +271,7 @@ async fn the_live_login_registry_is_bounded() {
             operation_id: dto::Id::new("c".repeat(32)).unwrap(),
         },
         expires_at,
+        lease_owner: "d".repeat(32),
         approval: None,
         actor: actor.clone(),
         code_attempts: 0,
