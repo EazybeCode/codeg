@@ -102,6 +102,55 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(self.built[-1], (dto.Provider.CLAUDE, ("claude", "auth", "status", "--json")))
 
 
+class _FakeLock:
+    def __init__(self):
+        self.exited = False
+
+    def __exit__(self, *exc):
+        self.exited = True
+        return False
+
+
+class SlotQuarantineTests(unittest.TestCase):
+    def _channel(self, cleanup, quarantine):
+        config = main.config_from_env(_full_env("/data/agents"))
+        return main.LoginChannel(
+            config, object(), dto.Provider.CODEX, _Scope(3, 7), "h" * 32,
+            ("codex", "app-server"), quarantine=quarantine, cleanup=cleanup,
+        )
+
+    def test_cleanup_failure_quarantines_slot_and_blocks_next_tenant(self):
+        quarantine = main.SlotQuarantine()
+        channel = self._channel(lambda path: False, quarantine)  # workdir removal fails
+        lock = _FakeLock()
+        channel._slot_lock = lock
+        channel._workdir = "/data/agents/run-xyz"
+        # The failure is surfaced, not swallowed.
+        with self.assertRaises(main.ChannelError):
+            channel.terminate()
+        self.assertTrue(quarantine.is_quarantined("a"))
+        self.assertTrue(lock.exited)  # slot lock released; quarantine is the durable guard
+        # The NEXT login AND probe on the same fixed slot are refused — no reuse of a
+        # lane whose workdir may still hold the previous tenant's data.
+        driver_for, probe_for = main.make_factories(
+            main.config_from_env(_full_env("/data/agents")), object(), quarantine=quarantine
+        )
+        with self.assertRaises(main.ChannelError):
+            driver_for(dto.Provider.CODEX, _Scope(9, 9), "g" * 32)
+        with self.assertRaises(main.ChannelError):
+            probe_for(dto.Provider.CLAUDE, _Scope(9, 9), "g" * 32)
+
+    def test_clean_unwind_releases_slot_without_quarantine(self):
+        quarantine = main.SlotQuarantine()
+        channel = self._channel(lambda path: True, quarantine)  # workdir removed cleanly
+        lock = _FakeLock()
+        channel._slot_lock = lock
+        channel._workdir = "/data/agents/run-xyz"
+        channel.terminate()  # no raise
+        self.assertFalse(quarantine.is_quarantined("a"))
+        self.assertTrue(lock.exited)
+
+
 class PurgeTests(unittest.TestCase):
     def test_purges_only_validated_run_dirs(self):
         with tempfile.TemporaryDirectory() as root:

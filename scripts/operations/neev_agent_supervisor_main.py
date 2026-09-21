@@ -111,6 +111,39 @@ def config_from_env(environ: Optional[dict] = None) -> Config:
 
 
 # --------------------------------------------------------------------------- #
+# Slot quarantine — fail-closed cross-tenant reuse guard
+# --------------------------------------------------------------------------- #
+
+
+class ChannelError(Exception):
+    """A login channel that could not be brought up OR torn down cleanly. Raised so a
+    teardown failure surfaces (a live child / half-removed workdir) instead of being
+    swallowed, and so a quarantined slot refuses to build a new channel."""
+
+
+class SlotQuarantine:
+    """Daemon-lifetime record of slots whose lane uid may still own a live child or an
+    incompletely-removed run workdir.
+
+    The login lane uid is FIXED per slot (e.g. 61000), so a slot whose child/workdir
+    teardown failed cannot be handed to the NEXT login or probe without risking a
+    cross-tenant HOME/CWD leak — exactly the hazard the runtime launcher already
+    guards. Once marked, a slot stays quarantined until the daemon restarts, at which
+    point the privileged startup purge removes the abandoned run dirs and the fresh
+    process starts with an empty quarantine. Retry is only possible AFTER that
+    verified privileged cleanup, never by reusing the slot in place."""
+
+    def __init__(self):
+        self._slots = set()
+
+    def mark(self, slot) -> None:
+        self._slots.add(slot)
+
+    def is_quarantined(self, slot) -> bool:
+        return slot in self._slots
+
+
+# --------------------------------------------------------------------------- #
 # Login channel — full credential-delivery lifecycle (matches a runtime run)
 # --------------------------------------------------------------------------- #
 
@@ -124,13 +157,16 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
     releases the slot lock — the same owner-handoff + locking + cleanup a runtime
     agent run uses."""
 
-    def __init__(self, config, volumes, provider, store_scope, handle, argv):
+    def __init__(self, config, volumes, provider, store_scope, handle, argv, *,
+                 quarantine, cleanup=None):
         self._config = config
         self._volumes = volumes
         self._provider = provider
         self._store_scope = store_scope
         self._handle = handle
         self._argv = argv
+        self._quarantine = quarantine
+        self._cleanup = cleanup  # injectable for tests; default is the launcher's
         self._workdir = None
         self._slot_lock = None
         self._delivery_cm = None
@@ -188,23 +224,42 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
         self._unwind()
 
     def _unwind(self):
-        import neev_agent_launch as launch
+        cleanup = self._cleanup
+        if cleanup is None:
+            import neev_agent_launch as launch
 
+            cleanup = launch._cleanup_run_workdir
+        clean = True
         if self._sandbox is not None:
             try:
-                self._sandbox.teardown()
+                self._sandbox.teardown()  # SIGKILL the lane child + reap (needs CAP_KILL)
             except Exception:
-                pass
+                clean = False  # teardown failed -> a live lane-uid child may survive
             self._sandbox = None
         if self._delivery_cm is not None:
             try:
-                self._delivery_cm.__exit__(None, None, None)  # restore + release run lock
+                self._delivery_cm.__exit__(None, None, None)  # restore canonical + release run lock
             except Exception:
-                pass
+                clean = False
             self._delivery_cm = None
         if self._workdir is not None:
-            launch._cleanup_run_workdir(self._workdir)
+            if not cleanup(self._workdir):  # symlink-safe bounded delete; False on failure
+                clean = False  # a run workdir left behind would leak into the next tenant
             self._workdir = None
+        if clean:
+            self._release_slot()
+            return
+        # A child may still be alive OR the workdir was not fully removed. The login
+        # lane uid is FIXED, so reusing this slot for the next login/probe would risk a
+        # cross-tenant leak. Quarantine the slot for the daemon's lifetime (the factory
+        # then refuses it until a privileged restart purge) and raise so the failure is
+        # reported, never swallowed. The slot lock is released — the quarantine, not the
+        # flock, is the durable no-reuse guarantee, and holding it would only leak the fd.
+        self._quarantine.mark(self._config.slot)
+        self._release_slot()
+        raise ChannelError("teardown_failed")
+
+    def _release_slot(self):
         if self._slot_lock is not None:
             try:
                 self._slot_lock.__exit__(None, None, None)
@@ -261,15 +316,25 @@ def _credential_present(config, handle, provider):
 # --------------------------------------------------------------------------- #
 
 
-def make_factories(config: Config, volumes, *, channel_factory=None):
+def make_factories(config: Config, volumes, *, channel_factory=None, quarantine=None):
     """Build (driver_for, probe_for). `channel_factory(provider, store_scope, handle,
     argv)` builds a Channel (default: the full-lifecycle LoginChannel); tests inject a
-    fake so the wiring is exercised without a real sandbox."""
-    build = channel_factory or (
-        lambda provider, store_scope, handle, argv: LoginChannel(
-            config, volumes, provider, store_scope, handle, argv
+    fake so the wiring is exercised without a real sandbox.
+
+    A `SlotQuarantine` (shared with the LoginChannels it builds) refuses to build ANY
+    channel — login or probe — for a slot whose previous teardown failed: `driver_for`
+    / `probe_for` then raise, which the supervisor turns into UNAVAILABLE rather than
+    reusing a slot that may still hold a live lane-uid child."""
+    quarantine = quarantine if quarantine is not None else SlotQuarantine()
+
+    def build(provider, store_scope, handle, argv):
+        if quarantine.is_quarantined(config.slot):
+            raise ChannelError("slot_quarantined")
+        if channel_factory is not None:
+            return channel_factory(provider, store_scope, handle, argv)
+        return LoginChannel(
+            config, volumes, provider, store_scope, handle, argv, quarantine=quarantine
         )
-    )
 
     def driver_for(provider, store_scope, handle):
         if provider is dto.Provider.CODEX:
@@ -379,6 +444,11 @@ def main(argv=None):  # pragma: no cover - Linux daemon glue
     bootstrap.apply(bootstrap.plan(config.uplink), bootstrap.CommandRunner())
 
     store = store_module.CredentialStore(Path(config.store_root), Path(config.master_key_path))
+    # Create the pristine store roots + lock + master key BEFORE anything reads it.
+    # Create-only: an already-provisioned store keeps its existing key untouched, and a
+    # populated store missing its key is refused rather than re-keyed. Without this a
+    # fresh deployment binds fine but the first start_login's volumes.create fails.
+    store.initialize()
     volumes = volumes_module.CredentialVolumes(store, volumes_module.FixedToolRunner())
     boot_id = dto.Id(uuid.uuid4().hex)
     supervisor = build_supervisor(config, volumes, boot_id)
