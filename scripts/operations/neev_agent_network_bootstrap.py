@@ -62,6 +62,15 @@ _PROXY_LOCK_DIR = "/var/lib/neev-supervisor/proxy-locks"
 _VALID_SLOTS = frozenset(("a", "b"))
 
 
+class CommandRunner:  # pragma: no cover - Linux subprocess
+    """Minimal checked runner for the bootstrap command plan (no shell)."""
+
+    def run(self, argv):
+        import subprocess
+
+        subprocess.run(argv, check=True, capture_output=True, timeout=30)
+
+
 class BootstrapError(Exception):
     _CATEGORIES = frozenset(("invalid", "unsupported", "apply", "teardown", "busy"))
 
