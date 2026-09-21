@@ -101,6 +101,10 @@ impl ProviderBinaries {
 pub(crate) enum RunEvent {
     Started(String),
     Chunk(String),
+    /// One recorded step of the provider's work — a tool call, its result, or a
+    /// status marker. Carried beside the text rather than inside it so the
+    /// reply stays the reply.
+    Activity(super::activity::ActivityDraft),
     Failed(String),
     Completed,
 }
@@ -215,10 +219,6 @@ impl ProviderCliRuntime {
         }
     }
 
-    /// Map one line of `--output-format stream-json` to an optional chunk.
-    fn chunk_from_line(line: &str) -> Option<String> {
-        chunk_from_line(line)
-    }
 }
 
 #[cfg(any(test, feature = "dev-agent"))]
@@ -269,14 +269,21 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
                 loop {
                     match lines.next_line().await {
                         Ok(Some(line)) => {
-                            if let Some(text) = Self::chunk_from_line(&line) {
-                                if !text.is_empty() && tx.send(RunEvent::Chunk(text)).await.is_err()
-                                {
+                            for event in parser.push(&line) {
+                                if send_item(&tx, event).await.is_err() {
                                     return;
                                 }
                             }
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            // A tool whose block never closed still ran.
+                            for event in parser.finish() {
+                                if send_item(&tx, event).await.is_err() {
+                                    return;
+                                }
+                            }
+                            break;
+                        }
                         Err(_) => {
                             let _ = tx.send(RunEvent::Failed("io".into())).await;
                             return;
@@ -662,15 +669,21 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
                 loop {
                     match lines.next_line().await {
                         Ok(Some(line)) => {
-                            if let Some(text) = chunk_from_line(&line) {
-                                if !text.is_empty()
-                                    && tx.send(RunEvent::Chunk(text)).await.is_err()
-                                {
+                            for event in parser.push(&line) {
+                                if send_item(&tx, event).await.is_err() {
                                     return true; // receiver gone -> stop launcher
                                 }
                             }
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            // A tool whose block never closed still ran.
+                            for event in parser.finish() {
+                                if send_item(&tx, event).await.is_err() {
+                                    return true;
+                                }
+                            }
+                            break;
+                        }
                         Err(_) => {
                             let _ = tx.send(RunEvent::Failed("io".into())).await;
                             return true; // io error -> stop launcher
