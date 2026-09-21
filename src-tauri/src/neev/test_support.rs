@@ -849,6 +849,13 @@ pub(super) async fn session(
 
 /// Explicitly isolated PostgreSQL test schema; caller must close before cleanup.
 pub(super) async fn postgres_database() -> (DatabaseConnection, DatabaseConnection, String) {
+    let (db, admin, schema) = postgres_database_uninitialized().await;
+    super::db::initialize(&db).await.unwrap();
+    (db, admin, schema)
+}
+
+pub(super) async fn postgres_database_uninitialized(
+) -> (DatabaseConnection, DatabaseConnection, String) {
     let url =
         std::env::var("NEEV_TEST_DATABASE_URL").expect("isolated NEEV_TEST_DATABASE_URL required");
     assert_eq!(
@@ -866,7 +873,6 @@ pub(super) async fn postgres_database() -> (DatabaseConnection, DatabaseConnecti
         .sqlx_logging(false)
         .set_schema_search_path(&schema);
     let db = Database::connect(opts).await.unwrap();
-    super::db::initialize(&db).await.unwrap();
     (db, admin, schema)
 }
 pub(super) async fn cleanup_postgres(

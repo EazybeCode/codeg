@@ -257,45 +257,8 @@ async fn partial_v3_schema_is_refused_without_repair() {
 #[tokio::test]
 #[ignore = "requires explicitly isolated NEEV_TEST_DATABASE_URL"]
 async fn postgres_v2_upgrade_preserves_data_and_enforces_content_foreign_keys() {
-    let (db, admin, schema) = h::postgres_database().await;
-    for table in [
-        "neev_gateway_revoke_intents",
-        "neev_gateway_redemptions",
-        "neev_gateway_relying_sessions",
-        "neev_gateway_exchanges",
-        "neev_gateway_relying_bindings",
-        "neev_gateway_revocations",
-        "neev_gateway_audience",
-    ] {
-        execute(&db, &format!("DROP TABLE {table}"), vec![])
-            .await
-            .unwrap();
-    }
-    for table in agent_status_migration::TABLE_NAMES.iter().rev() {
-        execute(&db, &format!("DROP TABLE {table}"), vec![])
-            .await
-            .unwrap();
-    }
-    execute(&db, "DROP TABLE neev_document_formats", vec![])
-        .await
-        .unwrap();
-    for table in agent_migration::TABLE_NAMES.iter().rev() {
-        execute(&db, &format!("DROP TABLE {table}"), vec![])
-            .await
-            .unwrap();
-    }
-    for table in content_migration::TABLE_NAMES.iter().rev() {
-        execute(&db, &format!("DROP TABLE {table}"), vec![])
-            .await
-            .unwrap();
-    }
-    execute(
-        &db,
-        "UPDATE neev_schema_version SET version=2 WHERE id=1",
-        vec![],
-    )
-    .await
-    .unwrap();
+    let (db, admin, schema) = h::postgres_database_uninitialized().await;
+    initialize_v2(&db).await;
 
     assert_v2_upgrades(&db).await;
     h::cleanup_postgres(db, admin, schema).await;
