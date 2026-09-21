@@ -484,3 +484,145 @@ async fn a_check_answered_with_the_wrong_operation_is_refused() {
         Err(SupervisorError::Invalid)
     ));
 }
+
+/// The credential handle a `Prepared` supervisor snapshot carries.
+const HANDLE: &str = "fedcba9876543210fedcba9876543210";
+
+fn prepared() -> dto::Response {
+    response(
+        dto::Op::ObserveLogin,
+        dto::ResultBody::ObserveLogin(dto::LoginSnapshot::Prepared {
+            receipt_id: dto::Id::new("7".repeat(32)).unwrap(),
+            storage_handle: dto::Id::new(HANDLE.to_owned()).unwrap(),
+            account_label: Some(dto::Label::new("Claude".to_owned()).unwrap()),
+        }),
+    )
+}
+
+fn settle_ack() -> dto::Response {
+    response(
+        dto::Op::SettleLogin,
+        dto::ResultBody::SettleLogin(dto::SettleLoginResult {
+            state: dto::CommittedState::Committed,
+            receipt_id: dto::Id::new("7".repeat(32)).unwrap(),
+            storage_handle: dto::Id::new(HANDLE.to_owned()).unwrap(),
+        }),
+    )
+}
+
+/// Start a REAL connect, so the attempt and the leased connect operation exist
+/// in the database exactly as production writes them.
+///
+/// The lease owner is deliberately not chosen by the test: it is whatever
+/// `intents::begin` minted and stored, which is the only value
+/// `completion::lock_ticket` accepts. A test that supplied its own would agree
+/// with a bug that invented one.
+async fn real_connect(
+    state: &ServerState,
+    actor: &crate::neev::types::OrgContext,
+) -> LoginTicket {
+    match crate::neev::agents::intents::begin(state, actor, Provider::Claude, "regression-connect")
+        .await
+        .unwrap()
+    {
+        crate::neev::agents::types::BeginOutcome::Pending(ticket) => ticket,
+        crate::neev::agents::types::BeginOutcome::Settled(_) => {
+            panic!("a first connect is pending")
+        }
+    }
+}
+
+/// The end of a sign-in, driven through the real completion gate.
+///
+/// Regression for a commit that failed silently and totally: the supervisor had
+/// signed the user in and stored their credential, but the ticket we rebuilt to
+/// publish it carried no lease owner, so `lock_ticket` refused it and every
+/// poll kept answering `awaiting` until the attempt expired. Asserting
+/// `Connected` alone would not be enough of a guard — both callers of
+/// `advance_login` discard its error — so this asserts the credential is
+/// actually readable afterwards.
+#[tokio::test]
+async fn a_prepared_login_publishes_the_credential_through_the_real_completion_gate() {
+    let (state, actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(vec![
+        Ok(started()),
+        Ok(prepared()),
+        Ok(settle_ack()),
+    ])))
+    .await;
+    let ticket = real_connect(&state, &actor).await;
+    start_login(&state, &actor, &ticket).await.unwrap();
+    let session = find_login(
+        &state.agent_logins,
+        &ticket.attempt_id,
+        actor.org_id,
+        actor.identity.user_id,
+    )
+    .unwrap();
+
+    assert_eq!(
+        advance_login(&state, &actor, &session).await,
+        Ok(LoginProgress::Connected)
+    );
+
+    // The product outcome rather than a label: the handle the launcher mounts is
+    // now deliverable, which `intents::credential` reports only for a CONNECTED
+    // connection.
+    assert_eq!(
+        crate::neev::agents::intents::credential(&state, &actor, Provider::Claude)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(HANDLE)
+    );
+    // The attempt is finished, so polls stop asking for an approval the user has
+    // already given.
+    assert_ne!(
+        crate::neev::agents::intents::attempt(&state, &actor, Provider::Claude, &ticket.attempt_id)
+            .await
+            .unwrap()
+            .state,
+        "pending"
+    );
+    assert!(find_login(
+        &state.agent_logins,
+        &ticket.attempt_id,
+        actor.org_id,
+        actor.identity.user_id
+    )
+    .is_none());
+}
+
+/// The gate the fix has to keep: holding the attempt is not enough, the commit
+/// must hold the operation's lease. This is what stops a coordinator that lost
+/// the lease from publishing a credential for a login it no longer owns.
+#[tokio::test]
+async fn a_login_without_the_operations_lease_still_cannot_publish_a_credential() {
+    let (state, actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(vec![
+        Ok(started()),
+        Ok(prepared()),
+    ])))
+    .await;
+    let ticket = real_connect(&state, &actor).await;
+    start_login(&state, &actor, &ticket).await.unwrap();
+    let mut session = find_login(
+        &state.agent_logins,
+        &ticket.attempt_id,
+        actor.org_id,
+        actor.identity.user_id,
+    )
+    .unwrap();
+    // Everything else about this login is genuine; only the lease is not ours.
+    session.lease_owner = "9".repeat(32);
+
+    assert!(matches!(
+        advance_login(&state, &actor, &session).await,
+        Err(SupervisorError::Invalid)
+    ));
+    // Nothing was published, so no credential can be delivered.
+    assert_eq!(
+        crate::neev::agents::intents::credential(&state, &actor, Provider::Claude)
+            .await
+            .unwrap(),
+        None
+    );
+}
