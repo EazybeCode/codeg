@@ -197,16 +197,21 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
             raise
 
     def _drain_stderr(self):
+        # Always drain the pipe fully (else a full stderr pipe would BLOCK the provider),
+        # but store only up to the cap — overflow is read and discarded, never persisted.
         if self._sandbox is None or self._sandbox.stderr is None:
             return
-        if len(self._stderr) >= _MAX_STDERR_BYTES:
-            return
-        try:
-            chunk = os.read(self._sandbox.stderr.fileno(), 65536)
-        except (BlockingIOError, OSError):
-            return
-        if chunk:
-            self._stderr.extend(chunk[: _MAX_STDERR_BYTES - len(self._stderr)])
+        fd = self._sandbox.stderr.fileno()
+        while True:
+            try:
+                chunk = os.read(fd, 65536)
+            except (BlockingIOError, OSError):
+                return
+            if not chunk:
+                return
+            room = _MAX_STDERR_BYTES - len(self._stderr)
+            if room > 0:
+                self._stderr.extend(chunk[:room])
 
     def read_stderr(self):
         self._drain_stderr()

@@ -147,16 +147,21 @@ class SandboxChannel(Channel):  # pragma: no cover - Linux subprocess path
         return chunk or b""
 
     def _drain_stderr(self) -> None:
+        # Always drain the pipe fully (else a full stderr pipe would BLOCK the provider),
+        # but store only up to the cap — overflow is read and discarded, never persisted.
         if self._handle is None or self._handle.stderr is None:
             return
-        if len(self._stderr) >= _MAX_STDERR_BYTES:
-            return
-        try:
-            chunk = os.read(self._handle.stderr.fileno(), _READ_CHUNK)
-        except (BlockingIOError, OSError):
-            return
-        if chunk:
-            self._stderr.extend(chunk[: _MAX_STDERR_BYTES - len(self._stderr)])
+        fd = self._handle.stderr.fileno()
+        while True:
+            try:
+                chunk = os.read(fd, _READ_CHUNK)
+            except (BlockingIOError, OSError):
+                return
+            if not chunk:
+                return  # EOF
+            room = _MAX_STDERR_BYTES - len(self._stderr)
+            if room > 0:
+                self._stderr.extend(chunk[:room])
 
     def read_stderr(self) -> bytes:
         self._drain_stderr()
