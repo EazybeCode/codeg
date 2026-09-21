@@ -7,6 +7,7 @@ import errno
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 import selectors
 import signal
@@ -349,6 +350,45 @@ class CredentialVolumes:
                 if self._mounts(mountpoint):
                     raise StoreError("busy")
             self._run([CRYPTSETUP, "close", mapping])
+
+    def revoke(self, scope: Scope, handle: str) -> None:
+        """Durably delete the persistent credential volume (its whole store entry).
+
+        This is the credential half of a connection teardown: after `close` has
+        unmapped the volume, `revoke` removes the on-disk entry so the user's stored
+        credentials are actually GONE, not merely unmounted. The supervisor calls
+        `close` then `revoke`; the absence of this method was silently turning every
+        `cleanup_connection` into a QUARANTINE (nothing durably deleted).
+
+        Fail closed and idempotent:
+
+          * a still-mapped volume is a `busy` error — never force-delete the entry out
+            from under a live dm mapping (the ext4 lives on `/dev/mapper/<name>`, so no
+            mapping means no possible live mount);
+          * a missing entry is a no-op, so a cleanup retried after a partial failure
+            still converges.
+        """
+        with self._store.locked():
+            entry = self._store.entry_path(handle)
+            if not os.path.lexists(str(entry)):
+                return  # already revoked
+            mapping_path = MAPPER_ROOT / self._mapping_name(handle)
+            if os.path.lexists(str(mapping_path)):
+                raise StoreError("busy")  # still open; the caller must close() first
+            self._remove_entry_tree(entry)
+
+    @staticmethod
+    def _remove_entry_tree(entry: Path) -> None:
+        """Remove a store entry directory in full. Refuses a symlinked or non-directory
+        entry (fail closed) so revoke can never be redirected to delete elsewhere."""
+        try:
+            if entry.is_symlink() or not entry.is_dir():
+                raise StoreError("unavailable")
+            shutil.rmtree(str(entry))
+        except StoreError:
+            raise
+        except OSError:
+            raise StoreError("unavailable") from None
 
     def status(self, scope: Scope, handle: str) -> str:
         with self._store.locked():

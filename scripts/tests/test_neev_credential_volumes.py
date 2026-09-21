@@ -405,6 +405,25 @@ class CredentialVolumeTests(unittest.TestCase):
         self.assertTrue(self.runner.mounted)
         self.assertTrue(self.runner.mapping)
 
+    def test_revoke_durably_deletes_closed_volume_and_is_idempotent(self):
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self.assertTrue(entry.exists())
+        self.volumes.open(self.scope, handle)
+        self.volumes.close(self.scope, handle)
+        self.volumes.revoke(self.scope, handle)
+        self.assertFalse(entry.exists())          # the whole entry tree is gone
+        self.volumes.revoke(self.scope, handle)   # idempotent: missing entry is a no-op
+
+    def test_revoke_refuses_while_still_mapped(self):
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self.volumes.open(self.scope, handle)     # still mapped (+ mounted)
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.revoke(self.scope, handle)
+        self.assertEqual(caught.exception.code, "busy")
+        self.assertTrue(entry.exists())           # not deleted out from under a mapping
+
     def test_close_owned_volume_and_idempotent_locked_status(self):
         handle = self.create()
         self.assertEqual(self.volumes.status(self.scope, handle), "locked")
