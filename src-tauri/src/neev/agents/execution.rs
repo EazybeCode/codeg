@@ -109,6 +109,39 @@ pub(crate) enum RunEvent {
     Completed,
 }
 
+/// The provider's own arguments: prompt, streaming JSON, model.
+///
+/// Each CLI is asked in ITS OWN dialect. Both were previously given Claude's
+/// flags, which Codex does not accept at all — its non-interactive entry point
+/// is a subcommand (`exec`) and its streaming switch is `--json`, verified
+/// against `codex exec --help` in the deployed agent image. An unknown provider
+/// gets Claude's form, which is what `resolve` already restricts the binary to.
+fn provider_argv(provider: &str, prompt: &str, model: &str) -> Vec<String> {
+    let mut argv: Vec<String> = match provider {
+        "codex" => vec![
+            "exec".into(),
+            // JSONL events on stdout; the parser reads the `item.*` envelopes.
+            "--json".into(),
+            prompt.to_owned(),
+        ],
+        _ => vec![
+            "-p".into(),
+            prompt.to_owned(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--include-partial-messages".into(),
+            "--verbose".into(),
+        ],
+    };
+    // An explicitly chosen model is passed through, so the UI's selection is the
+    // one the provider actually runs. Codex spells it `-m`.
+    if model != "default" {
+        argv.push(if provider == "codex" { "-m".into() } else { "--model".into() });
+        argv.push(model.to_owned());
+    }
+    argv
+}
+
 /// Forward one mapped stream item to the run's consumer.
 ///
 /// Empty text is dropped rather than sent: a zero-length delta would spend a
@@ -250,22 +283,19 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
         if request.prompt.trim().is_empty() {
             return Err(ExecutionError::Unauthorized);
         }
-        let mut command = Command::new(&self.binary);
-        command
-            .arg("-p")
-            .arg(&request.prompt)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--include-partial-messages")
-            .arg("--verbose");
         // Same model contract as the sandboxed runtime, so dev and production
         // cannot disagree about what "default" means.
-        if request.model != "default" {
-            if !safe_model(&request.model) {
-                return Err(ExecutionError::Unauthorized);
-            }
-            command.arg("--model").arg(&request.model);
+        if request.model != "default" && !safe_model(&request.model) {
+            return Err(ExecutionError::Unauthorized);
         }
+        let mut command = Command::new(&self.binary);
+        // Shares `provider_argv` with the sandboxed runtime, so dev cannot drift
+        // into invoking a provider differently from production.
+        command.args(provider_argv(
+            &request.provider,
+            &request.prompt,
+            &request.model,
+        ));
         let mut child = command
             .current_dir(&self.workspace)
             .stdin(Stdio::null())
@@ -564,18 +594,7 @@ impl SandboxedProviderCliRuntime {
         }
         argv.push("--".into());
         argv.push(binary.to_owned());
-        argv.push("-p".into());
-        argv.push(request.prompt.clone());
-        argv.push("--output-format".into());
-        argv.push("stream-json".into());
-        argv.push("--include-partial-messages".into());
-        argv.push("--verbose".into());
-        // An explicitly chosen model is passed through, so the UI's selection is
-        // the one the provider actually runs.
-        if request.model != "default" {
-            argv.push("--model".into());
-            argv.push(request.model.clone());
-        }
+        argv.extend(provider_argv(&request.provider, &request.prompt, &request.model));
         argv
     }
 
@@ -904,14 +923,20 @@ mod tests {
 
     #[test]
     fn provider_cli_maps_stream_json_text_delta_to_chunk() {
+        use super::super::activity::{StreamItem, StreamParser};
+        let mut parser = StreamParser::new("claude", Vec::new());
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"PONG"}}}"#;
-        assert_eq!(ProviderCliRuntime::chunk_from_line(line), Some("PONG".into()));
-        // Non-text events yield no chunk.
-        assert_eq!(
-            ProviderCliRuntime::chunk_from_line(r#"{"type":"system","subtype":"init"}"#),
-            None
-        );
-        assert_eq!(ProviderCliRuntime::chunk_from_line("not json"), None);
+        assert_eq!(parser.push(line), vec![StreamItem::Text("PONG".into())]);
+        // An init line is now a status marker rather than nothing, which is the
+        // point of the change: the model that answered is part of the trace.
+        assert!(matches!(
+            parser
+                .push(r#"{"type":"system","subtype":"init","model":"m"}"#)
+                .as_slice(),
+            [StreamItem::Activity(_)]
+        ));
+        // Provider chatter that is not JSON is still not content.
+        assert!(parser.push("not json").is_empty());
     }
 
     #[tokio::test]
@@ -979,6 +1004,40 @@ mod tests {
         assert_eq!(argv[sep + 1], "/usr/local/bin/claude");
         assert_eq!(&argv[sep + 2..sep + 4], &["-p".to_string(), "draft".to_string()]);
         assert!(argv.contains(&"stream-json".to_string()));
+    }
+
+    #[test]
+    fn each_provider_is_invoked_in_its_own_dialect() {
+        // Claude Code is headless via `-p` with a streaming output format.
+        let claude = provider_argv("claude", "draft", "default");
+        assert_eq!(&claude[..2], &["-p".to_string(), "draft".to_string()]);
+        assert!(claude.contains(&"stream-json".to_string()));
+        assert!(claude.contains(&"--include-partial-messages".to_string()));
+
+        // Codex is a SUBCOMMAND with `--json`, verified against `codex exec
+        // --help` in the deployed agent image. It rejects Claude's flags
+        // outright, which is why sharing them produced no output at all.
+        let codex = provider_argv("codex", "draft", "default");
+        assert_eq!(
+            codex,
+            vec![
+                "exec".to_string(),
+                "--json".to_string(),
+                "draft".to_string()
+            ]
+        );
+        assert!(!codex.contains(&"-p".to_string()));
+        assert!(!codex.contains(&"--output-format".to_string()));
+
+        // Model selection is spelled differently by each.
+        assert!(provider_argv("codex", "d", "gpt-5")
+            .windows(2)
+            .any(|pair| pair == ["-m".to_string(), "gpt-5".to_string()]));
+        assert!(provider_argv("claude", "d", "opus")
+            .windows(2)
+            .any(|pair| pair == ["--model".to_string(), "opus".to_string()]));
+        // "default" means the provider's own default: nothing is passed.
+        assert!(!provider_argv("codex", "d", "default").contains(&"-m".to_string()));
     }
 
     #[test]
@@ -1244,6 +1303,7 @@ mod tests {
         while let Some(event) = handle.next().await {
             match event {
                 RunEvent::Started(_) => started = true,
+                RunEvent::Activity(_) => {},
                 RunEvent::Chunk(chunk) => text.push_str(&chunk),
                 RunEvent::Completed => completed = true,
                 RunEvent::Failed(reason) => panic!("real run failed: {reason}"),

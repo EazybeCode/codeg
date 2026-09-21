@@ -100,16 +100,19 @@ fn run_request() -> RunRequest {
 fn event_json_maps_each_variant_with_escaping() {
     assert_eq!(
         event_json(&RunEvent::Started("r1".into())),
-        r#"{"type":"started","run_id":"r1"}"#
+        Some(r#"{"type":"started","run_id":"r1"}"#.to_owned())
     );
     assert_eq!(
         event_json(&RunEvent::Chunk("hi \"x\"".into())),
-        r#"{"type":"chunk","text":"hi \"x\""}"#
+        Some(r#"{"type":"chunk","text":"hi \"x\""}"#.to_owned())
     );
-    assert_eq!(event_json(&RunEvent::Completed), r#"{"type":"completed"}"#);
+    assert_eq!(
+        event_json(&RunEvent::Completed),
+        Some(r#"{"type":"completed"}"#.to_owned())
+    );
     assert_eq!(
         event_json(&RunEvent::Failed("canceled".into())),
-        r#"{"type":"failed","reason":"canceled"}"#
+        Some(r#"{"type":"failed","reason":"canceled"}"#.to_owned())
     );
 }
 

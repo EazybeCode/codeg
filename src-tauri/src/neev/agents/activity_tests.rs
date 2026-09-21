@@ -282,9 +282,9 @@ fn offsets_count_unicode_scalars_not_utf16_units() {
     let mut log = ActivityLog::new();
     let reply = "ok 🙂 done";
     let offset = reply.chars().count();
-    assert_eq!(offset, 10);
-    assert_eq!(reply.len(), 13, "bytes differ from scalars");
-    assert_eq!(reply.encode_utf16().count(), 11, "UTF-16 differs too");
+    assert_eq!(offset, 9);
+    assert_eq!(reply.len(), 12, "bytes differ from scalars");
+    assert_eq!(reply.encode_utf16().count(), 10, "UTF-16 differs too");
     let item = log
         .push(
             ActivityDraft {
@@ -297,7 +297,7 @@ fn offsets_count_unicode_scalars_not_utf16_units() {
             offset,
         )
         .unwrap();
-    assert_eq!(item.offset, 10);
+    assert_eq!(item.offset, 9);
 }
 
 #[test]

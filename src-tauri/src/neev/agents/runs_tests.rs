@@ -143,6 +143,7 @@ async fn a_reader_attaching_after_the_first_chunks_still_sees_all_of_them() {
                     emitted = end;
                     seen.push_str(&text);
                 }
+                RunSignal::Activity(_) => {},
                 RunSignal::Finished { .. } => break,
             }
         }
@@ -297,7 +298,8 @@ async fn over_limit_text_is_never_broadcast_only_never_stored() {
     while let Ok(signal) = events.recv().await {
         match signal {
             RunSignal::Delta(delta) => broadcast_chars += delta.text.chars().count(),
-            RunSignal::Finished { .. } => break,
+            RunSignal::Activity(_) => {},
+                RunSignal::Finished { .. } => break,
         }
     }
     let turn = h.settled(&run_id).await;
@@ -392,6 +394,7 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
         &h.state.database,
         &first.run_id,
         "the answer",
+        None,
         sessions::TurnStatus::Completed,
         None,
         NOW + 1,
@@ -446,6 +449,7 @@ async fn a_replay_is_answered_even_after_the_session_is_archived() {
         &h.state.database,
         &first.run_id,
         "done",
+        None,
         sessions::TurnStatus::Completed,
         None,
         NOW + 1,

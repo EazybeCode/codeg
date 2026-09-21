@@ -18,6 +18,7 @@ mod gateway_migration_tests;
 mod image_blob_migration;
 mod migration;
 mod org_code_migration;
+mod content_revision_cap_migration;
 mod session_migration;
 #[cfg(test)]
 mod session_tests;
@@ -201,6 +202,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             session_migration::upgrade(&tx).await?;
             session_migration::link_nodes(&tx).await?;
             session_migration::record_activity(&tx).await?;
+            content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
@@ -327,6 +329,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 session_migration::validate(&tx).await?;
                 session_migration::validate_node_link(&tx).await?;
                 session_migration::validate_activity(&tx).await?;
+                content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
@@ -348,6 +351,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         // and a database that already has them is unchanged.
         session_migration::link_nodes(&tx).await?;
         session_migration::record_activity(&tx).await?;
+        content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
@@ -523,6 +527,10 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     }
     if version == session_migration::ACTIVITY_SCHEMA_VERSION {
         session_migration::validate_activity(db).await?;
+        // 13 only. A schema-12 snapshot still has the historical 1000 bound and
+        // is valid as itself; requiring the raised cap before the upgrade step
+        // would refuse a database that is correct for its version.
+        content_revision_cap_migration::validate_document_revision_cap(db).await?;
     }
     Ok(version)
 }

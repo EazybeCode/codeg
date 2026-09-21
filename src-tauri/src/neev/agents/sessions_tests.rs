@@ -284,6 +284,7 @@ async fn finishing_a_turn_settles_it_and_is_not_replayable() {
         &h.database,
         &turn.run_id,
         "partial and then some",
+        None,
         TurnStatus::Completed,
         None,
         NOW + 2,
@@ -301,6 +302,7 @@ async fn finishing_a_turn_settles_it_and_is_not_replayable() {
         &h.database,
         &turn.run_id,
         "",
+        None,
         TurnStatus::Canceled,
         Some("canceled"),
         NOW + 3,
@@ -319,7 +321,7 @@ async fn a_failure_always_carries_a_reason() {
     let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "q", None).await.unwrap();
     // Even with no code supplied, the stored row is a well-formed failure — the
     // schema refuses a failed turn without one.
-    finish(&h.database, &turn.run_id, "", TurnStatus::Failed, None, NOW + 1)
+    finish(&h.database, &turn.run_id, "", None, TurnStatus::Failed, None, NOW + 1)
         .await
         .unwrap();
     let page = turns(&h.state, &h.owner, &session.id, None).await.unwrap();
@@ -337,6 +339,7 @@ async fn finish_refuses_to_mark_a_turn_running() {
             &h.database,
             &turn.run_id,
             "",
+            None,
             TurnStatus::Running,
             None,
             NOW + 1
@@ -540,6 +543,7 @@ async fn turn_history_pages_in_order() {
             &h.database,
             &turn.run_id,
             &format!("a{index}"),
+            None,
             TurnStatus::Completed,
             None,
             NOW + index,
@@ -570,6 +574,7 @@ fn conversation_prompt_replays_only_completed_exchanges_oldest_first() {
         run_id: format!("run{sequence}"),
         prompt: prompt.into(),
         response: response.into(),
+        activity: Vec::new(),
         status,
         error_code: None,
         provider: "claude".into(),
@@ -610,6 +615,7 @@ fn conversation_prompt_drops_whole_old_exchanges_to_stay_in_budget() {
         run_id: format!("run{sequence}"),
         prompt: "p".into(),
         response: response.into(),
+        activity: Vec::new(),
         status: TurnStatus::Completed,
         error_code: None,
         provider: "claude".into(),
