@@ -77,6 +77,14 @@ def main():
     # endpoint rather than mistake another/stale daemon's socket for readiness.
     if path.exists() or path.is_symlink():
         raise RuntimeError("control socket already exists")
+    epoch_dir = os.environ.get("NEEV_SUPERVISOR_EPOCH_DIR", "")
+    if not epoch_dir:
+        raise RuntimeError("missing coordinator epoch directory")
+    from neev_supervisor_deployment import provision_coordinator_epoch
+
+    # These durable files belong to the unprivileged coordinator, separately
+    # from the supervisor's private fence. Existing epochs are never reset.
+    provision_coordinator_epoch(epoch_dir)
     stopping = False
 
     def stop(_signum, _frame):
