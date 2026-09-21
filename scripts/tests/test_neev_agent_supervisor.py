@@ -235,6 +235,23 @@ class LoginFlowTests(SupervisorTestBase):
         self.ok(request(dto.SettleLoginRequest(dto.Id(receipt), witness), seq="4", rid="d" * 32))
         self.assertFalse(driver.released)
 
+    def test_failed_login_releases_transient_resources_without_revoking(self):
+        # A terminal failure (CLI exited rc1) must free the slot/run-lock/workdir NOW,
+        # not hold them until the ticket TTL (~10 min). The volume is left for the
+        # coordinator's cleanup to revoke — retry/cancel unaffected.
+        self.ok(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+        handle = self.volumes.created[0][1]
+        driver = self.drivers[handle]
+        driver.phase = "failed"
+        observe = request(dto.ObserveLoginRequest(binding(dto.Provider.CODEX)), seq="2", rid="b" * 32)
+        self.assertIs(self.ok(observe).body.state, dto.LoginState.FAILED)
+        self.assertTrue(driver.released)            # transient resources freed promptly
+        self.assertEqual(self.volumes.revoked, [])  # NOT revoked here (cleanup does)
+        # A subsequent observe still reports FAILED and does not re-release the driver.
+        driver.released = False
+        self.assertIs(self.ok(observe).body.state, dto.LoginState.FAILED)
+        self.assertFalse(driver.released)
+
     def test_start_conflict_and_observe_not_found(self):
         self.ok(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
         # Same key, DIFFERENT ticket (different lease), new request id -> conflict.

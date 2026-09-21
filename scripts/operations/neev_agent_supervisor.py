@@ -385,6 +385,13 @@ class Supervisor:
         if phase == "prepared" and attempt.receipt_id is None:
             attempt.receipt_id = self._mint_id()
             self._promote_entry(attempt, dto.RegistryPhase.PREPARED)
+        elif phase in ("failed", "expired"):
+            # The login process has terminated without committing, so free its transient
+            # resources NOW (slot proxy + per-scope run lock + run workdir) instead of
+            # holding them until the ticket TTL (~10 min) — that hold blocked the next
+            # login/probe/run on the slot. The credential volume is left for the
+            # coordinator's cleanup_connection to revoke (retry/cancel unaffected).
+            self._release_transient(attempt)
         return phase
 
     def _snapshot(self, attempt: _Attempt, phase: str):
@@ -510,7 +517,7 @@ class Supervisor:
             # Without this the channel keeps holding the slot lock (the health probe hits
             # a busy slot -> UNAVAILABLE) and the scope run lock (the next runtime run
             # waits it out ~120s then fails "provider failed to answer").
-            self._release_committed(attempt)
+            self._release_transient(attempt)
         elif (
             attempt.receipt_id != request.body.receipt_id.value
             or attempt.storage_handle != witness.storage_handle.value
@@ -521,14 +528,15 @@ class Supervisor:
             dto.Id(attempt.storage_handle),
         )
 
-    def _release_committed(self, attempt: _Attempt) -> None:
-        """Release a committed login's transient resources ONCE (the `released` flag makes
-        a replayed settle a no-op). The driver reference is KEPT so a later
-        cleanup_connection can still logout/teardown (a second channel teardown is an
-        idempotent no-op). The durable commit has already happened, so a release failure
-        never undoes it — it is swallowed here, and the channel itself quarantines the
-        slot on a teardown it cannot confirm clean. Preserves the credential volume: no
-        revoke, no logout."""
+    def _release_transient(self, attempt: _Attempt) -> None:
+        """Free a login's transient resources (slot proxy + per-scope run lock + run
+        workdir) ONCE, when the login has reached a terminal state — committed OR
+        failed/expired. The `released` flag makes it idempotent; the driver reference is
+        KEPT so a later cleanup_connection can still logout/teardown (a second channel
+        teardown is an idempotent no-op). Never revokes or logs out here: for a committed
+        login the credentials must persist, and for a failed/expired one the coordinator's
+        cleanup_connection performs the durable revoke — so retry/cancel are unaffected. A
+        release failure is swallowed (the channel quarantines the slot on a bad teardown)."""
         if attempt.released or attempt.driver is None:
             return
         attempt.released = True
