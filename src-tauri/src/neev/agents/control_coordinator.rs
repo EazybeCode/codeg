@@ -362,7 +362,6 @@ fn acquire(
     let current = decode_epoch(&original_record)?;
     let next = current
         .checked_add(1)
-        .filter(|epoch| *epoch <= i64::MAX)
         .ok_or(CoordinatorError::Exhausted)?;
 
     revalidate_parent(&parent, &spec, admission)?;

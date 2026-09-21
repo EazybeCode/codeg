@@ -2060,3 +2060,85 @@ async fn postgres_completion_and_invalidators_serialize_in_both_orders() {
         }
     }
 }
+
+/// Production-lifecycle regressions for the recovery wiring in `startup::serve`.
+///
+/// `serve` now calls `recover_startup` once, before the listener accepts
+/// anything, and then sweeps with `expire_pending` on a timer. These pin the
+/// behaviour that wiring exists to provide, and the safety property that makes
+/// the periodic half callable against a *serving* process.
+/// Startup recovery is necessary but NOT sufficient on its own, and this test
+/// pins exactly where the remaining dependency is.
+///
+/// `recover_startup` moves a crash-interrupted sign-in to `disconnecting` and
+/// **queues a cleanup operation**; the connection only returns to
+/// `disconnected` — the one state `intents::begin` will accept — once something
+/// claims that cleanup, performs the teardown effect, and calls
+/// `finish_cleanup`. There is no such executor bound in this tree (see
+/// `scripts/operations/neev_supervisor_transport.py`, "trusted FUTURE
+/// launcher"), so wiring recovery into `serve` is one half of the fix and the
+/// effect executor is the other. Asserting the halves separately keeps that
+/// honest instead of implying sign-in already recovers end to end.
+#[tokio::test]
+async fn startup_recovery_queues_cleanup_and_only_then_can_a_connect_be_re_begun() {
+    let h = Harness::new(h::database().await).await;
+    // A sign-in that was still in flight when the previous process died.
+    let interrupted = begin(&h, &h.alice_a, Provider::Claude, "interrupted-login").await;
+
+    // Until it is recovered the connection is stuck `connecting`, so the user
+    // can never obtain the per-user credential a run requires (§5.4).
+    assert!(
+        matches!(
+            intents::begin(&h.state, &h.alice_a, Provider::Claude, "retry-login").await,
+            Err(AgentError::Conflict)
+        ),
+        "a stuck connection must be what blocks the retry"
+    );
+
+    // Exactly what `serve` now does at boot.
+    assert_eq!(recovery::recover_startup(&h.state).await.unwrap(), 1);
+
+    // STILL blocked: the connection is `disconnecting` with a queued cleanup.
+    // This is the gap — recovery alone does not restore sign-in.
+    assert!(
+        matches!(
+            intents::begin(&h.state, &h.alice_a, Provider::Claude, "retry-login").await,
+            Err(AgentError::Conflict)
+        ),
+        "recovery must not claim to have restored the connection on its own"
+    );
+
+    // What the (absent) effect executor would do: claim the queued cleanup,
+    // perform the teardown, report success.
+    let cleanup = cleanup_id(&h, &interrupted).await;
+    let ticket = recovery::claim_cleanup(&h.state, &cleanup)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(ticket.target, CleanupTarget::Disconnect));
+    recovery::finish_cleanup(&h.state, &ticket, true).await.unwrap();
+
+    // Only now can the user sign in again.
+    assert!(
+        matches!(
+            intents::begin(&h.state, &h.alice_a, Provider::Claude, "retry-login").await,
+            Ok(BeginOutcome::Pending(_))
+        ),
+        "a fully cleaned-up connection must accept a new sign-in"
+    );
+}
+
+#[tokio::test]
+async fn the_periodic_sweep_never_cancels_a_login_that_is_still_in_time() {
+    let h = Harness::new(h::database().await).await;
+    let live = begin(&h, &h.alice_a, Provider::Claude, "live-login").await;
+    // This is what makes `expire_pending` safe to run on a timer against a
+    // serving process: an attempt inside its own deadline is untouched, so the
+    // sweep can never cancel a login a user is part-way through.
+    assert_eq!(recovery::expire_pending(&h.state).await.unwrap(), 0);
+    h.set_now(live.expires_at - 1);
+    assert_eq!(recovery::expire_pending(&h.state).await.unwrap(), 0);
+    // Only once its own deadline passes is it reclaimed.
+    h.set_now(live.expires_at);
+    assert_eq!(recovery::expire_pending(&h.state).await.unwrap(), 1);
+}

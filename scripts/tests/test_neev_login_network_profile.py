@@ -341,5 +341,37 @@ class LoginNetworkProfileTests(unittest.TestCase):
                 )
 
 
+class SlotProxyEnvTests(unittest.TestCase):
+    def setUp(self):
+        if module is None:
+            self.fail("login network profile is not implemented")
+
+    def test_proxy_url_matches_slot_proxy_ip_on_the_connect_port(self):
+        self.assertEqual(module.proxy_url("a"), "http://10.203.0.2:3128")
+        self.assertEqual(module.proxy_url("b"), "http://10.203.0.10:3128")
+        # The URL host must equal the slot's proxy IP (what the netns routes to).
+        for slot in ("a", "b"):
+            self.assertIn(module.slot_profile(slot).proxy_ip, module.proxy_url(slot))
+
+    def test_proxy_env_pins_all_proxy_vars_and_empties_no_proxy(self):
+        env = module.proxy_env("b")
+        for key in module.PROXY_ENV_KEYS:
+            self.assertEqual(env[key], "http://10.203.0.10:3128")
+        for key in module.NO_PROXY_ENV_KEYS:
+            self.assertEqual(env[key], "")
+        # Exactly the proxy + no-proxy keys, nothing else leaks in.
+        self.assertEqual(
+            set(env), set(module.PROXY_ENV_KEYS) | set(module.NO_PROXY_ENV_KEYS)
+        )
+
+    def test_proxy_helpers_reject_non_slots(self):
+        for value in ("A", "", "c", None, 1, True):
+            with self.subTest(value=value):
+                with self.assertRaises(module.ProfileError):
+                    module.proxy_url(value)
+                with self.assertRaises(module.ProfileError):
+                    module.proxy_env(value)
+
+
 if __name__ == "__main__":
     unittest.main()

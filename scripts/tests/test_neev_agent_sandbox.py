@@ -10,6 +10,7 @@ import platform
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 OPERATIONS = Path(__file__).parents[1] / "operations"
 sys.path.insert(0, str(OPERATIONS))
@@ -104,6 +105,37 @@ class SandboxSpecTests(unittest.TestCase):
         with self.assertRaises(sandbox.SandboxError):
             sandbox.build_launch_argv(spec(), join_netns="; rm -rf /")
 
+    def test_home_path_is_a_home_leaf_under_the_run_workdir(self):
+        self.assertEqual(
+            sandbox.home_path("/var/lib/neev-native/agents/org3-user7"),
+            "/var/lib/neev-native/agents/org3-user7/home",
+        )
+        with self.assertRaises(sandbox.SandboxError):
+            sandbox.home_path("relative/x")
+
+    def test_bind_source_inserts_the_ns_prelude_before_the_drop_chain(self):
+        mount = "/var/lib/neev-supervisor/credentials/" + "a" * 32 + "/mount"
+        argv = sandbox.build_launch_argv(spec(), bind_source=mount)
+        # The prelude runs the fixed interpreter + prelude script, as root inside the
+        # new mount namespace, BEFORE prlimit/setpriv drop privilege.
+        self.assertIn(sandbox.PYTHON, argv)
+        self.assertIn(sandbox.NS_PRELUDE, argv)
+        i = argv.index(sandbox.NS_PRELUDE)
+        self.assertEqual(argv[i + 1:i + 5], ["--src", mount, "--dst",
+                                             sandbox.home_path(spec().workdir)])
+        self.assertEqual(argv[i + 5], "--")
+        # Prelude sits after unshare, before prlimit/setpriv; provider still last.
+        self.assertLess(argv.index(sandbox.NS_PRELUDE), argv.index(sandbox.PRLIMIT))
+        self.assertLess(argv.index(sandbox.PRLIMIT), argv.index(sandbox.SETPRIV))
+        self.assertEqual(argv[-5:], list(spec().provider_argv))
+        # A malformed bind source (traversal) is rejected.
+        with self.assertRaises(sandbox.SandboxError):
+            sandbox.build_launch_argv(spec(), bind_source="/a/../b")
+
+    def test_no_bind_source_omits_the_prelude(self):
+        argv = sandbox.build_launch_argv(spec())
+        self.assertNotIn(sandbox.NS_PRELUDE, argv)
+
     def test_distinct_tenants_requires_separate_identity(self):
         a = spec()
         b = spec(
@@ -157,3 +189,65 @@ class EgressPolicyTests(unittest.TestCase):
     def test_provider_allowlist_rejects_malformed_ipv4(self):
         with self.assertRaises(Exception):
             sandbox.EgressPolicy.provider_allowlist(["not-an-ip"])
+
+
+class SecureOwnWorkdirTests(unittest.TestCase):
+    """Pin the fd-op ORDER in `_secure_own_workdir`.
+
+    The run workdir is created by the UNPRIVILEGED web server (uid 65532) but the
+    launcher runs euid 0 with ONLY the 9 ambient caps the cap-helper grants — which
+    exclude CAP_FOWNER. `fchmod` on a file the euid does not own needs CAP_FOWNER
+    (CAP_DAC_OVERRIDE does NOT cover chmod's owner check), so the OLD chmod-first
+    order EPERM'd on a web-owned dir -> `SandboxError("launch")` -> rc 3 (the RUN
+    path was dead in production; login/probe survived only because the supervisor
+    runs as real root). The fix takes ownership to euid 0 via CAP_CHOWN FIRST, then
+    chmods (self-owned now), then chowns to the lane. This regression locks that
+    order so a well-meaning revert to "chmod before chown" cannot re-break RUN."""
+
+    def _run(self, fchmod_side_effect=None):
+        calls = []
+        FD = 4242
+
+        def rec(name):
+            def _f(*a, **k):
+                calls.append((name, a))
+                if name == "fchmod" and fchmod_side_effect is not None:
+                    raise fchmod_side_effect
+            return _f
+
+        with mock.patch.object(sandbox.os, "open", return_value=FD), mock.patch.object(
+            sandbox.os, "fchmod", side_effect=rec("fchmod")
+        ), mock.patch.object(
+            sandbox.os, "fchown", side_effect=rec("fchown")
+        ), mock.patch.object(
+            sandbox.os, "close", side_effect=rec("close")
+        ):
+            sandbox._secure_own_workdir("/data/agents/run-x", 61000, 61000)
+        return calls, FD
+
+    def test_takes_ownership_before_chmod_then_hands_to_lane(self):
+        calls, fd = self._run()
+        ops = [(n, a) for (n, a) in calls if n in ("fchmod", "fchown")]
+        # Exact order: chown->(0,0), chmod 0700, chown->(lane).
+        self.assertEqual(
+            ops,
+            [
+                ("fchown", (fd, 0, 0)),
+                ("fchmod", (fd, 0o700)),
+                ("fchown", (fd, 61000, 61000)),
+            ],
+        )
+        # The fd is always closed (finally).
+        self.assertIn(("close", (fd,)), calls)
+
+    def test_chmod_before_ownership_would_be_a_regression(self):
+        # Guard the invariant explicitly: the FIRST mutating op must be the
+        # ownership-normalizing chown, never chmod.
+        calls, _ = self._run()
+        first_mutation = next(n for (n, _a) in calls if n in ("fchmod", "fchown"))
+        self.assertEqual(first_mutation, "fchown")
+
+    def test_chmod_eperm_surfaces_as_launch_category(self):
+        with self.assertRaises(sandbox.SandboxError) as caught:
+            self._run(fchmod_side_effect=OSError(1, "EPERM"))
+        self.assertEqual(caught.exception.category, "launch")

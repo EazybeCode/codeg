@@ -1,0 +1,93 @@
+# Scoped AppArmor profile for the Neev native-agent container.
+#
+# Retains Docker's default hardening (no writes to sensitive /proc and /sys, no raw
+# firmware/kcore/sysrq, ptrace confined to this profile, signals intra-profile plus a
+# receive from the container runtime's profile so `docker stop` works) but — unlike the
+# docker-default profile, which `deny mount,` — grants ONLY the four mount operations
+# the credential/sandbox path actually needs. Everything else about mount stays
+# denied by AppArmor default-deny (there is no blanket `mount,`).
+#
+# Pairs with: default Docker seccomp (kept; `cryptsetup open --disable-keyring`
+# avoids the kernel keyring), cap set {CHOWN,DAC_OVERRIDE,SETGID,SETUID,SETPCAP,
+# NET_ADMIN,SYS_ADMIN,MKNOD}, explicit loop/mapper devices + a device-cgroup rule for
+# the device-mapper major.
+#
+# Install (root, on the host):   apparmor_parser -r -W /etc/apparmor.d/neev-agent
+# Use:                           docker run --security-opt apparmor=neev-agent ...
+
+#include <tunables/global>
+
+profile neev-agent flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  umount,
+
+  # ---- Docker-default hardening (writes to sensitive kernel interfaces denied) ----
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s]}*/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+
+  # ---- The ONLY mounts Neev is allowed to perform ----
+  # 1. the decrypted LUKS ext4 at each credential store entry's mount dir
+  mount fstype=ext4 options=(rw, nodev, nosuid, noexec) -> /var/lib/neev-supervisor/credentials/*/mount/,
+  # 2. propagation changes of the mount tree: rprivate for the sandbox ns prelude,
+  #    rslave for `ip netns exec`/`ip -n` entering a namespace.
+  mount options=(rw, rprivate) -> /,
+  mount options=(rw, rslave) -> /,
+  mount options=(rw, slave) -> /,
+  # 3. a private /proc for the sandbox pid namespace (unshare --mount-proc) and a
+  #    fresh /sys when `ip netns exec` enters a network namespace.
+  mount fstype=proc -> /proc/,
+  mount fstype=sysfs -> /sys/,
+  # 4. bind the credential volume onto the run's private, lane-traversable HOME
+  mount options=(rw, rbind) /var/lib/neev-supervisor/credentials/*/mount/ -> /data/agents/run-*/home/,
+  # 5. per-slot network-namespace management for the runtime egress bootstrap.
+  #    `ip netns add` self-binds /run/netns, makes it shared, then binds the process
+  #    net namespace into it; the guest/proxy netns setup uses these.
+  mount options=(rw, bind) /run/netns/ -> /run/netns/,
+  mount options=(rw, rbind) /run/netns/ -> /run/netns/,
+  mount options=(rw, make-shared) /run/netns/,
+  mount options=(rw, shared) -> /run/netns/,
+  mount options=(rw, rshared) -> /run/netns/,
+  # Binding the new network namespace onto its /run/netns/<name> file: the kernel ns
+  # pseudo-source appears to AppArmor as "/", so the source is unconstrained but the
+  # TARGET is pinned under /run/netns/.
+  mount options=(rw, bind) -> /run/netns/*,
+  mount options=(rw, rbind) -> /run/netns/*,
+  # `ip netns exec <name>` bind-mounts a per-netns /etc/netns/<name>/resolv.conf over
+  # /etc/resolv.conf so the proxy namespace uses upstream DNS reachable via its own NAT.
+  # This is REQUIRED on Docker custom networks: the container's embedded resolver at
+  # 127.0.0.11 is a MAIN-netns loopback and is unreachable from the separate proxy netns,
+  # so without a per-netns resolv.conf the login proxy's resolver fails (stage=resolve).
+  # Bounded to exactly that source/target; the guest namespace still gets no DNS.
+  mount options=(rw, bind) /etc/netns/*/resolv.conf -> /etc/resolv.conf,
+  # ip_forward is provisioned by `docker --sysctl` (not written here); the profile
+  # deliberately does NOT allow /proc/sys writes.
+
+  ptrace (trace,read,tracedby,readby) peer=neev-agent,
+  signal (receive,send) peer=neev-agent,
+  # The container runtime must be able to deliver termination signals to the container's
+  # init, or `docker stop` cannot reach the process and waits out the FULL grace period
+  # before the daemon resorts to SIGKILL (observed ~15s). AppArmor matches the peer by
+  # its confinement LABEL, so the rule must name the runtime's actual profile: on this
+  # host the audit shows peer="runc" (runc is CONFINED under a profile named "runc"), so
+  # peer=runc is required; peer=unconfined is retained for standard hosts that run the
+  # runtime unconfined. RECEIVE only, from the runtime only — NOT a blanket unconfine
+  # (the container still cannot SEND signals outside its own profile, and no other
+  # confined profile may signal it).
+  signal (receive) peer=runc,
+  signal (receive) peer=unconfined,
+}

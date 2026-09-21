@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::neev::{auth::github, error::AuthError, startup::ServerState};
 
 mod agent;
+mod agent_sessions;
 mod auth;
 mod catalog;
 mod content;
@@ -72,6 +73,21 @@ impl IntoResponse for ApiError {
         let mut response = (status, Json(serde_json::json!({"code": code}))).into_response();
         add_private_headers(&mut response);
         response
+    }
+}
+
+/// Map the agent control plane's error taxonomy onto the HTTP one. `Unavailable`
+/// is the honest answer for both a storage problem and a refused provider
+/// operation — neither is something the caller can fix by retrying differently.
+pub(super) fn agent_error(value: crate::neev::agents::types::AgentError) -> ApiError {
+    use crate::neev::agents::types::AgentError;
+    match value {
+        AgentError::Auth(error) => ApiError::from(error),
+        AgentError::NotFound => ApiError::NotFound,
+        AgentError::InvalidInput => ApiError::Invalid,
+        AgentError::Conflict => ApiError::Conflict,
+        AgentError::RateLimited => ApiError::Limited,
+        AgentError::Unavailable => ApiError::Unavailable,
     }
 }
 
@@ -195,6 +211,67 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/neev/join", post(org::accept_join))
         .route("/api/neev/agent/run", post(agent::run))
         .route("/api/neev/agent/cancel", post(agent::cancel))
+        // Conductor-style agent sessions (spec §5). The one-shot `run`/`cancel`
+        // routes above stay as the ad-hoc team-chat panel path; these own the
+        // durable, resumable session surface.
+        .route(
+            "/api/neev/agent/sessions",
+            get(agent_sessions::list_sessions).post(agent_sessions::create_session),
+        )
+        .route(
+            "/api/neev/agent/sessions/{session_id}",
+            get(agent_sessions::get_session).patch(agent_sessions::update_session),
+        )
+        .route(
+            "/api/neev/agent/sessions/{session_id}/node",
+            patch(agent_sessions::move_session),
+        )
+        .route(
+            "/api/neev/agent/sessions/{session_id}/turns",
+            get(agent_sessions::list_turns).post(agent_sessions::start_turn),
+        )
+        .route(
+            "/api/neev/agent/runs/{run_id}/events",
+            get(agent_sessions::run_events),
+        )
+        .route("/api/neev/agent/runs/cancel", post(agent_sessions::cancel_run))
+        // Explicit team invocation (§5.3): posts the ask, then publishes an
+        // agent-authored reply into the same chat when the run completes.
+        .route(
+            "/api/neev/chats/{chat_id}/agent",
+            post(agent_sessions::team_invoke),
+        )
+        .route(
+            "/api/neev/agent/connections",
+            get(agent_sessions::list_connections),
+        )
+        // Per-user provider sign-in (§5.4). These are the state-machine half;
+        // completing a sign-in additionally requires the effect executor that
+        // performs the login inside the per-user isolation profile.
+        .route(
+            "/api/neev/agent/connections/{provider}/connect",
+            post(agent_sessions::connect),
+        )
+        .route(
+            "/api/neev/agent/connections/{provider}/attempts/{attempt_id}",
+            get(agent_sessions::connect_attempt),
+        )
+        .route(
+            "/api/neev/agent/connections/{provider}/attempts/{attempt_id}/code",
+            post(agent_sessions::submit_attempt_code),
+        )
+        .route(
+            "/api/neev/agent/connections/{provider}/cancel",
+            post(agent_sessions::cancel_connect),
+        )
+        .route(
+            "/api/neev/agent/connections/{provider}/disconnect",
+            post(agent_sessions::disconnect),
+        )
+        .route(
+            "/api/neev/agent/connections/{provider}/test",
+            post(agent_sessions::test_connection),
+        )
         .route("/api/neev/logout", post(auth::logout))
         .route("/api/neev/auth/google/login", post(auth::google_login))
         .route("/api/neev/auth/google/link", post(auth::google_link))
@@ -259,13 +336,13 @@ async fn capabilities(State(state): State<Arc<ServerState>>) -> Response {
     })
 }
 
-fn private_json(value: impl Serialize) -> Response {
+pub(super) fn private_json(value: impl Serialize) -> Response {
     let mut response = Json(value).into_response();
     add_private_headers(&mut response);
     response
 }
 
-fn add_private_headers(response: &mut Response) {
+pub(super) fn add_private_headers(response: &mut Response) {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

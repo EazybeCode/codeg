@@ -90,6 +90,9 @@ fn run_request() -> RunRequest {
         provider: "claude".into(),
         model: "default".into(),
         prompt: "draft a plan".into(),
+        // The fake/disabled runtimes used here do not deliver credentials; the
+        // sandboxed runtime's requirement is covered in `execution`'s tests.
+        credential_handle: None,
     }
 }
 

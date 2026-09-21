@@ -237,7 +237,12 @@ async fn seed_history(db: &DatabaseConnection) {
 }
 
 async fn exact_seven_fixture(db: &DatabaseConnection) {
-    // Fresh schema is now v10; drop the additive v10/v9 tables to reach v7.
+    // Drop later additive tables to reach the exact v7 inventory.
+    for table in ["neev_agent_turns", "neev_agent_sessions"] {
+        execute(db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     execute(db, "DROP TABLE neev_image_blobs", vec![])
         .await
         .unwrap();
@@ -310,7 +315,7 @@ async fn snapshot_gateway8_rows(db: &DatabaseConnection) -> Vec<Vec<String>> {
 async fn sqlite_gateway8_fresh_inventory_and_seed() {
     let database = h::empty_database().await;
     initialize(&database).await.unwrap();
-    assert_eq!(validate_content_snapshot(&database).await, Ok(10));
+    assert_eq!(validate_content_snapshot(&database).await, Ok(11));
     let row = one(
         &database,
         "SELECT audience,issuer,last_cursor,fetched_through,acknowledged_cursor,writer_epoch FROM neev_gateway_audience",
@@ -327,7 +332,12 @@ async fn sqlite_gateway8_fresh_inventory_and_seed() {
         row.try_get::<String>("", "issuer").unwrap(),
         "neev-native-v1"
     );
-    for column in ["last_cursor", "fetched_through", "acknowledged_cursor", "writer_epoch"] {
+    for column in [
+        "last_cursor",
+        "fetched_through",
+        "acknowledged_cursor",
+        "writer_epoch",
+    ] {
         assert_eq!(row.try_get::<i64>("", column).unwrap(), 0);
     }
 }
@@ -337,7 +347,7 @@ async fn sqlite_gateway8_fresh_inventory_and_seed() {
 async fn postgres_gateway8_fresh_inventory_and_seed() {
     let (db, admin, schema) = h::postgres_database().await;
     eprintln!("gateway8 fresh owned schema: {schema}");
-    assert_eq!(validate_content_snapshot(&db).await, Ok(10));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(11));
     let row = one(
         &db,
         "SELECT audience,issuer FROM neev_gateway_audience",
@@ -363,7 +373,10 @@ async fn assert_exact_columns(db: &DatabaseConnection) {
         {
             ("SELECT column_name AS name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 ORDER BY ordinal_position", vec![(*table).into()])
         } else {
-            ("SELECT name FROM pragma_table_info($1) ORDER BY cid", vec![(*table).into()])
+            (
+                "SELECT name FROM pragma_table_info($1) ORDER BY cid",
+                vec![(*table).into()],
+            )
         };
         let actual: Vec<String> = db
             .query_all(statement(db, sql, values))
@@ -378,7 +391,10 @@ async fn assert_exact_columns(db: &DatabaseConnection) {
         {
             ("SELECT column_default FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1", vec![(*table).into()])
         } else {
-            ("SELECT dflt_value AS column_default FROM pragma_table_info($1)", vec![(*table).into()])
+            (
+                "SELECT dflt_value AS column_default FROM pragma_table_info($1)",
+                vec![(*table).into()],
+            )
         };
         assert!(
             db.query_all(statement(db, sql, values))
@@ -409,14 +425,21 @@ async fn constraints_and_keys(db: &DatabaseConnection) {
         "ix_neev_gateway_redemptions_retry",
         "ix_neev_gateway_revocations_scope",
     ] {
-        assert!(relation_exists(db, name, "index").await, "missing index {name}");
+        assert!(
+            relation_exists(db, name, "index").await,
+            "missing index {name}"
+        );
     }
     // RESTRICT foreign keys: neither the source session nor the audience can be
     // deleted while a permanent binding references them.
     assert!(
-        execute(db, "DELETE FROM neev_sessions WHERE id=$1", vec![SOURCE.into()])
-            .await
-            .is_err(),
+        execute(
+            db,
+            "DELETE FROM neev_sessions WHERE id=$1",
+            vec![SOURCE.into()]
+        )
+        .await
+        .is_err(),
         "permanent source FK must block session deletion"
     );
     assert!(
@@ -587,9 +610,13 @@ async fn sqlite_gateway8_binding_only_history_is_valid() {
     // A permanent binding with no live relying row, receipt, event or intent.
     let db = h::database().await;
     seed_native(&db).await;
-    execute(&db, "UPDATE neev_gateway_audience SET last_cursor=0,fetched_through=0", vec![])
-        .await
-        .unwrap();
+    execute(
+        &db,
+        "UPDATE neev_gateway_audience SET last_cursor=0,fetched_through=0",
+        vec![],
+    )
+    .await
+    .unwrap();
     execute(
         &db,
         "INSERT INTO neev_gateway_relying_bindings(relying_ref,audience,source_session_id,user_id,org_id,created_at) VALUES ($1,'neev-collaboration-v1',$2,101,201,1120)",
@@ -624,12 +651,20 @@ async fn sqlite_gateway8_binding_only_history_is_valid() {
         .unwrap();
     assert_eq!(gateway_migration::validate(&db).await, Ok(()));
     // Later native revocation/role change is legitimate historical state.
-    execute(&db, "UPDATE neev_accounts SET auth_revision=9 WHERE id=101", vec![])
-        .await
-        .unwrap();
-    execute(&db, "UPDATE neev_memberships SET active=false,role='member' WHERE id=301", vec![])
-        .await
-        .unwrap();
+    execute(
+        &db,
+        "UPDATE neev_accounts SET auth_revision=9 WHERE id=101",
+        vec![],
+    )
+    .await
+    .unwrap();
+    execute(
+        &db,
+        "UPDATE neev_memberships SET active=false,role='member' WHERE id=301",
+        vec![],
+    )
+    .await
+    .unwrap();
     assert_eq!(gateway_migration::validate(&db).await, Ok(()));
 }
 
@@ -747,10 +782,17 @@ async fn sqlite_gateway8_keyset_history_crosses_pages() {
 // ---- Task C: atomic version chain and read-only history ----
 
 async fn downgrade_to(db: &DatabaseConnection, target: i64) {
-    // Fresh schema is now v10; drop each additive table the target predates.
-    execute(db, "DROP TABLE neev_image_blobs", vec![])
-        .await
-        .unwrap();
+    // Fresh schema is now v11; peel back one additive layer per version.
+    for table in ["neev_agent_turns", "neev_agent_sessions"] {
+        execute(db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
+    if target < 10 {
+        execute(db, "DROP TABLE neev_image_blobs", vec![])
+            .await
+            .unwrap();
+    }
     if target < 9 {
         execute(db, "DROP TABLE neev_org_join_codes", vec![])
             .await
@@ -776,7 +818,11 @@ async fn downgrade_to(db: &DatabaseConnection, target: i64) {
             .unwrap();
     }
     if target < 5 {
-        for table in ["neev_agent_operations", "neev_agent_attempts", "neev_agent_connections"] {
+        for table in [
+            "neev_agent_operations",
+            "neev_agent_attempts",
+            "neev_agent_connections",
+        ] {
             execute(db, &format!("DROP TABLE {table}"), vec![])
                 .await
                 .unwrap();
@@ -812,7 +858,7 @@ async fn sqlite_gateway8_populated_seven_upgrade_preserves_rows() {
     );
 
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(10));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(11));
     let after = one(&db, "SELECT r.blob_key,r.sha256,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE r.document_id=$1", vec![doc.into()]).await.unwrap().unwrap();
     assert_eq!(
         (
@@ -825,7 +871,11 @@ async fn sqlite_gateway8_populated_seven_upgrade_preserves_rows() {
     // One seeded audience and six initially empty gateway tables.
     assert_eq!(h::count(&db, "neev_gateway_audience").await, 1);
     for (table, _, _) in &GATEWAY_TABLES[1..] {
-        assert_eq!(h::count(&db, table).await, 0, "{table} not empty after upgrade");
+        assert_eq!(
+            h::count(&db, table).await,
+            0,
+            "{table} not empty after upgrade"
+        );
     }
 }
 
@@ -844,7 +894,7 @@ async fn sqlite_gateway8_reinitialize_preserves_history() {
     .unwrap();
     let before = snapshot_gateway8_rows(&db).await;
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(10));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(11));
     assert_eq!(
         snapshot_gateway8_rows(&db).await,
         before,
@@ -858,19 +908,26 @@ async fn sqlite_gateway8_initializer_marker_failure_rolls_back() {
     seed_native(&db).await;
     let account_before = h::count(&db, "neev_accounts").await;
     exact_seven_fixture(&db).await;
-    execute(&db, "CREATE TRIGGER fixture_reject_gateway8_marker BEFORE UPDATE OF version ON neev_schema_version WHEN NEW.version=10 BEGIN SELECT RAISE(ABORT,'fixture marker rejection'); END", vec![]).await.unwrap();
+    execute(&db, "CREATE TRIGGER fixture_reject_gateway8_marker BEFORE UPDATE OF version ON neev_schema_version WHEN NEW.version=11 BEGIN SELECT RAISE(ABORT,'fixture marker rejection'); END", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(
-        one(&db, "SELECT version FROM neev_schema_version WHERE id=1", vec![])
-            .await
-            .unwrap()
-            .unwrap()
-            .try_get::<i64>("", "version")
-            .unwrap(),
+        one(
+            &db,
+            "SELECT version FROM neev_schema_version WHERE id=1",
+            vec![]
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "version")
+        .unwrap(),
         7
     );
     for table in DROP_ORDER {
-        assert!(!relation_exists(&db, table, "table").await, "leaked {table}");
+        assert!(
+            !relation_exists(&db, table, "table").await,
+            "leaked {table}"
+        );
     }
     assert_eq!(h::count(&db, "neev_accounts").await, account_before);
     execute(&db, "DROP TRIGGER fixture_reject_gateway8_marker", vec![])
@@ -895,21 +952,25 @@ async fn sqlite_gateway8_initializer_marker_failure_rolls_back() {
 
 #[tokio::test]
 async fn sqlite_gateway8_exact_historical_three_through_eight_read_only() {
-    for target in [10_i64, 9, 8, 7, 6, 5, 4, 3] {
+    for target in [11_i64, 10, 9, 8, 7, 6, 5, 4, 3] {
         let db = h::database().await;
-        if target < 10 {
+        if target < 11 {
             downgrade_to(&db, target).await;
         }
         execute(&db, "PRAGMA query_only=ON", vec![]).await.unwrap();
         assert_eq!(validate_content_snapshot(&db).await, Ok(target));
         execute(&db, "PRAGMA query_only=OFF", vec![]).await.unwrap();
         assert_eq!(
-            one(&db, "SELECT version FROM neev_schema_version WHERE id=1", vec![])
-                .await
-                .unwrap()
-                .unwrap()
-                .try_get::<i64>("", "version")
-                .unwrap(),
+            one(
+                &db,
+                "SELECT version FROM neev_schema_version WHERE id=1",
+                vec![]
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "version")
+            .unwrap(),
             target
         );
     }
@@ -983,9 +1044,13 @@ async fn sqlite_gateway8_partial_marker_and_non_table_rejected() {
     execute(&db, "DROP TABLE neev_gateway_revoke_intents", vec![])
         .await
         .unwrap();
-    execute(&db, "CREATE VIEW neev_gateway_revoke_intents AS SELECT 1 AS audience", vec![])
-        .await
-        .unwrap();
+    execute(
+        &db,
+        "CREATE VIEW neev_gateway_revoke_intents AS SELECT 1 AS audience",
+        vec![],
+    )
+    .await
+    .unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(
         validate_content_snapshot(&db).await,
@@ -1000,11 +1065,19 @@ async fn sqlite_gateway8_rejects_duplicate_native_parent() {
     assert_eq!(gateway_migration::validate(&db).await, Ok(()));
     // Simulate an imported snapshot whose native membership table lacks the
     // composite unique constraint, holding a duplicate matching parent (R11).
-    execute(&db, "PRAGMA foreign_keys=OFF", vec![]).await.unwrap();
-    execute(&db, "CREATE TABLE fixture_m AS SELECT * FROM neev_memberships", vec![])
+    execute(&db, "PRAGMA foreign_keys=OFF", vec![])
         .await
         .unwrap();
-    execute(&db, "DROP TABLE neev_memberships", vec![]).await.unwrap();
+    execute(
+        &db,
+        "CREATE TABLE fixture_m AS SELECT * FROM neev_memberships",
+        vec![],
+    )
+    .await
+    .unwrap();
+    execute(&db, "DROP TABLE neev_memberships", vec![])
+        .await
+        .unwrap();
     execute(
         &db,
         "CREATE TABLE neev_memberships(id,org_id,user_id,role,revision,active)",
@@ -1012,9 +1085,13 @@ async fn sqlite_gateway8_rejects_duplicate_native_parent() {
     )
     .await
     .unwrap();
-    execute(&db, "INSERT INTO neev_memberships SELECT * FROM fixture_m", vec![])
-        .await
-        .unwrap();
+    execute(
+        &db,
+        "INSERT INTO neev_memberships SELECT * FROM fixture_m",
+        vec![],
+    )
+    .await
+    .unwrap();
     execute(
         &db,
         "INSERT INTO neev_memberships(id,org_id,user_id,role,revision,active) VALUES(301,201,101,'admin',1,true)",
@@ -1059,7 +1136,7 @@ async fn postgres_gateway8_populated_seven_upgrade_preserves_rows() {
         );
         exact_seven_fixture(&db).await;
         assert_eq!(initialize(&db).await, Ok(()));
-        assert_eq!(validate_content_snapshot(&db).await, Ok(10));
+        assert_eq!(validate_content_snapshot(&db).await, Ok(11));
         // Content revision/format preserved unchanged.
         let after = one(&db, "SELECT r.blob_key,r.sha256,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE r.document_id=$1", vec![doc.into()]).await.unwrap().unwrap();
         assert_eq!(
@@ -1094,12 +1171,16 @@ async fn postgres_gateway8_reinitialize_preserves_history() {
     let outcome = std::panic::AssertUnwindSafe(async {
         seed_native(&db).await;
         seed_history(&db).await;
-        execute(&db, "UPDATE neev_gateway_audience SET acknowledged_cursor=1,writer_epoch=5", vec![])
-            .await
-            .unwrap();
+        execute(
+            &db,
+            "UPDATE neev_gateway_audience SET acknowledged_cursor=1,writer_epoch=5",
+            vec![],
+        )
+        .await
+        .unwrap();
         let before = snapshot_gateway8_rows(&db).await;
         assert_eq!(initialize(&db).await, Ok(()));
-        assert_eq!(validate_content_snapshot(&db).await, Ok(10));
+        assert_eq!(validate_content_snapshot(&db).await, Ok(11));
         assert_eq!(snapshot_gateway8_rows(&db).await, before);
     })
     .catch_unwind()
@@ -1176,15 +1257,17 @@ async fn postgres_gateway8_initializer_marker_failure_rolls_back() {
 #[tokio::test]
 #[ignore = "requires guarded PostgreSQL"]
 async fn postgres_gateway8_exact_historical_three_through_eight_read_only() {
-    for target in [10_i64, 9, 8, 7, 6, 5, 4, 3] {
+    for target in [11_i64, 10, 9, 8, 7, 6, 5, 4, 3] {
         let (db, admin, schema) = h::postgres_database().await;
         eprintln!("gateway8 read-only {target} owned schema: {schema}");
         let outcome = std::panic::AssertUnwindSafe(async {
-            if target < 10 {
+            if target < 11 {
                 downgrade_to(&db, target).await;
             }
             let tx = db.begin().await.unwrap();
-            execute(&tx, "SET TRANSACTION READ ONLY", vec![]).await.unwrap();
+            execute(&tx, "SET TRANSACTION READ ONLY", vec![])
+                .await
+                .unwrap();
             assert_eq!(validate_content_snapshot(&tx).await, Ok(target));
             tx.rollback().await.unwrap();
         })
@@ -1224,9 +1307,17 @@ async fn postgres_gateway8_partial_marker_and_non_table_rejected() {
     // Missing gateway table.
     pg_reject_case("missing-table", "DROP TABLE neev_gateway_revoke_intents").await;
     // Stale marker over a full v8 inventory.
-    pg_reject_case("stale-marker", "UPDATE neev_schema_version SET version=7 WHERE id=1").await;
+    pg_reject_case(
+        "stale-marker",
+        "UPDATE neev_schema_version SET version=7 WHERE id=1",
+    )
+    .await;
     // Unknown extra table.
-    pg_reject_case("extra-table", "CREATE TABLE unknown_gateway_data(id INTEGER)").await;
+    pg_reject_case(
+        "extra-table",
+        "CREATE TABLE unknown_gateway_data(id INTEGER)",
+    )
+    .await;
     // Same-name view where a gateway table is expected.
     pg_reject_case(
         "same-name-view",

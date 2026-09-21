@@ -28,6 +28,7 @@ GUEST_DNS_SEARCH = ()
 GUEST_PUBLISHED_PORTS = ()
 GUEST_NO_PROXY = ""
 PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+NO_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy")
 PROXY_URLS = MappingProxyType(
     {
         "a": "http://10.203.0.2:3128",
@@ -115,6 +116,30 @@ def slot_profile(slot: str) -> SlotProfile:
     if type(slot) is not str or slot not in _SLOT_PROFILES:
         raise ProfileError("invalid")
     return _SLOT_PROFILES[slot]
+
+
+def proxy_url(slot: str) -> str:
+    """Return the fixed CONNECT-proxy URL the given slot's guest must egress through."""
+    if type(slot) is not str or slot not in PROXY_URLS:
+        raise ProfileError("invalid")
+    return PROXY_URLS[slot]
+
+
+def proxy_env(slot: str) -> dict:
+    """Authoritative, fixed proxy environment for a slot's guest process.
+
+    The guest's netns routes ONLY to the slot proxy IP (see `neev_agent_egress`), so
+    a direct provider TLS connection has no path out — the provider CLI must be told
+    to use the CONNECT proxy. This returns exactly that: HTTP(S)_PROXY (upper and
+    lower case) pinned to the slot proxy URL, and an EMPTY NO_PROXY/no_proxy so no
+    destination bypasses the proxy. These are server-owned constants, never inherited
+    from the ambient environment. Both the runtime launcher and the login/auth
+    subprocess use this so their egress path is identical."""
+    url = proxy_url(slot)
+    env = {key: url for key in PROXY_ENV_KEYS}
+    for key in NO_PROXY_ENV_KEYS:
+        env[key] = GUEST_NO_PROXY  # "" -> no bypass; everything is proxied
+    return env
 
 
 def validate_endpoints(endpoints: tuple[Endpoint, ...]) -> tuple[Endpoint, ...]:

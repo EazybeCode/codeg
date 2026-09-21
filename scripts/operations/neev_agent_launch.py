@@ -28,6 +28,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import neev_agent_sandbox as sandbox
+import neev_agent_credentials as credentials
 
 
 def _parse(argv):
@@ -37,6 +38,11 @@ def _parse(argv):
     parser.add_argument("--workdir", required=True)
     parser.add_argument("--uid", type=int, required=True)
     parser.add_argument("--gid", type=int, required=True)
+    # The runtime (execution.rs) always passes these: which per-user credential
+    # volume to open (scope = --tenant + --provider) and the opaque handle naming
+    # it. The launcher opens the caller's OWN volume and delivers it as HOME.
+    parser.add_argument("--provider", required=True, choices=sorted(credentials.PROVIDERS))
+    parser.add_argument("--credential-handle", required=True, dest="credential_handle")
     parser.add_argument("--provider-ipv4", action="append", default=[], dest="provider_ipv4")
     parser.add_argument("--cpu-seconds", type=int, default=120)
     parser.add_argument("--address-space-bytes", type=int, default=2 * 1024 * 1024 * 1024)
@@ -100,7 +106,80 @@ def _validate_workdir_under_trusted_root(workdir):
         raise sandbox.SandboxError("invalid")
 
 
-def main(argv=None):
+# The provider inherits ONLY this allowlist plus the credential env — never the
+# server's environment (DB URL, encryption key, ...). HOME/CLAUDE_CONFIG_DIR/
+# CODEX_HOME come from the delivery and point strictly inside the sandbox volume.
+_ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ")
+_DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
+
+
+def child_env(delivery, proxy_env=None):
+    """Minimal, secret-free environment for the sandboxed provider (pure).
+
+    When the run has provider egress, `proxy_env` is the authoritative fixed
+    slot-proxy environment (`neev_login_network_profile.proxy_env`): the guest's
+    netns only routes to the slot proxy IP, so without HTTP(S)_PROXY set the
+    provider's direct TLS would have no path out. The proxy vars come from the
+    server-owned profile, never inherited from the ambient environment."""
+    env = {"PATH": _DEFAULT_PATH}
+    for key in _ENV_ALLOWLIST:
+        value = os.environ.get(key)
+        if value is not None and "\x00" not in value:
+            env[key] = value
+    if proxy_env:
+        env.update(proxy_env)  # HTTP(S)_PROXY + empty NO_PROXY (fixed, authoritative)
+    env.update(delivery.env)  # HOME + provider config dir (authoritative)
+    return env
+
+
+def _become_credential_owner():  # pragma: no cover - requires the cap helper (euid 0)
+    """Elevate to euid 0 AND egid 0 for the credential/mount phase, WITHOUT becoming
+    unsignalable by the web-server parent that launched us.
+
+    The caplaunch helper execs us with ruid/euid/egid 65532 (the web-server uid/gid)
+    plus ambient caps (incl. CAP_SETUID/CAP_SETGID). The credential store, master key
+    and volume images are ROOT-owned (uid 0, gid 0) and their validators check BOTH
+    owner == geteuid() and group == getegid(); mount/cryptsetup also want euid 0. So the
+    trusted, fixed launcher raises BOTH euid and egid to 0 here — AFTER its args/workdir
+    are validated, BEFORE any credential effect.
+
+    Crucially we keep the CALLER'S uid as the SAVED set-uid instead of `setresuid(0,0,0)`:
+    kill(2) permits a sender whose real/effective uid equals the target's real OR saved
+    set-uid, so preserving suid == the web uid lets that parent (which runs with zero
+    effective caps) still cancel us — deliver the SIGTERM whose handler tears the sandbox
+    down and cleans the workdir. `setresuid(0,0,0)` would drop the saved-uid to 0 and
+    make cancel from the parent impossible; adding CAP_KILL to the helper only lets US
+    signal the inner provider, never the parent signal US. ruid/euid are 0, so cryptsetup
+    and the root-owned store's owner==geteuid check still pass, and the provider child is
+    still dropped to its DISTINCT unprivileged lane uid/gid with an empty capability set
+    by the sandbox's setpriv. Fail closed if elevation is impossible."""
+    import platform
+
+    if platform.system() != "Linux":
+        raise sandbox.SandboxError("unsupported")
+    if os.geteuid() == 0 and os.getegid() == 0:
+        return
+    caller_uid = os.getuid()  # the web-server parent's ruid (e.g. 65532)
+    try:
+        os.setresgid(0, 0, 0)  # CAP_SETGID
+        os.setresuid(0, 0, caller_uid)  # ruid/euid 0; saved-uid stays the caller's
+    except OSError as error:
+        raise sandbox.SandboxError("launch") from error
+    if os.geteuid() != 0 or os.getegid() != 0:
+        raise sandbox.SandboxError("launch")
+
+
+def _production_volumes():  # pragma: no cover - requires the real store
+    import neev_credential_store as store_module
+    import neev_credential_volumes as volumes_module
+
+    store = store_module.CredentialStore(
+        volumes_module._STORE_ROOT, volumes_module._KEY_PATH
+    )
+    return volumes_module.CredentialVolumes(store, volumes_module.FixedToolRunner())
+
+
+def main(argv=None, volumes=None):
     args = _parse(sys.argv[1:] if argv is None else argv)
     try:
         _validate_workdir_under_trusted_root(args.workdir)
@@ -108,15 +187,151 @@ def main(argv=None):
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: invalid spec: {error.category}", file=sys.stderr)
         return 2
+    # Open the caller's OWN per-user/per-provider credential volume and lend it to
+    # this run's lane uid for the CHILD'S ENTIRE LIFETIME (a per-scope run lock is
+    # held across the whole `with`, incl. cancel/teardown), then restored to the
+    # canonical owner on exit. A handle for another user/provider cannot unlock this
+    # scope; the lock means no other lane can access the volume concurrently.
+    if volumes is None:  # pragma: no cover - production wiring
+        try:
+            _become_credential_owner()
+        except sandbox.SandboxError as error:
+            print(
+                f"neev_agent_launch: cannot assume credential owner: {error.category}",
+                file=sys.stderr,
+            )
+            return 2
+        volumes = _production_volumes()
+    # The provider sees its credentials at a lane-traversable HOME under the run
+    # workdir; the sandbox bind-mounts the physical volume there in its private
+    # mount namespace (the 0700 secret store is never made traversable).
+    home_as = sandbox.home_path(spec.workdir)
+    # A run with provider egress must route the provider's TLS through its slot CONNECT
+    # proxy — the netns has no other path out. The slot_proxy context manager owns the
+    # slot for the child's WHOLE lifetime: it takes the exclusive slot lock (busy ->
+    # another run holds the endpoint), refuses a quarantined/occupied slot, spawns the
+    # namespaced proxy bound to the RUN allowlist, yields the authoritative proxy env,
+    # and stops+reaps the proxy before releasing the lock. deny_all runs have no proxy
+    # (and no network), so nothing is spawned.
+    if spec.egress.mode == "provider_allowlist":
+        import neev_slot_proxy as slot_proxy
+
+        try:
+            with slot_proxy.slot_proxy(args.provider, "run", args.slot) as proxy_env:
+                rc = _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as)
+                if rc == 6:
+                    # Workdir cleanup failed: the FIXED lane must not be reused. Write
+                    # the durable slot quarantine too so the next run's slot_proxy also
+                    # refuses (belt-and-braces with the Rust LaneGuard's rc-6 handling).
+                    slot_proxy.quarantine(args.slot)
+                return rc
+        except slot_proxy.SlotProxyError as error:
+            # busy/occupied/quarantined/timeout/unavailable — never a host or policy
+            # detail. A proxy that could not be confirmed dead has already quarantined
+            # the slot inside the context manager.
+            print(
+                f"neev_agent_launch: slot proxy unavailable: {error.category}",
+                file=sys.stderr,
+            )
+            return 7
+    return _deliver_run_cleanup(volumes, args, spec, None, home_as)
+
+
+def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as):
+    """Open the caller's OWN volume, lend it to the lane uid for the child's whole
+    lifetime, run the sandboxed provider, then privileged-remove the run workdir.
+
+    Returns the child's rc, or 5 (credential delivery refused) / 6 (workdir cleanup
+    failed -> lane must be quarantined, not reused)."""
     try:
-        handle = sandbox.launch(spec)
+        with credentials.deliver(
+            volumes,
+            args.tenant,
+            args.provider,
+            args.credential_handle,
+            args.uid,
+            args.gid,
+            home_as=home_as,
+        ) as delivery:
+            rc = _run_child(
+                spec, child_env(delivery, proxy_env), bind_source=delivery.mount
+            )
+    except credentials.CredentialError as error:
+        # Honest, non-sensitive reason ("busy" = another run for this user+provider
+        # holds the volume). Rust surfaces waiting/busy; nothing runs unauthorized.
+        print(
+            f"neev_agent_launch: credential delivery refused: {error.category}",
+            file=sys.stderr,
+        )
+        return 5
+    # The child has terminated and the sandbox is torn down. Remove THIS run's workdir
+    # tree ourselves (we are the privileged, euid-0 launcher) BEFORE returning: the
+    # provider ran as the lane uid and may have left files in its CWD owned by that
+    # uid, which a later run REUSING the same lane uid could otherwise read. The Rust
+    # LaneGuard runs as 65532 and cannot traverse a 0700 lane-owned run dir, so it
+    # cannot do this. If cleanup fails we return a distinct code so the lane is
+    # QUARANTINED (not reused) rather than leaking leftovers.
+    if not _cleanup_run_workdir(args.workdir):
+        print(
+            "neev_agent_launch: run workdir cleanup failed (lane must be quarantined)",
+            file=sys.stderr,
+        )
+        return 6
+    return rc
+
+
+_MAX_RUN_ENTRIES = 8192
+
+
+def _cleanup_run_workdir(workdir):
+    """Remove the run workdir tree as the euid-0 launcher. Symlink-safe, bounded, and
+    ONLY the validated run dir under the trusted root — so a later run reusing the
+    lane uid cannot read leftover CWD files. Returns True iff fully removed; refuses
+    (False) to delete through a mount or an unexpected/oversized tree (fail closed)."""
+    try:
+        _validate_workdir_under_trusted_root(workdir)
+    except sandbox.SandboxError:
+        return False
+    try:
+        if os.path.islink(workdir) or not os.path.isdir(workdir):
+            return False
+        seen = 0
+        for current, dirs, files in os.walk(workdir, topdown=False, followlinks=False):
+            for name in files:
+                seen += 1
+                if seen > _MAX_RUN_ENTRIES:
+                    return False
+                os.unlink(os.path.join(current, name))
+            for name in dirs:
+                seen += 1
+                if seen > _MAX_RUN_ENTRIES:
+                    return False
+                path = os.path.join(current, name)
+                if os.path.islink(path):
+                    os.unlink(path)
+                elif os.path.ismount(path):
+                    return False  # never delete through a mount
+                else:
+                    os.rmdir(path)
+        os.rmdir(workdir)
+        return True
+    except OSError:
+        return False
+
+
+def _run_child(spec, env, bind_source=None):
+    """Launch the provider in the sandbox, forward its stream, and always tear the
+    sandbox down. Runs while the credential volume is lent to this run's uid."""
+    try:
+        handle = sandbox.launch(spec, env=env, bind_source=bind_source)
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: launch failed: {error.category}", file=sys.stderr)
         return 3
 
     # Keep the signal handler async-signal-safe: do ONLY a fast process-group
     # kill (single syscall) to unblock the stdout read; the heavy teardown
-    # (reap + egress `ip`/`nft` commands) runs in the `finally` on the main flow.
+    # (reap + egress `ip`/`nft` commands) runs in the `finally`, and the credential
+    # ownership is restored + the run lock released by the enclosing `with` after.
     def _terminate(*_unused):
         try:
             os.killpg(os.getpgid(handle.pid), signal.SIGKILL)

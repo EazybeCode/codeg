@@ -106,6 +106,7 @@ pub(super) async fn verify_snapshot_staged(
     database: &DatabaseConnection,
     store: &BlobStore,
 ) -> Result<Manifest, VerifierFailure> {
+    use sha2::{Digest, Sha256};
     // Never use db::begin (SQLite write intent), initialize, or application startup.
     let tx = if database.get_database_backend() == DbBackend::Postgres {
         database
@@ -126,7 +127,9 @@ pub(super) async fn verify_snapshot_staged(
             .map_err(ContentError::from),
         VerificationStage::SnapshotSchema,
     )?;
-    let sql = if matches!(schema_version, 6 | 7 | 8) {
+    // document_formats exists at v6 and every later schema, so any v6+ snapshot
+    // carries block-format documents that must be decoded, not read as markdown.
+    let sql = if schema_version >= 6 {
         "SELECT r.org_id,r.blob_key,r.sha256,r.byte_length,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision ORDER BY r.org_id,r.blob_key"
     } else {
         "SELECT org_id,blob_key,sha256,byte_length,'markdown' AS format FROM neev_document_revisions ORDER BY org_id,blob_key"
@@ -177,6 +180,43 @@ pub(super) async fn verify_snapshot_staged(
         }
         blobs.push(reference);
     }
+    // schema10+ binds uploaded images to documents in neev_image_blobs, stored as
+    // separate `.img` blobs. Every referenced image must also be present + intact.
+    let mut image_refs = Vec::new();
+    if schema_version >= 10 {
+        let image_rows = at_stage(
+            tx.query_all(db::statement(
+                &tx,
+                "SELECT org_id,key,sha256,byte_length FROM neev_image_blobs ORDER BY org_id,key",
+                vec![],
+            ))
+            .await
+            .map_err(|_| ContentError::Storage),
+            VerificationStage::ReferenceQuery,
+        )?;
+        for row in image_rows {
+            let extract = |column: &str| {
+                row.try_get::<i64>("", column)
+                    .map_err(|_| ContentError::Storage)
+            };
+            let text = |column: &str| {
+                row.try_get::<String>("", column)
+                    .map_err(|_| ContentError::Storage)
+            };
+            image_refs.push(Reference {
+                org_id: at_stage(
+                    row.try_get("", "org_id").map_err(|_| ContentError::Storage),
+                    VerificationStage::ReferenceExtraction,
+                )?,
+                key: at_stage(text("key"), VerificationStage::ReferenceExtraction)?,
+                sha256: at_stage(text("sha256"), VerificationStage::ReferenceExtraction)?,
+                byte_length: at_stage(
+                    extract("byte_length"),
+                    VerificationStage::ReferenceExtraction,
+                )?,
+            });
+        }
+    }
     at_stage(
         tx.rollback().await.map_err(|_| ContentError::Storage),
         VerificationStage::TransactionRollback,
@@ -197,6 +237,23 @@ pub(super) async fn verify_snapshot_staged(
             )?;
         }
     }
+    image_refs.sort_by(|a, b| (a.org_id, &a.key).cmp(&(b.org_id, &b.key)));
+    for blob in &image_refs {
+        let bytes = at_stage(
+            store.read_image(blob.org_id, &blob.key).await,
+            VerificationStage::BlobRead,
+        )?;
+        if bytes.len() as i64 != blob.byte_length
+            || format!("{:x}", Sha256::digest(&bytes)) != blob.sha256
+        {
+            return Err(VerifierFailure::new(
+                VerificationStage::BlobRead,
+                ContentError::Storage,
+            ));
+        }
+    }
+    // Account for image blobs in the manifest so restore verification is complete.
+    blobs.extend(image_refs);
     Ok(Manifest {
         schema_version,
         blobs,

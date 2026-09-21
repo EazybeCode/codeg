@@ -21,6 +21,12 @@ _SESSION_RE = re.compile(
 _COUNTER_RE = re.compile(r"^[1-9][0-9]{0,18}$")
 _USER_CODE_RE = re.compile(r"^[A-Z0-9-]{1,64}$")
 _DEVICE_URL = "https://auth.openai.com/codex/device"
+# Verified against pinned Claude 2.1.267 (offline probe); legacy claude.ai is NOT
+# accepted. A Claude authorize URL must START WITH this origin+path (it carries a
+# query), matching control_dto.rs's `starts_with(CLAUDE_AUTHORIZE_URL)`.
+_CLAUDE_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
+_MAX_URL_BYTES = 1024
+_MAX_CODE_BYTES = 512
 
 
 class DtoError(Exception):
@@ -144,8 +150,26 @@ class UserCode(_SafeRepr):
             raise DtoError("invalid")
 
 
+@dataclass(frozen=True, repr=False)
+class AuthorizationCode(_SafeRepr):
+    """An authorization code pasted back by the user. A short-lived bearer secret:
+    `_SafeRepr` keeps it out of reprs, and it must never be logged. Bounded, single
+    line, printable — matches control_dto.rs's AuthorizationCode."""
+
+    value: str
+
+    def __post_init__(self):
+        if (
+            type(self.value) is not str
+            or not 1 <= len(self.value) <= _MAX_CODE_BYTES
+            or any(ch.isspace() or (ord(ch) < 0x20 or ord(ch) == 0x7F) for ch in self.value)
+        ):
+            raise DtoError("invalid")
+
+
 class Provider(Enum):
     CODEX = "codex"
+    CLAUDE = "claude"
 
 
 class Op(Enum):
@@ -155,6 +179,9 @@ class Op(Enum):
     CHECK_CONNECTION = "check_connection"
     CLEANUP_CONNECTION = "cleanup_connection"
     RECONCILE_PAGE = "reconcile_page"
+    # Delivers the authorization code a Claude-style login asks the user to paste
+    # back. Codex device logins never use it. (Seventh op; supersedes the freeze.)
+    SUBMIT_CODE = "submit_code"
 
 
 class Outcome(Enum):
@@ -418,7 +445,9 @@ class LoginProgress(LoginSnapshot):
 
 
 @dataclass(frozen=True, repr=False)
-class LoginChallenge(_SafeRepr):
+class DeviceChallenge(_SafeRepr):
+    """Codex: the user enters `user_code` at the fixed device verification URL."""
+
     verification_url: str
     user_code: UserCode
     expires_at: UnixSec
@@ -431,18 +460,40 @@ class LoginChallenge(_SafeRepr):
 
 
 @dataclass(frozen=True, repr=False)
+class AuthorizationCodeChallenge(_SafeRepr):
+    """Claude: the user opens `verification_url`, approves, and pastes the resulting
+    authorization code back (delivered by SUBMIT_CODE). No user_code exists."""
+
+    verification_url: str
+    expires_at: UnixSec
+
+    def __post_init__(self):
+        if (
+            type(self.verification_url) is not str
+            or len(self.verification_url) > _MAX_URL_BYTES
+            or not self.verification_url.startswith(_CLAUDE_AUTHORIZE_URL)
+        ):
+            raise DtoError("invalid")
+        _exact(self.expires_at, UnixSec)
+
+
+_CHALLENGES = (DeviceChallenge, AuthorizationCodeChallenge)
+
+
+@dataclass(frozen=True, repr=False)
 class LoginAwaitingUser(LoginSnapshot):
     state: LoginState
     expires_at: UnixSec
     poll_after_ms: RetryMs
-    challenge: LoginChallenge
+    challenge: object
 
     def __post_init__(self):
         if self.state is not LoginState.AWAITING_USER:
             raise DtoError("invalid")
         _exact(self.expires_at, UnixSec)
         _exact(self.poll_after_ms, RetryMs)
-        _exact(self.challenge, LoginChallenge)
+        if type(self.challenge) not in _CHALLENGES:
+            raise DtoError("invalid")
 
 
 @dataclass(frozen=True, repr=False)
@@ -564,6 +615,16 @@ class CleanupConnectionRequest(_SafeRepr):
 
 
 @dataclass(frozen=True, repr=False)
+class SubmitCodeRequest(_SafeRepr):
+    binding: LoginBinding
+    code: AuthorizationCode
+
+    def __post_init__(self):
+        _exact(self.binding, LoginBinding)
+        _exact(self.code, AuthorizationCode)
+
+
+@dataclass(frozen=True, repr=False)
 class ReconcilePageRequest(_SafeRepr):
     snapshot_revision: object
     after_entry_id: object
@@ -586,6 +647,7 @@ _REQUEST_OPS = {
     CheckConnectionRequest: Op.CHECK_CONNECTION,
     CleanupConnectionRequest: Op.CLEANUP_CONNECTION,
     ReconcilePageRequest: Op.RECONCILE_PAGE,
+    SubmitCodeRequest: Op.SUBMIT_CODE,
 }
 
 
@@ -779,22 +841,27 @@ class AppError(_SafeRepr):
             raise DtoError("invalid")
 
 
+# A login snapshot answers BOTH observe_login and submit_code (submitting a code
+# advances the same login state machine), matching control_dto.rs's
+# `Op::ObserveLogin | Op::SubmitCode => schema_login_snapshot`. Every other body
+# type answers exactly one op.
+_LOGIN_SNAPSHOT_OPS = frozenset((Op.OBSERVE_LOGIN, Op.SUBMIT_CODE))
 _SUCCESS_OPS = {
-    StartLoginResult: Op.START_LOGIN,
-    LoginProgress: Op.OBSERVE_LOGIN,
-    LoginAwaitingUser: Op.OBSERVE_LOGIN,
-    LoginPrepared: Op.OBSERVE_LOGIN,
-    LoginCommitted: Op.OBSERVE_LOGIN,
-    LoginFailed: Op.OBSERVE_LOGIN,
-    LoginTerminal: Op.OBSERVE_LOGIN,
-    SettleLoginResult: Op.SETTLE_LOGIN,
-    CheckPending: Op.CHECK_CONNECTION,
-    CheckFinished: Op.CHECK_CONNECTION,
-    CheckUnavailable: Op.CHECK_CONNECTION,
-    CleanupPending: Op.CLEANUP_CONNECTION,
-    CleanupCompleted: Op.CLEANUP_CONNECTION,
-    CleanupFailed: Op.CLEANUP_CONNECTION,
-    ReconcilePage: Op.RECONCILE_PAGE,
+    StartLoginResult: frozenset((Op.START_LOGIN,)),
+    LoginProgress: _LOGIN_SNAPSHOT_OPS,
+    LoginAwaitingUser: _LOGIN_SNAPSHOT_OPS,
+    LoginPrepared: _LOGIN_SNAPSHOT_OPS,
+    LoginCommitted: _LOGIN_SNAPSHOT_OPS,
+    LoginFailed: _LOGIN_SNAPSHOT_OPS,
+    LoginTerminal: _LOGIN_SNAPSHOT_OPS,
+    SettleLoginResult: frozenset((Op.SETTLE_LOGIN,)),
+    CheckPending: frozenset((Op.CHECK_CONNECTION,)),
+    CheckFinished: frozenset((Op.CHECK_CONNECTION,)),
+    CheckUnavailable: frozenset((Op.CHECK_CONNECTION,)),
+    CleanupPending: frozenset((Op.CLEANUP_CONNECTION,)),
+    CleanupCompleted: frozenset((Op.CLEANUP_CONNECTION,)),
+    CleanupFailed: frozenset((Op.CLEANUP_CONNECTION,)),
+    ReconcilePage: frozenset((Op.RECONCILE_PAGE,)),
 }
 
 
@@ -819,7 +886,7 @@ class Response(_SafeRepr):
         if self.outcome is Outcome.OK:
             if self.error is not None or type(self.body) not in _SUCCESS_OPS:
                 raise DtoError("invalid")
-            if _SUCCESS_OPS[type(self.body)] is not self.operation:
+            if self.operation not in _SUCCESS_OPS[type(self.body)]:
                 raise DtoError("invalid")
         else:
             if self.body is not None:
@@ -1083,6 +1150,11 @@ def _request_body(op, value):
     if op is Op.CLEANUP_CONNECTION:
         _keys(value, ("ticket",))
         return CleanupConnectionRequest(_cleanup_ticket(value["ticket"]))
+    if op is Op.SUBMIT_CODE:
+        _keys(value, ("binding", "code"))
+        return SubmitCodeRequest(
+            _login_binding(value["binding"]), AuthorizationCode(value["code"])
+        )
     _keys(value, ("snapshot_revision", "after_entry_id", "limit"))
     revision = (
         None if value["snapshot_revision"] is None else Counter(value["snapshot_revision"])
@@ -1183,6 +1255,11 @@ def _encode_request_body(body):
                 "lease_expires_at": ticket.lease_expires_at.value,
             }
         }
+    if type(body) is SubmitCodeRequest:
+        return {
+            "binding": _encode_login_binding(body.binding),
+            "code": body.code.value,
+        }
     return {
         "snapshot_revision": (
             None
@@ -1242,6 +1319,25 @@ def encode_request(request):
     return encoded
 
 
+def _login_challenge(value):
+    if type(value) is not dict or "kind" not in value:
+        raise DtoError("invalid")
+    kind = value["kind"]
+    if kind == "device":
+        _keys(value, ("kind", "verification_url", "user_code", "expires_at"))
+        return DeviceChallenge(
+            value["verification_url"],
+            UserCode(value["user_code"]),
+            UnixSec(value["expires_at"]),
+        )
+    if kind == "authorization_code":
+        _keys(value, ("kind", "verification_url", "expires_at"))
+        return AuthorizationCodeChallenge(
+            value["verification_url"], UnixSec(value["expires_at"])
+        )
+    raise DtoError("invalid")
+
+
 def _login_snapshot(value):
     if type(value) is not dict or "state" not in value:
         raise DtoError("invalid")
@@ -1251,17 +1347,11 @@ def _login_snapshot(value):
         return LoginProgress(state, UnixSec(value["expires_at"]), RetryMs(value["poll_after_ms"]))
     if state is LoginState.AWAITING_USER:
         _keys(value, ("state", "expires_at", "poll_after_ms", "challenge"))
-        challenge = value["challenge"]
-        _keys(challenge, ("verification_url", "user_code", "expires_at"))
         return LoginAwaitingUser(
             state,
             UnixSec(value["expires_at"]),
             RetryMs(value["poll_after_ms"]),
-            LoginChallenge(
-                challenge["verification_url"],
-                UserCode(challenge["user_code"]),
-                UnixSec(challenge["expires_at"]),
-            ),
+            _login_challenge(value["challenge"]),
         )
     if state is LoginState.PREPARED:
         _keys(value, ("state", "receipt_id", "storage_handle", "account_label"))
@@ -1322,7 +1412,7 @@ def _success_body(op, value):
             _enum(Disposition, value["disposition"]),
             RetryMs(value["poll_after_ms"]),
         )
-    if op is Op.OBSERVE_LOGIN:
+    if op in (Op.OBSERVE_LOGIN, Op.SUBMIT_CODE):
         return _login_snapshot(value)
     if op is Op.SETTLE_LOGIN:
         _keys(value, ("state", "receipt_id", "storage_handle"))
@@ -1421,6 +1511,21 @@ def decode_response(payload_bytes):
     )
 
 
+def _encode_login_challenge(challenge):
+    if type(challenge) is DeviceChallenge:
+        return {
+            "kind": "device",
+            "verification_url": challenge.verification_url,
+            "user_code": challenge.user_code.value,
+            "expires_at": challenge.expires_at.value,
+        }
+    return {
+        "kind": "authorization_code",
+        "verification_url": challenge.verification_url,
+        "expires_at": challenge.expires_at.value,
+    }
+
+
 def _encode_login_snapshot(body):
     if type(body) is LoginProgress:
         return {
@@ -1433,11 +1538,7 @@ def _encode_login_snapshot(body):
             "state": body.state.value,
             "expires_at": body.expires_at.value,
             "poll_after_ms": body.poll_after_ms.value,
-            "challenge": {
-                "verification_url": body.challenge.verification_url,
-                "user_code": body.challenge.user_code.value,
-                "expires_at": body.challenge.expires_at.value,
-            },
+            "challenge": _encode_login_challenge(body.challenge),
         }
     if type(body) is LoginPrepared:
         return {

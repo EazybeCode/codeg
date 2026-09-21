@@ -5,7 +5,7 @@ use crate::neev::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sea_orm::{ConnectionTrait, DatabaseTransaction};
 
-pub(super) async fn begin(
+pub(crate) async fn begin(
     state: &ServerState,
     actor: &OrgContext,
 ) -> Result<DatabaseTransaction, ContentError> {
@@ -41,7 +41,7 @@ async fn node(tx: &DatabaseTransaction, org_id: i32, node_id: i32) -> Result<(),
     Ok(())
 }
 
-pub(super) async fn receipt(
+pub(crate) async fn receipt(
     tx: &DatabaseTransaction,
     actor: &OrgContext,
     action: &str,
@@ -62,7 +62,7 @@ pub(super) async fn receipt(
     .transpose()
 }
 
-pub(super) async fn record_receipt(
+pub(crate) async fn record_receipt(
     tx: &DatabaseTransaction,
     actor: &OrgContext,
     action: &str,

@@ -92,6 +92,9 @@ async fn mixed_history(database: sea_orm::DatabaseConnection) {
     let historical_charge = h.usage("charged_bytes").await;
     for table in [
         "neev_image_blobs",
+        // Session turns reference their session; drop children first.
+        "neev_agent_turns",
+        "neev_agent_sessions",
         "neev_org_join_codes",
         "neev_gateway_revoke_intents",
         "neev_gateway_redemptions",

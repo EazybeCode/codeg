@@ -25,6 +25,11 @@ pub(crate) enum ExecutionError {
     Isolation,
     Provider,
     Unavailable,
+    /// The requested provider has no binary bound in this deployment. Distinct
+    /// from `Provider` (a real launch failure) so the UI can say "this provider
+    /// is not available here" instead of implying the run was attempted — and
+    /// so we never quietly run one provider for another's selection.
+    Unsupported,
 }
 
 /// An author-scoped request to run one prompt in one chat with a connected model.
@@ -36,6 +41,59 @@ pub(crate) struct RunRequest {
     pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) prompt: String,
+    /// The caller's own per-user, per-provider credential volume handle (the
+    /// `storage_handle` of their connected `neev_agent_connections` row).
+    ///
+    /// This is how §5.4 is enforced at the execution boundary: the sandboxed
+    /// runtime REFUSES to launch without one, so a run can never fall back to a
+    /// shared host login or to whatever identity the server process happens to
+    /// carry. `None` means "this user has not connected this provider".
+    pub(crate) credential_handle: Option<String>,
+}
+
+/// A credential handle is 32 hex characters (`neev_credential_store` handle
+/// length), matching the `storage_handle` column's constraint. Validated before
+/// it can reach an argv.
+pub(crate) fn valid_credential_handle(value: &str) -> bool {
+    value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// A model name safe to place in an argv: bounded, and free of anything that
+/// could be read as a flag or a separator.
+///
+/// `sessions::model` applies the SAME rule at creation time, so a session can
+/// never be stored with a model every one of its runs would refuse.
+pub(crate) fn safe_model(value: &str) -> bool {
+    (1..=80).contains(&value.len())
+        && !value.starts_with('-')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+}
+
+/// The provider binaries this deployment actually has. A provider with no
+/// binary is [`ExecutionError::Unsupported`] — never silently served by another.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProviderBinaries {
+    pub(crate) claude: Option<String>,
+    pub(crate) codex: Option<String>,
+}
+
+impl ProviderBinaries {
+    pub(crate) fn claude(binary: impl Into<String>) -> Self {
+        Self {
+            claude: Some(binary.into()),
+            codex: None,
+        }
+    }
+
+    fn resolve(&self, provider: &str) -> Option<&str> {
+        match provider {
+            "claude" => self.claude.as_deref(),
+            "codex" => self.codex.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// Streamed lifecycle of a run, mapped from ACP session updates by a real adapter.
@@ -172,13 +230,23 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
         if request.prompt.trim().is_empty() {
             return Err(ExecutionError::Unauthorized);
         }
-        let mut child = Command::new(&self.binary)
+        let mut command = Command::new(&self.binary);
+        command
             .arg("-p")
             .arg(&request.prompt)
             .arg("--output-format")
             .arg("stream-json")
             .arg("--include-partial-messages")
-            .arg("--verbose")
+            .arg("--verbose");
+        // Same model contract as the sandboxed runtime, so dev and production
+        // cannot disagree about what "default" means.
+        if request.model != "default" {
+            if !safe_model(&request.model) {
+                return Err(ExecutionError::Unauthorized);
+            }
+            command.arg("--model").arg(&request.model);
+        }
+        let mut child = command
             .current_dir(&self.workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -284,10 +352,18 @@ impl SlotPool {
     }
 }
 
-/// RAII guard: releases the lane back to the pool AND removes the ephemeral
-/// per-run workdir, on every exit path including a panic (fixes the slot-leak and
-/// residual-workdir issues). Removing the workdir means a later run that reuses
-/// the same uid finds nothing to read.
+/// RAII guard: removes the ephemeral per-run workdir and — **only if that
+/// succeeded** — returns the lane to the pool, on every exit path including a
+/// panic.
+///
+/// The conditional release is the isolation guarantee. The launcher chowns the
+/// run directory to the dropped run uid at mode 0700, so the unprivileged web
+/// server frequently CANNOT delete it. Releasing the lane anyway would hand the
+/// same uid to the next tenant while the previous tenant's private files were
+/// still sitting in a directory that uid owns — a cross-tenant read. So a lane
+/// whose workdir could not be removed is **quarantined**: it never re-enters the
+/// pool, the run count simply drops, and a privileged sweep (startup, or the
+/// supervisor's own teardown) is what reclaims it.
 struct LaneGuard {
     slots: SlotPool,
     lane: Lane,
@@ -296,8 +372,22 @@ struct LaneGuard {
 
 impl Drop for LaneGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.workdir);
-        self.slots.release(self.lane);
+        if workdir_is_clear(&self.workdir) {
+            self.slots.release(self.lane);
+        }
+        // Otherwise: quarantined. Losing a lane costs throughput; reusing a uid
+        // over another tenant's readable files costs isolation.
+    }
+}
+
+/// Whether the run directory is genuinely gone. Removal succeeding and the
+/// directory never having existed are both fine; anything else (permission
+/// denied because the run uid owns it, a busy mount) is not.
+fn workdir_is_clear(workdir: &Path) -> bool {
+    match std::fs::remove_dir_all(workdir) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => !workdir.exists(),
     }
 }
 
@@ -336,7 +426,7 @@ fn chunk_from_line(line: &str) -> Option<String> {
 pub(crate) struct SandboxedProviderCliRuntime {
     python: String,
     launcher: PathBuf,
-    binary: String,
+    binaries: ProviderBinaries,
     workspace_root: PathBuf,
     provider_ipv4: Vec<String>,
     /// The fixed-command privileged launch helper (`neev-agent-caplaunch`,
@@ -359,7 +449,7 @@ impl SandboxedProviderCliRuntime {
     pub(crate) fn new(
         python: impl Into<String>,
         launcher: impl Into<PathBuf>,
-        binary: impl Into<String>,
+        binaries: ProviderBinaries,
         workspace_root: impl Into<PathBuf>,
         provider_ipv4: Vec<String>,
         cap_helper: Option<String>,
@@ -367,7 +457,7 @@ impl SandboxedProviderCliRuntime {
         Self {
             python: python.into(),
             launcher: launcher.into(),
-            binary: binary.into(),
+            binaries,
             workspace_root: workspace_root.into(),
             provider_ipv4,
             cap_helper,
@@ -375,9 +465,47 @@ impl SandboxedProviderCliRuntime {
         }
     }
 
+    /// Validate a request against what this deployment can actually do, before
+    /// any lane, workdir or process exists. Returns the resolved provider binary.
+    ///
+    /// The credential handle is required here, not optional: that is the point
+    /// of §5.4. Without the caller's OWN per-user volume there is nothing to
+    /// deliver as the run's HOME, and launching anyway would silently reuse
+    /// whatever identity the host has — exactly the shared-login shortcut the
+    /// spec rejects.
+    fn resolve(&self, request: &RunRequest) -> Result<(String, String), ExecutionError> {
+        if request.user_id <= 0 || request.org_id <= 0 || request.prompt.trim().is_empty() {
+            return Err(ExecutionError::Unauthorized);
+        }
+        let binary = self
+            .binaries
+            .resolve(&request.provider)
+            .ok_or(ExecutionError::Unsupported)?;
+        let handle = request
+            .credential_handle
+            .as_deref()
+            .ok_or(ExecutionError::Unauthorized)?;
+        if !valid_credential_handle(handle) {
+            return Err(ExecutionError::Unauthorized);
+        }
+        // `default` means "the provider's own default", expressed by passing no
+        // `--model` at all rather than by inventing a name here.
+        if request.model != "default" && !safe_model(&request.model) {
+            return Err(ExecutionError::Unauthorized);
+        }
+        Ok((binary.to_owned(), handle.to_owned()))
+    }
+
     /// The launcher's own arguments (everything the launcher parses); the provider
     /// binary only ever appears AFTER the `--` sandbox separator.
-    fn launcher_args(&self, request: &RunRequest, lane: Lane, workdir: &Path) -> Vec<String> {
+    fn launcher_args(
+        &self,
+        request: &RunRequest,
+        lane: Lane,
+        workdir: &Path,
+        binary: &str,
+        handle: &str,
+    ) -> Vec<String> {
         let mut argv = vec![
             "--tenant".into(),
             format!("org:{}/user:{}", request.org_id, request.user_id),
@@ -389,31 +517,54 @@ impl SandboxedProviderCliRuntime {
             lane.uid.to_string(),
             "--gid".into(),
             lane.uid.to_string(),
+            // Which per-user credential volume to open and mount as the run's
+            // HOME. The launcher derives the scope from `--tenant` + this
+            // provider, so a handle alone cannot reach another tenant's volume.
+            "--provider".into(),
+            request.provider.clone(),
+            "--credential-handle".into(),
+            handle.to_owned(),
         ];
         for ip in &self.provider_ipv4 {
             argv.push("--provider-ipv4".into());
             argv.push(ip.clone());
         }
         argv.push("--".into());
-        argv.push(self.binary.clone());
+        argv.push(binary.to_owned());
         argv.push("-p".into());
         argv.push(request.prompt.clone());
         argv.push("--output-format".into());
         argv.push("stream-json".into());
         argv.push("--include-partial-messages".into());
         argv.push("--verbose".into());
+        // An explicitly chosen model is passed through, so the UI's selection is
+        // the one the provider actually runs.
+        if request.model != "default" {
+            argv.push("--model".into());
+            argv.push(request.model.clone());
+        }
         argv
     }
 
     /// The full spawn argv: the privileged cap-helper (production, keeps the
     /// server unprivileged) OR a direct `python <launcher>` (dev/test) — followed
     /// by the launcher's args. Pure; unit-tested.
-    fn launch_argv(&self, request: &RunRequest, lane: Lane, workdir: &Path) -> Vec<String> {
+    fn launch_argv(
+        &self,
+        request: &RunRequest,
+        lane: Lane,
+        workdir: &Path,
+        binary: &str,
+        handle: &str,
+    ) -> Vec<String> {
         let mut argv = match &self.cap_helper {
             Some(helper) => vec![helper.clone()],
-            None => vec![self.python.clone(), self.launcher.to_string_lossy().into_owned()],
+            None => vec![
+                self.python.clone(),
+                self.launcher.to_string_lossy().into_owned(),
+            ],
         };
-        argv.extend(self.launcher_args(request, lane, workdir));
+        argv.extend(self.launcher_args(request, lane, workdir, binary, handle));
         argv
     }
 }
@@ -447,9 +598,10 @@ async fn graceful_stop(child: &mut tokio::process::Child, pid: Option<u32>) {
 
 impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
     async fn run(&self, request: RunRequest) -> Result<RunHandle, ExecutionError> {
-        if request.user_id <= 0 || request.org_id <= 0 || request.prompt.trim().is_empty() {
-            return Err(ExecutionError::Unauthorized);
-        }
+        // Everything that can be refused is refused BEFORE a lane, a workdir or
+        // a process exists: an unsupported provider or a caller with no
+        // credential of their own never consumes an isolation slot.
+        let (binary, handle) = self.resolve(&request)?;
         let lane = self.slots.acquire().ok_or(ExecutionError::Unavailable)?;
         let run_id = uuid::Uuid::new_v4().to_string();
         // Ephemeral, unique-per-run workdir; the LaneGuard removes it on teardown
@@ -466,9 +618,17 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
         if std::fs::create_dir_all(&workdir).is_err() {
             return Err(ExecutionError::Isolation); // guard drops -> releases lane
         }
-        let argv = self.launch_argv(&request, lane, &workdir);
+        let argv = self.launch_argv(&request, lane, &workdir, &binary, &handle);
         let mut child = match Command::new(&argv[0])
             .args(&argv[1..])
+            // Defence in depth for §5.4: the server's own HOME/config must not
+            // be inheritable by anything downstream. The launcher mounts the
+            // caller's credential volume and sets the real HOME after dropping
+            // privileges, so clearing these here can only remove an accident.
+            .env_remove("HOME")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -610,7 +770,7 @@ pub(crate) fn disabled_runtime() -> std::sync::Arc<AgentRuntime> {
 pub(crate) fn sandboxed_runtime(
     python: impl Into<String>,
     launcher: impl Into<PathBuf>,
-    binary: impl Into<String>,
+    binaries: ProviderBinaries,
     workspace_root: impl Into<PathBuf>,
     provider_ipv4: Vec<String>,
     cap_helper: Option<String>,
@@ -618,7 +778,7 @@ pub(crate) fn sandboxed_runtime(
     std::sync::Arc::new(AgentRuntime::Sandboxed(SandboxedProviderCliRuntime::new(
         python,
         launcher,
-        binary,
+        binaries,
         workspace_root,
         provider_ipv4,
         cap_helper,
@@ -633,14 +793,19 @@ pub(crate) fn new_job_registry() -> JobRegistry {
 mod tests {
     use super::*;
 
+    const HANDLE: &str = "0123456789abcdef0123456789abcdef";
+
+    /// A well-formed request: a supported provider, the provider's own default
+    /// model, and the caller's own credential handle.
     fn request(prompt: &str) -> RunRequest {
         RunRequest {
             user_id: 7,
             org_id: 3,
             chat_id: "chat-1".into(),
-            provider: "codex".into(),
-            model: "gpt".into(),
+            provider: "claude".into(),
+            model: "default".into(),
             prompt: prompt.into(),
+            credential_handle: Some(HANDLE.into()),
         }
     }
 
@@ -717,7 +882,7 @@ mod tests {
         SandboxedProviderCliRuntime::new(
             "python3",
             "/opt/neev/scripts/operations/neev_agent_launch.py",
-            "/usr/local/bin/claude",
+            ProviderBinaries::claude("/usr/local/bin/claude"),
             "/data/agents",
             vec!["140.82.112.3".into()],
             None, // direct exec (dev/test)
@@ -729,13 +894,13 @@ mod tests {
         let runtime = SandboxedProviderCliRuntime::new(
             "python3",
             "/opt/neev/scripts/operations/neev_agent_launch.py",
-            "/usr/local/bin/claude",
+            ProviderBinaries::claude("/usr/local/bin/claude"),
             "/data/agents",
             vec!["140.82.112.3".into()],
             Some("/opt/neev/bin/neev-agent-caplaunch".into()),
         );
         let lane = Lane { slot: "a", uid: 61000 };
-        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/data/agents/run-x"));
+        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/data/agents/run-x"), "/usr/local/bin/claude", HANDLE);
         // The privileged fixed-command helper is argv[0] — NOT python and NOT the
         // provider; the server execs only the helper (keeps itself unprivileged).
         assert_eq!(argv[0], "/opt/neev/bin/neev-agent-caplaunch");
@@ -751,7 +916,7 @@ mod tests {
         let runtime = sandboxed();
         let lane = Lane { slot: "a", uid: 61000 };
         let workdir = Path::new("/var/lib/neev-native/agents/run-abc");
-        let argv = runtime.launch_argv(&request("draft"), lane, workdir);
+        let argv = runtime.launch_argv(&request("draft"), lane, workdir, "/usr/local/bin/claude", HANDLE);
         // First tokens are the launcher, never the provider binary.
         assert_eq!(argv[0], "python3");
         assert!(argv[1].ends_with("neev_agent_launch.py"));
@@ -775,11 +940,212 @@ mod tests {
     #[test]
     fn sandboxed_deny_all_when_no_provider_ip() {
         let runtime = SandboxedProviderCliRuntime::new(
-            "python3", "/l/launch.py", "/usr/local/bin/claude", "/w", vec![], None,
+            "python3", "/l/launch.py", ProviderBinaries::claude("/usr/local/bin/claude"), "/w", vec![], None,
         );
         let lane = Lane { slot: "b", uid: 61001 };
-        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/w/run-x"));
+        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/w/run-x"), "/usr/local/bin/claude", HANDLE);
         assert!(!argv.contains(&"--provider-ipv4".to_string()));
+    }
+
+    #[tokio::test]
+    async fn an_unbound_provider_is_refused_not_served_by_another_binary() {
+        // Only Claude is bound in this deployment.
+        let runtime = sandboxed();
+        let mut codex = request("hi");
+        codex.provider = "codex".into();
+        assert_eq!(
+            runtime.run(codex).await.err(),
+            Some(ExecutionError::Unsupported),
+            "a Codex selection must never be served by the Claude binary"
+        );
+        // Refused before any isolation lane was consumed.
+        assert!(runtime.slots.acquire().is_some());
+        assert!(runtime.slots.acquire().is_some());
+
+        // With a Codex binary bound, the SAME request routes to that binary.
+        let both = SandboxedProviderCliRuntime::new(
+            "python3",
+            "/l/launch.py",
+            ProviderBinaries {
+                claude: Some("/usr/local/bin/claude".into()),
+                codex: Some("/usr/local/bin/codex".into()),
+            },
+            "/w",
+            vec![],
+            None,
+        );
+        let mut codex = request("hi");
+        codex.provider = "codex".into();
+        let (binary, _) = both.resolve(&codex).expect("codex resolves");
+        assert_eq!(binary, "/usr/local/bin/codex");
+        let argv = both.launch_argv(
+            &codex,
+            Lane { slot: "a", uid: 61000 },
+            Path::new("/w/run-x"),
+            &binary,
+            HANDLE,
+        );
+        let sep = argv.iter().position(|a| a == "--").expect("separator");
+        assert_eq!(argv[sep + 1], "/usr/local/bin/codex");
+        // The launcher is told which provider scope to open credentials for.
+        assert!(argv.contains(&"--provider".to_string()));
+        assert!(argv.contains(&"codex".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_run_without_the_caller_s_own_credential_is_refused() {
+        let runtime = sandboxed();
+        let mut anonymous = request("hi");
+        anonymous.credential_handle = None;
+        // No per-user credential means no identity to deliver. Refusing here is
+        // what stops a run from silently inheriting a shared host login (§5.4).
+        assert_eq!(
+            runtime.run(anonymous).await.err(),
+            Some(ExecutionError::Unauthorized)
+        );
+        // A malformed handle is refused too — it never reaches an argv.
+        for bad in ["", "short", "../../etc/passwd", &"z".repeat(32)] {
+            let mut request = request("hi");
+            request.credential_handle = Some(bad.to_owned());
+            assert_eq!(
+                runtime.run(request).await.err(),
+                Some(ExecutionError::Unauthorized),
+                "accepted handle {bad:?}"
+            );
+        }
+        // And no lane was consumed by any of those refusals.
+        assert!(runtime.slots.acquire().is_some());
+        assert!(runtime.slots.acquire().is_some());
+    }
+
+    #[test]
+    fn the_credential_handle_is_passed_to_the_launcher_not_the_provider() {
+        let runtime = sandboxed();
+        let argv = runtime.launch_argv(
+            &request("hi"),
+            Lane { slot: "a", uid: 61000 },
+            Path::new("/data/agents/run-x"),
+            "/usr/local/bin/claude",
+            HANDLE,
+        );
+        let sep = argv.iter().position(|a| a == "--").expect("separator");
+        // The handle is a LAUNCHER argument: the privileged side opens the
+        // volume and mounts it as HOME. The provider argv never sees it.
+        assert!(argv[..sep].contains(&"--credential-handle".to_string()));
+        assert!(argv[..sep].contains(&HANDLE.to_string()));
+        assert!(!argv[sep..].contains(&HANDLE.to_string()));
+        assert!(argv[..sep].contains(&"--provider".to_string()));
+        assert!(argv[..sep].contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn an_explicit_model_reaches_the_provider_and_default_means_no_flag() {
+        let runtime = sandboxed();
+        let lane = Lane { slot: "a", uid: 61000 };
+        let workdir = Path::new("/w/run-x");
+
+        // "default" is expressed by passing no --model at all, so the provider
+        // picks its own; we never invent a model name on the user's behalf.
+        let argv = runtime.launch_argv(
+            &request("hi"),
+            lane,
+            workdir,
+            "/usr/local/bin/claude",
+            HANDLE,
+        );
+        assert!(!argv.contains(&"--model".to_string()));
+
+        // A chosen model is actually passed through — the UI's selection is what
+        // runs, so the session's stored model is not a decorative label.
+        let mut chosen = request("hi");
+        chosen.model = "claude-opus-4-1".into();
+        let argv = runtime.launch_argv(&chosen, lane, workdir, "/usr/local/bin/claude", HANDLE);
+        let position = argv
+            .iter()
+            .position(|arg| arg == "--model")
+            .expect("--model present");
+        assert_eq!(argv[position + 1], "claude-opus-4-1");
+        // It sits in the PROVIDER argv, after the sandbox separator.
+        let sep = argv.iter().position(|a| a == "--").expect("separator");
+        assert!(position > sep);
+    }
+
+    #[tokio::test]
+    async fn a_model_that_could_be_read_as_a_flag_is_refused() {
+        let runtime = sandboxed();
+        for bad in ["--dangerously-skip-permissions", "a b", "model;rm", &"m".repeat(81)] {
+            let mut request = request("hi");
+            request.model = bad.to_owned();
+            assert_eq!(
+                runtime.run(request).await.err(),
+                Some(ExecutionError::Unauthorized),
+                "accepted model {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lane_whose_workdir_survives_is_quarantined_rather_than_reused() {
+        let pool = SlotPool::new();
+        let root = tempfile::tempdir().unwrap();
+        let clean = root.path().join("run-clean");
+        let stuck = root.path().join("run-stuck");
+        std::fs::create_dir_all(&clean).unwrap();
+        std::fs::create_dir_all(&stuck).unwrap();
+
+        let first = pool.acquire().expect("first lane");
+        let second = pool.acquire().expect("second lane");
+        assert!(pool.acquire().is_none(), "only two lanes exist");
+
+        // A run whose directory really is gone returns its lane.
+        drop(LaneGuard {
+            slots: pool.clone(),
+            lane: first,
+            workdir: clean.clone(),
+        });
+        assert!(!clean.exists());
+        assert_eq!(pool.acquire(), Some(first), "a cleaned lane is reusable");
+        pool.release(first);
+
+        // Simulate what production looks like when the run uid owns the
+        // directory at 0700 and the unprivileged server cannot remove it: the
+        // path is still there after the guard drops.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(stuck.join("credentials"), b"tenant secret").unwrap();
+            // Make the PARENT unwritable so the child cannot be unlinked.
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        drop(LaneGuard {
+            slots: pool.clone(),
+            lane: second,
+            workdir: stuck.clone(),
+        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let blocked = stuck.exists();
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            if blocked {
+                // The lane must NOT come back: handing this uid to another
+                // tenant would give them a directory still holding the previous
+                // tenant's files.
+                assert_ne!(
+                    pool.acquire(),
+                    Some(second),
+                    "a lane with a surviving workdir was reused"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_workdir_counts_as_clear() {
+        // Nothing to remove is not a failure: the run never wrote anything, or
+        // a privileged sweep already reclaimed it.
+        let root = tempfile::tempdir().unwrap();
+        assert!(workdir_is_clear(&root.path().join("never-existed")));
     }
 
     #[test]
@@ -822,6 +1188,9 @@ mod tests {
                 provider: "claude".into(),
                 model: "default".into(),
                 prompt: "Reply with exactly one word: PONG".into(),
+                // Dev/test path only: the unsandboxed runtime uses the operator's
+                // own already-authenticated CLI and delivers no credentials.
+                credential_handle: None,
             })
             .await
             .unwrap();

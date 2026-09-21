@@ -1,0 +1,1055 @@
+//! Server-owned agent **sessions** and their **turn/run history** (spec §5.1).
+//!
+//! This is the durable half of Agent Chats: it replaces the one-shot,
+//! non-persisted `RunRequest`/`agentText` path with a session entity that owns
+//! an ordered history of turns, so a reload restores the conversation and a
+//! dropped stream can reattach to a run instead of re-executing a prompt.
+//!
+//! Three invariants are load-bearing:
+//! - **Owner-only, always private.** Every read and write is scoped by
+//!   `(org_id, owner_id)` from the server-authoritative actor — never from the
+//!   request — and `visibility` is CHECK-pinned to `'private'` in the schema, so
+//!   a session's content cannot reach team-visible storage from here at all.
+//! - **The prompt is durable before the run starts.** A turn row is written
+//!   (status `running`) *before* the runtime is asked to execute, so a refusal
+//!   (runtime disabled, both lanes busy, provider error) is recorded as a real
+//!   failed turn the user can see and retry, rather than vanishing.
+//! - **No turn stays `running` across a restart.** [`reconcile_interrupted`]
+//!   runs at startup and settles every live turn as `failed/interrupted`,
+//!   because the process that owned its stream is gone and it can never
+//!   complete.
+
+use sea_orm::{ConnectionTrait, DatabaseConnection, QueryResult};
+
+use crate::neev::{
+    auth::session,
+    content::{resources, types::ContentError},
+    db,
+    error::database_error,
+    org,
+    startup::ServerState,
+    types::OrgContext,
+};
+
+/// One user may keep this many sessions in an org (archived included). A bound
+/// list keeps the sidebar and the per-user storage footprint finite.
+const MAX_SESSIONS_PER_OWNER: i64 = 200;
+/// Turns per session. Past this the user starts a new session; the cap keeps a
+/// single session's replay bounded.
+const MAX_TURNS_PER_SESSION: i64 = 500;
+/// Mirrors the schema's `length(response)<=262144`.
+pub(crate) const MAX_RESPONSE_CHARS: usize = 262_144;
+/// Mirrors the schema's `length(prompt) BETWEEN 1 AND 32768`.
+const MAX_PROMPT_CHARS: usize = 32_768;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnStatus {
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+impl TurnStatus {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, ContentError> {
+        match value {
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "canceled" => Ok(Self::Canceled),
+            _ => Err(ContentError::Storage),
+        }
+    }
+}
+
+/// What a session is for.
+///
+/// Both kinds are private to their owner; the difference is *what the run is
+/// allowed to do afterwards*. A `Chat` session is a saved Agent Chat and its
+/// replies stay with the owner. A `Team` session exists only to hold the
+/// durable turn for an explicit team invocation, and its reply is published as
+/// an agent-authored message into the bound chat (§5.3). Keeping them apart is
+/// what stops a team invocation from ever replaying a private session's
+/// history as context — a `Team` session's runs are sent the explicit prompt
+/// and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionKind {
+    Chat,
+    Team,
+}
+
+impl SessionKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Team => "team",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "chat" => Some(Self::Chat),
+            "team" => Some(Self::Team),
+            _ => None,
+        }
+    }
+}
+
+/// A team session's id is **derived** from `(org, owner, chat, provider)`, so
+/// "get or create" is a plain insert that loses harmlessly against a concurrent
+/// one — the primary key does the deduplication, and no extra index or lock is
+/// needed.
+///
+/// The provider is part of the key because a turn may never contradict its
+/// session's provider (the schema validator proves this by join). Switching
+/// provider therefore starts a *separate* team session for the same chat rather
+/// than rewriting history that already ran elsewhere.
+///
+/// The digest is laid out in the canonical 8-4-4-4-12 shape so the value passes
+/// the same id validation as every other resource id.
+pub(crate) fn team_session_id(org_id: i32, owner_id: i32, chat_id: &str, provider: &str) -> String {
+    let digest = org::digest_parts(&[
+        "agent.session.team",
+        &org_id.to_string(),
+        &owner_id.to_string(),
+        chat_id,
+        provider,
+    ]);
+    let hex = &digest[..32];
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// Get or create the invoker's team session for one chat and provider.
+///
+/// The id is deterministic, so a concurrent duplicate loses on the primary key
+/// and both callers end up with the same session — no lock, no extra index.
+pub(crate) async fn ensure_team_session(
+    state: &ServerState,
+    actor: &OrgContext,
+    chat_id: &str,
+    provider_name: &str,
+    model_name: &str,
+    title_text: &str,
+) -> Result<AgentSession, ContentError> {
+    let provider_name = provider(provider_name)?.to_owned();
+    let model_name = model(model_name)?.to_owned();
+    let title_text = title(title_text)?;
+    let id = team_session_id(actor.org_id, actor.identity.user_id, chat_id, &provider_name);
+    let tx = resources::begin(state, actor).await?;
+    // Write authority over the chat is the invoker's right to have an agent
+    // speak there; it is re-proved again at publish time.
+    let chat = crate::neev::content::access::authorized(&tx, actor, chat_id, true).await?;
+    if chat.kind != crate::neev::content::types::ResourceKind::Chat {
+        return Err(ContentError::NotFound);
+    }
+    let now = now(state)?;
+    db::execute(
+        &tx,
+        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,archived,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'private','team',$7,'chat',false,1,$8,$8) ON CONFLICT DO NOTHING",
+        vec![
+            actor.org_id.into(),
+            id.clone().into(),
+            actor.identity.user_id.into(),
+            title_text.into(),
+            provider_name.into(),
+            model_name.into(),
+            chat_id.into(),
+            now.into(),
+        ],
+    )
+    .await?;
+    let found = owned(&tx, actor, &id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(found)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentSession {
+    pub(crate) id: String,
+    pub(crate) org_id: i32,
+    pub(crate) owner_id: i32,
+    pub(crate) title: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) kind: SessionKind,
+    pub(crate) bound_chat_id: Option<String>,
+    /// Where this session sits in the workspace tree, or `None` for unfiled.
+    ///
+    /// Server-held so the placement follows the user to another device. Only a
+    /// `chat` session can carry one; a `team` holder is internal and is never
+    /// listed, so it is never in the tree.
+    pub(crate) node_id: Option<i32>,
+    pub(crate) archived: bool,
+    pub(crate) revision: i64,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentTurn {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) sequence: i64,
+    pub(crate) run_id: String,
+    pub(crate) prompt: String,
+    pub(crate) response: String,
+    pub(crate) status: TurnStatus,
+    pub(crate) error_code: Option<String>,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+    pub(crate) completed_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionInput {
+    pub(crate) title: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) bound_chat_id: Option<String>,
+    /// Optional placement in the workspace tree. Omitted means unfiled, which is
+    /// what every session created before this existed stays.
+    pub(crate) node_id: Option<i32>,
+    pub(crate) request_id: String,
+}
+
+const SESSION_COLUMNS: &str = "org_id,id,owner_id,title,provider,model,kind,bound_chat_id,node_id,archived,revision,created_at,updated_at";
+const TURN_COLUMNS: &str = "org_id,session_id,sequence,id,run_id,prompt,response,status,error_code,provider,model,created_at,updated_at,completed_at";
+
+fn session_row(row: &QueryResult) -> Result<AgentSession, ContentError> {
+    Ok(AgentSession {
+        org_id: row.try_get("", "org_id").map_err(database_error)?,
+        id: row.try_get("", "id").map_err(database_error)?,
+        owner_id: row.try_get("", "owner_id").map_err(database_error)?,
+        title: row.try_get("", "title").map_err(database_error)?,
+        provider: row.try_get("", "provider").map_err(database_error)?,
+        model: row.try_get("", "model").map_err(database_error)?,
+        kind: SessionKind::parse(
+            &row.try_get::<String>("", "kind").map_err(database_error)?,
+        )
+        .ok_or(ContentError::Storage)?,
+        bound_chat_id: row.try_get("", "bound_chat_id").map_err(database_error)?,
+        node_id: row.try_get("", "node_id").map_err(database_error)?,
+        archived: row.try_get("", "archived").map_err(database_error)?,
+        revision: row.try_get("", "revision").map_err(database_error)?,
+        created_at: row.try_get("", "created_at").map_err(database_error)?,
+        updated_at: row.try_get("", "updated_at").map_err(database_error)?,
+    })
+}
+
+fn turn_row(row: &QueryResult) -> Result<AgentTurn, ContentError> {
+    let status: String = row.try_get("", "status").map_err(database_error)?;
+    Ok(AgentTurn {
+        session_id: row.try_get("", "session_id").map_err(database_error)?,
+        sequence: row.try_get("", "sequence").map_err(database_error)?,
+        id: row.try_get("", "id").map_err(database_error)?,
+        run_id: row.try_get("", "run_id").map_err(database_error)?,
+        prompt: row.try_get("", "prompt").map_err(database_error)?,
+        response: row.try_get("", "response").map_err(database_error)?,
+        status: TurnStatus::parse(&status)?,
+        error_code: row.try_get("", "error_code").map_err(database_error)?,
+        provider: row.try_get("", "provider").map_err(database_error)?,
+        model: row.try_get("", "model").map_err(database_error)?,
+        created_at: row.try_get("", "created_at").map_err(database_error)?,
+        updated_at: row.try_get("", "updated_at").map_err(database_error)?,
+        completed_at: row.try_get("", "completed_at").map_err(database_error)?,
+    })
+}
+
+/// A session title: same shape rule as a resource title, so the two surfaces
+/// cannot disagree about what a user may type.
+fn title(value: &str) -> Result<String, ContentError> {
+    if value.chars().any(char::is_control) {
+        return Err(ContentError::Invalid);
+    }
+    let value = value.trim();
+    if !(1..=100).contains(&value.chars().count()) {
+        return Err(ContentError::Invalid);
+    }
+    Ok(value.to_owned())
+}
+
+fn provider(value: &str) -> Result<&str, ContentError> {
+    match value {
+        "claude" | "codex" => Ok(value),
+        _ => Err(ContentError::Invalid),
+    }
+}
+
+/// Accepted model names. `default` means "the provider's own default"; anything
+/// else must satisfy the SAME rule the runtime applies before building an argv,
+/// so creation cannot produce a session whose every run would be refused.
+fn model(value: &str) -> Result<&str, ContentError> {
+    if value == "default" || crate::neev::agents::execution::safe_model(value) {
+        Ok(value)
+    } else {
+        Err(ContentError::Invalid)
+    }
+}
+
+fn prompt(value: &str) -> Result<&str, ContentError> {
+    if !(1..=MAX_PROMPT_CHARS).contains(&value.chars().count()) {
+        return Err(ContentError::Invalid);
+    }
+    Ok(value)
+}
+
+fn now(state: &ServerState) -> Result<i64, ContentError> {
+    let now = state.clock.now_unix();
+    if now < 0 {
+        Err(ContentError::Invalid)
+    } else {
+        Ok(now)
+    }
+}
+
+/// Load a session the actor owns, or `NotFound`. Ownership is part of the WHERE
+/// clause, so another member of the same org gets the same answer as a stranger:
+/// the session does not exist for them.
+async fn owned<C: ConnectionTrait>(
+    db: &C,
+    actor: &OrgContext,
+    id: &str,
+) -> Result<AgentSession, ContentError> {
+    db::one(
+        db,
+        &format!("SELECT {SESSION_COLUMNS} FROM neev_agent_sessions WHERE org_id=$1 AND id=$2 AND owner_id=$3"),
+        vec![
+            actor.org_id.into(),
+            id.into(),
+            actor.identity.user_id.into(),
+        ],
+    )
+    .await?
+    .map(|row| session_row(&row))
+    .transpose()?
+    .ok_or(ContentError::NotFound)
+}
+
+pub(crate) async fn create(
+    state: &ServerState,
+    actor: &OrgContext,
+    input: SessionInput,
+) -> Result<AgentSession, ContentError> {
+    let title = title(&input.title)?;
+    let provider = provider(&input.provider)?.to_owned();
+    let model = model(&input.model)?.to_owned();
+    let request = org::normalize_request_id(&input.request_id).map_err(|_| ContentError::Invalid)?;
+    let hash = org::digest_parts(&[
+        "agent.session.create",
+        &actor.org_id.to_string(),
+        &title,
+        &provider,
+        &model,
+        input.bound_chat_id.as_deref().unwrap_or(""),
+        // In the digest so a retry that asks for a DIFFERENT placement is a
+        // different request rather than silently resolving to the first one.
+        &input.node_id.map(|id| id.to_string()).unwrap_or_default(),
+    ]);
+    let tx = resources::begin(state, actor).await?;
+    // A committed retry returns the same session rather than creating a second.
+    if let Some(id) = resources::receipt(&tx, actor, "agent.session.create", &request, &hash).await?
+    {
+        let existing = owned(&tx, actor, &id).await?;
+        session::recheck(&tx, actor, state.clock.now_unix()).await?;
+        tx.commit().await.map_err(database_error)?;
+        return Ok(existing);
+    }
+    // A bound chat must be one the actor may actually read right now; binding
+    // never grants access and never survives losing it.
+    if let Some(chat_id) = input.bound_chat_id.as_deref() {
+        let chat = crate::neev::content::access::authorized(&tx, actor, chat_id, false).await?;
+        if chat.kind != crate::neev::content::types::ResourceKind::Chat {
+            return Err(ContentError::NotFound);
+        }
+    }
+    if let Some(node_id) = input.node_id {
+        require_node(&tx, actor, node_id).await?;
+    }
+    let count: i64 = db::one(
+        &tx,
+        "SELECT COUNT(*) AS n FROM neev_agent_sessions WHERE org_id=$1 AND owner_id=$2",
+        vec![actor.org_id.into(), actor.identity.user_id.into()],
+    )
+    .await?
+    .ok_or(ContentError::Storage)?
+    .try_get("", "n")
+    .map_err(database_error)?;
+    if count >= MAX_SESSIONS_PER_OWNER {
+        return Err(ContentError::Quota);
+    }
+    let now = now(state)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    db::execute(
+        &tx,
+        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,node_id,archived,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'private','chat',$7,$8,$9,false,1,$10,$10)",
+        vec![
+            actor.org_id.into(),
+            id.clone().into(),
+            actor.identity.user_id.into(),
+            title.clone().into(),
+            provider.clone().into(),
+            model.clone().into(),
+            input.bound_chat_id.clone().into(),
+            input.bound_chat_id.as_ref().map(|_| "chat").into(),
+            input.node_id.into(),
+            now.into(),
+        ],
+    )
+    .await?;
+    resources::record_receipt(&tx, actor, "agent.session.create", &request, &hash, &id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(AgentSession {
+        id,
+        org_id: actor.org_id,
+        owner_id: actor.identity.user_id,
+        title,
+        provider,
+        model,
+        kind: SessionKind::Chat,
+        bound_chat_id: input.bound_chat_id,
+        node_id: input.node_id,
+        archived: false,
+        revision: 1,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// The owner's sessions, most recently updated first. Archived sessions are
+/// excluded unless asked for, so the sidebar shows live work by default.
+pub(crate) async fn list(
+    state: &ServerState,
+    actor: &OrgContext,
+    include_archived: bool,
+) -> Result<Vec<AgentSession>, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    let filter = if include_archived {
+        ""
+    } else {
+        " AND archived=false"
+    };
+    // Only saved Agent Chats are listed. A `team` session is an internal holder
+    // for one chat's invocations and would be noise in the sidebar.
+    let sql = format!(
+        "SELECT {SESSION_COLUMNS} FROM neev_agent_sessions WHERE org_id=$1 AND owner_id=$2 AND kind='chat'{filter} ORDER BY updated_at DESC,id LIMIT {MAX_SESSIONS_PER_OWNER}"
+    );
+    let rows = tx
+        .query_all(db::statement(
+            &tx,
+            &sql,
+            vec![actor.org_id.into(), actor.identity.user_id.into()],
+        ))
+        .await
+        .map_err(database_error)?;
+    let items = rows
+        .iter()
+        .map(session_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(items)
+}
+
+pub(crate) async fn get(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+) -> Result<AgentSession, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    let found = owned(&tx, actor, id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(found)
+}
+
+/// The session's turns in order. `after` is a sequence cursor, so a reload can
+/// fetch the whole history and a live view can fetch only what it is missing.
+pub(crate) async fn turns(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    after: Option<i64>,
+) -> Result<crate::neev::content::types::Page<AgentTurn>, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    owned(&tx, actor, id).await?;
+    if after.is_some_and(|cursor| cursor < 0) {
+        return Err(ContentError::Invalid);
+    }
+    let sql = format!(
+        "SELECT {TURN_COLUMNS} FROM neev_agent_turns WHERE org_id=$1 AND session_id=$2 AND sequence>$3 ORDER BY sequence LIMIT 101"
+    );
+    let rows = tx
+        .query_all(db::statement(
+            &tx,
+            &sql,
+            vec![actor.org_id.into(), id.into(), after.unwrap_or(0).into()],
+        ))
+        .await
+        .map_err(database_error)?;
+    let has_more = rows.len() > 100;
+    let items = rows
+        .iter()
+        .take(100)
+        .map(turn_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let next_after = if has_more {
+        items.last().map(|turn| turn.sequence.to_string())
+    } else {
+        None
+    };
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(crate::neev::content::types::Page { items, next_after })
+}
+
+/// Rename, (un)archive or re-file, guarded by the caller's expected revision so
+/// two tabs cannot silently overwrite each other.
+///
+/// `node` names a tree node that must exist in the actor's org, checked inside
+/// this transaction so a node cannot be deleted between the check and the write.
+async fn mutate(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    expected_revision: i64,
+    assignment: &str,
+    value: sea_orm::Value,
+    node: Option<i32>,
+) -> Result<AgentSession, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    let current = owned(&tx, actor, id).await?;
+    if current.revision != expected_revision {
+        return Err(ContentError::Conflict);
+    }
+    if let Some(node_id) = node {
+        require_node(&tx, actor, node_id).await?;
+    }
+    let now = now(state)?;
+    let revision = current.revision.checked_add(1).ok_or(ContentError::Conflict)?;
+    let changed = db::execute(
+        &tx,
+        &format!("UPDATE neev_agent_sessions SET {assignment}=$1,revision=$2,updated_at=$3 WHERE org_id=$4 AND id=$5 AND owner_id=$6 AND revision=$7"),
+        vec![
+            value,
+            revision.into(),
+            now.into(),
+            actor.org_id.into(),
+            id.into(),
+            actor.identity.user_id.into(),
+            expected_revision.into(),
+        ],
+    )
+    .await?;
+    if changed.rows_affected() != 1 {
+        return Err(ContentError::Conflict);
+    }
+    let updated = owned(&tx, actor, id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(updated)
+}
+
+pub(crate) async fn rename(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    new_title: &str,
+    expected_revision: i64,
+) -> Result<AgentSession, ContentError> {
+    let new_title = title(new_title)?;
+    mutate(
+        state,
+        actor,
+        id,
+        expected_revision,
+        "title",
+        new_title.into(),
+        None,
+    )
+    .await
+}
+
+/// Whether `node_id` is a node in the ACTOR'S OWN org.
+///
+/// The org predicate is the whole point: node ids are globally sequential, so
+/// without it a valid id from another tenant would file a session against that
+/// tenant's project. Node visibility is org membership — `neev_nodes` has no
+/// owner column — so membership, which `resources::begin` already established, is
+/// the correct and only ACL here. Every node kind is allowed; where a session may
+/// sit in the tree is the workspace's decision, not this layer's.
+async fn require_node(
+    tx: &sea_orm::DatabaseTransaction,
+    actor: &OrgContext,
+    node_id: i32,
+) -> Result<(), ContentError> {
+    if node_id <= 0 {
+        return Err(ContentError::Invalid);
+    }
+    db::one(
+        tx,
+        "SELECT 1 AS present FROM neev_nodes WHERE org_id=$1 AND id=$2",
+        vec![actor.org_id.into(), node_id.into()],
+    )
+    .await?
+    .ok_or(ContentError::NotFound)?;
+    Ok(())
+}
+
+/// File a saved session under a node, or unfile it with `None`.
+///
+/// Placement is stored rather than kept per browser, so the session appears in
+/// the same project on the user's other devices. The session's own ACL is
+/// untouched: it stays private to its owner, and filing it under a node that
+/// other members can see does not make the session visible to them.
+pub(crate) async fn move_to_node(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    node_id: Option<i32>,
+    expected_revision: i64,
+) -> Result<AgentSession, ContentError> {
+    mutate(
+        state,
+        actor,
+        id,
+        expected_revision,
+        "node_id",
+        node_id.into(),
+        node_id,
+    )
+    .await
+}
+
+/// Unfile every session pointing at `node_id`, for a transaction that is about to
+/// delete or archive that node.
+///
+/// Node deletion does not exist yet; when it does it MUST call this in its own
+/// transaction, before removing the node. Unfiling rather than refusing is what
+/// keeps someone else's private session from either blocking the delete or
+/// revealing, by blocking it, that a session was filed there at all. Returns
+/// nothing for the same reason: a count would leak how many private sessions
+/// other members had under that node.
+pub(crate) async fn clear_node_pointers(
+    tx: &sea_orm::DatabaseTransaction,
+    org_id: i32,
+    node_id: i32,
+) -> Result<(), ContentError> {
+    db::execute(
+        tx,
+        "UPDATE neev_agent_sessions SET node_id=NULL WHERE org_id=$1 AND node_id=$2",
+        vec![org_id.into(), node_id.into()],
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn set_archived(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    archived: bool,
+    expected_revision: i64,
+) -> Result<AgentSession, ContentError> {
+    mutate(
+        state,
+        actor,
+        id,
+        expected_revision,
+        "archived",
+        archived.into(),
+        None,
+    )
+    .await
+}
+
+/// Write the prompt as a live turn and hand back the durable run id. The caller
+/// starts the runtime *after* this commits, so a refusal still has a row to
+/// settle (see [`finish`]).
+/// `request_id`, when given, makes the whole turn idempotent: a replay — whether
+/// it races the first attempt or arrives long after it finished — resolves to
+/// the SAME turn and run id, so the provider is never asked to execute the same
+/// ask twice and no second reply can be published. `None` is for saved-session
+/// turns, where the client already owns the turn it just created.
+pub(crate) async fn begin_turn(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+    text: &str,
+    request_id: Option<&str>,
+) -> Result<(AgentTurn, bool), ContentError> {
+    let text = prompt(text)?;
+    let request_id = request_id
+        .map(|value| org::normalize_request_id(value).map_err(|_| ContentError::Invalid))
+        .transpose()?;
+    let tx = resources::begin(state, actor).await?;
+    let found = owned(&tx, actor, session_id).await?;
+    // A replay is answered BEFORE the archived/live-turn guards: retrying a
+    // request that already succeeded must return its result, not a late
+    // objection about the session's current state.
+    if let Some(request) = request_id.as_deref() {
+        if let Some(existing) = turn_by_request(&tx, actor.org_id, session_id, request).await? {
+            session::recheck(&tx, actor, state.clock.now_unix()).await?;
+            tx.commit().await.map_err(database_error)?;
+            // `false` = this caller did NOT create the turn, so it must not
+            // execute anything. Deciding that here, inside the transaction that
+            // the unique `(org_id, session_id, request_id)` index arbitrates, is
+            // what makes two simultaneous retries safe: exactly one caller can
+            // ever be told it created the turn.
+            return Ok((existing, false));
+        }
+    }
+    if found.archived {
+        return Err(ContentError::Archived);
+    }
+    // One live turn per session: a second concurrent run in the same session
+    // would interleave two replies into one ordered history.
+    if let Some(live) = live_turn(&tx, actor.org_id, session_id).await? {
+        let _ = live;
+        return Err(ContentError::Conflict);
+    }
+    let sequence: i64 = db::one(
+        &tx,
+        "SELECT COALESCE(MAX(sequence),0) AS n FROM neev_agent_turns WHERE org_id=$1 AND session_id=$2",
+        vec![actor.org_id.into(), session_id.into()],
+    )
+    .await?
+    .ok_or(ContentError::Storage)?
+    .try_get::<i64>("", "n")
+    .map_err(database_error)?;
+    if sequence >= MAX_TURNS_PER_SESSION {
+        return Err(ContentError::Quota);
+    }
+    let sequence = sequence.checked_add(1).ok_or(ContentError::Conflict)?;
+    let now = now(state)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let run_id = uuid::Uuid::new_v4().simple().to_string();
+    db::execute(
+        &tx,
+        "INSERT INTO neev_agent_turns(org_id,session_id,sequence,id,run_id,request_id,prompt,response,status,error_code,provider,model,created_at,updated_at,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7,'','running',NULL,$8,$9,$10,$10,NULL)",
+        vec![
+            actor.org_id.into(),
+            session_id.into(),
+            sequence.into(),
+            id.clone().into(),
+            run_id.clone().into(),
+            request_id.clone().into(),
+            text.into(),
+            found.provider.clone().into(),
+            found.model.clone().into(),
+            now.into(),
+        ],
+    )
+    .await?;
+    // The session's own timestamp/revision move so the sidebar reorders and a
+    // concurrent rename is detected.
+    db::execute(
+        &tx,
+        "UPDATE neev_agent_sessions SET revision=revision+1,updated_at=$1 WHERE org_id=$2 AND id=$3 AND owner_id=$4",
+        vec![
+            now.into(),
+            actor.org_id.into(),
+            session_id.into(),
+            actor.identity.user_id.into(),
+        ],
+    )
+    .await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok((AgentTurn {
+        id,
+        session_id: session_id.to_owned(),
+        sequence,
+        run_id,
+        prompt: text.to_owned(),
+        response: String::new(),
+        status: TurnStatus::Running,
+        error_code: None,
+        provider: found.provider,
+        model: found.model,
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    }, true))
+}
+
+/// How many earlier turns may be replayed to the provider as context.
+const CONTEXT_TURNS: usize = 12;
+/// Total characters of replayed context. The newest turns are kept; older ones
+/// are dropped rather than truncated mid-turn, so the provider never sees half
+/// an exchange.
+const CONTEXT_CHARS: usize = 24_000;
+
+/// Compose what the provider actually receives for this turn: the session's
+/// recent completed exchanges followed by the new prompt. This is what makes a
+/// session multi-turn rather than a series of unrelated one-shots.
+///
+/// Only *completed* turns are replayed — a failed or canceled turn produced no
+/// trustworthy answer, and replaying its partial text would invent context. The
+/// composed transcript is never stored: the turn row keeps the user's own
+/// prompt, so the history a user reads is the history they wrote.
+pub(crate) fn conversation_prompt(history: &[AgentTurn], next: &str) -> String {
+    let mut exchanges: Vec<String> = Vec::new();
+    let mut budget = CONTEXT_CHARS;
+    for turn in history
+        .iter()
+        .rev()
+        .filter(|turn| turn.status == TurnStatus::Completed && !turn.response.is_empty())
+        .take(CONTEXT_TURNS)
+    {
+        let block = format!("User: {}\n\nAssistant: {}", turn.prompt, turn.response);
+        let cost = block.chars().count();
+        if cost > budget {
+            break;
+        }
+        budget -= cost;
+        exchanges.push(block);
+    }
+    if exchanges.is_empty() {
+        return next.to_owned();
+    }
+    exchanges.reverse();
+    format!("{}\n\nUser: {}", exchanges.join("\n\n"), next)
+}
+
+/// The recent turns used to build [`conversation_prompt`], newest last.
+pub(crate) async fn recent_turns(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+) -> Result<Vec<AgentTurn>, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    owned(&tx, actor, session_id).await?;
+    let sql = format!(
+        "SELECT {TURN_COLUMNS} FROM neev_agent_turns WHERE org_id=$1 AND session_id=$2 AND status='completed' ORDER BY sequence DESC LIMIT {CONTEXT_TURNS}"
+    );
+    let rows = tx
+        .query_all(db::statement(
+            &tx,
+            &sql,
+            vec![actor.org_id.into(), session_id.into()],
+        ))
+        .await
+        .map_err(database_error)?;
+    let mut items = rows
+        .iter()
+        .map(turn_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    items.reverse();
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(items)
+}
+
+/// The turn a `(session, request_id)` already produced, if any. The unique
+/// index on `(org_id, session_id, request_id)` means this is the only turn a
+/// replay can resolve to.
+async fn turn_by_request<C: ConnectionTrait>(
+    db: &C,
+    org_id: i32,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Option<AgentTurn>, ContentError> {
+    db::one(
+        db,
+        &format!("SELECT {TURN_COLUMNS} FROM neev_agent_turns WHERE org_id=$1 AND session_id=$2 AND request_id=$3"),
+        vec![org_id.into(), session_id.into(), request_id.into()],
+    )
+    .await?
+    .map(|row| turn_row(&row))
+    .transpose()
+}
+
+async fn live_turn<C: ConnectionTrait>(
+    db: &C,
+    org_id: i32,
+    session_id: &str,
+) -> Result<Option<String>, ContentError> {
+    Ok(db::one(
+        db,
+        "SELECT run_id FROM neev_agent_turns WHERE org_id=$1 AND session_id=$2 AND status='running' LIMIT 1",
+        vec![org_id.into(), session_id.into()],
+    )
+    .await?
+    .map(|row| row.try_get::<String>("", "run_id"))
+    .transpose()
+    .map_err(database_error)?)
+}
+
+/// The turn a run id names, for reattach. Ownership is proved through the
+/// session join, so a run id leaked to another user resolves to `NotFound`.
+pub(crate) async fn turn_by_run(
+    state: &ServerState,
+    actor: &OrgContext,
+    run_id: &str,
+) -> Result<AgentTurn, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    let row = db::one(
+        &tx,
+        &format!("SELECT {} FROM neev_agent_turns t WHERE t.org_id=$1 AND t.run_id=$2 AND EXISTS(SELECT 1 FROM neev_agent_sessions s WHERE s.org_id=t.org_id AND s.id=t.session_id AND s.owner_id=$3)", TURN_COLUMNS.split(',').map(|c| format!("t.{c}")).collect::<Vec<_>>().join(",")),
+        vec![
+            actor.org_id.into(),
+            run_id.into(),
+            actor.identity.user_id.into(),
+        ],
+    )
+    .await?
+    .ok_or(ContentError::NotFound)?;
+    let turn = turn_row(&row)?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(turn)
+}
+
+/// The turn a run id names, without an actor. For the run driver and for the
+/// stream's terminal read — both of which happen *after* the request that
+/// proved authorization, and neither of which may re-run a session check
+/// (the run is server-owned and must settle even if the browser left).
+pub(crate) async fn turn_by_run_id(
+    database: &DatabaseConnection,
+    run_id: &str,
+) -> Result<Option<AgentTurn>, ContentError> {
+    db::one(
+        database,
+        &format!("SELECT {TURN_COLUMNS} FROM neev_agent_turns WHERE run_id=$1"),
+        vec![run_id.into()],
+    )
+    .await?
+    .map(|row| turn_row(&row))
+    .transpose()
+}
+
+/// Persist the accumulated output of a live run. Called by the run driver, not
+/// by a request, so it takes the raw connection and carries no session recheck:
+/// the run is server-owned and must finish recording even if the browser left.
+pub(crate) async fn persist_response(
+    database: &DatabaseConnection,
+    run_id: &str,
+    response: &str,
+    now: i64,
+) -> Result<(), ContentError> {
+    let response = clamp(response);
+    db::execute(
+        database,
+        "UPDATE neev_agent_turns SET response=$1,updated_at=$2 WHERE run_id=$3 AND status='running'",
+        vec![response.into(), now.into(), run_id.into()],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Settle a run. Idempotent: only a `running` row is moved, so a late cancel
+/// after a completion cannot rewrite history.
+pub(crate) async fn finish(
+    database: &DatabaseConnection,
+    run_id: &str,
+    response: &str,
+    status: TurnStatus,
+    error_code: Option<&str>,
+    now: i64,
+) -> Result<(), ContentError> {
+    if status == TurnStatus::Running {
+        return Err(ContentError::Invalid);
+    }
+    // The schema pairs a terminal status with an error code exactly when it is
+    // a failure; keep the two in step here rather than trusting the caller.
+    let error_code = match status {
+        TurnStatus::Completed => None,
+        TurnStatus::Canceled => Some(error_code.unwrap_or("canceled")),
+        _ => Some(error_code.unwrap_or("unavailable")),
+    };
+    db::execute(
+        database,
+        "UPDATE neev_agent_turns SET response=$1,status=$2,error_code=$3,updated_at=$4,completed_at=$4 WHERE run_id=$5 AND status='running'",
+        vec![
+            clamp(response).into(),
+            status.name().into(),
+            error_code.into(),
+            now.into(),
+            run_id.into(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Truncate to the stored cap on a character boundary. The driver stops a run
+/// that reaches the cap, so this is a last-resort guard rather than the normal
+/// path — but it must never let an oversized value reach the CHECK.
+fn clamp(value: &str) -> String {
+    if value.chars().count() <= MAX_RESPONSE_CHARS {
+        return value.to_owned();
+    }
+    value.chars().take(MAX_RESPONSE_CHARS).collect()
+}
+
+/// Settle every turn left `running` by a previous process. Run once at startup,
+/// before the HTTP surface accepts traffic: the streams those turns belonged to
+/// died with their process, so leaving them live would show a permanently
+/// spinning reply that can never resolve.
+pub(crate) async fn reconcile_interrupted(
+    database: &DatabaseConnection,
+    now: i64,
+) -> Result<u64, ContentError> {
+    let changed = db::execute(
+        database,
+        "UPDATE neev_agent_turns SET status='failed',error_code='interrupted',updated_at=$1,completed_at=$1 WHERE status='running'",
+        vec![now.into()],
+    )
+    .await?;
+    Ok(changed.rows_affected())
+}
+
+/// Map an execution refusal to the durable error code stored on the turn.
+pub(crate) fn execution_error_code(
+    error: &crate::neev::agents::execution::ExecutionError,
+) -> &'static str {
+    use crate::neev::agents::execution::ExecutionError;
+    match error {
+        ExecutionError::Disabled => "disabled",
+        ExecutionError::Unauthorized => "unauthorized",
+        ExecutionError::Isolation => "isolation",
+        ExecutionError::Provider => "provider",
+        ExecutionError::Unavailable => "unavailable",
+        ExecutionError::Unsupported => "unsupported",
+    }
+}
+
+/// Map a streamed failure reason to a stored code. Unknown reasons become
+/// `provider` rather than being invented into the domain.
+pub(crate) fn failure_code(reason: &str) -> (TurnStatus, &'static str) {
+    match reason {
+        "canceled" => (TurnStatus::Canceled, "canceled"),
+        "io" => (TurnStatus::Failed, "io"),
+        _ => (TurnStatus::Failed, "provider"),
+    }
+}
+
+#[cfg(test)]
+#[path = "sessions_tests.rs"]
+mod sessions_tests;
+
+/// The HTTP layer's cursor parsing: sequences travel as strings so a 64-bit
+/// value survives JSON, exactly like the message/revision cursors.
+pub(crate) fn parse_cursor(value: &str) -> Result<i64, ContentError> {
+    value.parse::<i64>().map_err(|_| ContentError::Invalid)
+}

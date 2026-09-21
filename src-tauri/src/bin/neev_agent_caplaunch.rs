@@ -31,31 +31,40 @@ const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin
 // Capability numbers (linux/capability.h) — defined locally so we don't depend on
 // the libc crate exporting CAP_* constants. The exact caps the sandbox launcher
 // needs (and no more): chown the per-run workdir, drop to the tenant uid/gid, drop
-// the capability bounding set, create namespaces, wire the egress netns/nft, and
-// mkdir under root-owned /run.
+// the capability bounding set, create namespaces, wire the egress netns/nft, mkdir
+// under root-owned /run, mknod the LUKS device-mapper/loop nodes (cryptsetup runs as
+// a child of the launcher and inherits caps only via the AMBIENT set — empty file
+// caps — so MKNOD must be raised here, not merely present in the launcher's own
+// permitted set), and signal the uid-dropped provider child (a root process WITHOUT
+// CAP_KILL cannot signal a process it does not own by uid, so cancel/teardown of the
+// lane-uid child requires CAP_KILL in the ambient set).
 #[cfg(target_os = "linux")]
 mod cap {
     pub const CHOWN: i32 = 0;
     pub const DAC_OVERRIDE: i32 = 1;
+    pub const KILL: i32 = 5;
     pub const SETGID: i32 = 6;
     pub const SETUID: i32 = 7;
     pub const SETPCAP: i32 = 8;
     pub const NET_ADMIN: i32 = 12;
     pub const SYS_ADMIN: i32 = 21;
+    pub const MKNOD: i32 = 27;
     // prctl(2) ambient-capability selectors.
     pub const PR_CAP_AMBIENT: i32 = 47;
     pub const PR_CAP_AMBIENT_RAISE: u64 = 2;
 }
 
 #[cfg(target_os = "linux")]
-const CAPS: [i32; 7] = [
+const CAPS: [i32; 9] = [
     cap::CHOWN,
     cap::DAC_OVERRIDE,
+    cap::KILL,
     cap::SETGID,
     cap::SETUID,
     cap::SETPCAP,
     cap::NET_ADMIN,
     cap::SYS_ADMIN,
+    cap::MKNOD,
 ];
 
 #[cfg(target_os = "linux")]

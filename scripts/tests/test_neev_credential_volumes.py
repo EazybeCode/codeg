@@ -47,6 +47,14 @@ class FixtureRunner:
         self.replace_mapping_after_uuid = False
         self.busy_umount = False
         self.umount_error = None
+        # Debian util-linux (2.38) space-pads the JSON MAJ:MIN columns; when set the
+        # fixture reproduces that padding so the parser's normalization is exercised.
+        self.pad_device_numbers = False
+        # Orphan-recovery hooks: status_error raises on `cryptsetup status` (fail-closed
+        # paths); dead_status returns a backing-gone status (device (null), type n/a).
+        self.status_error = None
+        self.dead_status = False
+        self.foreign_device = False  # loop backs a different device (maj:min) than the image
 
     def run(self, argv, input_bytes=None):
         self.calls.append((list(argv), input_bytes))
@@ -68,8 +76,21 @@ class FixtureRunner:
                 self.foreign_loop = True
             return (self.uuid + "\n").encode("ascii")
         if argv[1:2] == ["status"]:
+            if self.status_error is not None:
+                raise self.status_error  # e.g. a timeout/missing (non-exit-4) failure
             if not self.mapping:
                 raise self.module.CommandError("failed", returncode=4)
+            if self.dead_status:
+                # Backing gone (loop auto-detached with a dead container): active in the
+                # kernel but device (null) / type n/a — an inert orphan.
+                return (
+                    "/dev/mapper/" + argv[-1] + " is active.\n"
+                    "  type:    n/a\n"
+                    "  cipher:  aes-xts-plain64\n"
+                    "  keysize: 512 bits\n"
+                    "  device:  (null)\n"
+                    "  mode:    read/write\n"
+                ).encode("ascii")
             return (
                 "/dev/mapper/" + argv[-1] + " is active.\n"
                 "  type:    LUKS2\n"
@@ -83,15 +104,21 @@ class FixtureRunner:
         if program == self.module.LOSETUP:
             image_stat = self.image.stat()
             back_inode = image_stat.st_ino + (1 if self.foreign_loop else 0)
+            back_device = "%d:%d" % (
+                os.major(image_stat.st_dev),
+                os.minor(image_stat.st_dev) + (1 if self.foreign_device else 0),
+            )
+            loop_device = "7:7"
+            if self.pad_device_numbers:
+                back_device = "       " + back_device + " "
+                loop_device = "  " + loop_device + "  "
             payload = {
                 "loopdevices": [{
                     "name": "/dev/loop7",
                     "back-file": str(self.image),
                     "back-ino": back_inode,
-                    "back-maj:min": "%d:%d" % (
-                        os.major(image_stat.st_dev), os.minor(image_stat.st_dev)
-                    ),
-                    "maj:min": "7:7",
+                    "back-maj:min": back_device,
+                    "maj:min": loop_device,
                 }]
             }
             return json.dumps(payload).encode("ascii")
@@ -109,7 +136,11 @@ class FixtureRunner:
                     ),
                     "fstype": "ext4",
                     "options": "rw,nosuid,nodev,noexec,relatime",
-                    "maj:min": "253:8" if self.foreign_mount else "253:7",
+                    "maj:min": (
+                        ("253:8" if self.foreign_mount else "253:7")
+                        if not self.pad_device_numbers
+                        else ("  253:8  " if self.foreign_mount else "  253:7  ")
+                    ),
                 })
             return json.dumps({"filesystems": filesystems}).encode("ascii")
         if program == self.module.MOUNT:
@@ -128,6 +159,11 @@ class FixtureRunner:
             mapping_path = self.mapper_root / argv[-1]
             if mapping_path.exists():
                 mapping_path.unlink()
+            return b""
+        if program == self.module.DMSETUP and argv[1:2] == ["mknodes"]:
+            # Recreate the /dev/mapper node for a surviving kernel mapping.
+            self.mapper_root.mkdir(mode=0o700, exist_ok=True)
+            (self.mapper_root / argv[-1]).touch(mode=0o600)
             return b""
         if program == self.module.MKFS:
             return b""
@@ -198,8 +234,8 @@ class CredentialVolumeTests(unittest.TestCase):
                 "--key-file", "-", image,
             ],
             [
-                self.module.CRYPTSETUP, "open", "--type", "luks2", "--key-file", "-",
-                image, mapping,
+                self.module.CRYPTSETUP, "open", "--type", "luks2", "--disable-keyring",
+                "--key-file", "-", image, mapping,
             ],
             [
                 self.module.MKFS, "-q", "-b", "4096", "-m", "0",
@@ -393,6 +429,153 @@ class CredentialVolumeTests(unittest.TestCase):
         self.assertTrue(self.runner.mounted)
         self.assertTrue(self.runner.mapping)
 
+    def test_revoke_durably_deletes_closed_volume_and_is_idempotent(self):
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self.assertTrue(entry.exists())
+        self.volumes.open(self.scope, handle)
+        self.volumes.close(self.scope, handle)
+        self.volumes.revoke(self.scope, handle)
+        self.assertFalse(entry.exists())          # the whole entry tree is gone
+        self.volumes.revoke(self.scope, handle)   # idempotent: missing entry is a no-op
+
+    def test_revoke_refuses_while_still_mounted_or_mapped(self):
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self.volumes.open(self.scope, handle)     # mounted AND mapped
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.revoke(self.scope, handle)
+        self.assertEqual(caught.exception.code, "busy")
+        self.assertTrue(entry.exists())           # never deleted under a live mount/mapping
+
+    def test_revoke_refuses_wrong_scope_and_preserves_entry(self):
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self.volumes.open(self.scope, handle)
+        self.volumes.close(self.scope, handle)
+        other = self.store_module.Scope(self.scope.org_id, self.scope.user_id + 1, "claude")
+        with self.assertRaises(self.store_module.StoreError):
+            self.volumes.revoke(other, handle)    # authenticated by manifest, not handle alone
+        self.assertTrue(entry.exists())           # a foreign scope cannot delete it
+        self.volumes.revoke(self.scope, handle)   # the true owner still can
+        self.assertFalse(entry.exists())
+
+    def test_full_close_then_revoke_cleanup_converges_on_retry(self):
+        # Exactly the supervisor's cleanup order (close THEN revoke), run TWICE: the
+        # second pass models a crash after the durable delete but before the disposal
+        # record. It must converge (no exception) rather than quarantine forever.
+        handle = self.create()
+        self.volumes.open(self.scope, handle)
+        self.volumes.close(self.scope, handle)
+        self.volumes.revoke(self.scope, handle)
+        self.assertFalse(self.store.entry_path(handle).exists())
+        self.volumes.close(self.scope, handle)    # entry absent -> no-op, not an error
+        self.volumes.revoke(self.scope, handle)   # entry absent -> no-op
+
+    def test_close_restores_node_then_closes_orphan_when_dev_node_absent(self):
+        # Restart mid-login: the KERNEL dm mapping survives but its /dev/mapper node lived
+        # in the dead container's /dev. close() must restore the node (mknodes), validate
+        # the real backing image, and cryptsetup-close it — not treat it as unmapped.
+        handle = self.create()
+        self.volumes.open(self.scope, handle)
+        self.runner.mounted = False                       # not mounted in this container
+        node = self.mapper_root / ("neev-credential-" + handle)
+        if node.exists():
+            node.unlink()                                 # /dev node absent, kernel active
+        self.runner.calls.clear()
+        self.volumes.close(self.scope, handle)
+        self.assertTrue(any(a[0] == self.module.DMSETUP and a[1:2] == ["mknodes"]
+                            for a, _ in self.runner.calls))   # node restored
+        self.assertTrue(any(a[1:2] == ["close"] for a, _ in self.runner.calls))  # then closed
+        self.assertFalse(self.runner.mapping)
+
+    def test_revoke_refuses_surviving_kernel_orphan_until_closed(self):
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self.volumes.open(self.scope, handle)
+        self.runner.mounted = False
+        node = self.mapper_root / ("neev-credential-" + handle)
+        if node.exists():
+            node.unlink()                                 # node absent, kernel active
+        self.runner.calls.clear()
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.revoke(self.scope, handle)       # must refuse; close() clears it first
+        self.assertEqual(caught.exception.code, "busy")
+        self.assertTrue(entry.exists())
+
+    def _make_node_absent_kernel_active(self, handle):
+        self.volumes.open(self.scope, handle)
+        self.runner.mounted = False
+        node = self.mapper_root / ("neev-credential-" + handle)
+        if node.exists():
+            node.unlink()  # /dev node gone; self.runner.mapping stays True (kernel active)
+        self.runner.calls.clear()
+
+    def test_orphan_recovery_fails_closed_on_status_error_and_preserves_entry(self):
+        # A non-exit-4 `cryptsetup status` failure (timeout/missing/permission) must NOT
+        # be read as "inactive" and let revoke delete a possibly-live backing image.
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self._make_node_absent_kernel_active(handle)
+        self.runner.status_error = self.module.CommandError("timeout")
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.revoke(self.scope, handle)
+        self.assertEqual(caught.exception.code, "unavailable")
+        self.assertTrue(entry.exists())  # image preserved on a transient error
+        self.assertFalse(any(a[0] == self.module.DMSETUP for a, _ in self.runner.calls))
+
+    def test_orphan_with_unverifiable_backing_after_mknodes_is_refused(self):
+        # Even after restoring the node, if cryptsetup cannot verify the backing image
+        # (device (null) / type n/a — a truly gone loop), close() must REFUSE (conflict),
+        # NEVER infer "inert" and remove. Fail-closed preserves the entry.
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self._make_node_absent_kernel_active(handle)
+        self.runner.dead_status = True  # status stays (null) even after mknodes
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.close(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertTrue(entry.exists())
+
+    def test_orphan_backing_a_foreign_inode_is_refused_not_closed(self):
+        handle = self.create()
+        self._make_node_absent_kernel_active(handle)
+        self.runner.foreign_loop = True  # live backing, but a DIFFERENT inode than our image
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.close(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertFalse(any(a[1:2] == ["close"] for a, _ in self.runner.calls))  # never closed
+
+    def test_orphan_backing_a_foreign_device_is_refused_not_closed(self):
+        handle = self.create()
+        self._make_node_absent_kernel_active(handle)
+        self.runner.foreign_device = True  # right inode, but a DIFFERENT backing device
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.close(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertFalse(any(a[1:2] == ["close"] for a, _ in self.runner.calls))
+
+    def test_open_after_restart_restores_node_and_reuses_committed_image(self):
+        # A committed volume left mapped at a stop reopens after restart: open() restores
+        # the node (mknodes), validates the real backing image, and REUSES the mapping
+        # (mounts it) — no fresh cryptsetup open, no "already active" collision.
+        handle = self.create()
+        self._make_node_absent_kernel_active(handle)
+        self.volumes.open(self.scope, handle)  # must NOT fail "already active"
+        self.assertTrue(any(a[0] == self.module.DMSETUP and a[1:2] == ["mknodes"]
+                            for a, _ in self.runner.calls))
+        self.assertFalse(any(a[1:2] == ["open"] for a, _ in self.runner.calls))  # reused
+        self.assertTrue(any(a[0] == self.module.MOUNT for a, _ in self.runner.calls))
+
+    def test_close_refuses_absent_entry_with_dangling_mapping(self):
+        handle = self.create()
+        self.volumes.revoke(self.scope, handle)   # entry gone
+        # Simulate a dangling dm mapping surviving the deleted entry.
+        (self.mapper_root / ("neev-credential-" + handle)).touch(mode=0o600)
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.close(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
+
     def test_close_owned_volume_and_idempotent_locked_status(self):
         handle = self.create()
         self.assertEqual(self.volumes.status(self.scope, handle), "locked")
@@ -445,6 +628,30 @@ class CredentialVolumeTests(unittest.TestCase):
             self.volumes.open(self.scope, handle)
         self.assertEqual(caught.exception.code, "conflict")
         self.assertFalse(any(argv[1:2] == ["open"] for argv, unused in self.runner.calls))
+
+    def test_util_linux_padded_maj_min_columns_are_tolerated(self):
+        # Debian util-linux 2.38 space-pads losetup/findmnt JSON MAJ:MIN strings
+        # (e.g. "       0:93 ", "  7:0  "). create() (losetup back-maj:min +
+        # maj:min) and open() (findmnt maj:min) must still validate rather than
+        # fail conflict on the padding, while every identity check is preserved.
+        self.runner.pad_device_numbers = True
+        handle = self.create()
+        self.assertEqual(self.manifest(handle)["phase"], "ready")
+        mountpoint = self.volumes.open(self.scope, handle)
+        self.assertEqual(mountpoint, self.root / handle / "mount")
+        self.assertEqual(self.volumes.status(self.scope, handle), "open")
+        self.volumes.close(self.scope, handle)
+
+    def test_device_number_normalizer_trims_only_strict_digit_pairs(self):
+        normalize = self.module._normalized_device_number
+        self.assertEqual(normalize("  7:0  "), "7:0")
+        self.assertEqual(normalize("       0:93 "), "0:93")
+        self.assertEqual(normalize("253:8"), "253:8")
+        for bad in ("7:", ":0", "7", "7 0", "a:0", "7:0:1", "", "   ",
+                    "0x7:0", "-1:0", 70, None, b"7:0"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(self.store_module.StoreError):
+                    normalize(bad)
 
     def test_status_parsers_reject_malformed_duplicate_and_ambiguous_output(self):
         invalid_status = (
@@ -764,6 +971,48 @@ class LinuxCredentialVolumeAcceptance(unittest.TestCase):
                     cleanup_error = "mapping neev-credential-%s under %s" % (handle, fixture)
             if cleanup_error is not None:
                 self.fail("cleanup failed; retained safe resource: %s" % cleanup_error)
+
+
+class SecureFilesystemRootTests(unittest.TestCase):
+    def setUp(self):
+        load_module("neev_credential_store", STORE_PATH)
+        self.module = load_module("neev_credential_volumes", VOLUMES_PATH)
+
+    def test_chown_to_root_then_chmod_then_canonical_needs_no_fowner(self):
+        # No CAP_FOWNER in the helper profile: take ownership to root (CAP_CHOWN),
+        # chmod as owner 0 (no FOWNER), then hand to 65532 (CAP_CHOWN). This is
+        # FOWNER-free on BOTH a fresh mount and a reopen (already 65532-owned).
+        order = []
+        with mock.patch.object(self.module.os, "open", return_value=7), mock.patch.object(
+            self.module.os, "fchmod",
+            side_effect=lambda fd, mode: order.append(("chmod", fd, mode)),
+        ), mock.patch.object(
+            self.module.os, "fchown",
+            side_effect=lambda fd, uid, gid: order.append(("chown", fd, uid, gid)),
+        ), mock.patch.object(
+            self.module.os, "fsync",
+            side_effect=lambda fd: order.append(("fsync", fd)),
+        ), mock.patch.object(self.module.os, "close"):
+            self.module._secure_filesystem_root(self.module.Path("/mnt/x"))
+        self.assertEqual(
+            order,
+            [("chown", 7, 0, 0), ("chmod", 7, 0o700), ("chown", 7, 65532, 65532), ("fsync", 7)],
+        )
+
+
+class ToolLayoutTests(unittest.TestCase):
+    def test_privileged_tools_are_non_setuid(self):
+        # The native agent image (Dockerfile.native.agent) strips ALL setuid/setgid;
+        # mount/umount run privileged via the caplaunch helper's capabilities, not a
+        # setuid bit. Guard against re-introducing 04755.
+        sys.path.insert(0, str(OPERATIONS))
+        module = load_module("neev_credential_volumes_layout", VOLUMES_PATH)
+        targets = module._TOOL_TARGETS
+        self.assertEqual(targets[module.MOUNT][1], 0o755)
+        self.assertEqual(targets[module.UMOUNT][1], 0o755)
+        for program, (_target, mode) in targets.items():
+            self.assertFalse(mode & stat.S_ISUID, program)
+            self.assertFalse(mode & stat.S_ISGID, program)
 
 
 if __name__ == "__main__":

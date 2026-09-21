@@ -33,6 +33,31 @@ pub(crate) async fn list(
     Ok(result)
 }
 
+/// The caller's own credential-volume handle for `provider`, if they have a
+/// CONNECTED connection (spec §5.4).
+///
+/// Returns `None` when the user has not signed this provider in, or when the
+/// connection is in any non-connected state — a half-finished or reconnect-
+/// required connection has no credential to deliver. The handle identifies the
+/// caller's own volume only: it is read from the row keyed by
+/// `(org_id, user_id, provider)` taken from the server-authoritative actor, so
+/// it can never name another user's credentials.
+pub(crate) async fn credential(
+    state: &ServerState,
+    actor: &OrgContext,
+    provider: Provider,
+) -> Result<Option<String>, AgentError> {
+    let tx = store::authorized_transaction(state, actor).await?;
+    let connection = store::lock_connection(&tx, actor, provider).await?;
+    let handle = connection.and_then(|row| {
+        (row.state == ConnectionState::Connected)
+            .then_some(row.storage_handle)
+            .flatten()
+    });
+    store::commit_authorized(tx, state, actor).await?;
+    Ok(handle)
+}
+
 pub(crate) async fn attempt(
     state: &ServerState,
     actor: &OrgContext,
