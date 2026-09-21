@@ -286,11 +286,20 @@ def _secure_own_workdir(workdir, run_uid, run_gid):  # pragma: no cover - Linux 
     except OSError as error:
         raise SandboxError("invalid") from error
     try:
-        # chmod BEFORE chown: while the caller still owns the dir, chmod needs no
-        # CAP_FOWNER; after chown to the tenant uid it would. This keeps the
-        # privileged cap set minimal (CAP_CHOWN only, not CAP_FOWNER).
-        os.fchmod(fd, 0o700)
-        os.fchown(fd, run_uid, run_gid)
+        # The run workdir is created by the UNPRIVILEGED web server (uid 65532, via
+        # execution.rs) and THIS launcher runs with euid 0 but only the 9 ambient
+        # caps the cap-helper grants — which deliberately do NOT include CAP_FOWNER.
+        # fchmod on a file whose owner != euid needs CAP_FOWNER (CAP_DAC_OVERRIDE
+        # does NOT cover chmod's owner check), so chmod'ing a web-owned dir EPERMs.
+        # (The login/probe path passed only because it is driven by the supervisor,
+        # which runs as real root with the full cap set.) We DO hold CAP_CHOWN, so:
+        # take ownership to our own euid/egid (0,0) FIRST, THEN fchmod (now owner ==
+        # euid, no CAP_FOWNER needed), THEN hand ownership to the tenant lane — chown
+        # preserves the mode bits. All ops act on the O_NOFOLLOW fd (no TOCTOU /
+        # symlink-follow); the caller guarantees no parent component is tenant-writable.
+        os.fchown(fd, 0, 0)  # take ownership via CAP_CHOWN so the chmod is self-owned
+        os.fchmod(fd, 0o700)  # owner == euid now -> no CAP_FOWNER required
+        os.fchown(fd, run_uid, run_gid)  # hand to the lane uid/gid (CAP_CHOWN)
     except OSError as error:
         raise SandboxError("launch") from error
     finally:
