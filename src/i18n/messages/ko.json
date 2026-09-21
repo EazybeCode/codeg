@@ -178,7 +178,11 @@
     "signInCodeHint": "페이지를 열어 승인한 뒤, 받은 코드를 여기에 붙여넣으세요.",
     "testConnection": "테스트",
     "testConnectionNamed": "{name} 연결 테스트",
-    "testingConnection": "테스트하는 중…"
+    "testingConnection": "테스트하는 중…",
+    "renameFailed": "이 이름을 저장하지 못했습니다.",
+    "activityWorking": "작업 중…",
+    "activityRunningTool": "{name} 실행 중…",
+    "activityElapsed": "{number}초"
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

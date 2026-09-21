@@ -76,6 +76,13 @@ export function NativeBoundary({
         {t("loading")}
       </main>
     )
+  // Both of these hold the workspace still without taking it away. While a
+  // check is in flight that is only a pause; when one could not be made at all,
+  // it is a pause with a way out of it — and in neither case is anything under
+  // here reachable, so nothing can be read or written until authority is proved
+  // again. A definitive refusal never reaches this point: it clears the session
+  // above, and the subtree goes with it.
+  const held = auth.status === "revalidating" || auth.status === "unverified"
   return (
     <>
       {auth.status === "revalidating" && (
@@ -83,9 +90,18 @@ export function NativeBoundary({
           {t("loading")}
         </main>
       )}
+      {auth.status === "unverified" && (
+        <main className="mx-auto flex max-w-md flex-col justify-center gap-4 p-6 text-foreground">
+          <p role="alert">{t("error_unavailable")}</p>
+          {/* Re-proves the session that is still held rather than starting
+              from nothing, so what is behind this survives the attempt —
+              including an attempt that fails again. */}
+          <Button onClick={() => void auth.retry()}>{t("retry")}</Button>
+        </main>
+      )}
       <NativeSuspendedSurface
         key={auth.scopeKey ?? "signed-out"}
-        hidden={auth.status === "revalidating"}
+        hidden={held}
         className="min-h-dvh bg-background text-foreground"
       >
         {children}

@@ -178,7 +178,11 @@
     "signInCodeHint": "افتح الصفحة ووافق، ثم الصق الرمز الذي تحصل عليه هنا.",
     "testConnection": "اختبار",
     "testConnectionNamed": "اختبار اتصال {name}",
-    "testingConnection": "جارٍ الاختبار…"
+    "testingConnection": "جارٍ الاختبار…",
+    "renameFailed": "تعذّر حفظ هذا الاسم.",
+    "activityWorking": "جارٍ العمل…",
+    "activityRunningTool": "يشغّل {name}…",
+    "activityElapsed": "{number} ث"
   },
   "Native": {
     "callbackConflict": "تتعارض طريقة تسجيل الدخول هذه مع حساب موجود. استخدم طريقة تسجيل الدخول الأصلية، ثم افتح الإعدادات لربط طريقة أخرى. لا تُدمج الحسابات تلقائيًا أبدًا.",

@@ -47,20 +47,22 @@ const message = {
 }
 const path = `/api/neev/chats/${resource.id}/messages`
 beforeEach(() => {
-  // The agent context panel remembers open/closed per user in localStorage;
-  // start every test from the default (closed) so panel interactions are stable.
+  // The composer remembers its mode and provider per chat, per reader; start
+  // every test from "never chosen" so the defaults under test are the ones
+  // being exercised.
   localStorage.clear()
 })
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
-function mount() {
+function mount(fresh = false) {
   return render(
     <NativeTestRoot>
       <NativeBoundary>
         <NativeChat
           resource={resource}
+          fresh={fresh}
           onBack={() => {}}
           onChanged={() => {}}
         />
@@ -140,12 +142,6 @@ it("retries a committed message with the same request ID and displays its human 
     expectedAuthRevision: "1",
   })
   expect(bodies[1]).toEqual(bodies[0])
-  // Agent controls now live in the collapsible right context panel.
-  await user.click(screen.getByRole("button", { name: "Agent panel" }))
-  expect(screen.getByRole("button", { name: "Ask agent" })).toBeDisabled()
-  expect(
-    screen.getByRole("link", { name: "Personal AI connections" })
-  ).toHaveAttribute("href", "/settings")
   expect(mock.unknown).toEqual([])
 })
 
@@ -388,51 +384,13 @@ it.each(["1", "9007199254740992"])(
 
 const capable = () => json({ ...nativeCapabilities, runtimeEnabled: true })
 
-it("keeps the human thread primary with the agent in a collapsible panel", async () => {
-  localStorage.clear()
-  mockNativeSession(undefined, {
-    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
-    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
-  })
-  const user = userEvent.setup()
-  mount()
-  // Human composer is present; the agent controls are NOT in the main column.
-  await screen.findByRole("textbox", { name: "Message" })
-  expect(screen.getByRole("button", { name: "Send" })).toBeVisible()
-  expect(screen.queryByRole("button", { name: "Ask agent" })).toBeNull()
-  // Opening the context panel reveals the agent controls.
-  await user.click(screen.getByRole("button", { name: "Agent panel" }))
-  expect(screen.getByRole("button", { name: "Ask agent" })).toBeVisible()
-})
-
-it("keeps Ask agent disabled while the runtime is unavailable", async () => {
-  mockNativeSession(undefined, {
-    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
-    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
-  })
-  const user = userEvent.setup()
-  mount()
-  await user.type(
-    await screen.findByRole("textbox", { name: "Message" }),
-    "help"
-  )
-  // The agent lives in the collapsible right context panel; open it first.
-  await user.click(screen.getByRole("button", { name: "Agent panel" }))
-  expect(screen.getByRole("button", { name: "Ask agent" })).toBeDisabled()
-  // Honest disabled state — no faked "Connected".
-  expect(screen.getByText("Agents are turned off.")).toBeVisible()
-  // Both the ask and the reply become team-visible, so the panel must say so
-  // unmistakably before anyone can send (spec §5.3).
-  expect(
-    screen.getByText(
-      "Your question and the agent's reply are both posted to this conversation."
-    )
-  ).toBeVisible()
-})
-
 const RUN_ID = "0123456789abcdef0123456789abcdef"
+const SESSION_ID = "77777777-7777-4777-8777-777777777777"
 const AGENT_PATH = `POST /api/neev/chats/${resource.id}/agent`
 const RUN_EVENTS = `GET /api/neev/agent/runs/${RUN_ID}/events`
+const TEAM_SESSION = (provider: string) =>
+  `GET /api/neev/chats/${resource.id}/agent?provider=${provider}`
+const TURNS = `GET /api/neev/agent/sessions/${SESSION_ID}/turns`
 const askMessage = {
   ...message,
   id: "44444444-4444-4444-8444-444444444444",
@@ -452,7 +410,7 @@ const replyMessage = {
 }
 const runningTurn = {
   id: "66666666-6666-4666-8666-666666666666",
-  sessionId: "77777777-7777-4777-8777-777777777777",
+  sessionId: SESSION_ID,
   sequence: "1",
   runId: RUN_ID,
   prompt: "help",
@@ -467,6 +425,24 @@ const runningTurn = {
   updatedAt: 1_700_000_000,
   completedAt: null,
 }
+const teamSession = {
+  id: SESSION_ID,
+  orgId: 3,
+  ownerId: 1,
+  title: "Team invocation",
+  provider: "claude",
+  model: "default",
+  boundChatId: resource.id,
+  archived: false,
+  revision: "1",
+  createdAt: 1_700_000_000,
+  updatedAt: 1_700_000_000,
+}
+/** No invocation has ever been made here — an empty history, not an error. */
+const noSessions = {
+  [TEAM_SESSION("claude")]: () => json({ code: "not_found" }, 404),
+  [TEAM_SESSION("codex")]: () => json({ code: "not_found" }, 404),
+}
 
 function sseBody(...frames: string[]) {
   return new Response(frames.map((frame) => `data: ${frame}\n\n`).join(""), {
@@ -475,16 +451,155 @@ function sseBody(...frames: string[]) {
   })
 }
 
-async function openAgentPanel(user: ReturnType<typeof userEvent.setup>) {
+async function typeAsk(user: ReturnType<typeof userEvent.setup>) {
   await user.type(
     await screen.findByRole("textbox", { name: "Message" }),
     "help"
   )
-  // The agent lives in the collapsible right context panel; open it first.
-  await user.click(screen.getByRole("button", { name: "Agent panel" }))
 }
 
-it("posts the ask and the persisted agent reply to the conversation", async () => {
+it("opens a new chat in agent mode and an existing one in team mode", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+  })
+  const user = userEvent.setup()
+  const view = mount(true)
+  const agent = await screen.findByRole("button", { name: "Ask agent" })
+  expect(agent).toHaveAttribute("aria-pressed", "true")
+  // Both modes are one click away, inside the same conversation: there is no
+  // separate agent thread to switch to.
+  const team = screen.getByRole("button", { name: "Team chat" })
+  expect(team).toHaveAttribute("aria-pressed", "false")
+  await user.click(team)
+  expect(team).toHaveAttribute("aria-pressed", "true")
+  expect(agent).toHaveAttribute("aria-pressed", "false")
+  // The provider lives inside the agent composer, not in a panel beside it.
+  expect(screen.queryByRole("combobox", { name: "Provider" })).toBeNull()
+  await user.click(agent)
+  expect(screen.getByRole("combobox", { name: "Provider" })).toBeVisible()
+  view.unmount()
+  // Nothing chosen for this chat yet, and no agent history in it: team.
+  localStorage.clear()
+  mount()
+  expect(
+    await screen.findByRole("button", { name: "Team chat" })
+  ).toHaveAttribute("aria-pressed", "true")
+})
+
+it("remembers the chosen mode and provider across a reload", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+  })
+  const user = userEvent.setup()
+  const view = mount()
+  // A human-only thread opens in team mode; choosing Agent is a decision.
+  await user.click(await screen.findByRole("button", { name: "Ask agent" }))
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Provider" }),
+    "codex"
+  )
+  view.unmount()
+  mount()
+  // Forgetting this is not a cosmetic slip: Enter would post to the team
+  // instead of invoking, and the sender would only find out afterwards.
+  expect(
+    await screen.findByRole("button", { name: "Ask agent" })
+  ).toHaveAttribute("aria-pressed", "true")
+  expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue(
+    "codex"
+  )
+})
+
+it("opens a thread that already has agent replies in agent mode", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({ items: [askMessage, replyMessage], nextAfter: null }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+  })
+  mount()
+  expect(
+    await screen.findByRole("button", { name: "Ask agent" })
+  ).toHaveAttribute("aria-pressed", "true")
+})
+
+it("falls back to team mode and says so when no runtime is bound", async () => {
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount(true)
+  expect(
+    await screen.findByRole("button", { name: "Team chat" })
+  ).toHaveAttribute("aria-pressed", "true")
+  // Choosing it anyway is honest about why it cannot be used.
+  await user.click(screen.getByRole("button", { name: "Ask agent" }))
+  expect(screen.getByText("Agents are turned off.")).toBeVisible()
+  const box = screen.getByRole("textbox", { name: "Message" })
+  await user.type(box, "help")
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
+  // Enter does not quietly swallow the prompt: it says why, and keeps it.
+  fireEvent.keyDown(box, { key: "Enter" })
+  expect(await screen.findByRole("alert")).toBeVisible()
+  expect(box).toHaveValue("help")
+})
+
+it("stays writable through a long run and keeps what was typed during it", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            controller = c
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      ),
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  const box = await screen.findByRole("textbox", { name: "Message" })
+  // The ask went durable and cleared the box, but the box itself stays open:
+  // a run can last minutes and thinking does not pause for it.
+  await waitFor(() => expect(box).toHaveValue(""))
+  expect(box).toBeEnabled()
+  await user.type(box, "and also this")
+  act(() =>
+    controller.enqueue(
+      new TextEncoder().encode(
+        'data: {"type":"finished","status":"completed","errorCode":null}\n\n'
+      )
+    )
+  )
+  act(() => controller.close())
+  // Finishing the run publishes the reply; it does not touch what was typed
+  // while it ran.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled()
+  )
+  expect(box).toHaveValue("and also this")
+})
+
+it("posts the ask and the persisted agent reply to the one conversation", async () => {
   const invocations: Record<string, unknown>[] = []
   let replied = false
   const mock = mockNativeSession(undefined, {
@@ -498,6 +613,7 @@ it("posts the ask and the persisted agent reply to the conversation", async () =
     [`GET ${path}?after=1`]: () =>
       json({ items: replied ? [replyMessage] : [], nextAfter: null }),
     [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
     [AGENT_PATH]: (init) => {
       invocations.push(JSON.parse(init.body as string))
       return json(
@@ -517,11 +633,9 @@ it("posts the ask and the persisted agent reply to the conversation", async () =
     },
   })
   const user = userEvent.setup()
-  mount()
-  await openAgentPanel(user)
-  const ask = screen.getByRole("button", { name: "Ask agent" })
-  expect(ask).toBeEnabled()
-  await user.click(ask)
+  mount(true)
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
   // The ask carries the audience the composer was pinned to and an idempotent
   // request id, exactly like posting a message.
   await waitFor(() => expect(invocations).toHaveLength(1))
@@ -532,62 +646,112 @@ it("posts the ask and the persisted agent reply to the conversation", async () =
     requestId: expect.any(String),
     expectedAuthRevision: "1",
   })
-  // Both rows land in the thread, and the reply is labelled as agent-authored
-  // by provider, attributed to the human who invoked it.
+  // Both rows land in the same thread, and the reply is labelled as
+  // agent-authored by provider, attributed to the human who invoked it.
   const thread = await screen.findByRole("list", { name: "Messages" })
   expect(await within(thread).findByText("do X")).toBeVisible()
   expect(within(thread).getByText("help")).toBeVisible()
-  expect(within(thread).getByText("claude")).toBeVisible()
   expect(within(thread).getByText("agent · asked by Sagar")).toBeVisible()
+  // The ask was shown immediately from the invocation AND came back in the
+  // reread; it is one message either way.
+  await waitFor(() =>
+    expect(within(thread).getAllByRole("listitem")).toHaveLength(2)
+  )
   expect(mock.unknown).toEqual([])
 })
 
-it("keeps a refused invocation's ask visible and names the reason", async () => {
-  const refusedTurn = {
-    ...runningTurn,
-    status: "failed",
-    errorCode: "disabled",
-    completedAt: 1_700_000_001,
-  }
-  let posted = false
-  mockNativeSession(undefined, {
-    "GET /api/workos/capabilities": capable,
-    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
-    [`GET ${path}`]: () =>
-      json({ items: posted ? [askMessage] : [], nextAfter: null }),
-    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
-    [AGENT_PATH]: () => {
-      posted = true
-      return json(
-        { message: askMessage, turn: refusedTurn, runId: RUN_ID },
-        201
-      )
-    },
-  })
-  const user = userEvent.setup()
-  mount()
-  await openAgentPanel(user)
-  await user.click(screen.getByRole("button", { name: "Ask agent" }))
-  // The question stays team-visible even though no reply came …
-  const thread = await screen.findByRole("list", { name: "Messages" })
-  expect(await within(thread).findByText("help")).toBeVisible()
-  // … and the refusal is surfaced rather than left as a pending state.
-  expect(await screen.findByRole("alert")).toBeVisible()
-  expect(within(thread).queryByText(/asked by/)).toBeNull()
-})
-
-it("surfaces an error when the invocation is refused outright (503)", async () => {
+it("sends on Enter, keeps Shift+Enter a newline, and never sends mid-composition", async () => {
+  const invocations: Record<string, unknown>[] = []
   mockNativeSession(undefined, {
     "GET /api/workos/capabilities": capable,
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
-    [AGENT_PATH]: () => json({ code: "unavailable" }, 503),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: (init) => {
+      invocations.push(JSON.parse(init.body as string))
+      return json(
+        { message: askMessage, turn: runningTurn, runId: RUN_ID },
+        201
+      )
+    },
+    [RUN_EVENTS]: () =>
+      sseBody('{"type":"finished","status":"completed","errorCode":null}'),
   })
   const user = userEvent.setup()
-  mount()
-  await openAgentPanel(user)
-  await user.click(screen.getByRole("button", { name: "Ask agent" }))
-  expect(await screen.findByRole("alert")).toBeVisible()
+  mount(true)
+  const box = await screen.findByRole("textbox", { name: "Message" })
+  await user.type(box, "help")
+  fireEvent.keyDown(box, { key: "Enter", shiftKey: true })
+  expect(invocations).toHaveLength(0)
+  // An input method is mid-conversion: Enter accepts a candidate, not a send.
+  fireEvent.keyDown(box, { key: "Enter", isComposing: true })
+  fireEvent.keyDown(box, { key: "Enter", keyCode: 229 })
+  expect(invocations).toHaveLength(0)
+  fireEvent.keyDown(box, { key: "Enter" })
+  await waitFor(() => expect(invocations).toHaveLength(1))
+  expect(invocations[0].prompt).toBe("help")
+})
+
+it("names the tool in flight, counts the seconds, and opens the call", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const encoder = new TextEncoder()
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            controller = c
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      ),
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // Working status is immediate, before any activity has arrived, and it
+  // counts from the moment the run started. (The Send button says "Working…"
+  // too, so this asks the thread rather than the page.)
+  const thread = within(await screen.findByRole("list", { name: "Messages" }))
+  expect(await thread.findByRole("button", { name: /Working…/ })).toBeVisible()
+  expect(screen.getByText("0s")).toBeVisible()
+  await waitFor(() => expect(controller).toBeDefined())
+  act(() =>
+    controller.enqueue(
+      encoder.encode(
+        'data: {"type":"activity","kind":"tool_call","seq":1,"offset":0,' +
+          '"id":"call-1","name":"Bash","input":"{\\"command\\":\\"ls -a\\"}",' +
+          '"inputTruncated":false}\n\n'
+      )
+    )
+  )
+  // The CURRENT tool, not a generic spinner.
+  expect(await screen.findByText("Running Bash…")).toBeVisible()
+  // The same frame twice is one row: `seq` is the identity, not the position.
+  act(() =>
+    controller.enqueue(
+      encoder.encode(
+        'data: {"type":"activity","kind":"tool_call","seq":1,"offset":0,' +
+          '"id":"call-1","name":"Bash","input":"{\\"command\\":\\"ls -a\\"}",' +
+          '"inputTruncated":false}\n\n'
+      )
+    )
+  )
+  await user.click(screen.getByRole("button", { name: /Running Bash/ }))
+  expect(screen.getAllByText("Bash")).toHaveLength(1)
+  // The call opens into its real arguments — a public summary of what ran.
+  await user.click(screen.getByRole("button", { name: /^Bash/ }))
+  expect(screen.getByText('{"command":"ls -a"}')).toBeVisible()
+  act(() => controller.close())
 })
 
 it("shows Cancel while the invoked run streams and cancels it by run id", async () => {
@@ -598,6 +762,7 @@ it("shows Cancel while the invoked run streams and cancels it by run id", async 
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
     [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
     [AGENT_PATH]: () =>
       json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
     [RUN_EVENTS]: () =>
@@ -620,13 +785,262 @@ it("shows Cancel while the invoked run streams and cancels it by run id", async 
     },
   })
   const user = userEvent.setup()
-  mount()
-  await openAgentPanel(user)
-  await user.click(screen.getByRole("button", { name: "Ask agent" }))
+  mount(true)
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
   await screen.findByText("partial")
   await user.click(screen.getByRole("button", { name: "Cancel" }))
   await waitFor(() => expect(canceled).toEqual({ runId: RUN_ID }))
   act(() => controller.close())
+}, 10000)
+
+it("keeps a refused invocation's ask visible and names the reason", async () => {
+  const refusedTurn = {
+    ...runningTurn,
+    status: "failed",
+    errorCode: "disabled",
+    completedAt: 1_700_000_001,
+  }
+  let posted = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({ items: posted ? [askMessage] : [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () => {
+      posted = true
+      return json(
+        { message: askMessage, turn: refusedTurn, runId: RUN_ID },
+        201
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // The question stays team-visible even though no reply came …
+  const thread = await screen.findByRole("list", { name: "Messages" })
+  expect(await within(thread).findByText("help")).toBeVisible()
+  // … and the refusal is surfaced rather than left as a pending state.
+  expect(await screen.findByRole("alert")).toBeVisible()
+  expect(within(thread).queryByText(/asked by/)).toBeNull()
+})
+
+it("surfaces an error when the invocation is refused outright (503)", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () => json({ code: "unavailable" }, 503),
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  expect(await screen.findByRole("alert")).toBeVisible()
+})
+
+it("points an unconnected provider at the one place it can be fixed", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [
+          {
+            provider: "claude",
+            state: "reconnect_required",
+            accountLabel: "sagar@example.test",
+            checkedAt: 1_700_000_000,
+            errorCode: "unauthorized",
+          },
+        ],
+      }),
+  })
+  mount(true)
+  expect(await screen.findByText("claude is not connected yet.")).toBeVisible()
+  expect(
+    screen.getByRole("link", { name: "Personal AI connections" })
+  ).toHaveAttribute("href", "/settings")
+})
+
+const completedTurn = {
+  ...runningTurn,
+  response: "do X",
+  status: "completed",
+  completedAt: 1_700_000_050,
+  activity: [
+    {
+      seq: 1,
+      offset: 0,
+      id: "call-1",
+      kind: "tool_call",
+      name: "Read",
+      input: '{"file_path":"/tmp/notes.md"}',
+      inputTruncated: false,
+    },
+    {
+      seq: 2,
+      offset: 0,
+      id: "result-1",
+      kind: "tool_result",
+      callId: "call-1",
+      output: "two lines",
+      outputTruncated: false,
+      isError: false,
+    },
+  ],
+}
+
+it("replays this reader's own stored trace when the conversation is reopened", async () => {
+  const mock = mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({ items: [askMessage, replyMessage], nextAfter: null }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    [TEAM_SESSION("claude")]: () => json(teamSession),
+    [TEAM_SESSION("codex")]: () => json({ code: "not_found" }, 404),
+    [TURNS]: () => json({ items: [completedTurn], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount()
+  // The reply is there from the message list; the trace comes from the turn.
+  expect(await screen.findByText("do X")).toBeVisible()
+  const summary = await screen.findByRole("button", {
+    name: /1 tool calls, 1 results/,
+  })
+  await user.click(summary)
+  expect(screen.getByText("Read")).toBeVisible()
+  expect(screen.getByText("/tmp/notes.md")).toBeVisible()
+  expect(screen.getByText("two lines")).toBeVisible()
+  expect(mock.unknown).toEqual([])
+})
+
+it("re-reads only what is new after a run completes", async () => {
+  const reads: string[] = []
+  const mock = mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({ items: [askMessage, replyMessage], nextAfter: null }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    [TEAM_SESSION("claude")]: () => json(teamSession),
+    [TEAM_SESSION("codex")]: () => json({ code: "not_found" }, 404),
+    [TURNS]: () => {
+      reads.push("all")
+      return json({ items: [completedTurn], nextAfter: null })
+    },
+    [`${TURNS}?after=1`]: () => {
+      reads.push("after=1")
+      return json({ items: [], nextAfter: null })
+    },
+    [AGENT_PATH]: () =>
+      json(
+        {
+          message: { ...askMessage, id: replyMessage.id, sequence: "3" },
+          turn: { ...runningTurn, sequence: "2" },
+          runId: RUN_ID,
+        },
+        201
+      ),
+    [`GET ${path}?after=3`]: () => json({ items: [], nextAfter: null }),
+    [RUN_EVENTS]: () =>
+      sseBody('{"type":"finished","status":"completed","errorCode":null}'),
+  })
+  const user = userEvent.setup()
+  mount()
+  await screen.findByRole("button", { name: /1 tool calls/ })
+  expect(reads).toEqual(["all"])
+  await user.type(screen.getByRole("textbox", { name: "Message" }), "and then?")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // The settled turn is settled forever, so the next read starts after it
+  // rather than pulling the whole history down again.
+  await waitFor(() => expect(reads).toEqual(["all", "after=1"]))
+  expect(mock.unknown).toEqual([])
+})
+
+it("never attaches another person's private trace to their reply", async () => {
+  // The holder the server handed back is owned by someone else. Even if it
+  // arrived, its turns are not this reader's to see.
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({
+        items: [
+          { ...askMessage, authorId: 2, authorName: "Riya" },
+          { ...replyMessage, authorId: 2, authorName: "Riya" },
+        ],
+        nextAfter: null,
+      }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    [TEAM_SESSION("claude")]: () => json({ ...teamSession, ownerId: 2 }),
+    [TEAM_SESSION("codex")]: () => json({ code: "not_found" }, 404),
+    [TURNS]: () => json({ items: [completedTurn], nextAfter: null }),
+  })
+  mount()
+  expect(await screen.findByText("do X")).toBeVisible()
+  await waitFor(() => expect(screen.queryByText(/tool calls/)).toBeNull())
+  expect(screen.queryByText("Read")).toBeNull()
+})
+
+it("rejoins a run that was still going, without re-sending anything", async () => {
+  const attachments: string[] = []
+  const posts: string[] = []
+  let replied = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({
+        items: replied ? [askMessage, replyMessage] : [askMessage],
+        nextAfter: null,
+      }),
+    [`GET ${path}?after=1`]: () =>
+      json({ items: replied ? [replyMessage] : [], nextAfter: null }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    [AGENT_PATH]: () => {
+      posts.push("invoked")
+      return json(
+        { message: askMessage, turn: runningTurn, runId: RUN_ID },
+        201
+      )
+    },
+    [TEAM_SESSION("claude")]: () => json(teamSession),
+    [TEAM_SESSION("codex")]: () => json({ code: "not_found" }, 404),
+    [TURNS]: () =>
+      json({
+        items: [replied ? completedTurn : runningTurn],
+        nextAfter: null,
+      }),
+    [RUN_EVENTS]: () => {
+      attachments.push(RUN_ID)
+      replied = true
+      return sseBody(
+        '{"type":"chunk","text":"resumed"}',
+        '{"type":"finished","status":"completed","errorCode":null}'
+      )
+    },
+  })
+  mount()
+  // Reopening attaches to the run already in flight and streams it …
+  expect(await screen.findByText("do X")).toBeVisible()
+  // … exactly once, and it never re-posts the prompt.
+  expect(posts).toEqual([])
+  expect(attachments).toEqual([RUN_ID])
+  expect(
+    within(screen.getByRole("list", { name: "Messages" })).getAllByRole(
+      "listitem"
+    )
+  ).toHaveLength(2)
 })
 
 const pushing = () => json({ ...nativeCapabilities, realtime: true })
@@ -715,7 +1129,7 @@ it("keeps polling and says so when the server does not push", async () => {
  * one character per line while a long action label held the row open, pushing
  * the composer off-screen.
  */
-it("keeps the chat header on one row with a title that can give way", async () => {
+it("keeps the chat header on one compact row with a title that can give way", async () => {
   // The view adopts the server's copy after its first load, so the long title
   // has to come back from the resource route too.
   const longTitled = { ...resource, title: "Nested team review [test]" }
@@ -761,4 +1175,39 @@ it("keeps the chat header on one row with a title that can give way", async () =
   // The visible label collapses on a phone; the accessible name never does —
   // `getByRole` above already proves that.
   expect(share.querySelector("span")).toHaveClass("hidden", "sm:inline")
+})
+
+it("keeps what was typed while a send was in flight", async () => {
+  // The composer stays usable during a send, because an agent run shares this
+  // box and can take minutes. That makes the clear a race: by the time the
+  // server answers, the next message may already be half-written. Clearing the
+  // box wholesale would delete it in front of the person typing it.
+  let release!: (value: Response) => void
+  const user = userEvent.setup()
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}`]: () =>
+      new Promise<Response>((resolve) => {
+        release = resolve
+      }),
+  })
+  mount()
+  const composer = await screen.findByRole("textbox", { name: "Message" })
+  await user.type(composer, "first message")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(release).toBeDefined())
+
+  // Still usable, and used.
+  expect(composer).toBeEnabled()
+  await user.clear(composer)
+  await user.type(composer, "second thought")
+  await act(async () => {
+    release(json({ ...message, body: "first message" }, 201))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  })
+  // The send cleared what it sent, and nothing else.
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+    "second thought"
+  )
 })

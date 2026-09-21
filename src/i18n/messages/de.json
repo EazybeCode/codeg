@@ -178,7 +178,11 @@
     "signInCodeHint": "Öffne die Seite und bestätige, füge dann den erhaltenen Code hier ein.",
     "testConnection": "Testen",
     "testConnectionNamed": "{name}-Verbindung testen",
-    "testingConnection": "Wird getestet…"
+    "testingConnection": "Wird getestet…",
+    "renameFailed": "Dieser Name konnte nicht gespeichert werden.",
+    "activityWorking": "Arbeitet…",
+    "activityRunningTool": "Führt {name} aus…",
+    "activityElapsed": "{number}s"
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

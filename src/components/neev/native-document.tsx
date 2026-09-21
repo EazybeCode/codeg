@@ -229,7 +229,7 @@ function Document({
     setDocWidthState(next)
     setDocWidth(next)
   }
-  const [latest, setLatest] = useState(resource),
+  const [latest, setLatestState] = useState(resource),
     [draft, setDraft] = useState<Body>(emptyBody),
     [conversion, setConversion] = useState<RichDocument | null>(null),
     [conversionFailed, setConversionFailed] = useState(false),
@@ -279,6 +279,21 @@ function Document({
     enabled: !loading && !revoked,
     onPoll: refresh,
   })
+  /**
+   * The current resource, readable by code that resumed after an await.
+   *
+   * `latest` is state, so it is only true from the NEXT render — and the work
+   * here hands off between saves, automatic naming and renames within a single
+   * tick, each needing the revision the one before it produced. Reading the
+   * rendered copy would precondition on a revision the server has already moved
+   * past. The ref is written first, so it is true the moment it changes.
+   */
+  const latestRef = useRef(resource)
+  function setLatest(next: NativeResource) {
+    latestRef.current = next
+    setLatestState(next)
+  }
+
   const documentError =
     error ?? (conflict ? new NativeClientError("conflict") : null)
   const visibleEditorGeneration = editorGeneration.current
@@ -462,9 +477,12 @@ function Document({
         throw new NativeClientError("invalid_response")
       setLatest(metadata)
       onChanged(metadata)
-      if (!(await loadHistory(metadata.contentRevision))) return
+      // The revision list is for the history panel; the body is the page. They
+      // do not depend on each other, so waiting for the list before asking for
+      // the body put a round trip in front of the first thing anyone reads.
+      const history = loadHistory(metadata.contentRevision)
       // Dirty or ambiguously committed drafts keep BOTH original preconditions.
-      if (
+      const wantsBody =
         !dirty.current &&
         !retry.current &&
         !sending.current &&
@@ -472,8 +490,18 @@ function Document({
         (validateContent ||
           !loaded ||
           metadata.contentRevision !== base.current.content)
-      ) {
-        const body = await readBody(metadata)
+      // Started BEFORE the history is awaited, so the two travel together, and
+      // awaited as a pair so neither can fail unobserved — a body that rejects
+      // while the history is still in flight lands in the catch below rather
+      // than escaping as an unhandled rejection. The checks that decide whether
+      // to USE the body still run after both have arrived.
+      const [current, pendingBody] = await Promise.all([
+        history,
+        wantsBody ? readBody(metadata) : null,
+      ])
+      if (!current) return
+      if (wantsBody) {
+        const body = pendingBody
         if (
           !scope.isCurrent() ||
           dirty.current ||
@@ -533,7 +561,13 @@ function Document({
       conflict ||
       stalled ||
       latest.archived ||
-      sending.current
+      sending.current ||
+      // An unproved session must not be written under. Every other writer here
+      // is something a person did, and a held surface is inert so they cannot;
+      // this one would fire on its own. The draft is safe either way — it stays
+      // in the editor — and the next edit after the session is proved again
+      // schedules the save that was skipped.
+      !auth.verified
     )
       return
     const timer = window.setTimeout(() => void save(), autosaveMs)
@@ -542,7 +576,16 @@ function Document({
     // leaves something still unsaved; the rest are the conditions that make
     // saving possible at all.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft, pass, loaded, conflict, stalled, latest.archived, AUTOSAVE_MS])
+  }, [
+    draft,
+    pass,
+    loaded,
+    conflict,
+    stalled,
+    latest.archived,
+    autosaveMs,
+    auth.verified,
+  ])
 
   /**
    * Name it once, from what was written, after it is first saved.
@@ -558,6 +601,106 @@ function Document({
    * would still hold the old auth revision and be refused.
    */
   const pendingName = useRef(fresh)
+  /**
+   * The name while it is being typed, and null when it is not.
+   *
+   * Renaming by hand is the reader's decision, so the moment they touch it the
+   * automatic naming stops — a name someone chose is never overwritten.
+   */
+  const [titleDraft, setTitleDraft] = useState<string | null>(null)
+  const [renaming, setRenaming] = useState(false)
+  const [titleError, setTitleError] = useState<unknown>(null)
+  const canRename = actions?.isCreator === true && !latest.archived
+  /**
+   * The typed name, readable synchronously.
+   *
+   * Escape clears the draft and blurs in the same tick, and the blur handler
+   * would otherwise still be holding the render's copy of it — cancelling would
+   * save the very text it cancelled. A ref is cleared the instant Escape is
+   * pressed, so what the commit reads is what is actually true.
+   */
+  const titleDraftRef = useRef<string | null>(null)
+  /** `renaming` as a guard, before the re-render that would show it. */
+  const renamingRef = useRef(false)
+  /** Unique per document, so cached tabs do not share one field. */
+  const titleFieldId = `neev-document-title-${resource.id}`
+
+  function editTitle(value: string | null) {
+    // Touching the title is choosing the name. Automatic naming stops here,
+    // not at the commit: a name derived from the body landing midway through
+    // typing would be overwriting a decision already visibly being made.
+    if (value !== null) pendingName.current = false
+    titleDraftRef.current = value
+    setTitleDraft(value)
+  }
+
+  async function commitTitle() {
+    const next = (titleDraftRef.current ?? "").trim()
+    editTitle(null)
+    // Nothing typed, unchanged, or already cancelled: not a rename.
+    if (
+      !next ||
+      next === latestRef.current.title ||
+      !auth.session ||
+      renamingRef.current
+    )
+      return
+    renamingRef.current = true
+    setRenaming(true)
+    setTitleError(null)
+    // Joins the same queue the body save uses, and becomes the thing others
+    // wait for. Waiting without taking the lock let a flush return past this
+    // rename, and let the autosave timer be consumed while it ran.
+    const running = renameTo(inFlight.current, next)
+    inFlight.current = running
+    await running
+  }
+
+  async function renameTo(previous: Promise<void>, next: string) {
+    // A rename changes the auth revision, so a save already running must
+    // finish first — its revision is the one this has to build on.
+    await previous
+    try {
+      if (!scope.isCurrent() || !auth.session) return
+      // Read AFTER the wait: a save that just landed, or the automatic naming
+      // that follows it, may have moved the revision this must precondition on.
+      const metadata = latestRef.current
+      sending.current = true
+      const renamed = await updateNativeResource(
+        resource.orgId,
+        resource.id,
+        {
+          nodeId: metadata.nodeId,
+          title: next,
+          visibility: metadata.visibility,
+          archived: metadata.archived,
+          expectedAuthRevision: metadata.authRevision,
+        },
+        auth.session.csrf,
+        scope.signal
+      )
+      if (!scope.isCurrent()) return
+      base.current = { ...base.current, auth: renamed.authRevision }
+      setLatest(renamed)
+      onChanged(renamed)
+    } catch (cause) {
+      if (!scope.isCurrent()) return
+      // Say so and keep what was typed, rather than showing the old name back
+      // as though nothing had been asked for.
+      setTitleError(cause)
+      editTitle(next)
+      auth.handleAuthorityError(cause)
+    } finally {
+      sending.current = false
+      renamingRef.current = false
+      if (scope.isCurrent()) {
+        setRenaming(false)
+        // An autosave that came due while this held the lock was declined and
+        // never rescheduled. Anything still unsaved asks for a new timer.
+        if (dirty.current) setPass((value) => value + 1)
+      }
+    }
+  }
   async function nameFromWriting(metadata: NativeResource) {
     if (!pendingName.current || !auth.session) return
     // A document already named by hand is never renamed by us.
@@ -1069,9 +1212,51 @@ function Document({
         </DropdownMenu>
       </header>
       <div className="pb-1 pt-4">
-        <h1 className="break-words text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em]">
-          {latest.title}
-        </h1>
+        {/*
+          The title IS the control. Renaming was a menu item three clicks away,
+          which is why every document stayed called `Untitled`: the obvious
+          thing to do — click the name and type — did nothing at all.
+        */}
+        {canRename ? (
+          <>
+            <label className="sr-only" htmlFor={titleFieldId}>
+              {t("title")}
+            </label>
+            <input
+              id={titleFieldId}
+              value={titleDraft ?? latest.title}
+              disabled={renaming}
+              maxLength={100}
+              onChange={(event) => editTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) return
+                if (event.key === "Enter") {
+                  event.preventDefault()
+                  event.currentTarget.blur()
+                }
+                // Escape restores the stored name and gives the page back.
+                // Clearing the ref first is what makes it a cancellation: the
+                // blur below runs the commit, and finds nothing to save.
+                if (event.key === "Escape") {
+                  event.preventDefault()
+                  editTitle(null)
+                  event.currentTarget.blur()
+                }
+              }}
+              onBlur={() => void commitTitle()}
+              className="w-full break-words border-0 bg-transparent p-0 text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em] outline-none placeholder:text-muted-foreground/40 disabled:opacity-70"
+            />
+          </>
+        ) : (
+          <h1 className="break-words text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em]">
+            {latest.title}
+          </h1>
+        )}
+        {titleError !== null && (
+          <p role="alert" className="mt-1 text-xs text-destructive">
+            {t("renameFailed")}
+          </p>
+        )}
       </div>
       {!loaded ? (
         <div className="space-y-3">

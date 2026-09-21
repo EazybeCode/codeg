@@ -178,7 +178,11 @@
     "signInCodeHint": "打开页面并批准，然后把拿到的代码粘贴回这里。",
     "testConnection": "测试",
     "testConnectionNamed": "测试 {name} 连接",
-    "testingConnection": "正在测试…"
+    "testingConnection": "正在测试…",
+    "renameFailed": "无法保存该名称。",
+    "activityWorking": "处理中…",
+    "activityRunningTool": "正在运行 {name}…",
+    "activityElapsed": "{number} 秒"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

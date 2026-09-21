@@ -40,8 +40,11 @@ import {
 } from "@/components/ui/select"
 import {
   describeToolInput,
+  elapsedSeconds,
   mergeActivity,
+  runningTool,
   summariseActivity,
+  visibleActivity,
 } from "@/lib/neev-agent-activity"
 import { type NeevActivityItem } from "@/lib/neev-agent-sessions-client"
 import { cn } from "@/lib/utils"
@@ -568,7 +571,7 @@ function NewAgentChat({
       <div className="flex min-h-0 flex-1 items-end justify-center px-4 pb-2 sm:px-8">
         <div className="w-full max-w-[832px] pb-4">
           <h1 className="text-xl font-semibold tracking-tight">
-            {t(provider === "claude" ? "newClaudeChat" : "newCodexChat")}
+            {t("newAgentChat")}
           </h1>
           <p className="mt-1 text-sm leading-6 text-muted-foreground">
             {t("agentChatsPrivate")}
@@ -818,55 +821,99 @@ function CreateSessionDialog({
  * Everything rendered here is model-authored text. It is displayed and nothing
  * else: never parsed into a request, never put in a URL, never executed.
  */
-function AgentActivity({ items }: { items: NeevActivityItem[] }) {
+/**
+ * What the agent did, and what it is doing.
+ *
+ * A subdued line rather than a bordered panel: while a turn runs it says so
+ * immediately, counts the seconds, and names the tool currently in flight; when
+ * it is done it collapses to a count that opens into concise rows. The
+ * provider's own bookkeeping — `end_turn`, `success`, the model line — is left
+ * out, because a row that repeats what the transcript already shows is noise
+ * between the reader and the answer.
+ */
+export function ActivityTimeline({
+  items,
+  running,
+  startedAt,
+}: {
+  /** The turn's activity, already merged with anything arriving live. */
+  items: NeevActivityItem[]
+  /** Whether this turn is still going, so the status shows at once. */
+  running: boolean
+  /** When the turn began, in epoch milliseconds; null if unknown. */
+  startedAt: number | null
+}) {
   const t = useTranslations("NativeContent")
+  const n = useTranslations("Native")
   const [open, setOpen] = useState(false)
   const [shown, setShown] = useState<number | null>(null)
-  if (items.length === 0) return null
-  const summary = summariseActivity(items)
+  // The clock only advances from the interval — reading the time during render,
+  // or writing it as the effect runs, would be a side effect in the wrong place.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!running || startedAt === null) return
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [running, startedAt])
+
+  const visible = visibleActivity(items)
+  if (!running && visible.length === 0) return null
+  const summary = summariseActivity(visible)
+  const current = running ? runningTool(visible) : null
+  const seconds =
+    running && startedAt !== null ? elapsedSeconds(startedAt, now) : null
+
   return (
-    <div className="my-2 rounded-lg border bg-muted/30 text-[13px]">
+    <div className="my-1.5 text-[13px]">
       <button
         type="button"
         aria-expanded={open}
+        disabled={visible.length === 0}
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-start text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-w-0 max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-start text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:hover:text-muted-foreground"
       >
-        <ChevronRight
-          aria-hidden
-          className={cn(
-            "size-3.5 shrink-0 transition-transform",
-            open && "rotate-90"
-          )}
-        />
+        {visible.length > 0 && (
+          <ChevronRight
+            aria-hidden
+            className={cn(
+              "size-3.5 shrink-0 transition-transform",
+              open && "rotate-90"
+            )}
+          />
+        )}
         <span className="truncate">
-          {t("activitySummary", {
-            number: summary.calls,
-            name: String(summary.results),
-          })}
+          {running
+            ? current
+              ? t("activityRunningTool", { name: current.name })
+              : t("activityWorking")
+            : t("activitySummary", {
+                number: summary.calls,
+                name: String(summary.results),
+              })}
         </span>
+        {seconds !== null && (
+          <span className="shrink-0 tabular-nums opacity-70">
+            {t("activityElapsed", { number: seconds })}
+          </span>
+        )}
         {summary.errors > 0 && (
           <span className="shrink-0 text-destructive">
             {t("activityErrors", { number: summary.errors })}
           </span>
         )}
       </button>
-      {open && (
-        <ul className="space-y-0.5 border-t px-1.5 py-1.5">
-          {items.map((item) => (
+      {open && visible.length > 0 && (
+        <ul className="mt-0.5 space-y-0.5 border-s ps-2">
+          {visible.map((item) => (
             <li key={item.seq}>
               {item.kind === "status" ? (
                 <p
                   role="status"
-                  className="px-1.5 py-1 text-xs text-muted-foreground"
+                  className="px-1 py-0.5 text-xs text-muted-foreground"
                 >
                   {item.state === "truncated"
                     ? t("activityTruncated")
-                    : item.state === "unsupported"
-                      ? t("activityUnsupported", {
-                          name: item.detail ?? "",
-                        })
-                      : (item.detail ?? item.state)}
+                    : t("activityUnsupported", { name: item.detail ?? "" })}
                 </p>
               ) : (
                 <>
@@ -878,7 +925,7 @@ function AgentActivity({ items }: { items: NeevActivityItem[] }) {
                         value === item.seq ? null : item.seq
                       )
                     }
-                    className="flex w-full min-w-0 items-baseline gap-2 rounded px-1.5 py-1 text-start hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-start hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     {item.kind === "tool_call" ? (
                       <>
@@ -900,12 +947,12 @@ function AgentActivity({ items }: { items: NeevActivityItem[] }) {
                       >
                         {item.isError
                           ? t("activityFailed")
-                          : t("activityReturned")}
+                          : oneLineOf(item.output)}
                       </span>
                     )}
                   </button>
                   {shown === item.seq && (
-                    <pre className="mx-1.5 mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 font-mono text-xs">
+                    <pre className="mx-1 mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 p-2 font-mono text-xs">
                       {item.kind === "tool_call" ? item.input : item.output}
                       {(item.kind === "tool_call"
                         ? item.inputTruncated
@@ -922,8 +969,18 @@ function AgentActivity({ items }: { items: NeevActivityItem[] }) {
           ))}
         </ul>
       )}
+      <span className="sr-only">{running ? n("working") : ""}</span>
     </div>
   )
+}
+
+/** A tool's output as one readable line, for the collapsed row. */
+function oneLineOf(output: string): string {
+  const flat = output.replace(/\s+/g, " ").trim()
+  const characters = [...flat]
+  return characters.length <= 80
+    ? flat
+    : `${characters.slice(0, 79).join("").trimEnd()}…`
 }
 
 function AgentSessionView({
@@ -1248,12 +1305,16 @@ function AgentSessionView({
                   </div>
                 ) : (
                   <>
-                    <AgentActivity
+                    <ActivityTimeline
                       items={
                         turn.runId === activeRun
                           ? mergeActivity(turn.activity, liveActivity)
                           : turn.activity
                       }
+                      running={
+                        turn.runId === activeRun && turn.status === "running"
+                      }
+                      startedAt={turn.createdAt * 1000}
                     />
                     {turn.response && (
                       <NativeMarkdown markdown={turn.response} />
