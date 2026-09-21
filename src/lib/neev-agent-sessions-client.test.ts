@@ -499,8 +499,12 @@ describe("sign-in approval", () => {
     userCode: "ABCD-EFGH",
     needsCode: false,
   }
+  // EXACTLY what the server sends: `approval_dto` in agent_sessions.rs writes
+  // the literal "authorizationCode", camelCase like every other field in the
+  // payload. This fixture previously used the snake_case spelling the client
+  // happened to expect, so the suite passed while live sign-in showed no link.
   const pasted = {
-    kind: "authorization_code",
+    kind: "authorizationCode",
     verificationUrl: "https://claude.com/cai/oauth/authorize",
     userCode: null,
     needsCode: true,
@@ -535,6 +539,20 @@ describe("sign-in approval", () => {
       verificationUrl: pasted.verificationUrl,
       needsCode: true,
     })
+  })
+
+  it("still accepts the snake_case spelling of the paste-code kind", () => {
+    // Kept so a client and server that disagree about spelling cannot strand a
+    // user mid-sign-in again — the failure this guards was invisible until it
+    // reached a real browser.
+    const attempt = (approval: unknown) =>
+      parseConnectAttempt(
+        { state: "pending", expiresAt: 1_700_000_600, approval },
+        "claude"
+      ).approval
+    expect(attempt({ ...pasted, kind: "authorization_code" })).toEqual(
+      attempt(pasted)
+    )
   })
 
   it("refuses an approval that could mislead or be unsafe to render", () => {

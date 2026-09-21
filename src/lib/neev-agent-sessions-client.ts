@@ -734,6 +734,9 @@ export type NeevConnectOutcome =
  * the supervisor polls — Neev needs nothing further.
  * `authorization_code` (Claude): the user approves in their own browser and
  * pastes the code they are given back into Neev.
+ *
+ * These are the INTERNAL names. The server sends `authorizationCode`; see
+ * `approvalKind` for the mapping.
  */
 export type NeevApproval =
   | { kind: "device"; verificationUrl: string; userCode: string }
@@ -792,6 +795,25 @@ function verificationUrl(value: unknown, provider: NeevAgentProvider): string {
   return raw
 }
 
+/**
+ * The wire's `kind`, mapped to ours.
+ *
+ * The server sends `authorizationCode` — a literal in `approval_dto`, matching
+ * the camelCase of every other field in the payload. This client originally
+ * read `authorization_code`, so the whole approval failed to parse and the
+ * panel sat on "waiting for sign-in" with no link to open: the one screen where
+ * the user cannot proceed without it.
+ *
+ * The snake_case spelling is still accepted. It costs one line, and rejecting a
+ * payload over its spelling is precisely what caused this.
+ */
+function approvalKind(value: unknown): "device" | "authorization_code" | null {
+  if (value === "device") return "device"
+  if (value === "authorizationCode" || value === "authorization_code")
+    return "authorization_code"
+  return null
+}
+
 export function parseApproval(
   value: unknown,
   provider: NeevAgentProvider
@@ -802,9 +824,10 @@ export function parseApproval(
     "userCode",
     "needsCode",
   ])
+  const kind = approvalKind(object.kind)
   const url = verificationUrl(object.verificationUrl, provider)
   if (typeof object.needsCode !== "boolean") return invalid()
-  if (object.kind === "device") {
+  if (kind === "device") {
     // A device flow is only actionable with a code to type; and it never asks
     // for one back, so a `needsCode` device payload is self-contradictory.
     const userCode = text(object.userCode)
@@ -812,7 +835,7 @@ export function parseApproval(
       return invalid()
     return { kind: "device", verificationUrl: url, userCode }
   }
-  if (object.kind === "authorization_code") {
+  if (kind === "authorization_code") {
     if (object.userCode !== null) return invalid()
     return {
       kind: "authorization_code",

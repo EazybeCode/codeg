@@ -460,7 +460,7 @@ it("skips polling while the tab is hidden and resumes when it returns", async ()
   await waitFor(() => expect(polls).toBeGreaterThan(0))
 })
 
-it("rides out a transient poll failure and then reports the wait as failed", async () => {
+it("rides out a transient poll failure and then stops without a verdict", async () => {
   let polls = 0
   mockNativeSession(undefined, {
     "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
@@ -486,11 +486,17 @@ it("rides out a transient poll failure and then reports the wait as failed", asy
   )
   // One blip must not abandon a live sign-in, but a dead endpoint must not be
   // hammered forever either.
-  expect(await screen.findByText("Sign-in failed.")).toBeVisible()
+  expect(await screen.findByRole("alert")).toBeVisible()
   const settled = polls
   expect(settled).toBeGreaterThan(1)
   await new Promise((resolve) => setTimeout(resolve, 60))
   expect(polls).toBe(settled)
+  // Giving up on the poll is not a verdict on the sign-in. The server never
+  // answered, so the wait stands and the user keeps the way out.
+  expect(screen.queryByText("Sign-in failed.")).toBeNull()
+  expect(
+    screen.getByRole("button", { name: "Cancel claude sign-in" })
+  ).toBeEnabled()
 })
 
 it("names the provider on every action so two rows are distinguishable", async () => {
@@ -520,8 +526,11 @@ const DEVICE_APPROVAL = {
   userCode: "ABCD-EFGH",
   needsCode: false,
 }
+// The literal the server sends (`approval_dto`, agent_sessions.rs). This
+// fixture used to carry the snake_case spelling the client expected, which is
+// why the suite stayed green while live sign-in showed no link to open.
 const CODE_APPROVAL = {
-  kind: "authorization_code",
+  kind: "authorizationCode",
   verificationUrl: "https://claude.com/cai/oauth/authorize?x=1",
   userCode: null,
   needsCode: true,
@@ -660,4 +669,129 @@ it("shows no approval prompt until the server has produced one", async () => {
   expect(
     await screen.findByRole("link", { name: "Open the sign-in page" })
   ).toBeVisible()
+})
+
+it("keeps a sign-in cancellable when polling gives up", async () => {
+  // Observed live: the poll failed repeatedly, the client called the sign-in
+  // "failed", cleared the attempt AND its stored copy — leaving a "connecting"
+  // row with no Cancel and nothing for a reload to recover, while the server
+  // still held a live attempt. Only the server may declare a sign-in over.
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      provider: "claude",
+      attemptId: ATTEMPT_ID,
+      expiresAt: FAR_FUTURE,
+      cancelKey: "cancel-key-1",
+      connectKey: "connect-key-1",
+    })
+  )
+  let polls = 0
+  let canceled: Record<string, unknown> | null = null
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("connecting")),
+    [ATTEMPT]: () => {
+      polls += 1
+      return json({ error: "unavailable" }, 503)
+    },
+    [CANCEL]: (init) => {
+      canceled = JSON.parse(init.body as string)
+      return json({ operationId: OPERATION_ID, generation: "3" })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+
+  // It stops hammering the endpoint...
+  await waitFor(() => expect(polls).toBeGreaterThan(3))
+  const settled = polls
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  expect(polls).toBe(settled)
+
+  // ...without inventing an outcome the server never gave.
+  expect(screen.queryByText("Sign-in failed.")).toBeNull()
+  expect(await screen.findByRole("alert")).toBeVisible()
+
+  // The wait, its stored copy and the way out all survive.
+  expect(screen.getByText("Waiting for sign-in\u2026")).toBeVisible()
+  expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull()
+  await user.click(
+    screen.getByRole("button", { name: "Cancel claude sign-in" })
+  )
+  await waitFor(() =>
+    expect(canceled).toEqual({
+      attemptId: ATTEMPT_ID,
+      requestKey: "cancel-key-1",
+    })
+  )
+})
+
+it("resumes a stalled sign-in when the user asks for status", async () => {
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      provider: "claude",
+      attemptId: ATTEMPT_ID,
+      expiresAt: FAR_FUTURE,
+      cancelKey: "cancel-key-1",
+      connectKey: "connect-key-1",
+    })
+  )
+  let failing = true
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("connecting")),
+    [ATTEMPT]: () =>
+      failing
+        ? json({ error: "unavailable" }, 503)
+        : json({
+            state: "pending",
+            expiresAt: FAR_FUTURE,
+            approval: CODE_APPROVAL,
+          }),
+  })
+  const user = userEvent.setup()
+  mount()
+  expect(await screen.findByRole("alert")).toBeVisible()
+  expect(
+    screen.queryByRole("link", { name: "Open the sign-in page" })
+  ).toBeNull()
+
+  failing = false
+  await user.click(screen.getByRole("button", { name: "Refresh status" }))
+
+  // Polling picks the same attempt back up and the approval appears.
+  expect(
+    await screen.findByRole("link", { name: "Open the sign-in page" })
+  ).toBeVisible()
+})
+
+it("offers a way out of a sign-in this browser never started", async () => {
+  // Started in another browser, or stranded by a page that lost its attempt:
+  // with no attempt id there is nothing to cancel, so the row used to have no
+  // actions at all. `intents::disconnect` accepts `connecting` and cancels the
+  // pending attempt, so that is the recovery.
+  let disconnected: Record<string, unknown> | null = null
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("connecting")),
+    [DISCONNECT]: (init) => {
+      disconnected = JSON.parse(init.body as string)
+      return json({ operationId: OPERATION_ID, generation: "3" })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+
+  const disconnect = await screen.findByRole("button", {
+    name: "Disconnect claude",
+  })
+  // Nothing else: there is no connection yet to test, and a second sign-in
+  // over a live one is not a recovery.
+  expect(screen.queryByRole("button", { name: "Connect claude" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "Reconnect claude" })).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: "Test claude connection" })
+  ).toBeNull()
+
+  await user.click(disconnect)
+  await waitFor(() => expect(disconnected).not.toBeNull())
 })

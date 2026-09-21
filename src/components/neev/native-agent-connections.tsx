@@ -141,6 +141,9 @@ export function NativeAgentConnectionsPanel({
   const [tested, setTested] = useState<NeevAgentConnection | null>(null)
   const [code, setCode] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  // Polling gave up, but the sign-in did NOT fail: the server was never heard
+  // from. The attempt stays, so Cancel stays, and "Refresh status" resumes.
+  const [stalled, setStalled] = useState(false)
   // Per-provider connect keys for the current page. A resumed attempt carries
   // its own key, so a reload never loses the ability to replay rather than
   // start a second sign-in.
@@ -154,6 +157,9 @@ export function NativeAgentConnectionsPanel({
       : null
 
   const refresh = useCallback(() => {
+    // Also the explicit way out of a stalled poll: asking for status is asking
+    // for the wait to be picked back up.
+    setStalled(false)
     setRefreshToken((value) => value + 1)
     onRefresh?.()
   }, [onRefresh])
@@ -171,6 +177,7 @@ export function NativeAgentConnectionsPanel({
   const remember = useCallback(
     (next: Attempt | null) => {
       setAttempt(next)
+      setStalled(false)
       if (storageKey) writeStoredAttempt(storageKey, next)
     },
     [storageKey]
@@ -198,7 +205,7 @@ export function NativeAgentConnectionsPanel({
   // Poll the pending sign-in until the server settles it. Nothing here decides
   // the outcome; it only reports the state the server returns.
   useEffect(() => {
-    if (!attempt || !auth.session) return
+    if (!attempt || !auth.session || stalled) return
     const controller = new AbortController()
     let timer = 0
     let failures = 0
@@ -242,9 +249,16 @@ export function NativeAgentConnectionsPanel({
         failures += 1
         // A blip should not abandon a live sign-in, but an endpoint that keeps
         // failing must not be hammered forever either.
+        //
+        // Stop polling — do NOT declare the sign-in failed. Only the server
+        // decides that, and it has said nothing. Calling this "failed" cleared
+        // the attempt and its stored copy, so the row went to "connecting" with
+        // no Cancel and a reload had nothing to restore, while the server still
+        // held a live attempt. The attempt is kept, so Cancel stays available
+        // and a reload resumes; "Refresh status" restarts the wait.
         if (failures > POLL_RETRIES) {
           setError(cause)
-          settle("failed")
+          setStalled(true)
           return
         }
         timer = window.setTimeout(() => void poll(), pollMs * 2 ** failures)
@@ -257,7 +271,7 @@ export function NativeAgentConnectionsPanel({
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [attempt, pollMs, refresh, remember, auth])
+  }, [attempt, pollMs, refresh, remember, auth, stalled])
 
   async function connect(provider: NeevAgentProvider) {
     if (busy || !auth.session) return
@@ -540,11 +554,29 @@ export function NativeAgentConnectionsPanel({
           {t("cancelSignIn")}
         </Button>
       )
+    // A sign-in the server still holds but this browser knows nothing about:
+    // started elsewhere, or stranded here by a page that lost its attempt. With
+    // no attempt id there is nothing to cancel, so the row would otherwise be
+    // permanently actionless. Disconnect is the way out — `intents::disconnect`
+    // accepts `connecting` and cancels the pending attempt with it. Nothing
+    // else is offered: there is no connection yet to test, and starting a
+    // second sign-in over a live one is not a recovery.
+    if (connection.state === "connecting")
+      return (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={working}
+          aria-label={named("disconnectProvider")}
+          onClick={() => void disconnect(provider)}
+        >
+          {t("disconnectProvider")}
+        </Button>
+      )
     // No runtime, or a state the server is already moving through: nothing here
     // could be acted on, so nothing is offered.
     if (
       connection.state === "disabled" ||
-      connection.state === "connecting" ||
       connection.state === "disconnecting" ||
       connection.state === "unavailable"
     )
