@@ -795,3 +795,62 @@ it("offers a way out of a sign-in this browser never started", async () => {
   await user.click(disconnect)
   await waitFor(() => expect(disconnected).not.toBeNull())
 })
+
+it("will not start a second provider's sign-in over a live one", async () => {
+  // The panel holds one attempt and the supervisor's login slot is shared, so
+  // connecting Codex here would overwrite the Claude attempt — and its stored
+  // copy — while the user is still authorizing it, leaving nothing to cancel
+  // it by.
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      provider: "claude",
+      attemptId: ATTEMPT_ID,
+      expiresAt: FAR_FUTURE,
+      cancelKey: "cancel-key-1",
+      connectKey: "connect-key-1",
+    })
+  )
+  let codexConnects = 0
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [
+          connection("connecting"),
+          { ...connection("not_signed_in"), provider: "codex" },
+        ],
+      }),
+    [ATTEMPT]: () =>
+      json({
+        state: "pending",
+        expiresAt: FAR_FUTURE,
+        approval: CODE_APPROVAL,
+      }),
+    [CODEX_CONNECT]: () => {
+      codexConnects += 1
+      return pendingConnect()
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+
+  expect(await screen.findByText("Waiting for sign-in\u2026")).toBeVisible()
+  const codex = screen.getByRole("button", { name: "Connect codex" })
+  expect(codex).toBeDisabled()
+  // Even if the click lands anyway, nothing is sent and the attempt stands.
+  await user.click(codex)
+  expect(codexConnects).toBe(0)
+  expect(JSON.parse(localStorage.getItem(STORAGE_KEY) as string)).toMatchObject(
+    { provider: "claude", attemptId: ATTEMPT_ID }
+  )
+
+  // The live sign-in stays fully usable.
+  expect(
+    screen.getByRole("button", { name: "Cancel claude sign-in" })
+  ).toBeEnabled()
+  expect(screen.getByRole("button", { name: "Refresh status" })).toBeEnabled()
+  expect(
+    screen.getByRole("link", { name: "Open the sign-in page" })
+  ).toBeVisible()
+})

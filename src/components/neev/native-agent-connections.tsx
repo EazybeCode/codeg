@@ -274,7 +274,12 @@ export function NativeAgentConnectionsPanel({
   }, [attempt, pollMs, refresh, remember, auth, stalled])
 
   async function connect(provider: NeevAgentProvider) {
-    if (busy || !auth.session) return
+    // Only one sign-in at a time, and not only because this panel holds one
+    // attempt: the supervisor's login slot is shared, so a second provider
+    // started now would overwrite the attempt — and its stored copy — while the
+    // first is still waiting on the user's authorization, stranding it with
+    // nothing left to cancel it by.
+    if (busy || attempt || !auth.session) return
     setBusy(provider)
     setError(null)
     setOutcome(null)
@@ -531,6 +536,10 @@ export function NativeAgentConnectionsPanel({
   function actionsFor(connection: NeevAgentConnection) {
     const provider = connection.provider
     const working = busy === provider
+    // Another provider's sign-in is still waiting for the user. Starting one
+    // here would replace it, so the verb that would do that is offered but not
+    // usable; cancelling or cleaning up stays available on every row.
+    const otherSignIn = attempt !== null && attempt.provider !== provider
     // Every provider renders the same verbs, so the accessible name has to say
     // which one — otherwise two identical "Connect" buttons are ambiguous to a
     // screen reader and to keyboard navigation.
@@ -602,7 +611,7 @@ export function NativeAgentConnectionsPanel({
         {connection.state !== "connected" && (
           <Button
             size="sm"
-            disabled={working}
+            disabled={working || otherSignIn}
             aria-label={named(
               reconnecting ? "reconnectProvider" : "connectProvider"
             )}
