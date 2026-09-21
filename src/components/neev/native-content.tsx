@@ -35,10 +35,25 @@ export type ContentCreation = {
   request: number
   returnFocus?: HTMLElement | null
 }
-export type ContentOpen = { resource: NativeResource; request: number }
+export type ContentOpen = {
+  resource: NativeResource
+  request: number
+  /** Just created: its name may still follow the first line written in it. */
+  fresh?: boolean
+}
 type Props = {
   node: NativeNode
   onRequestNavigationGuard: (guard: ContentNavigationGuard) => void
+  /** The document's autosave pause; shortened by tests, never in the app. */
+  autosaveMs?: number
+  /**
+   * A resource changed under this surface — renamed, archived, re-shared.
+   *
+   * The workspace keeps the lists the sidebar, the tabs and the breadcrumb all
+   * read from. Without this, a document that names itself from its first line
+   * is called by its new name on the page and `Untitled` everywhere else.
+   */
+  onResourceChanged?: (resource: NativeResource) => void
   creation?: ContentCreation
   /** Shell mode: the left rail owns navigation, so hide the built-in folder index
    *  (tablist + resource list) and render only the open resource / creation. */
@@ -67,6 +82,8 @@ function Content({
   open: openTarget,
   onOpened,
   onCreationCancelled,
+  autosaveMs,
+  onResourceChanged,
 }: Props) {
   const auth = useNativeAuth(),
     router = useRouter(),
@@ -144,11 +161,32 @@ function Content({
     setSaving(false)
     setSelected(resource)
   }, [])
+  /**
+   * Try to save, and only ask if that failed.
+   *
+   * Autosave means "unsaved" is usually "unsaved for another 800ms". Showing
+   * the discard dialog then — with Discard as its emphasized button — offers to
+   * throw away work that was about to be written down anyway. So: flush first,
+   * and put the question to the reader only when the flush did not land, which
+   * is the one case where there is a real choice to make.
+   */
+  // Defaults to "could not save this", so anything that does not offer a
+  // flush — a team chat's unsent message, for instance — still gets asked
+  // about rather than silently passed over as clean.
+  const flush = useRef<() => Promise<boolean>>(async () => false)
+  const registerFlush = useCallback((next: () => Promise<boolean>) => {
+    flush.current = next
+  }, [])
   const guard = useCallback<ContentNavigationGuard>((action) => {
-    if (dirtyRef.current) {
+    if (!dirtyRef.current) return action()
+    const ask = () => {
       opener.current = document.activeElement as HTMLElement
       setPending(() => action)
-    } else action()
+    }
+    void flush
+      .current()
+      .then((saved) => (saved ? action() : ask()))
+      .catch(ask)
   }, [])
   // Shell mode: when the left rail opens a resource, select it directly (guarded
   // against an unsaved draft) and mirror its kind for follow-on actions.
@@ -490,9 +528,17 @@ function Content({
     }
   }
   const changed = useCallback(
-    (resource: NativeResource) =>
-      setSelected((old) => (old?.id === resource.id ? resource : old)),
-    []
+    (resource: NativeResource) => {
+      setSelected((old) => (old?.id === resource.id ? resource : old))
+      setItems((old) =>
+        old.map((item) => (item.id === resource.id ? resource : item))
+      )
+      // And out to whoever owns the lists the sidebar, the tabs and the
+      // breadcrumb read from — otherwise a document that names itself is
+      // called by its new name here and `Untitled` everywhere else.
+      onResourceChanged?.(resource)
+    },
+    [onResourceChanged]
   )
   return (
     <>
@@ -573,7 +619,7 @@ function Content({
                     cancelCreation()
                   }
                 }}
-                className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14 sm:px-10"
+                className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-6 sm:px-10"
               >
                 <p className="text-xs text-muted-foreground">
                   {n("insideFolder", { name: node.name })}
@@ -596,14 +642,14 @@ function Content({
                     onChange={(event) => setTitle(event.target.value)}
                     className="mt-2 w-full border-0 bg-transparent p-0 text-[2.5rem] font-bold leading-[1.2] tracking-tight outline-none placeholder:text-muted-foreground/40"
                   />
-                  <p className="mt-4 text-sm leading-6 text-muted-foreground">
-                    {t(
-                      kind === "chat"
-                        ? "newChatBodyHint"
-                        : "newDocumentBodyHint"
-                    )}
-                  </p>
                   <NativeError error={error} />
+                  {/*
+                    A fallback path only. Documents and chats are made the
+                    moment they are asked for, named `Untitled`, and named
+                    properly by whatever gets written in them — see
+                    `createContent` in native-workspace.tsx. Nothing here
+                    submits on its own.
+                  */}
                   <div className="mt-6 flex gap-2">
                     <Button
                       type="submit"
@@ -699,6 +745,7 @@ function Content({
               <NativeChat
                 key={`${selected.id}:${draftGeneration}`}
                 resource={selected}
+                fresh={openTarget?.fresh === true}
                 onBack={back}
                 onChanged={changed}
                 onDirtyChange={onDirtyChange}
@@ -721,9 +768,12 @@ function Content({
               <NativeDocument
                 key={`${selected.id}:${draftGeneration}`}
                 resource={selected}
+                fresh={openTarget?.fresh === true}
                 onBack={back}
                 onChanged={changed}
                 onDirtyChange={onDirtyChange}
+                onRegisterFlush={registerFlush}
+                autosaveMs={autosaveMs}
                 actions={{
                   isCreator: selected.creatorId === auth.session?.user.id,
                   archived: selected.archived,

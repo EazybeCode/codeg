@@ -58,7 +58,26 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
-function mount(current = resource) {
+/**
+ * Wait for the save that happens on its own, or press the one control left.
+ *
+ * There is no Save button any more: a document saves itself a pause after the
+ * writing stops. The only button is Try again, and it appears only when a save
+ * did not land — which is exactly when a test wants to drive the retry.
+ */
+async function saveOnce(user: ReturnType<typeof userEvent.setup>) {
+  const retry = screen.queryByRole("button", { name: "Try again" })
+  if (retry) {
+    await user.click(retry)
+    return
+  }
+  // Otherwise the save already happened on its own; give it a moment.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400))
+  })
+}
+
+function mount(current = resource, autosaveMs = 150) {
   return render(
     <NativeTestRoot>
       <NativeBoundary>
@@ -67,6 +86,7 @@ function mount(current = resource) {
           onBack={() => {}}
           onChanged={() => {}}
           onDirtyChange={() => {}}
+          autosaveMs={autosaveMs}
         />
       </NativeBoundary>
     </NativeTestRoot>
@@ -91,7 +111,7 @@ it("places document toolbar before the editor in keyboard order", async () => {
     [`GET /api/neev/resources/${resource.id}`]: () => json(empty),
     [`GET ${path}/revisions`]: () => json({ items: [], nextAfter: null }),
   })
-  mount(empty)
+  mount(empty, 1_000_000)
   const editor = await screen.findByRole(
     "textbox",
     { name: "Document content" },
@@ -234,10 +254,10 @@ it.each([409, 400, "lost"] as const)(
     const user = userEvent.setup()
     mount()
     const editor = await editRich("My rich draft")
-    await user.click(screen.getByRole("button", { name: "Save" }))
+    await saveOnce(user)
     expect(await screen.findByRole("alert")).toBeVisible()
     expect(editor).toHaveTextContent("My rich draft")
-    await user.click(screen.getByRole("button", { name: "Save" }))
+    await saveOnce(user)
     expect(bodies).toHaveLength(2)
     expect(bodies[1]).toEqual(bodies[0])
     expect(bodies[1]).toMatchObject({
@@ -271,7 +291,7 @@ it.each([false, true])(
       },
     })
     const user = userEvent.setup()
-    mount()
+    mount(resource, 1_000_000)
     await screen.findByRole("textbox", { name: "Document content" })
     await openMenu(user)
     await user.click(
@@ -462,6 +482,7 @@ it.each(["navigation", "logout"])(
             onBack={() => {}}
             onChanged={changed}
             onDirtyChange={() => {}}
+            autosaveMs={150}
           />
         </NativeBoundary>
       </NativeTestRoot>
@@ -469,7 +490,7 @@ it.each(["navigation", "logout"])(
     const view = render(renderDocument(resource))
     const richTextbox = await editRich("Unsaved secret")
     const retained = (richTextbox as HTMLElement & { editor: Editor }).editor
-    await user.click(screen.getByRole("button", { name: "Save" }))
+    await saveOnce(user)
     await waitFor(() => expect(release).toBeDefined())
     if (action === "navigation") {
       view.rerender(renderDocument(other))
@@ -542,7 +563,7 @@ it.each(["content", "audience"])(
     expect(
       screen.getByRole("button", { name: "Compare with latest" })
     ).toBeVisible()
-    await user.click(screen.getByRole("button", { name: "Save" }))
+    await saveOnce(user)
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "This document changed since you started editing. Your draft is preserved. Compare it with the latest version before saving again."
     )
@@ -589,14 +610,14 @@ it("uses the save shortcut and reuses the exact request after a lost save respon
     },
   })
   const user = userEvent.setup()
-  mount()
+  mount(resource, 1_000_000)
   await user.type(
     await screen.findByRole("textbox", { name: "Document content" }),
     "!"
   )
   await user.keyboard("{Control>}s{/Control}")
   expect(await screen.findByRole("alert")).toBeVisible()
-  await user.click(screen.getByRole("button", { name: "Save" }))
+  await saveOnce(user)
   expect(await screen.findByText("Saved")).toBeVisible()
   expect(bodies).toHaveLength(2)
   expect(bodies[1]).toEqual(bodies[0])
@@ -645,7 +666,7 @@ it("lets the author accept a newer content/audience basis without losing their d
     contentRevision: "2",
     visibility: "organization",
   }
-  await user.click(screen.getByRole("button", { name: "Save" }))
+  await saveOnce(user)
   await user.click(
     await screen.findByRole("button", { name: "Compare with latest" })
   )
@@ -655,7 +676,8 @@ it("lets the author accept a newer content/audience basis without losing their d
     })
   )
   expect(editor).toHaveValue("seed!")
-  await user.click(screen.getByRole("button", { name: "Save" }))
+  await saveOnce(user)
+  await waitFor(() => expect(bodies).toHaveLength(2), { timeout: 3000 })
   expect(await screen.findByText("Saved")).toBeVisible()
   expect(bodies[1]).toEqual({
     requestId: expect.any(String),
@@ -800,7 +822,7 @@ it.each([
         json({ items: [revision], nextAfter: null }),
     })
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
-    mount()
+    mount(resource, 1_000_000)
     if (rich) await editRich("seed secret draft")
     else
       await user.type(
@@ -989,8 +1011,8 @@ it("preserves edits and their original preconditions when a changed-head poll bo
     )
   })
   expect(editor).toHaveValue("seed!")
-  expect(screen.getByRole("button", { name: "Save" })).toBeEnabled()
-  await user.click(screen.getByRole("button", { name: "Save" }))
+  expect(screen.getByText("Unsaved changes")).toBeVisible()
+  await saveOnce(user)
   expect(submitted).toEqual({
     requestId: expect.any(String),
     markdown: "seed!",
@@ -1104,18 +1126,230 @@ it("keeps a dirty draft and recovery controls when foreground Compare has unavai
     name: "Document content",
   })
   await user.type(editor, " private draft")
-  await user.click(screen.getByRole("button", { name: "Save" }))
+  await saveOnce(user)
   await user.click(
     await screen.findByRole("button", { name: "Compare with latest" })
   )
   expect(await screen.findByRole("alert")).toBeVisible()
   expect(editor).toHaveValue("seed private draft")
-  // Save + Compare stay visible; Copy draft + Reload latest live in the header menu.
-  for (const name of ["Save", "Compare with latest"])
-    expect(screen.getByRole("button", { name })).toBeEnabled()
+  // Compare stays visible; Copy draft + Reload latest live in the header menu.
+  expect(
+    screen.getByRole("button", { name: "Compare with latest" })
+  ).toBeEnabled()
   expect(screen.queryByRole("dialog")).toBeNull()
   await openMenu(user)
   for (const name of ["Copy draft", "Reload latest"])
     expect(screen.getByRole("menuitem", { name })).toBeEnabled()
   expect(mock.unknown).toEqual([])
+})
+
+it("waits for the save already running before reporting a flush", async () => {
+  // The flush is what navigation asks before it asks the reader anything. If
+  // it returned past an in-flight save it would report "still unsaved" and a
+  // discard dialog would offer to throw away work that was about to land.
+  let release!: (value: Response) => void
+  const bodies: Record<string, unknown>[] = []
+  let flush!: () => Promise<boolean>
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}/content?revision=1`]: () =>
+      json({ document: null, revision, markdown: "seed" }),
+    [`GET ${path}/revisions`]: () =>
+      json({ items: [revision], nextAfter: null }),
+    [`POST ${path}/revisions`]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return new Promise<Response>((resolve) => {
+        release = resolve
+      })
+    },
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeDocument
+          resource={resource}
+          onBack={() => {}}
+          onChanged={() => {}}
+          onDirtyChange={() => {}}
+          onRegisterFlush={(next) => {
+            flush = next
+          }}
+          autosaveMs={150}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  await user.type(
+    await screen.findByRole("textbox", { name: "Document content" }),
+    "!"
+  )
+  // The autosave is now in flight and has not been answered.
+  await waitFor(() => expect(release).toBeDefined())
+
+  let settled: boolean | null = null
+  const pending = flush().then((value) => {
+    settled = value
+  })
+  // It must still be waiting, not reporting failure past the running save.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30))
+  })
+  expect(settled).toBeNull()
+
+  await act(async () => {
+    release(
+      json(
+        { ...revision, revision: "2", byteLength: "5", parentRevision: "1" },
+        201
+      )
+    )
+    await pending
+  })
+  expect(settled).toBe(true)
+  expect(bodies).toHaveLength(1)
+})
+
+it("waits for the save already running before reporting a flush", async () => {
+  // The flush is what navigation asks before it asks the reader anything. If
+  // it returned past an in-flight save it would report "still unsaved" and a
+  // discard dialog would offer to throw away work that was about to land.
+  let release!: (value: Response) => void
+  const bodies: Record<string, unknown>[] = []
+  let flush!: () => Promise<boolean>
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}/content?revision=1`]: () =>
+      json({ document: null, revision, markdown: "seed" }),
+    [`GET ${path}/revisions`]: () =>
+      json({ items: [revision], nextAfter: null }),
+    [`POST ${path}/revisions`]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return new Promise<Response>((resolve) => {
+        release = resolve
+      })
+    },
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeDocument
+          resource={resource}
+          onBack={() => {}}
+          onChanged={() => {}}
+          onDirtyChange={() => {}}
+          onRegisterFlush={(next) => {
+            flush = next
+          }}
+          autosaveMs={150}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  await user.type(
+    await screen.findByRole("textbox", { name: "Document content" }),
+    "!"
+  )
+  // The autosave is now in flight and has not been answered.
+  await waitFor(() => expect(release).toBeDefined())
+
+  let settled: boolean | null = null
+  const pending = flush().then((value) => {
+    settled = value
+  })
+  // It must still be waiting, not reporting failure past the running save.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30))
+  })
+  expect(settled).toBeNull()
+
+  await act(async () => {
+    release(
+      json(
+        { ...revision, revision: "2", byteLength: "5", parentRevision: "1" },
+        201
+      )
+    )
+    await pending
+  })
+  expect(settled).toBe(true)
+  expect(bodies).toHaveLength(1)
+})
+
+it("recognises its own committed save instead of crying conflict", async () => {
+  // Save A commits but its response is lost. The writer types again, so save B
+  // carries a NEW request id with the revision A already consumed — a 409 for
+  // a write nobody else made. It must rebase, not raise a conflict wall.
+  const bodies: Record<string, unknown>[] = []
+  let reads = 0
+  let stored = "seed"
+  let head = { ...resource }
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(head),
+    [`GET ${path}/content?revision=1`]: () =>
+      json({ document: null, revision, markdown: "seed" }),
+    [`GET ${path}/content?revision=2`]: () => {
+      reads += 1
+      return json({
+        document: null,
+        // The stored revision must describe the body it carries: the parser
+        // refuses a byteLength that does not match, before anything compares.
+        revision: {
+          ...revision,
+          revision: "2",
+          parentRevision: "1",
+          byteLength: String(new TextEncoder().encode(stored).length),
+        },
+        markdown: stored,
+      })
+    },
+    [`GET ${path}/revisions`]: () =>
+      json({ items: [revision], nextAfter: null }),
+    [`POST ${path}/revisions`]: (init) => {
+      const body = JSON.parse(init.body as string) as { markdown: string }
+      bodies.push(body)
+      if (bodies.length === 1) {
+        // Committed server-side; the answer never arrives.
+        stored = body.markdown
+        head = { ...resource, contentRevision: "2", authRevision: "1" }
+        throw new TypeError("lost response")
+      }
+      if (bodies.length === 2) return json({ code: "conflict" }, 409)
+      // Rebased onto its own write, the next save goes through.
+      stored = body.markdown
+      head = { ...resource, contentRevision: "3", authRevision: "1" }
+      return json(
+        {
+          ...revision,
+          revision: "3",
+          parentRevision: "2",
+          byteLength: String(new TextEncoder().encode(body.markdown).length),
+        },
+        201
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  const editor = await screen.findByRole("textbox", {
+    name: "Document content",
+  })
+  await user.type(editor, "A")
+  await waitFor(() => expect(bodies).toHaveLength(1), { timeout: 3000 })
+
+  // Type more: this save gets a fresh request id and the stale revision.
+  await user.type(editor, "B")
+  await waitFor(() => expect(bodies).toHaveLength(2), { timeout: 3000 })
+
+  await waitFor(() => expect(reads).toBeGreaterThan(0), { timeout: 2000 })
+  // Its own write, recognised: no conflict reported, draft intact, and the
+  // rest of the writing lands on the revision that already exists.
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
+  expect(editor).toHaveValue("seedAB")
+  await waitFor(() => expect(bodies).toHaveLength(3), { timeout: 3000 })
+  expect(bodies[2]).toMatchObject({
+    markdown: "seedAB",
+    expectedContentRevision: "2",
+  })
 })

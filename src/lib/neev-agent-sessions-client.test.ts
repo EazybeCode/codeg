@@ -18,7 +18,10 @@ import {
   parseAgentConnections,
   parseAgentSession,
   parseAgentTurn,
+  parseActivity,
+  parseActivityEvent,
   parseRunEvent,
+  sliceByScalars,
   parseStartedTurn,
   startAgentTurn,
   updateAgentSession,
@@ -50,6 +53,7 @@ const turn = {
   runId: RUN_ID,
   prompt: "Explain this file",
   response: "",
+  activity: [],
   status: "running",
   errorCode: null,
   provider: "claude",
@@ -971,5 +975,93 @@ describe("agent run stream", () => {
         kind,
       })
     }
+  })
+})
+
+describe("activity traces", () => {
+  const call = {
+    seq: 1,
+    offset: 4,
+    id: "toolu_01",
+    kind: "tool_call",
+    name: "Bash",
+    input: '{"command":"ls"}',
+    inputTruncated: false,
+  }
+
+  it("parses each kind and orders by seq", () => {
+    const items = parseActivity([
+      {
+        seq: 3,
+        offset: 9,
+        id: "s",
+        kind: "status",
+        state: "result",
+        detail: null,
+      },
+      call,
+      {
+        seq: 2,
+        offset: 7,
+        id: "result:toolu_01",
+        kind: "tool_result",
+        callId: "toolu_01",
+        output: "a\nb",
+        outputTruncated: false,
+        isError: true,
+      },
+    ])
+    expect(items.map((item) => item.seq)).toEqual([1, 2, 3])
+    expect(items[1]).toMatchObject({ kind: "tool_result", isError: true })
+  })
+
+  it("drops an unreadable item instead of failing the whole turn", () => {
+    // A future kind, a missing field and a bad seq must not cost the reader
+    // the trace they CAN see — still less the reply it decorates.
+    const items = parseActivity([
+      call,
+      { seq: 2, offset: 0, id: "x", kind: "from_the_future" },
+      { seq: 0, offset: 0, id: "y", kind: "status", state: "stop" },
+      { seq: 3, offset: 0, id: "z", kind: "tool_call", name: "Bash" },
+      "not an object",
+    ])
+    expect(items).toHaveLength(1)
+    expect(items[0].id).toBe("toolu_01")
+  })
+
+  it("keeps one item per seq, so a replayed prefix cannot duplicate", () => {
+    const items = parseActivity([call, { ...call, name: "Read" }])
+    expect(items).toHaveLength(1)
+  })
+
+  it("is empty for anything that is not a list", () => {
+    expect(parseActivity(undefined)).toEqual([])
+    expect(parseActivity({})).toEqual([])
+    expect(parseActivity(null)).toEqual([])
+  })
+
+  it("reads an activity frame off the run stream and ignores other frames", () => {
+    expect(parseActivityEvent({ type: "activity", ...call })).toMatchObject({
+      kind: "tool_call",
+      seq: 1,
+    })
+    expect(parseActivityEvent({ type: "chunk", text: "hi" })).toBeNull()
+    expect(parseActivityEvent(call)).toBeNull()
+  })
+
+  it("slices by unicode scalars, which is the unit the server counts", () => {
+    // The trap: the server counts scalars, a JS string is UTF-16. A plain
+    // slice drifts left by one per astral character.
+    const reply = "ok 🙂 done"
+    expect(sliceByScalars(reply, 4)).toBe("ok 🙂")
+    expect(reply.slice(0, 4)).not.toBe("ok 🙂")
+    expect(sliceByScalars(reply, 0)).toBe("")
+    expect(sliceByScalars(reply, 999)).toBe(reply)
+  })
+
+  it("carries the trace on a parsed turn", () => {
+    const parsed = parseAgentTurn({ ...turn, activity: [call] })
+    expect(parsed.activity).toHaveLength(1)
+    expect(parseAgentTurn(turn).activity).toEqual([])
   })
 })

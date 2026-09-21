@@ -23,11 +23,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { NativeClientError } from "@/lib/neev-client"
+import { sendsOnEnter } from "@/lib/neev-composer-keys"
+import { firstLineTitle } from "@/lib/neev-first-line-title"
 import type { ResourceActions } from "./native-document"
 import {
   appendNativeMessage,
   listNativeMessages,
   loadNativeResource,
+  updateNativeResource,
   NativeContentNotFoundError,
   type NativeResource,
   type NativeMessage,
@@ -61,6 +64,8 @@ type Props = {
   onDirtyChange?: (dirty: boolean) => void
   onRequestSettings?: () => void
   actions?: ResourceActions
+  /** Just created and still called "New chat": the first message may name it. */
+  fresh?: boolean
 }
 export function NativeChat(props: Props) {
   const auth = useNativeAuth()
@@ -78,6 +83,7 @@ function Chat({
   onDirtyChange,
   onRequestSettings,
   actions,
+  fresh = false,
 }: Props) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
@@ -341,6 +347,7 @@ function Chat({
       retry.current = null
       pinned.current = latest.authRevision
       onDirtyChange?.(false)
+      void nameFromFirstMessage(input.body)
     } catch (e) {
       fail(e)
     } finally {
@@ -350,6 +357,52 @@ function Chat({
       }
     }
   }
+  /**
+   * A chat nobody named takes its name from what was said first.
+   *
+   * Once, and only while it still carries the placeholder: a name someone
+   * chose is never overwritten. It runs after the message landed, so the auth
+   * revision it uses is the current one, and it takes the send mutex so a
+   * second message cannot race the rename into a conflict.
+   */
+  const pendingName = useRef(fresh)
+  async function nameFromFirstMessage(body: string) {
+    if (!pendingName.current || !auth.session) return
+    // A chat already named by hand is never renamed by us.
+    if (latest.title !== t("untitledChat")) {
+      pendingName.current = false
+      return
+    }
+    const derived = firstLineTitle(body)
+    // An empty message names nothing; keep the chance for the next one.
+    if (!derived || derived === latest.title) return
+    pendingName.current = false
+    sending.current = true
+    try {
+      const renamed = await updateNativeResource(
+        resource.orgId,
+        resource.id,
+        {
+          nodeId: latest.nodeId,
+          title: derived,
+          visibility: latest.visibility,
+          archived: latest.archived,
+          expectedAuthRevision: latest.authRevision,
+        },
+        auth.session.csrf,
+        scope.signal
+      )
+      if (!scope.isCurrent()) return
+      pinned.current = renamed.authRevision
+      setLatest(renamed)
+      onChanged(renamed)
+    } catch {
+      // Naming is a convenience; a failure must not disturb the conversation.
+    } finally {
+      sending.current = false
+    }
+  }
+
   if (revoked)
     return (
       <div className="space-y-3">
@@ -362,7 +415,7 @@ function Chat({
   if (loading) return <p role="status">{n("loading")}</p>
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
-      <div className="flex shrink-0 items-start gap-2 px-4 py-3 sm:gap-3 sm:px-8 sm:py-5">
+      <div className="flex shrink-0 items-start gap-2 px-4 py-2 sm:gap-3 sm:px-8 sm:py-2">
         <Button
           variant="ghost"
           size="icon"
@@ -497,7 +550,7 @@ function Chat({
                   48
               }}
               aria-label={t("messages")}
-              className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 py-4 sm:px-8 sm:py-6"
+              className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 py-3 sm:px-8 sm:py-3"
             >
               {messages.map((message) => (
                 <li
@@ -554,6 +607,7 @@ function Chat({
               <label className="block">
                 <span className="sr-only">{t("message")}</span>
                 <textarea
+                  autoFocus={fresh}
                   placeholder={t("message")}
                   value={draft}
                   disabled={loading || saving || latest.archived}
@@ -563,6 +617,11 @@ function Chat({
                     setDraft(event.target.value)
                     retry.current = null
                     onDirtyChange?.(!!event.target.value)
+                  }}
+                  onKeyDown={(event) => {
+                    if (!sendsOnEnter(event, { busy: saving })) return
+                    event.preventDefault()
+                    void send()
                   }}
                   className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none sm:text-sm"
                 />

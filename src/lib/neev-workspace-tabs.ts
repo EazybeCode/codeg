@@ -13,7 +13,17 @@
 
 export type WorkspaceTab =
   | { kind: "project"; nodeId: number }
-  | { kind: "resource"; resourceId: string; nodeId: number }
+  | {
+      kind: "resource"
+      resourceId: string
+      nodeId: number
+      /**
+       * Made a moment ago and not named yet, so the panel that opens it may
+       * take a name from the first thing written. Never persisted: on a later
+       * visit it is simply a document, and renaming it then would be wrong.
+       */
+      fresh?: boolean
+    }
   | { kind: "agent"; sessionId: string }
   | { kind: "draft"; provider: string; nodeId: number | null }
 

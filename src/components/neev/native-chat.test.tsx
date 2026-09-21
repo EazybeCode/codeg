@@ -457,6 +457,8 @@ const runningTurn = {
   runId: RUN_ID,
   prompt: "help",
   response: "",
+  // Every turn carries its tool trace; an empty one is still a trace.
+  activity: [],
   status: "running",
   errorCode: null,
   provider: "claude",
