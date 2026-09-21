@@ -316,62 +316,90 @@ it("uses an accessible drawer at the mobile breakpoint with Escape focus return"
   expect(mock.unknown).toEqual([])
 })
 
-it.each(["Cancel", "Escape"])(
-  "returns to the workspace and restores focus after draft %s",
-  async (action) => {
-    const mock = mockNativeSession(undefined, {
-      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
-      "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
-      "GET /api/neev/nodes": () =>
-        json({
-          nodes: [
-            {
-              id: 4,
-              orgId: 3,
-              kind: "project",
-              parentId: null,
-              name: "Menu project",
-              revision: "1",
-            },
-          ],
-          nextAfter: null,
-        }),
-      "GET /api/neev/nodes/4/documents": () =>
-        json({ items: [], nextAfter: null }),
-    })
-    const user = userEvent.setup()
-    render(
-      <NativeTestRoot>
-        <NativeWorkspace />
-      </NativeTestRoot>
-    )
-    const trigger = await screen.findByRole("button", {
-      name: "Actions for Menu project",
-    })
-    trigger.focus()
-    await user.keyboard("{Enter}")
-    await user.click(
-      await screen.findByRole("menuitem", { name: "New document" })
-    )
-    // Full-page draft with an inline title (no small modal), focused for naming.
-    const draft = await screen.findByRole("region", { name: "New document" })
-    expect(draft).toHaveTextContent("Inside Menu project")
-    await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "Title" })).toHaveFocus()
-    )
-    if (action === "Escape") await user.keyboard("{Escape}")
-    else await user.click(screen.getByRole("button", { name: "Cancel" }))
-    await waitFor(() =>
-      expect(screen.queryByRole("region", { name: "New document" })).toBeNull()
-    )
-    expect(trigger).toHaveFocus()
-    // Back on the project's own contents, not a generic invitation.
-    expect(
-      screen.getByRole("heading", { level: 1, name: "Menu project" })
-    ).toBeVisible()
-    expect(mock.unknown).toEqual([])
-  }
-)
+it("makes a document the moment it is asked for, with no form to fill in", async () => {
+  // No title to think of first: the thing exists, opens in its own tab, and
+  // takes its name from what gets written in it.
+  const created: Record<string, unknown>[] = []
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 4,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Menu project",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    // A real server lists the row it just made.
+    "GET /api/neev/nodes/4/documents": () =>
+      json({
+        items: created.map((body) => ({
+          ...resource,
+          kind: "document",
+          nodeId: 4,
+          title: body.title,
+          contentRevision: "0",
+        })),
+        nextAfter: null,
+      }),
+    "POST /api/neev/nodes/4/documents": (init) => {
+      const body = JSON.parse(init.body as string)
+      created.push(body)
+      return json(
+        {
+          ...resource,
+          kind: "document",
+          nodeId: 4,
+          title: body.title,
+          contentRevision: "0",
+        },
+        201
+      )
+    },
+    // The panel re-reads the resource it was handed, by its own authority.
+    [`GET /api/neev/resources/${resource.id}`]: () =>
+      json({
+        ...resource,
+        kind: "document",
+        nodeId: 4,
+        title: "Untitled",
+        contentRevision: "0",
+      }),
+    [`GET /api/neev/documents/${resource.id}/revisions`]: () =>
+      json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  const trigger = await screen.findByRole("button", {
+    name: "Actions for Menu project",
+  })
+  trigger.focus()
+  await user.keyboard("{Enter}")
+  await user.click(
+    await screen.findByRole("menuitem", { name: "New document" })
+  )
+
+  // Created straight away, with a placeholder name rather than a prompt.
+  await waitFor(() => expect(created).toHaveLength(1))
+  expect(created[0]).toMatchObject({ title: "Untitled" })
+  expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull()
+  // And it is open, in its own tab.
+  expect(
+    await screen.findByRole("tab", { name: /Untitled/ })
+  ).toHaveAttribute("aria-selected", "true")
+  expect(mock.unknown).toEqual([])
+})
 
 it("moves a nested folder with its wire revision and retains the draft on conflict", async () => {
   const nodes = [
@@ -555,14 +583,14 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
       "wip"
     )
   )
-  // Creating a conversation reveals it in the sidebar and opens it.
+  // Creating a conversation makes it at once — no name asked for — and
+  // reveals it in the sidebar under the placeholder it was given.
   await user.click(screen.getByRole("button", { name: "Actions for Space" }))
   await user.click(screen.getByRole("menuitem", { name: "New chat" }))
-  await user.type(screen.getByRole("textbox", { name: "Title" }), "Gamma")
-  await user.click(screen.getByRole("button", { name: "Create" }))
+  expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull()
   await within(screen.getByRole("navigation", { name: "Projects" })).findByRole(
     "button",
-    { name: "Gamma" }
+    { name: "New chat" }
   )
   expect(mock.unknown).toEqual([])
 })

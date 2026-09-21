@@ -16,7 +16,14 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
-import { ArrowLeft, ArrowUp, Bot, MoreHorizontal, Plus } from "lucide-react"
+import {
+  ArrowLeft,
+  ArrowUp,
+  Bot,
+  ChevronRight,
+  MoreHorizontal,
+  Plus,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import {
@@ -31,7 +38,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import {
+  describeToolInput,
+  mergeActivity,
+  summariseActivity,
+} from "@/lib/neev-agent-activity"
+import { type NeevActivityItem } from "@/lib/neev-agent-sessions-client"
+import { cn } from "@/lib/utils"
 import { NativeClientError } from "@/lib/neev-client"
+import { sendsOnEnter } from "@/lib/neev-composer-keys"
 import {
   cancelAgentRun,
   createAgentSession,
@@ -593,10 +608,9 @@ function NewAgentChat({
             maxLength={NEEV_MAX_PROMPT_CHARS}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                event.preventDefault()
-                void start()
-              }
+              if (!sendsOnEnter(event, { busy })) return
+              event.preventDefault()
+              void start()
             }}
             placeholder={t("agentPromptPlaceholder")}
             className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none disabled:opacity-60 sm:text-sm"
@@ -793,6 +807,125 @@ function CreateSessionDialog({
   )
 }
 
+/**
+ * What the agent did, between what it said.
+ *
+ * Collapsed to one line by default — a run can make dozens of tool calls, and
+ * unrolled they bury the answer. Opening shows one concise row per call: the
+ * tool and an abbreviated command or path, with the full input and output a
+ * further click away.
+ *
+ * Everything rendered here is model-authored text. It is displayed and nothing
+ * else: never parsed into a request, never put in a URL, never executed.
+ */
+function AgentActivity({ items }: { items: NeevActivityItem[] }) {
+  const t = useTranslations("NativeContent")
+  const [open, setOpen] = useState(false)
+  const [shown, setShown] = useState<number | null>(null)
+  if (items.length === 0) return null
+  const summary = summariseActivity(items)
+  return (
+    <div className="my-2 rounded-lg border bg-muted/30 text-[13px]">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-start text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <ChevronRight
+          aria-hidden
+          className={cn(
+            "size-3.5 shrink-0 transition-transform",
+            open && "rotate-90"
+          )}
+        />
+        <span className="truncate">
+          {t("activitySummary", {
+            number: summary.calls,
+            name: String(summary.results),
+          })}
+        </span>
+        {summary.errors > 0 && (
+          <span className="shrink-0 text-destructive">
+            {t("activityErrors", { number: summary.errors })}
+          </span>
+        )}
+      </button>
+      {open && (
+        <ul className="space-y-0.5 border-t px-1.5 py-1.5">
+          {items.map((item) => (
+            <li key={item.seq}>
+              {item.kind === "status" ? (
+                <p
+                  role="status"
+                  className="px-1.5 py-1 text-xs text-muted-foreground"
+                >
+                  {item.state === "truncated"
+                    ? t("activityTruncated")
+                    : item.state === "unsupported"
+                      ? t("activityUnsupported", {
+                          name: item.detail ?? "",
+                        })
+                      : (item.detail ?? item.state)}
+                </p>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    aria-expanded={shown === item.seq}
+                    onClick={() =>
+                      setShown((value) =>
+                        value === item.seq ? null : item.seq
+                      )
+                    }
+                    className="flex w-full min-w-0 items-baseline gap-2 rounded px-1.5 py-1 text-start hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {item.kind === "tool_call" ? (
+                      <>
+                        <span className="shrink-0 font-medium">
+                          {item.name}
+                        </span>
+                        <span className="truncate font-mono text-xs text-muted-foreground">
+                          {describeToolInput(item.input)}
+                        </span>
+                      </>
+                    ) : (
+                      <span
+                        className={cn(
+                          "truncate text-xs",
+                          item.isError
+                            ? "text-destructive"
+                            : "text-muted-foreground"
+                        )}
+                      >
+                        {item.isError
+                          ? t("activityFailed")
+                          : t("activityReturned")}
+                      </span>
+                    )}
+                  </button>
+                  {shown === item.seq && (
+                    <pre className="mx-1.5 mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-background p-2 font-mono text-xs">
+                      {item.kind === "tool_call" ? item.input : item.output}
+                      {(item.kind === "tool_call"
+                        ? item.inputTruncated
+                        : item.outputTruncated) && (
+                        <span className="block pt-1 text-muted-foreground">
+                          {t("activityTruncated")}
+                        </span>
+                      )}
+                    </pre>
+                  )}
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function AgentSessionView({
   session,
   connections,
@@ -822,6 +955,10 @@ function AgentSessionView({
     [activeRun, setActiveRun] = useState<string | null>(null),
     [phase, setPhase] = useState<NeevRunPhase>("streaming"),
     [liveText, setLiveText] = useState(""),
+    // The running turn's trace. Upserted by `seq`, never appended: a reattach
+    // replays the stored prefix before streaming live, so the same item
+    // arrives twice and appending would show every tool call twice.
+    [liveActivity, setLiveActivity] = useState<NeevActivityItem[]>([]),
     // Bumped to ask for a fresh attachment to the same run — an explicit
     // reattach, never a re-run.
     [attachNonce, setAttachNonce] = useState(0)
@@ -830,6 +967,7 @@ function AgentSessionView({
   // What the current attachment has streamed so far, readable from the settle
   // handler without making it depend on the rendered value.
   const liveRef = useRef("")
+  const liveActivityRef = useRef<NeevActivityItem[]>([])
   // A queued navigation held back by an unsent prompt.
   const [pending, setPending] = useState<(() => void) | null>(null)
 
@@ -906,12 +1044,22 @@ function AgentSessionView({
       onPhase: (next) => {
         if (!controller.signal.aborted) setPhase(next)
       },
+      onActivity: (item) => {
+        if (controller.signal.aborted) return
+        setLiveActivity((old) => {
+          const next = mergeActivity(old, [item])
+          liveActivityRef.current = next
+          return next
+        })
+      },
       onEvent: (event) => {
         if (controller.signal.aborted) return
         // A replay restarts the buffer: the server resends everything it stored.
         if (event.type === "started") {
           liveRef.current = ""
           setLiveText("")
+          liveActivityRef.current = []
+          setLiveActivity([])
         } else if (event.type === "chunk") {
           liveRef.current += event.text
           setLiveText(liveRef.current)
@@ -924,8 +1072,13 @@ function AgentSessionView({
                     status: event.status,
                     errorCode: event.errorCode,
                     // The stream replays exactly what the server stored, so the
-                    // accumulated text is the durable response.
+                    // accumulated text is the durable response — and the same
+                    // is true of the trace beside it.
                     response: liveRef.current || turn.response,
+                    activity: mergeActivity(
+                      turn.activity,
+                      liveActivityRef.current
+                    ),
                   }
                 : turn
             )
@@ -1094,7 +1247,18 @@ function AgentSessionView({
                     )}
                   </div>
                 ) : (
-                  turn.response && <NativeMarkdown markdown={turn.response} />
+                  <>
+                    <AgentActivity
+                      items={
+                        turn.runId === activeRun
+                          ? mergeActivity(turn.activity, liveActivity)
+                          : turn.activity
+                      }
+                    />
+                    {turn.response && (
+                      <NativeMarkdown markdown={turn.response} />
+                    )}
+                  </>
                 )}
                 {turn.status !== "completed" && turn.runId !== activeRun && (
                   <p className="text-xs text-muted-foreground">
@@ -1125,6 +1289,11 @@ function AgentSessionView({
               onChange={(event) => {
                 draftRef.current = event.target.value
                 setDraft(event.target.value)
+              }}
+              onKeyDown={(event) => {
+                if (!sendsOnEnter(event, { busy: sending || running })) return
+                event.preventDefault()
+                void send()
               }}
               className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none sm:text-sm"
             />

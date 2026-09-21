@@ -85,6 +85,7 @@ import {
   type NeevAgentSession,
 } from "@/lib/neev-agent-sessions-client"
 import {
+  createNativeResource,
   listNativeResources,
   loadNativeResource,
   type NativeResource,
@@ -165,15 +166,21 @@ function ResourcePanel({
   resourceId,
   node,
   cached,
+  fresh,
   registerGuard,
   onGone,
+  onChanged,
 }: {
   orgId: number
   resourceId: string
+  /** Newly created, so it may still take its name from what is written. */
+  fresh: boolean
   node: NativeNode | undefined
   cached: NativeResource | undefined
   registerGuard: (guard: ContentNavigationGuard) => void
   onGone: () => void
+  /** A rename or re-share, on its way to the lists the chrome reads. */
+  onChanged: (resource: NativeResource) => void
 }) {
   const auth = useNativeAuth(),
     t = useTranslations("Native")
@@ -225,8 +232,9 @@ function ResourcePanel({
     <NativeContent
       node={node}
       chromeless
-      open={{ resource, request }}
+      open={{ resource, request, fresh }}
       onRequestNavigationGuard={registerGuard}
+      onResourceChanged={onChanged}
     />
   )
 }
@@ -538,7 +546,7 @@ function NativeWorkspaceTree({
                     <DropdownMenuItem
                       onSelect={() => {
                         contentOpener.current = node.id
-                        createContent(node, "document")
+                        void createContent(node, "document")
                       }}
                     >
                       <FileText aria-hidden className="size-4" />
@@ -547,7 +555,7 @@ function NativeWorkspaceTree({
                     <DropdownMenuItem
                       onSelect={() => {
                         contentOpener.current = node.id
-                        createContent(node, "chat")
+                        void createContent(node, "chat")
                       }}
                     >
                       <MessagesSquare aria-hidden className="size-4" />
@@ -694,6 +702,14 @@ function WorkspaceContent() {
   // What the reader is looking for, across the projects and items already
   // loaded plus their own agent chats. Empty means the tree.
   const [query, setQuery] = useState("")
+  // One creation at a time, and its failure said out loud.
+  const creating = useRef(false)
+  /** Request ids held per attempt, so a retry replays rather than duplicates. */
+  const pendingCreate = useRef(new Map<string, string>())
+  /** The scope as it is right now, for answers that arrive after a change. */
+  const scopeRef = useRef(auth.scopeKey)
+  scopeRef.current = auth.scopeKey
+  const [createError, setCreateError] = useState<unknown>(null)
   // What is open, and which one is in front. A tab is a reference; the views
   // below still fetch and authorize their own subject.
   const [tabs, setTabs] = useState<WorkspaceTab[]>([])
@@ -806,7 +822,6 @@ function WorkspaceContent() {
   const [creation, setCreation] = useState<
     (ContentCreation & { nodeId: number }) | undefined
   >()
-  const creationNumber = useRef(0)
   const org = auth.session?.organization
   const { handleError } = auth
   const [nodes, setNodes] = useState<NativeNode[]>([]),
@@ -905,36 +920,6 @@ function WorkspaceContent() {
     [showTab]
   )
 
-  /** Start a draft of `kind` inside `node`, from the sidebar or the landing. */
-  const createContent = useCallback(
-    (node: NativeNode, kind: NativeResourceKind) => {
-      const active = document.activeElement as HTMLElement | null
-      const menu = active?.closest('[role="menu"]')
-      const returnFocus =
-        document.getElementById(menu?.getAttribute("aria-labelledby") ?? "") ??
-        active
-      keepAll(() => {
-        // The created kind decides the section, so the new item lands and
-        // appears under this container in the right list.
-        const nextSection = kind === "document" ? "docs" : "team"
-        setSectionState(nextSection)
-        setActiveSection(nextSection)
-        setOpen(null)
-        setExpanded((old) => new Set([...old, node.id]))
-        setCreation({
-          kind,
-          nodeId: node.id,
-          request: ++creationNumber.current,
-          returnFocus,
-        })
-        setDrawer(false)
-        // The draft is written on the project's own page, so that is the tab
-        // that has to be in front.
-        showTab({ kind: "project", nodeId: node.id })
-      })
-    },
-    [showTab]
-  )
   /**
    * Open a saved agent chat straight into its transcript.
    *
@@ -1124,6 +1109,90 @@ function WorkspaceContent() {
     [nodeById, itemsByNode, agentSessions, t, c]
   )
 
+  /** Start a draft of `kind` inside `node`, from the sidebar or the landing. */
+  /**
+   * Make it now, and let the writing name it.
+   *
+   * There is no form and no name to think of first: the thing exists a moment
+   * after it is asked for, opens with the cursor in the body, and takes its
+   * name from the first line written in it. Anyone who would rather name it
+   * themselves still can, and doing so stops the name following the text.
+   *
+   * The request id is held per click, so a retry — or React mounting an effect
+   * twice — replays the SAME creation rather than making a second one.
+   */
+  const createContent = useCallback(
+    async (node: NativeNode, kind: NativeResourceKind) => {
+      if (!auth.session || creating.current) return
+      creating.current = true
+      setCreateError(null)
+      // One id per (project, kind) attempt, kept until it SUCCEEDS. A create
+      // whose response was lost has very likely committed; retrying with a new
+      // id would make a second document, so the retry replays the same one and
+      // the server returns the row it already made.
+      const attempt = `${node.id}:${kind}`
+      const requestId =
+        pendingCreate.current.get(attempt) ?? crypto.randomUUID()
+      pendingCreate.current.set(attempt, requestId)
+      // An answer that arrives after the reader has left this organization
+      // must not open a tab in the next one. The ref is read at answer time
+      // and written on every render, so it reflects the scope NOW — comparing
+      // the captured `auth.scopeKey` with itself could only ever agree.
+      const scope = scopeRef.current
+      try {
+        const resource = await createNativeResource(
+          node.orgId,
+          node.id,
+          kind,
+          {
+            title: c(kind === "document" ? "untitledDocument" : "untitledChat"),
+            requestId,
+          },
+          auth.session.csrf,
+          auth.signal
+        )
+        if (scopeRef.current !== scope) return
+        pendingCreate.current.delete(attempt)
+        // The server's own row, straight into the list it belongs to: the tab
+        // can say what it is called immediately instead of "Loading" until a
+        // refetch catches up.
+        setItemsByNode((old) => {
+          const list = old[node.id] ?? {
+            loading: false,
+            items: [],
+            error: null,
+          }
+          return {
+            ...old,
+            [node.id]: {
+              ...list,
+              items: [
+                resource,
+                ...list.items.filter((item) => item.id !== resource.id),
+              ],
+            },
+          }
+        })
+        setExpanded((old) => new Set([...old, node.id]))
+        void loadItems(node.id)
+        setDrawer(false)
+        // `fresh` is what lets the panel name it from the first thing typed.
+        showTab({
+          kind: "resource",
+          resourceId: resource.id,
+          nodeId: node.id,
+          fresh: true,
+        })
+      } catch (cause) {
+        if (scopeRef.current !== scope) return
+        setCreateError(cause)
+        auth.handleAuthorityError(cause)
+      } finally {
+        creating.current = false
+      }
+    },
+    [auth, c, loadItems, showTab]
+  )
   const openResource = useCallback(
     (node: NativeNode, resource: NativeResource) =>
       keepAll(() => {
@@ -1459,6 +1528,7 @@ function WorkspaceContent() {
             {loading ? t("loading") : ""}
           </p>
           <NativeError error={error} />
+          <NativeError error={createError} />
         </div>
       </nav>
       <div className="border-t border-sidebar-border p-1.5">
@@ -1722,7 +1792,7 @@ function WorkspaceContent() {
                               )
                             else if (kind === "claude" || kind === "codex")
                               startAgentChat(node, kind)
-                            else createContent(node, kind)
+                            else void createContent(node, kind)
                           }}
                         />
                       )
@@ -1730,6 +1800,22 @@ function WorkspaceContent() {
                       <ResourcePanel
                         orgId={org.id}
                         resourceId={tab.resourceId}
+                        fresh={tab.fresh === true}
+                        onChanged={(next) =>
+                          setItemsByNode((old) => {
+                            const list = old[tab.nodeId]
+                            if (!list) return old
+                            return {
+                              ...old,
+                              [tab.nodeId]: {
+                                ...list,
+                                items: list.items.map((item) =>
+                                  item.id === next.id ? next : item
+                                ),
+                              },
+                            }
+                          })
+                        }
                         node={nodeById(tab.nodeId)}
                         cached={(itemsByNode[tab.nodeId]?.items ?? []).find(
                           (item) => item.id === tab.resourceId

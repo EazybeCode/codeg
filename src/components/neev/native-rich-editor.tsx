@@ -63,6 +63,15 @@ export const richSchema = BlockNoteSchema.create({
 export type NativeRichEditorProps = {
   document: RichDocument
   readOnly: boolean
+  /**
+   * Put the cursor here once, when the editor is ready.
+   *
+   * For a document that was just created: the writer asked for a document, so
+   * they should be able to type. Only once, and only when asked — stealing
+   * focus on every render, or in a tab that is not in front, would fight the
+   * person using it.
+   */
+  autoFocus?: boolean
   onChange: (next: RichDocument) => void
   /** Upload an image bound to this document; resolves to its internal serve URL.
    *  Absent in read-only mode. */
@@ -73,6 +82,7 @@ export type NativeRichEditorProps = {
 export function NativeRichEditor({
   document,
   readOnly,
+  autoFocus = false,
   onChange,
   uploadImage,
 }: NativeRichEditorProps) {
@@ -215,6 +225,21 @@ export function NativeRichEditor({
       }),
     [editor]
   )
+  const focused = useRef(false)
+  useEffect(() => {
+    if (!autoFocus || readOnly || focused.current) return
+    focused.current = true
+    // After the editor has mounted its view; focusing before that is a no-op.
+    const timer = window.setTimeout(() => {
+      try {
+        editor.focus()
+      } catch {
+        // A view that went away before this ran needs no cursor.
+      }
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [autoFocus, readOnly, editor])
+
   const insertImage = async (file: File) => {
     if (!uploadImage) return
     try {

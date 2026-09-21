@@ -1358,6 +1358,7 @@ export async function followAgentRun({
   runId: runIdValue,
   signal,
   onEvent,
+  onActivity,
   onPhase,
   retryDelays = RUN_RETRY_DELAYS,
   healthyAfterMs = RUN_HEALTHY_AFTER_MS,
@@ -1366,6 +1367,14 @@ export async function followAgentRun({
   runId: string
   signal: AbortSignal
   onEvent: (event: NeevRunEvent) => void
+  /**
+   * The turn's tool trace, as it happens.
+   *
+   * Separate from `onEvent` because it is a separate track: text and activity
+   * interleave by `offset`, and a reattach replays the stored prefix of BOTH,
+   * so the receiver upserts on `seq` rather than appending.
+   */
+  onActivity?: (item: NeevActivityItem) => void
   onPhase: (phase: NeevRunPhase) => void
   retryDelays?: readonly number[]
   healthyAfterMs?: number
@@ -1399,7 +1408,12 @@ export async function followAgentRun({
           if (event.type === "finished") finished = true
           onEvent(event)
         },
-        signal
+        signal,
+        (item) => {
+          if (done()) return
+          delivered = true
+          onActivity?.(item)
+        }
       )
     } catch (error) {
       if (done()) return
@@ -1434,7 +1448,8 @@ export async function followAgentRun({
 export async function openAgentRunStream(
   runIdValue: string,
   onEvent: (event: NeevRunEvent) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onActivity?: (item: NeevActivityItem) => void
 ): Promise<void> {
   assertRunId(runIdValue)
   const response = await fetch(`/api/neev/agent/runs/${runIdValue}/events`, {
@@ -1464,8 +1479,22 @@ export async function openAgentRunStream(
       buffer = buffer.slice(boundary + 2)
       for (const line of frame.split("\n"))
         if (line.startsWith("data:")) {
-          const event = parseRunEvent(line.slice(5).trim())
+          const raw = line.slice(5).trim()
+          const event = parseRunEvent(raw)
           if (event) onEvent(event)
+          else if (onActivity) {
+            // `parseRunEvent` returns null for anything it does not know,
+            // which includes the activity frame and any future one. Only a
+            // readable activity item is forwarded; the rest stays ignored.
+            let value: unknown
+            try {
+              value = JSON.parse(raw)
+            } catch {
+              value = null
+            }
+            const item = value === null ? null : parseActivityEvent(value)
+            if (item) onActivity(item)
+          }
         }
       boundary = buffer.indexOf("\n\n")
     }

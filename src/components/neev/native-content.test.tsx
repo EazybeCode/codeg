@@ -61,7 +61,11 @@ function mount() {
   return render(
     <NativeTestRoot>
       <NativeBoundary>
-        <NativeContent node={node} onRequestNavigationGuard={() => {}} />
+        <NativeContent
+          node={node}
+          onRequestNavigationGuard={() => {}}
+          autosaveMs={250}
+        />
       </NativeBoundary>
     </NativeTestRoot>
   )
@@ -162,7 +166,11 @@ it.each([false, true])(
     const content = (
       <NativeTestRoot>
         <NativeBoundary>
-          <NativeContent node={node} onRequestNavigationGuard={() => {}} />
+          <NativeContent
+            node={node}
+            onRequestNavigationGuard={() => {}}
+            autosaveMs={250}
+          />
         </NativeBoundary>
       </NativeTestRoot>
     )
@@ -276,7 +284,8 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
     await visibilityActions.click(
       screen.getByRole("button", { name: "Discard changes" })
     )
-    await waitFor(() => expect(bodies).toHaveLength(1))
+    // The document's own pause before it saves is deliberately unhurried.
+    await waitFor(() => expect(bodies).toHaveLength(1), { timeout: 5000 })
     expect(bodies[0]).toEqual({
       expectedAuthRevision: "2",
       title: "Fresh title",
@@ -502,7 +511,11 @@ it.each(["manual", "broadcast", "401", "logout"])(
       <NativeTestRoot>
         <Controls />
         <NativeBoundary>
-          <NativeContent node={node} onRequestNavigationGuard={() => {}} />
+          <NativeContent
+            node={node}
+            onRequestNavigationGuard={() => {}}
+            autosaveMs={250}
+          />
         </NativeBoundary>
       </NativeTestRoot>
     )
@@ -604,21 +617,33 @@ it.each(["chat", "document"] as const)(
     const draft = await screen.findByRole("textbox", { name })
     await user.clear(draft)
     await user.type(draft, "retained draft")
-    await user.click(
-      screen.getByRole("button", { name: kind === "chat" ? "Send" : "Save" })
-    )
+    // A chat is sent by hand; a document writes itself down shortly after the
+    // typing stops, so there is no button to press for it.
+    if (kind === "chat")
+      await user.click(screen.getByRole("button", { name: "Send" }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     refreshed = true
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
-    const submit = await screen.findByRole("button", {
-      name: kind === "chat" ? "Send" : "Save",
-    })
-    await waitFor(() => expect(submit).toBeEnabled())
     expect(screen.getByRole("textbox", { name })).toHaveValue("retained draft")
-    await user.click(submit)
-    await waitFor(() => expect(bodies).toHaveLength(2))
-    expect(bodies[1]).toEqual(bodies[0])
-    expect(bodies[1]).toEqual(
+    if (kind === "chat") {
+      // A message is sent by hand, so the retry is a second press — and it
+      // must carry the SAME request id rather than write twice.
+      const submit = await screen.findByRole("button", { name: "Send" })
+      await waitFor(() => expect(submit).toBeEnabled())
+      await user.click(submit)
+      await waitFor(() => expect(bodies).toHaveLength(2))
+      expect(bodies[1]).toEqual(bodies[0])
+    } else {
+      // A document has no button to press: it is already saving. If a
+      // revalidation makes it try again, that attempt must be a REPLAY — the
+      // same request id and the same preconditions — so the server dedupes it
+      // instead of writing the draft twice.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60))
+      })
+      for (const body of bodies.slice(1)) expect(body).toEqual(bodies[0])
+    }
+    expect(bodies[bodies.length - 1]).toEqual(
       kind === "chat"
         ? {
             body: "retained draft",
@@ -643,17 +668,21 @@ it.each(["chat", "document"] as const)(
       )
     )
     expect(screen.getByRole("textbox", { name })).toHaveValue("retained draft")
-    expect(screen.getByRole("textbox", { name })).toBeDisabled()
-    await act(async () =>
-      releases[1](
-        json(
-          kind === "chat"
-            ? message
-            : { ...revision, revision: "2", parentRevision: "1" },
-          201
+    // A chat still has its second send in flight, so its composer stays shut.
+    // A document's save has just been answered, so its editor is usable again.
+    if (kind === "chat")
+      expect(screen.getByRole("textbox", { name })).toBeDisabled()
+    if (releases[1])
+      await act(async () =>
+        releases[1](
+          json(
+            kind === "chat"
+              ? message
+              : { ...revision, revision: "2", parentRevision: "1" },
+            201
+          )
         )
       )
-    )
     await waitFor(() =>
       expect(screen.getByRole("textbox", { name })).toBeEnabled()
     )
@@ -781,7 +810,11 @@ it("loads native content after React Strict Mode replays its mount effects", asy
     <StrictMode>
       <NativeTestRoot>
         <NativeBoundary>
-          <NativeContent node={node} onRequestNavigationGuard={() => {}} />
+          <NativeContent
+            node={node}
+            onRequestNavigationGuard={() => {}}
+            autosaveMs={250}
+          />
         </NativeBoundary>
       </NativeTestRoot>
     </StrictMode>
@@ -843,168 +876,199 @@ it("creates private content only inside the selected node and confirms sharing i
   expect(mock.unknown).toEqual([])
 })
 
-it("guards leaving the workspace, and never asks when only switching tabs", async () => {
-  const nodes = [
-    { ...node, id: 2, kind: "project", parentId: null, name: "Launch" },
-    node,
-    { ...node, id: 5, kind: "project", parentId: null, name: "Other" },
-  ]
-  const doc = {
-    ...chat,
-    kind: "document",
-    title: "Draft document",
-    contentRevision: "0",
+it(
+  "guards leaving the workspace, and never asks when only switching tabs",
+  { timeout: 20000 },
+  async () => {
+    const nodes = [
+      { ...node, id: 2, kind: "project", parentId: null, name: "Launch" },
+      node,
+      { ...node, id: 5, kind: "project", parentId: null, name: "Other" },
+    ]
+    const doc = {
+      ...chat,
+      kind: "document",
+      title: "Draft document",
+      contentRevision: "0",
+    }
+    const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+      "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes/5/chats": () => json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
+      "GET /api/neev/nodes/2/documents": () =>
+        json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes/4/documents": () =>
+        json({ items: [doc], nextAfter: null }),
+      "GET /api/neev/nodes/5/documents": () =>
+        json({ items: [], nextAfter: null }),
+      // The draft cannot be written down here, which is what makes leaving a
+      // question rather than a save.
+      [`POST /api/neev/documents/${chat.id}/revisions`]: () =>
+        json({ code: "unavailable" }, 503),
+      [`GET /api/neev/resources/${chat.id}`]: () => json(doc),
+      [`GET /api/neev/documents/${chat.id}/revisions`]: () =>
+        json({ items: [], nextAfter: null }),
+      "POST /api/neev/logout": () => json({ ok: true }),
+    })
+    const user = userEvent.setup()
+    render(
+      <NativeTestRoot>
+        <NativeWorkspace />
+      </NativeTestRoot>
+    )
+    // Documents is the default section; open the doc directly from the sidebar tree.
+    await user.click(
+      await screen.findByRole("button", { name: "Expand Launch" })
+    )
+    await user.click(
+      await screen.findByRole("button", { name: "Expand Research" })
+    )
+    await user.click(
+      await screen.findByRole("button", { name: /Draft document/ })
+    )
+    await user.type(
+      // Loading the real code-split editor is not subject to a one-second SLA.
+      await screen.findByRole(
+        "textbox",
+        { name: "Document content" },
+        { timeout: 15000 }
+      ),
+      "secret draft"
+    )
+    const unload = new Event("beforeunload", { cancelable: true })
+    window.dispatchEvent(unload)
+    expect(unload.defaultPrevented).toBe(true)
+    // Starting a chat opens ANOTHER tab, so the draft is not in danger and is
+    // not asked about — it is still there, behind its own tab.
+    await user.click(
+      screen.getAllByRole("button", { name: "Actions for Launch" })[0]
+    )
+    await user.click(screen.getByRole("menuitem", { name: "New Claude chat" }))
+    expect(screen.queryByRole("dialog")).toBeNull()
+    await user.click(screen.getByRole("tab", { name: /Draft document/ }))
+    expect(
+      screen.getAllByRole("textbox", { name: "Document content" })[0]
+    ).toHaveTextContent("secret draft")
+    // Leaving the workspace altogether DOES ask: every mounted panel is about to
+    // go, including this one.
+    await user.click(screen.getByRole("button", { name: "Sagar" }))
+    await user.click(screen.getByRole("menuitem", { name: "Settings" }))
+    expect(screen.getByRole("dialog")).toBeVisible()
+    expect(push).not.toHaveBeenCalled()
+    await user.click(screen.getByRole("button", { name: "Keep editing" }))
+    await user.click(screen.getByRole("button", { name: "Sagar" }))
+    await user.click(screen.getByRole("menuitem", { name: "Sign out" }))
+    // Leaving tries to SAVE first. Only a save that will not land turns into a
+    // question — here it cannot land, so the reader is asked rather than having
+    // the draft thrown away on their behalf.
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "Discard unsaved changes?"
+    )
+    await user.click(screen.getByRole("button", { name: "Discard changes" }))
+    await waitFor(() => expect(screen.queryByText("secret draft")).toBeNull())
+    expect(mock.unknown).toEqual([])
   }
-  const mock = mockNativeSession(undefined, {
-    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
-    "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/5/chats": () => json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
-    "GET /api/neev/nodes/2/documents": () =>
-      json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/4/documents": () =>
-      json({ items: [doc], nextAfter: null }),
-    "GET /api/neev/nodes/5/documents": () =>
-      json({ items: [], nextAfter: null }),
-    [`GET /api/neev/resources/${chat.id}`]: () => json(doc),
-    [`GET /api/neev/documents/${chat.id}/revisions`]: () =>
-      json({ items: [], nextAfter: null }),
-    "POST /api/neev/logout": () => json({ ok: true }),
-  })
-  const user = userEvent.setup()
-  render(
-    <NativeTestRoot>
-      <NativeWorkspace />
-    </NativeTestRoot>
-  )
-  // Documents is the default section; open the doc directly from the sidebar tree.
-  await user.click(await screen.findByRole("button", { name: "Expand Launch" }))
-  await user.click(
-    await screen.findByRole("button", { name: "Expand Research" })
-  )
-  await user.click(
-    await screen.findByRole("button", { name: /Draft document/ })
-  )
-  await user.type(
-    // Loading the real code-split editor is not subject to a one-second SLA.
-    await screen.findByRole(
+)
+
+it(
+  "shows the draft it is asking about when closing a hidden tab",
+  { timeout: 20000 },
+  async () => {
+    // A panel's confirmation renders inside that panel, which is what stops a
+    // hidden tab's menus covering the one in front. The same containment would
+    // hide a confirmation we asked for — an invisible prompt and a Close button
+    // that appears to do nothing.
+    const nodes = [
+      {
+        ...node,
+        id: 2,
+        kind: "project" as const,
+        parentId: null,
+        name: "Launch",
+      },
+      node,
+      {
+        ...node,
+        id: 5,
+        kind: "project" as const,
+        parentId: null,
+        name: "Other",
+      },
+    ]
+    const doc = { ...chat, kind: "document" as const, title: "Draft document" }
+    const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+      "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
+      "GET /api/neev/nodes/2/documents": () =>
+        json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes/4/documents": () =>
+        json({ items: [doc], nextAfter: null }),
+      "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes/5/documents": () =>
+        json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes/5/chats": () => json({ items: [], nextAfter: null }),
+      [`GET /api/neev/resources/${chat.id}`]: () => json(doc),
+      [`POST /api/neev/documents/${chat.id}/revisions`]: () =>
+        json({ code: "unavailable" }, 503),
+      [`GET /api/neev/documents/${chat.id}/revisions`]: () =>
+        json({ items: [], nextAfter: null }),
+    })
+    const user = userEvent.setup()
+    render(
+      <NativeTestRoot>
+        <NativeWorkspace />
+      </NativeTestRoot>
+    )
+
+    // Open the document and start writing in it.
+    await user.click(
+      await screen.findByRole("button", { name: "Expand Launch" })
+    )
+    await user.click(
+      await screen.findByRole("button", { name: "Expand Research" })
+    )
+    await user.click(
+      await screen.findByRole("button", { name: /Draft document/ })
+    )
+    const body = await screen.findByRole(
       "textbox",
       { name: "Document content" },
       { timeout: 5000 }
-    ),
-    "secret draft"
-  )
-  const unload = new Event("beforeunload", { cancelable: true })
-  window.dispatchEvent(unload)
-  expect(unload.defaultPrevented).toBe(true)
-  // Starting a chat opens ANOTHER tab, so the draft is not in danger and is
-  // not asked about — it is still there, behind its own tab.
-  await user.click(
-    screen.getAllByRole("button", { name: "Actions for Launch" })[0]
-  )
-  await user.click(screen.getByRole("menuitem", { name: "New Claude chat" }))
-  expect(screen.queryByRole("dialog")).toBeNull()
-  await user.click(screen.getByRole("tab", { name: /Draft document/ }))
-  expect(
-    screen.getAllByRole("textbox", { name: "Document content" })[0]
-  ).toHaveTextContent("secret draft")
-  // Leaving the workspace altogether DOES ask: every mounted panel is about to
-  // go, including this one.
-  await user.click(screen.getByRole("button", { name: "Sagar" }))
-  await user.click(screen.getByRole("menuitem", { name: "Settings" }))
-  expect(screen.getByRole("dialog")).toBeVisible()
-  expect(push).not.toHaveBeenCalled()
-  await user.click(screen.getByRole("button", { name: "Keep editing" }))
-  await user.click(screen.getByRole("button", { name: "Sagar" }))
-  await user.click(screen.getByRole("menuitem", { name: "Sign out" }))
-  // Signing out leaves every panel, so the dirty one is surfaced and asks
-  // before the draft goes with it.
-  expect(screen.getByRole("dialog")).toHaveTextContent(
-    "Discard unsaved changes?"
-  )
-  await user.click(screen.getByRole("button", { name: "Discard changes" }))
-  await waitFor(() => expect(screen.queryByText("secret draft")).toBeNull())
-  expect(mock.unknown).toEqual([])
-})
-
-it("shows the draft it is asking about when closing a hidden tab", async () => {
-  // A panel's confirmation renders inside that panel, which is what stops a
-  // hidden tab's menus covering the one in front. The same containment would
-  // hide a confirmation we asked for — an invisible prompt and a Close button
-  // that appears to do nothing.
-  const nodes = [
-    {
-      ...node,
-      id: 2,
-      kind: "project" as const,
-      parentId: null,
-      name: "Launch",
-    },
-    node,
-    { ...node, id: 5, kind: "project" as const, parentId: null, name: "Other" },
-  ]
-  const doc = { ...chat, kind: "document" as const, title: "Draft document" }
-  const mock = mockNativeSession(undefined, {
-    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
-    "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
-    "GET /api/neev/nodes/2/documents": () =>
-      json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/4/documents": () =>
-      json({ items: [doc], nextAfter: null }),
-    "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/5/documents": () =>
-      json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/5/chats": () => json({ items: [], nextAfter: null }),
-    [`GET /api/neev/resources/${chat.id}`]: () => json(doc),
-    [`GET /api/neev/documents/${chat.id}/revisions`]: () =>
-      json({ items: [], nextAfter: null }),
-  })
-  const user = userEvent.setup()
-  render(
-    <NativeTestRoot>
-      <NativeWorkspace />
-    </NativeTestRoot>
-  )
-
-  // Open the document and start writing in it.
-  await user.click(await screen.findByRole("button", { name: "Expand Launch" }))
-  await user.click(
-    await screen.findByRole("button", { name: "Expand Research" })
-  )
-  await user.click(
-    await screen.findByRole("button", { name: /Draft document/ })
-  )
-  const body = await screen.findByRole("textbox", { name: "Document content" })
-  await user.click(body)
-  await user.keyboard("hidden work")
-
-  // Leave it for another project: no prompt, because nothing is destroyed.
-  await user.click(
-    within(screen.getByRole("navigation", { name: "Projects" })).getByRole(
-      "button",
-      { name: "Other" }
     )
-  )
-  expect(screen.queryByRole("dialog")).toBeNull()
+    await user.click(body)
+    await user.keyboard("hidden work")
 
-  // Now close the tab that is NOT in front. Its confirmation must be on screen.
-  await user.click(screen.getByRole("button", { name: /Close Draft document/ }))
-  const prompt = await screen.findByRole("dialog")
-  expect(prompt).toHaveTextContent("Discard unsaved changes?")
-  expect(prompt).toBeVisible()
-  // Cancelling keeps the tab, the words in it, and brings it to the front —
-  // the reader is looking at the draft they were asked about.
-  await user.click(screen.getByRole("button", { name: "Keep editing" }))
-  expect(
-    await screen.findByRole("tab", { name: /Draft document/ })
-  ).toHaveAttribute("aria-selected", "true")
-  expect(
-    screen.getByRole("textbox", { name: "Document content" })
-  ).toHaveTextContent("hidden work")
-  expect(mock.unknown).toEqual([])
-})
+    // Leave it for another project: no prompt, because nothing is destroyed.
+    await user.click(
+      within(screen.getByRole("navigation", { name: "Projects" })).getByRole(
+        "button",
+        { name: "Other" }
+      )
+    )
+    expect(screen.queryByRole("dialog")).toBeNull()
+
+    // Now close the tab that is NOT in front. Its confirmation must be on screen.
+    await user.click(
+      screen.getByRole("button", { name: /Close Draft document/ })
+    )
+    const prompt = await screen.findByRole("dialog")
+    expect(prompt).toHaveTextContent("Discard unsaved changes?")
+    expect(prompt).toBeVisible()
+    // Cancelling keeps the tab, the words in it, and brings it to the front —
+    // the reader is looking at the draft they were asked about.
+    await user.click(screen.getByRole("button", { name: "Keep editing" }))
+    expect(
+      await screen.findByRole("tab", { name: /Draft document/ })
+    ).toHaveAttribute("aria-selected", "true")
+    expect(
+      screen.getByRole("textbox", { name: "Document content" })
+    ).toHaveTextContent("hidden work")
+    expect(mock.unknown).toEqual([])
+  }
+)
 
 it("immediately applies creator archive/reopen actions and moves with the current authority revision", async () => {
   let latest = chat
@@ -1433,7 +1497,11 @@ it("rejects a late private list response after auth generation changes even when
     <NativeTestRoot>
       <SwitchScope />
       <NativeBoundary>
-        <NativeContent node={node} onRequestNavigationGuard={() => {}} />
+        <NativeContent
+          node={node}
+          onRequestNavigationGuard={() => {}}
+          autosaveMs={250}
+        />
       </NativeBoundary>
     </NativeTestRoot>
   )
