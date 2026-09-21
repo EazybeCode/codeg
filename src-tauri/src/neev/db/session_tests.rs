@@ -124,10 +124,11 @@ async fn project_node(db: &DatabaseConnection, org: i32) -> i32 {
 /// once the column exists, and it is exactly what a server that has not yet run
 /// layer 12 has on disk.
 async fn downgrade_to_eleven(db: &DatabaseConnection) {
+    // Drop the column rather than rebuilding the table: `neev_agent_turns`
+    // carries a foreign key to this one, so dropping and recreating it would
+    // fail against the turns a session under test owns.
     for statement in [
-        "CREATE TABLE tmp_sessions AS SELECT org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,archived,revision,created_at,updated_at FROM neev_agent_sessions",
-        "DROP TABLE neev_agent_sessions",
-        "ALTER TABLE tmp_sessions RENAME TO neev_agent_sessions",
+        "ALTER TABLE neev_agent_sessions DROP COLUMN node_id",
         "UPDATE neev_schema_version SET version=11",
     ] {
         execute(db, statement, vec![]).await.unwrap();
@@ -364,7 +365,18 @@ async fn a_pointer_to_a_removed_node_is_rejected_and_clearing_it_restores_validi
     let db = h::database().await;
     let (org, user, _) = seed(&db).await;
     insert_session(&db, org, user).await;
-    let node = project_node(&db, org).await;
+    // A node of its own: `seed`'s project holds the chat resource, and that
+    // foreign key would refuse the deletion this test is about.
+    let node: i32 = one(
+        &db,
+        "INSERT INTO neev_nodes(org_id,parent_id,kind,name,revision,created_by) VALUES($1,NULL,'project','Doomed',1,$2) RETURNING id",
+        vec![org.into(), user.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "id")
+    .unwrap();
     execute(
         &db,
         "UPDATE neev_agent_sessions SET node_id=$1 WHERE org_id=$2 AND id=$3",
@@ -505,7 +517,11 @@ async fn with_unconstrained<F>(
     );
 }
 
-const SESSION_COLS: &str = "org_id INTEGER NOT NULL,id TEXT NOT NULL,owner_id INTEGER NOT NULL,title TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,visibility TEXT NOT NULL,kind TEXT NOT NULL,bound_chat_id TEXT,bound_kind TEXT,archived BOOLEAN NOT NULL,revision BIGINT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL";
+// Mirrors the real table column-for-column AND in order: the replica is
+// repopulated with a positional `INSERT ... SELECT *`, so a missing or
+// misplaced column is a count/type mismatch rather than a weaker constraint.
+// `node_id` is last because layer 12 adds it with `ALTER TABLE`.
+const SESSION_COLS: &str = "org_id INTEGER NOT NULL,id TEXT NOT NULL,owner_id INTEGER NOT NULL,title TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,visibility TEXT NOT NULL,kind TEXT NOT NULL,bound_chat_id TEXT,bound_kind TEXT,archived BOOLEAN NOT NULL,revision BIGINT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,node_id INTEGER";
 const TURN_COLS: &str = "org_id INTEGER NOT NULL,session_id TEXT NOT NULL,sequence BIGINT NOT NULL,id TEXT NOT NULL,run_id TEXT NOT NULL,request_id TEXT,prompt TEXT NOT NULL,response TEXT NOT NULL,status TEXT NOT NULL,error_code TEXT,provider TEXT NOT NULL,model TEXT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,completed_at BIGINT";
 
 fn nothing<'a>(
@@ -529,7 +545,7 @@ async fn validator_rejects_a_session_that_escaped_the_private_default() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','organization','chat',NULL,NULL,0,1,1000,1000)",
+        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','organization','chat',NULL,NULL,0,1,1000,1000,NULL)",
         vec![],
         nothing,
     )
@@ -541,7 +557,7 @@ async fn validator_rejects_a_session_with_an_unknown_provider() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','gpt','default','private','chat',NULL,NULL,0,1,1000,1000)",
+        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','gpt','default','private','chat',NULL,NULL,0,1,1000,1000,NULL)",
         vec![],
         nothing,
     )
@@ -555,7 +571,7 @@ async fn validator_rejects_a_session_whose_owner_lost_its_membership() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(4242,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','private','chat',NULL,NULL,0,1,1000,1000)",
+        "INSERT INTO neev_agent_sessions VALUES(4242,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','private','chat',NULL,NULL,0,1,1000,1000,NULL)",
         vec![],
         nothing,
     )
@@ -567,7 +583,7 @@ async fn validator_rejects_a_session_id_of_the_wrong_storage_class() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(1,777,1,'T','claude','default','private','chat',NULL,NULL,0,1,1000,1000)",
+        "INSERT INTO neev_agent_sessions VALUES(1,777,1,'T','claude','default','private','chat',NULL,NULL,0,1,1000,1000,NULL)",
         vec![],
         nothing,
     )
@@ -579,7 +595,7 @@ async fn validator_rejects_a_half_bound_session() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','private','chat','33333333-3333-4333-8333-333333333333',NULL,0,1,1000,1000)",
+        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','private','chat','33333333-3333-4333-8333-333333333333',NULL,0,1,1000,1000,NULL)",
         vec![],
         nothing,
     )

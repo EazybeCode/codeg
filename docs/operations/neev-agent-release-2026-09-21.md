@@ -4,8 +4,10 @@
 
 - Public app: https://app.neev.so/workspace
 - Source remote/branch: `workos` / `workos/team-workspace` (`EazybeCode/neev`).
-- Agent runtime recovery: `a95e62f2`; orphan reaping: `7b495f6e`; approval UI and concurrent sign-in guard: `ff745d1b`.
-- Release image: `neev-native-agent:restart-final`.
+- Backend/schema 12: `e1ad5748`; Projects UI: `d2d7c3a2`; runtime directory ownership fix: `7ec039de`.
+- Release image: `neev-native-agent:projects-final-d2d7c3a2`.
+- Live workspace SHA-256: `47f0110e44a93952736b4db4155cdabbecd24417bf5be491c5dd5ae9057e3813`.
+- Deployed 21 September 2026 at 06:28 UTC; live schema marker verified as 12.
 - Live compose: `/opt/neev-native-https-20260913/compose.yml` on the existing host.
 - Keep the service on `neev-native-private-20260913`, address `10.0.2.4`; Caddy uses this address.
 - Keep PostgreSQL certificate verification and its certificate bind mount.
@@ -25,9 +27,12 @@ Persistent host paths are `/var/lib/neev-native/agent-supervisor`, `/etc/neev-na
 - Runtime stop-signal acceptance passed with a graceful exit in 0.05 seconds.
 - Full-page documents/chats, nested-folder New chat, rich content persistence, organization joining, and team message delivery were tested on the same-host canary.
 - Initial JavaScript: 27 files, approximately 442 KiB compressed, versus approximately 1.39 MiB before lazy loading.
-- A successfully authenticated model response still requires the user's provider authorization; an approval challenge alone is not a completed account connection.
+- Real Claude authorization and connection Test passed. The production cap-helper path, running from a web-owned directory as UID 65532, returned the exact requested text “Neev connection works” with exit code 0.
+- The final browser chat check remains pending Google phone verification after the web session expired; the runtime reply was verified independently.
 
-- Final runtime suite: 499 passed, 3 skipped; container-init tests: 3 passed.
+- Final runtime suite: 518 passed, 3 skipped; focused directory ownership tests: 18 passed.
+- Projects UI checks: 72 focused tests, then 57 landing/client tests; final production build passed.
+- Same-host PostgreSQL schema 11→12 upgrade, session create/reload, project move, stale-revision rejection, invalid destination rejection, private-owner access and restart persistence passed.
 - Real restart acceptance passed: committed credential sentinel preserved, interrupted login cleaned, fresh login and cancellation succeeded, no fixture mapping/store/loop leaks. Log: `/tmp/neev-agent-restart-acceptance.log` on the host.
 - Final combined image passed Claude and Codex native HTTP approval/cancel checks. Its actual production init reaped an adopted child in the same-host canary.
 
@@ -36,3 +41,17 @@ Persistent host paths are `/var/lib/neev-native/agent-supervisor`, `/etc/neev-na
 Pre-agent database backup: `/opt/neev-db-backups/neev-before-agent6e-schema11-20260921-014828.sql` (104606 bytes, private).
 
 Compose backups are stored beside the live compose file, including `compose.yml.before-agent6e-20260921-014915` and `compose.yml.before-ui64fa-20260921-020310`. The runtime-off schema-11 rollback image is `neev-native:schema11-ui-rollback`. Do not start a schema-9 image against the current database. Preserve credential keys and coordinator state during rollback.
+
+## Projects and Settings
+
+The top-level navigation is Projects, with New project and the project tree. Documents, team chats and agent chats are reached through a project or folder. The empty workspace now opens on Projects. Settings has separate Organization, Members, Personal AI connections and Your profile sections. Existing private agent chats remain unfiled until their owner places them in a project; the association is stored on the server and survives restarts.
+
+## Required proxy DNS configuration
+
+Docker custom networks inject the main-namespace resolver `127.0.0.11`, which is unreachable from the isolated proxy namespace. The deployment binds `/etc/neev-native/proxy-resolv.conf` read-only to `/etc/netns/neev-login-proxy/resolv.conf`. Its IPv4 resolvers come from the host's configured upstreams. The `neev-agent` AppArmor profile permits that resolver bind. Guest DNS remains disabled. Preserve this bind and profile when recreating the service.
+
+## Schema 12 recovery
+
+The latest private database backup is `/opt/neev-db-backups/neev-before-projects-schema12-20260921-062805.sql` (110846 bytes). Compose was backed up as `compose.yml.before-projects12-20260921-062806`.
+
+**Do not start a schema-11 image against the upgraded schema-12 database.** The earlier schema-11 rollback image is retained for historical recovery only. Preserve credentials, keys, coordinator state, documents and the proxy DNS bind. Recover the current schema by rolling forward with a compatible server; do not restore a database backup over newer writes without explicitly accounting for those writes.
