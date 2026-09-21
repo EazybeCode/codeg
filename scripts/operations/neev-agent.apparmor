@@ -67,6 +67,13 @@ profile neev-agent flags=(attach_disconnected,mediate_deleted) {
   # TARGET is pinned under /run/netns/.
   mount options=(rw, bind) -> /run/netns/*,
   mount options=(rw, rbind) -> /run/netns/*,
+  # `ip netns exec <name>` bind-mounts a per-netns /etc/netns/<name>/resolv.conf over
+  # /etc/resolv.conf so the proxy namespace uses upstream DNS reachable via its own NAT.
+  # This is REQUIRED on Docker custom networks: the container's embedded resolver at
+  # 127.0.0.11 is a MAIN-netns loopback and is unreachable from the separate proxy netns,
+  # so without a per-netns resolv.conf the login proxy's resolver fails (stage=resolve).
+  # Bounded to exactly that source/target; the guest namespace still gets no DNS.
+  mount options=(rw, bind) /etc/netns/*/resolv.conf -> /etc/resolv.conf,
   # ip_forward is provisioned by `docker --sysctl` (not written here); the profile
   # deliberately does NOT allow /proc/sys writes.
 

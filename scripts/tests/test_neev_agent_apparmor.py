@@ -41,6 +41,7 @@ class ApparmorProfileTests(unittest.TestCase):
             "-> /data/agents/run-*/home/,",   # bind the volume onto the run's HOME
             "mount fstype=proc -> /proc/,",    # private /proc for the pid namespace
             "-> /run/netns/*,",                # per-slot netns management
+            "/etc/netns/*/resolv.conf -> /etc/resolv.conf,",  # per-netns proxy DNS
         ):
             self.assertIn(required, self.text)
 
