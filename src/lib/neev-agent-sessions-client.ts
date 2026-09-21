@@ -418,23 +418,19 @@ function assertRunId(value: string): void {
   if (!RUN_ID.test(value)) invalidRequest()
 }
 
+/**
+ * Every session the caller owns. There is deliberately no server-side project
+ * filter: the unfiled organizer needs the whole list anyway, so a project view
+ * filters what it already has rather than asking twice. `ListSessionsInput`
+ * accepts `archived` only, and it denies unknown fields.
+ */
 export async function listAgentSessions(
   includeArchived = false,
-  signal?: AbortSignal,
-  nodeId?: number | null
+  signal?: AbortSignal
 ): Promise<NeevAgentSession[]> {
-  const query = new URLSearchParams()
-  if (includeArchived) query.set("archived", "1")
-  // Omitted entirely means every session, which is what the unfiled organizer
-  // and the no-project view both need.
-  if (nodeId !== undefined && nodeId !== null) {
-    if (!Number.isSafeInteger(nodeId) || nodeId <= 0) invalidRequest()
-    query.set("nodeId", String(nodeId))
-  }
-  const suffix = query.toString()
   return parseAgentSessions(
     await contentGet(
-      `/api/neev/agent/sessions${suffix ? `?${suffix}` : ""}`,
+      `/api/neev/agent/sessions${includeArchived ? "?archived=1" : ""}`,
       signal
     )
   )

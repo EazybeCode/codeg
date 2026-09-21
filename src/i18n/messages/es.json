@@ -206,6 +206,7 @@
     "newProject": "Nuevo proyecto",
     "newSubfolder": "Nueva subcarpeta",
     "emptyProjects": "Crea un proyecto para organizar el trabajo de tu equipo.",
+    "projectsLanding": "Abre un proyecto para trabajar en él o crea uno.",
     "expand": "Expandir {name}",
     "collapse": "Contraer {name}",
     "actions": "Acciones de {name}",

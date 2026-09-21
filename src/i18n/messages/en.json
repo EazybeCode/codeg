@@ -206,6 +206,7 @@
     "newProject": "New project",
     "newSubfolder": "New subfolder",
     "emptyProjects": "Create a project to give your team’s work a home.",
+    "projectsLanding": "Open a project to work in it, or create one.",
     "expand": "Expand {name}",
     "collapse": "Collapse {name}",
     "actions": "Actions for {name}",

@@ -504,10 +504,11 @@ it("treats a server that does not send nodeId as unfiled, not as ours", async ()
   })
   mount({ nodeId: 7, nodeName: "Launch" })
 
-  expect(await screen.findByText("Agent chats in Launch")).toBeVisible()
+  // Await the list: the heading renders while the sessions are still loading.
   expect(
-    screen.getByRole("button", { name: /Not in a project \(2\)/ })
+    await screen.findByRole("button", { name: /Not in a project \(2\)/ })
   ).toBeVisible()
+  expect(screen.getByText("Agent chats in Launch")).toBeVisible()
   // …and none of them is shown as belonging to this project.
   expect(screen.queryByText("Refactor the parser")).toBeNull()
 })
