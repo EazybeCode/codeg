@@ -47,14 +47,60 @@ import errno
 import os
 import signal
 import socket
+import stat
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
 
-import neev_agent_network_bootstrap as bootstrap
-import neev_login_network_profile as profile
-import neev_provider_egress as egress
+
+# Exit code for a refusal during startup, kept clear of the probe codes below.
+BOOTSTRAP_EXIT = 4
+
+
+def _trusted_module_directory() -> str:
+    """This file's own directory, once it is proved safe to import from.
+
+    The child runs under `-I`, which is what keeps a hostile CWD, `PYTHONPATH`
+    and user site-packages out of a process that starts as root — and which also
+    removes the script's directory from `sys.path`, so the imports below would
+    otherwise fail outright. Putting exactly one directory back is the narrow
+    fix, but only after checking nobody else can write to it: a group- or
+    world-writable module directory is a way to have this root process import
+    somebody else's code, which is the very thing `-I` is here to prevent.
+    """
+    directory = os.path.dirname(os.path.abspath(__file__))
+    try:
+        info = os.stat(directory)
+    except OSError:
+        _bootstrap_failure("module directory is unreadable")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        _bootstrap_failure("module directory is writable by others")
+    if info.st_uid not in (0, os.geteuid()):
+        _bootstrap_failure("module directory is owned by another user")
+    return directory
+
+
+def _bootstrap_failure(reason: str):
+    """Exit on a distinct code, because 1 already means "nothing is listening".
+
+    The parent reads this process's exit status, and the one code that means a
+    free endpoint must mean only that. A startup refusal sharing it would be
+    read as permission to start a second proxy.
+    """
+    sys.stderr.write("neev_slot_proxy: %s\n" % reason)
+    raise SystemExit(BOOTSTRAP_EXIT)
+
+
+if __name__ == "__main__":  # pragma: no cover - child entry only
+    _MODULE_DIRECTORY = _trusted_module_directory()
+    if _MODULE_DIRECTORY not in sys.path:
+        sys.path.insert(0, _MODULE_DIRECTORY)
+
+import neev_agent_network_bootstrap as bootstrap  # noqa: E402
+import neev_login_network_profile as profile  # noqa: E402
+import neev_provider_egress as egress  # noqa: E402
 
 
 PROXY_PORT = 3128
@@ -70,7 +116,13 @@ VALID_PURPOSES = frozenset(("login", "run"))
 # CAP_KILL to reach a uid-dropped child.
 READY_TIMEOUT_SECONDS = 10.0
 STOP_TIMEOUT_SECONDS = 5.0
-_POLL_SECONDS = 0.02
+PROBE_TIMEOUT_SECONDS = 1.0
+
+# Probe exit codes. Absence has exactly ONE code; everything else is a question
+# we could not answer, and an unanswered question is not a free endpoint.
+PROBE_LISTENING = 0
+PROBE_FREE = 1
+PROBE_UNDETERMINED = 3
 
 _QUARANTINE_DIR = "/var/lib/neev-supervisor/proxy-quarantine"
 
@@ -198,14 +250,14 @@ class _Child:
 class ProxyLauncher:
     """Spawns and stops the namespaced child. Replaced wholesale in tests."""
 
-    def listener_present(self, slot: str) -> bool:  # pragma: no cover - Linux netns
+    def listener_present(self, slot: str) -> bool:
         """True if something is already bound to this slot's proxy endpoint.
 
         Probed from inside the namespace, because that is the only place the
-        address exists.
+        address exists. Only the one defined absence code is read as free: a
+        crash, a signal, or any other exit is `unavailable`, because starting a
+        second proxy on top of a live one is worse than refusing to start.
         """
-        import subprocess
-
         argv = [
             bootstrap.IP,
             "netns",
@@ -226,11 +278,15 @@ class ProxyLauncher:
         except (OSError, subprocess.SubprocessError):
             # If we cannot tell, we must not assume the endpoint is free.
             raise SlotProxyError("unavailable") from None
-        return completed.returncode == 0
+        if completed.returncode == PROBE_LISTENING:
+            return True
+        if completed.returncode == PROBE_FREE:
+            return False
+        # Undetermined, killed by a signal, or a probe that failed to start at
+        # all: no answer, so no start.
+        raise SlotProxyError("unavailable")
 
     def start(self, provider: str, purpose: str, slot: str):  # pragma: no cover
-        import subprocess
-
         read_fd, write_fd = os.pipe()
         os.set_inheritable(write_fd, True)
         argv = child_argv(provider, purpose, slot, write_fd)
@@ -354,58 +410,190 @@ def slot_proxy(
 # --------------------------------------------------------------------------- #
 
 
-def drop_privileges() -> None:  # pragma: no cover - Linux credentials
-    """Become uid/gid 62000 with no groups, no caps and no-new-privs.
+# Linux `prctl` options and the capability-set layout the child gives up.
+PR_CAPBSET_READ = 23
+PR_CAPBSET_DROP = 24
+PR_SET_NO_NEW_PRIVS = 38
+PR_GET_NO_NEW_PRIVS = 39
+PR_CAP_AMBIENT = 47
+PR_CAP_AMBIENT_CLEAR_ALL = 4
+CAP_SETPCAP = 8
+_CAP_LAST_CAP_FALLBACK = 40
+_LINUX_CAPABILITY_VERSION_3 = 0x20080522
+_CAPABILITY_FIELDS = ("CapBnd", "CapEff", "CapPrm", "CapInh", "CapAmb")
 
-    Order is load-bearing: no-new-privs first so nothing later can regain
-    privilege through exec, then groups, then gid, then uid — dropping uid first
-    would make the group calls fail and leave the process partly privileged.
-    3128 is unprivileged, so the bind after this needs nothing retained.
+
+class _SystemOps:  # pragma: no cover - Linux credentials
+    """The real syscalls. A recording double replaces this in the tests."""
+
+    def __init__(self):
+        import ctypes
+
+        self._ctypes = ctypes
+        self._libc = ctypes.CDLL(None, use_errno=True)
+        self._libc.prctl.restype = ctypes.c_int
+        self._libc.prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+
+    def geteuid(self):
+        return os.geteuid()
+
+    def getegid(self):
+        return os.getegid()
+
+    def prctl(self, option, arg2=0, arg3=0, arg4=0, arg5=0):
+        return self._libc.prctl(option, arg2, arg3, arg4, arg5)
+
+    def cap_last_cap(self):
+        try:
+            with open("/proc/sys/kernel/cap_last_cap", "rb") as handle:
+                return int(handle.read().strip())
+        except (OSError, ValueError):
+            # Only affects which capabilities we walk; the final /proc check is
+            # what actually decides whether the sets are empty.
+            return _CAP_LAST_CAP_FALLBACK
+
+    def setgroups(self, groups):
+        os.setgroups(groups)
+
+    def setresgid(self, gid):
+        os.setresgid(gid, gid, gid)
+
+    def setresuid(self, uid):
+        os.setresuid(uid, uid, uid)
+
+    def zero_capabilities(self):
+        ctypes = self._ctypes
+
+        class _Header(ctypes.Structure):
+            _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+
+        class _Data(ctypes.Structure):
+            _fields_ = [
+                ("effective", ctypes.c_uint32),
+                ("permitted", ctypes.c_uint32),
+                ("inheritable", ctypes.c_uint32),
+            ]
+
+        header = _Header(_LINUX_CAPABILITY_VERSION_3, 0)
+        data = (_Data * 2)()
+        return self._libc.capset(ctypes.byref(header), ctypes.byref(data))
+
+    def capability_state(self):
+        return read_capability_state()
+
+
+def read_capability_state(status_path: str = "/proc/self/status") -> dict:
+    """The kernel's own view of this process: the five cap masks and NoNewPrivs.
+
+    Read back rather than inferred. Every call that should have emptied a set
+    can fail with its return value discarded, so the only trustworthy statement
+    about the capabilities we hold is the one /proc makes.
     """
-    import ctypes
+    wanted = set(_CAPABILITY_FIELDS) | {"NoNewPrivs"}
+    state = {}
+    try:
+        with open(status_path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                name, separator, value = line.partition(":")
+                if not separator or name not in wanted:
+                    continue
+                value = value.strip()
+                try:
+                    state[name] = (
+                        int(value) if name == "NoNewPrivs" else int(value, 16)
+                    )
+                except ValueError:
+                    _refuse()
+    except OSError:
+        # Unverifiable is not the same as empty.
+        _refuse()
+    return state
 
-    libc = ctypes.CDLL(None, use_errno=True)
-    PR_SET_NO_NEW_PRIVS = 38
-    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-        raise SlotProxyError("unavailable")
-    if os.geteuid() == 0:
-        os.setgroups([])
-        os.setresgid(PROXY_GID, PROXY_GID, PROXY_GID)
-        os.setresuid(PROXY_UID, PROXY_UID, PROXY_UID)
-    if os.geteuid() != PROXY_UID or os.getegid() != PROXY_GID:
-        raise SlotProxyError("unavailable")
-    _drop_all_capabilities(libc)
+
+def _refuse():
+    raise SlotProxyError("unavailable")
 
 
-def _drop_all_capabilities(libc) -> None:  # pragma: no cover - Linux capabilities
-    """Empty the permitted/effective/inheritable sets and the bounding set.
+def verify_dropped(state: dict) -> None:
+    """Refuse unless every capability set is empty and no-new-privs is on.
 
-    After a uid change the effective set is already cleared, but the bounding
-    set survives; leaving it populated would let a future exec of a file-capable
-    binary regain what this just gave up.
+    CapAmb may be absent on a kernel with no ambient capabilities at all, which
+    is genuinely zero; the other four must be present, because a missing field
+    means we did not read what we think we read.
     """
-    import ctypes
+    for field in _CAPABILITY_FIELDS:
+        if field not in state:
+            if field == "CapAmb":
+                continue
+            _refuse()
+        elif state[field] != 0:
+            _refuse()
+    if state.get("NoNewPrivs") != 1:
+        _refuse()
 
-    PR_CAPBSET_DROP = 24
-    CAP_LAST_CAP = 40
-    for capability in range(CAP_LAST_CAP + 1):
-        libc.prctl(PR_CAPBSET_DROP, capability, 0, 0, 0)
 
-    class _Header(ctypes.Structure):
-        _fields_ = [("version", ctypes.c_uint32), ("pid", ctypes.c_int)]
+def drop_privileges(ops=None) -> None:
+    """Become uid/gid 62000 with no groups, no capabilities and no-new-privs.
 
-    class _Data(ctypes.Structure):
-        _fields_ = [
-            ("effective", ctypes.c_uint32),
-            ("permitted", ctypes.c_uint32),
-            ("inheritable", ctypes.c_uint32),
-        ]
+    The order is the whole substance of this function.
 
-    header = _Header(0x20080522, 0)  # _LINUX_CAPABILITY_VERSION_3
-    data = (_Data * 2)()
-    if libc.capset(ctypes.byref(header), ctypes.byref(data)) != 0:
-        # An empty set that will not apply is a privilege we cannot account for.
-        raise SlotProxyError("unavailable")
+    No-new-privs first, so nothing after it can regain privilege through an
+    exec. Then the BOUNDING SET, while we are still root: `PR_CAPBSET_DROP`
+    requires CAP_SETPCAP in the effective set, and the uid drop is exactly what
+    takes CAP_SETPCAP away — dropping the bounding set afterwards returns EPERM
+    for every capability and leaves it fully populated. Then groups, gid, uid,
+    in that order, because dropping uid first would make the group calls fail
+    and strand a half-dropped identity. Then ambient, then the remaining
+    permitted/effective/inheritable sets, which anyone may always empty.
+
+    Every return value is checked, and the kernel is asked at the end whether it
+    agrees: a capability we failed to drop is not something to discover later
+    from the process this is supposed to be confining. 3128 is unprivileged, so
+    the bind that follows needs nothing retained.
+    """
+    ops = ops or _SystemOps()
+    if ops.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        _refuse()
+
+    if ops.geteuid() == 0:
+        _drop_bounding_set(ops)
+        ops.setgroups([])
+        ops.setresgid(PROXY_GID)
+        ops.setresuid(PROXY_UID)
+
+    if ops.geteuid() != PROXY_UID or ops.getegid() != PROXY_GID:
+        _refuse()
+
+    # Ambient caps do not survive a uid change, but say so explicitly and check.
+    if ops.prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0:
+        _refuse()
+    if ops.zero_capabilities() != 0:
+        _refuse()
+
+    verify_dropped(ops.capability_state())
+
+
+def _drop_bounding_set(ops) -> None:
+    """Empty the bounding set. Must run while CAP_SETPCAP is still effective.
+
+    A populated bounding set would let a later exec of a file-capable binary
+    regain precisely what the uid drop just gave up.
+    """
+    last = ops.cap_last_cap()
+    # CAP_SETPCAP last: it is the one authorising these drops. Removing it from
+    # the BOUNDING set does not remove it from the effective set, so the order
+    # is belt-and-braces rather than required — and cheap.
+    order = [cap for cap in range(last + 1) if cap != CAP_SETPCAP] + [CAP_SETPCAP]
+    for capability in order:
+        present = ops.prctl(PR_CAPBSET_READ, capability, 0, 0, 0)
+        if present < 0:
+            # Not a capability this kernel knows; nothing to drop.
+            continue
+        if present == 0:
+            continue
+        if ops.prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0:
+            # This is the EPERM that an ignored return value used to hide.
+            _refuse()
 
 
 def _serve(provider: str, purpose: str, host: str, port: int, ready_fd: int) -> int:
@@ -443,18 +631,28 @@ def _serve(provider: str, purpose: str, host: str, port: int, ready_fd: int) -> 
 
 
 def _probe(host: str, port: int) -> int:
-    """Exit 0 if something is already listening; 1 if the endpoint is free."""
+    """0 listening, 1 definitely free, 3 undetermined.
+
+    Only a refused connection proves nothing is bound. A timeout, an unreachable
+    address or a resolver failure says we could not find out — reporting that as
+    free is how a live proxy gets a second one started on top of it.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.settimeout(1.0)
+        probe.settimeout(PROBE_TIMEOUT_SECONDS)
         try:
             probe.connect((host, port))
-        except (ConnectionRefusedError, socket.timeout, OSError):
-            return 1
-    return 0
+        except ConnectionRefusedError:
+            return PROBE_FREE
+        except OSError:
+            return PROBE_UNDETERMINED
+    return PROBE_LISTENING
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(add_help=False)
+    parser = argparse.ArgumentParser(
+        prog="neev_slot_proxy",
+        description="Internal entry point for the per-slot provider egress proxy.",
+    )
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--probe", action="store_true")
     parser.add_argument("--provider")

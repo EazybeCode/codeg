@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import importlib.util
+import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -29,17 +32,45 @@ import time
 import unittest
 from pathlib import Path
 
-# Appended, not inserted: this worktree carries older copies of some shared ops
-# modules, and the bootstrap/profile/egress this integrates with must be the
-# ones actually on PYTHONPATH. In main, where they are all one directory, this
-# resolves identically.
+# Shared ops modules (bootstrap, profile, egress) come from wherever they
+# actually live — this worktree carries stale partial copies, so its directory
+# is APPENDED rather than inserted. The module under test, by contrast, is
+# loaded by explicit path: main may already carry an older cherry-pick of it,
+# and that copy must never be what these tests exercise.
 _OPERATIONS = str(Path(__file__).resolve().parents[1] / "operations")
 if _OPERATIONS not in sys.path:
     sys.path.append(_OPERATIONS)
 
 import neev_agent_network_bootstrap as bootstrap  # noqa: E402
 import neev_login_network_profile as profile  # noqa: E402
-import neev_slot_proxy as slotproxy  # noqa: E402
+
+_MODULE_PATH = os.path.join(_OPERATIONS, "neev_slot_proxy.py")
+_SPEC = importlib.util.spec_from_file_location("neev_slot_proxy", _MODULE_PATH)
+slotproxy = importlib.util.module_from_spec(_SPEC)
+sys.modules["neev_slot_proxy"] = slotproxy
+_SPEC.loader.exec_module(slotproxy)
+
+# Where the shared ops modules actually live, taken from one that is already
+# imported rather than guessed.
+_SHARED_OPERATIONS = os.path.dirname(os.path.abspath(bootstrap.__file__))
+
+
+def stage_operations(mode=0o755):
+    """A single directory holding the module and everything it imports.
+
+    The child runs under `-I` with no PYTHONPATH, so its whole import closure
+    has to sit beside it. That is true of the deployed layout and of main; it is
+    not true of this worktree, which carries only some of the shared modules.
+    """
+    staged = tempfile.mkdtemp()
+    for name in os.listdir(_SHARED_OPERATIONS):
+        if name.endswith(".py"):
+            shutil.copy(os.path.join(_SHARED_OPERATIONS, name), staged)
+    # Last, so the module under test is this worktree's and not any older copy
+    # already sitting in the shared directory.
+    shutil.copy(_MODULE_PATH, staged)
+    os.chmod(staged, mode)
+    return staged
 
 
 # --------------------------------------------------------------------------- #
@@ -142,6 +173,74 @@ def free_port():
 
 
 # --------------------------------------------------------------------------- #
+
+
+
+class FakeOps:
+    """Records the credential sequence so its ORDER can be asserted off-Linux."""
+
+    def __init__(self, *, bounding=None, fail=None, state=None, euid=0, last=40):
+        self.calls = []
+        self.bounding = set(range(last + 1)) if bounding is None else set(bounding)
+        self.fail = fail or {}
+        self.euid = euid
+        self.egid = 0
+        self.last = last
+        if state is None:
+            state = {name: 0 for name in slotproxy._CAPABILITY_FIELDS}
+            state["NoNewPrivs"] = 1
+        self.state = state
+
+    def geteuid(self):
+        return self.euid
+
+    def getegid(self):
+        return self.egid
+
+    def cap_last_cap(self):
+        return self.last
+
+    def prctl(self, option, arg2=0, arg3=0, arg4=0, arg5=0):
+        if option == slotproxy.PR_CAPBSET_READ:
+            if arg2 > self.last:
+                return -1
+            return 1 if arg2 in self.bounding else 0
+        if option == slotproxy.PR_CAPBSET_DROP:
+            self.calls.append(("capbset_drop", arg2))
+            if "capbset_drop" in self.fail:
+                return self.fail["capbset_drop"]
+            self.bounding.discard(arg2)
+            return 0
+        if option == slotproxy.PR_SET_NO_NEW_PRIVS:
+            self.calls.append(("no_new_privs",))
+            return self.fail.get("no_new_privs", 0)
+        if option == slotproxy.PR_CAP_AMBIENT:
+            self.calls.append(("ambient_clear",))
+            return self.fail.get("ambient_clear", 0)
+        raise AssertionError("unexpected prctl option %r" % option)
+
+    def setgroups(self, groups):
+        self.calls.append(("setgroups", tuple(groups)))
+
+    def setresgid(self, gid):
+        self.calls.append(("setresgid", gid))
+        self.egid = gid
+
+    def setresuid(self, uid):
+        self.calls.append(("setresuid", uid))
+        self.euid = uid
+
+    def zero_capabilities(self):
+        self.calls.append(("capset_zero",))
+        return self.fail.get("capset_zero", 0)
+
+    def capability_state(self):
+        self.calls.append(("read_state",))
+        return dict(self.state)
+
+    def order(self):
+        return [call[0] for call in self.calls]
+
 
 
 class ScopeTests(unittest.TestCase):
@@ -576,7 +675,11 @@ class StopTests(unittest.TestCase):
 
 
 class ProbeTests(unittest.TestCase):
-    """The occupancy probe, against real sockets on this host."""
+    """The occupancy probe, against real sockets on this host.
+
+    Absence has exactly one exit code. Everything else means the question went
+    unanswered, and an unanswered question must not read as a free endpoint.
+    """
 
     def test_a_listening_endpoint_is_detected(self):
         with socket.socket() as server:
@@ -591,17 +694,69 @@ class ProbeTests(unittest.TestCase):
                 0,
             )
 
-    def test_a_free_endpoint_reports_free(self):
+    def test_only_a_refused_connection_reports_free(self):
         port = free_port()
-        self.assertEqual(slotproxy._probe("127.0.0.1", port), 1)
+        self.assertEqual(slotproxy._probe("127.0.0.1", port), slotproxy.PROBE_FREE)
         self.assertEqual(
             slotproxy.main(["--probe", "--host", "127.0.0.1", "--port", str(port)]), 1
         )
 
-    def test_an_unreachable_address_is_not_reported_as_free_by_accident(self):
-        # A refused connection means free; anything else must not be mistaken
-        # for it, so the probe's only success is an actual completed connect.
-        self.assertEqual(slotproxy._probe("127.0.0.1", free_port()), 1)
+    def test_a_probe_that_could_not_find_out_says_so_instead_of_free(self):
+        # A resolver failure is not evidence that nothing is listening.
+        self.assertEqual(
+            slotproxy._probe("no-such-host.invalid.", 3128),
+            slotproxy.PROBE_UNDETERMINED,
+        )
+        self.assertNotEqual(slotproxy.PROBE_UNDETERMINED, slotproxy.PROBE_FREE)
+
+
+class ListenerPresentTests(unittest.TestCase):
+    """How the parent reads the probe's exit code."""
+
+    class _Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    def run_with(self, outcome):
+        launcher = slotproxy.ProxyLauncher()
+        original = slotproxy.subprocess
+        self.addCleanup(setattr, slotproxy, "subprocess", original)
+
+        class _Fake:
+            SubprocessError = original.SubprocessError
+            TimeoutExpired = original.TimeoutExpired
+
+            @staticmethod
+            def run(argv, timeout=None):
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return ListenerPresentTests._Result(outcome)
+
+        slotproxy.subprocess = _Fake
+        return launcher.listener_present("a")
+
+    def test_zero_is_occupied_and_one_is_free(self):
+        self.assertTrue(self.run_with(0))
+        self.assertFalse(self.run_with(1))
+
+    def test_any_other_exit_is_unavailable_never_free(self):
+        # 3 = the probe could not determine; 2 = it rejected its own arguments;
+        # -9 = it was killed. None of these is evidence of a free endpoint, and
+        # treating them as one starts a second proxy over a live one.
+        for outcome in (3, 2, -9, -15, 127, 255):
+            with self.subTest(outcome):
+                with self.assertRaises(slotproxy.SlotProxyError) as caught:
+                    self.run_with(outcome)
+                self.assertEqual(caught.exception.category, "unavailable")
+
+    def test_a_probe_that_will_not_run_is_unavailable(self):
+        for error in (
+            OSError("no ip binary"),
+            subprocess.TimeoutExpired("probe", 1),
+        ):
+            with self.subTest(type(error).__name__):
+                with self.assertRaises(slotproxy.SlotProxyError):
+                    self.run_with(error)
 
 
 class ChildCliTests(unittest.TestCase):
@@ -646,6 +801,239 @@ class ChildCliTests(unittest.TestCase):
         self.assertGreater(slotproxy.PROXY_PORT, 1024)
 
 
+class PrivilegeDropTests(unittest.TestCase):
+    """The credential drop, asserted by call order and by the kernel's own answer."""
+
+    def test_the_bounding_set_is_emptied_while_root_still_holds_cap_setpcap(self):
+        ops = FakeOps(last=40)
+        slotproxy.drop_privileges(ops)
+
+        order = ops.order()
+        # THE bug this pins: PR_CAPBSET_DROP needs CAP_SETPCAP in the effective
+        # set, and setresuid(62000) is exactly what removes it. Every drop must
+        # happen before the identity changes, or all of them return EPERM.
+        last_drop = max(i for i, name in enumerate(order) if name == "capbset_drop")
+        self.assertLess(last_drop, order.index("setresuid"))
+        self.assertLess(order.index("no_new_privs"), order.index("capbset_drop"))
+        self.assertEqual(ops.bounding, set())
+
+    def test_the_full_sequence_runs_in_the_order_the_kernel_requires(self):
+        ops = FakeOps(bounding={0, 8}, last=40)
+        slotproxy.drop_privileges(ops)
+        self.assertEqual(
+            [name for name in ops.order() if name != "capbset_drop"],
+            [
+                "no_new_privs",
+                "setgroups",
+                "setresgid",
+                "setresuid",
+                "ambient_clear",
+                "capset_zero",
+                "read_state",
+            ],
+        )
+        # CAP_SETPCAP is dropped last of the bounding set: it authorises the rest.
+        drops = [call[1] for call in ops.calls if call[0] == "capbset_drop"]
+        self.assertEqual(drops, [0, slotproxy.CAP_SETPCAP])
+        self.assertIn(("setgroups", ()), ops.calls)
+        self.assertIn(("setresgid", 62000), ops.calls)
+        self.assertIn(("setresuid", 62000), ops.calls)
+
+    def test_a_refused_bounding_drop_is_not_swallowed(self):
+        # EPERM here was previously discarded, leaving a populated bounding set
+        # behind a comment claiming it was empty.
+        ops = FakeOps(fail={"capbset_drop": -1})
+        with self.assertRaises(slotproxy.SlotProxyError):
+            slotproxy.drop_privileges(ops)
+        self.assertNotIn("setresuid", ops.order())
+
+    def test_every_other_failed_call_also_refuses(self):
+        for failure in ("no_new_privs", "ambient_clear", "capset_zero"):
+            with self.subTest(failure):
+                ops = FakeOps(fail={failure: -1})
+                with self.assertRaises(slotproxy.SlotProxyError):
+                    slotproxy.drop_privileges(ops)
+
+    def test_capabilities_the_kernel_does_not_know_are_skipped_not_dropped(self):
+        ops = FakeOps(bounding={0, 1}, last=3)
+        slotproxy.drop_privileges(ops)
+        # Only capabilities actually present are dropped; an unknown index
+        # returns -1 from CAPBSET_READ and must not be treated as a failure.
+        self.assertEqual(
+            sorted(call[1] for call in ops.calls if call[0] == "capbset_drop"), [0, 1]
+        )
+
+    def test_the_kernel_has_the_last_word_even_when_every_call_succeeded(self):
+        for field in slotproxy._CAPABILITY_FIELDS:
+            with self.subTest(field):
+                state = {name: 0 for name in slotproxy._CAPABILITY_FIELDS}
+                state["NoNewPrivs"] = 1
+                state[field] = 0x20  # one capability left behind
+                ops = FakeOps(state=state)
+                with self.assertRaises(slotproxy.SlotProxyError):
+                    slotproxy.drop_privileges(ops)
+
+    def test_the_final_check_requires_no_new_privs_to_be_on(self):
+        state = {name: 0 for name in slotproxy._CAPABILITY_FIELDS}
+        state["NoNewPrivs"] = 0
+        with self.assertRaises(slotproxy.SlotProxyError):
+            slotproxy.drop_privileges(FakeOps(state=state))
+
+    def test_landing_on_the_wrong_identity_refuses(self):
+        # Never reachable in production, but a half-dropped identity must not
+        # proceed to bind as though it were the proxy account.
+        ops = FakeOps(euid=1000)
+        with self.assertRaises(slotproxy.SlotProxyError):
+            slotproxy.drop_privileges(ops)
+
+
+class CapabilityStateTests(unittest.TestCase):
+    """Parsing the kernel's answer, which is the only thing that is trusted."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+
+    def write(self, text):
+        path = os.path.join(self._dir.name, "status")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def test_the_five_masks_and_no_new_privs_are_read_as_numbers(self):
+        path = self.write(
+            "Name:\tpython3\n"
+            "Uid:\t62000\t62000\t62000\n"
+            "CapInh:\t0000000000000000\n"
+            "CapPrm:\t0000000000000000\n"
+            "CapEff:\t0000000000000000\n"
+            "CapBnd:\t000001ffffffffff\n"
+            "CapAmb:\t0000000000000000\n"
+            "NoNewPrivs:\t1\n"
+        )
+        state = slotproxy.read_capability_state(path)
+        self.assertEqual(state["CapBnd"], 0x1FFFFFFFFFF)
+        self.assertEqual(state["CapEff"], 0)
+        self.assertEqual(state["NoNewPrivs"], 1)
+        # A populated bounding set is exactly the failure root found on the host.
+        with self.assertRaises(slotproxy.SlotProxyError):
+            slotproxy.verify_dropped(state)
+
+    def test_a_fully_dropped_process_verifies(self):
+        path = self.write(
+            "CapInh:\t0000000000000000\n"
+            "CapPrm:\t0000000000000000\n"
+            "CapEff:\t0000000000000000\n"
+            "CapBnd:\t0000000000000000\n"
+            "CapAmb:\t0000000000000000\n"
+            "NoNewPrivs:\t1\n"
+        )
+        slotproxy.verify_dropped(slotproxy.read_capability_state(path))
+
+    def test_an_unreadable_or_unparsable_status_is_refused_not_assumed_empty(self):
+        with self.assertRaises(slotproxy.SlotProxyError):
+            slotproxy.read_capability_state(os.path.join(self._dir.name, "absent"))
+        garbled = self.write("CapBnd:\tnot-a-number\n")
+        with self.assertRaises(slotproxy.SlotProxyError):
+            slotproxy.read_capability_state(garbled)
+
+    def test_a_missing_mask_is_refused_but_an_absent_ambient_set_is_zero(self):
+        # No CapBnd line means we did not read what we think we read.
+        with self.assertRaises(slotproxy.SlotProxyError):
+            slotproxy.verify_dropped(
+                {"CapEff": 0, "CapPrm": 0, "CapInh": 0, "CapAmb": 0, "NoNewPrivs": 1}
+            )
+        # A kernel with no ambient capabilities at all is genuinely zero.
+        slotproxy.verify_dropped(
+            {"CapBnd": 0, "CapEff": 0, "CapPrm": 0, "CapInh": 0, "NoNewPrivs": 1}
+        )
+
+
+class IsolatedInterpreterTests(unittest.TestCase):
+    """The child really runs under `-I`. These invoke it exactly as it is spawned.
+
+    `-I` drops the script's directory from `sys.path`, which is what made every
+    spawned proxy die on `ModuleNotFoundError` before it could bind. The flag is
+    kept — it is what keeps a hostile CWD and PYTHONPATH out of a process that
+    starts as root — and the one directory it needs is put back explicitly,
+    after checking nobody else can write to it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.staged = stage_operations()
+        cls.module = os.path.join(cls.staged, "neev_slot_proxy.py")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.staged, ignore_errors=True)
+
+    def isolated(self, *args, module=None):
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        # No PYTHONPATH, no CWD on the path, no user site-packages: exactly the
+        # child's situation.
+        return subprocess.run(
+            [sys.executable, "-I", "-B", module or self.module, *args],
+            capture_output=True,
+            text=True,
+            env=environment,
+            cwd="/",
+        )
+
+    def test_the_module_imports_under_dash_I_with_no_pythonpath(self):
+        out = self.isolated("--help")
+        self.assertNotIn("ModuleNotFoundError", out.stderr)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("--serve", out.stdout)
+
+    def test_the_probe_subcommand_answers_from_a_real_isolated_child(self):
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen(16)
+            port = server.getsockname()[1]
+            busy = self.isolated("--probe", "--host", "127.0.0.1", "--port", str(port))
+            self.assertNotIn("ModuleNotFoundError", busy.stderr)
+            self.assertEqual(busy.returncode, slotproxy.PROBE_LISTENING, busy.stderr)
+        free = self.isolated(
+            "--probe", "--host", "127.0.0.1", "--port", str(free_port())
+        )
+        self.assertEqual(free.returncode, slotproxy.PROBE_FREE, free.stderr)
+
+    def test_the_serve_flags_this_module_builds_are_accepted_by_the_child(self):
+        # The real argv minus only the `ip netns exec` prefix that needs Linux.
+        # A rejected flag would exit 2 before ever binding.
+        argv = slotproxy.child_argv("claude", "login", "a", 3)
+        self.assertEqual(argv[4], sys.executable)
+        flags = argv[8:]
+        self.assertIn("--serve", flags)
+        out = self.isolated(*[flag for flag in flags], module=self.module)
+        # It will fail to bind 10.203.0.2 off Linux, but it must get that far:
+        # not an import error and not an argument rejection.
+        self.assertNotIn("ModuleNotFoundError", out.stderr)
+        self.assertNotEqual(out.returncode, 2, out.stderr)
+
+    def test_the_child_refuses_a_module_directory_others_can_write(self):
+        # A writable module directory is a way to make this root process import
+        # somebody else's code, which is the whole reason `-I` is there.
+        staged = stage_operations(mode=0o777)
+        self.addCleanup(shutil.rmtree, staged, True)
+        out = self.isolated(
+            "--probe",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(free_port()),
+            module=os.path.join(staged, "neev_slot_proxy.py"),
+        )
+        # Not merely non-zero: it must not collide with PROBE_FREE, or the
+        # parent would read a refused startup as a free endpoint.
+        self.assertEqual(out.returncode, slotproxy.BOOTSTRAP_EXIT, out.stderr)
+        self.assertNotEqual(slotproxy.BOOTSTRAP_EXIT, slotproxy.PROBE_FREE)
+        self.assertNotEqual(slotproxy.BOOTSTRAP_EXIT, slotproxy.PROBE_LISTENING)
+        self.assertIn("writable by others", out.stderr)
+
+
 @unittest.skipUnless(
     sys.platform.startswith("linux") and os.geteuid() == 0,
     "namespace entry and the credential drop need Linux and root",
@@ -653,23 +1041,33 @@ class ChildCliTests(unittest.TestCase):
 class LinuxHostTests(unittest.TestCase):
     """The two things a fake cannot stand in for, when the host can run them."""
 
-    def test_the_child_drops_to_the_proxy_account_with_no_new_privs(self):
+    def test_the_child_ends_with_every_capability_set_empty(self):
         code = (
-            "import os,sys,ctypes\n"
+            "import json,os,sys\n"
             "sys.path.insert(0, %r)\n"
             "import neev_slot_proxy as p\n"
             "p.drop_privileges()\n"
-            "libc = ctypes.CDLL(None, use_errno=True)\n"
-            "print(os.geteuid(), os.getegid(), len(os.getgroups()),"
-            " libc.prctl(39,0,0,0,0))\n"
+            "state = p.read_capability_state()\n"
+            "state['uid'] = os.geteuid(); state['gid'] = os.getegid()\n"
+            "state['groups'] = len(os.getgroups())\n"
+            "print(json.dumps(state))\n"
         ) % os.path.dirname(slotproxy.__file__)
         out = subprocess.run(
             [sys.executable, "-I", "-c", code], capture_output=True, text=True
         )
         self.assertEqual(out.returncode, 0, out.stderr)
-        uid, gid, groups, nnp = out.stdout.split()
-        self.assertEqual((uid, gid, groups), ("62000", "62000", "0"))
-        self.assertEqual(nnp, "1")  # PR_GET_NO_NEW_PRIVS
+        state = json.loads(out.stdout)
+
+        # The identity.
+        self.assertEqual(
+            (state["uid"], state["gid"], state["groups"]), (62000, 62000, 0)
+        )
+        # And the capabilities as the KERNEL reports them, not as the calls
+        # claimed. CapBnd is the one that silently survived before.
+        for field in ("CapBnd", "CapEff", "CapPrm", "CapInh", "CapAmb"):
+            with self.subTest(field):
+                self.assertEqual(state.get(field, 0), 0)
+        self.assertEqual(state["NoNewPrivs"], 1)
 
     def test_a_real_proxy_serves_and_stops_inside_the_namespace(self):
         launcher = slotproxy.ProxyLauncher()
