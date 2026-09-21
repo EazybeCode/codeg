@@ -26,6 +26,11 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { NativeClientError } from "@/lib/neev-client"
 import {
+  assignSessionProject,
+  forgetSessionProjects,
+  readSessionProjects,
+} from "@/lib/neev-agent-session-projects"
+import {
   cancelAgentRun,
   createAgentSession,
   followAgentRun,
@@ -79,6 +84,9 @@ function isTurnErrorCode(value: string | null): value is TurnErrorCode {
 type Props = {
   onRequestSettings?: () => void
   onRequestNavigationGuard?: (guard: ContentNavigationGuard) => void
+  /** The project this surface was opened from; null outside one. */
+  nodeId?: number | null
+  nodeName?: string
 }
 
 export function NativeAgentChats(props: Props) {
@@ -87,14 +95,31 @@ export function NativeAgentChats(props: Props) {
   return <AgentChats key={auth.scopeKey} {...props} />
 }
 
-function AgentChats({ onRequestSettings, onRequestNavigationGuard }: Props) {
+function AgentChats({
+  onRequestSettings,
+  onRequestNavigationGuard,
+  nodeId = null,
+  nodeName,
+}: Props) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
+  // The scope the filing is stored under. NOT `auth.scopeKey`: that carries a
+  // revalidation generation, so the map would be lost on every refresh. User
+  // and organization are what actually scope it.
+  const projectScope =
+    auth.session && auth.session.organization
+      ? `${auth.session.user.id}:${auth.session.organization.id}`
+      : null
+
   const [sessions, setSessions] = useState<NeevAgentSession[] | null>(null),
     [connections, setConnections] = useState<NeevAgentConnections | null>(null),
     [showArchived, setShowArchived] = useState(false),
     [open, setOpen] = useState<NeevAgentSession | null>(null),
+    // Which project each session is filed under. Local, per user+org, and never
+    // a claim about who may read anything — see neev-agent-session-projects.
+    [projects, setProjects] = useState(() => readSessionProjects(projectScope)),
+    [showUnfiled, setShowUnfiled] = useState(false),
     [creating, setCreating] = useState(false),
     [error, setError] = useState<unknown>(null)
 
@@ -113,6 +138,16 @@ function AgentChats({ onRequestSettings, onRequestNavigationGuard }: Props) {
         if (controller.signal.aborted) return
         setSessions(list)
         setConnections(wiring)
+        // Pointers to sessions the server no longer lists would outlive what
+        // they point at. Archived rows are hidden rather than gone, so only
+        // prune when looking at the full list.
+        if (showArchived)
+          setProjects(
+            forgetSessionProjects(
+              projectScope,
+              list.map((session) => session.id)
+            )
+          )
         setError(null)
       } catch (cause) {
         if (controller.signal.aborted) return
@@ -123,7 +158,29 @@ function AgentChats({ onRequestSettings, onRequestNavigationGuard }: Props) {
     }
     void load()
     return () => controller.abort()
-  }, [showArchived, refreshToken, auth])
+  }, [showArchived, refreshToken, auth, projectScope])
+
+  /**
+   * What this project shows, and what is not in any project yet.
+   *
+   * Outside a project every session is shown, so nothing is ever unreachable.
+   * Inside one, only its own — showing the same global list under every project
+   * would say each of them contains all of it, which is not true.
+   */
+  const shown = (sessions ?? []).filter(
+    (session) => nodeId === null || projects[session.id] === nodeId
+  )
+  const unfiled = (sessions ?? []).filter(
+    (session) => projects[session.id] === undefined
+  )
+  const file = useCallback(
+    (session: NeevAgentSession) => {
+      if (nodeId === null) return
+      // A local pointer only: the session is not moved, copied or re-shared.
+      setProjects(assignSessionProject(projectScope, session.id, nodeId))
+    },
+    [projectScope, nodeId]
+  )
 
   // Keep the freshly-changed session visible without a round trip; the server's
   // own row is what we store, so nothing here is optimistic.
@@ -180,7 +237,11 @@ function AgentChats({ onRequestSettings, onRequestNavigationGuard }: Props) {
       <NativeError error={error} />
 
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium">{t("agentSessions")}</h2>
+        <h2 className="text-sm font-medium">
+          {nodeName
+            ? t("agentChatsIn", { name: nodeName })
+            : t("agentSessions")}
+        </h2>
         <Button
           variant="ghost"
           size="sm"
@@ -193,13 +254,13 @@ function AgentChats({ onRequestSettings, onRequestNavigationGuard }: Props) {
 
       {sessions === null ? (
         <p role="status">{n("loading")}</p>
-      ) : sessions.length === 0 ? (
+      ) : shown.length === 0 ? (
         <p className="rounded-xl border p-5 text-sm text-muted-foreground">
           {t("emptyAgentChats")}
         </p>
       ) : (
         <ul aria-label={t("agentSessions")} className="space-y-2">
-          {sessions.map((session) => (
+          {shown.map((session) => (
             <li key={session.id}>
               <button
                 type="button"
@@ -221,11 +282,50 @@ function AgentChats({ onRequestSettings, onRequestNavigationGuard }: Props) {
         </ul>
       )}
 
+      {nodeId !== null && unfiled.length > 0 && (
+        <div className="rounded-xl border p-4">
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={showUnfiled}
+            onClick={() => setShowUnfiled((value) => !value)}
+          >
+            {t("unfiledAgentChats", { number: unfiled.length })}
+          </Button>
+          {showUnfiled && (
+            <ul
+              aria-label={t("unfiledAgentSessions")}
+              className="mt-2 space-y-1"
+            >
+              {unfiled.map((session) => (
+                <li
+                  key={session.id}
+                  className="flex items-center justify-between gap-3 text-sm"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {session.title}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => file(session)}
+                  >
+                    {t("moveAgentChatHere")}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       <CreateSessionDialog
         open={creating}
         onClose={() => setCreating(false)}
         onCreated={(session) => {
           absorb(session)
+          // Created from a project, so it belongs to that project.
+          if (nodeId !== null)
+            setProjects(assignSessionProject(projectScope, session.id, nodeId))
           setCreating(false)
           setOpen(session)
         }}

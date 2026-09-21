@@ -845,6 +845,8 @@ function WorkspaceContent() {
             // the owner and are not filed under a project/folder, so this
             // surface is available whatever the rail has selected.
             <NativeAgentChats
+              nodeId={selectedNode?.id ?? null}
+              nodeName={selectedNode?.name}
               onRequestNavigationGuard={registerGuard}
               onRequestSettings={() =>
                 navigationGuard.current(() => router.push("/settings"))
