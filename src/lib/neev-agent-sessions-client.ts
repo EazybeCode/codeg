@@ -849,6 +849,12 @@ export function parseApproval(
 export interface NeevOperationReceipt {
   operationId: string
   generation: string
+  /**
+   * The connection AFTER the request, which is the point of reading it: a 200
+   * means the teardown was accepted, not that the credential is already gone.
+   * If the supervisor could not be reached the row is still `disconnecting`.
+   */
+  connection: NeevAgentConnection
 }
 
 /**
@@ -983,11 +989,21 @@ export async function submitConnectCode(
   )
 }
 
+/**
+ * `ReceiptDto` from both `cancel_connect` and `disconnect_provider` — the same
+ * shape from both, checked against each.
+ *
+ * It carries the connection as it stands after the request, and this parser
+ * used to demand only the two ids: a disconnect the server had performed came
+ * back looking like an unexpected response. `generation` is a decimal string,
+ * not a number — the server stringifies an i64 that would not survive JSON.
+ */
 export function parseOperationReceipt(value: unknown): NeevOperationReceipt {
-  const object = exact(value, ["operationId", "generation"])
+  const object = exact(value, ["operationId", "generation", "connection"])
   return {
     operationId: hexId(object.operationId),
     generation: nonNegativeInteger(object.generation),
+    connection: parseConnection(object.connection),
   }
 }
 

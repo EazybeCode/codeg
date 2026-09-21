@@ -46,6 +46,8 @@ import { NativeError } from "./native-boundary"
 const ATTEMPT_POLL_MS = 3_000
 /** Transient poll failures tolerated before the wait is reported as failed. */
 const POLL_RETRIES = 3
+/** How long a reconnect waits for its own teardown before giving the row back. */
+const TEARDOWN_ROUNDS = 10
 const RUN_ID = /^[0-9a-f]{32}$/
 
 type Attempt = {
@@ -285,36 +287,105 @@ export function NativeAgentConnectionsPanel({
     setOutcome(null)
     setApproval(null)
     setCode("")
-    // One key per in-flight sign-in: a retry after a lost response replays the
-    // SAME attempt instead of starting a second one.
-    const connectKey = pendingKeys.current.get(provider) ?? newRequestKey()
-    pendingKeys.current.set(provider, connectKey)
     try {
-      const started = await startProviderConnect(
-        provider,
-        connectKey,
-        auth.session.csrf,
-        auth.signal
-      )
-      if (started.outcome === "pending")
-        remember({
-          provider,
-          attemptId: started.attemptId,
-          expiresAt: started.expiresAt,
-          cancelKey: newRequestKey(),
-          connectKey,
-        })
-      else {
-        // Already in its final state; the returned row is the truth.
-        pendingKeys.current.delete(provider)
-        refresh()
-      }
+      await beginSignIn(provider)
     } catch (cause) {
       setError(cause)
       auth.handleAuthorityError(cause)
     } finally {
       setBusy(null)
     }
+  }
+
+  /** Start a sign-in. The caller owns `busy` and the error reporting. */
+  async function beginSignIn(provider: NeevAgentProvider) {
+    if (!auth.session) return
+    // One key per in-flight sign-in: a retry after a lost response replays the
+    // SAME attempt instead of starting a second one.
+    const connectKey = pendingKeys.current.get(provider) ?? newRequestKey()
+    pendingKeys.current.set(provider, connectKey)
+    const started = await startProviderConnect(
+      provider,
+      connectKey,
+      auth.session.csrf,
+      auth.signal
+    )
+    if (started.outcome === "pending")
+      remember({
+        provider,
+        attemptId: started.attemptId,
+        expiresAt: started.expiresAt,
+        cancelKey: newRequestKey(),
+        connectKey,
+      })
+    else {
+      // Already in its final state; the returned row is the truth.
+      pendingKeys.current.delete(provider)
+      refresh()
+    }
+  }
+
+  /**
+   * Reconnect is a teardown followed by a sign-in, never a sign-in on its own.
+   *
+   * A `reconnect_required` row still holds the old credential, and the server
+   * rightly refuses to start a second sign-in over it — connecting straight
+   * away returns 409 and the user is left doing Disconnect and Connect by hand.
+   * So: disconnect, wait for the server to actually reach `not_signed_in`, and
+   * only then start. The wait is what keeps this from racing the queued
+   * teardown; the backend guard is respected rather than worked around.
+   */
+  async function reconnect(provider: NeevAgentProvider) {
+    if (busy || attempt || !auth.session) return
+    setBusy(provider)
+    setError(null)
+    setOutcome(null)
+    setApproval(null)
+    setCode("")
+    try {
+      const receipt = await disconnectProvider(
+        provider,
+        newRequestKey(),
+        auth.session.csrf,
+        auth.signal
+      )
+      pendingKeys.current.delete(provider)
+      // The receipt carries the row as it stands, so a teardown that already
+      // completed needs no poll at all.
+      const cleared =
+        receipt.connection.state === "not_signed_in" ||
+        (await waitForSignedOut(provider))
+      if (cleared) await beginSignIn(provider)
+      // Otherwise the teardown is still running. The row says `disconnecting`,
+      // which is the truth; starting anyway would just earn the 409 this exists
+      // to avoid. The next refresh offers Connect.
+      else refresh()
+    } catch (cause) {
+      setError(cause)
+      auth.handleAuthorityError(cause)
+      refresh()
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * Poll until the server says the credential is gone. Bounded: the teardown is
+   * queued work, and this holds the row busy while it runs.
+   */
+  async function waitForSignedOut(provider: NeevAgentProvider) {
+    for (let round = 0; round < TEARDOWN_ROUNDS; round += 1) {
+      const wiring = await loadAgentConnections(auth.signal)
+      // Keep the row honest while we wait rather than freezing the old state.
+      if (owned) setLoaded(wiring)
+      const row = wiring.connections.find(
+        (candidate) => candidate.provider === provider
+      )
+      if (!row || row.state === "not_signed_in") return true
+      if (row.state !== "disconnecting") return false
+      await new Promise((resolve) => setTimeout(resolve, pollMs))
+    }
+    return false
   }
 
   async function cancel() {
@@ -621,7 +692,9 @@ export function NativeAgentConnectionsPanel({
             aria-label={named(
               reconnecting ? "reconnectProvider" : "connectProvider"
             )}
-            onClick={() => void connect(provider)}
+            onClick={() =>
+              void (reconnecting ? reconnect(provider) : connect(provider))
+            }
           >
             {t(reconnecting ? "reconnectProvider" : "connectProvider")}
           </Button>
