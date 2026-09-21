@@ -368,12 +368,13 @@ def main(argv=None):  # pragma: no cover - Linux daemon glue
     config = config_from_env()
     # _cleanup_run_workdir + the login workdir validation read this.
     os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = config.workspace_root
+    paths, policy = deployment.from_config(config)
 
-    # Prepare protected state (fence dir+lock+record, control key, socket parent) via
-    # the deployment module BEFORE anything binds; then purge abandoned runs and bring
-    # up the egress bridges/proxy netns. All of this happens before the control socket
-    # is bind-ready, which is what the container-init waits on.
-    deployment.provision(config)
+    # Prepare protected state (fence dir+lock+record, IPC dir + control key) via the
+    # deployment module BEFORE anything binds; then purge abandoned runs and bring up
+    # the egress bridges/proxy netns. All of this happens before the control socket is
+    # bind-ready, which is what the container-init waits on.
+    deployment.provision(paths, policy)
     purge_abandoned_runs(config.workspace_root)
     bootstrap.apply(bootstrap.plan(config.uplink), bootstrap.CommandRunner())
 
@@ -386,13 +387,16 @@ def main(argv=None):  # pragma: no cover - Linux daemon glue
     except sup.RegistryError as error:
         raise SystemExit("neev supervisor: durable recovery failed: %s" % error.reason)
 
-    fence = fence_mod.FenceOwner.open(deployment.fence_deployment(config))
+    fence = fence_mod.FenceOwner.open(deployment.fence_deployment(paths, policy))
+    bind_path = deployment.socket_path(paths)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.bind(config.socket_path)
-    os.chown(config.socket_path, 0, config.control_gid)  # root:control_gid
-    os.chmod(config.socket_path, 0o660)
+    sock.bind(bind_path)
+    os.chown(bind_path, policy.supervisor_uid, policy.control_gid)  # root:control_gid
+    os.chmod(bind_path, 0o660)
     sock.listen(32)
-    listener = transport.SupervisorListener.adopt(sock, deployment.control_deployment(config))
+    listener = transport.SupervisorListener.adopt(
+        sock, deployment.control_deployment(paths, policy)
+    )
     try:
         asyncio.run(sup.serve(listener, fence, supervisor))
     finally:

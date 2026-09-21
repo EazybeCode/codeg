@@ -18,8 +18,8 @@ import neev_agent_login_drivers as drivers  # noqa: E402
 
 def _full_env(workspace_root):
     return {
-        "NEEV_SUPERVISOR_SOCKET": "/run/neev/supervisor.sock",
-        "NEEV_SUPERVISOR_KEY": "/run/neev/control.key",
+        "NEEV_SUPERVISOR_SOCKET": "/run/neev/ipc/control.sock",
+        "NEEV_SUPERVISOR_KEY": "/run/neev/ipc/control.key",
         "NEEV_SUPERVISOR_FENCE_DIR": "/run/neev/fence",
         "NEEV_SUPERVISOR_STORE_ROOT": "/var/lib/neev-supervisor/credentials",
         "NEEV_SUPERVISOR_MASTER_KEY": "/etc/neev-supervisor/credential-master.key",
