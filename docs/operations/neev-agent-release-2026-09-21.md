@@ -80,3 +80,22 @@ The latest private database backup is `/opt/neev-db-backups/neev-before-projects
 - Live Claude first-message creation and tab switching passed: a saved conversation returned exactly “Tabbed Claude chat works.” Codex remains signed out; its execution was not verified.
 - Backend, Docmost, schema 12, provider credentials and isolation configuration are unchanged. This release does not claim complete Notion feature parity; team chat retains its existing inner controls.
 - Released at 12:48 UTC; exact canary/live artifact hash matched. Compose backup: `compose.yml.before-ui-reference-20260921-124804`. Prior schema-compatible image remains available for rollback.
+
+## Autosave and agent activity release — 15:32 UTC
+
+- Live image: `neev-native-agent:ux-2d4608ff`; source integration `e3e05783`, pushed to remote `workos`, branch `workos/team-workspace`. UI commits `60350307`, `2d4608ff`; backend production through `c129c761`, test fixture corrections through `30a2deb6`.
+- Exact same-host candidate/live workspace SHA-256: `54578cfa509a5778f613a239235893b77cfd524903841e6abf3f2af2bf00756c`.
+- Documents autosave after a pause, serialize overlapping saves, retain edits while requests are pending, and recover an ambiguously committed save without overwriting newer text. Navigation flushes pending saves; failures retain the draft and expose retry. Editors remain writable and keep focus during autosave.
+- New documents and team chats open immediately inside their project or nested folder. Their first content supplies an editable name, propagated to the page, sidebar, breadcrumb and tab. Manually supplied names are preserved. Enter sends in team and agent composers; Shift+Enter inserts a newline; composition input is guarded.
+- Reduced document and chat top spacing. Restored resource tabs resolve their names even when their folder is collapsed.
+- Real agent tool calls/results now pass through parsing, bounded run events, SSE and stored turn history. The UI groups and expands this activity. Unicode offsets, replay deduplication, truncated traces and slow subscribers are handled. Hidden model reasoning is not exposed.
+- Schema 13 adds stored activity and raises the per-document revision ceiling to 100,000; the existing organization storage quota remains enforced. Actual same-host schema-12 upgrade retained existing revisions.
+- Verification: 204 frontend tests across 11 affected suites; after the final cursor/tab fixes, 53 document/workspace tests passed, changed-file lint and production webpack export passed. Focused native suite: 591 passed, one Markdown parser timeout under build load; the exact failed test passed separately. Three explicit PostgreSQL tests passed: revision limit, populated document-format migration and v2 upgrade/foreign keys. Other external-integration tests remained ignored; the unrelated desktop test harness was not claimed as passing.
+- Browser candidate checks passed: nested immediate creation, editor/composer focus, automatic naming throughout navigation, document save/reload, continued editability and retained cursor after save, Enter-send and Shift+Enter newline, and restored tab names. Live Claude executed a harmless Bash `printf`, displayed the actual `neev-trace-ok` tool result, and retained its expandable call/result activity after a full page reload. The live acceptance chat is `UX trace check [test]`.
+- Codex launch arguments were corrected against the installed CLI, but Codex remains signed out; authenticated Codex execution was not verified. Docmost was not rebuilt.
+
+### Schema 13 recovery
+
+Private backup: `/opt/neev-db-backups/neev-before-ux-schema13-20260921-153209.sql`. Compose backup: `compose.yml.before-ux13-20260921-153209`.
+
+Use `neev-native-agent:ux-schema13-rollback` for UI rollback: it combines the new schema-compatible server with the previous UI. **Do not run the old schema-12 server against schema 13.** Credentials, agent keys, isolation configuration, coordinator state, document volumes and the proxy DNS mount were preserved. A database restore must account for writes made after the backup.
