@@ -31,10 +31,26 @@ const MEMBERS = "Members",
   AGENTS = "Personal AI connections",
   PROFILE = "Your profile",
   ORGANIZATION = "Organization"
+const PANEL_ID: Record<string, string> = {
+  [ORGANIZATION]: "neev-settings-organization",
+  [MEMBERS]: "neev-settings-members",
+  [AGENTS]: "neev-settings-agents",
+  [PROFILE]: "neev-settings-profile",
+}
+/**
+ * The panel for a section, open or closed.
+ *
+ * Deliberately by id rather than by role and name: a hidden element has no
+ * computed accessible name, so `getByRole("tabpanel", { name })` can only ever
+ * reach the section that happens to be open — which is precisely the section a
+ * test asserting "this one is *not* showing" is not looking at. The id is on the
+ * panel whatever its state, so the query works from either side and the
+ * visibility assertion stays the test's own to make.
+ */
 function panelOf(section: string) {
-  // `hidden: true` so the query reaches a panel that is currently closed; the
-  // assertion about whether it is *visible* is then the test's own.
-  return screen.getByRole("tabpanel", { name: section, hidden: true })
+  const panel = document.getElementById(PANEL_ID[section])
+  if (!panel) throw new Error(`no settings panel for section "${section}"`)
+  return panel
 }
 function fixtures(owner = 1) {
   return {
