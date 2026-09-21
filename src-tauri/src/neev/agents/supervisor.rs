@@ -113,10 +113,14 @@ impl LiveSupervisor {
         })
     }
 
+    pub(crate) fn boot_id(&self) -> &Id {
+        &self.boot_id
+    }
+
     /// The epoch this coordinator currently owns. Read per exchange (not cached)
     /// so a lease that has been poisoned or moved on stops us immediately — the
     /// supervisor fences on exactly this value.
-    fn epoch(&self) -> Result<i64, SupervisorError> {
+    pub(crate) fn epoch(&self) -> Result<i64, SupervisorError> {
         let mut lease = match self.coordinator.lock() {
             Ok(lease) => lease,
             Err(poisoned) => poisoned.into_inner(),
@@ -717,6 +721,151 @@ async fn dispatch_cleanup(
         Some(ResultBody::CleanupConnection(_)) => Err(SupervisorError::Unavailable),
         _ => Err(SupervisorError::Invalid),
     }
+}
+
+/// Entries requested per reconcile page, and the page ceiling. Both bounded so
+/// a supervisor cannot make startup walk forever.
+const RECONCILE_LIMIT: u8 = 32;
+const RECONCILE_MAX_PAGES: usize = 64;
+
+/// Re-learn what the supervisor still holds, page by page.
+///
+/// Taking the status epoch clears the previous owner's check records, so this
+/// runs between activation and enablement: until we know which connections the
+/// supervisor still has state for, admitting new checks would be guessing. It
+/// reports how many entries it saw; the caller's readiness depends on it
+/// returning `Ok` at all.
+pub(crate) async fn reconcile(state: &ServerState) -> Result<usize, SupervisorError> {
+    let mut snapshot: Option<Counter> = None;
+    let mut after: Option<Id> = None;
+    let mut seen = 0usize;
+    for _ in 0..RECONCILE_MAX_PAGES {
+        let request = request_of(RequestBody::ReconcilePage(
+            super::control_dto::ReconcilePageRequest {
+                // Both cursor fields travel together or not at all.
+                snapshot_revision: snapshot.clone(),
+                after_entry_id: after.clone(),
+                limit: RECONCILE_LIMIT,
+            },
+        ))?;
+        let page = match state.supervisor.exchange(request).await?.body {
+            Some(ResultBody::ReconcilePage(page)) => page,
+            _ => return Err(SupervisorError::Invalid),
+        };
+        seen += page.entries.len();
+        // The page states its own continuation; absent means this was the last.
+        match page.next_after_entry_id.clone() {
+            None => return Ok(seen),
+            Some(cursor) => {
+                after = Some(cursor);
+                snapshot = Some(page.snapshot_revision.clone());
+            }
+        }
+    }
+    // The ceiling is a guard, not an expected outcome: a supervisor that never
+    // ends its pages has not reconciled, so readiness must not follow.
+    Err(SupervisorError::Invalid)
+}
+
+/// What a bounded connection check concluded, in the terms `status` stores.
+pub(crate) enum CheckProgress {
+    /// The supervisor is still working; the caller should poll again.
+    Pending,
+    /// A terminal observation, ready to be finalized.
+    Observed(super::status::CheckedAccountOutcome),
+}
+
+/// Ask the supervisor to verify one connection's credential, side-effect free.
+///
+/// The ticket is the one `status::prepare_connection_check` issued, so the
+/// check is bound to a specific connection generation and storage handle: a
+/// result cannot be applied to a connection that has since changed underneath
+/// it, and `finalize_connection_check` re-proves that before storing anything.
+pub(crate) async fn check_connection(
+    state: &ServerState,
+    ticket: &super::status::StatusTicket,
+) -> Result<CheckProgress, SupervisorError> {
+    use super::status::{CheckUnavailable, CheckedAccountOutcome};
+    let request = request_of(RequestBody::CheckConnection(
+        super::control_dto::CheckConnectionBody {
+            ticket: super::control_dto::CheckTicketDto {
+                binding: super::control_dto::ConnectionBinding {
+                    scope: Scope {
+                        org_id: owner_id(ticket.org_id())?,
+                        user_id: owner_id(ticket.user_id())?,
+                        provider: wire_provider(ticket.provider()),
+                    },
+                    connection_id: id(ticket.connection_id())?,
+                    generation: counter(ticket.generation())?,
+                },
+                session_id: SessionId::new(ticket.session_id().to_owned())
+                    .map_err(|_| SupervisorError::Invalid)?,
+                storage_handle: id(ticket.storage_handle())?,
+                check_id: id(ticket.check_id())?,
+                expires_at: unix_sec(ticket.expires_at())?,
+            },
+        },
+    ))?;
+    let result = match state.supervisor.exchange(request).await?.body {
+        Some(ResultBody::CheckConnection(result)) => result,
+        _ => return Err(SupervisorError::Invalid),
+    };
+    Ok(match result {
+        super::control_dto::CheckResult::Queued { .. }
+        | super::control_dto::CheckResult::Checking { .. } => CheckProgress::Pending,
+        super::control_dto::CheckResult::Finished {
+            observed_at,
+            account,
+            ..
+        } => {
+            let observed_at = observed_at.get();
+            CheckProgress::Observed(match account {
+                super::control_dto::AccountStatus::Supported { account_label } => {
+                    CheckedAccountOutcome::Supported {
+                        account_label: account_label.as_str().to_owned(),
+                        observed_at,
+                    }
+                }
+                super::control_dto::AccountStatus::Disconnected => {
+                    CheckedAccountOutcome::Disconnected { observed_at }
+                }
+                super::control_dto::AccountStatus::Unsupported => {
+                    CheckedAccountOutcome::Unsupported { observed_at }
+                }
+            })
+        }
+        super::control_dto::CheckResult::Unavailable { reason, .. } => {
+            CheckProgress::Observed(CheckedAccountOutcome::Unavailable(match reason {
+                super::control_dto::CheckFailure::ProviderUnavailable => {
+                    CheckUnavailable::ProviderUnavailable
+                }
+                super::control_dto::CheckFailure::Interrupted => CheckUnavailable::Interrupted,
+                super::control_dto::CheckFailure::Expired => CheckUnavailable::Expired,
+            }))
+        }
+    })
+}
+
+/// Adopt the status epoch this process's coordinator owns, reconciling with the
+/// supervisor first. Returns `None` when there is no live supervisor to
+/// reconcile against — checks then stay disabled, which is the honest state.
+pub(crate) async fn adopt_status_epoch(
+    state: &ServerState,
+) -> Option<super::status::StatusEpochTicket> {
+    let (epoch, boot_id) = match state.supervisor.as_ref() {
+        Supervisor::Live(live) => (live.epoch().ok()?, live.boot_id().as_str().to_owned()),
+        #[cfg(test)]
+        Supervisor::Scripted(_) => (1, "1".repeat(32)),
+        Supervisor::Unavailable => return None,
+    };
+    super::status::adopt_epoch(state, epoch, boot_id, |_ticket| async move {
+        reconcile(state)
+            .await
+            .map(|_| ())
+            .map_err(|_| super::status::StatusError::Unavailable)
+    })
+    .await
+    .ok()
 }
 
 #[cfg(test)]

@@ -833,6 +833,110 @@ async fn finish_from_storage(
     }
 }
 
+/// How long a `test` request will follow a bounded provider check before
+/// reporting that it could not settle. The supervisor polls with its own
+/// backoff; this is the request's patience, not the check's lifetime.
+const CHECK_POLL_ATTEMPTS: usize = 20;
+const CHECK_POLL_INTERVAL_MS: u64 = 250;
+
+/// `POST /api/neev/agent/connections/{provider}/test` — verify the caller's own
+/// stored credential against the provider, side-effect free.
+///
+/// The whole chain is real: the status epoch is adopted (which requires a
+/// successful reconcile with the supervisor), `prepare_connection_check` admits
+/// the check against a specific connection generation and storage handle, the
+/// supervisor performs it, and `finalize_connection_check` re-proves the
+/// connection has not changed underneath before storing the observation. The
+/// response is the connection as it now stands.
+///
+/// `503` means the check genuinely could not be performed — no supervisor, or
+/// it never settled within the request's patience. It never reports a
+/// connection as verified on the strength of having asked.
+pub(super) async fn test_connection(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let provider = path_provider(&safe_path(path)?)?;
+    let _permit = catalog::permit(&state)?;
+    let (input, actor) =
+        catalog::organization_mutation::<ConnectInput>(&state, request, SESSION_BODY_LIMIT).await?;
+    // The request key is validated on the same rule as every other connection
+    // mutation, even though a check writes no operation row.
+    if input.request_key.is_empty() || input.request_key.len() > 64 {
+        return Err(ApiError::Invalid);
+    }
+    if !state.supervisor.is_available() {
+        return Err(ApiError::Unavailable);
+    }
+    // Adopting the epoch is what proves this process reconciled with the
+    // supervisor; without it `prepare_connection_check` would refuse as stale.
+    let epoch = supervisor::adopt_status_epoch(&state)
+        .await
+        .ok_or(ApiError::Unavailable)?;
+
+    let admission =
+        crate::neev::agents::status::prepare_connection_check(&state, &actor, &epoch, provider)
+            .await
+            .map_err(status_error)?;
+    let ticket = admission.ticket().clone();
+
+    for attempt in 0..CHECK_POLL_ATTEMPTS {
+        match supervisor::check_connection(&state, &ticket).await {
+            Ok(supervisor::CheckProgress::Observed(outcome)) => {
+                let finalized = crate::neev::agents::status::finalize_connection_check(
+                    &state, &actor, &ticket, outcome,
+                )
+                .await
+                .map_err(status_error)?;
+                return match finalized {
+                    crate::neev::agents::status::CheckFinalized::Applied(view) => {
+                        Ok(private_json(ConnectionTestDto {
+                            connection: connection_dto(view, state.agents.is_available()),
+                        }))
+                    }
+                    // The provider could not be reached, or the check lapsed:
+                    // the stored connection is untouched and we say so.
+                    crate::neev::agents::status::CheckFinalized::Unavailable(_) => {
+                        Err(ApiError::Unavailable)
+                    }
+                    // Something else moved the connection while we checked.
+                    crate::neev::agents::status::CheckFinalized::Stale => Err(ApiError::Conflict),
+                };
+            }
+            Ok(supervisor::CheckProgress::Pending) => {
+                if attempt + 1 < CHECK_POLL_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(CHECK_POLL_INTERVAL_MS))
+                        .await;
+                }
+            }
+            // A failed exchange leaves the admitted check to expire on its own
+            // deadline rather than being reported as an outcome.
+            Err(error) => return Err(super::agent_error(error.into())),
+        }
+    }
+    Err(ApiError::Unavailable)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionTestDto {
+    connection: ConnectionDto,
+}
+
+/// Map the status module's taxonomy onto HTTP. `Busy` and `Stale` are both
+/// "someone else is mid-flight or moved it" — a retry is the answer, not an
+/// error the user can fix.
+fn status_error(error: crate::neev::agents::status::StatusError) -> ApiError {
+    use crate::neev::agents::status::StatusError;
+    match error {
+        StatusError::Agent(agent) => super::agent_error(agent),
+        StatusError::Invalid => ApiError::Invalid,
+        StatusError::Busy | StatusError::Stale => ApiError::Conflict,
+        StatusError::Unavailable => ApiError::Unavailable,
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TeamInvokeInput {

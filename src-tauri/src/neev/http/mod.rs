@@ -264,6 +264,10 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             "/api/neev/agent/connections/{provider}/disconnect",
             post(agent_sessions::disconnect),
         )
+        .route(
+            "/api/neev/agent/connections/{provider}/test",
+            post(agent_sessions::test_connection),
+        )
         .route("/api/neev/logout", post(auth::logout))
         .route("/api/neev/auth/google/login", post(auth::google_login))
         .route("/api/neev/auth/google/link", post(auth::google_link))

@@ -1252,3 +1252,59 @@ async fn a_second_turn_carries_the_first_exchange_as_context() {
     assert_eq!(turns["items"][0]["prompt"], "remember: blue");
     assert_eq!(turns["items"][1]["prompt"], "what colour?");
 }
+
+/// The test button must never report a connection as verified on the strength
+/// of having asked. With no supervisor there is nothing to verify against, so
+/// the route refuses rather than echoing back the stored state.
+#[tokio::test]
+async fn testing_a_connection_without_a_supervisor_is_refused() {
+    let (_state, client, _db, _org) = fixture(fake(&["x"])).await;
+    let refused = client
+        .post("/api/neev/agent/connections/claude/test")
+        .json(&serde_json::json!({ "requestKey": "settings-test" }))
+        .await;
+    assert_eq!(
+        refused.status_code(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "a check with no supervisor must not report a verified connection"
+    );
+    // And nothing was written: the connection is untouched.
+    let connections = client
+        .get("/api/neev/agent/connections")
+        .await
+        .json::<Value>();
+    let claude = connections["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["provider"] == "claude")
+        .unwrap()
+        .clone();
+    assert_eq!(claude["checkedAt"], Value::Null);
+    assert_eq!(claude["accountLabel"], Value::Null);
+}
+
+#[tokio::test]
+async fn testing_a_connection_validates_its_inputs_and_provider() {
+    let (state, client, _db, _org) = fixture(fake(&["x"])).await;
+    // An unknown provider is not distinguishable from having no connection.
+    client
+        .post("/api/neev/agent/connections/gpt/test")
+        .json(&serde_json::json!({ "requestKey": "k" }))
+        .await
+        .assert_status_not_found();
+    // A malformed request key is refused before anything is attempted.
+    client
+        .post("/api/neev/agent/connections/claude/test")
+        .json(&serde_json::json!({ "requestKey": "x".repeat(65) }))
+        .await
+        .assert_status_bad_request();
+    // Unauthenticated callers cannot probe connections at all.
+    let server = axum_test::TestServer::new(crate::neev::http::router(state)).unwrap();
+    assert!(server
+        .post("/api/neev/agent/connections/claude/test")
+        .json(&serde_json::json!({ "requestKey": "k" }))
+        .await
+        .status_code()
+        .is_client_error());
+}

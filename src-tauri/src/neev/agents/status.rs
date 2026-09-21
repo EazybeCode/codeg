@@ -1,5 +1,17 @@
-//! Durable status publication only. Host ownership and reconciled readiness remain
-//! sealed until a separately reviewed child coordinator adapter exists.
+//! Durable status publication, plus the coordinator adapter that owns it.
+//!
+//! Host ownership and reconciled readiness used to be sealed pending a reviewed
+//! adapter; [`adopt_epoch`] is it. Two properties are load-bearing:
+//!
+//! - **An epoch can only be claimed by the process that owns the lease.**
+//!   [`claim_status_epoch`] takes the epoch and boot id the `control_coordinator`
+//!   lease minted, and nothing else can name an epoch.
+//! - **Readiness cannot be fabricated.** [`ReconciledStatusReady`] has no
+//!   constructor reachable from outside this module, and the only way to enable
+//!   checks is [`adopt_epoch`], which mints it *internally* and only after the
+//!   caller's reconcile future has actually succeeded. A caller that cannot
+//!   reconcile with the supervisor therefore cannot enable checks, however much
+//!   it would like to.
 #![allow(dead_code)]
 
 use super::{
@@ -359,6 +371,151 @@ async fn delete_record(
         phase.as_str().into(),
     ]);
     execute_exact(tx,"DELETE FROM neev_agent_status_checks WHERE connection_id=$1 AND check_id=$2 AND owner_epoch=$3 AND session_id=$4 AND generation=$5 AND storage_handle=$6 AND issued_at=$7 AND expires_at=$8 AND EXISTS(SELECT 1 FROM neev_agent_status_owner WHERE id=1 AND epoch=$9 AND boot_id=$10 AND phase=$11)",values,1).await
+}
+
+/// Claim the epoch this process's coordinator lease currently owns.
+///
+/// The values come from `control_coordinator::CoordinatorLease::checked_epoch`
+/// and its per-process boot id; a caller with no lease has nothing to pass.
+pub(crate) fn claim_status_epoch(
+    epoch: i64,
+    boot_id: String,
+) -> Result<CheckedStatusEpoch, StatusError> {
+    valid_epoch(epoch, &boot_id)?;
+    Ok(CheckedStatusEpoch { epoch, boot_id })
+}
+
+impl StatusEpochTicket {
+    pub(crate) fn epoch(&self) -> i64 {
+        self.epoch
+    }
+
+    pub(crate) fn boot_id(&self) -> &str {
+        &self.boot_id
+    }
+}
+
+impl StatusTicket {
+    pub(crate) fn org_id(&self) -> i32 {
+        self.org_id
+    }
+
+    pub(crate) fn user_id(&self) -> i32 {
+        self.user_id
+    }
+
+    pub(crate) fn provider(&self) -> Provider {
+        self.provider
+    }
+
+    pub(crate) fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
+    pub(crate) fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn storage_handle(&self) -> &str {
+        &self.storage_handle
+    }
+
+    pub(crate) fn check_id(&self) -> &str {
+        &self.check_id
+    }
+
+    pub(crate) fn expires_at(&self) -> i64 {
+        self.expires_at
+    }
+}
+
+impl StatusTicket {
+    /// Build a ticket directly, for exercising code that CONSUMES one (the
+    /// supervisor's check dispatch) without standing up a connected connection
+    /// and an enabled epoch first. Physically `cfg(test)`: a release binary
+    /// cannot construct a ticket except through `prepare_connection_check`,
+    /// which is what binds it to a real connection generation and handle.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_test(
+        epoch: i64,
+        boot_id: String,
+        org_id: i32,
+        user_id: i32,
+        provider: Provider,
+        connection_id: String,
+        generation: i64,
+        session_id: String,
+        storage_handle: String,
+        check_id: String,
+        issued_at: i64,
+        expires_at: i64,
+    ) -> Self {
+        Self {
+            epoch,
+            boot_id,
+            org_id,
+            user_id,
+            provider,
+            connection_id,
+            generation,
+            session_id,
+            storage_handle,
+            check_id,
+            issued_at,
+            expires_at,
+        }
+    }
+}
+
+impl CheckAdmission {
+    pub(crate) fn ticket(&self) -> &StatusTicket {
+        match self {
+            Self::Started(ticket) | Self::Joined(ticket) => ticket,
+        }
+    }
+}
+
+/// Take ownership of the status epoch and enable checks — but only after the
+/// caller has genuinely reconciled with the supervisor.
+///
+/// `reconcile` is run between activation and enablement, exactly where the
+/// protocol requires it: activation clears the previous owner's check records,
+/// so the coordinator must re-learn what the supervisor still holds before it
+/// starts admitting new checks. If `reconcile` fails, checks stay disabled and
+/// the error propagates; `ReconciledStatusReady` is minted here and never
+/// escapes, which is what stops a caller asserting readiness it does not have.
+///
+/// Idempotent: an epoch already owned and `Ready` re-runs `reconcile` and
+/// re-enables, which is harmless and keeps a restart simple.
+pub(crate) async fn adopt_epoch<F, Fut>(
+    state: &ServerState,
+    epoch: i64,
+    boot_id: String,
+    reconcile: F,
+) -> Result<StatusEpochTicket, StatusError>
+where
+    F: FnOnce(StatusEpochTicket) -> Fut,
+    Fut: std::future::Future<Output = Result<(), StatusError>>,
+{
+    let claim = claim_status_epoch(epoch, boot_id)?;
+    let ticket = match activate_status_epoch(state, &claim).await? {
+        Activation::Activated(ticket) => ticket,
+        // A closed epoch is not ours to revive; a new lease epoch must be taken.
+        Activation::Existing(_, StatusPhase::Closed) => return Err(StatusError::Stale),
+        Activation::Existing(ticket, _) => ticket,
+    };
+    reconcile(ticket.clone()).await?;
+    let ready = ReconciledStatusReady {
+        epoch: ticket.epoch,
+        boot_id: ticket.boot_id.clone(),
+    };
+    enable_status_checks(state, &ticket, &ready).await?;
+    Ok(ticket)
 }
 
 pub(crate) async fn activate_status_epoch(

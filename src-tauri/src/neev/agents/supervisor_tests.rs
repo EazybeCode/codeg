@@ -286,3 +286,200 @@ async fn the_live_login_registry_is_bounded() {
         .unwrap()
         .contains_key(&format!("attempt-{}", MAX_LIVE_LOGINS + 49)));
 }
+
+/// A check ticket for a real actor. `StatusTicket::for_test` exists so the
+/// dispatch under test can be exercised without standing up a connected
+/// connection and an enabled epoch first.
+fn check_ticket(actor: &crate::neev::types::OrgContext) -> crate::neev::agents::status::StatusTicket {
+    crate::neev::agents::status::StatusTicket::for_test(
+        1,
+        "1".repeat(32),
+        actor.org_id,
+        actor.identity.user_id,
+        Provider::Claude,
+        "4".repeat(32),
+        1,
+        actor.identity.session_id.clone(),
+        "8".repeat(32),
+        "7".repeat(32),
+        NOW,
+        NOW + 300,
+    )
+}
+
+fn reconcile_page(entries: usize, revision: &str, more: bool) -> dto::Response {
+    let page = dto::ReconcilePage {
+        snapshot_revision: dto::Counter::new(revision.to_owned()).unwrap(),
+        next_after_entry_id: more
+            .then(|| dto::Id::new(format!("{:032x}", entries.saturating_sub(1))).unwrap()),
+        entries: (0..entries)
+            .map(|index| dto::ReconcileEntry {
+                entry_id: dto::Id::new(format!("{index:032x}")).unwrap(),
+                binding: dto::ConnectionBinding {
+                    scope: dto::Scope {
+                        org_id: dto::OwnerId::new(1).unwrap(),
+                        user_id: dto::OwnerId::new(2).unwrap(),
+                        provider: dto::Provider::Claude,
+                    },
+                    connection_id: dto::Id::new("4".repeat(32)).unwrap(),
+                    generation: dto::Counter::new("1".into()).unwrap(),
+                },
+                attempt_id: dto::Id::new("5".repeat(32)).unwrap(),
+                operation_id: dto::Id::new("6".repeat(32)).unwrap(),
+                phase: dto::RegistryPhase::PendingLogin,
+                storage_handle: None,
+                receipt_id: None,
+                cleanup_operation_id: None,
+            })
+            .collect(),
+    };
+    response(dto::Op::ReconcilePage, dto::ResultBody::ReconcilePage(page))
+}
+
+#[tokio::test]
+async fn reconciling_walks_pages_until_a_short_one() {
+    // A page that names a continuation is followed; one that does not ends the
+    // walk. The page states this itself rather than us inferring it from length.
+    let (state, _actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(vec![
+        Ok(reconcile_page(RECONCILE_LIMIT as usize, "7", true)),
+        Ok(reconcile_page(3, "7", false)),
+    ])))
+    .await;
+    assert_eq!(reconcile(&state).await, Ok(RECONCILE_LIMIT as usize + 3));
+
+    let Supervisor::Scripted(scripted) = state.supervisor.as_ref() else {
+        panic!("scripted supervisor expected");
+    };
+    let sent = scripted.requests();
+    assert_eq!(sent.len(), 2, "one page too few or too many");
+    // The second request must carry BOTH cursor fields or neither — the DTO
+    // rejects a half-specified cursor.
+    match &sent[1].body {
+        dto::RequestBody::ReconcilePage(body) => {
+            assert!(body.snapshot_revision.is_some());
+            assert!(body.after_entry_id.is_some());
+        }
+        _ => panic!("expected a reconcile page request"),
+    }
+}
+
+#[tokio::test]
+async fn a_supervisor_that_never_ends_its_pages_is_not_reconciled() {
+    // Every page points at another, forever. Readiness must NOT follow from a walk that
+    // never terminates, so this is a failure rather than a silent give-up.
+    let answers = (0..(RECONCILE_MAX_PAGES + 5))
+        .map(|_| Ok(reconcile_page(RECONCILE_LIMIT as usize, "7", true)))
+        .collect();
+    let (state, _actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(answers))).await;
+    assert_eq!(reconcile(&state).await, Err(SupervisorError::Invalid));
+}
+
+#[tokio::test]
+async fn readiness_cannot_be_reached_without_a_successful_reconcile() {
+    // The supervisor refuses to reconcile: adoption fails, so checks stay
+    // disabled. This is the property that stops a coordinator asserting a
+    // readiness it never established.
+    let (state, _actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(vec![Err(
+        SupervisorError::Unavailable,
+    )])))
+    .await;
+    assert!(adopt_status_epoch(&state).await.is_none());
+}
+
+#[tokio::test]
+async fn adopting_an_epoch_enables_checks_after_reconciling() {
+    let (state, _actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(vec![Ok(
+        reconcile_page(0, "7", false),
+    )])))
+    .await;
+    let epoch = adopt_status_epoch(&state)
+        .await
+        .expect("a reconciled epoch is adopted");
+    assert_eq!(epoch.epoch(), 1);
+    // Reconcile happened BEFORE enablement, which is the ordering the protocol
+    // requires: activation clears the previous owner's records.
+    let Supervisor::Scripted(scripted) = state.supervisor.as_ref() else {
+        panic!("scripted supervisor expected");
+    };
+    assert!(matches!(
+        scripted.requests().first().map(|request| request.op()),
+        Some(dto::Op::ReconcilePage)
+    ));
+}
+
+#[tokio::test]
+async fn with_no_supervisor_no_epoch_is_adopted() {
+    let (state, _actor) = state_with(Supervisor::Unavailable).await;
+    assert!(adopt_status_epoch(&state).await.is_none());
+}
+
+#[tokio::test]
+async fn a_check_maps_every_supervisor_outcome_without_inventing_one() {
+    use crate::neev::agents::status::{CheckUnavailable, CheckedAccountOutcome};
+    let observed = dto::UnixSec::new(NOW + 5).unwrap();
+    let cases: Vec<(dto::ResultBody, &str)> = vec![
+        (
+            dto::ResultBody::CheckConnection(dto::CheckResult::Queued {
+                check_id: dto::Id::new("7".repeat(32)).unwrap(),
+                poll_after_ms: dto::RetryMs::new(250).unwrap(),
+            }),
+            "pending",
+        ),
+        (
+            dto::ResultBody::CheckConnection(dto::CheckResult::Finished {
+                check_id: dto::Id::new("7".repeat(32)).unwrap(),
+                observed_at: observed.clone(),
+                account: dto::AccountStatus::Supported {
+                    account_label: dto::Label::new("work@example.test".into()).unwrap(),
+                },
+            }),
+            "supported",
+        ),
+        (
+            dto::ResultBody::CheckConnection(dto::CheckResult::Finished {
+                check_id: dto::Id::new("7".repeat(32)).unwrap(),
+                observed_at: observed.clone(),
+                account: dto::AccountStatus::Disconnected,
+            }),
+            "disconnected",
+        ),
+        (
+            dto::ResultBody::CheckConnection(dto::CheckResult::Unavailable {
+                check_id: dto::Id::new("7".repeat(32)).unwrap(),
+                reason: dto::CheckFailure::ProviderUnavailable,
+            }),
+            "unavailable",
+        ),
+    ];
+    for (body, expected) in cases {
+        let (state, actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(vec![Ok(
+            response(dto::Op::CheckConnection, body),
+        )])))
+        .await;
+        let ticket = check_ticket(&actor);
+        let progress = check_connection(&state, &ticket).await.unwrap();
+        let actual = match progress {
+            CheckProgress::Pending => "pending",
+            CheckProgress::Observed(CheckedAccountOutcome::Supported { .. }) => "supported",
+            CheckProgress::Observed(CheckedAccountOutcome::Disconnected { .. }) => "disconnected",
+            CheckProgress::Observed(CheckedAccountOutcome::Unsupported { .. }) => "unsupported",
+            CheckProgress::Observed(CheckedAccountOutcome::Unavailable(
+                CheckUnavailable::ProviderUnavailable,
+            )) => "unavailable",
+            CheckProgress::Observed(CheckedAccountOutcome::Unavailable(_)) => "other",
+        };
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn a_check_answered_with_the_wrong_operation_is_refused() {
+    let (state, actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(vec![Ok(
+        started(),
+    )])))
+    .await;
+    assert!(matches!(
+        check_connection(&state, &check_ticket(&actor)).await,
+        Err(SupervisorError::Invalid)
+    ));
+}
