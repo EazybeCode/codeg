@@ -597,7 +597,10 @@ it("takes a pasted authorization code and forwards it without keeping it", async
     [SUBMIT]: (init) => {
       submitted.push(JSON.parse(init.body as string))
       approved = true
-      return json({ state: "completed" }, 202)
+      return json(
+        { state: "completed", expiresAt: FAR_FUTURE, approval: null },
+        202
+      )
     },
   })
   const user = userEvent.setup()
@@ -853,4 +856,50 @@ it("will not start a second provider's sign-in over a live one", async () => {
   expect(
     screen.getByRole("link", { name: "Open the sign-in page" })
   ).toBeVisible()
+})
+
+it("stops asking for a code once the server has taken one", async () => {
+  // The submit answers with the whole attempt. If it comes back still pending
+  // but with no challenge, the server has the code and is working on it —
+  // leaving the paste prompt up would invite a second code nothing awaits.
+  let approval: unknown = CODE_APPROVAL
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [CONNECT]: () => pendingConnect(),
+    [ATTEMPT]: () =>
+      json({ state: "pending", expiresAt: FAR_FUTURE, approval }),
+    [SUBMIT]: () => {
+      approval = null
+      return json(
+        { state: "pending", expiresAt: FAR_FUTURE, approval: null },
+        202
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Connect claude" })
+  )
+  await user.type(
+    await screen.findByRole("textbox", {
+      name: "Paste the authorization code",
+    }),
+    "ac_abc123"
+  )
+  await user.click(screen.getByRole("button", { name: "Submit code" }))
+
+  // No error: a 202 carrying the attempt is exactly what success looks like.
+  expect(screen.queryByRole("alert")).toBeNull()
+  // The prompt goes, the wait is reported as still running, and it stays
+  // cancellable.
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("textbox", { name: "Paste the authorization code" })
+    ).toBeNull()
+  )
+  expect(await screen.findByText("Sign-in in progress.")).toBeVisible()
+  expect(
+    screen.getByRole("button", { name: "Cancel claude sign-in" })
+  ).toBeEnabled()
 })

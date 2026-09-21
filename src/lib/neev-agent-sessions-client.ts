@@ -958,7 +958,7 @@ export async function submitConnectCode(
   code: string,
   csrf: string,
   signal?: AbortSignal
-): Promise<{ state: NeevAttemptState }> {
+): Promise<NeevConnectAttempt> {
   assertProvider(provider)
   if (!RUN_ID.test(attemptId)) invalidRequest()
   if (
@@ -967,18 +967,20 @@ export async function submitConnectCode(
     code.length > NEEV_MAX_AUTH_CODE_CHARS
   )
     invalidRequest()
-  const object = exact(
+  // The server answers 202 with the whole attempt, not a bare state — the same
+  // shape the poll returns, so it is read with the same parser rather than a
+  // second opinion about the contract. Expecting `{state}` alone made a
+  // perfectly good submission look like an unexpected response, and the user
+  // was told their code had failed after it had in fact been accepted.
+  return parseConnectAttempt(
     await contentMutation(
       `/api/neev/agent/connections/${provider}/attempts/${attemptId}/code`,
       { code },
       csrf,
       signal
     ),
-    ["state"]
+    provider
   )
-  const state = text(object.state)
-  if (!ATTEMPT_STATES.includes(state as NeevAttemptState)) return invalid()
-  return { state: state as NeevAttemptState }
 }
 
 export function parseOperationReceipt(value: unknown): NeevOperationReceipt {
