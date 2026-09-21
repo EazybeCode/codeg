@@ -28,7 +28,7 @@ Persistent host paths are `/var/lib/neev-native/agent-supervisor`, `/etc/neev-na
 - Full-page documents/chats, nested-folder New chat, rich content persistence, organization joining, and team message delivery were tested on the same-host canary.
 - Initial JavaScript: 27 files, approximately 442 KiB compressed, versus approximately 1.39 MiB before lazy loading.
 - Real Claude authorization and connection Test passed. The production cap-helper path, running from a web-owned directory as UID 65532, returned the exact requested text “Neev connection works” with exit code 0.
-- The final browser chat check remains pending Google phone verification after the web session expired; the runtime reply was verified independently.
+- The live browser chat check subsequently passed: Claude returned the exact requested text through the normal web UI, including the new first-message creation flow.
 
 - Final runtime suite: 518 passed, 3 skipped; focused directory ownership tests: 18 passed.
 - Projects UI checks: 72 focused tests, then 57 landing/client tests; final production build passed.
@@ -55,3 +55,16 @@ Docker custom networks inject the main-namespace resolver `127.0.0.11`, which is
 The latest private database backup is `/opt/neev-db-backups/neev-before-projects-schema12-20260921-062805.sql` (110846 bytes). Compose was backed up as `compose.yml.before-projects12-20260921-062806`.
 
 **Do not start a schema-11 image against the upgraded schema-12 database.** The earlier schema-11 rollback image is retained for historical recovery only. Preserve credentials, keys, coordinator state, documents and the proxy DNS bind. Recover the current schema by rolling forward with a compatible server; do not restore a database backup over newer writes without explicitly accounting for those writes.
+
+## Reference-based workspace UI update — 11:12 UTC
+
+- Source commits: `74a24d5c`, `7c95fcd4`; pushed to `workos/team-workspace`.
+- Current live image: `neev-native-agent:ui-reference-7c95fcd4`.
+- Current workspace SHA-256: `9ff01bf63c6a55435e562c7e56f2eb743ce1dab92944d035fe43ae802c063f32` (same-host canary and live matched).
+- Frontend-only image layered on `projects-final-d2d7c3a2`; schema 12 and provider runtime unchanged. Previous image remains compatible for rollback.
+- Compose backup: `compose.yml.before-ui-reference-20260921-111246`.
+- Navigation combines documents, team chats, and private agent sessions under projects. Project names open their contents; menus offer each creation type. Agent sessions restore after reload.
+- Claude/Codex creation opens a prompt-first composer; the first message creates and titles the saved chat. Disconnected providers link directly to `/settings?section=agents`.
+- Document canvas uses a 760px focus width, larger title, and more generous spacing; existing rich-editor block styling is preserved. Full Conductor-style tabs/right context pane are not part of this update.
+- Verification: 2,593 frontend tests passed before browser QA refinements; 96 affected tests passed after the refinements; production webpack export passed. Turbopack is blocked by the worktree dependency symlink.
+- Browser checks passed for project navigation, retained mixed sidebar contents during agent chats, Back to folder, saved-chat restoration, and the AI connection deep link. Production first-message creation returned exactly “The new project chat works.” from Claude. Codex remains signed out and was not claimed as verified execution.
