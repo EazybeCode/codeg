@@ -568,8 +568,8 @@ function Document({
     <section
       data-doc-width={docWidth}
       className={
-        "min-h-0 min-w-0 flex-1 overflow-y-auto px-7 pb-16 pt-4 sm:px-12 [&>div]:mx-auto " +
-        (docWidth === "focus" ? "[&>div]:max-w-3xl" : "[&>div]:max-w-none")
+        "min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-24 pt-14 sm:px-10 [&>div]:mx-auto " +
+        (docWidth === "focus" ? "[&>div]:max-w-[760px]" : "[&>div]:max-w-none")
       }
       aria-label={latest.title}
       onKeyDown={(event) => {
@@ -757,7 +757,7 @@ function Document({
         </DropdownMenu>
       </header>
       <div className="space-y-2 pb-4 pt-6">
-        <h1 className="break-words text-3xl font-semibold leading-tight sm:text-4xl">
+        <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
           {latest.title}
         </h1>
         <p className="text-xs text-muted-foreground">

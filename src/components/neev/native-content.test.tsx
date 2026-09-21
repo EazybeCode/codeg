@@ -88,6 +88,7 @@ async function triggerAction(
 }
 it("opens a chat as a page and restores the folder listing on Back", async () => {
   mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -139,6 +140,7 @@ it.each([false, true])(
       releaseResource = resolve
     })
     const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
       "GET /api/neev/nodes/4/documents": () =>
         json({ items: [], nextAfter: null }),
       "GET /api/neev/session": () =>
@@ -207,6 +209,7 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
     })
     const bodies: Record<string, unknown>[] = []
     const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
       "GET /api/neev/nodes/4/documents": () =>
         json({ items: [], nextAfter: null }),
       "GET /api/neev/session": () =>
@@ -299,6 +302,7 @@ it("drops a retained mutation intent when a parent creation request supersedes i
   const shared = { ...chat, visibility: "organization" as const }
   const bodies: unknown[] = []
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -369,6 +373,7 @@ it.each([
   async (_label, response) => {
     let refreshed = false
     const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
       "GET /api/neev/nodes/4/documents": () =>
         json({ items: [], nextAfter: null }),
       "GET /api/neev/session": () =>
@@ -409,6 +414,7 @@ it.each([403, 404, 503])(
       release = resolve
     })
     const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
       "GET /api/neev/nodes/4/documents": () =>
         json({ items: [], nextAfter: null }),
       "GET /api/neev/nodes/4/chats": () =>
@@ -454,6 +460,7 @@ it.each(["manual", "broadcast", "401", "logout"])(
     }
     vi.stubGlobal("BroadcastChannel", Channel)
     const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
       "GET /api/neev/nodes/4/documents": () =>
         json({ items: [], nextAfter: null }),
       "GET /api/neev/session": () =>
@@ -548,6 +555,7 @@ it.each(["chat", "document"] as const)(
       createdAt: 1700000000,
     }
     const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
       "GET /api/neev/nodes/4/chats": () =>
         json({ items: kind === "chat" ? [resource] : [], nextAfter: null }),
       "GET /api/neev/nodes/4/documents": () =>
@@ -664,6 +672,7 @@ it("waits for the entire loaded resource window before revealing a retained draf
     (resource) => resource.title !== "Revoked entry"
   )
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -725,6 +734,7 @@ it("waits for the entire loaded resource window before revealing a retained draf
 it("hard-clears the scope when the loaded window loses authority during revalidation", async () => {
   let reads = 0
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -754,6 +764,7 @@ it("hard-clears the scope when the loaded window loses authority during revalida
 
 it("loads native content after React Strict Mode replays its mount effects", async () => {
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -777,6 +788,7 @@ it("creates private content only inside the selected node and confirms sharing i
   let latest = chat
   const bodies: unknown[] = []
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
@@ -837,6 +849,7 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
     contentRevision: "0",
   }
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/5/chats": () => json({ items: [], nextAfter: null }),
@@ -880,7 +893,10 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
   expect(unload.defaultPrevented).toBe(true)
   // Leaving for the agent chats guards the unsaved draft — the rail is gone, so
   // this is the surface switch that still exists.
-  await user.click(screen.getAllByRole("button", { name: "Agent chats" })[0])
+  await user.click(
+    screen.getAllByRole("button", { name: "Actions for Launch" })[0]
+  )
+  await user.click(screen.getByRole("menuitem", { name: "New Claude chat" }))
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "Discard unsaved changes?"
   )
@@ -909,6 +925,7 @@ it("immediately applies creator archive/reopen actions and moves with the curren
   let latest = chat
   const bodies: Record<string, unknown>[] = []
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -978,6 +995,7 @@ it("never offers independent sharing for a source-bound document", async () => {
     originChatId: "33333333-3333-4333-8333-333333333333",
   }
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [doc], nextAfter: null }),
@@ -1000,6 +1018,7 @@ it("never offers independent sharing for a source-bound document", async () => {
 
 it("discards the actual draft before opening a creator action on the same resource", async () => {
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -1030,6 +1049,7 @@ it("discards the actual draft before opening a creator action on the same resour
 
 it("guards leaving a dirty page before keyboard switching folder tabs", async () => {
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/chats": () =>
       json({ items: [chat], nextAfter: null }),
     "GET /api/neev/nodes/4/documents": () =>
@@ -1071,6 +1091,7 @@ it("guards leaving a dirty page before keyboard switching folder tabs", async ()
 
 it("shows a truthful Agent chats placeholder without faking a list or fetching", async () => {
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/session": () => json(orgSession),
@@ -1095,6 +1116,7 @@ it("auth invalidation clears a private draft even while its Settings guard is op
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
   let expired = false
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/session": () =>
@@ -1150,6 +1172,7 @@ it("ignores a delayed PATCH for A after navigating to B and writing a draft", as
   }
   let release!: (value: Response) => void
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -1206,6 +1229,7 @@ it("rejects delayed move destinations from a previously selected resource", asyn
   })
   let moves = 0
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -1262,6 +1286,7 @@ it("refreshes the loaded resource page window and removes revoked entries on an 
   }))
   let polled = false
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
@@ -1297,6 +1322,7 @@ it("rejects a late private list response after auth generation changes even when
   let release!: (response: Response) => void
   let switched = false
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/session": () =>

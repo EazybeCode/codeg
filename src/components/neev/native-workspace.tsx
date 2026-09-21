@@ -9,7 +9,6 @@ import {
   ChevronRight,
   FileText,
   Folder,
-  FolderTree,
   Layers3,
   Menu,
   MessagesSquare,
@@ -36,6 +35,8 @@ import { cn } from "@/lib/utils"
 import {
   DEFAULT_SECTION,
   getActiveSection,
+  getOpenAgentSession,
+  setOpenAgentSession,
   getOpenResource,
   setActiveSection,
   setOpenResource,
@@ -60,6 +61,12 @@ import {
   type ContentNavigationGuard,
 } from "./native-content"
 import { NativeAgentChats } from "./native-agent-chats"
+import {
+  listAgentSessions,
+  NEEV_AGENT_PROVIDERS,
+  type NeevAgentProvider,
+  type NeevAgentSession,
+} from "@/lib/neev-agent-sessions-client"
 import {
   listNativeResources,
   loadNativeResource,
@@ -97,6 +104,109 @@ function ancestry(nodes: NativeNode[], nodeId: number): number[] {
 // separate index page. Creation always carries the container selected in this menu.
 const CONTENT_KINDS: NativeResourceKind[] = ["document", "chat"]
 
+/**
+ * What a project actually holds, as its own page.
+ *
+ * The centre used to be a generic invitation to create a project even when the
+ * reader had several, which told them nothing about the one they had selected.
+ * This lists its documents, its team chats and its agent chats together, in one
+ * measure, with the same five ways to add that the sidebar menu offers.
+ */
+function ProjectContents({
+  node,
+  items,
+  loading,
+  sessions,
+  onOpenResource,
+  onOpenSession,
+  onCreate,
+}: {
+  node: NativeNode
+  items: NativeResource[]
+  loading: boolean
+  sessions: NeevAgentSession[]
+  onOpenResource: (resource: NativeResource) => void
+  onOpenSession: (session: NeevAgentSession) => void
+  onCreate: (kind: NativeResourceKind | "folder" | NeevAgentProvider) => void
+}) {
+  const t = useTranslations("Native"),
+    c = useTranslations("NativeContent")
+  const empty = !loading && items.length === 0 && sessions.length === 0
+  const row =
+    "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-2 text-start text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+  return (
+    <div className="mt-8 space-y-6">
+      <div className="flex flex-wrap gap-2">
+        {(
+          [
+            ["document", c("newDocument"), FileText],
+            ["chat", c("newChat"), MessagesSquare],
+            ["claude", c("newClaudeChat"), Bot],
+            ["codex", c("newCodexChat"), Bot],
+            ["folder", t("newSubfolder"), Folder],
+          ] as const
+        ).map(([kind, label, Icon]) => (
+          <Button
+            key={kind}
+            variant="outline"
+            size="sm"
+            onClick={() => onCreate(kind)}
+          >
+            <Icon aria-hidden className="size-4" />
+            {label}
+          </Button>
+        ))}
+      </div>
+      {loading && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {t("loading")}
+        </p>
+      )}
+      {empty && (
+        <p className="text-sm leading-6 text-muted-foreground">
+          {t("sectionEmpty")}
+        </p>
+      )}
+      {(items.length > 0 || sessions.length > 0) && (
+        <ul aria-label={node.name} className="space-y-0.5">
+          {items.map((resource) => (
+            <li key={resource.id}>
+              <button className={row} onClick={() => onOpenResource(resource)}>
+                {resource.kind === "document" ? (
+                  <FileText
+                    aria-hidden
+                    className="size-4 shrink-0 text-muted-foreground"
+                  />
+                ) : (
+                  <MessagesSquare
+                    aria-hidden
+                    className="size-4 shrink-0 text-muted-foreground"
+                  />
+                )}
+                <span className="truncate">{resource.title}</span>
+              </button>
+            </li>
+          ))}
+          {sessions.map((session) => (
+            <li key={session.id}>
+              <button className={row} onClick={() => onOpenSession(session)}>
+                <Bot
+                  aria-hidden
+                  className="size-4 shrink-0 text-muted-foreground"
+                />
+                <span className="truncate">{session.title}</span>
+                <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                  {session.provider}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function NativeWorkspaceTree({
   nodes,
   parentId = null,
@@ -111,6 +221,10 @@ function NativeWorkspaceTree({
   selectResource,
   openAgents,
   agentsOpen,
+  agentSessions,
+  openAgentSessionId,
+  openAgentSession,
+  startAgentChat,
 }: {
   nodes: NativeNode[]
   parentId?: number | null
@@ -130,6 +244,11 @@ function NativeWorkspaceTree({
    *  server (schema 12). Opening them from here moves nothing. */
   openAgents: (node: NativeNode) => void
   agentsOpen: boolean
+  /** The caller's own saved agent chats, already filed under a node. */
+  agentSessions: NeevAgentSession[]
+  openAgentSessionId: string | null
+  openAgentSession: (node: NativeNode, session: NeevAgentSession) => void
+  startAgentChat: (node: NativeNode, provider: NeevAgentProvider) => void
 }) {
   const t = useTranslations("Native")
   const c = useTranslations("NativeContent")
@@ -184,6 +303,8 @@ function NativeWorkspaceTree({
                     {node.name}
                   </span>
                 </button>
+                {/* One menu for everything a project can hold, instead of a
+                    permanent row per kind repeated under every container. */}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <button
@@ -208,6 +329,7 @@ function NativeWorkspaceTree({
                         createContent(node, "document")
                       }}
                     >
+                      <FileText aria-hidden className="size-4" />
                       {c("newDocument")}
                     </DropdownMenuItem>
                     <DropdownMenuItem
@@ -216,12 +338,24 @@ function NativeWorkspaceTree({
                         createContent(node, "chat")
                       }}
                     >
+                      <MessagesSquare aria-hidden className="size-4" />
                       {c("newChat")}
                     </DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => openAgents(node)}>
-                      {c("agentChats")}
-                    </DropdownMenuItem>
+                    {NEEV_AGENT_PROVIDERS.map((agentProvider) => (
+                      <DropdownMenuItem
+                        key={agentProvider}
+                        onSelect={() => startAgentChat(node, agentProvider)}
+                      >
+                        <Bot aria-hidden className="size-4" />
+                        {c(
+                          agentProvider === "claude"
+                            ? "newClaudeChat"
+                            : "newCodexChat"
+                        )}
+                      </DropdownMenuItem>
+                    ))}
                     <DropdownMenuItem onSelect={() => create(node)}>
+                      <Folder aria-hidden className="size-4" />
                       {t("newSubfolder")}
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => edit(node)}>
@@ -246,6 +380,10 @@ function NativeWorkspaceTree({
                     selectResource={selectResource}
                     openAgents={openAgents}
                     agentsOpen={agentsOpen}
+                    agentSessions={agentSessions}
+                    openAgentSessionId={openAgentSessionId}
+                    openAgentSession={openAgentSession}
+                    startAgentChat={startAgentChat}
                   />
                   <ul className="ms-3 space-y-0.5 border-s border-sidebar-border/60 ps-1.5">
                     {(list?.items ?? []).map((resource) => (
@@ -287,31 +425,36 @@ function NativeWorkspaceTree({
                         {t("loading")}
                       </li>
                     )}
-                    {CONTENT_KINDS.map((contentKind) => (
-                      <li key={contentKind}>
-                        <button
-                          onClick={() => createContent(node, contentKind)}
-                          className="flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-xs text-muted-foreground hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
-                        >
-                          <Plus aria-hidden className="size-3.5 shrink-0" />
-                          {c(
-                            contentKind === "document"
-                              ? "newDocument"
-                              : "newChat"
-                          )}
-                        </button>
-                      </li>
-                    ))}
-                    <li>
-                      <button
-                        onClick={() => openAgents(node)}
-                        aria-current={agentsOpen ? "page" : undefined}
-                        className="flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-xs text-muted-foreground hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        <Bot aria-hidden className="size-3.5 shrink-0" />
-                        {c("agentChats")}
-                      </button>
-                    </li>
+                    {/* Agent chats are items in the tree, like documents and
+                        team chats: the same kind of thing, not a destination. */}
+                    {agentSessions
+                      .filter((item) => item.nodeId === node.id)
+                      .map((item) => (
+                        <li key={item.id}>
+                          <button
+                            onClick={() => openAgentSession(node, item)}
+                            aria-current={
+                              openAgentSessionId === item.id
+                                ? "page"
+                                : undefined
+                            }
+                            className={cn(
+                              "flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring",
+                              openAgentSessionId === item.id
+                                ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+                                : "text-muted-foreground hover:bg-sidebar-accent/60"
+                            )}
+                          >
+                            <Bot aria-hidden className="size-3.5 shrink-0" />
+                            <span className="truncate" title={item.title}>
+                              {item.title}
+                            </span>
+                            <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                              {item.provider}
+                            </span>
+                          </button>
+                        </li>
+                      ))}
                   </ul>
                 </>
               )}
@@ -331,6 +474,20 @@ function WorkspaceContent() {
     auth = useNativeAuth(),
     mobile = useIsMobile()
   const router = useRouter()
+  // What the centre is showing when it is showing an agent chat: a saved one,
+  // or a draft for a provider that has no session yet.
+  const [agentView, setAgentView] = useState<{
+    sessionId: string | null
+    provider: NeevAgentProvider | null
+  } | null>(null)
+  // The caller's own saved chats, read once for the whole tree rather than per
+  // container: they are private, so this is one small list either way.
+  const [agentSessions, setAgentSessions] = useState<NeevAgentSession[]>([])
+  const [agentsToken] = useState(0)
+  // Restoration is attempted once per mount, like the resource pointer.
+  const agentRestored = useRef(false)
+  const user = auth.session?.user.id
+  const orgId = auth.session?.organization?.id
   const navigationGuard = useRef<ContentNavigationGuard>((action) => action())
   const registerGuard = useCallback((guard: ContentNavigationGuard) => {
     navigationGuard.current = guard
@@ -372,6 +529,75 @@ function WorkspaceContent() {
       changeSection("agents")
     },
     [changeSection]
+  )
+  /** Start a draft of `kind` inside `node`, from the sidebar or the landing. */
+  const createContent = useCallback(
+    (node: NativeNode, kind: NativeResourceKind) => {
+      const active = document.activeElement as HTMLElement | null
+      const menu = active?.closest('[role="menu"]')
+      const returnFocus =
+        document.getElementById(menu?.getAttribute("aria-labelledby") ?? "") ??
+        active
+      navigationGuard.current(() => {
+        // The created kind decides the section, so the new item lands and
+        // appears under this container in the right list.
+        const nextSection = kind === "document" ? "docs" : "team"
+        setSectionState(nextSection)
+        setActiveSection(nextSection)
+        setSelected(node.id)
+        setOpen(null)
+        setAgentView(null)
+        setExpanded((old) => new Set([...old, node.id]))
+        setCreation({ kind, request: ++creationNumber.current, returnFocus })
+        setDrawer(false)
+      })
+    },
+    []
+  )
+  /**
+   * Open a saved agent chat straight into its transcript.
+   *
+   * Same gesture as opening a document: the sidebar owns selection and the
+   * centre shows the thing selected, with no intervening list.
+   */
+  const openAgentSession = useCallback(
+    (node: NativeNode, session: NeevAgentSession) => {
+      navigationGuard.current(() => {
+        setSelected(node.id)
+        setOpen(null)
+        setCreation(undefined)
+        setAgentView({ sessionId: session.id, provider: null })
+        setSectionState("agents")
+        setActiveSection("agents")
+        if (user !== undefined && orgId !== undefined)
+          setOpenAgentSession(user, orgId, session.id)
+        setDrawer(false)
+      })
+    },
+    [user, orgId]
+  )
+  /**
+   * Start a new agent chat: straight to a composer for that provider.
+   *
+   * Nothing is created here. The session comes into existence with the first
+   * message, so an abandoned draft leaves nothing behind to clean up.
+   */
+  const startAgentChat = useCallback(
+    (node: NativeNode, provider: NeevAgentProvider) => {
+      navigationGuard.current(() => {
+        setSelected(node.id)
+        setOpen(null)
+        setCreation(undefined)
+        setAgentView({ sessionId: null, provider })
+        setSectionState("agents")
+        setActiveSection("agents")
+        // A draft is not a place to come back to.
+        if (user !== undefined && orgId !== undefined)
+          setOpenAgentSession(user, orgId, null)
+        setDrawer(false)
+      })
+    },
+    [user, orgId]
   )
   // The resource kind shown for the active section. Agent Chats has no backend
   // resources yet (§5) — the center renders an honest connect/setup surface.
@@ -450,6 +676,42 @@ function WorkspaceContent() {
       if (!itemsByNode[id]) void loadItems(id)
     }
   }, [expanded, itemsByNode, loadItems, section])
+  // One read for the whole tree. A failure here must not take the workspace
+  // down: the sidebar simply shows no agent chats, and the centre surface still
+  // reports its own errors.
+  useEffect(() => {
+    if (!org) return
+    const controller = new AbortController()
+    const load = async () => {
+      try {
+        const list = await listAgentSessions(false, controller.signal)
+        if (controller.signal.aborted) return
+        setAgentSessions(list)
+        // Restore what the reader had open, once and only into a session the
+        // server still returns — a stale pointer selects nothing.
+        if (!agentRestored.current) {
+          agentRestored.current = true
+          const remembered =
+            user !== undefined && orgId !== undefined
+              ? getOpenAgentSession(user, orgId)
+              : null
+          const session = list.find((item) => item.id === remembered)
+          if (session && session.nodeId !== null) {
+            setSelected(session.nodeId)
+            setExpanded((old) => new Set([...old, session.nodeId as number]))
+            setAgentView({ sessionId: session.id, provider: null })
+          } else if (remembered && user !== undefined && orgId !== undefined)
+            setOpenAgentSession(user, orgId, null)
+        }
+      } catch (cause) {
+        if (controller.signal.aborted) return
+        auth.handleAuthorityError(cause)
+      }
+    }
+    void load()
+    return () => controller.abort()
+  }, [org, agentsToken, auth, user, orgId])
+
   const openResource = useCallback(
     (node: NativeNode, resource: NativeResource) =>
       navigationGuard.current(() => {
@@ -460,8 +722,6 @@ function WorkspaceContent() {
       }),
     []
   )
-  const user = auth.session?.user.id
-  const orgId = org?.id
   // Remember only WHICH resource is open, scoped to this user and org. The
   // pointer confers nothing: it is re-fetched and re-authorized on restore.
   useEffect(() => {
@@ -692,33 +952,14 @@ function WorkspaceContent() {
                 openEditor({ kind: node.kind, parentId: node.parentId, node })
               )
             }
-            createContent={(node, kind) => {
-              const active = document.activeElement as HTMLElement | null
-              const menu = active?.closest('[role="menu"]')
-              const returnFocus =
-                document.getElementById(
-                  menu?.getAttribute("aria-labelledby") ?? ""
-                ) ?? active
-              navigationGuard.current(() => {
-                // Cross-section creation: switch to the created kind's section so the
-                // new item lands and appears under this container in the right list.
-                const nextSection = kind === "document" ? "docs" : "team"
-                setSectionState(nextSection)
-                setActiveSection(nextSection)
-                setSelected(node.id)
-                setOpen(null)
-                setExpanded((old) => new Set([...old, node.id]))
-                setCreation({
-                  kind,
-                  request: ++creationNumber.current,
-                  returnFocus,
-                })
-                setDrawer(false)
-              })
-            }}
+            createContent={createContent}
             selectResource={openResource}
             openAgents={openAgents}
             agentsOpen={section === "agents"}
+            agentSessions={agentSessions}
+            openAgentSessionId={agentView?.sessionId ?? null}
+            openAgentSession={openAgentSession}
+            startAgentChat={startAgentChat}
           />
           {!loading && nodes.length === 0 && (
             <p className="px-2 text-sm text-muted-foreground">
@@ -765,7 +1006,7 @@ function WorkspaceContent() {
   )
   return (
     <div className="flex h-dvh min-w-0 flex-col overflow-hidden">
-      <header className="flex min-h-16 shrink-0 items-center gap-3 border-b px-4 sm:px-6">
+      <header className="flex h-11 shrink-0 items-center gap-2 border-b px-2 sm:px-3">
         {!mobile && (
           <Button
             variant="ghost"
@@ -835,12 +1076,12 @@ function WorkspaceContent() {
       </header>
       <div className="flex min-h-0 min-w-0 flex-1">
         {!mobile && sidebarOpen && (
-          <aside className="w-64 shrink-0 border-e bg-sidebar text-sidebar-foreground">
+          <aside className="w-[250px] shrink-0 border-e bg-sidebar text-sidebar-foreground">
             {sidebar}
           </aside>
         )}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {section === "agents" && selectedNode ? (
+          {section === "agents" && selectedNode && agentView ? (
             // Saved agent sessions, always inside the project they were opened
             // from. They are private to their owner and the server files them
             // under a node (schema 12); this surface never appears without one,
@@ -848,6 +1089,18 @@ function WorkspaceContent() {
             <NativeAgentChats
               nodeId={selectedNode.id}
               nodeName={selectedNode.name}
+              sessionId={agentView.sessionId}
+              draftProvider={agentView.provider}
+              onSessionCreated={(session) => {
+                // The tree owns selection, so it learns about the new chat and
+                // selects it; the centre is already showing it.
+                setAgentSessions((old) => [
+                  session,
+                  ...old.filter((item) => item.id !== session.id),
+                ])
+                setAgentView({ sessionId: session.id, provider: null })
+              }}
+              onDraftCancelled={() => setAgentView(null)}
               onRequestNavigationGuard={registerGuard}
               onRequestSettings={() =>
                 navigationGuard.current(() => router.push("/settings"))
@@ -869,32 +1122,99 @@ function WorkspaceContent() {
               }}
             />
           ) : (
-            // The landing. There is nothing above a project to land on, so
-            // this names the one thing to do rather than a section that no
-            // longer exists.
-            <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 px-6 py-24 text-center">
-              <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
-                <FolderTree
-                  aria-hidden
-                  className="size-5 text-muted-foreground"
-                />
-              </div>
-              <h1 className="text-xl font-semibold tracking-tight">
-                {t("projects")}
-              </h1>
-              <p className="max-w-sm text-sm leading-6 text-muted-foreground">
-                {nodes.length === 0 ? t("emptyProjects") : t("projectsLanding")}
-              </p>
-              <Button
-                onClick={() =>
-                  navigationGuard.current(() =>
-                    openEditor({ kind: "project", parentId: null })
-                  )
-                }
-              >
-                <Plus aria-hidden className="size-4" />
-                {t("newProject")}
-              </Button>
+            // The landing.
+            //
+            // With a project selected this is that project's contents, because
+            // a workspace with things in it should not open on an invitation to
+            // create more. With nothing selected it is the list of projects,
+            // and only an empty organization gets the empty state.
+            <div className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14">
+              {selectedNode ? (
+                <>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                    {t("projects")}
+                  </p>
+                  <h1 className="mt-2 break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+                    {selectedNode.name}
+                  </h1>
+                  <ProjectContents
+                    node={selectedNode}
+                    items={itemsByNode[selectedNode.id]?.items ?? []}
+                    loading={itemsByNode[selectedNode.id]?.loading ?? false}
+                    sessions={agentSessions.filter(
+                      (item) => item.nodeId === selectedNode.id
+                    )}
+                    onOpenResource={(resource) =>
+                      openResource(selectedNode, resource)
+                    }
+                    onOpenSession={(session) =>
+                      openAgentSession(selectedNode, session)
+                    }
+                    onCreate={(kind) =>
+                      kind === "folder"
+                        ? navigationGuard.current(() =>
+                            openEditor({
+                              kind: "folder",
+                              parentId: selectedNode.id,
+                            })
+                          )
+                        : kind === "claude" || kind === "codex"
+                          ? startAgentChat(selectedNode, kind)
+                          : createContent(selectedNode, kind)
+                    }
+                  />
+                </>
+              ) : (
+                <>
+                  <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+                    {t("projects")}
+                  </h1>
+                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                    {nodes.length === 0
+                      ? t("emptyProjects")
+                      : t("projectsLanding")}
+                  </p>
+                  {nodes.length > 0 && (
+                    <ul className="mt-6 space-y-1">
+                      {nodes
+                        .filter((node) => node.parentId === null)
+                        .map((node) => (
+                          <li key={node.id}>
+                            <button
+                              onClick={() =>
+                                navigationGuard.current(() => {
+                                  setSelected(node.id)
+                                  setExpanded(
+                                    (old) => new Set([...old, node.id])
+                                  )
+                                })
+                              }
+                              className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-start text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              <Layers3
+                                aria-hidden
+                                className="size-4 shrink-0 text-muted-foreground"
+                              />
+                              <span className="truncate">{node.name}</span>
+                            </button>
+                          </li>
+                        ))}
+                    </ul>
+                  )}
+                  <Button
+                    variant="outline"
+                    className="mt-6"
+                    onClick={() =>
+                      navigationGuard.current(() =>
+                        openEditor({ kind: "project", parentId: null })
+                      )
+                    }
+                  >
+                    <Plus aria-hidden className="size-4" />
+                    {t("newProject")}
+                  </Button>
+                </>
+              )}
             </div>
           )}
         </main>

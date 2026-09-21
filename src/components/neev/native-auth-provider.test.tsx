@@ -222,6 +222,8 @@ it("never paints an old catalog response after a tab changes organization", asyn
   }
   vi.stubGlobal("BroadcastChannel", Channel)
   const mock = mockNativeSession(orgSession, {
+    // The workspace reads the caller's agent chats alongside the tree.
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/session": () =>
       json({
         ...orgSession,

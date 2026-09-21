@@ -24,6 +24,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { NativeClientError } from "@/lib/neev-client"
 import {
   cancelAgentRun,
@@ -51,7 +58,6 @@ import type { ContentNavigationGuard } from "./native-content"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeError } from "./native-boundary"
 import { NativeMarkdown } from "./native-markdown"
-import { NativeAgentConnectionsPanel } from "./native-agent-connections"
 import {
   NativeDialogContent as DialogContent,
   NativeDropdownMenuContent as DropdownMenuContent,
@@ -83,6 +89,16 @@ type Props = {
   /** The project this surface was opened from; null outside one. */
   nodeId?: number | null
   nodeName?: string
+  /** Open this saved session directly, as the sidebar does. */
+  sessionId?: string | null
+  /**
+   * Start a NEW chat with this provider: straight to a composer, no dialog.
+   * The session is created by the first message, titled from what was typed.
+   */
+  draftProvider?: NeevAgentProvider | null
+  /** A session the composer just created, so the tree can select it. */
+  onSessionCreated?: (session: NeevAgentSession) => void
+  onDraftCancelled?: () => void
 }
 
 export function NativeAgentChats(props: Props) {
@@ -96,6 +112,10 @@ function AgentChats({
   onRequestNavigationGuard,
   nodeId = null,
   nodeName,
+  sessionId = null,
+  draftProvider = null,
+  onSessionCreated,
+  onDraftCancelled,
 }: Props) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
@@ -190,10 +210,53 @@ function AgentChats({
     [auth, nodeId, filing, absorb]
   )
 
-  if (open)
+  // A new chat is a composer, not a form: the provider came from the menu that
+  // opened it, and the first message is what creates the session.
+  if (draftProvider)
+    return (
+      <NewAgentChat
+        key={`${nodeId ?? "none"}:${draftProvider}`}
+        provider={draftProvider}
+        nodeId={nodeId}
+        connections={connections}
+        connectionsLoading={connections === null && error === null}
+        onRequestNavigationGuard={onRequestNavigationGuard}
+        onRequestSettings={onRequestSettings}
+        onCancel={() => onDraftCancelled?.()}
+        onCreated={(session) => {
+          absorb(session)
+          setOpen(session)
+          onSessionCreated?.(session)
+        }}
+      />
+    )
+
+  // The sidebar owns selection, so a named session opens straight into its
+  // transcript rather than through this surface's own list.
+  const selected = sessionId
+    ? (sessions ?? []).find((item) => item.id === sessionId)
+    : null
+  if (sessionId && !selected)
+    return sessions === null ? (
+      <p role="status" className="px-6 py-10 text-sm text-muted-foreground">
+        {n("loading")}
+      </p>
+    ) : (
+      // The list has resolved and this is not in it: deleted, archived, or
+      // filed elsewhere. An endless "Loading" would be a lie.
+      <div className="space-y-3 px-6 py-10">
+        <p role="status" className="text-sm text-muted-foreground">
+          {t("agentChatMissing")}
+        </p>
+        <Button size="sm" variant="outline" onClick={reload}>
+          {n("retry")}
+        </Button>
+      </div>
+    )
+  if (selected || open)
     return (
       <AgentSessionView
-        session={open}
+        session={(selected ?? open) as NeevAgentSession}
         connections={connections}
         onBack={() => setOpen(null)}
         onChanged={absorb}
@@ -225,12 +288,6 @@ function AgentChats({
           {t("newAgentChat")}
         </Button>
       </div>
-
-      <NativeAgentConnectionsPanel
-        connections={connections}
-        onRefresh={reload}
-        onRequestSettings={onRequestSettings}
-      />
 
       <NativeError error={error} />
 
@@ -327,6 +384,259 @@ function AgentChats({
           setOpen(session)
         }}
       />
+    </div>
+  )
+}
+
+/**
+ * Derive a session title from the first message.
+ *
+ * The user came here to type, not to name something. A title still has to exist
+ * — it is how the chat is found again — so it is taken from the opening line,
+ * trimmed to the server's limit on whole characters rather than bytes.
+ */
+export function deriveSessionTitle(prompt: string): string {
+  const line = prompt.trim().split(/\r?\n/, 1)[0]?.trim() ?? ""
+  const characters = [...line]
+  if (characters.length === 0) return ""
+  if (characters.length <= 60) return line
+  return `${characters.slice(0, 59).join("").trimEnd()}…`
+}
+
+/**
+ * A new agent chat: an empty transcript and a composer, and nothing else.
+ *
+ * The provider is already decided — it came from the menu item that opened this
+ * — so the only decision left here is the model, and `default` is the answer
+ * unless the operator has a specific one. The session is created by the first
+ * message so that an abandoned draft leaves nothing behind.
+ */
+function NewAgentChat({
+  provider: initialProvider,
+  nodeId,
+  connections,
+  connectionsLoading,
+  onCreated,
+  onCancel,
+  onRequestSettings,
+  onRequestNavigationGuard,
+}: {
+  provider: NeevAgentProvider
+  nodeId: number | null
+  connections: NeevAgentConnections | null
+  connectionsLoading: boolean
+  onCreated: (session: NeevAgentSession) => void
+  onCancel: () => void
+  onRequestSettings?: () => void
+  onRequestNavigationGuard?: (guard: ContentNavigationGuard) => void
+}) {
+  const auth = useNativeAuth(),
+    t = useTranslations("NativeContent"),
+    n = useTranslations("Native")
+  const [provider, setProvider] = useState<NeevAgentProvider>(initialProvider)
+  const [draft, setDraft] = useState(""),
+    [model, setModel] = useState(NEEV_DEFAULT_MODEL),
+    [advanced, setAdvanced] = useState(false),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState<unknown>(null)
+  // The menu chose a provider; re-opening for another one must follow it.
+  useEffect(() => setProvider(initialProvider), [initialProvider])
+  const request = useRef<string | null>(null)
+  // A session the first turn failed on. It EXISTS, so a retry sends into it
+  // rather than creating a second one for the same draft.
+  const created = useRef<NeevAgentSession | null>(null)
+  const draftRef = useRef("")
+  draftRef.current = draft
+
+  // An unsent draft is work; leaving must ask, exactly as a document does.
+  useEffect(() => {
+    onRequestNavigationGuard?.((action) => {
+      if (!draftRef.current.trim()) return action()
+      if (window.confirm(t("discardDraftPrompt"))) action()
+    })
+    return () => onRequestNavigationGuard?.((action) => action())
+  }, [onRequestNavigationGuard, t])
+
+  const connection = connections?.connections.find(
+    (row) => row.provider === provider
+  )
+  // Three different things, said differently: still asking the server, asking
+  // and been told there is no runtime, and a provider the user must connect.
+  const ready = connection?.state === "connected"
+  const unknown = connectionsLoading || connections === null
+
+  async function start() {
+    const prompt = draft.trim()
+    if (!prompt || busy || !auth.session || !ready) return
+    setBusy(true)
+    setError(null)
+    // One id per draft: a retry after a lost response returns the SAME session
+    // rather than creating a second one.
+    request.current ??= crypto.randomUUID()
+    try {
+      const session =
+        created.current ??
+        (await createAgentSession(
+          {
+            title: deriveSessionTitle(prompt),
+            nodeId,
+            provider,
+            model: advanced ? model : NEEV_DEFAULT_MODEL,
+            requestId: request.current,
+          },
+          auth.session.csrf,
+          auth.signal
+        ))
+      // Remembered BEFORE the turn: if the turn fails the session still
+      // exists, and must never be created a second time for this draft.
+      created.current = session
+      await startAgentTurn(session.id, prompt, auth.session.csrf, auth.signal)
+      setDraft("")
+      draftRef.current = ""
+      onCreated(session)
+    } catch (cause) {
+      auth.handleAuthorityError(cause)
+      if (created.current) {
+        // The session exists and the turn MAY already have run — a lost
+        // response is not a failed request. Never resend blindly: ask the
+        // server what actually happened.
+        const session = created.current
+        let landed = false
+        try {
+          const history = await listAgentTurns(session.id, null, auth.signal)
+          landed = history.items.some((turn) => turn.prompt === prompt)
+        } catch {
+          // Could not find out. Treat it as not sent, which keeps the words
+          // the user typed rather than discarding them on a guess.
+          landed = false
+        }
+        if (landed) {
+          // The work was done. Hand over to the transcript that holds it.
+          setDraft("")
+          draftRef.current = ""
+          onCreated(session)
+          return
+        }
+        // Nothing was recorded: the chat exists but is empty. Keep the prompt
+        // where the user can see it and send it again deliberately — an empty
+        // chat and a lost message would explain nothing.
+        setError(cause)
+        return
+      }
+      setError(cause)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 items-center justify-center px-6">
+        <div className="w-full max-w-[760px] space-y-2 text-center">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {t(provider === "claude" ? "newClaudeChat" : "newCodexChat")}
+          </h1>
+          <p className="text-sm leading-6 text-muted-foreground">
+            {t("agentChatsPrivate")}
+          </p>
+        </div>
+      </div>
+      <div className="border-t px-6 py-4">
+        <div className="mx-auto w-full max-w-[760px] space-y-3">
+          <NativeError error={error} />
+          {created.current && error !== null && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {t("agentChatKept")}
+            </p>
+          )}
+          {!ready && !unknown && (
+            <div
+              role="status"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm"
+            >
+              <span className="text-muted-foreground">
+                {t("providerNotConnected", { name: provider })}
+              </span>
+              <Button size="sm" variant="outline" onClick={onRequestSettings}>
+                {t("connectProvider")}
+              </Button>
+            </div>
+          )}
+          <label className="sr-only" htmlFor="neev-new-agent-chat">
+            {t("message")}
+          </label>
+          <textarea
+            id="neev-new-agent-chat"
+            value={draft}
+            autoFocus
+            rows={3}
+            disabled={!ready}
+            maxLength={NEEV_MAX_PROMPT_CHARS}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault()
+                void start()
+              }
+            }}
+            placeholder={t("agentPromptPlaceholder")}
+            className="w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+          />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <Select
+                value={provider}
+                onValueChange={(next) => setProvider(next as NeevAgentProvider)}
+              >
+                <SelectTrigger size="sm" aria-label={t("agentProvider")}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {NEEV_AGENT_PROVIDERS.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {t(option === "claude" ? "claudeLabel" : "codexLabel")}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {advanced ? (
+                <>
+                  <label className="sr-only" htmlFor="neev-new-agent-model">
+                    {t("agentModel")}
+                  </label>
+                  <input
+                    id="neev-new-agent-model"
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                    className="h-8 w-44 rounded-lg border bg-background px-2 text-xs focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                </>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs text-muted-foreground"
+                  onClick={() => setAdvanced(true)}
+                >
+                  {t("providerDefaultModel")}
+                </Button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={onCancel}>
+                {n("cancel")}
+              </Button>
+              <Button
+                size="sm"
+                disabled={!draft.trim() || busy || !ready}
+                onClick={() => void start()}
+              >
+                {t("send")}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

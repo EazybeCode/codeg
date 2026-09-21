@@ -506,7 +506,7 @@ function Content({
         className={
           selected || chromeless
             ? "flex min-h-0 flex-1 flex-col"
-            : "mx-auto w-full max-w-4xl space-y-6 overflow-y-auto px-5 py-10 sm:px-10"
+            : "mx-auto w-full max-w-[760px] space-y-6 overflow-y-auto px-6 py-10 sm:px-10"
         }
       >
         {!selected && !chromeless && (
@@ -573,7 +573,7 @@ function Content({
                     cancelCreation()
                   }
                 }}
-                className="mx-auto w-full max-w-3xl px-7 pb-16 pt-10 sm:px-12"
+                className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14 sm:px-10"
               >
                 <p className="text-xs text-muted-foreground">
                   {n("insideFolder", { name: node.name })}
@@ -594,7 +594,7 @@ function Content({
                     disabled={saving}
                     maxLength={100}
                     onChange={(event) => setTitle(event.target.value)}
-                    className="mt-3 w-full border-0 bg-transparent p-0 text-3xl font-semibold leading-tight outline-none placeholder:text-muted-foreground/50 sm:text-4xl"
+                    className="mt-2 w-full border-0 bg-transparent p-0 text-[2.5rem] font-bold leading-[1.2] tracking-tight outline-none placeholder:text-muted-foreground/40"
                   />
                   <p className="mt-4 text-sm leading-6 text-muted-foreground">
                     {t(

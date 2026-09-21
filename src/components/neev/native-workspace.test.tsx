@@ -45,6 +45,7 @@ it("hides and disables an open workspace menu until visibility auth is revalidat
     release = resolve
   })
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/session": () => (revalidating ? pending : json(orgSession)),
     "GET /api/neev/nodes": () =>
       json({
@@ -85,6 +86,7 @@ it("hides and disables an open workspace menu until visibility auth is revalidat
 })
 it("shows the person and organization without GitHub or chat controls", async () => {
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes": () =>
       json({
         nodes: [
@@ -102,7 +104,6 @@ it("shows the person and organization without GitHub or chat controls", async ()
     "GET /api/neev/nodes/7/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
-    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/agent/connections": () =>
       json({
         runtimeEnabled: false,
@@ -139,17 +140,26 @@ it("shows the person and organization without GitHub or chat controls", async ()
   expect(
     screen.queryByRole("navigation", { name: "Sections" })
   ).not.toBeInTheDocument()
-  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
-  await user.click(await screen.findByRole("button", { name: "Agent chats" }))
-  expect(await screen.findByText(/No saved agent chats yet/)).toBeVisible()
-  expect(screen.getByRole("button", { name: "New agent chat" })).toBeEnabled()
-  expect(screen.getByText("Agents are turned off.")).toBeVisible()
+  await user.click(
+    await screen.findByRole("button", { name: "Actions for Space" })
+  )
+  await user.click(
+    await screen.findByRole("menuitem", { name: "New Claude chat" })
+  )
+  // Straight to a composer for that provider: no list, no naming dialog.
+  expect(await screen.findByText("New Claude chat")).toBeVisible()
+  expect(screen.getByRole("textbox", { name: "Message" })).toBeVisible()
+  // With no runtime bound it says so rather than letting the user type into
+  // something that cannot answer.
+  expect(screen.getByText("claude is not connected yet.")).toBeVisible()
+  expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
   expect(mock.unknown).toEqual([])
 })
 
 it("clears the organization tree when a foreground content 403 exposes revoked membership", async () => {
   let bootstraps = 0
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/session": () =>
       ++bootstraps === 1
@@ -179,7 +189,7 @@ it("clears the organization tree when a foreground content 403 exposes revoked m
   )
   // Expanding the container lists its items; a 403 there reveals revoked access.
   await user.click(
-    await screen.findByRole("button", { name: "Revoked project" })
+    (await screen.findAllByRole("button", { name: "Revoked project" }))[0]
   )
   await waitFor(() => expect(bootstraps).toBe(2))
   await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"))
@@ -192,6 +202,7 @@ it("clears the organization tree when a foreground content 403 exposes revoked m
 it("supports keyboard project creation, nested placement and dialog focus restoration", async () => {
   const bodies: unknown[] = []
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/3/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes": () => json({ nodes: [], nextAfter: null }),
@@ -259,6 +270,7 @@ it("supports keyboard project creation, nested placement and dialog focus restor
 it("uses an accessible drawer at the mobile breakpoint with Escape focus return", async () => {
   viewport.mobile = true
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes": () =>
       json({
         nodes: [
@@ -301,6 +313,7 @@ it.each(["Cancel", "Escape"])(
   "returns to the workspace and restores focus after draft %s",
   async (action) => {
     const mock = mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
       "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
       "GET /api/neev/nodes": () =>
         json({
@@ -345,8 +358,9 @@ it.each(["Cancel", "Escape"])(
       expect(screen.queryByRole("region", { name: "New document" })).toBeNull()
     )
     expect(trigger).toHaveFocus()
+    // Back on the project's own contents, not a generic invitation.
     expect(
-      screen.getByText("Open a project to work in it, or create one.")
+      screen.getByRole("heading", { level: 1, name: "Menu project" })
     ).toBeVisible()
     expect(mock.unknown).toEqual([])
   }
@@ -389,6 +403,7 @@ it("moves a nested folder with its wire revision and retains the draft on confli
   ]
   let body: unknown
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/1/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
     "GET /api/neev/nodes/1/documents": () =>
@@ -458,6 +473,7 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
   }
   let items = [chatA, chatB]
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/7/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes": () =>
@@ -518,7 +534,8 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("")
   )
   // Creating a conversation reveals it in the sidebar and opens it.
-  await user.click(screen.getByRole("button", { name: "New chat" }))
+  await user.click(screen.getByRole("button", { name: "Actions for Space" }))
+  await user.click(screen.getByRole("menuitem", { name: "New chat" }))
   await user.type(screen.getByRole("textbox", { name: "Title" }), "Gamma")
   await user.click(screen.getByRole("button", { name: "Create" }))
   await within(screen.getByRole("navigation", { name: "Projects" })).findByRole(
@@ -531,6 +548,7 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
 it("lists a container's documents and team chats together", async () => {
   const document = { ...resource, kind: "document", title: "Brief" }
   const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes": () =>
       json({
@@ -562,10 +580,19 @@ it("lists a container's documents and team chats together", async () => {
   // the documents to show the chats.
   expect(await screen.findByRole("button", { name: "Brief" })).toBeVisible()
   expect(await screen.findByRole("button", { name: "Alpha" })).toBeVisible()
-  // And both ways to add to it, plus the way in to agent chats.
-  expect(screen.getByRole("button", { name: "New document" })).toBeEnabled()
-  expect(screen.getByRole("button", { name: "New chat" })).toBeEnabled()
-  expect(screen.getByRole("button", { name: "Agent chats" })).toBeEnabled()
+  // Creation is one menu on the row, not a permanent row per kind repeated
+  // under every container.
+  expect(screen.queryByRole("button", { name: "New document" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "New chat" })).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Actions for Space" }))
+  for (const label of [
+    "New document",
+    "New chat",
+    "New Claude chat",
+    "New Codex chat",
+    "New subfolder",
+  ])
+    expect(screen.getByRole("menuitem", { name: label })).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
 
@@ -603,6 +630,7 @@ function rememberOpen(ref: unknown = { resourceId: DOC_ID, nodeId: 4 }) {
 function restoringRoutes(resource: () => Response) {
   return {
     "GET /api/neev/nodes": () => json({ nodes: [NODE], nextAfter: null }),
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [DOC], nextAfter: null }),
     // A container lists both kinds now, so both are stubbed.
@@ -648,7 +676,7 @@ it("returns the reader to the resource they had open before a reload", async () 
   )
   mountWorkspace()
   // The container is revealed and its items listed …
-  expect(await screen.findByText("Roadmap")).toBeVisible()
+  expect((await screen.findAllByText("Roadmap")).length).toBeGreaterThan(0)
   // … and the document is actually OPEN: its title shows both as the rail entry
   // and in the open document's own header. The empty-section placeholder would
   // give neither.
@@ -669,7 +697,7 @@ it("restores nothing when the resource is gone or no longer permitted", async ()
     const view = mountWorkspace()
     // A deleted or newly-forbidden id lands the reader in their section, not on
     // an error — they never asked for this fetch.
-    expect(await screen.findByText("Roadmap")).toBeVisible()
+    expect((await screen.findAllByText("Roadmap")).length).toBeGreaterThan(0)
     expect(screen.queryByTitle("Launch plan")).toBeNull()
     expect(screen.queryByRole("alert")).toBeNull()
     view.unmount()
@@ -693,7 +721,7 @@ it("ignores a pointer left by a different organization", async () => {
     })
   )
   mountWorkspace()
-  await screen.findByText("Roadmap")
+  await screen.findAllByText("Roadmap")
   expect(screen.queryByTitle("Launch plan")).toBeNull()
   // Not even a lookup: a pointer from another tenant is never dereferenced.
   expect(fetched).toBe(0)
@@ -707,7 +735,7 @@ it("ignores a pointer whose resource belongs to the other section", async () => 
     restoringRoutes(() => json({ ...DOC, kind: "chat", originChatId: null }))
   )
   mountWorkspace()
-  await screen.findByText("Roadmap")
+  await screen.findAllByText("Roadmap")
   expect(screen.queryByTitle("Launch plan")).toBeNull()
 })
 
@@ -722,7 +750,7 @@ it("discards a malformed pointer without a lookup", async () => {
     })
   )
   mountWorkspace()
-  await screen.findByText("Roadmap")
+  await screen.findAllByText("Roadmap")
   expect(fetched).toBe(0)
 })
 
@@ -734,7 +762,9 @@ it("remembers the opened resource, and forgets it on the way back", async () => 
   )
   const user = userEvent.setup()
   mountWorkspace()
-  await user.click(await screen.findByRole("button", { name: "Roadmap" }))
+  await user.click(
+    (await screen.findAllByRole("button", { name: "Roadmap" }))[0]
+  )
   await user.click(await screen.findByRole("button", { name: "Launch plan" }))
   // A pointer, not content: just which resource, under which container.
   await waitFor(() =>
@@ -742,9 +772,10 @@ it("remembers the opened resource, and forgets it on the way back", async () => 
       JSON.parse(localStorage.getItem("neev.ws.open.1:3") as string)
     ).toEqual({ resourceId: DOC_ID, nodeId: 4 })
   )
-  // Leaving for the agent chats closes the resource, so there is nothing to
+  // Leaving for an agent chat closes the resource, so there is nothing to
   // restore — the next reload lands where the reader actually left off.
-  await user.click(screen.getByRole("button", { name: "Agent chats" }))
+  await user.click(screen.getByRole("button", { name: "Actions for Roadmap" }))
+  await user.click(screen.getByRole("menuitem", { name: "New Claude chat" }))
   await waitFor(() =>
     expect(localStorage.getItem("neev.ws.open.1:3")).toBeNull()
   )
@@ -771,6 +802,7 @@ it("reveals a restored resource nested under collapsed ancestors", async () => {
     JSON.stringify({ resourceId: CHAT_ID, nodeId: 6 })
   )
   mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/6/documents": () =>
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes": () => json({ nodes: tree, nextAfter: null }),
@@ -802,6 +834,7 @@ it("lands on Projects, never on a global agent list", async () => {
   // outside Projects, which is the one thing the workspace should not have.
   localStorage.setItem("neev.ws.section", "agents")
   mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes": () =>
       json({
         nodes: [

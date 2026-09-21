@@ -148,8 +148,11 @@ it("lists saved sessions and says they are private", async () => {
   mount()
   expect(await screen.findByText("Refactor the parser")).toBeVisible()
   expect(screen.getByText(/Private to you/)).toBeVisible()
-  expect(screen.getByText("Connected")).toBeVisible()
-  expect(screen.getByText("sagar@example.test")).toBeVisible()
+  // Connection administration lives in Settings, not on a chat surface: this
+  // is where you talk to an agent, not where you manage accounts.
+  expect(screen.queryByText("Connected")).toBeNull()
+  expect(screen.queryByText("sagar@example.test")).toBeNull()
+  expect(screen.queryByRole("button", { name: "Disconnect claude" })).toBeNull()
   expect(mock.unknown).toEqual([])
 })
 
@@ -533,4 +536,180 @@ it("keeps the session where it was when a move is refused", async () => {
   expect(
     screen.getByRole("button", { name: /Not in a project \(1\)/ })
   ).toBeVisible()
+})
+
+const CONNECTED = {
+  runtimeEnabled: true,
+  connections: [
+    {
+      provider: "claude",
+      state: "connected",
+      accountLabel: "sagar@example.test",
+      checkedAt: 1_700_000_000,
+      errorCode: null,
+    },
+    {
+      provider: "codex",
+      state: "not_signed_in",
+      accountLabel: null,
+      checkedAt: null,
+      errorCode: null,
+    },
+  ],
+}
+
+function composer(project = { nodeId: 7, nodeName: "Launch" }) {
+  return render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeAgentChats
+          nodeId={project.nodeId}
+          nodeName={project.nodeName}
+          draftProvider="claude"
+          onSessionCreated={vi.fn()}
+          onDraftCancelled={vi.fn()}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+}
+
+it("creates the session from the first message, titled by what was typed", async () => {
+  // The user came to type, not to name something: no dialog, no title field.
+  let created: Record<string, unknown> | null = null
+  let started: Record<string, unknown> | null = null
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () => json(CONNECTED),
+    "POST /api/neev/agent/sessions": (init) => {
+      created = JSON.parse(init.body as string)
+      return json({ ...session, nodeId: 7 }, 201)
+    },
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: (init) => {
+      started = JSON.parse(init.body as string)
+      return json({ turn: runningTurn, runId: RUN_ID }, 201)
+    },
+  })
+  const user = userEvent.setup()
+  composer()
+
+  expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull()
+  const box = await screen.findByRole("textbox", { name: "Message" })
+  await waitFor(() => expect(box).toBeEnabled())
+  await user.type(box, "Explain the parser to me")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+
+  await waitFor(() =>
+    expect(started).toEqual({ prompt: "Explain the parser to me" })
+  )
+  // Filed under the project it was started in, titled from the message, and
+  // on the provider's own default model.
+  expect(created).toMatchObject({
+    title: "Explain the parser to me",
+    nodeId: 7,
+    provider: "claude",
+    model: "default",
+  })
+})
+
+it("will not let a disconnected provider be typed into", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () => json(CONNECTED),
+  })
+  const user = userEvent.setup()
+  composer()
+
+  // Claude is connected, so switching to Codex must say so rather than
+  // accepting a message nothing can answer.
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled()
+  )
+  await user.click(screen.getByRole("combobox", { name: "Provider" }))
+  await user.click(await screen.findByRole("option", { name: "Codex" }))
+
+  expect(await screen.findByText("codex is not connected yet.")).toBeVisible()
+  expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+  // The way out is the real connection flow, never a fake one.
+  expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled()
+})
+
+async function failingFirstTurn(turns: unknown[]) {
+  let creates = 0
+  const onCreated = vi.fn()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () => json(CONNECTED),
+    "POST /api/neev/agent/sessions": () => {
+      creates += 1
+      return json({ ...session, nodeId: 7 }, 201)
+    },
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ code: "unavailable" }, 503),
+    // What the server says actually happened.
+    [`GET /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ items: turns, nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeAgentChats
+          nodeId={7}
+          nodeName="Launch"
+          draftProvider="claude"
+          onSessionCreated={onCreated}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  const box = await screen.findByRole("textbox", { name: "Message" })
+  await waitFor(() => expect(box).toBeEnabled())
+  await user.type(box, "Explain the parser")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  return { onCreated, creates: () => creates, box }
+}
+
+it("keeps the message when the first turn left no trace", async () => {
+  // The chat exists but nothing was recorded. Discarding the words the user
+  // typed and showing an empty transcript would explain nothing.
+  const { onCreated, creates, box } = await failingFirstTurn([])
+
+  expect(await screen.findByRole("alert")).toBeVisible()
+  expect(
+    screen.getByText(/The chat was created but this message was not sent/)
+  ).toBeVisible()
+  expect(box).toHaveValue("Explain the parser")
+  // Not resent, and certainly not created again.
+  expect(onCreated).not.toHaveBeenCalled()
+  expect(creates()).toBe(1)
+})
+
+it("hands over when the first turn actually ran", async () => {
+  // A lost response is not a failed request: the prompt is in the history, so
+  // the work was done and resending it would do it twice.
+  const { onCreated, creates } = await failingFirstTurn([
+    { ...runningTurn, prompt: "Explain the parser" },
+  ])
+
+  await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1))
+  expect(creates()).toBe(1)
+})
+
+it("says a missing chat is missing instead of loading forever", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () => json(CONNECTED),
+  })
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeAgentChats nodeId={7} nodeName="Launch" sessionId={SESSION_ID} />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  expect(
+    await screen.findByText("That chat is no longer in this project.")
+  ).toBeVisible()
+  expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled()
 })

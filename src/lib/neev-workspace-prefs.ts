@@ -154,3 +154,45 @@ export function setOpenResource(
     /* ignore */
   }
 }
+
+/**
+ * The agent chat the reader had open, remembered per user and organization.
+ *
+ * A pointer, never content: the id only, and it is checked against the list the
+ * server returns before anything is shown. Restoring the section without this
+ * would land the reader on a project with nothing selected, having thrown away
+ * the one thing they were looking at.
+ */
+const AGENT_SESSION_PREFIX = "neev.ws.agent"
+
+function agentSessionKey(userId: number, orgId: number): string {
+  return `${AGENT_SESSION_PREFIX}.${userId}:${orgId}`
+}
+
+export function getOpenAgentSession(
+  userId: number,
+  orgId: number
+): string | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = localStorage.getItem(agentSessionKey(userId, orgId))
+    return raw && UUID.test(raw) ? raw : null
+  } catch {
+    return null
+  }
+}
+
+export function setOpenAgentSession(
+  userId: number,
+  orgId: number,
+  value: string | null
+): void {
+  if (typeof window === "undefined") return
+  try {
+    const key = agentSessionKey(userId, orgId)
+    if (value === null) localStorage.removeItem(key)
+    else localStorage.setItem(key, value)
+  } catch {
+    /* ignore */
+  }
+}
