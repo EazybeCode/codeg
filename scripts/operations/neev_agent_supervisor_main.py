@@ -427,7 +427,6 @@ def main(argv=None):  # pragma: no cover - Linux daemon glue
     import asyncio
     import platform
     import socket
-    import uuid
 
     import neev_agent_network_bootstrap as bootstrap
     import neev_credential_store as store_module
@@ -469,13 +468,13 @@ def main(argv=None):  # pragma: no cover - Linux daemon glue
     # fresh deployment binds fine but the first start_login's volumes.create fails.
     store.initialize()
     volumes = volumes_module.CredentialVolumes(store, volumes_module.FixedToolRunner())
-    boot_id = dto.Id(uuid.uuid4().hex)
-    supervisor = build_supervisor(config, volumes, boot_id)
-    try:
-        supervisor.recover()  # fail-closed: RegistryError aborts startup
-    except sup.RegistryError as error:
-        raise SystemExit("neev supervisor: durable recovery failed: %s" % error.reason)
 
+    # Open the fence, bind + adopt the control socket, THEN build the supervisor from the
+    # listener's boot id. The listener mints the supervisor boot id used in BOTH the
+    # handshake and per-response correlation, so the supervisor MUST stamp its responses
+    # with the SAME id: building it with an independent uuid made ServerChannel.finish
+    # reject every response as a correlation mismatch (the daemon appeared to serve but
+    # every op failed). One boot id, sourced from the listener, is the invariant.
     fence = fence_mod.FenceOwner.open(deployment.fence_deployment(paths, policy))
     bind_path = deployment.socket_path(paths)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -486,6 +485,14 @@ def main(argv=None):  # pragma: no cover - Linux daemon glue
     listener = transport.SupervisorListener.adopt(
         sock, deployment.control_deployment(paths, policy)
     )
+    supervisor = build_supervisor(config, volumes, listener.supervisor_boot_id)
+    try:
+        supervisor.recover()  # fail-closed, BEFORE any request is served
+    except sup.RegistryError as error:
+        listener.close()
+        fence.close()
+        raise SystemExit("neev supervisor: durable recovery failed: %s" % error.reason)
+
     try:
         asyncio.run(sup.serve(listener, fence, supervisor))
     finally:
