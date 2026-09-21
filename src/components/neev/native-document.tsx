@@ -568,7 +568,9 @@ function Document({
     <section
       data-doc-width={docWidth}
       className={
-        "min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-24 pt-14 sm:px-10 [&>div]:mx-auto " +
+        // No top padding here: the sticky action header sits flush under the
+        // tab strip. The whitespace above the title belongs to the title.
+        "min-h-0 min-w-0 flex-1 overflow-y-auto px-6 pb-24 pt-0 sm:px-10 [&>div]:mx-auto " +
         (docWidth === "focus" ? "[&>div]:max-w-[760px]" : "[&>div]:max-w-none")
       }
       aria-label={latest.title}
@@ -754,7 +756,7 @@ function Document({
           </DropdownMenuContent>
         </DropdownMenu>
       </header>
-      <div className="pb-2 pt-10">
+      <div className="pb-2 pt-16">
         <h1 className="break-words text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em]">
           {latest.title}
         </h1>
