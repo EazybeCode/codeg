@@ -385,7 +385,12 @@ it.each(["1", "9007199254740992"])(
 const capable = () => json({ ...nativeCapabilities, runtimeEnabled: true })
 
 const RUN_ID = "0123456789abcdef0123456789abcdef"
-const SESSION_ID = "77777777-7777-4777-8777-777777777777"
+// A REAL derived team session id from the database: `team_session_id` hashes
+// (org, owner, chat, provider) into the 8-4-4-4-12 shape, so its version and
+// variant nibbles are hash output (`2882`, `c4cb`) and not UUID bits. Using it
+// here keeps invocation, discovery and replay honest about what the server
+// actually sends.
+const SESSION_ID = "2b4cd22b-bb13-2882-c4cb-0773b9534435"
 const AGENT_PATH = `POST /api/neev/chats/${resource.id}/agent`
 const RUN_EVENTS = `GET /api/neev/agent/runs/${RUN_ID}/events`
 const TEAM_SESSION = (provider: string) =>

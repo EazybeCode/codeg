@@ -206,6 +206,25 @@ export type NeevRunEvent =
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+/**
+ * An agent session id, which is NOT always a UUID.
+ *
+ * A team session's id is DERIVED — `team_session_id` in `agents/sessions.rs`
+ * hashes `(org, owner, chat, provider)` and lays the digest out in the
+ * canonical 8-4-4-4-12 shape so it looks like one. The version and variant
+ * nibbles a real UUID reserves are, in a digest, just more hash output: roughly
+ * fifteen in sixteen team ids fail the version check and eleven in sixteen fail
+ * the variant check, so most of them were refused as `invalid_response` — which
+ * is what broke live invocation, because a turn carries its session id.
+ *
+ * So a session id is validated as what it actually is: an opaque, canonically
+ * shaped, lowercase hex token. Every real UUID still matches, so a personal
+ * session is unaffected. This is used for session ids ONLY — chat, resource,
+ * turn, message and request ids stay strict UUIDs, because those really are
+ * generated as UUIDs and loosening them would buy nothing.
+ */
+const SESSION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** Run ids are the server's dash-less uuid: 32 lowercase hex digits. */
 const RUN_ID = /^[0-9a-f]{32}$/
 const TURN_STATUSES: readonly NeevTurnStatus[] = [
@@ -299,6 +318,12 @@ function uuid(value: unknown): string {
   return parsed
 }
 
+function sessionId(value: unknown): string {
+  const parsed = text(value)
+  if (!SESSION_ID.test(parsed)) return invalid()
+  return parsed
+}
+
 function runId(value: unknown): string {
   const parsed = text(value)
   if (!RUN_ID.test(parsed)) return invalid()
@@ -344,7 +369,8 @@ export function parseAgentSession(value: unknown): NeevAgentSession {
   const model = text(object.model)
   if (model.length === 0 || [...model].length > 80) return invalid()
   return {
-    id: uuid(object.id),
+    // Opaque: a team session's id is a digest, not a UUID. See `SESSION_ID`.
+    id: sessionId(object.id),
     orgId: positiveId(object.orgId),
     ownerId: positiveId(object.ownerId),
     title,
@@ -476,8 +502,9 @@ export function parseAgentTurn(value: unknown): NeevAgentTurn {
   // disagreeing means the row is not something we can display truthfully.
   if ((status === "running") === (completedAt !== null)) return invalid()
   return {
+    // The TURN is a real UUID; the session it belongs to may be a digest.
     id: uuid(object.id),
-    sessionId: uuid(object.sessionId),
+    sessionId: sessionId(object.sessionId),
     sequence: integerString(object.sequence),
     runId: runId(object.runId),
     prompt: text(object.prompt),
@@ -572,6 +599,18 @@ function assertUuid(value: string): void {
   if (!UUID.test(value)) invalidRequest()
 }
 
+/**
+ * A session id on its way into a URL.
+ *
+ * Same rule as {@link SESSION_ID}: canonical shape, lowercase hex, opaque. It
+ * is still a strict allowlist — nothing that could carry a path segment, a
+ * query or an escape can pass — it simply does not insist on UUID version and
+ * variant bits that a derived team id never had.
+ */
+function assertSessionId(value: string): void {
+  if (!SESSION_ID.test(value)) invalidRequest()
+}
+
 function assertRunId(value: string): void {
   if (!RUN_ID.test(value)) invalidRequest()
 }
@@ -608,7 +647,7 @@ export async function setAgentSessionNode(
   csrf: string,
   signal?: AbortSignal
 ): Promise<NeevAgentSession> {
-  assertUuid(sessionId)
+  assertSessionId(sessionId)
   if (nodeId !== null && (!Number.isSafeInteger(nodeId) || nodeId <= 0))
     invalidRequest()
   if (!/^(0|[1-9]\d{0,18})$/.test(expectedRevision)) invalidRequest()
@@ -660,7 +699,7 @@ export async function loadAgentSession(
   sessionId: string,
   signal?: AbortSignal
 ): Promise<NeevAgentSession> {
-  assertUuid(sessionId)
+  assertSessionId(sessionId)
   const session = parseAgentSession(
     await contentGet(`/api/neev/agent/sessions/${sessionId}`, signal)
   )
@@ -674,7 +713,7 @@ export async function updateAgentSession(
   csrf: string,
   signal?: AbortSignal
 ): Promise<NeevAgentSession> {
-  assertUuid(sessionId)
+  assertSessionId(sessionId)
   try {
     integerString(input.expectedRevision)
   } catch {
@@ -704,7 +743,7 @@ export async function listAgentTurns(
   after: string | null = null,
   signal?: AbortSignal
 ): Promise<NativePage<NeevAgentTurn>> {
-  assertUuid(sessionId)
+  assertSessionId(sessionId)
   if (after !== null) {
     try {
       integerString(after)
@@ -736,7 +775,7 @@ export async function startAgentTurn(
   csrf: string,
   signal?: AbortSignal
 ): Promise<NeevStartedTurn> {
-  assertUuid(sessionId)
+  assertSessionId(sessionId)
   if (
     typeof prompt !== "string" ||
     prompt.length === 0 ||

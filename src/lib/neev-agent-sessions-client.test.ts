@@ -32,6 +32,9 @@ import {
 const SESSION_ID = "123e4567-e89b-42d3-a456-426614174000"
 const TURN_ID = "223e4567-e89b-42d3-a456-426614174001"
 const RUN_ID = "0123456789abcdef0123456789abcdef"
+/** The version/variant-checked shape, to prove a real team id is not one. */
+const UUID_STRICT =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 const session = {
   id: SESSION_ID,
@@ -1117,5 +1120,127 @@ describe("activity traces", () => {
     const parsed = parseAgentTurn({ ...turn, activity: [call] })
     expect(parsed.activity).toHaveLength(1)
     expect(parseAgentTurn(turn).activity).toEqual([])
+  })
+})
+
+/**
+ * A team session's id is a DIGEST laid out to look like a UUID.
+ *
+ * `team_session_id` hashes `(org, owner, chat, provider)` and slices the result
+ * into 8-4-4-4-12. The nibbles a UUID reserves for version and variant are, in
+ * a digest, just more hash output — so most team ids fail a strict UUID check.
+ * The id below is a REAL one, taken from the database after a live invocation
+ * that had completed with six activity items and the correct reply; the client
+ * still refused the whole response, and the run looked broken to the user.
+ */
+describe("derived team session ids", () => {
+  const TEAM_SESSION_ID = "2b4cd22b-bb13-2882-c4cb-0773b9534435"
+  const CHAT_ID = "423e4567-e89b-42d3-a456-426614174003"
+  const teamTurn = { ...settled, sessionId: TEAM_SESSION_ID }
+  const teamSession = {
+    ...session,
+    id: TEAM_SESSION_ID,
+    boundChatId: CHAT_ID,
+  }
+
+  it("accepts the digest the server actually stores, in the session and in its turns", () => {
+    // Variant nibble `c`: not a value any UUID version may carry.
+    expect(UUID_STRICT.test(TEAM_SESSION_ID)).toBe(false)
+    expect(parseAgentSession(teamSession).id).toBe(TEAM_SESSION_ID)
+    expect(parseAgentTurn(teamTurn).sessionId).toBe(TEAM_SESSION_ID)
+  })
+
+  it("still refuses anything that is not a canonical lowercase hex id", () => {
+    for (const bad of [
+      "2B4CD22B-BB13-2882-C4CB-0773B9534435",
+      "2b4cd22b-bb13-2882-c4cb-0773b953443",
+      "2b4cd22bbb132882c4cb0773b9534435",
+      "2b4cd22b-bb13-2882-c4cb-0773b953443g",
+      "../2b4cd22b-bb13-2882-c4cb-0773b9534435",
+      "2b4cd22b-bb13-2882-c4cb-0773b9534435?x=1",
+    ]) {
+      expect(() => parseAgentSession({ ...teamSession, id: bad })).toThrow(
+        NativeClientError
+      )
+      expect(() => parseAgentTurn({ ...teamTurn, sessionId: bad })).toThrow(
+        NativeClientError
+      )
+    }
+  })
+
+  it("keeps the turn's own id a strict UUID", () => {
+    // Only the SESSION id is derived. A turn id really is a UUID, and
+    // loosening it would buy nothing.
+    expect(() => parseAgentTurn({ ...teamTurn, id: TEAM_SESSION_ID })).toThrow(
+      NativeClientError
+    )
+  })
+
+  it("carries a live invocation through, session id and all", async () => {
+    const ask = {
+      id: "523e4567-e89b-42d3-a456-426614174004",
+      sequence: "1",
+      authorId: 9,
+      authorName: "Sagar",
+      body: "summarise the incident",
+      createdAt: 1_700_000_000,
+      authorKind: "human",
+      agentLabel: null,
+    }
+    const running = {
+      ...turn,
+      sessionId: TEAM_SESSION_ID,
+      activity: [
+        {
+          seq: 1,
+          offset: 0,
+          id: "call-1",
+          kind: "tool_call",
+          name: "Read",
+          input: '{"file_path":"/tmp/a"}',
+          inputTruncated: false,
+        },
+      ],
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json({ message: ask, turn: running, runId: RUN_ID }, 201)
+      )
+    )
+    const invocation = await invokeTeamAgent(
+      CHAT_ID,
+      {
+        prompt: "summarise the incident",
+        provider: "claude",
+        model: "default",
+        requestId: SESSION_ID,
+        expectedAuthRevision: "2",
+      },
+      "csrf"
+    )
+    expect(invocation.turn.sessionId).toBe(TEAM_SESSION_ID)
+    expect(invocation.turn.activity).toHaveLength(1)
+  })
+
+  it("discovers and replays a derived session without rejecting its own id", async () => {
+    const urls: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(url)
+        return url.includes("/turns")
+          ? json({ items: [teamTurn], nextAfter: null })
+          : json(teamSession)
+      })
+    )
+    const found = await loadTeamAgentSession(CHAT_ID, "claude")
+    expect(found?.id).toBe(TEAM_SESSION_ID)
+    const page = await listAgentTurns(TEAM_SESSION_ID)
+    expect(page.items[0].sessionId).toBe(TEAM_SESSION_ID)
+    expect(urls).toEqual([
+      `/api/neev/chats/${CHAT_ID}/agent?provider=claude`,
+      `/api/neev/agent/sessions/${TEAM_SESSION_ID}/turns`,
+    ])
   })
 })
