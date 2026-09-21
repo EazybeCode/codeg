@@ -133,27 +133,36 @@ def child_env(delivery, proxy_env=None):
 
 
 def _become_credential_owner():  # pragma: no cover - requires the cap helper (euid 0)
-    """Elevate to euid 0 AND egid 0 for the credential/mount phase.
+    """Elevate to euid 0 AND egid 0 for the credential/mount phase, WITHOUT becoming
+    unsignalable by the web-server parent that launched us.
 
-    The caplaunch helper execs us with euid/egid 65532 (the web-server uid/gid) plus
-    ambient caps (incl. CAP_SETUID/CAP_SETGID). The credential store, master key and
-    volume images are ROOT-owned (uid 0, gid 0) and their validators check BOTH
-    owner == geteuid() and group == getegid(); mount/cryptsetup also want euid 0. So
-    the trusted, fixed launcher raises BOTH euid and egid to 0 here — AFTER its
-    args/workdir are validated, BEFORE any credential effect. (Raising only the uid
-    left egid at 65532, so a root-owned mountpoint failed the gid check.) The provider
-    child is still dropped to its DISTINCT unprivileged lane uid/gid with an empty
-    capability set by the sandbox's setpriv, so nothing untrusted runs as root. Fail
-    closed if elevation is impossible (e.g. the profile lacks CAP_SETUID/CAP_SETGID)."""
+    The caplaunch helper execs us with ruid/euid/egid 65532 (the web-server uid/gid)
+    plus ambient caps (incl. CAP_SETUID/CAP_SETGID). The credential store, master key
+    and volume images are ROOT-owned (uid 0, gid 0) and their validators check BOTH
+    owner == geteuid() and group == getegid(); mount/cryptsetup also want euid 0. So the
+    trusted, fixed launcher raises BOTH euid and egid to 0 here — AFTER its args/workdir
+    are validated, BEFORE any credential effect.
+
+    Crucially we keep the CALLER'S uid as the SAVED set-uid instead of `setresuid(0,0,0)`:
+    kill(2) permits a sender whose real/effective uid equals the target's real OR saved
+    set-uid, so preserving suid == the web uid lets that parent (which runs with zero
+    effective caps) still cancel us — deliver the SIGTERM whose handler tears the sandbox
+    down and cleans the workdir. `setresuid(0,0,0)` would drop the saved-uid to 0 and
+    make cancel from the parent impossible; adding CAP_KILL to the helper only lets US
+    signal the inner provider, never the parent signal US. ruid/euid are 0, so cryptsetup
+    and the root-owned store's owner==geteuid check still pass, and the provider child is
+    still dropped to its DISTINCT unprivileged lane uid/gid with an empty capability set
+    by the sandbox's setpriv. Fail closed if elevation is impossible."""
     import platform
 
     if platform.system() != "Linux":
         raise sandbox.SandboxError("unsupported")
     if os.geteuid() == 0 and os.getegid() == 0:
         return
+    caller_uid = os.getuid()  # the web-server parent's ruid (e.g. 65532)
     try:
         os.setresgid(0, 0, 0)  # CAP_SETGID
-        os.setresuid(0, 0, 0)  # CAP_SETUID (after gid: still privileged here)
+        os.setresuid(0, 0, caller_uid)  # ruid/euid 0; saved-uid stays the caller's
     except OSError as error:
         raise sandbox.SandboxError("launch") from error
     if os.geteuid() != 0 or os.getegid() != 0:
