@@ -193,18 +193,47 @@ def main(argv=None, volumes=None):
             )
             return 2
         volumes = _production_volumes()
-    # A run with provider egress must route the provider's TLS through its slot
-    # CONNECT proxy — the netns has no other path out. deny_all runs have no proxy
-    # (and no network), so no proxy env is injected.
-    proxy_env = None
-    if spec.egress.mode == "provider_allowlist":
-        import neev_login_network_profile as network_profile
-
-        proxy_env = network_profile.proxy_env(args.slot)
     # The provider sees its credentials at a lane-traversable HOME under the run
     # workdir; the sandbox bind-mounts the physical volume there in its private
     # mount namespace (the 0700 secret store is never made traversable).
     home_as = sandbox.home_path(spec.workdir)
+    # A run with provider egress must route the provider's TLS through its slot CONNECT
+    # proxy — the netns has no other path out. The slot_proxy context manager owns the
+    # slot for the child's WHOLE lifetime: it takes the exclusive slot lock (busy ->
+    # another run holds the endpoint), refuses a quarantined/occupied slot, spawns the
+    # namespaced proxy bound to the RUN allowlist, yields the authoritative proxy env,
+    # and stops+reaps the proxy before releasing the lock. deny_all runs have no proxy
+    # (and no network), so nothing is spawned.
+    if spec.egress.mode == "provider_allowlist":
+        import neev_slot_proxy as slot_proxy
+
+        try:
+            with slot_proxy.slot_proxy(args.provider, "run", args.slot) as proxy_env:
+                rc = _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as)
+                if rc == 6:
+                    # Workdir cleanup failed: the FIXED lane must not be reused. Write
+                    # the durable slot quarantine too so the next run's slot_proxy also
+                    # refuses (belt-and-braces with the Rust LaneGuard's rc-6 handling).
+                    slot_proxy.quarantine(args.slot)
+                return rc
+        except slot_proxy.SlotProxyError as error:
+            # busy/occupied/quarantined/timeout/unavailable — never a host or policy
+            # detail. A proxy that could not be confirmed dead has already quarantined
+            # the slot inside the context manager.
+            print(
+                f"neev_agent_launch: slot proxy unavailable: {error.category}",
+                file=sys.stderr,
+            )
+            return 7
+    return _deliver_run_cleanup(volumes, args, spec, None, home_as)
+
+
+def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as):
+    """Open the caller's OWN volume, lend it to the lane uid for the child's whole
+    lifetime, run the sandboxed provider, then privileged-remove the run workdir.
+
+    Returns the child's rc, or 5 (credential delivery refused) / 6 (workdir cleanup
+    failed -> lane must be quarantined, not reused)."""
     try:
         with credentials.deliver(
             volumes,

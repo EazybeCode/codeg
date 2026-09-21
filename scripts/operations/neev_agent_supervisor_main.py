@@ -111,36 +111,20 @@ def config_from_env(environ: Optional[dict] = None) -> Config:
 
 
 # --------------------------------------------------------------------------- #
-# Slot quarantine — fail-closed cross-tenant reuse guard
+# Fail-closed cross-tenant reuse guard
 # --------------------------------------------------------------------------- #
 
 
 class ChannelError(Exception):
     """A login channel that could not be brought up OR torn down cleanly. Raised so a
     teardown failure surfaces (a live child / half-removed workdir) instead of being
-    swallowed, and so a quarantined slot refuses to build a new channel."""
+    swallowed, and so a quarantined slot refuses to build a new channel.
 
-
-class SlotQuarantine:
-    """Daemon-lifetime record of slots whose lane uid may still own a live child or an
-    incompletely-removed run workdir.
-
-    The login lane uid is FIXED per slot (e.g. 61000), so a slot whose child/workdir
-    teardown failed cannot be handed to the NEXT login or probe without risking a
-    cross-tenant HOME/CWD leak — exactly the hazard the runtime launcher already
-    guards. Once marked, a slot stays quarantined until the daemon restarts, at which
-    point the privileged startup purge removes the abandoned run dirs and the fresh
-    process starts with an empty quarantine. Retry is only possible AFTER that
-    verified privileged cleanup, never by reusing the slot in place."""
-
-    def __init__(self):
-        self._slots = set()
-
-    def mark(self, slot) -> None:
-        self._slots.add(slot)
-
-    def is_quarantined(self, slot) -> bool:
-        return slot in self._slots
+    The durable slot quarantine itself lives in `neev_slot_proxy` (a file marker that
+    survives the process and is shared with the runtime launcher), because the login
+    lane uid is FIXED per slot: a slot whose sandbox child or run workdir did not tear
+    down cleanly must not be handed to the next login/probe, and the marker is only
+    cleared by the privileged restart purge or a deliberate operator action."""
 
 
 # --------------------------------------------------------------------------- #
@@ -158,27 +142,35 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
     agent run uses."""
 
     def __init__(self, config, volumes, provider, store_scope, handle, argv, *,
-                 quarantine, cleanup=None):
+                 cleanup=None, quarantine_dir=None):
         self._config = config
         self._volumes = volumes
         self._provider = provider
         self._store_scope = store_scope
         self._handle = handle
         self._argv = argv
-        self._quarantine = quarantine
         self._cleanup = cleanup  # injectable for tests; default is the launcher's
+        self._quarantine_dir = quarantine_dir  # None -> slot_proxy default
         self._workdir = None
-        self._slot_lock = None
+        self._proxy_cm = None
         self._delivery_cm = None
         self._sandbox = None
 
     def start(self):
-        import neev_agent_network_bootstrap as bootstrap
         import neev_agent_credentials as credentials
         import neev_agent_sandbox as sandbox
+        import neev_slot_proxy as slot_proxy
 
-        self._slot_lock = bootstrap.slot_proxy_lock(self._config.slot)
-        self._slot_lock.__enter__()  # BusyError propagates -> driver start fails
+        # Own the slot's LOGIN proxy for the whole login: this takes the exclusive slot
+        # lock (busy propagates -> driver start fails), refuses a quarantined or already
+        # occupied slot, spawns the namespaced CONNECT proxy bound to the login
+        # allowlist, and yields the authoritative HTTP(S)_PROXY env. The provider's TLS
+        # has no other path out of the netns.
+        self._proxy_cm = slot_proxy.slot_proxy(
+            self._provider.value, "login", self._config.slot,
+            quarantine_dir=self._quarantine_dir,
+        )
+        proxy_env = self._proxy_cm.__enter__()
         try:
             self._workdir = _make_run_dir(self._config)
             home = sandbox.home_path(self._workdir)
@@ -189,7 +181,7 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
             )
             delivery = self._delivery_cm.__enter__()
             spec = _login_spec(self._config, tenant, self._argv, self._workdir)
-            env = _login_env(self._config, self._provider, home)
+            env = _login_env(self._config, self._provider, home, proxy_env)
             self._sandbox = sandbox.launch(
                 spec, env=env, bind_source=delivery.mount, stdin_pipe=True
             )
@@ -224,6 +216,8 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
         self._unwind()
 
     def _unwind(self):
+        import neev_slot_proxy as slot_proxy
+
         cleanup = self._cleanup
         if cleanup is None:
             import neev_agent_launch as launch
@@ -246,26 +240,23 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
             if not cleanup(self._workdir):  # symlink-safe bounded delete; False on failure
                 clean = False  # a run workdir left behind would leak into the next tenant
             self._workdir = None
-        if clean:
-            self._release_slot()
-            return
-        # A child may still be alive OR the workdir was not fully removed. The login
-        # lane uid is FIXED, so reusing this slot for the next login/probe would risk a
-        # cross-tenant leak. Quarantine the slot for the daemon's lifetime (the factory
-        # then refuses it until a privileged restart purge) and raise so the failure is
-        # reported, never swallowed. The slot lock is released — the quarantine, not the
-        # flock, is the durable no-reuse guarantee, and holding it would only leak the fd.
-        self._quarantine.mark(self._config.slot)
-        self._release_slot()
-        raise ChannelError("teardown_failed")
-
-    def _release_slot(self):
-        if self._slot_lock is not None:
+        # Stop + reap the login proxy child and release the slot lock. slot_proxy's own
+        # __exit__ writes the durable quarantine marker if the proxy child cannot be
+        # confirmed gone (SlotProxyError), so a live proxy also blocks reuse.
+        if self._proxy_cm is not None:
             try:
-                self._slot_lock.__exit__(None, None, None)
+                self._proxy_cm.__exit__(None, None, None)
             except Exception:
-                pass
-            self._slot_lock = None
+                clean = False
+            self._proxy_cm = None
+        if clean:
+            return
+        # The sandbox child or the run workdir did not tear down cleanly. The login lane
+        # uid is FIXED, so the next login/probe MUST NOT reuse this slot: write the same
+        # durable slot-proxy quarantine marker (cleared only by the privileged restart
+        # purge or an operator) and raise so the failure is surfaced, never swallowed.
+        slot_proxy.quarantine(self._config.slot, directory=self._quarantine_dir)
+        raise ChannelError("teardown_failed")
 
 
 def _tenant(store_scope) -> str:
@@ -293,12 +284,11 @@ def _login_spec(config, tenant, argv_tuple, workdir):
     )
 
 
-def _login_env(config, provider, home):
+def _login_env(config, provider, home, proxy_env):
     import neev_agent_credentials as credentials
-    import neev_login_network_profile as profile
 
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin"}
-    env.update(profile.proxy_env(config.slot))  # route login TLS via the slot proxy
+    env.update(proxy_env)  # authoritative slot-proxy env from the live slot_proxy CM
     env.update(credentials.provider_env(home, provider.value))
     return env
 
@@ -316,24 +306,27 @@ def _credential_present(config, handle, provider):
 # --------------------------------------------------------------------------- #
 
 
-def make_factories(config: Config, volumes, *, channel_factory=None, quarantine=None):
+def make_factories(config: Config, volumes, *, channel_factory=None, quarantine_dir=None):
     """Build (driver_for, probe_for). `channel_factory(provider, store_scope, handle,
     argv)` builds a Channel (default: the full-lifecycle LoginChannel); tests inject a
     fake so the wiring is exercised without a real sandbox.
 
-    A `SlotQuarantine` (shared with the LoginChannels it builds) refuses to build ANY
-    channel — login or probe — for a slot whose previous teardown failed: `driver_for`
-    / `probe_for` then raise, which the supervisor turns into UNAVAILABLE rather than
-    reusing a slot that may still hold a live lane-uid child."""
-    quarantine = quarantine if quarantine is not None else SlotQuarantine()
+    Before building ANY channel — login or probe — the slot is checked against the
+    durable `neev_slot_proxy` quarantine: a slot whose previous teardown could not be
+    confirmed clean refuses here, so `driver_for`/`probe_for` raise and the supervisor
+    reports UNAVAILABLE rather than reusing a slot that may still hold a live lane-uid
+    child. The marker is cleared only by the privileged restart purge or an operator."""
 
     def build(provider, store_scope, handle, argv):
-        if quarantine.is_quarantined(config.slot):
+        import neev_slot_proxy as slot_proxy
+
+        if slot_proxy.is_quarantined(config.slot, directory=quarantine_dir):
             raise ChannelError("slot_quarantined")
         if channel_factory is not None:
             return channel_factory(provider, store_scope, handle, argv)
         return LoginChannel(
-            config, volumes, provider, store_scope, handle, argv, quarantine=quarantine
+            config, volumes, provider, store_scope, handle, argv,
+            quarantine_dir=quarantine_dir,
         )
 
     def driver_for(provider, store_scope, handle):

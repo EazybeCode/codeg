@@ -203,6 +203,18 @@ class CredentialWiringTests(unittest.TestCase):
             captured["bind_source"] = bind_source
             return FakeHandle()
 
+        # The runtime now owns the slot's RUN proxy through the slot_proxy CM (real one
+        # spawns a namespaced listener); stub it to yield the authoritative slot env so
+        # the wiring — provider+purpose scope and the env reaching the child — is what's
+        # exercised here, not the netns machinery.
+        import neev_login_network_profile as network_profile
+        import neev_slot_proxy as slot_proxy
+
+        @contextlib.contextmanager
+        def fake_slot_proxy(provider, purpose, slot, **kwargs):
+            captured["proxy_scope"] = (provider, purpose, slot)
+            yield network_profile.proxy_env(slot)
+
         with tempfile.TemporaryDirectory() as root:
             run_dir = os.path.join(root, "run-abc")
             os.mkdir(run_dir)
@@ -216,18 +228,22 @@ class CredentialWiringTests(unittest.TestCase):
             os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = root
             saved_deliver = credentials.deliver
             saved_launch = sandbox.launch
+            saved_slot_proxy = slot_proxy.slot_proxy
             credentials.deliver = fake_deliver
             sandbox.launch = fake_launch
+            slot_proxy.slot_proxy = fake_slot_proxy
             try:
                 rc = launch.main(argv, volumes=object())
             finally:
                 credentials.deliver = saved_deliver
                 sandbox.launch = saved_launch
+                slot_proxy.slot_proxy = saved_slot_proxy
                 if saved_root is None:
                     os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
                 else:
                     os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = saved_root
         self.assertEqual(rc, 0)
+        self.assertEqual(captured["proxy_scope"], ("codex", "run", "b"))
         env = captured["env"]
         # Slot "b" proxy, routed through the fixed slot CONNECT proxy, all bypass off.
         self.assertEqual(env["HTTPS_PROXY"], "http://10.203.0.10:3128")
