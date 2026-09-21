@@ -166,6 +166,15 @@ class PurgeTests(unittest.TestCase):
     def test_missing_root_is_noop(self):
         self.assertEqual(main.purge_abandoned_runs("/nonexistent/neev/root", cleanup=lambda p: True), 0)
 
+    def test_abandoned_runs_remain_detects_unremovable_leftover(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertFalse(main._abandoned_runs_remain(root))  # clean
+            os.mkdir(os.path.join(root, "run-leftover"))
+            self.assertTrue(main._abandoned_runs_remain(root))   # a run dir survived
+            os.symlink("/etc", os.path.join(root, "run-link"))   # symlink never counts
+            os.rmdir(os.path.join(root, "run-leftover"))
+            self.assertFalse(main._abandoned_runs_remain(root))
+
 
 if __name__ == "__main__":
     unittest.main()

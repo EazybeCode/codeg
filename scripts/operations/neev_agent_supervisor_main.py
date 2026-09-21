@@ -394,6 +394,23 @@ def purge_abandoned_runs(workspace_root: str, cleanup=None) -> int:
     return removed
 
 
+def _abandoned_runs_remain(workspace_root: str) -> bool:
+    """True if any validated `run-*` dir is STILL present after a purge — i.e. the
+    privileged cleanup could not remove a leftover. The daemon refuses to serve in that
+    state rather than reuse a lane whose previous tenant's files survive."""
+    try:
+        names = os.listdir(workspace_root)
+    except OSError:
+        return False
+    for name in names:
+        if _RUN_DIR_RE.fullmatch(name) is None:
+            continue
+        path = os.path.join(workspace_root, name)
+        if not os.path.islink(path) and os.path.isdir(path):
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -415,6 +432,7 @@ def main(argv=None):  # pragma: no cover - Linux daemon glue
     import neev_agent_network_bootstrap as bootstrap
     import neev_credential_store as store_module
     import neev_credential_volumes as volumes_module
+    import neev_slot_proxy as slot_proxy
     import neev_supervisor_deployment as deployment
     import neev_supervisor_fence as fence_mod
     import neev_supervisor_transport as transport
@@ -434,6 +452,14 @@ def main(argv=None):  # pragma: no cover - Linux daemon glue
     # bind-ready, which is what the container-init waits on.
     deployment.provision(paths, policy)
     purge_abandoned_runs(config.workspace_root)
+    if _abandoned_runs_remain(config.workspace_root):
+        raise SystemExit(
+            "neev supervisor: abandoned run workdirs could not be purged; refusing to serve"
+        )
+    # The privileged purge verified this workspace is clean, so a durable slot
+    # quarantine left by a prior crash/teardown can be lifted — restart IS the recovery
+    # path (retry only after verified privileged cleanup, never by reusing in place).
+    slot_proxy.clear_quarantine(config.slot)
     bootstrap.apply(bootstrap.plan(config.uplink), bootstrap.CommandRunner())
 
     store = store_module.CredentialStore(Path(config.store_root), Path(config.master_key_path))
