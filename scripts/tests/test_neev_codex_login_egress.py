@@ -79,10 +79,21 @@ class PolicyTests(unittest.TestCase):
             b"HOST: auth.openai.com:443\r\n"
             b"USER-AGENT: INVENTED\r\n"
             b"PROXY-CONNECTION: Keep-Alive\r\n\r\n",
+            # Bun clients send "Proxy-Connection: close" — must be accepted too.
+            b"CONNECT auth.openai.com:443 HTTP/1.1\r\n"
+            b"host: auth.openai.com:443\r\n"
+            b"proxy-connection: close\r\n\r\n",
         )
         for request in requests:
             with self.subTest(request=request):
                 self.assertEqual(module.parse_connect(request), "auth.openai.com")
+
+    def test_proxy_connection_rejects_other_values(self):
+        request = (
+            b"CONNECT auth.openai.com:443 HTTP/1.1\r\n"
+            b"proxy-connection: te\r\n\r\n"
+        )
+        self.assert_egress_error("invalid", lambda: module.parse_connect(request))
 
     def test_exact_8192_byte_boundary_is_valid_and_next_byte_overflows(self):
         prefix = b"CONNECT auth.openai.com:443 HTTP/1.1\r\nUser-Agent: "
@@ -152,7 +163,9 @@ class PolicyTests(unittest.TestCase):
             VALID_REQUEST[:-2] + b"Proxy-Authorization: Basic c2VjcmV0\r\n\r\n",
             VALID_REQUEST[:-2] + b"X-Forwarded-For: 127.0.0.1\r\n\r\n",
             VALID_REQUEST[:-2] + b" folded\r\n\r\n",
-            VALID_REQUEST[:-2] + b"Proxy-Connection: close\r\n\r\n",
+            # "Proxy-Connection: close" is now VALID (Bun clients send it); an unknown
+            # value is still rejected — see test_proxy_connection_rejects_other_values.
+            VALID_REQUEST[:-2] + b"Proxy-Connection: te\r\n\r\n",
             VALID_REQUEST.replace(b"auth.openai.com:443\r\n\r\n", b"evil.invalid:443\r\n\r\n"),
         )
         for request in cases:

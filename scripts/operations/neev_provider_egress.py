@@ -156,7 +156,11 @@ def parse_connect(header: bytes, policy: DestinationPolicy) -> str:
             raise EgressError("invalid")
         if lowered == b"host" and value != authority:
             raise EgressError("invalid")
-        if lowered == b"proxy-connection" and value not in (b"keep-alive", b"Keep-Alive"):
+        # The pinned Claude CLI's Bun HTTP client sends "Proxy-Connection: close" on its
+        # CONNECT; accept keep-alive AND close, case-insensitively (a validated token) —
+        # any other value is still rejected. (Captured: CONNECT platform.claude.com:443
+        # HTTP/1.1, Host platform.claude.com:443, Proxy-Connection: close.)
+        if lowered == b"proxy-connection" and value.lower() not in (b"keep-alive", b"close"):
             raise EgressError("invalid")
         seen.add(lowered)
     return authority.rsplit(b":", 1)[0].decode("ascii")

@@ -132,7 +132,10 @@ def parse_connect(header: bytes) -> str:
             raise EgressError("invalid")
         if lowered == b"host" and value != _AUTHORITY:
             raise EgressError("invalid")
-        if lowered == b"proxy-connection" and value not in (b"keep-alive", b"Keep-Alive"):
+        # Accept keep-alive AND close, case-insensitively (a validated token) — clients
+        # legitimately send "Proxy-Connection: close" on a CONNECT; any other value is
+        # still rejected. Kept in sync with neev_provider_egress.parse_connect.
+        if lowered == b"proxy-connection" and value.lower() not in (b"keep-alive", b"close"):
             raise EgressError("invalid")
         seen.add(lowered)
     return DESTINATION_HOST

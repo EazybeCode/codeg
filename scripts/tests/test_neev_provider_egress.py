@@ -100,6 +100,29 @@ class PolicyAndParseTests(unittest.TestCase):
             egress.parse_connect(request, self.policy)
         self.assertEqual(caught.exception.code, "invalid")
 
+    def test_parse_connect_accepts_proxy_connection_close(self):
+        # The EXACT shape the pinned Claude CLI (Bun) sends during login — captured:
+        # CONNECT platform.claude.com:443 HTTP/1.1 / Host: platform.claude.com:443 /
+        # Proxy-Connection: close. Must be accepted (rejecting `close` broke login).
+        policy = egress.policy_for("claude", "login")
+        request = (
+            b"CONNECT platform.claude.com:443 HTTP/1.1\r\n"
+            b"Host: platform.claude.com:443\r\n"
+            b"Proxy-Connection: close\r\n\r\n"
+        )
+        self.assertEqual(egress.parse_connect(request, policy), "platform.claude.com")
+        # case-insensitive keep-alive/close both accepted
+        for value in (b"keep-alive", b"Keep-Alive", b"close", b"Close", b"CLOSE"):
+            ok = (b"CONNECT platform.claude.com:443 HTTP/1.1\r\n"
+                  b"Host: platform.claude.com:443\r\nProxy-Connection: " + value + b"\r\n\r\n")
+            self.assertEqual(egress.parse_connect(ok, policy), "platform.claude.com")
+        # any OTHER value is still rejected
+        bad = (b"CONNECT platform.claude.com:443 HTTP/1.1\r\n"
+               b"Host: platform.claude.com:443\r\nProxy-Connection: te\r\n\r\n")
+        with self.assertRaises(egress.EgressError) as caught:
+            egress.parse_connect(bad, policy)
+        self.assertEqual(caught.exception.code, "invalid")
+
     def test_unknown_scope_policy_is_denied(self):
         with self.assertRaises(egress.EgressError):
             egress.policy_for("bogus", "run")
