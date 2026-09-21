@@ -144,14 +144,30 @@ def web_parent(args):
 
 
 def _lane_procs(uid):
-    """PIDs owned by the lane uid, via ps (fail-open to empty)."""
+    """PIDs whose REAL uid is the lane uid, read straight from /proc (no `ps` binary in
+    the image). The sandbox's nested pid namespace is visible from the container root's
+    /proc, so a surviving lane-uid provider would show up here."""
+    found = []
     try:
-        out = subprocess.run(
-            ["ps", "-u", str(uid), "-o", "pid=,comm="], capture_output=True, timeout=15
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return [line for line in out.stdout.decode("utf-8", "replace").splitlines() if line.strip()]
+        pids = [entry for entry in os.listdir("/proc") if entry.isdigit()]
+    except OSError:
+        return found
+    for pid in pids:
+        try:
+            ruid = None
+            comm = "?"
+            with open("/proc/%s/status" % pid, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("Name:"):
+                        comm = line.split("\t", 1)[-1].strip()
+                    elif line.startswith("Uid:"):
+                        ruid = int(line.split()[1])  # real uid
+                        break
+            if ruid == uid:
+                found.append("%s %s" % (pid, comm))
+        except (OSError, ValueError):
+            continue
+    return found
 
 
 def run(args):
