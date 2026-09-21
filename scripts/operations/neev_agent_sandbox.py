@@ -320,6 +320,12 @@ class SandboxHandle:
         that drive the provider's stdio); None otherwise."""
         return self._process.stdin
 
+    @property
+    def stderr(self):
+        """The agent's piped stderr, when launched with stderr_pipe=True (login flows
+        that classify a failure); None otherwise."""
+        return self._process.stderr
+
     def wait(self, timeout=None):
         return self._process.wait(timeout=timeout)
 
@@ -374,11 +380,15 @@ def _create_bind_mountpoint(workdir, run_uid, run_gid):  # pragma: no cover - Li
     return target
 
 
-def launch(spec, env=None, bind_source=None, stdin_pipe=False):  # pragma: no cover - Linux production path
+def launch(spec, env=None, bind_source=None, stdin_pipe=False, stderr_pipe=False):  # pragma: no cover - Linux production path
     """Launch the agent inside the sandbox. Linux only.
 
     `stdin_pipe=True` opens a pipe to the provider's stdin (login flows that drive the
     provider's stdio, e.g. Codex app-server / Claude paste-code); default DEVNULL.
+
+    `stderr_pipe=True` captures the provider's stderr on a pipe so a login flow can read
+    and CLASSIFY a failure (sanitized) before teardown; default DEVNULL (production runs
+    never capture provider stderr).
 
     For a `provider_allowlist` egress policy this wires (and later tears down) a
     named per-tenant egress netns via `neev_agent_egress` and JOINS the agent to
@@ -434,7 +444,7 @@ def launch(spec, env=None, bind_source=None, stdin_pipe=False):  # pragma: no co
             cwd=spec.workdir,
             stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE if stderr_pipe else subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
             env=env,

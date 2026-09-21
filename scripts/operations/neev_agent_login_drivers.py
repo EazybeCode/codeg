@@ -27,6 +27,8 @@ from __future__ import annotations
 import abc
 import json
 import os
+import re
+import sys
 import time
 from typing import Optional
 
@@ -39,6 +41,42 @@ _READ_CHUNK = 65536
 _PROBE_DEADLINE_SECONDS = 30.0
 _PROBE_POLL_SECONDS = 0.05
 _MAX_STATUS_BYTES = 65536
+_MAX_STDERR_BYTES = 65536
+
+# The ONLY hostnames a login-failure diagnostic may name — a fixed allowlist, so the
+# classifier can never echo an attacker-influenced or secret-bearing string.
+_KNOWN_HOSTS = (
+    "api.anthropic.com", "claude.com", "claude.ai", "console.anthropic.com",
+    "platform.claude.com", "auth.openai.com", "chatgpt.com", "api.openai.com",
+)
+_STATUS_RE = re.compile(r"(?:http|status|code|response)[^0-9]{0,12}([1-5][0-9]{2})", re.I)
+_EGRESS_MARKERS = (
+    "econnrefused", "connection refused", "etimedout", "enotfound", "eai_again",
+    "tunnel", "proxy", "getaddrinfo", "network is unreachable", "socket hang up",
+)
+_TOKEN_MARKERS = ("oauth", "token", "invalid_grant", "unauthorized", "exchange", "roles")
+
+
+def classify_login_failure(stderr: bytes) -> tuple:
+    """Reduce raw provider stderr to SAFE, structured signals: (http_status, host,
+    category). Emits only a numeric status, a host from the fixed `_KNOWN_HOSTS` set, and
+    a fixed category string — NEVER raw stderr, tokens, codes, URLs or arbitrary text."""
+    text = stderr.decode("utf-8", "replace")[:_MAX_STDERR_BYTES]
+    low = text.lower()
+    host = next((h for h in _KNOWN_HOSTS if h in low), None)
+    match = _STATUS_RE.search(low)
+    status = int(match.group(1)) if match else None
+    if any(marker in low for marker in _EGRESS_MARKERS):
+        category = "egress_blocked"
+    elif status is not None and 400 <= status < 600:
+        category = "http_error"
+    elif any(marker in low for marker in _TOKEN_MARKERS):
+        category = "token_exchange"
+    elif not text.strip():
+        category = "no_stderr"
+    else:
+        category = "unknown"
+    return status, host, category
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +105,11 @@ class Channel(abc.ABC):
     @abc.abstractmethod
     def terminate(self) -> None: ...
 
+    def read_stderr(self) -> bytes:
+        """Bounded provider stderr captured so far (b"" if not captured). Used ONLY to
+        classify a login failure into safe categories — never logged raw."""
+        return b""
+
 
 class SandboxChannel(Channel):  # pragma: no cover - Linux subprocess path
     """A Channel backed by a sandboxed provider process (`neev_agent_sandbox.launch`
@@ -78,16 +121,21 @@ class SandboxChannel(Channel):  # pragma: no cover - Linux subprocess path
         self._bind_source = bind_source
         self._env = env
         self._handle = None
+        self._stderr = bytearray()
 
     def start(self) -> None:
         import neev_agent_sandbox as sandbox
 
         self._handle = sandbox.launch(
-            self._spec, env=self._env, bind_source=self._bind_source, stdin_pipe=True
+            self._spec, env=self._env, bind_source=self._bind_source,
+            stdin_pipe=True, stderr_pipe=True,
         )
         os.set_blocking(self._handle.stdout.fileno(), False)
+        if self._handle.stderr is not None:
+            os.set_blocking(self._handle.stderr.fileno(), False)
 
     def read(self) -> bytes:
+        self._drain_stderr()
         if self._handle is None or self._handle.stdout is None:
             return b""
         try:
@@ -97,6 +145,22 @@ class SandboxChannel(Channel):  # pragma: no cover - Linux subprocess path
         except OSError:
             return b""
         return chunk or b""
+
+    def _drain_stderr(self) -> None:
+        if self._handle is None or self._handle.stderr is None:
+            return
+        if len(self._stderr) >= _MAX_STDERR_BYTES:
+            return
+        try:
+            chunk = os.read(self._handle.stderr.fileno(), _READ_CHUNK)
+        except (BlockingIOError, OSError):
+            return
+        if chunk:
+            self._stderr.extend(chunk[: _MAX_STDERR_BYTES - len(self._stderr)])
+
+    def read_stderr(self) -> bytes:
+        self._drain_stderr()
+        return bytes(self._stderr)
 
     def write(self, data: bytes) -> None:
         if self._handle is None or self._handle.stdin is None:
@@ -233,6 +297,7 @@ class ClaudeLoginDriver(sup.LoginDriver):
                     self._handle(event)
             except claude_proto.ProtocolError:
                 self._state, self._failure = "failed", "provider_unavailable"
+                self._emit_failure_diagnostic(None)
                 return
         returncode = self._channel.returncode()
         if self._state not in ("prepared", "failed") and returncode is not None:
@@ -241,12 +306,30 @@ class ClaudeLoginDriver(sup.LoginDriver):
             # is NOT success), AND real credentials landed in the volume. The rc-0 gate
             # is essential: the config dir is pre-created by credential delivery, so a
             # dir-presence check alone would falsely report prepared on a failed login.
-            if self._submitted and returncode == 0 and self._credential_present():
+            credential = self._credential_present()
+            if self._submitted and returncode == 0 and credential:
                 self._state = "prepared"
             else:
                 self._state, self._failure = "failed", (
                     "reauth_required" if self._submitted else "provider_unavailable"
                 )
+                # Emit a SANITIZED diagnostic (rc, credential-record bool, classified
+                # http status/host, category) to the daemon's stderr BEFORE teardown
+                # revokes the volume. Never logs raw stderr, tokens, codes or URLs.
+                self._emit_failure_diagnostic(returncode, credential)
+
+    def _emit_failure_diagnostic(self, returncode, credential=None) -> None:
+        try:
+            status, host, category = classify_login_failure(self._channel.read_stderr())
+            if credential is None:
+                credential = self._credential_present()
+            sys.stderr.write(
+                "NEEV-LOGIN-DIAG provider=claude rc=%s cred_record=%s http_status=%s "
+                "host=%s class=%s\n" % (returncode, bool(credential), status, host, category)
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass  # diagnostics must never break the login state machine
 
     def _handle(self, event) -> None:
         if event.kind == "login_url":

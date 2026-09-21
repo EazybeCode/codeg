@@ -43,6 +43,7 @@ _CLAUDE_PROBE_ARGV = ("claude", "auth", "status", "--json")
 
 _RUN_DIR_RE = re.compile(r"run-[A-Za-z0-9._-]{1,64}\Z")
 _KEY_BASENAME = "control.key"  # the transport loads the key by this fixed name
+_MAX_STDERR_BYTES = 65536      # bounded provider stderr captured for login diagnostics
 
 
 class ConfigError(Exception):
@@ -156,6 +157,7 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
         self._proxy_cm = None
         self._delivery_cm = None
         self._sandbox = None
+        self._stderr = bytearray()
 
     def start(self):
         import neev_agent_credentials as credentials
@@ -184,14 +186,34 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
             spec = _login_spec(self._config, tenant, self._argv, self._workdir)
             env = _login_env(self._config, self._provider, home, proxy_env)
             self._sandbox = sandbox.launch(
-                spec, env=env, bind_source=delivery.mount, stdin_pipe=True
+                spec, env=env, bind_source=delivery.mount,
+                stdin_pipe=True, stderr_pipe=True,
             )
             os.set_blocking(self._sandbox.stdout.fileno(), False)
+            if self._sandbox.stderr is not None:
+                os.set_blocking(self._sandbox.stderr.fileno(), False)
         except BaseException:
             self._unwind()
             raise
 
+    def _drain_stderr(self):
+        if self._sandbox is None or self._sandbox.stderr is None:
+            return
+        if len(self._stderr) >= _MAX_STDERR_BYTES:
+            return
+        try:
+            chunk = os.read(self._sandbox.stderr.fileno(), 65536)
+        except (BlockingIOError, OSError):
+            return
+        if chunk:
+            self._stderr.extend(chunk[: _MAX_STDERR_BYTES - len(self._stderr)])
+
+    def read_stderr(self):
+        self._drain_stderr()
+        return bytes(self._stderr)
+
     def read(self):
+        self._drain_stderr()
         if self._sandbox is None or self._sandbox.stdout is None:
             return b""
         try:

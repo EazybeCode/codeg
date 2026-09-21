@@ -33,12 +33,16 @@ _CODEX_PROBE_ACCOUNT = (
 
 
 class FakeChannel(drivers.Channel):
-    def __init__(self, chunks=None):
+    def __init__(self, chunks=None, stderr=b""):
         self._chunks = list(chunks or [])
+        self._stderr = stderr
         self.writes = []
         self.started = False
         self.terminated = False
         self._rc = None
+
+    def read_stderr(self):
+        return self._stderr
 
     def start(self):
         self.started = True
@@ -157,6 +161,53 @@ class ClaudeDriverTests(unittest.TestCase):
         codex_channel = FakeChannel([])
         drivers.CodexLoginDriver(codex_channel).release()
         self.assertTrue(codex_channel.terminated)
+
+
+class LoginFailureDiagnosticTests(unittest.TestCase):
+    def test_classifier_emits_only_safe_signals(self):
+        stderr = (b"Error: request to https://api.anthropic.com/api/oauth/claude_cli/roles"
+                  b" failed with HTTP 403; token=sk-secret-DO-NOT-LEAK")
+        self.assertEqual(drivers.classify_login_failure(stderr),
+                         (403, "api.anthropic.com", "http_error"))
+
+    def test_classifier_egress_and_empty_and_unknown_host(self):
+        self.assertEqual(drivers.classify_login_failure(
+            b"connect ECONNREFUSED through proxy 10.203.0.2:3128")[2], "egress_blocked")
+        self.assertEqual(drivers.classify_login_failure(b""), (None, None, "no_stderr"))
+        status, host, _ = drivers.classify_login_failure(
+            b"failed talking to evil.attacker.example, status 500")
+        self.assertEqual(status, 500)
+        self.assertIsNone(host)  # arbitrary hosts are NEVER echoed
+
+    def test_driver_emits_sanitized_diagnostic_without_leaking_stderr(self):
+        import contextlib
+        import io
+
+        preamble = (
+            b"Opening browser to sign in\xe2\x80\xa6\r\n"
+            b"If browser did not open visit: " + _CLAUDE_URL.encode() + b"\r\n"
+            b"Paste code here if prompted > "
+        )
+        channel = FakeChannel(
+            [preamble],
+            stderr=b"HTTP 403 from api.anthropic.com token=sk-MUST-NOT-LEAK",
+        )
+        driver = drivers.ClaudeLoginDriver(channel, credential_present=lambda: False)
+        driver.start()
+        driver.poll()
+        driver.submit_code("code")
+        channel.exit(1)
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            self.assertEqual(driver.poll().phase, "failed")
+        line = buffer.getvalue()
+        self.assertIn("NEEV-LOGIN-DIAG provider=claude", line)
+        self.assertIn("rc=1", line)
+        self.assertIn("cred_record=False", line)
+        self.assertIn("http_status=403", line)
+        self.assertIn("host=api.anthropic.com", line)
+        self.assertIn("class=http_error", line)
+        self.assertNotIn("sk-MUST-NOT-LEAK", line)  # raw stderr/token never logged
 
 
 class AccountProbeTests(unittest.TestCase):
