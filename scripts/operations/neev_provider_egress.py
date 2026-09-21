@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import socket
+import sys
 from contextlib import suppress
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -47,6 +49,83 @@ _RESPONSES = login._RESPONSES
 _ESTABLISHED = login._ESTABLISHED
 
 _ALLOWED_HEADERS = frozenset((b"host", b"user-agent", b"proxy-connection"))
+
+# --------------------------------------------------------------------------- #
+# Safe, fixed-vocabulary CONNECT diagnostics (no header values/auth/TLS/URLs)
+# --------------------------------------------------------------------------- #
+
+_DIAG_KNOWN_HOSTS = frozenset((
+    "api.anthropic.com", "claude.com", "claude.ai", "console.anthropic.com",
+    "platform.claude.com", "statsig.anthropic.com", "auth.openai.com",
+    "chatgpt.com", "api.openai.com",
+))
+_HOSTNAME_RE = re.compile(rb"^[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*$")
+_HTTP_VERSIONS = {b"HTTP/1.1": "http11", b"HTTP/1.0": "http10", b"HTTP/2": "http2"}
+_PROXY_CONN_TOKENS = {b"keep-alive": "keep-alive", b"close": "close"}
+
+
+def _safe_authority(authority: bytes) -> str:
+    """A CONNECT authority is a bare host:port destination — for the official CLI it never
+    carries a callback URL / token / state, so a validated hostname:port is safe to log.
+    Anything that is not a bare hostname:port is reported as 'malformed', never echoed."""
+    host, sep, port = authority.partition(b":")
+    if not sep or not port.isdigit() or len(authority) > 260 or _HOSTNAME_RE.match(host) is None:
+        return "malformed"
+    name = host.decode("ascii").lower()
+    return "%s:%s(%s)" % (name, port.decode("ascii"),
+                          "known" if name in _DIAG_KNOWN_HOSTS else "other")
+
+
+def classify_connect_request(header) -> str:
+    """Fixed-vocabulary, SAFE one-line summary of a CONNECT for one-shot diagnosis:
+    method/version enums, the destination authority (validated host:port), whether Host
+    matches the authority, whether a bare `Connection` header is present, the
+    Proxy-Connection token class, and header NAMES only (bounded). No header VALUES except
+    the two connection directives; no auth, no TLS payload, no URLs, no bodies."""
+    if not header:
+        return "shape=no_header"
+    try:
+        lines = header.split(b"\r\n\r\n", 1)[0].split(b"\r\n")
+        parts = lines[0].split(b" ") if lines else []
+        method = "CONNECT" if parts[:1] == [b"CONNECT"] else "other"
+        authority = parts[1] if len(parts) > 1 else b""
+        version = _HTTP_VERSIONS.get(parts[2], "other") if len(parts) > 2 else "other"
+        names, host_value, proxy_conn, connection_present = [], None, "absent", False
+        for line in lines[1:]:
+            if not line:
+                continue
+            name, sep, value = line.partition(b":")
+            lname = name.strip().lower()
+            if len(names) < 16:
+                names.append(name.strip().decode("ascii", "replace")[:32])
+            if lname == b"host":
+                host_value = value.strip()
+            elif lname == b"proxy-connection":
+                proxy_conn = _PROXY_CONN_TOKENS.get(value.strip().lower(), "other")
+            elif lname == b"connection":
+                connection_present = True
+        host_matches = None if host_value is None else (host_value == authority)
+        return (
+            "method=%s version=%s authority=%s host_matches=%s connection_present=%s "
+            "proxy_connection=%s header_names=%r"
+            % (method, version, _safe_authority(authority), host_matches,
+               connection_present, proxy_conn, names)
+        )
+    except Exception:
+        return "shape=unparseable"
+
+
+def _log_egress_diag(stage: str, category: str, header) -> None:
+    """Emit ONE safe, fixed-vocabulary diagnostic to the proxy's stderr (the child
+    inherits the daemon's stderr -> container log). Never logs header values/auth/URLs."""
+    try:
+        sys.stderr.write(
+            "NEEV-EGRESS-DIAG stage=%s category=%s %s\n"
+            % (stage, category, classify_connect_request(header))
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 # Per-host resolver program: the host is embedded as a validated %r literal (an
 # FQDN of [a-z0-9.-] only, so the repr can carry no quote/backslash/injection), and
@@ -241,17 +320,23 @@ class ProviderEgressProxy:
         self._writers.add(writer)
         upstream_writer = None
         established = False
+        header = None
+        stage = "header"
         deadline = asyncio.get_running_loop().time() + LIFETIME_SECONDS
         try:
             header = await self._read_header(
                 reader, login._phase_deadline(deadline, HEADER_SECONDS)
             )
+            stage = "parse"
             host = parse_connect(header, self._policy)
+            stage = "resolve"
             addresses = await login._before(
                 asyncio.ensure_future(_resolve(host, self._policy)),
                 login._phase_deadline(deadline, DNS_SECONDS),
             )
+            stage = "validate"
             selected = validated_ipv4(addresses)
+            stage = "dial"
             upstream_reader, upstream_writer = await self._dial(
                 selected, self._policy.port_for(host),
                 login._phase_deadline(deadline, CONNECT_SECONDS),
@@ -265,9 +350,11 @@ class ProviderEgressProxy:
             raise
         except EgressError as error:
             if not established:
+                _log_egress_diag(stage, error.args[0] if error.args else "unknown", header)
                 await self._send_error(writer, error)
         except Exception:
             if not established:
+                _log_egress_diag(stage, "unavailable", header)
                 await self._send_error(writer, EgressError("unavailable"))
         finally:
             await self._cleanup_writers(upstream_writer, writer)

@@ -123,6 +123,36 @@ class PolicyAndParseTests(unittest.TestCase):
             egress.parse_connect(bad, policy)
         self.assertEqual(caught.exception.code, "invalid")
 
+    def test_connect_classifier_is_fixed_vocab_and_leaks_no_values(self):
+        header = (
+            b"CONNECT platform.claude.com:443 HTTP/1.1\r\n"
+            b"Host: platform.claude.com:443\r\n"
+            b"Proxy-Connection: close\r\n"
+            b"Proxy-Authorization: Basic c2VjcmV0LXRva2Vu\r\n\r\n"
+        )
+        summary = egress.classify_connect_request(header)
+        self.assertIn("method=CONNECT", summary)
+        self.assertIn("version=http11", summary)
+        self.assertIn("authority=platform.claude.com:443(known)", summary)
+        self.assertIn("host_matches=True", summary)
+        self.assertIn("proxy_connection=close", summary)
+        self.assertIn("connection_present=False", summary)
+        self.assertIn("Proxy-Authorization", summary)   # the NAME is fine to show
+        self.assertNotIn("c2VjcmV0", summary)           # the VALUE is never shown
+
+    def test_connect_classifier_flags_connection_header_and_unknown_host(self):
+        header = (
+            b"CONNECT sneaky.example.net:443 HTTP/2\r\n"
+            b"Connection: keep-alive\r\n\r\n"
+        )
+        summary = egress.classify_connect_request(header)
+        self.assertIn("version=http2", summary)
+        self.assertIn("connection_present=True", summary)
+        self.assertIn("(other)", summary)               # unknown host classed, still shown host:port
+        self.assertEqual(egress.classify_connect_request(b""), "shape=no_header")
+        self.assertIn("malformed", egress.classify_connect_request(
+            b"CONNECT not an authority HTTP/1.1\r\n\r\n"))
+
     def test_unknown_scope_policy_is_denied(self):
         with self.assertRaises(egress.EgressError):
             egress.policy_for("bogus", "run")
