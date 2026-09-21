@@ -94,6 +94,8 @@ function ancestry(nodes: NativeNode[], nodeId: number): number[] {
 // Compact nested containers that reveal their real, directly-selectable resources
 // (documents or team conversations) inline — navigation happens here, not behind a
 // separate index page. Creation always carries the container selected in this menu.
+const CONTENT_KINDS: NativeResourceKind[] = ["document", "chat"]
+
 function NativeWorkspaceTree({
   nodes,
   parentId = null,
@@ -106,6 +108,8 @@ function NativeWorkspaceTree({
   edit,
   createContent,
   selectResource,
+  openAgents,
+  agentsOpen,
 }: {
   nodes: NativeNode[]
   parentId?: number | null
@@ -121,11 +125,14 @@ function NativeWorkspaceTree({
   edit: (node: NativeNode) => void
   createContent: (node: NativeNode, kind: NativeResourceKind) => void
   selectResource: (node: NativeNode, resource: NativeResource) => void
+  /** Agent chats are private and unfiled; a container is the way IN, not where
+   *  they are stored. Opening them from here moves nothing. */
+  openAgents: (node: NativeNode) => void
+  agentsOpen: boolean
 }) {
   const t = useTranslations("Native")
   const c = useTranslations("NativeContent")
   const contentOpener = useRef<number | null>(null)
-  const ItemIcon = kind === "document" ? FileText : MessagesSquare
   return (
     <ul
       className={cn(
@@ -210,6 +217,9 @@ function NativeWorkspaceTree({
                     >
                       {c("newChat")}
                     </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => openAgents(node)}>
+                      {c("agentChats")}
+                    </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => create(node)}>
                       {t("newSubfolder")}
                     </DropdownMenuItem>
@@ -233,6 +243,8 @@ function NativeWorkspaceTree({
                     edit={edit}
                     createContent={createContent}
                     selectResource={selectResource}
+                    openAgents={openAgents}
+                    agentsOpen={agentsOpen}
                   />
                   <ul className="ms-3 space-y-0.5 border-s border-sidebar-border/60 ps-1.5">
                     {(list?.items ?? []).map((resource) => (
@@ -249,7 +261,17 @@ function NativeWorkspaceTree({
                               : "text-muted-foreground hover:bg-sidebar-accent/60"
                           )}
                         >
-                          <ItemIcon aria-hidden className="size-3.5 shrink-0" />
+                          {resource.kind === "document" ? (
+                            <FileText
+                              aria-hidden
+                              className="size-3.5 shrink-0"
+                            />
+                          ) : (
+                            <MessagesSquare
+                              aria-hidden
+                              className="size-3.5 shrink-0"
+                            />
+                          )}
                           <span className="truncate" title={resource.title}>
                             {resource.title}
                           </span>
@@ -264,20 +286,29 @@ function NativeWorkspaceTree({
                         {t("loading")}
                       </li>
                     )}
-                    {list && !list.loading && list.items.length === 0 && (
-                      <li className="px-2 py-1 text-xs text-muted-foreground">
-                        {c(
-                          kind === "document" ? "emptyDocuments" : "emptyChats"
-                        )}
+                    {CONTENT_KINDS.map((contentKind) => (
+                      <li key={contentKind}>
+                        <button
+                          onClick={() => createContent(node, contentKind)}
+                          className="flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-xs text-muted-foreground hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Plus aria-hidden className="size-3.5 shrink-0" />
+                          {c(
+                            contentKind === "document"
+                              ? "newDocument"
+                              : "newChat"
+                          )}
+                        </button>
                       </li>
-                    )}
+                    ))}
                     <li>
                       <button
-                        onClick={() => createContent(node, kind)}
+                        onClick={() => openAgents(node)}
+                        aria-current={agentsOpen ? "page" : undefined}
                         className="flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-xs text-muted-foreground hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
                       >
-                        <Plus aria-hidden className="size-3.5 shrink-0" />
-                        {c(kind === "document" ? "newDocument" : "newChat")}
+                        <Bot aria-hidden className="size-3.5 shrink-0" />
+                        {c("agentChats")}
                       </button>
                     </li>
                   </ul>
@@ -328,6 +359,20 @@ function WorkspaceContent() {
       setDrawer(false)
     })
   }, [])
+  /**
+   * Open the private agent chats from inside a container.
+   *
+   * The sessions are NOT filed under the container and nothing about them is
+   * changed by this: they stay private to their owner, in their own store, with
+   * the same sharing. The project is the way in, not where they live.
+   */
+  const openAgents = useCallback(
+    (node: NativeNode) => {
+      setSelected(node.id)
+      changeSection("agents")
+    },
+    [changeSection]
+  )
   // The resource kind shown for the active section. Agent Chats has no backend
   // resources yet (§5) — the center renders an honest connect/setup surface.
   const sectionKind: NativeResourceKind =
@@ -365,18 +410,20 @@ function WorkspaceContent() {
         },
       }))
       try {
-        const page = await listNativeResources(
-          org.id,
-          nodeId,
-          sectionKind,
-          false,
-          null,
-          auth.signal
+        // Both kinds, together: a project holds its documents and its team
+        // chats, and the sidebar no longer has a mode that hides one of them.
+        const pages = await Promise.all(
+          CONTENT_KINDS.map((kind) =>
+            listNativeResources(org.id, nodeId, kind, false, null, auth.signal)
+          )
         )
         if (stamp !== itemsRequest.current) return
+        const items = pages
+          .flatMap((page) => page.items)
+          .sort((left, right) => left.title.localeCompare(right.title))
         setItemsByNode((old) => ({
           ...old,
-          [nodeId]: { loading: false, items: page.items, error: null },
+          [nodeId]: { loading: false, items, error: null },
         }))
       } catch (e) {
         if (stamp !== itemsRequest.current) return
@@ -393,7 +440,7 @@ function WorkspaceContent() {
         auth.handleAuthorityError(e)
       }
     },
-    [org, sectionKind, auth]
+    [org, auth]
   )
   // A section switch keeps containers expanded but invalidates their lists.
   // Fetch missing lists after invalidation as well as on first expansion.
@@ -595,31 +642,8 @@ function WorkspaceContent() {
       setLoading(false)
     }
   }
-  const sectionItems: { id: Section; label: string; icon: typeof Bot }[] = [
-    { id: "agents", label: c("agentChats"), icon: Bot },
-    { id: "team", label: c("teamChat"), icon: MessagesSquare },
-    { id: "docs", label: c("documents"), icon: FileText },
-  ]
   const sidebar = (
     <div className="flex h-full min-w-0 flex-col gap-4 p-3">
-      <nav aria-label={t("sections")} className="space-y-1">
-        {sectionItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => changeSection(item.id)}
-            aria-current={section === item.id ? "page" : undefined}
-            className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium focus-visible:ring-2 focus-visible:ring-ring",
-              section === item.id
-                ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                : "text-muted-foreground hover:bg-sidebar-accent/60"
-            )}
-          >
-            <item.icon aria-hidden className="size-4 shrink-0" />
-            {item.label}
-          </button>
-        ))}
-      </nav>
       <nav
         aria-label={t("projects")}
         className="flex min-h-0 flex-1 flex-col gap-2"
@@ -693,6 +717,8 @@ function WorkspaceContent() {
               })
             }}
             selectResource={openResource}
+            openAgents={openAgents}
+            agentsOpen={section === "agents"}
           />
           {!loading && nodes.length === 0 && (
             <p className="px-2 text-sm text-muted-foreground">
