@@ -1031,13 +1031,17 @@ function WorkspaceContent() {
     },
     [org, auth]
   )
-  // Fetch any expanded container that has no list yet — in every section,
-  // because the sidebar shows the same tree whatever the centre is showing.
+  // Restored resource tabs need their names even when their folder is closed.
+  // Load each required folder once; keep its visible expansion state unchanged.
   useEffect(() => {
-    for (const id of expanded) {
+    const needed = new Set(expanded)
+    for (const tab of tabs) {
+      if (tab.kind === "resource") needed.add(tab.nodeId)
+    }
+    for (const id of needed) {
       if (!itemsByNode[id]) void loadItems(id)
     }
-  }, [expanded, itemsByNode, loadItems])
+  }, [expanded, tabs, itemsByNode, loadItems])
   // One read for the whole tree. A failure here must not take the workspace
   // down: the sidebar simply shows no agent chats, and the centre surface still
   // reports its own errors.

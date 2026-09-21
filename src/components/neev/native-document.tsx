@@ -1024,7 +1024,7 @@ function Document({
             </DropdownMenuItem>
             {loaded && draft.format === "markdown" && (
               <DropdownMenuItem
-                disabled={saving || latest.archived}
+                disabled={latest.archived}
                 onSelect={() => {
                   try {
                     setConversion(importMarkdown(draft.markdown))
@@ -1099,7 +1099,7 @@ function Document({
             <NativeRichEditor
               key={`${auth.scopeKey}:${resource.id}:${visibleEditorGeneration}`}
               document={draft.document}
-              readOnly={saving || latest.archived}
+              readOnly={latest.archived}
               autoFocus={fresh}
               onChange={(document) => edit({ format: "blocks", document })}
               uploadImage={
@@ -1119,7 +1119,7 @@ function Document({
               <span className="text-sm">{t("documentContent")}</span>
               <textarea
                 value={draft.markdown}
-                disabled={saving || latest.archived}
+                disabled={latest.archived}
                 onChange={(event) =>
                   edit({ format: "markdown", markdown: event.target.value })
                 }
@@ -1218,7 +1218,7 @@ function Document({
             {n("cancel")}
           </Button>
           <Button
-            disabled={saving || latest.archived}
+            disabled={latest.archived}
             onClick={() => {
               if (!conversion) return
               edit({ format: "blocks", document: conversion })

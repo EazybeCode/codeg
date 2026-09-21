@@ -395,9 +395,10 @@ it("makes a document the moment it is asked for, with no form to fill in", async
   expect(created[0]).toMatchObject({ title: "Untitled" })
   expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull()
   // And it is open, in its own tab.
-  expect(
-    await screen.findByRole("tab", { name: /Untitled/ })
-  ).toHaveAttribute("aria-selected", "true")
+  expect(await screen.findByRole("tab", { name: /Untitled/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
   expect(mock.unknown).toEqual([])
 })
 
@@ -528,7 +529,8 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
     "GET /api/neev/nodes/7/chats": () => json({ items, nextAfter: null }),
     [`GET /api/neev/resources/${chatA.id}`]: () => json(chatA),
     [`GET /api/neev/resources/${chatB.id}`]: () => json(chatB),
-    [`GET /api/neev/resources/${created.id}`]: () => json(created),
+    [`GET /api/neev/resources/${created.id}`]: () =>
+      json(items.find((item) => item.id === created.id) ?? created),
     [`GET /api/neev/chats/${chatA.id}/messages`]: () =>
       json({ items: [], nextAfter: null }),
     [`GET /api/neev/chats/${chatB.id}/messages`]: () =>
