@@ -172,7 +172,7 @@ async fn fresh_install_creates_session_storage_at_version_eleven() {
     let db = h::database().await;
     assert_eq!(
         schema_version(&db).await,
-        session_migration::NODE_LINK_SCHEMA_VERSION
+        session_migration::ACTIVITY_SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
@@ -204,7 +204,7 @@ async fn nine_to_eleven_upgrade_preserves_every_row() {
 
     assert_eq!(
         schema_version(&db).await,
-        session_migration::NODE_LINK_SCHEMA_VERSION
+        session_migration::ACTIVITY_SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
@@ -242,7 +242,7 @@ async fn ten_to_eleven_preserves_content_and_image_inventory() {
         .unwrap();
     assert_eq!(validate_content_snapshot(&db).await, Ok(10));
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(11));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(13));
     assert!(table_exists(&db, "neev_image_blobs").await);
     assert_eq!(count(&db, "neev_messages").await, 1);
     assert_eq!(initialize(&db).await, Ok(()));
@@ -258,7 +258,7 @@ async fn upgrade_is_replayable_when_message_columns_already_exist() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         schema_version(&db).await,
-        session_migration::NODE_LINK_SCHEMA_VERSION
+        session_migration::ACTIVITY_SCHEMA_VERSION
     );
     // Idempotent: initializing an already-current database validates in place.
     assert_eq!(initialize(&db).await, Ok(()));
@@ -278,7 +278,7 @@ async fn eleven_to_twelve_adds_the_node_column_and_leaves_sessions_unfiled() {
 
     assert_eq!(
         schema_version(&db).await,
-        session_migration::NODE_LINK_SCHEMA_VERSION
+        session_migration::ACTIVITY_SCHEMA_VERSION
     );
     // The session that existed before the column did is retained, and reads as
     // unfiled rather than being dropped or given an invented placement.
@@ -522,7 +522,7 @@ async fn with_unconstrained<F>(
 // misplaced column is a count/type mismatch rather than a weaker constraint.
 // `node_id` is last because layer 12 adds it with `ALTER TABLE`.
 const SESSION_COLS: &str = "org_id INTEGER NOT NULL,id TEXT NOT NULL,owner_id INTEGER NOT NULL,title TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,visibility TEXT NOT NULL,kind TEXT NOT NULL,bound_chat_id TEXT,bound_kind TEXT,archived BOOLEAN NOT NULL,revision BIGINT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,node_id INTEGER";
-const TURN_COLS: &str = "org_id INTEGER NOT NULL,session_id TEXT NOT NULL,sequence BIGINT NOT NULL,id TEXT NOT NULL,run_id TEXT NOT NULL,request_id TEXT,prompt TEXT NOT NULL,response TEXT NOT NULL,status TEXT NOT NULL,error_code TEXT,provider TEXT NOT NULL,model TEXT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,completed_at BIGINT";
+const TURN_COLS: &str = "org_id INTEGER NOT NULL,session_id TEXT NOT NULL,sequence BIGINT NOT NULL,id TEXT NOT NULL,run_id TEXT NOT NULL,request_id TEXT,prompt TEXT NOT NULL,response TEXT NOT NULL,status TEXT NOT NULL,error_code TEXT,provider TEXT NOT NULL,model TEXT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,completed_at BIGINT,activity TEXT";
 
 fn nothing<'a>(
     _db: &'a DatabaseConnection,

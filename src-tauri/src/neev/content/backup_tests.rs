@@ -174,7 +174,7 @@ async fn sqlite_gateway8_rich_format_six_seven_eight() {
 async fn sqlite_schema_nine_through_eleven_decode_rich_bodies_and_catch_corruption() {
     // Regression: a v9/v10 snapshot must decode block documents (not read them as
     // markdown) and reject a corrupt rich body at the rich-decode stage.
-    for schema_version in [9, 10, 11] {
+    for schema_version in [9, 10, 11, 12, 13] {
         rich_snapshot_contract(h::database().await, schema_version).await;
     }
 }
@@ -303,7 +303,35 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
-    if schema_version == 11 {
+    if schema_version == 13 {
+        return;
+    }
+    // 13 and 12 are additive COLUMNS on the session tables; a snapshot of an
+    // older version drops them and keeps the tables, which only go below 11.
+    db::execute(
+        database,
+        "ALTER TABLE neev_agent_turns DROP COLUMN activity",
+        vec![],
+    )
+    .await
+    .unwrap();
+    if schema_version < 12 {
+        db::execute(
+            database,
+            "ALTER TABLE neev_agent_sessions DROP COLUMN node_id",
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    if schema_version >= 11 {
+        db::execute(
+            database,
+            "UPDATE neev_schema_version SET version=$1",
+            vec![schema_version.into()],
+        )
+        .await
+        .unwrap();
         return;
     }
     let sqlite_rebuild =
@@ -606,7 +634,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 11);
+    assert_eq!(manifest.schema_version, 13);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await

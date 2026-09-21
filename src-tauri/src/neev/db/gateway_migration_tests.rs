@@ -315,7 +315,7 @@ async fn snapshot_gateway8_rows(db: &DatabaseConnection) -> Vec<Vec<String>> {
 async fn sqlite_gateway8_fresh_inventory_and_seed() {
     let database = h::empty_database().await;
     initialize(&database).await.unwrap();
-    assert_eq!(validate_content_snapshot(&database).await, Ok(11));
+    assert_eq!(validate_content_snapshot(&database).await, Ok(13));
     let row = one(
         &database,
         "SELECT audience,issuer,last_cursor,fetched_through,acknowledged_cursor,writer_epoch FROM neev_gateway_audience",
@@ -782,11 +782,29 @@ async fn sqlite_gateway8_keyset_history_crosses_pages() {
 // ---- Task C: atomic version chain and read-only history ----
 
 async fn downgrade_to(db: &DatabaseConnection, target: i64) {
-    // Fresh schema is now v11; peel back one additive layer per version.
-    for table in ["neev_agent_turns", "neev_agent_sessions"] {
-        execute(db, &format!("DROP TABLE {table}"), vec![])
+    // Fresh schema is now v13; peel back one additive layer per version.
+    // 13 and 12 are COLUMNS on the session tables rather than tables of their
+    // own, so they come off with DROP COLUMN and the tables survive.
+    if target < 13 {
+        execute(db, "ALTER TABLE neev_agent_turns DROP COLUMN activity", vec![])
             .await
             .unwrap();
+    }
+    if target < 12 {
+        execute(
+            db,
+            "ALTER TABLE neev_agent_sessions DROP COLUMN node_id",
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    if target < 11 {
+        for table in ["neev_agent_turns", "neev_agent_sessions"] {
+            execute(db, &format!("DROP TABLE {table}"), vec![])
+                .await
+                .unwrap();
+        }
     }
     if target < 10 {
         execute(db, "DROP TABLE neev_image_blobs", vec![])
@@ -858,7 +876,7 @@ async fn sqlite_gateway8_populated_seven_upgrade_preserves_rows() {
     );
 
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(11));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(13));
     let after = one(&db, "SELECT r.blob_key,r.sha256,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE r.document_id=$1", vec![doc.into()]).await.unwrap().unwrap();
     assert_eq!(
         (
@@ -894,7 +912,7 @@ async fn sqlite_gateway8_reinitialize_preserves_history() {
     .unwrap();
     let before = snapshot_gateway8_rows(&db).await;
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(11));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(13));
     assert_eq!(
         snapshot_gateway8_rows(&db).await,
         before,
@@ -908,7 +926,7 @@ async fn sqlite_gateway8_initializer_marker_failure_rolls_back() {
     seed_native(&db).await;
     let account_before = h::count(&db, "neev_accounts").await;
     exact_seven_fixture(&db).await;
-    execute(&db, "CREATE TRIGGER fixture_reject_gateway8_marker BEFORE UPDATE OF version ON neev_schema_version WHEN NEW.version=11 BEGIN SELECT RAISE(ABORT,'fixture marker rejection'); END", vec![]).await.unwrap();
+    execute(&db, "CREATE TRIGGER fixture_reject_gateway8_marker BEFORE UPDATE OF version ON neev_schema_version WHEN NEW.version=13 BEGIN SELECT RAISE(ABORT,'fixture marker rejection'); END", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(
         one(
@@ -952,9 +970,9 @@ async fn sqlite_gateway8_initializer_marker_failure_rolls_back() {
 
 #[tokio::test]
 async fn sqlite_gateway8_exact_historical_three_through_eight_read_only() {
-    for target in [11_i64, 10, 9, 8, 7, 6, 5, 4, 3] {
+    for target in [13_i64, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3] {
         let db = h::database().await;
-        if target < 11 {
+        if target < 13 {
             downgrade_to(&db, target).await;
         }
         execute(&db, "PRAGMA query_only=ON", vec![]).await.unwrap();

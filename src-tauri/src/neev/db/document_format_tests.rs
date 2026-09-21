@@ -11,7 +11,7 @@ async fn populated_five_upgrades(database: DatabaseConnection) {
         .unwrap()
         .try_get::<i64>("", "version")
         .unwrap();
-    assert_eq!(exists, 11);
+    assert_eq!(exists, 13);
     for table in ["neev_agent_turns", "neev_agent_sessions"] {
         execute(db, &format!("DROP TABLE {table}"), vec![])
             .await
