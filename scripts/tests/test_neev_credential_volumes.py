@@ -50,6 +50,11 @@ class FixtureRunner:
         # Debian util-linux (2.38) space-pads the JSON MAJ:MIN columns; when set the
         # fixture reproduces that padding so the parser's normalization is exercised.
         self.pad_device_numbers = False
+        # Orphan-recovery hooks: status_error raises on `cryptsetup status` (fail-closed
+        # paths); dead_status returns a backing-gone status (device (null), type n/a).
+        self.status_error = None
+        self.dead_status = False
+        self.foreign_device = False  # loop backs a different device (maj:min) than the image
 
     def run(self, argv, input_bytes=None):
         self.calls.append((list(argv), input_bytes))
@@ -71,8 +76,21 @@ class FixtureRunner:
                 self.foreign_loop = True
             return (self.uuid + "\n").encode("ascii")
         if argv[1:2] == ["status"]:
+            if self.status_error is not None:
+                raise self.status_error  # e.g. a timeout/missing (non-exit-4) failure
             if not self.mapping:
                 raise self.module.CommandError("failed", returncode=4)
+            if self.dead_status:
+                # Backing gone (loop auto-detached with a dead container): active in the
+                # kernel but device (null) / type n/a — an inert orphan.
+                return (
+                    "/dev/mapper/" + argv[-1] + " is active.\n"
+                    "  type:    n/a\n"
+                    "  cipher:  aes-xts-plain64\n"
+                    "  keysize: 512 bits\n"
+                    "  device:  (null)\n"
+                    "  mode:    read/write\n"
+                ).encode("ascii")
             return (
                 "/dev/mapper/" + argv[-1] + " is active.\n"
                 "  type:    LUKS2\n"
@@ -87,7 +105,8 @@ class FixtureRunner:
             image_stat = self.image.stat()
             back_inode = image_stat.st_ino + (1 if self.foreign_loop else 0)
             back_device = "%d:%d" % (
-                os.major(image_stat.st_dev), os.minor(image_stat.st_dev)
+                os.major(image_stat.st_dev),
+                os.minor(image_stat.st_dev) + (1 if self.foreign_device else 0),
             )
             loop_device = "7:7"
             if self.pad_device_numbers:
@@ -140,6 +159,11 @@ class FixtureRunner:
             mapping_path = self.mapper_root / argv[-1]
             if mapping_path.exists():
                 mapping_path.unlink()
+            return b""
+        if program == self.module.DMSETUP and argv[1:2] == ["mknodes"]:
+            # Recreate the /dev/mapper node for a surviving kernel mapping.
+            self.mapper_root.mkdir(mode=0o700, exist_ok=True)
+            (self.mapper_root / argv[-1]).touch(mode=0o600)
             return b""
         if program == self.module.MKFS:
             return b""
@@ -447,6 +471,101 @@ class CredentialVolumeTests(unittest.TestCase):
         self.assertFalse(self.store.entry_path(handle).exists())
         self.volumes.close(self.scope, handle)    # entry absent -> no-op, not an error
         self.volumes.revoke(self.scope, handle)   # entry absent -> no-op
+
+    def test_close_restores_node_then_closes_orphan_when_dev_node_absent(self):
+        # Restart mid-login: the KERNEL dm mapping survives but its /dev/mapper node lived
+        # in the dead container's /dev. close() must restore the node (mknodes), validate
+        # the real backing image, and cryptsetup-close it — not treat it as unmapped.
+        handle = self.create()
+        self.volumes.open(self.scope, handle)
+        self.runner.mounted = False                       # not mounted in this container
+        node = self.mapper_root / ("neev-credential-" + handle)
+        if node.exists():
+            node.unlink()                                 # /dev node absent, kernel active
+        self.runner.calls.clear()
+        self.volumes.close(self.scope, handle)
+        self.assertTrue(any(a[0] == self.module.DMSETUP and a[1:2] == ["mknodes"]
+                            for a, _ in self.runner.calls))   # node restored
+        self.assertTrue(any(a[1:2] == ["close"] for a, _ in self.runner.calls))  # then closed
+        self.assertFalse(self.runner.mapping)
+
+    def test_revoke_refuses_surviving_kernel_orphan_until_closed(self):
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self.volumes.open(self.scope, handle)
+        self.runner.mounted = False
+        node = self.mapper_root / ("neev-credential-" + handle)
+        if node.exists():
+            node.unlink()                                 # node absent, kernel active
+        self.runner.calls.clear()
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.revoke(self.scope, handle)       # must refuse; close() clears it first
+        self.assertEqual(caught.exception.code, "busy")
+        self.assertTrue(entry.exists())
+
+    def _make_node_absent_kernel_active(self, handle):
+        self.volumes.open(self.scope, handle)
+        self.runner.mounted = False
+        node = self.mapper_root / ("neev-credential-" + handle)
+        if node.exists():
+            node.unlink()  # /dev node gone; self.runner.mapping stays True (kernel active)
+        self.runner.calls.clear()
+
+    def test_orphan_recovery_fails_closed_on_status_error_and_preserves_entry(self):
+        # A non-exit-4 `cryptsetup status` failure (timeout/missing/permission) must NOT
+        # be read as "inactive" and let revoke delete a possibly-live backing image.
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self._make_node_absent_kernel_active(handle)
+        self.runner.status_error = self.module.CommandError("timeout")
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.revoke(self.scope, handle)
+        self.assertEqual(caught.exception.code, "unavailable")
+        self.assertTrue(entry.exists())  # image preserved on a transient error
+        self.assertFalse(any(a[0] == self.module.DMSETUP for a, _ in self.runner.calls))
+
+    def test_orphan_with_unverifiable_backing_after_mknodes_is_refused(self):
+        # Even after restoring the node, if cryptsetup cannot verify the backing image
+        # (device (null) / type n/a — a truly gone loop), close() must REFUSE (conflict),
+        # NEVER infer "inert" and remove. Fail-closed preserves the entry.
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self._make_node_absent_kernel_active(handle)
+        self.runner.dead_status = True  # status stays (null) even after mknodes
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.close(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertTrue(entry.exists())
+
+    def test_orphan_backing_a_foreign_inode_is_refused_not_closed(self):
+        handle = self.create()
+        self._make_node_absent_kernel_active(handle)
+        self.runner.foreign_loop = True  # live backing, but a DIFFERENT inode than our image
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.close(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertFalse(any(a[1:2] == ["close"] for a, _ in self.runner.calls))  # never closed
+
+    def test_orphan_backing_a_foreign_device_is_refused_not_closed(self):
+        handle = self.create()
+        self._make_node_absent_kernel_active(handle)
+        self.runner.foreign_device = True  # right inode, but a DIFFERENT backing device
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.close(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
+        self.assertFalse(any(a[1:2] == ["close"] for a, _ in self.runner.calls))
+
+    def test_open_after_restart_restores_node_and_reuses_committed_image(self):
+        # A committed volume left mapped at a stop reopens after restart: open() restores
+        # the node (mknodes), validates the real backing image, and REUSES the mapping
+        # (mounts it) — no fresh cryptsetup open, no "already active" collision.
+        handle = self.create()
+        self._make_node_absent_kernel_active(handle)
+        self.volumes.open(self.scope, handle)  # must NOT fail "already active"
+        self.assertTrue(any(a[0] == self.module.DMSETUP and a[1:2] == ["mknodes"]
+                            for a, _ in self.runner.calls))
+        self.assertFalse(any(a[1:2] == ["open"] for a, _ in self.runner.calls))  # reused
+        self.assertTrue(any(a[0] == self.module.MOUNT for a, _ in self.runner.calls))
 
     def test_close_refuses_absent_entry_with_dangling_mapping(self):
         handle = self.create()

@@ -27,6 +27,7 @@ MOUNT = "/usr/bin/mount"
 UMOUNT = "/usr/bin/umount"
 FINDMNT = "/usr/bin/findmnt"
 LOSETUP = "/usr/sbin/losetup"
+DMSETUP = "/usr/sbin/dmsetup"
 MAPPER_ROOT = Path("/dev/mapper")
 
 _STORE_ROOT = Path("/var/lib/neev-supervisor/credentials")
@@ -40,10 +41,15 @@ _INPUT_LIMIT = 64 * 1024
 _TIMEOUT_SECONDS = 30.0
 _SAFE_CODES = frozenset(("invalid", "unavailable", "conflict", "busy", "quota"))
 _MINIMAL_ENV = {"PATH": "/usr/sbin:/usr/bin", "LC_ALL": "C"}
-_ALLOWED_TOOLS = frozenset((CRYPTSETUP, MKFS, MOUNT, UMOUNT, FINDMNT, LOSETUP))
+_ALLOWED_TOOLS = frozenset((CRYPTSETUP, MKFS, MOUNT, UMOUNT, FINDMNT, LOSETUP, DMSETUP))
 _TOOL_TARGETS = {
     CRYPTSETUP: (Path(CRYPTSETUP), 0o755),
     MKFS: (Path("/usr/sbin/mke2fs"), 0o755),
+    # `dmsetup mknodes <name>` recreates the /dev/mapper node of a surviving kernel dm
+    # mapping whose node lived in a now-dead container's /dev, so the existing strict
+    # validation can verify its backing image before close/reopen. Non-setuid 0755 like
+    # the other tools (a re-introduced setuid is rejected).
+    DMSETUP: (Path(DMSETUP), 0o755),
     # Non-setuid on the native agent image (Dockerfile.native.agent strips ALL
     # setuid/setgid bits); the privileged mount/umount syscalls are authorized by
     # the caplaunch helper's scoped file capabilities, not by a setuid bit. Require
@@ -297,6 +303,10 @@ class CredentialVolumes:
             mapping_path = MAPPER_ROOT / mapping
             mounts = self._mounts(mountpoint)
             _validate_mountpoint(mountpoint, mounted=bool(mounts))
+            # Restore an absent /dev node for a surviving kernel mapping (dead container)
+            # so a COMMITTED volume left mapped is validated + reused here rather than
+            # colliding with a fresh `cryptsetup open` ("already active").
+            self._restore_mapping_node(mapping, mapping_path)
             mapping_exists = os.path.lexists(str(mapping_path))
             if mounts:
                 if not mapping_exists:
@@ -307,6 +317,9 @@ class CredentialVolumes:
             self._require_empty_mountpoint(mountpoint)
             opened = False
             if mapping_exists:
+                # Either already mapped in this container, or a surviving kernel mapping
+                # whose node was just restored: validate its real backing image (below),
+                # then reuse it — the committed credentials survive the restart intact.
                 self._validate_mapping(mapping, image)
             else:
                 key = self._store.volume_key(scope, handle)
@@ -348,11 +361,15 @@ class CredentialVolumes:
             mapping_path = MAPPER_ROOT / mapping
             mounts = self._mounts(mountpoint)
             _validate_mountpoint(mountpoint, mounted=bool(mounts))
+            # Restore the /dev node first if a kernel mapping survives from a dead
+            # container (node absent here) so the strict validation below verifies its
+            # real backing image and closes it — instead of mistaking it for unmapped.
+            self._restore_mapping_node(mapping, mapping_path)
             mapping_exists = os.path.lexists(str(mapping_path))
             if not mapping_exists:
                 if mounts:
                     raise StoreError("conflict")
-                return
+                return  # no /dev node AND no live kernel mapping: truly not mapped
             self._validate_mapping(mapping, image)
             if mounts:
                 self._validate_owned_mount(mounts, mountpoint, mapping_path)
@@ -392,10 +409,14 @@ class CredentialVolumes:
             # manifest read, not `_ready_entry`'s ready-only check.
             self._store.read_manifest(scope, handle)  # raises on scope/handle mismatch
             mountpoint = entry / _MOUNT_NAME
+            mapping = self._mapping_name(handle)
             if self._mounts(mountpoint):
                 raise StoreError("busy")  # still mounted; the caller must close() first
-            if os.path.lexists(str(MAPPER_ROOT / self._mapping_name(handle))):
-                raise StoreError("busy")  # still mapped
+            # Refuse while the mapping survives — by its /dev node OR (its node gone with
+            # a dead container) still live in the kernel. close() clears it first; deleting
+            # the backing image under a live mapping would leave it dangling. Fail-closed.
+            if os.path.lexists(str(MAPPER_ROOT / mapping)) or self._kernel_mapping_active(mapping):
+                raise StoreError("busy")
             self._remove_entry_tree(entry)
             self._fsync_directory(entry.parent)
 
@@ -535,7 +556,14 @@ class CredentialVolumes:
         if (
             item["name"] != loop_device
             or type(item["back-file"]) is not str
-            or Path(item["back-file"]) != image
+            # The back-file PATH is not compared lexically to the image path: the kernel
+            # records a loop's back-file as a mount-namespace d_path, which legitimately
+            # differs from our configured path across the bind-mounted persistent store
+            # and a container restart (e.g. a mount-relative "/credentials/<h>/volume.luks")
+            # even with production-identical mount targets. The (device, inode) pair below
+            # is the authoritative regular-file identity — it cannot be spoofed by a path
+            # difference and changes if the image is replaced — so it, with the strict
+            # loop-name/type checks, proves the loop backs THIS entry's image.
             or type(item["back-ino"]) is not int
             or item["back-ino"] != metadata.st_ino
             or back_device != expected_device
@@ -612,6 +640,51 @@ class CredentialVolumes:
     @staticmethod
     def _mapping_name(handle: str) -> str:
         return "neev-credential-" + handle
+
+    def _kernel_mapping_active(self, mapping: str) -> bool:
+        """True if the KERNEL still has an active dm mapping by this name — regardless of
+        whether its /dev/mapper node exists in THIS container (a crash/stop in another
+        container leaves the mapping live in the global kernel while its node, which lived
+        in that container's /dev, is gone here).
+
+        Fail closed: ONLY `cryptsetup status`'s documented "inactive" exit (4) means gone;
+        a timeout / missing binary / permission error is `unavailable`, NEVER silently
+        treated as inactive (which would let revoke delete a still-live backing image)."""
+        try:
+            self._runner.run([CRYPTSETUP, "status", mapping])
+            return True
+        except CommandError as error:
+            if error.kind == "failed" and error.returncode == 4:
+                return False  # cryptsetup's documented "inactive" status
+            raise StoreError("unavailable") from None
+        except StoreError:
+            raise
+        except Exception:
+            raise StoreError("unavailable") from None
+
+    def _restore_mapping_node(self, mapping: str, mapping_path: Path) -> None:
+        """Recreate an absent /dev/mapper node for a surviving KERNEL mapping.
+
+        A crash/stop in another container leaves the dm mapping live in the global kernel
+        while its /dev/mapper node — which lived in THAT container's /dev — is gone here.
+        Without the node, `cryptsetup status` cannot resolve the backing device (it
+        reports "(null)") and a fresh `cryptsetup open` collides ("already active"), so a
+        committed volume cannot be reopened and an interrupted one cannot be closed.
+
+        `dmsetup mknodes <mapping>` (CAP_MKNOD, already in the profile) recreates the node
+        for exactly this mapping from the kernel's own table. With the node restored, the
+        EXISTING strict `_validate_mapping` verifies the actual backing loop is this
+        entry's image before anything is closed/reopened — real backing verification, not
+        an inference from a null device or a name-alone assumption.
+
+        Fail closed: only `cryptsetup status`'s documented "inactive" exit means there is
+        no mapping to restore; a timeout / missing binary / permission error is
+        `unavailable`, never silently skipped."""
+        if os.path.lexists(str(mapping_path)):
+            return  # node already present
+        if not self._kernel_mapping_active(mapping):  # fail-closed on non-exit-4 errors
+            return  # no live kernel mapping -> nothing to restore
+        self._run([DMSETUP, "mknodes", mapping])
 
     def _run(self, argv: List[str], input_bytes: Optional[bytes] = None) -> bytes:
         try:
