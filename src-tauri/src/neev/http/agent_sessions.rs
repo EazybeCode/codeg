@@ -77,6 +77,10 @@ struct TurnDto {
     run_id: String,
     prompt: String,
     response: String,
+    /// The turn's recorded tool trace. Always present, `[]` when the turn used
+    /// no tools — a client seeding from this must not have to tell "no trace"
+    /// apart from "field missing".
+    activity: Vec<crate::neev::agents::activity::ActivityItem>,
     status: &'static str,
     error_code: Option<String>,
     provider: String,
@@ -209,6 +213,7 @@ fn turn_dto(turn: AgentTurn) -> TurnDto {
         run_id: turn.run_id,
         prompt: turn.prompt,
         response: turn.response,
+        activity: turn.activity,
         status: turn.status.name(),
         error_code: turn.error_code,
         provider: turn.provider,
@@ -469,6 +474,19 @@ fn chunk_event(text: &str) -> Event {
     json_event(&serde_json::json!({ "type": "chunk", "text": text }))
 }
 
+/// One recorded step of the provider's work.
+///
+/// `seq` is the client's dedupe key: a reattach replays the stored prefix and
+/// then streams live items, so the same item may arrive twice and must upsert
+/// rather than append.
+fn activity_event(item: &crate::neev::agents::activity::ActivityItem) -> Event {
+    let mut value = serde_json::to_value(item).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("type".into(), serde_json::json!("activity"));
+    }
+    json_event(&value)
+}
+
 fn finished_event(status: TurnStatus, error_code: Option<&str>) -> Event {
     json_event(&serde_json::json!({
         "type": "finished",
@@ -591,6 +609,11 @@ pub(super) async fn run_events(
             {
                 return;
             }
+            for item in &turn.activity {
+                if deliver(&mut sender, activity_event(item)).await.is_err() {
+                    return;
+                }
+            }
             let _ = deliver(
                 &mut sender,
                 finished_event(turn.status, turn.error_code.as_deref()),
@@ -690,6 +713,13 @@ async fn follow_live(
     {
         return;
     }
+    let mut delivered_seq = 0;
+    for item in &attachment.activity {
+        if deliver(sender, activity_event(item)).await.is_err() {
+            return;
+        }
+        delivered_seq = delivered_seq.max(item.seq);
+    }
     let mut emitted = attachment.snapshot_chars;
     loop {
         // An IDLE stream still has to notice a revocation. The timeout turns a
@@ -716,9 +746,13 @@ async fn follow_live(
                 // re-proving authority before every delivery costs one check
                 // per burst rather than one per token.
                 let mut finished = None;
+                let mut pending: Vec<crate::neev::agents::activity::ActivityItem> = Vec::new();
                 loop {
                     match attachment.events.try_recv() {
                         Ok(RunSignal::Delta(next)) => text.push_str(&splice(next, &mut emitted)),
+                        // Pulled off the queue while coalescing text; held so it
+                        // is delivered after this frame rather than dropped.
+                        Ok(RunSignal::Activity(item)) => pending.push(item),
                         Ok(RunSignal::Finished { status, error_code }) => {
                             finished = Some((status, error_code));
                             break;
@@ -734,10 +768,25 @@ async fn follow_live(
                 if !text.is_empty() && deliver(sender, chunk_event(&text)).await.is_err() {
                     return;
                 }
+                for item in &pending {
+                    if deliver(sender, activity_event(item)).await.is_err() {
+                        return;
+                    }
+                    delivered_seq = delivered_seq.max(item.seq);
+                }
                 if let Some((status, error_code)) = finished {
                     let _ = deliver(sender, finished_event(status, error_code.as_deref())).await;
                     return;
                 }
+            }
+            Ok(RunSignal::Activity(item)) => {
+                if authority.ensure(state).await.is_err() {
+                    return;
+                }
+                if deliver(sender, activity_event(&item)).await.is_err() {
+                    return;
+                }
+                delivered_seq = delivered_seq.max(item.seq);
             }
             Ok(RunSignal::Finished { status, error_code }) => {
                 if authority.ensure(state).await.is_err() {
@@ -759,6 +808,24 @@ async fn follow_live(
                         return;
                     }
                     emitted = chars;
+                }
+                // The trace shares this channel with the text, so a lagged
+                // reader drops activity signals too. The text is recovered from
+                // the run's buffer above; recover the trace from the run's log
+                // the same way, or the live view keeps a hole no amount of
+                // client-side dedupe can fill. Re-emitting from the cursor is
+                // safe because items are idempotent by `seq`.
+                for item in attachment.run.activity_snapshot() {
+                    if item.seq <= delivered_seq {
+                        continue;
+                    }
+                    if authority.ensure(state).await.is_err() {
+                        return;
+                    }
+                    if deliver(sender, activity_event(&item)).await.is_err() {
+                        return;
+                    }
+                    delivered_seq = item.seq;
                 }
             }
             // The run ended and its sender was dropped without us seeing the

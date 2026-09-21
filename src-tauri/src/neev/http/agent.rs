@@ -58,14 +58,21 @@ async fn authorize(
     Ok(session::organization(&state.database, &token, now).await?)
 }
 
-fn event_json(event: &RunEvent) -> String {
+/// `None` for an event this legacy stream does not carry.
+///
+/// The one-shot run stream is text only. Tool activity is a property of a
+/// durable TURN — numbered and stored per turn so a reload can reproduce it —
+/// so it is served by the session stream rather than reinvented here without
+/// any of that.
+fn event_json(event: &RunEvent) -> Option<String> {
     let quote = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
-    match event {
+    Some(match event {
         RunEvent::Started(id) => format!("{{\"type\":\"started\",\"run_id\":{}}}", quote(id)),
         RunEvent::Chunk(text) => format!("{{\"type\":\"chunk\",\"text\":{}}}", quote(text)),
+        RunEvent::Activity(_) => return None,
         RunEvent::Completed => "{\"type\":\"completed\"}".into(),
         RunEvent::Failed(reason) => format!("{{\"type\":\"failed\",\"reason\":{}}}", quote(reason)),
-    }
+    })
 }
 
 /// POST `/api/neev/agent/run` — start an author-scoped run, stream events as SSE.
@@ -148,7 +155,13 @@ pub(super) async fn run(
                             jobs.remove(&run_id);
                         }
                     }
-                    let sse = Event::default().data(event_json(&event));
+                    // An event this stream does not carry becomes a comment
+                    // frame: the stream stays alive and well-formed, and a
+                    // client parsing `data:` as JSON never sees an empty body.
+                    let sse = match event_json(&event) {
+                        Some(json) => Event::default().data(json),
+                        None => Event::default().comment("skip"),
+                    };
                     Some((Ok::<Event, Infallible>(sse), (handle, state, run_id, done)))
                 }
                 None => {

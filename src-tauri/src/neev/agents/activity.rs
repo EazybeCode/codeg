@@ -27,6 +27,11 @@ pub(crate) const MAX_INPUT_CHARS: usize = 2_048;
 pub(crate) const MAX_OUTPUT_CHARS: usize = 4_096;
 /// Total serialised activity stored for one turn. Mirrors the schema CHECK.
 pub(crate) const MAX_ACTIVITY_CHARS: usize = 65_536;
+/// Bytes held back so the `truncated` marker is always affordable at the moment
+/// the budget runs out. Comfortably larger than that marker serialises to,
+/// because being wrong in this direction costs a few bytes of capacity and
+/// being wrong in the other costs the whole trace.
+const MARKER_RESERVE: usize = 128;
 
 /// What one recorded step was.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,7 +488,9 @@ impl ActivityLog {
         Self {
             items: Vec::new(),
             next_seq: 1,
-            chars: 0,
+            // The empty array's own two bytes, so the budget counts the
+            // document rather than its contents.
+            chars: 2,
             truncated: false,
         }
     }
@@ -516,6 +523,13 @@ impl ActivityLog {
     ///
     /// The first refusal appends a `truncated` marker (itself the last item),
     /// so a trace that stops early always says that it did.
+    ///
+    /// Budgeting is deliberately pessimistic. `chars` tracks the size of the
+    /// serialised ARRAY, not the sum of its items — the brackets and the commas
+    /// between them are real bytes, and undercounting them is how a log that
+    /// believes it fits produces a document that does not. A marker-sized
+    /// reserve is held back on top, so the `truncated` marker is always
+    /// affordable at the moment it is needed.
     pub(crate) fn push(&mut self, draft: ActivityDraft, offset: usize) -> Option<ActivityItem> {
         if self.truncated {
             return None;
@@ -526,12 +540,17 @@ impl ActivityLog {
             id: draft.id,
             kind: draft.kind,
         };
-        let size = serde_json::to_string(&item).map(|text| text.len()).unwrap_or(0);
-        if self.items.len() + 1 >= MAX_ITEMS || self.chars + size > MAX_ACTIVITY_CHARS {
+        // `+ 1` is the separator this item needs once it is not the first.
+        let cost = serde_json::to_string(&item)
+            .map(|text| text.len() + 1)
+            .unwrap_or(0);
+        if self.items.len() + 1 >= MAX_ITEMS
+            || self.chars + cost + MARKER_RESERVE > MAX_ACTIVITY_CHARS
+        {
             return self.mark_truncated(offset);
         }
         self.next_seq += 1;
-        self.chars += size;
+        self.chars += cost;
         self.items.push(item.clone());
         Some(item)
     }
@@ -554,15 +573,52 @@ impl ActivityLog {
 
     /// The stored form: `None` when there is nothing, so a turn without tools
     /// stores NULL rather than an empty array.
+    ///
+    /// A non-empty log ALWAYS stores something. If the budget was somehow still
+    /// exceeded, the newest items are dropped — deterministically, from the end
+    /// — and the `truncated` marker is re-attached, because a reader who saw a
+    /// trace live must not find it gone after a reload. Returning `None` here
+    /// would discard the whole thing to save the tail of it.
     pub(crate) fn stored(&self) -> Option<String> {
         if self.items.is_empty() {
             return None;
         }
         let text = serialize(&self.items);
-        if text.len() > MAX_ACTIVITY_CHARS {
-            return None;
+        if text.len() <= MAX_ACTIVITY_CHARS {
+            return Some(text);
         }
-        Some(text)
+        let mut kept: Vec<ActivityItem> = self.items.clone();
+        while !kept.is_empty() {
+            kept.pop();
+            let mut candidate = kept.clone();
+            candidate.push(ActivityItem {
+                // Numbered past everything kept, so a client that already has
+                // the earlier items still upserts this cleanly.
+                seq: kept.last().map(|item| item.seq).unwrap_or(0) + 1,
+                offset: kept.last().map(|item| item.offset).unwrap_or(0),
+                id: STATE_TRUNCATED.to_owned(),
+                kind: ActivityKind::Status {
+                    state: STATE_TRUNCATED.to_owned(),
+                    detail: None,
+                },
+            });
+            let text = serialize(&candidate);
+            if text.len() <= MAX_ACTIVITY_CHARS {
+                return Some(text);
+            }
+        }
+        // Even one item plus a marker does not fit: store the marker alone, so
+        // the turn still reports that a trace existed and was cut.
+        let marker = vec![ActivityItem {
+            seq: 1,
+            offset: 0,
+            id: STATE_TRUNCATED.to_owned(),
+            kind: ActivityKind::Status {
+                state: STATE_TRUNCATED.to_owned(),
+                detail: None,
+            },
+        }];
+        Some(serialize(&marker))
     }
 }
 

@@ -109,6 +109,26 @@ pub(crate) enum RunEvent {
     Completed,
 }
 
+/// Forward one mapped stream item to the run's consumer.
+///
+/// Empty text is dropped rather than sent: a zero-length delta would spend a
+/// broadcast and a database write to say nothing.
+async fn send_item(
+    tx: &mpsc::Sender<RunEvent>,
+    item: super::activity::StreamItem,
+) -> Result<(), ()> {
+    let event = match item {
+        super::activity::StreamItem::Text(text) => {
+            if text.is_empty() {
+                return Ok(());
+            }
+            RunEvent::Chunk(text)
+        }
+        super::activity::StreamItem::Activity(draft) => RunEvent::Activity(draft),
+    };
+    tx.send(event).await.map_err(|_| ())
+}
+
 /// A live run: a bounded stream of [`RunEvent`] plus an idempotent cancel that
 /// interrupts the turn (never a login/DB effect).
 pub(crate) struct RunHandle {
@@ -259,6 +279,12 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
         let (tx, rx) = mpsc::channel::<RunEvent>(16);
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
         let started = run_id.clone();
+        // Built before the request moves. The handle is what names this user's
+        // credential volume, so it is scrubbed out of anything a trace records.
+        let mut parser = super::activity::StreamParser::new(
+            &request.provider,
+            request.credential_handle.iter().cloned().collect(),
+        );
         tokio::spawn(async move {
             if tx.send(RunEvent::Started(started)).await.is_err() {
                 let _ = child.kill().await;
@@ -653,6 +679,11 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
         let (tx, rx) = mpsc::channel::<RunEvent>(16);
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
         let started = run_id.clone();
+        // The credential handle names this user's volume; scrub it from traces.
+        let mut parser = super::activity::StreamParser::new(
+            &request.provider,
+            request.credential_handle.iter().cloned().collect(),
+        );
         tokio::spawn(async move {
             // Move the guard into the task so lane release + workdir removal happen
             // when the task ends, on every path including panic.

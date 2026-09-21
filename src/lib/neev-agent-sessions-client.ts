@@ -83,6 +83,70 @@ export interface NeevAgentSession {
   updatedAt: number
 }
 
+/** Server-emitted trace states. `truncated` and `unsupported` are ours. */
+export type NeevActivityState =
+  | "model"
+  | "stop"
+  | "result"
+  | "truncated"
+  | "unsupported"
+
+interface NeevActivityBase {
+  /**
+   * Monotonic within a turn and the DEDUPE KEY. A reattach replays the stored
+   * prefix before streaming live items, so the same item can arrive twice —
+   * upsert on this, never append.
+   */
+  seq: number
+  /**
+   * Where in the reply text this happened, counted in **Unicode scalar values**
+   * (Rust `chars()`), NOT UTF-16 code units. `text.slice(0, offset)` is wrong
+   * past the first astral character; use {@link sliceByScalars}.
+   */
+  offset: number
+  id: string
+}
+
+export type NeevActivityItem =
+  | (NeevActivityBase & {
+      kind: "tool_call"
+      name: string
+      /**
+       * Already-serialised JSON, as a STRING: a tool input streamed in
+       * fragments is not always valid JSON when its block ends, so the server
+       * forwards what arrived rather than guessing. `JSON.parse` inside a try,
+       * and treat it as untrusted display text.
+       */
+      input: string
+      inputTruncated: boolean
+    })
+  | (NeevActivityBase & {
+      kind: "tool_result"
+      /** The `id` of the `tool_call` this answers; may match none. */
+      callId: string
+      output: string
+      outputTruncated: boolean
+      isError: boolean
+    })
+  | (NeevActivityBase & {
+      kind: "status"
+      state: NeevActivityState
+      detail: string | null
+    })
+
+/**
+ * Slice `text` at a server `offset`.
+ *
+ * The server counts Unicode scalars and a JavaScript string is UTF-16, so a
+ * plain `slice` drifts left by one per astral character (an emoji is 1 scalar
+ * and 2 UTF-16 units). Spreading into an array iterates by code point, which is
+ * the unit the server promised.
+ */
+export function sliceByScalars(text: string, offset: number): string {
+  if (offset <= 0) return ""
+  return [...text].slice(0, offset).join("")
+}
+
 export interface NeevAgentTurn {
   id: string
   sessionId: string
@@ -90,6 +154,8 @@ export interface NeevAgentTurn {
   runId: string
   prompt: string
   response: string
+  /** The turn's tool trace; `[]` when it used none. Seed the view from this. */
+  activity: NeevActivityItem[]
   status: NeevTurnStatus
   errorCode: string | null
   provider: string
@@ -296,6 +362,96 @@ export function parseAgentSession(value: unknown): NeevAgentSession {
   }
 }
 
+const ACTIVITY_STATES: readonly NeevActivityState[] = [
+  "model",
+  "stop",
+  "result",
+  "truncated",
+  "unsupported",
+]
+
+function activityItem(value: unknown): NeevActivityItem | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const item = value as Record<string, unknown>
+  const seq = item.seq
+  const offset = item.offset
+  if (
+    typeof seq !== "number" ||
+    !Number.isSafeInteger(seq) ||
+    seq < 1 ||
+    typeof offset !== "number" ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    typeof item.id !== "string"
+  )
+    return null
+  const base = { seq, offset, id: item.id }
+  if (
+    item.kind === "tool_call" &&
+    typeof item.name === "string" &&
+    typeof item.input === "string"
+  )
+    return {
+      ...base,
+      kind: "tool_call",
+      name: item.name,
+      input: item.input,
+      inputTruncated: item.inputTruncated === true,
+    }
+  if (
+    item.kind === "tool_result" &&
+    typeof item.callId === "string" &&
+    typeof item.output === "string"
+  )
+    return {
+      ...base,
+      kind: "tool_result",
+      callId: item.callId,
+      output: item.output,
+      outputTruncated: item.outputTruncated === true,
+      isError: item.isError === true,
+    }
+  if (
+    item.kind === "status" &&
+    typeof item.state === "string" &&
+    ACTIVITY_STATES.includes(item.state as NeevActivityState)
+  )
+    return {
+      ...base,
+      kind: "status",
+      state: item.state as NeevActivityState,
+      detail: typeof item.detail === "string" ? item.detail : null,
+    }
+  return null
+}
+
+/**
+ * Parse a turn's trace.
+ *
+ * An unreadable ITEM is dropped, not fatal: a turn's reply must still display
+ * when its decoration does not, and a future server may send a kind this build
+ * has never heard of. Sorted by `seq` so the caller can rely on the order.
+ */
+export function parseActivity(value: unknown): NeevActivityItem[] {
+  if (!Array.isArray(value)) return []
+  const items: NeevActivityItem[] = []
+  const seen = new Set<number>()
+  for (const entry of value) {
+    const item = activityItem(entry)
+    if (!item || seen.has(item.seq)) continue
+    seen.add(item.seq)
+    items.push(item)
+  }
+  return items.sort((left, right) => left.seq - right.seq)
+}
+
+/** One `activity` frame off the run stream, or `null` if it is not one. */
+export function parseActivityEvent(value: unknown): NeevActivityItem | null {
+  if (!value || typeof value !== "object") return null
+  if ((value as Record<string, unknown>).type !== "activity") return null
+  return activityItem(value)
+}
+
 export function parseAgentTurn(value: unknown): NeevAgentTurn {
   const object = exact(value, [
     "id",
@@ -304,6 +460,7 @@ export function parseAgentTurn(value: unknown): NeevAgentTurn {
     "runId",
     "prompt",
     "response",
+    "activity",
     "status",
     "errorCode",
     "provider",
@@ -325,6 +482,7 @@ export function parseAgentTurn(value: unknown): NeevAgentTurn {
     runId: runId(object.runId),
     prompt: text(object.prompt),
     response: text(object.response),
+    activity: parseActivity(object.activity),
     status: status as NeevTurnStatus,
     errorCode: nullableCode(object.errorCode),
     provider: text(object.provider),

@@ -210,6 +210,8 @@ pub(crate) struct AgentTurn {
     pub(crate) run_id: String,
     pub(crate) prompt: String,
     pub(crate) response: String,
+    /// The turn's recorded tool trace, or `None` when it used no tools.
+    pub(crate) activity: Vec<super::activity::ActivityItem>,
     pub(crate) status: TurnStatus,
     pub(crate) error_code: Option<String>,
     pub(crate) provider: String,
@@ -232,7 +234,7 @@ pub(crate) struct SessionInput {
 }
 
 const SESSION_COLUMNS: &str = "org_id,id,owner_id,title,provider,model,kind,bound_chat_id,node_id,archived,revision,created_at,updated_at";
-const TURN_COLUMNS: &str = "org_id,session_id,sequence,id,run_id,prompt,response,status,error_code,provider,model,created_at,updated_at,completed_at";
+const TURN_COLUMNS: &str = "org_id,session_id,sequence,id,run_id,prompt,response,activity,status,error_code,provider,model,created_at,updated_at,completed_at";
 
 fn session_row(row: &QueryResult) -> Result<AgentSession, ContentError> {
     Ok(AgentSession {
@@ -264,6 +266,11 @@ fn turn_row(row: &QueryResult) -> Result<AgentTurn, ContentError> {
         run_id: row.try_get("", "run_id").map_err(database_error)?,
         prompt: row.try_get("", "prompt").map_err(database_error)?,
         response: row.try_get("", "response").map_err(database_error)?,
+        activity: super::activity::parse_stored(
+            row.try_get::<Option<String>>("", "activity")
+                .map_err(database_error)?
+                .as_deref(),
+        ),
         status: TurnStatus::parse(&status)?,
         error_code: row.try_get("", "error_code").map_err(database_error)?,
         provider: row.try_get("", "provider").map_err(database_error)?,
@@ -782,6 +789,9 @@ pub(crate) async fn begin_turn(
         run_id,
         prompt: text.to_owned(),
         response: String::new(),
+        // A turn records its trace as it runs; none exists at the moment the
+        // prompt becomes durable.
+        activity: Vec::new(),
         status: TurnStatus::Running,
         error_code: None,
         provider: found.provider,
@@ -963,6 +973,7 @@ pub(crate) async fn finish(
     database: &DatabaseConnection,
     run_id: &str,
     response: &str,
+    activity: Option<&str>,
     status: TurnStatus,
     error_code: Option<&str>,
     now: i64,
@@ -979,9 +990,15 @@ pub(crate) async fn finish(
     };
     db::execute(
         database,
-        "UPDATE neev_agent_turns SET response=$1,status=$2,error_code=$3,updated_at=$4,completed_at=$4 WHERE run_id=$5 AND status='running'",
+        "UPDATE neev_agent_turns SET response=$1,activity=$2,status=$3,error_code=$4,updated_at=$5,completed_at=$5 WHERE run_id=$6 AND status='running'",
         vec![
             clamp(response).into(),
+            // Oversized activity stores as NULL rather than failing the write:
+            // losing the decoration is recoverable, losing the reply is not.
+            activity
+                .filter(|text| text.len() <= super::activity::MAX_ACTIVITY_CHARS)
+                .map(str::to_owned)
+                .into(),
             status.name().into(),
             error_code.into(),
             now.into(),

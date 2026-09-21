@@ -200,10 +200,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             image_blob_migration::upgrade(&tx).await?;
             session_migration::upgrade(&tx).await?;
             session_migration::link_nodes(&tx).await?;
+            session_migration::record_activity(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![session_migration::NODE_LINK_SCHEMA_VERSION.into()],
+                vec![session_migration::ACTIVITY_SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -305,8 +306,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 image_blob_migration::validate(&tx).await?;
                 session_migration::validate(&tx).await?;
             }
-            // Current. Validate in place, including the node link, and preserve
-            // every row.
+            // A v12 database has the node link but not the activity column:
+            // validate what exists, then fall through to the tail.
             session_migration::NODE_LINK_SCHEMA_VERSION if names == v11_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
@@ -315,11 +316,22 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 image_blob_migration::validate(&tx).await?;
                 session_migration::validate(&tx).await?;
                 session_migration::validate_node_link(&tx).await?;
+            }
+            // Current. Validate in place and preserve every row.
+            session_migration::ACTIVITY_SCHEMA_VERSION if names == v11_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
+                session_migration::validate(&tx).await?;
+                session_migration::validate_node_link(&tx).await?;
+                session_migration::validate_activity(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
         }
-        // Apply missing additive storage in order, then publish schema 12.
+        // Apply missing additive storage in order, then publish schema 13.
         if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected {
             gateway_migration::upgrade(&tx).await?;
         }
@@ -332,11 +344,14 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         if names != v11_expected {
             session_migration::upgrade(&tx).await?;
         }
+        // Both are column-guarded, so every path can apply them unconditionally
+        // and a database that already has them is unchanged.
         session_migration::link_nodes(&tx).await?;
+        session_migration::record_activity(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![session_migration::NODE_LINK_SCHEMA_VERSION.into()],
+            vec![session_migration::ACTIVITY_SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -474,29 +489,40 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         gateway_migration::SCHEMA_VERSION => names == gateway_expected,
         org_code_migration::SCHEMA_VERSION => names == org_code_expected,
         image_blob_migration::SCHEMA_VERSION => names == image_expected,
-        session_migration::SCHEMA_VERSION => names == session_expected,
+        // 12 and 13 add COLUMNS, so they share 11's table inventory. Without
+        // these arms a migrated database falls to `_ => false` and the only
+        // caller, `content::backup`, refuses to export or restore it.
+        session_migration::SCHEMA_VERSION
+        | session_migration::NODE_LINK_SCHEMA_VERSION
+        | session_migration::ACTIVITY_SCHEMA_VERSION => names == session_expected,
         _ => false,
     };
     if !valid {
         return Err(AuthError::Unavailable);
     }
-    if matches!(version, 6 | 7 | 8 | 9 | 10 | 11) {
+    if matches!(version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13) {
         document_format_migration::validate(db).await?;
     }
-    if matches!(version, 7 | 8 | 9 | 10 | 11) {
+    if matches!(version, 7 | 8 | 9 | 10 | 11 | 12 | 13) {
         agent_status_migration::validate(db).await?;
     }
-    if matches!(version, 8 | 9 | 10 | 11) {
+    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13) {
         gateway_migration::validate(db).await?;
     }
-    if matches!(version, 9 | 10 | 11) {
+    if matches!(version, 9 | 10 | 11 | 12 | 13) {
         org_code_migration::validate(db).await?;
     }
-    if matches!(version, 10 | 11) {
+    if matches!(version, 10 | 11 | 12 | 13) {
         image_blob_migration::validate(db).await?;
     }
-    if version == session_migration::SCHEMA_VERSION {
+    if matches!(version, 11 | 12 | 13) {
         session_migration::validate(db).await?;
+    }
+    if matches!(version, 12 | 13) {
+        session_migration::validate_node_link(db).await?;
+    }
+    if version == session_migration::ACTIVITY_SCHEMA_VERSION {
+        session_migration::validate_activity(db).await?;
     }
     Ok(version)
 }

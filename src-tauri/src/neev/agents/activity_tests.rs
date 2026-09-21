@@ -390,6 +390,82 @@ fn stored_activity_round_trips_and_corruption_reads_as_none() {
     assert!(parse_stored(Some(&"x".repeat(MAX_ACTIVITY_CHARS + 1))).is_empty());
 }
 
+/// Fill the log with large items until it refuses, then assert the stored form
+/// is always a valid, in-budget document that kept the earlier work.
+fn fill_to_cap(payload: &str) -> String {
+    let mut log = ActivityLog::new();
+    for index in 0..MAX_ITEMS {
+        log.push(
+            ActivityDraft {
+                id: format!("t{index}"),
+                kind: ActivityKind::ToolResult {
+                    call_id: format!("t{index}"),
+                    output: payload.to_owned(),
+                    output_truncated: false,
+                    is_error: false,
+                },
+            },
+            index,
+        );
+    }
+    let stored = log
+        .stored()
+        .expect("a non-empty trace must never store as nothing");
+    assert!(
+        stored.len() <= MAX_ACTIVITY_CHARS,
+        "stored {} bytes, cap is {MAX_ACTIVITY_CHARS}",
+        stored.len()
+    );
+    stored
+}
+
+#[test]
+fn a_trace_that_fills_its_budget_still_stores_and_still_says_it_was_cut() {
+    // Big enough that the byte cap bites before the item cap.
+    let stored = fill_to_cap(&"y".repeat(900));
+    let items = parse_stored(Some(&stored));
+    assert!(
+        items.len() > 1,
+        "the earlier items are kept, not discarded with the tail"
+    );
+    assert_eq!(
+        items.last().unwrap().kind,
+        ActivityKind::Status {
+            state: STATE_TRUNCATED.into(),
+            detail: None,
+        },
+        "the marker survives to the stored form, so a reload still reports the cut"
+    );
+    // Seq stays usable as a dedupe key across the trimmed document.
+    let mut seqs: Vec<u32> = items.iter().map(|item| item.seq).collect();
+    let before = seqs.len();
+    seqs.dedup();
+    assert_eq!(seqs.len(), before, "no duplicate seq survives trimming");
+}
+
+#[test]
+fn a_multibyte_trace_respects_the_byte_cap_not_a_character_count() {
+    // Every payload character is 4 bytes here, so a log that budgeted in
+    // characters would store roughly four times the cap.
+    let stored = fill_to_cap(&"🙂".repeat(300));
+    assert!(stored.len() <= MAX_ACTIVITY_CHARS);
+    let items = parse_stored(Some(&stored));
+    assert!(!items.is_empty(), "multibyte content still stores");
+    assert_eq!(
+        items.last().unwrap().kind,
+        ActivityKind::Status {
+            state: STATE_TRUNCATED.into(),
+            detail: None,
+        }
+    );
+    // And what came back is intact rather than cut through a code point.
+    for item in &items {
+        if let ActivityKind::ToolResult { output, .. } = &item.kind {
+            assert!(output.chars().all(|c| c == '🙂'));
+        }
+    }
+}
+
 #[test]
 fn a_turn_without_tools_stores_nothing_at_all() {
     let log = ActivityLog::new();

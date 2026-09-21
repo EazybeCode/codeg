@@ -40,6 +40,9 @@ pub(crate) struct RunDelta {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RunSignal {
     Delta(RunDelta),
+    /// One recorded step of the provider's work. Carries its own `seq`, which
+    /// is what lets a reattached reader drop an item it already has.
+    Activity(super::activity::ActivityItem),
     Finished {
         status: TurnStatus,
         error_code: Option<String>,
@@ -55,6 +58,9 @@ pub(crate) struct LiveRun {
     /// `(text, character count)` — the count is carried so appending stays O(1)
     /// in the length of the reply rather than rescanning it per token.
     buffer: Mutex<(String, usize)>,
+    /// The turn's tool trace. Separate from the text so the reply is only ever
+    /// the reply, and capped independently of it.
+    activity: Mutex<super::activity::ActivityLog>,
     events: broadcast::Sender<RunSignal>,
     cancel: Mutex<Option<oneshot::Sender<()>>>,
 }
@@ -109,6 +115,47 @@ impl LiveRun {
         (guard.0.clone(), guard.1)
     }
 
+    /// Record one step of the provider's work at the reply's current length.
+    ///
+    /// The offset is read under the same lock discipline as the text, so an
+    /// item can never claim a position later than the text that existed when it
+    /// happened. Returns `None` when a cap refused it.
+    pub(crate) fn record_activity(
+        &self,
+        draft: super::activity::ActivityDraft,
+    ) -> Option<super::activity::ActivityItem> {
+        let offset = {
+            let guard = match self.buffer.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.1
+        };
+        let mut log = match self.activity.lock() {
+            Ok(log) => log,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        log.push(draft, offset)
+    }
+
+    /// The trace so far, for a reader attaching mid-run.
+    pub(crate) fn activity_snapshot(&self) -> Vec<super::activity::ActivityItem> {
+        let log = match self.activity.lock() {
+            Ok(log) => log,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        log.items().to_vec()
+    }
+
+    /// The stored form of the trace, written with the turn's terminal state.
+    pub(crate) fn activity_stored(&self) -> Option<String> {
+        let log = match self.activity.lock() {
+            Ok(log) => log,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        log.stored()
+    }
+
     /// Subscribe to this run's signals without taking a snapshot. Tests use it
     /// to observe exactly what a reader would be told.
     #[cfg(test)]
@@ -155,6 +202,9 @@ pub(crate) struct Attachment {
     pub(crate) run: Arc<LiveRun>,
     pub(crate) snapshot: String,
     pub(crate) snapshot_chars: usize,
+    /// The trace already recorded when this reader attached. Replayed before
+    /// live signals; an item that appears in both is identified by `seq`.
+    pub(crate) activity: Vec<super::activity::ActivityItem>,
     pub(crate) events: broadcast::Receiver<RunSignal>,
 }
 
@@ -165,10 +215,12 @@ pub(crate) fn attach(registry: &RunRegistry, run_id: &str) -> Option<Attachment>
     let run = find(registry, run_id)?;
     let events = run.events.subscribe();
     let (snapshot, snapshot_chars) = run.snapshot();
+    let activity = run.activity_snapshot();
     Some(Attachment {
         run,
         snapshot,
         snapshot_chars,
+        activity,
         events,
     })
 }
@@ -215,6 +267,7 @@ pub(crate) fn start(
         session_id,
         turn_id,
         buffer: Mutex::new((String::new(), 0)),
+        activity: Mutex::new(super::activity::ActivityLog::new()),
         events,
         cancel: Mutex::new(handle.take_canceler()),
     });
@@ -240,6 +293,13 @@ async fn drive(
         match event {
             // The runtime's own id is internal; the durable identity is ours.
             RunEvent::Started(_) => {}
+            RunEvent::Activity(draft) => {
+                // Refused only when a cap is spent, in which case the log has
+                // already recorded that it truncated.
+                if let Some(item) = live.record_activity(draft) {
+                    let _ = live.events.send(RunSignal::Activity(item));
+                }
+            }
             RunEvent::Chunk(text) => {
                 if text.is_empty() {
                     continue;
@@ -304,7 +364,17 @@ async fn drive(
 
     // Settle the durable row BEFORE leaving the registry, so a reader can never
     // observe a run that is neither live nor final.
-    let stored = persist_terminal(&state, &database, &run_id, &response, status, error_code).await;
+    let trace = live.activity_stored();
+    let stored = persist_terminal(
+        &state,
+        &database,
+        &run_id,
+        &response,
+        trace.as_deref(),
+        status,
+        error_code,
+    )
+    .await;
     // A success is only reported once it is DURABLE. If the write could not be
     // made, saying "completed" would promise a replay that does not exist, so
     // the reader is told the truth instead; the row stays `running` and
@@ -402,6 +472,9 @@ async fn reconcile_stranded(state: Arc<ServerState>, run_id: String, response: S
             &state.database,
             &run_id,
             &response,
+            // The live log died with the failed write; leave whatever the row
+            // already holds rather than overwriting a trace with nothing.
+            None,
             TurnStatus::Failed,
             // The provider may well have completed; what failed is our ability
             // to record it. `unavailable` is the honest label for that, and it
@@ -429,13 +502,14 @@ async fn persist_terminal(
     database: &sea_orm::DatabaseConnection,
     run_id: &str,
     response: &str,
+    activity: Option<&str>,
     status: TurnStatus,
     error_code: Option<&str>,
 ) -> bool {
     let mut delay = FINISH_BACKOFF_MS;
     for attempt in 0..FINISH_ATTEMPTS {
         let now = state.clock.now_unix();
-        if sessions::finish(database, run_id, response, status, error_code, now)
+        if sessions::finish(database, run_id, response, activity, status, error_code, now)
             .await
             .is_ok()
         {
@@ -463,6 +537,8 @@ pub(crate) async fn settle_refusal(
         &state.database,
         run_id,
         "",
+        // A refusal happened before any provider stream existed.
+        None,
         TurnStatus::Failed,
         Some(code),
         now,

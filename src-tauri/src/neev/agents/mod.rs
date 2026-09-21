@@ -1,3 +1,4 @@
+pub(crate) mod activity;
 pub(crate) mod completion;
 pub(crate) mod control_coordinator;
 pub(crate) mod control_dto;

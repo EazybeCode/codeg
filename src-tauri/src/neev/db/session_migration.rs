@@ -63,6 +63,24 @@ pub(super) const TABLE_NAMES: &[&str] = &["neev_agent_sessions", "neev_agent_tur
 /// reveals that someone else's PRIVATE session was filed under that node.
 pub(super) const NODE_LINK_SCHEMA_VERSION: i64 = 12;
 
+/// Additive layer 13: the turn's recorded **tool activity**.
+///
+/// Another column, not a table, so the inventory is still 11's and the stored
+/// marker is again the only thing that distinguishes it — handled the same way
+/// as 12 in [`super::migrate`].
+///
+/// Nullable with no default: every turn that already exists keeps exactly what
+/// it had, and NULL means "no trace recorded", which is the truth for a turn
+/// that ran before this existed. Nothing is backfilled — a trace we did not
+/// observe cannot be reconstructed, and inventing one would be worse than
+/// showing none.
+///
+/// **Rollback.** A schema-12 binary REJECTS a 13 database: its version match
+/// has no arm for 13 and falls through to `Unavailable`. Rolling back therefore
+/// means running the PREVIOUS UI against THIS backend, not redeploying the
+/// previous backend.
+pub(super) const ACTIVITY_SCHEMA_VERSION: i64 = 13;
+
 /// Terminal run failures a turn may record. `interrupted` is reserved for
 /// startup reconciliation (the server died mid-run), which is why a restarted
 /// server can never leave a turn stuck in `running`.
@@ -332,6 +350,17 @@ fn session_columns() -> Vec<(&'static str, &'static str)> {
     )]
 }
 
+/// The additive turn columns of layer 13.
+///
+/// The length CHECK mirrors `activity::MAX_ACTIVITY_CHARS`, so an oversized
+/// trace is refused by the database as well as by the writer.
+fn turn_columns() -> Vec<(&'static str, &'static str)> {
+    vec![(
+        "activity",
+        "ALTER TABLE neev_agent_turns ADD COLUMN activity TEXT CHECK(activity IS NULL OR length(activity)<=65536)",
+    )]
+}
+
 /// Whether `table.column` already exists. `ADD COLUMN` is not idempotent on
 /// either backend, and this upgrade can meet a `neev_messages` that already
 /// carries the columns (a replayed migration, or a database whose session
@@ -388,6 +417,46 @@ pub(super) async fn link_nodes(tx: &DatabaseTransaction) -> Result<(), AuthError
 /// Separate from [`validate`] because that one describes layer 11, which is a
 /// database without this column: a v11 marker must still validate, so the node
 /// checks can only run once the marker says 12.
+/// Apply layer 13. Guarded per column, so a replayed migration is a no-op.
+pub(super) async fn record_activity(tx: &DatabaseTransaction) -> Result<(), AuthError> {
+    for (column, statement) in turn_columns() {
+        if !has_column(tx, "neev_agent_turns", column).await? {
+            super::execute(tx, statement, vec![]).await?;
+        }
+    }
+    validate_activity(tx).await
+}
+
+/// Prove layer 13's invariants. Separate from the others for the same reason
+/// the node checks are: a 12 database has no such column to check.
+pub(super) async fn validate_activity<C: ConnectionTrait>(db: &C) -> Result<(), AuthError> {
+    let sqlite = match db.get_database_backend() {
+        DbBackend::Sqlite => true,
+        DbBackend::Postgres => false,
+        _ => return Err(AuthError::Unavailable),
+    };
+    let mut queries = vec![
+        // Mirrors the CHECK, re-proved against a restored dump that may never
+        // have carried it.
+        "SELECT 1 AS invalid FROM neev_agent_turns WHERE activity IS NOT NULL AND length(activity)>65536 LIMIT 1",
+        // An empty string is not "no trace" — NULL is. Storing one would make a
+        // turn that recorded nothing indistinguishable from one that recorded
+        // an empty array.
+        "SELECT 1 AS invalid FROM neev_agent_turns WHERE activity IS NOT NULL AND length(activity)=0 LIMIT 1",
+    ];
+    if sqlite {
+        queries.push(
+            "SELECT 1 AS invalid FROM neev_agent_turns WHERE activity IS NOT NULL AND typeof(activity)<>'text' LIMIT 1",
+        );
+    }
+    for query in queries {
+        if any(db, query).await? {
+            return Err(AuthError::Unavailable);
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn validate_node_link<C: ConnectionTrait>(db: &C) -> Result<(), AuthError> {
     let sqlite = match db.get_database_backend() {
         DbBackend::Sqlite => true,
