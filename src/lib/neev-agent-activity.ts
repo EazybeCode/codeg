@@ -14,10 +14,13 @@ import {
 /**
  * Merge new items into what we already have.
  *
- * `seq` is the identity, NOT the position: reattaching to a live run replays
- * the stored prefix before continuing, so the same item arrives twice. Append
- * and the trace doubles; upsert and it does not. The server promises never to
- * send two different items under one `seq`, so last-write-wins is safe.
+ * `seq` is the identity, NOT the position, and last-write-wins under it is
+ * load-bearing twice over. Reattaching to a live run replays the stored prefix
+ * before continuing, so the same item arrives twice — append and the trace
+ * doubles, upsert and it does not. And a tool call is announced the moment it
+ * starts, then sent again under the same `seq` once its arguments are complete:
+ * the later copy is the fuller one, and it replaces the placeholder in place
+ * rather than appearing beneath it.
  */
 export function mergeActivity(
   current: readonly NeevActivityItem[],
@@ -126,4 +129,55 @@ function oneLine(value: string): string {
   return characters.length <= 80
     ? flat
     : `${characters.slice(0, 79).join("").trimEnd()}…`
+}
+
+/**
+ * The statuses worth putting on screen.
+ *
+ * `model`, `stop` and `result` are the provider's own bookkeeping — the end of
+ * a turn is already visible from the turn ending, and repeating it as a row
+ * called `end_turn` or `success` is noise between the reader and the answer.
+ * What survives is what changes the meaning of the trace: a cap was hit, or the
+ * provider's stream is one we cannot read.
+ */
+export function isNoise(item: NeevActivityItem): boolean {
+  return (
+    item.kind === "status" &&
+    (item.state === "model" || item.state === "stop" || item.state === "result")
+  )
+}
+
+/** Everything the reader should see, in order. */
+export function visibleActivity(
+  items: readonly NeevActivityItem[]
+): NeevActivityItem[] {
+  return items.filter((item) => !isNoise(item))
+}
+
+/**
+ * What the agent is doing right now, if anything.
+ *
+ * The last tool call with no result yet: that is the one still running. A call
+ * whose result has arrived is finished, however recent it is.
+ */
+export function runningTool(
+  items: readonly NeevActivityItem[]
+): { name: string; input: string } | null {
+  const answered = new Set(
+    items
+      .filter((item) => item.kind === "tool_result")
+      .map((item) => (item.kind === "tool_result" ? item.callId : ""))
+  )
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item.kind !== "tool_call") continue
+    if (answered.has(item.id)) return null
+    return { name: item.name, input: item.input }
+  }
+  return null
+}
+
+/** Whole seconds since `startedAt`, for a running turn. */
+export function elapsedSeconds(startedAt: number, now: number): number {
+  return Math.max(0, Math.floor((now - startedAt) / 1000))
 }

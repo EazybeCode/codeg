@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeBoundary } from "./native-boundary"
@@ -16,6 +16,10 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.clearAllMocks()
 })
+function StatusProbe() {
+  const auth = useNativeAuth()
+  return <span data-testid="auth-status">{auth.status}</span>
+}
 function Controls() {
   const auth = useNativeAuth()
   return (
@@ -273,3 +277,157 @@ it("never paints an old catalog response after a tab changes organization", asyn
   expect(screen.queryByText("Private old project")).toBeNull()
   expect(mock.unknown).toEqual([])
 })
+
+/** A workspace with one document open and something typed in it. */
+const DRAFT_DOC = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+const DRAFT_NODE = {
+  id: 4,
+  orgId: 3,
+  kind: "project" as const,
+  parentId: null,
+  name: "Roadmap",
+  revision: "1",
+}
+const DRAFT_RESOURCE = {
+  id: DRAFT_DOC,
+  orgId: 3,
+  nodeId: 4,
+  kind: "chat",
+  creatorId: 1,
+  title: "Launch plan",
+  visibility: "private",
+  originChatId: null,
+  authRevision: "1",
+  contentRevision: "0",
+  archived: false,
+  createdAt: 0,
+  updatedAt: 0,
+}
+
+function draftRoutes(session: () => Response) {
+  return {
+    "GET /api/neev/session": session,
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/nodes": () => json({ nodes: [DRAFT_NODE], nextAfter: null }),
+    "GET /api/neev/nodes/4/documents": () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/4/chats": () =>
+      json({ items: [DRAFT_RESOURCE], nextAfter: null }),
+    [`GET /api/neev/resources/${DRAFT_DOC}`]: () => json(DRAFT_RESOURCE),
+    [`GET /api/neev/chats/${DRAFT_DOC}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+  }
+}
+
+async function openDraft(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(
+    (await screen.findAllByRole("button", { name: "Roadmap" }))[0]
+  )
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  await user.click(
+    await within(tree).findByRole(
+      "button",
+      { name: "Launch plan" },
+      { timeout: 5000 }
+    )
+  )
+  const composer = await screen.findByRole(
+    "textbox",
+    { name: "Message" },
+    { timeout: 5000 }
+  )
+  await user.type(composer, "unsaved sentence")
+  return composer
+}
+
+it(
+  "keeps an unsaved draft through a revalidation that could not be answered",
+  { timeout: 30000 },
+  async () => {
+    // Silence is not a refusal. Treating an unreachable server as one unmounted
+    // the whole workspace, and a moment of bad wifi took the writing with it.
+    let reachable = true
+    mockNativeSession(
+      undefined,
+      draftRoutes(() =>
+        reachable ? json(orgSession) : json({ code: "unavailable" }, 503)
+      )
+    )
+    const user = userEvent.setup()
+    render(
+      <NativeTestRoot>
+        <StatusProbe />
+        <NativeBoundary>
+          <NativeWorkspace />
+        </NativeBoundary>
+      </NativeTestRoot>
+    )
+    const composer = await openDraft(user)
+    expect(composer).toHaveValue("unsaved sentence")
+
+    reachable = false
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")))
+    // Held, not taken: the draft is still mounted, and nothing under here can be
+    // reached or written until the session is proved again.
+    await screen.findByRole("alert")
+    // The session is held, not in force — the surface it belongs to is hidden
+    // and inert for as long as that lasts (covered where the same `held` path is
+    // exercised by a revalidation in flight), and the draft is still in it.
+    expect(screen.getByTestId("auth-status")).toHaveTextContent("unverified")
+    expect(composer).toBeInTheDocument()
+    expect(composer).toHaveValue("unsaved sentence")
+    expect(router.replace).not.toHaveBeenCalledWith("/login")
+
+    // A retry that fails again changes nothing: still held, still holding the
+    // draft. Retrying is not a second chance to lose the work.
+    await user.click(screen.getByRole("button", { name: "Try again" }))
+    await waitFor(() =>
+      expect(screen.getByTestId("auth-status")).toHaveTextContent("unverified")
+    )
+    expect(composer).toBeInTheDocument()
+    expect(composer).toHaveValue("unsaved sentence")
+
+    reachable = true
+    await user.click(screen.getByRole("button", { name: "Try again" }))
+    // The same element, still holding the same words, reachable again.
+    await waitFor(() =>
+      expect(screen.getByTestId("auth-status")).toHaveTextContent(
+        "authenticated"
+      )
+    )
+    // The same element, still holding the same words.
+    expect(composer).toBeInTheDocument()
+    expect(composer).toHaveValue("unsaved sentence")
+  }
+)
+
+it(
+  "clears an unsaved draft when the revalidation is an actual refusal",
+  { timeout: 30000 },
+  async () => {
+    // The other half of the same rule: an answer that says no is obeyed, and
+    // everything scoped to that session goes, drafts included.
+    let allowed = true
+    mockNativeSession(
+      undefined,
+      draftRoutes(() =>
+        allowed ? json(orgSession) : json({ code: "unauthorized" }, 401)
+      )
+    )
+    const user = userEvent.setup()
+    render(
+      <NativeTestRoot>
+        <NativeBoundary>
+          <NativeWorkspace />
+        </NativeBoundary>
+      </NativeTestRoot>
+    )
+    await openDraft(user)
+
+    allowed = false
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")))
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"))
+    expect(screen.queryByDisplayValue("unsaved sentence")).toBeNull()
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  }
+)

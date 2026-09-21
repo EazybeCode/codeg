@@ -14,6 +14,7 @@ import {
   listAgentSessions,
   listAgentTurns,
   loadAgentConnections,
+  loadTeamAgentSession,
   openAgentRunStream,
   parseAgentConnections,
   parseAgentSession,
@@ -562,6 +563,59 @@ describe("team invocation", () => {
         "csrf"
       )
     ).rejects.toBeInstanceOf(NativeClientError)
+  })
+
+  it("reads back the caller's own holder for the chat, and none for a chat never invoked in", async () => {
+    const bound = { ...session, boundChatId: CHAT_ID }
+    const calls: string[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        calls.push(url)
+        return url.endsWith("codex")
+          ? json({ code: "not_found" }, 404)
+          : json(bound)
+      })
+    )
+    expect(await loadTeamAgentSession(CHAT_ID, "claude")).toEqual({
+      ...bound,
+      nodeId: null,
+    })
+    // Never invoked with this provider here: an empty history, not a failure.
+    expect(await loadTeamAgentSession(CHAT_ID, "codex")).toBeNull()
+    expect(calls).toEqual([
+      `/api/neev/chats/${CHAT_ID}/agent?provider=claude`,
+      `/api/neev/chats/${CHAT_ID}/agent?provider=codex`,
+    ])
+  })
+
+  it("refuses a holder bound to another chat or another provider", async () => {
+    // Either would attach one conversation's private trace to a different one.
+    for (const bad of [
+      { ...session, boundChatId: SESSION_ID },
+      { ...session, boundChatId: null },
+      { ...session, boundChatId: CHAT_ID, provider: "codex" },
+    ]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => json(bad))
+      )
+      await expect(
+        loadTeamAgentSession(CHAT_ID, "claude")
+      ).rejects.toBeInstanceOf(NativeClientError)
+    }
+  })
+
+  it("refuses an unknown provider or a malformed chat id before any request", async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal("fetch", fetcher)
+    await expect(
+      loadTeamAgentSession("not-a-uuid", "claude")
+    ).rejects.toBeInstanceOf(NativeClientError)
+    await expect(
+      loadTeamAgentSession(CHAT_ID, "gemini" as "claude")
+    ).rejects.toBeInstanceOf(NativeClientError)
+    expect(fetcher).not.toHaveBeenCalled()
   })
 
   it("accepts exactly the models the runtime would accept", () => {

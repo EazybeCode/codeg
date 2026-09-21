@@ -178,7 +178,11 @@
     "signInCodeHint": "ページを開いて承認し、受け取ったコードをここに貼り付けてください。",
     "testConnection": "テスト",
     "testConnectionNamed": "{name} の接続をテスト",
-    "testingConnection": "テストしています…"
+    "testingConnection": "テストしています…",
+    "renameFailed": "この名前は保存できませんでした。",
+    "activityWorking": "作業中…",
+    "activityRunningTool": "{name} を実行中…",
+    "activityElapsed": "{number}秒"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

@@ -1356,3 +1356,292 @@ it("recognises its own committed save instead of crying conflict", async () => {
     expectedContentRevision: "2",
   })
 })
+
+/** The creator's own document, so the title is the editable control. */
+const creatorActions = {
+  isCreator: true,
+  archived: false,
+  visibility: "private" as const,
+  shareable: true,
+  disabled: false,
+  onRename: () => {},
+  onShare: () => {},
+  onMakePrivate: () => {},
+  onArchiveToggle: () => {},
+  onMove: () => {},
+}
+
+function mountRenameable(
+  handlers: Parameters<typeof mockNativeSession>[1],
+  onRegisterFlush?: (next: () => Promise<boolean>) => void
+) {
+  mockNativeSession(undefined, handlers)
+  return render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeDocument
+          resource={resource}
+          actions={creatorActions}
+          onBack={() => {}}
+          onChanged={() => {}}
+          onDirtyChange={() => {}}
+          onRegisterFlush={onRegisterFlush}
+          autosaveMs={150}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+}
+
+const seeded = {
+  [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+  [`GET ${path}/content?revision=1`]: () =>
+    json({ document: null, revision, markdown: "seed" }),
+  [`GET ${path}/revisions`]: () => json({ items: [revision], nextAfter: null }),
+}
+
+it("escapes out of a rename without saving anything", async () => {
+  // Escape clears the field and blurs in the same tick, and the blur is what
+  // commits. Read the draft a render too late and cancelling SAVES the text it
+  // just cancelled — the one thing Escape must never do.
+  const renames: unknown[] = []
+  const user = userEvent.setup()
+  mountRenameable({
+    ...seeded,
+    [`PATCH /api/neev/resources/${resource.id}`]: (init) => {
+      renames.push(JSON.parse(init.body as string))
+      return json(resource)
+    },
+  })
+  const title = await screen.findByRole("textbox", { name: "Title" })
+  await user.clear(title)
+  await user.type(title, "Renamed by hand")
+  expect(title).toHaveValue("Renamed by hand")
+  await user.keyboard("{Escape}")
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60))
+  })
+  expect(renames).toEqual([])
+  // And the stored name is what is shown again.
+  expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue(
+    "Design document"
+  )
+})
+
+it("renames behind the save already running, not alongside it", async () => {
+  // A rename and a body save both move the auth revision. Send the rename
+  // while a save is in flight and it preconditions on a revision the server
+  // has already moved past — a 409 the reader did nothing to deserve.
+  let release!: (value: Response) => void
+  const order: string[] = []
+  const renames: Record<string, unknown>[] = []
+  const user = userEvent.setup()
+  mountRenameable({
+    ...seeded,
+    [`POST ${path}/revisions`]: () => {
+      order.push("save")
+      return new Promise<Response>((resolve) => {
+        release = resolve
+      })
+    },
+    [`PATCH /api/neev/resources/${resource.id}`]: (init) => {
+      order.push("rename")
+      renames.push(JSON.parse(init.body as string))
+      return json({
+        ...resource,
+        authRevision: "2",
+        title: "Named by hand",
+      })
+    },
+  })
+  await user.type(
+    await screen.findByRole("textbox", { name: "Document content" }),
+    "!"
+  )
+  await waitFor(() => expect(release).toBeDefined())
+
+  const title = screen.getByRole("textbox", { name: "Title" })
+  await user.clear(title)
+  await user.type(title, "Named by hand")
+  await act(async () => {
+    fireEvent.blur(title)
+    await new Promise((resolve) => setTimeout(resolve, 40))
+  })
+  // Still waiting behind the save rather than racing it.
+  expect(order).toEqual(["save"])
+
+  await act(async () => {
+    release(
+      json(
+        { ...revision, revision: "2", byteLength: "5", parentRevision: "1" },
+        201
+      )
+    )
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  })
+  expect(order).toEqual(["save", "rename"])
+  expect(renames).toHaveLength(1)
+  expect(renames[0].title).toBe("Named by hand")
+  // On the revision that is current when it is sent — read after the wait,
+  // not captured before it.
+  expect(renames[0].expectedAuthRevision).toBe("1")
+})
+
+it("never auto-names over a title being typed", async () => {
+  // A new document names itself from its first words. But a writer who names
+  // it themselves has already decided, and a derived name landing mid-keystroke
+  // would be overwriting that decision in front of them.
+  let release!: (value: Response) => void
+  const renames: Record<string, unknown>[] = []
+  const user = userEvent.setup()
+  const empty = { ...resource, title: "Untitled", contentRevision: "0" }
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(empty),
+    [`GET ${path}/revisions`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}/revisions`]: () =>
+      new Promise<Response>((resolve) => {
+        release = resolve
+      }),
+    [`PATCH /api/neev/resources/${resource.id}`]: (init) => {
+      const body = JSON.parse(init.body as string)
+      renames.push(body)
+      return json({ ...empty, authRevision: "2", title: body.title })
+    },
+  })
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeDocument
+          resource={empty}
+          actions={creatorActions}
+          fresh
+          onBack={() => {}}
+          onChanged={() => {}}
+          onDirtyChange={() => {}}
+          autosaveMs={150}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  await user.type(
+    await screen.findByRole(
+      "textbox",
+      { name: "Document content" },
+      { timeout: 5000 }
+    ),
+    "Autosave acceptance"
+  )
+  await waitFor(() => expect(release).toBeDefined())
+
+  // Typed while the first save — the one that would have named it — is in
+  // flight.
+  const title = screen.getByRole("textbox", { name: "Title" })
+  await user.clear(title)
+  await user.type(title, "My own name")
+  await act(async () => {
+    fireEvent.blur(title)
+    release(json({ ...revision, revision: "1", byteLength: "19" }, 201))
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  })
+  // Exactly one rename, and it is theirs.
+  expect(renames.map((body) => body.title)).toEqual(["My own name"])
+})
+
+it("waits for a rename in flight before reporting a flush", async () => {
+  // Navigation asks the flush whether everything is written down. A rename is
+  // a write: return past it and the reader is told they can leave while their
+  // document's name is still in the air.
+  let release!: (value: Response) => void
+  let flush!: () => Promise<boolean>
+  const user = userEvent.setup()
+  mountRenameable(
+    {
+      ...seeded,
+      [`PATCH /api/neev/resources/${resource.id}`]: () =>
+        new Promise<Response>((resolve) => {
+          release = resolve
+        }),
+    },
+    (next) => {
+      flush = next
+    }
+  )
+  const title = await screen.findByRole("textbox", { name: "Title" })
+  await user.clear(title)
+  await user.type(title, "Named while leaving")
+  await act(async () => {
+    fireEvent.blur(title)
+  })
+  await waitFor(() => expect(release).toBeDefined())
+
+  let settled: boolean | null = null
+  const pending = flush().then((value) => {
+    settled = value
+  })
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 40))
+  })
+  expect(settled).toBeNull()
+
+  await act(async () => {
+    release(
+      json({ ...resource, authRevision: "2", title: "Named while leaving" })
+    )
+    await pending
+  })
+  expect(settled).toBe(true)
+})
+
+it(
+  "does not save under an unproved session, and saves once it is proved again",
+  { timeout: 30000 },
+  async () => {
+    // A held session is not a weaker one: nothing may be written under it. The
+    // surface is inert, so no person can start a write — but a debounced autosave
+    // would start one on its own, with nobody there to be stopped. It waits, and
+    // the work waits with it, intact.
+    let reachable = true
+    const saves: unknown[] = []
+    mockNativeSession(undefined, {
+      "GET /api/neev/session": () =>
+        reachable ? json(orgSession) : json({ code: "unavailable" }, 503),
+      [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+      [`GET ${path}/content?revision=1`]: () =>
+        json({ document: null, revision, markdown: "seed" }),
+      [`GET ${path}/revisions`]: () =>
+        json({ items: [revision], nextAfter: null }),
+      [`POST ${path}/revisions`]: (init) => {
+        saves.push(JSON.parse(init.body as string))
+        return json(
+          { ...revision, revision: "2", byteLength: "6", parentRevision: "1" },
+          201
+        )
+      },
+    })
+    const user = userEvent.setup()
+    mount(resource, 2000)
+    await user.type(
+      await screen.findByRole(
+        "textbox",
+        { name: "Document content" },
+        { timeout: 5000 }
+      ),
+      "!"
+    )
+
+    // The check fails before the debounce elapses.
+    reachable = false
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")))
+    await screen.findByRole("button", { name: "Try again" })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2600))
+    })
+    expect(saves).toEqual([])
+
+    // Proved again — and the save that was owed happens on its own, without
+    // waiting for another keystroke nobody knew to make.
+    reachable = true
+    await user.click(screen.getByRole("button", { name: "Try again" }))
+    await waitFor(() => expect(saves).toHaveLength(1), { timeout: 10000 })
+  }
+)

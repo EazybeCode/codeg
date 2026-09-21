@@ -178,7 +178,11 @@
     "signInCodeHint": "Abra a página e aprove, depois cole aqui o código que você receber.",
     "testConnection": "Testar",
     "testConnectionNamed": "Testar a conexão de {name}",
-    "testingConnection": "Testando…"
+    "testingConnection": "Testando…",
+    "renameFailed": "Não foi possível guardar esse nome.",
+    "activityWorking": "A trabalhar…",
+    "activityRunningTool": "A executar {name}…",
+    "activityElapsed": "{number}s"
   },
   "Native": {
     "callbackConflict": "Este método de acesso entra em conflito com uma conta existente. Use seu método de acesso original e abra Configurações para vincular outro método. As contas nunca são mescladas automaticamente.",

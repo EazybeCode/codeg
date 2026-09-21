@@ -84,7 +84,25 @@ it("hides and disables an open workspace menu until visibility auth is revalidat
   expect(await screen.findByRole("menu")).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
+const CHAT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+const chatResource = {
+  id: CHAT_ID,
+  orgId: 3,
+  nodeId: 7,
+  kind: "chat",
+  creatorId: 1,
+  title: "New chat",
+  visibility: "private",
+  originChatId: null,
+  authRevision: "1",
+  contentRevision: "0",
+  archived: false,
+  createdAt: 0,
+  updatedAt: 0,
+}
+
 it("shows the person and organization without GitHub or chat controls", async () => {
+  const created: Record<string, unknown>[] = []
   const mock = mockNativeSession(undefined, {
     "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes": () =>
@@ -103,7 +121,23 @@ it("shows the person and organization without GitHub or chat controls", async ()
       }),
     "GET /api/neev/nodes/7/documents": () =>
       json({ items: [], nextAfter: null }),
-    "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
+    // A real server lists the row it just made; an empty list here would
+    // evict the created chat from the tab's own cache.
+    "GET /api/neev/nodes/7/chats": () =>
+      json({
+        items: created.length ? [{ ...chatResource, nodeId: 7 }] : [],
+        nextAfter: null,
+      }),
+    // One entry, and what it makes is an ordinary chat resource — not a
+    // standalone private session that exists only in the client.
+    "POST /api/neev/nodes/7/chats": (init) => {
+      created.push(JSON.parse(init.body as string))
+      return json({ ...chatResource, nodeId: 7, title: "New chat" }, 201)
+    },
+    [`GET /api/neev/resources/${CHAT_ID}`]: () =>
+      json({ ...chatResource, nodeId: 7, title: "New chat" }),
+    [`GET /api/neev/chats/${CHAT_ID}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
     "GET /api/neev/agent/connections": () =>
       json({
         runtimeEnabled: false,
@@ -143,23 +177,20 @@ it("shows the person and organization without GitHub or chat controls", async ()
   await user.click(
     await screen.findByRole("button", { name: "Actions for Space" })
   )
+  // One agent entry, and no provider asked for up front — that is chosen
+  // inside the conversation.
+  expect(screen.queryByRole("menuitem", { name: /Claude|Codex/ })).toBeNull()
   await user.click(
-    await screen.findByRole("menuitem", { name: "New Claude chat" })
+    await screen.findByRole("menuitem", { name: "New agent chat" })
   )
-  // Straight to a composer for that provider: no list, no naming dialog.
-  // Its name is in the tab strip and on the panel, so there are two.
-  expect(
-    (await screen.findAllByText("New Claude chat")).length
-  ).toBeGreaterThanOrEqual(2)
-  expect(screen.getByRole("tab", { name: /New Claude chat/ })).toHaveAttribute(
+  // It created an actual chat the server owns, rather than a composer for a
+  // private session that exists nowhere until the first message.
+  await waitFor(() => expect(created).toHaveLength(1))
+  expect(screen.getByRole("tab", { name: /New chat/ })).toHaveAttribute(
     "aria-selected",
     "true"
   )
-  expect(screen.getByRole("textbox", { name: "Message" })).toBeVisible()
-  // With no runtime bound it says so rather than letting the user type into
-  // something that cannot answer.
-  expect(screen.getByText("claude is not connected yet.")).toBeVisible()
-  expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+  expect(await screen.findByRole("textbox", { name: "Message" })).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
 
@@ -393,7 +424,13 @@ it("makes a document the moment it is asked for, with no form to fill in", async
   // Created straight away, with a placeholder name rather than a prompt.
   await waitFor(() => expect(created).toHaveLength(1))
   expect(created[0]).toMatchObject({ title: "Untitled" })
-  expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull()
+  // Nothing was asked for first: no dialog stood between the click and the
+  // document. The title field that exists is the document's own, already
+  // carrying the placeholder — a thing to edit, not a form to fill in.
+  expect(screen.queryByRole("dialog")).toBeNull()
+  expect(await screen.findByRole("textbox", { name: "Title" })).toHaveValue(
+    "Untitled"
+  )
   // And it is open, in its own tab.
   expect(await screen.findByRole("tab", { name: /Untitled/ })).toHaveAttribute(
     "aria-selected",
@@ -588,7 +625,7 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
   // Creating a conversation makes it at once — no name asked for — and
   // reveals it in the sidebar under the placeholder it was given.
   await user.click(screen.getByRole("button", { name: "Actions for Space" }))
-  await user.click(screen.getByRole("menuitem", { name: "New chat" }))
+  await user.click(screen.getByRole("menuitem", { name: "New agent chat" }))
   expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull()
   await within(screen.getByRole("navigation", { name: "Projects" })).findByRole(
     "button",
@@ -637,14 +674,12 @@ it("lists a container's documents and team chats together", async () => {
   expect(screen.queryByRole("button", { name: "New document" })).toBeNull()
   expect(screen.queryByRole("button", { name: "New chat" })).toBeNull()
   await user.click(screen.getByRole("button", { name: "Actions for Space" }))
-  for (const label of [
-    "New document",
-    "New chat",
-    "New Claude chat",
-    "New Codex chat",
-    "New subfolder",
-  ])
+  // One conversation entry, not one per provider and not one per mode: agent
+  // or team, and which provider answers, are chosen inside the conversation.
+  for (const label of ["New document", "New agent chat", "New subfolder"])
     expect(screen.getByRole("menuitem", { name: label })).toBeVisible()
+  expect(screen.queryByRole("menuitem", { name: /Claude|Codex/ })).toBeNull()
+  expect(screen.queryByRole("menuitem", { name: "New chat" })).toBeNull()
   expect(mock.unknown).toEqual([])
 })
 
@@ -679,14 +714,33 @@ function rememberOpen(ref: unknown = { resourceId: DOC_ID, nodeId: 4 }) {
   localStorage.setItem("neev.ws.open.1:3", JSON.stringify(ref))
 }
 
+const NEW_CHAT_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+const NEW_CHAT = {
+  ...DOC,
+  id: NEW_CHAT_ID,
+  kind: "chat",
+  title: "New chat",
+  contentRevision: "0",
+}
+
 function restoringRoutes(resource: () => Response) {
+  const made: unknown[] = []
   return {
     "GET /api/neev/nodes": () => json({ nodes: [NODE], nextAfter: null }),
     "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [DOC], nextAfter: null }),
     // A container lists both kinds now, so both are stubbed.
-    "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/4/chats": () =>
+      json({ items: made.length ? [NEW_CHAT] : [], nextAfter: null }),
+    // Starting an agent chat creates an ordinary chat resource.
+    "POST /api/neev/nodes/4/chats": () => {
+      made.push(1)
+      return json(NEW_CHAT, 201)
+    },
+    [`GET /api/neev/resources/${NEW_CHAT_ID}`]: () => json(NEW_CHAT),
+    [`GET /api/neev/chats/${NEW_CHAT_ID}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
     [`GET /api/neev/resources/${DOC_ID}`]: resource,
     [`GET /api/neev/documents/${DOC_ID}/content`]: () =>
       json({
@@ -829,12 +883,15 @@ it("remembers the opened resource, and forgets it on the way back", async () => 
       JSON.parse(localStorage.getItem("neev.ws.open.1:3") as string)
     ).toEqual({ resourceId: DOC_ID, nodeId: 4 })
   )
-  // Leaving for an agent chat closes the resource, so there is nothing to
-  // restore — the next reload lands where the reader actually left off.
+  // An agent chat IS a resource now, so starting one moves the pointer to it
+  // rather than clearing it: the next reload lands on the conversation the
+  // reader actually left open.
   await user.click(screen.getByRole("button", { name: "Actions for Roadmap" }))
-  await user.click(screen.getByRole("menuitem", { name: "New Claude chat" }))
+  await user.click(screen.getByRole("menuitem", { name: "New agent chat" }))
   await waitFor(() =>
-    expect(localStorage.getItem("neev.ws.open.1:3")).toBeNull()
+    expect(
+      JSON.parse(localStorage.getItem("neev.ws.open.1:3") as string)
+    ).toEqual({ resourceId: NEW_CHAT_ID, nodeId: 4 })
   )
 })
 
@@ -977,6 +1034,9 @@ it("opens a project's contents by its name, and folds it by its chevron", async 
 it("keeps documents and team chats in the tree while an agent chat is open", async () => {
   // The tree lists every kind, so opening an agent chat is not a change of
   // content. Invalidating the cache here emptied a tree that was still right.
+  const opened: unknown[] = []
+  // This project is node 7, so the chat it makes hangs under node 7.
+  const made = { ...NEW_CHAT, nodeId: 7 }
   mockNativeSession(undefined, {
     "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes": () =>
@@ -998,7 +1058,16 @@ it("keeps documents and team chats in the tree while an agent chat is open", asy
         items: [{ ...resource, kind: "document" as const, title: "Brief" }],
         nextAfter: null,
       }),
-    "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/7/chats": () =>
+      json({ items: opened.length ? [made] : [], nextAfter: null }),
+    // The entry makes a chat resource; the tree must survive that.
+    "POST /api/neev/nodes/7/chats": () => {
+      opened.push(1)
+      return json(made, 201)
+    },
+    [`GET /api/neev/resources/${NEW_CHAT_ID}`]: () => json(made),
+    [`GET /api/neev/chats/${NEW_CHAT_ID}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
     "GET /api/neev/agent/connections": () =>
       json({ runtimeEnabled: true, connections: [] }),
   })
@@ -1012,12 +1081,10 @@ it("keeps documents and team chats in the tree while an agent chat is open", asy
   ).toBeVisible()
 
   await user.click(screen.getByRole("button", { name: "Actions for Space" }))
-  await user.click(screen.getByRole("menuitem", { name: "New Codex chat" }))
+  await user.click(screen.getByRole("menuitem", { name: "New agent chat" }))
 
-  // The composer is open AND the project still shows what it holds.
-  expect(
-    (await screen.findAllByText("New Codex chat")).length
-  ).toBeGreaterThanOrEqual(2)
+  // The conversation is open AND the project still shows what it holds.
+  expect(await screen.findByRole("textbox", { name: "Message" })).toBeVisible()
   expect(within(tree).getByRole("button", { name: "Brief" })).toBeVisible()
 })
 

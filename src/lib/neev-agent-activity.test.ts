@@ -1,9 +1,13 @@
 import { expect, it } from "vitest"
 import {
   describeToolInput,
+  elapsedSeconds,
+  isNoise,
   mergeActivity,
+  runningTool,
   splitByActivity,
   summariseActivity,
+  visibleActivity,
 } from "./neev-agent-activity"
 import { type NeevActivityItem } from "./neev-agent-sessions-client"
 
@@ -109,4 +113,49 @@ it("describes a tool input without trusting it to be valid JSON", () => {
   expect([
     ...describeToolInput(JSON.stringify({ command: "x".repeat(200) })),
   ]).toHaveLength(80)
+})
+
+const status = (
+  seq: number,
+  state: "model" | "stop" | "result" | "truncated" | "unsupported",
+  detail: string | null = null
+): NeevActivityItem => ({
+  seq,
+  offset: 0,
+  kind: "status",
+  id: `s${seq}`,
+  state,
+  detail,
+})
+
+it("drops the provider's bookkeeping and keeps what changes the meaning", () => {
+  // `end_turn` and `success` repeat what the transcript already shows; a cap
+  // being hit, or a stream we cannot read, does not.
+  expect(isNoise(status(1, "model"))).toBe(true)
+  expect(isNoise(status(2, "stop"))).toBe(true)
+  expect(isNoise(status(3, "result"))).toBe(true)
+  expect(isNoise(status(4, "truncated"))).toBe(false)
+  expect(isNoise(status(5, "unsupported", "codex"))).toBe(false)
+  expect(isNoise(call(6))).toBe(false)
+  expect(
+    visibleActivity([call(1), status(2, "result"), status(3, "truncated")]).map(
+      (item) => item.seq
+    )
+  ).toEqual([1, 3])
+})
+
+it("names the tool still in flight, and nothing once it answers", () => {
+  // The last call with no result is the one running.
+  expect(runningTool([call(1)])?.name).toBe("Bash")
+  expect(runningTool([call(1), result(2)])).toBeNull()
+  expect(runningTool([call(1), result(2), call(3)])?.name).toBe("Bash")
+  expect(runningTool([])).toBeNull()
+  expect(runningTool([status(1, "truncated")])).toBeNull()
+})
+
+it("counts whole seconds and never counts backwards", () => {
+  expect(elapsedSeconds(1_000, 4_500)).toBe(3)
+  expect(elapsedSeconds(1_000, 1_000)).toBe(0)
+  // A clock that disagrees with itself must not show a negative age.
+  expect(elapsedSeconds(5_000, 1_000)).toBe(0)
 })

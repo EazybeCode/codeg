@@ -25,15 +25,46 @@ type Status =
   | "revalidating"
   | "authenticated"
   | "unauthenticated"
+  /**
+   * A revalidation that could not be answered, with a session still held.
+   *
+   * NOT a weaker "authenticated": nothing may be read or written under it, and
+   * the surface it belongs to is hidden and inert until the check succeeds.
+   * What it does preserve is the subtree, because the alternative is worse than
+   * an unanswered check — dropping a laptop's wifi for a moment would unmount
+   * every open panel and take unsaved writing with it. Authority is re-proved
+   * on Retry; a definitive refusal still clears everything.
+   */
+  | "unverified"
   | "unavailable"
 interface NativeAuth {
   status: Status
+  /**
+   * Whether this session has been proved, right now.
+   *
+   * `session` outlives a failed check on purpose, so it alone is no longer the
+   * question to ask before writing. Anything that mutates — including work a
+   * timer would start on its own, with no one there to be stopped by an inert
+   * surface — asks this instead.
+   */
+  verified: boolean
   session: NativeSession | null
   capabilities: NativeCapabilities | null
   scopeKey: string | null
   signal: AbortSignal | undefined
   logoutError: boolean
   refresh: () => Promise<void>
+  /**
+   * Prove the session that is still held, without discarding it first.
+   *
+   * `refresh` starts from nothing — it clears the session, and everything
+   * scoped to it, before asking. That is right when there is nothing worth
+   * keeping, and exactly wrong after a check that failed to be answered: it
+   * would destroy the drafts the hold exists to protect. This re-proves what is
+   * already there, and falls back to `refresh` when nothing is held. An answer
+   * that refuses, or that comes back as a different identity, still clears.
+   */
+  retry: () => Promise<void>
   logout: () => Promise<void>
   changed: () => Promise<void>
   handleError: (error: unknown) => void
@@ -87,15 +118,21 @@ export function NativeAuthProvider({
     const next = clear()
     setStatus("loading")
     try {
-      const caps = await loadServerCapabilities(next.controller.signal)
+      // Asked for together: both are same-origin reads that do not depend on
+      // each other, and running them nose-to-tail put a whole round trip in
+      // front of every other request the workspace makes. The checks below are
+      // unchanged and still run before anything is believed — a capabilities
+      // response that is not `native` rejects the pair, aborted or superseded
+      // work is still dropped, and nothing is published until both are in.
+      const [caps, value] = await Promise.all([
+        loadServerCapabilities(next.controller.signal),
+        loadNativeSession(next.controller.signal),
+      ])
       if (caps.mode !== "native")
         throw new NativeClientError("invalid_response")
       if (next.controller.signal.aborted || next.generation !== current.current)
         return
       setCapabilities(caps)
-      const value = await loadNativeSession(next.controller.signal)
-      if (next.controller.signal.aborted || next.generation !== current.current)
-        return
       recoveryCsrf.current = value.csrf
       verified.current = value
       setSession(value)
@@ -126,12 +163,16 @@ export function NativeAuthProvider({
     const isCurrent = () =>
       !controller.signal.aborted && epoch === current.current
     try {
-      const caps = await loadServerCapabilities(controller.signal)
+      // Same pairing as the first load, and the same fail-closed order: a
+      // non-native capabilities answer throws before the session is used for
+      // anything, and a superseded revalidation is dropped.
+      const [caps, value] = await Promise.all([
+        loadServerCapabilities(controller.signal),
+        loadNativeSession(controller.signal),
+      ])
       if (!isCurrent()) return
       if (caps.mode !== "native")
         throw new NativeClientError("invalid_response")
-      const value = await loadNativeSession(controller.signal)
-      if (!isCurrent()) return
       // CSRF is validated against the cookie session by bootstrap. Compare only
       // in memory: it must never become a React key, DOM value, or stored draft key.
       const sameSession =
@@ -148,14 +189,23 @@ export function NativeAuthProvider({
       setStatus("authenticated")
     } catch (error) {
       if (!isCurrent()) return
-      clear()
-      recoveryCsrf.current = null
-      setStatus(
+      // A refusal is an answer: the reader is not entitled to this any more,
+      // and everything scoped to it goes, drafts included.
+      if (
         error instanceof NativeClientError &&
-          (error.kind === "unauthorized" || error.kind === "forbidden")
-          ? "unauthenticated"
-          : "unavailable"
-      )
+        (error.kind === "unauthorized" || error.kind === "forbidden")
+      ) {
+        clear()
+        recoveryCsrf.current = null
+        setStatus("unauthenticated")
+        return
+      }
+      // Anything else is not an answer at all — an unreachable server, a
+      // dropped connection, a reply that made no sense. Destroying the session
+      // here treated silence as a refusal, and a moment of bad wifi took every
+      // open draft with it. The session is kept, unproved and unusable, until
+      // the check can actually be made.
+      setStatus("unverified")
     }
   }, [clear, refresh])
   const changed = useCallback(async () => {
@@ -278,15 +328,20 @@ export function NativeAuthProvider({
   const scopeKey = session
     ? `${session.user.id}:${session.organization?.id ?? "identity"}:${generation}`
     : null
+  // Proved, and still proved: a check that has not come back leaves the
+  // session in place but not in force.
+  const proved = status === "authenticated"
   const value = useMemo(
     () => ({
       status,
+      verified: proved,
       session,
       capabilities,
       scopeKey,
       signal,
       logoutError,
       refresh,
+      retry: revalidateVisibility,
       logout,
       changed,
       handleError,
@@ -294,12 +349,14 @@ export function NativeAuthProvider({
     }),
     [
       status,
+      proved,
       session,
       capabilities,
       scopeKey,
       signal,
       logoutError,
       refresh,
+      revalidateVisibility,
       logout,
       changed,
       handleError,

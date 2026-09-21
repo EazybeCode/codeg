@@ -16,6 +16,7 @@ import { useNativeAuth } from "./native-auth-provider"
 import {
   json,
   mockNativeSession,
+  nativeCapabilities,
   NativeTestRoot,
   orgSession,
 } from "./test-helpers"
@@ -383,9 +384,12 @@ it.each([
   ],
   ["401", 401],
   ["403", 403],
-  ["failure", 503],
+  // A transient failure is deliberately NOT here. An unanswered check is not a
+  // refusal, and treating it as one destroyed drafts every time the network
+  // hiccuped; the session is held instead, and the work with it. See
+  // native-auth-provider.test.tsx.
 ])(
-  "hard-clears actual private drafts on visibility %s mismatch or failure",
+  "hard-clears actual private drafts on visibility %s mismatch or refusal",
   async (_label, response) => {
     let refreshed = false
     const mock = mockNativeSession(undefined, {
@@ -668,10 +672,12 @@ it.each(["chat", "document"] as const)(
       )
     )
     expect(screen.getByRole("textbox", { name })).toHaveValue("retained draft")
-    // A chat still has its second send in flight, so its composer stays shut.
-    // A document's save has just been answered, so its editor is usable again.
+    // A chat's composer stays usable while a send is in flight — an agent run
+    // shares this box and can take minutes. What that costs is a race the
+    // clear has to win honestly: text typed before the server answers is newer
+    // than the send, and survives it.
     if (kind === "chat")
-      expect(screen.getByRole("textbox", { name })).toBeDisabled()
+      expect(screen.getByRole("textbox", { name })).toBeEnabled()
     if (releases[1])
       await act(async () =>
         releases[1](
@@ -891,11 +897,22 @@ it(
       title: "Draft document",
       contentRevision: "0",
     }
+    const STARTED_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    const started: NativeResource[] = []
     const mock = mockNativeSession(undefined, {
       "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
-      "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes/2/chats": () =>
+        json({ items: started.length ? [started[0]] : [], nextAfter: null }),
       "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
       "GET /api/neev/nodes/5/chats": () => json({ items: [], nextAfter: null }),
+      // Starting an agent chat creates an ordinary chat resource under Launch.
+      "POST /api/neev/nodes/2/chats": () => {
+        started.push({ ...chat, id: STARTED_ID, nodeId: 2, title: "New chat" })
+        return json(started[0], 201)
+      },
+      [`GET /api/neev/resources/${STARTED_ID}`]: () => json(started[0]),
+      [`GET /api/neev/chats/${STARTED_ID}/messages`]: () =>
+        json({ items: [], nextAfter: null }),
       "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
       "GET /api/neev/nodes/2/documents": () =>
         json({ items: [], nextAfter: null }),
@@ -945,7 +962,7 @@ it(
     await user.click(
       screen.getAllByRole("button", { name: "Actions for Launch" })[0]
     )
-    await user.click(screen.getByRole("menuitem", { name: "New Claude chat" }))
+    await user.click(screen.getByRole("menuitem", { name: "New agent chat" }))
     expect(screen.queryByRole("dialog")).toBeNull()
     await user.click(screen.getByRole("tab", { name: /Draft document/ }))
     expect(
@@ -1268,6 +1285,29 @@ it("auth invalidation clears a private draft even while its Settings guard is op
     "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/nodes/4/documents": () =>
       json({ items: [], nextAfter: null }),
+    // The link to Settings lives in the agent composer now, and only appears
+    // when there is a runtime and a provider that is not connected yet.
+    "GET /api/workos/capabilities": () =>
+      json({ ...nativeCapabilities, runtimeEnabled: true }),
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [
+          {
+            provider: "claude",
+            state: "not_signed_in",
+            accountLabel: null,
+            checkedAt: null,
+            errorCode: null,
+          },
+        ],
+      }),
+    // With a runtime bound, the conversation asks whether this reader has ever
+    // invoked here. They have not, and an empty history is a normal history.
+    [`GET /api/neev/chats/${chat.id}/agent?provider=claude`]: () =>
+      json({ code: "not_found" }, 404),
+    [`GET /api/neev/chats/${chat.id}/agent?provider=codex`]: () =>
+      json({ code: "not_found" }, 404),
     "GET /api/neev/session": () =>
       json(
         expired
@@ -1295,10 +1335,11 @@ it("auth invalidation clears a private draft even while its Settings guard is op
     await screen.findByRole("textbox", { name: "Message" }),
     "secret pending draft"
   )
-  // The personal-agents link now lives in the collapsible agent context panel.
-  await user.click(screen.getByRole("button", { name: "Agent panel" }))
+  // The link lives with the agent composer now: the mode is the thing that
+  // decides what Send does, so what it needs to work is stated next to it.
+  await user.click(screen.getByRole("button", { name: "Ask agent" }))
   await user.click(
-    screen.getByRole("link", { name: "Personal AI connections" })
+    await screen.findByRole("link", { name: "Personal AI connections" })
   )
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "Discard unsaved changes?"

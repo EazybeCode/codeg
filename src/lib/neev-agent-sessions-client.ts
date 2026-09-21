@@ -916,6 +916,46 @@ export async function invokeTeamAgent(
 }
 
 /**
+ * The CALLER'S OWN holder for one chat and provider, or `null` if they have
+ * never invoked here.
+ *
+ * This is what makes a reopened conversation show the trace it showed before:
+ * the session's turns carry the persisted activity, so the view replays what
+ * actually happened rather than starting blank. `404` means no invocation, not
+ * a failure — an empty history is a normal history.
+ *
+ * It is private by construction. The server scopes the lookup to the current
+ * actor and organization, and this checks the two things a wrong row would get
+ * wrong anyway: the holder must be bound to the chat that was asked about, and
+ * it must be for the provider that was asked about. The caller additionally
+ * refuses a holder owned by anyone else, so no one else's private trace can be
+ * attached to a message in a shared thread.
+ */
+export async function loadTeamAgentSession(
+  chatId: string,
+  provider: NeevAgentProvider,
+  signal?: AbortSignal
+): Promise<NeevAgentSession | null> {
+  assertUuid(chatId)
+  if (!NEEV_AGENT_PROVIDERS.includes(provider)) invalidRequest()
+  let session: NeevAgentSession
+  try {
+    session = parseAgentSession(
+      await contentGet(
+        `/api/neev/chats/${chatId}/agent?provider=${provider}`,
+        signal
+      )
+    )
+  } catch (error) {
+    if (error instanceof NativeContentNotFoundError) return null
+    throw error
+  }
+  if (session.boundChatId !== chatId || session.provider !== provider)
+    return invalid()
+  return session
+}
+
+/**
  * Per-user provider sign-in (spec §5.4).
  *
  * `connect` records the intent and hands back an attempt to poll; completion is

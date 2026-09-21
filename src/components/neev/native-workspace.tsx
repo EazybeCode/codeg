@@ -80,7 +80,6 @@ import { NativeAgentChats } from "./native-agent-chats"
 import { NativeTabPanel } from "./native-suspended-surface"
 import {
   listAgentSessions,
-  NEEV_AGENT_PROVIDERS,
   type NeevAgentProvider,
   type NeevAgentSession,
 } from "@/lib/neev-agent-sessions-client"
@@ -257,7 +256,7 @@ function ProjectPanel({
   sessions: NeevAgentSession[]
   onOpenResource: (resource: NativeResource) => void
   onOpenSession: (session: NeevAgentSession) => void
-  onCreate: (kind: NativeResourceKind | "folder" | NeevAgentProvider) => void
+  onCreate: (kind: NativeResourceKind | "folder") => void
 }) {
   if (!node) return null
   return (
@@ -341,7 +340,7 @@ function ProjectContents({
   sessions: NeevAgentSession[]
   onOpenResource: (resource: NativeResource) => void
   onOpenSession: (session: NeevAgentSession) => void
-  onCreate: (kind: NativeResourceKind | "folder" | NeevAgentProvider) => void
+  onCreate: (kind: NativeResourceKind | "folder") => void
 }) {
   const t = useTranslations("Native"),
     c = useTranslations("NativeContent")
@@ -354,9 +353,7 @@ function ProjectContents({
         {(
           [
             ["document", c("newDocument"), FileText],
-            ["chat", c("newChat"), MessagesSquare],
-            ["claude", c("newClaudeChat"), Bot],
-            ["codex", c("newCodexChat"), Bot],
+            ["chat", c("newAgentChat"), Bot],
             ["folder", t("newSubfolder"), Folder],
           ] as const
         ).map(([kind, label, Icon]) => (
@@ -438,7 +435,6 @@ function NativeWorkspaceTree({
   selectedNodeId,
   openAgentSessionId,
   openAgentSession,
-  startAgentChat,
 }: {
   nodes: NativeNode[]
   parentId?: number | null
@@ -463,7 +459,6 @@ function NativeWorkspaceTree({
   selectedNodeId: number | null
   openAgentSessionId: string | null
   openAgentSession: (node: NativeNode, session: NeevAgentSession) => void
-  startAgentChat: (node: NativeNode, provider: NeevAgentProvider) => void
 }) {
   const t = useTranslations("Native")
   const c = useTranslations("NativeContent")
@@ -552,28 +547,19 @@ function NativeWorkspaceTree({
                       <FileText aria-hidden className="size-4" />
                       {c("newDocument")}
                     </DropdownMenuItem>
+                    {/* One entry, and it makes an ordinary chat resource.
+                        Agent or team, and which provider answers, are decided
+                        inside the conversation — where they can be changed
+                        without starting a different kind of thing. */}
                     <DropdownMenuItem
                       onSelect={() => {
                         contentOpener.current = node.id
                         void createContent(node, "chat")
                       }}
                     >
-                      <MessagesSquare aria-hidden className="size-4" />
-                      {c("newChat")}
+                      <Bot aria-hidden className="size-4" />
+                      {c("newAgentChat")}
                     </DropdownMenuItem>
-                    {NEEV_AGENT_PROVIDERS.map((agentProvider) => (
-                      <DropdownMenuItem
-                        key={agentProvider}
-                        onSelect={() => startAgentChat(node, agentProvider)}
-                      >
-                        <Bot aria-hidden className="size-4" />
-                        {c(
-                          agentProvider === "claude"
-                            ? "newClaudeChat"
-                            : "newCodexChat"
-                        )}
-                      </DropdownMenuItem>
-                    ))}
                     <DropdownMenuItem onSelect={() => create(node)}>
                       <Folder aria-hidden className="size-4" />
                       {t("newSubfolder")}
@@ -603,7 +589,6 @@ function NativeWorkspaceTree({
                     selectedNodeId={selectedNodeId}
                     openAgentSessionId={openAgentSessionId}
                     openAgentSession={openAgentSession}
-                    startAgentChat={startAgentChat}
                   />
                   <ul className="ms-3 space-y-0.5 border-s border-sidebar-border/60 ps-1.5">
                     {(list?.items ?? []).map((resource) => (
@@ -941,28 +926,6 @@ function WorkspaceContent() {
     },
     [user, orgId, showTab]
   )
-  /**
-   * Start a new agent chat: straight to a composer for that provider.
-   *
-   * Nothing is created here. The session comes into existence with the first
-   * message, so an abandoned draft leaves nothing behind to clean up.
-   */
-  const startAgentChat = useCallback(
-    (node: NativeNode, provider: NeevAgentProvider) => {
-      keepAll(() => {
-        setOpen(null)
-        setCreation(undefined)
-        setSectionState("agents")
-        setActiveSection("agents")
-        // A draft is not a place to come back to.
-        if (user !== undefined && orgId !== undefined)
-          setOpenAgentSession(user, orgId, null)
-        setDrawer(false)
-        showTab({ kind: "draft", provider, nodeId: node.id })
-      })
-    },
-    [user, orgId, showTab]
-  )
   // The resource kind shown for the active section. Agent Chats has no backend
   // resources yet (§5) — the center renders an honest connect/setup surface.
   const sectionKind: NativeResourceKind =
@@ -1108,7 +1071,9 @@ function WorkspaceContent() {
           agentSessions.find((item) => item.id === tab.sessionId)?.title ??
           t("loading")
         )
-      return c(tab.provider === "claude" ? "newClaudeChat" : "newCodexChat")
+      // Provider-neutral: which one answers is chosen inside the chat and can
+      // change before the first message, so the tab cannot claim one yet.
+      return c("newAgentChat")
     },
     [nodeById, itemsByNode, agentSessions, t, c]
   )
@@ -1180,6 +1145,11 @@ function WorkspaceContent() {
         setExpanded((old) => new Set([...old, node.id]))
         void loadItems(node.id)
         setDrawer(false)
+        // The same opening the sidebar performs, so the restore pointer moves
+        // to what was just made. Without this a reload after creating
+        // something brought the reader back to whatever they had open before
+        // it, and the new thing was nowhere.
+        setOpen({ resource, request: ++openNumber.current })
         // `fresh` is what lets the panel name it from the first thing typed.
         showTab({
           kind: "resource",
@@ -1512,7 +1482,6 @@ function WorkspaceContent() {
             selectedNodeId={frontNodeId}
             openAgentSessionId={frontSessionId}
             openAgentSession={openAgentSession}
-            startAgentChat={startAgentChat}
           />
           {!loading && nodes.length === 0 && !query.trim() && (
             <p className="px-2 text-sm text-muted-foreground">
@@ -1794,8 +1763,6 @@ function WorkspaceContent() {
                                   parentId: node.id,
                                 })
                               )
-                            else if (kind === "claude" || kind === "codex")
-                              startAgentChat(node, kind)
                             else void createContent(node, kind)
                           }}
                         />
