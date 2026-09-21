@@ -1,26 +1,40 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import Link from "next/link"
 import { useRouter } from "next/navigation"
+import { useTheme } from "next-themes"
+import {
+  closeTab as closeWorkspaceTab,
+  closeTabByKey,
+  openTab as openWorkspaceTab,
+  readTabs,
+  tabKey,
+  writeTabs,
+  type WorkspaceTab,
+} from "@/lib/neev-workspace-tabs"
 import { useTranslations } from "next-intl"
 import {
   Bot,
   ChevronRight,
   FileText,
+  Check,
   Folder,
   Layers3,
   Menu,
   MessagesSquare,
+  Monitor,
+  Moon,
   MoreHorizontal,
   PanelLeft,
   Plus,
+  Search,
   Settings2,
+  X,
+  Sun,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
-  DialogClose,
   DialogDescription,
   DialogTitle,
   DialogTrigger,
@@ -28,6 +42,8 @@ import {
 import {
   DropdownMenu,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -61,6 +77,7 @@ import {
   type ContentNavigationGuard,
 } from "./native-content"
 import { NativeAgentChats } from "./native-agent-chats"
+import { NativeTabPanel } from "./native-suspended-surface"
 import {
   listAgentSessions,
   NEEV_AGENT_PROVIDERS,
@@ -112,6 +129,195 @@ const CONTENT_KINDS: NativeResourceKind[] = ["document", "chat"]
  * This lists its documents, its team chats and its agent chats together, in one
  * measure, with the same five ways to add that the sidebar menu offers.
  */
+
+/** A container and every ancestor above it, outermost first. */
+function trail(nodes: NativeNode[], nodeId: number): string[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const names: string[] = []
+  let current = byId.get(nodeId)
+  // Bounded by the node count: a corrupt `parentId` chain must not spin.
+  for (let step = 0; current && step <= nodes.length; step += 1) {
+    names.unshift(current.name)
+    current = current.parentId === null ? undefined : byId.get(current.parentId)
+  }
+  return names
+}
+
+function TabIcon({ tab }: { tab: WorkspaceTab }) {
+  const className = "size-3.5 shrink-0"
+  if (tab.kind === "project")
+    return <Layers3 aria-hidden className={className} />
+  if (tab.kind === "agent" || tab.kind === "draft")
+    return <Bot aria-hidden className={className} />
+  return <FileText aria-hidden className={className} />
+}
+
+/**
+ * A document or team chat, resolved before it is rendered.
+ *
+ * The sidebar's lists are lazy and paginated, so a tab's resource is often not
+ * in them — being absent from a catalog is not the same as being gone. This
+ * asks for the resource itself, and only a refusal from that authorized read
+ * closes the tab.
+ */
+function ResourcePanel({
+  orgId,
+  resourceId,
+  node,
+  cached,
+  registerGuard,
+  onGone,
+}: {
+  orgId: number
+  resourceId: string
+  node: NativeNode | undefined
+  cached: NativeResource | undefined
+  registerGuard: (guard: ContentNavigationGuard) => void
+  onGone: () => void
+}) {
+  const auth = useNativeAuth(),
+    t = useTranslations("Native")
+  // Seeded from the sidebar's list when it happens to hold this one, and
+  // otherwise fetched below. Either way it is read once: the panel then owns
+  // what it is showing.
+  const [loaded, setLoaded] = useState<NativeResource | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  const [request, setRequest] = useState(0)
+  const resource = loaded ?? cached ?? null
+  useEffect(() => {
+    if (resource || !node) return
+    const controller = new AbortController()
+    const load = async () => {
+      try {
+        const found = await loadNativeResource(
+          orgId,
+          resourceId,
+          controller.signal
+        )
+        if (controller.signal.aborted) return
+        setRequest((value) => value + 1)
+        setLoaded(found)
+      } catch (cause) {
+        if (controller.signal.aborted) return
+        auth.handleAuthorityError(cause)
+        // Gone or no longer permitted, from the resource's OWN read — not
+        // from its absence in a lazily-loaded catalog.
+        if (
+          cause instanceof NativeClientError &&
+          (cause.status === 404 || cause.status === 403)
+        )
+          onGone()
+        else setError(cause)
+      }
+    }
+    void load()
+    return () => controller.abort()
+  }, [resource, node, orgId, resourceId, auth, onGone])
+
+  if (error) return <NativeError error={error} />
+  if (!node || !resource)
+    return (
+      <p role="status" className="px-6 py-10 text-sm text-muted-foreground">
+        {t("loading")}
+      </p>
+    )
+  return (
+    <NativeContent
+      node={node}
+      chromeless
+      open={{ resource, request }}
+      onRequestNavigationGuard={registerGuard}
+    />
+  )
+}
+
+/**
+ * A project's own page: what it holds, and the ways to add to it.
+ */
+function ProjectPanel({
+  node,
+  items,
+  loading,
+  sessions,
+  onOpenResource,
+  onOpenSession,
+  onCreate,
+}: {
+  node: NativeNode | undefined
+  items: NativeResource[]
+  loading: boolean
+  sessions: NeevAgentSession[]
+  onOpenResource: (resource: NativeResource) => void
+  onOpenSession: (session: NeevAgentSession) => void
+  onCreate: (kind: NativeResourceKind | "folder" | NeevAgentProvider) => void
+}) {
+  if (!node) return null
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14">
+        <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+          {node.name}
+        </h1>
+        <ProjectContents
+          node={node}
+          items={items}
+          loading={loading}
+          sessions={sessions}
+          onOpenResource={onOpenResource}
+          onOpenSession={onOpenSession}
+          onCreate={onCreate}
+        />
+      </div>
+    </div>
+  )
+}
+
+/** Nothing open yet: the projects there are, and the way to make one. */
+function WorkspaceStart({
+  nodes,
+  onOpen,
+  onCreate,
+}: {
+  nodes: NativeNode[]
+  onOpen: (node: NativeNode) => void
+  onCreate: () => void
+}) {
+  const t = useTranslations("Native")
+  const roots = nodes.filter((node) => node.parentId === null)
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14">
+        <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+          {t("projects")}
+        </h1>
+        <p className="mt-3 text-sm leading-6 text-muted-foreground">
+          {roots.length === 0 ? t("emptyProjects") : t("projectsLanding")}
+        </p>
+        <ul className="mt-6 space-y-0.5">
+          {roots.map((node) => (
+            <li key={node.id}>
+              <button
+                onClick={() => onOpen(node)}
+                className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-start text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Layers3
+                  aria-hidden
+                  className="size-4 shrink-0 text-muted-foreground"
+                />
+                <span className="truncate">{node.name}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        <Button variant="outline" size="sm" className="mt-6" onClick={onCreate}>
+          <Plus aria-hidden className="size-4" />
+          {t("newProject")}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function ProjectContents({
   node,
   items,
@@ -483,6 +689,7 @@ type Editor = {
 }
 function WorkspaceContent() {
   const t = useTranslations("Native"),
+    c = useTranslations("NativeContent"),
     auth = useNativeAuth(),
     mobile = useIsMobile()
   const router = useRouter()
@@ -496,15 +703,121 @@ function WorkspaceContent() {
   // container: they are private, so this is one small list either way.
   const [agentSessions, setAgentSessions] = useState<NeevAgentSession[]>([])
   const [agentsToken] = useState(0)
+  // What the reader is looking for, across the projects and items already
+  // loaded plus their own agent chats. Empty means the tree.
+  const [query, setQuery] = useState("")
+  // What is open, and which one is in front. A tab is a reference; the views
+  // below still fetch and authorize their own subject.
+  const [tabs, setTabs] = useState<WorkspaceTab[]>([])
+  const [activeTab, setActiveTab] = useState(-1)
+  const [tabLimit, setTabLimit] = useState(false)
+  const tabsRestored = useRef(false)
+  // The tabs as they stand RIGHT NOW, for handlers that open or close several
+  // in one gesture. Deliberately not read from `tabs` inside a state updater:
+  // an updater must be pure, and the extra `setActiveTab` in one was being
+  // dropped on re-invocation.
+  const tabsRef = useRef<WorkspaceTab[]>([])
+  /**
+   * Tabs that have actually been looked at.
+   *
+   * A restored tab is a reference, not a running editor: mounting all of them
+   * at startup would open a dozen editors and pollers before the first paint,
+   * for panels the reader may never return to. A panel mounts when its tab is
+   * first brought to the front, and from then on it STAYS mounted — which is
+   * what keeps a draft safe when switching away and back.
+   */
+  const [visited, setVisited] = useState<ReadonlySet<string>>(new Set())
+  const activeTabRef = useRef(-1)
+  const commitTabs = useCallback((next: WorkspaceTab[], active: number) => {
+    tabsRef.current = next
+    activeTabRef.current = active
+    setTabs(next)
+    setActiveTab(active)
+    const front = next[active]
+    if (front) setVisited((old) => new Set([...old, tabKey(front)]))
+  }, [])
+  const { theme, setTheme } = useTheme()
   // Restoration is attempted once per mount, like the resource pointer.
   const agentRestored = useRef(false)
   const user = auth.session?.user.id
   const orgId = auth.session?.organization?.id
-  const navigationGuard = useRef<ContentNavigationGuard>((action) => action())
-  const registerGuard = useCallback((guard: ContentNavigationGuard) => {
-    navigationGuard.current = guard
+  /**
+   * One guard per open tab, not one for the workspace.
+   *
+   * Every mounted panel registers its own, and they are all mounted at once —
+   * a single shared guard would mean closing one tab consulted whichever panel
+   * happened to register last, and a hidden panel's unsaved work would be
+   * discarded without anyone being asked about it.
+   */
+  /**
+   * Do it. Nothing is being destroyed.
+   *
+   * Opening a tab, switching to one, or opening a dialog leaves every other
+   * panel mounted and holding its draft, so there is nothing to ask the reader
+   * about. Only closing a tab (`guardTab`) or leaving the workspace
+   * (`guardAll`) destroys anything.
+   */
+  const keepAll = (action: () => void) => action()
+  const guards = useRef(new Map<string, ContentNavigationGuard>())
+  const registerGuardFor = useCallback(
+    (key: string) => (guard: ContentNavigationGuard) => {
+      guards.current.set(key, guard)
+    },
+    []
+  )
+  /**
+   * Bring a tab to the front, so whatever it is about to say is visible.
+   *
+   * A panel's confirmation renders INSIDE that panel — which is what stops a
+   * hidden tab's menus appearing over the one in front. The same containment
+   * would hide a confirmation we asked for, leaving a dialog nobody can see and
+   * a Close button that appears to do nothing.
+   */
+  const facePanel = useCallback((key: string) => {
+    const index = tabsRef.current.findIndex((tab) => tabKey(tab) === key)
+    if (index < 0 || index === activeTabRef.current) return
+    activeTabRef.current = index
+    setActiveTab(index)
+    setVisited((old) => new Set([...old, key]))
   }, [])
-  const [creation, setCreation] = useState<ContentCreation | undefined>()
+
+  /** Ask ONE tab. Used when closing it, which is the only thing that destroys it. */
+  const guardTab = useCallback(
+    (key: string, action: () => void) => {
+      const guard = guards.current.get(key)
+      if (!guard) return action()
+      // Show the tab being asked about before it asks.
+      facePanel(key)
+      guard(action)
+    },
+    [facePanel]
+  )
+  /**
+   * Ask EVERY open tab, then act.
+   *
+   * For leaving the workspace altogether — settings, sign-out — where every
+   * mounted panel is about to go, not just the one in front.
+   */
+  const guardAll = useCallback(
+    (action: () => void) => {
+      const pending = [...guards.current.entries()]
+      const run = (index: number): void => {
+        if (index >= pending.length) return action()
+        const [key, guard] = pending[index]
+        // Whichever panel stops to ask something becomes the visible one, so
+        // the reader is looking at the draft they are being asked about.
+        facePanel(key)
+        guard(() => run(index + 1))
+      }
+      run(0)
+    },
+    [facePanel]
+  )
+  // The draft being written, and the project it belongs to — a workspace with
+  // several open tabs needs to know which one is showing it.
+  const [creation, setCreation] = useState<
+    (ContentCreation & { nodeId: number }) | undefined
+  >()
   const creationNumber = useRef(0)
   const org = auth.session?.organization
   const { handleError } = auth
@@ -522,7 +835,7 @@ function WorkspaceContent() {
     [section, setSectionState] = useState<Section>(DEFAULT_SECTION)
   useEffect(() => setSectionState(getActiveSection()), [])
   const changeSection = useCallback((next: Section) => {
-    navigationGuard.current(() => {
+    keepAll(() => {
       setSectionState(next)
       setActiveSection(next)
       setDrawer(false)
@@ -550,16 +863,83 @@ function WorkspaceContent() {
    * thing the screen did not show. Expanding comes along for the ride, because
    * opening something you cannot see the inside of is half a gesture.
    */
-  const selectNode = useCallback((node: NativeNode) => {
-    navigationGuard.current(() => {
-      setSelected(node.id)
-      setOpen(null)
-      setCreation(undefined)
-      setAgentView(null)
-      setExpanded((old) => new Set([...old, node.id]))
-      setDrawer(false)
-    })
-  }, [])
+  const nodeById = useCallback(
+    (id: number) => nodes.find((node) => node.id === id),
+    [nodes]
+  )
+  /** Close a tab by identity, for a panel reporting its own subject gone. */
+  const dropTab = useCallback(
+    (key: string) => {
+      const next = closeTabByKey(tabsRef.current, key, activeTabRef.current)
+      commitTabs(next.tabs, next.active)
+      guards.current.delete(key)
+    },
+    [commitTabs]
+  )
+  /** A draft that became a real chat keeps its place in the strip. */
+  const replaceTab = useCallback(
+    (key: string, tab: WorkspaceTab) => {
+      const index = tabsRef.current.findIndex((item) => tabKey(item) === key)
+      if (index < 0) return
+      const next = [...tabsRef.current]
+      next[index] = tab
+      // The guard belonged to the draft; the chat registers its own.
+      guards.current.delete(key)
+      commitTabs(next, activeTabRef.current)
+    },
+    [commitTabs]
+  )
+
+  /** Bring a tab to the front, adding it if it is not open yet. */
+  const showTab = useCallback(
+    (tab: WorkspaceTab) => {
+      const next = openWorkspaceTab(tabsRef.current, tab)
+      // Refused at the limit rather than evicting something that may hold
+      // unsaved work; the reader closes a tab themselves.
+      if (next.refused) {
+        setTabLimit(true)
+        return
+      }
+      setTabLimit(false)
+      commitTabs(next.tabs, next.active)
+    },
+    [commitTabs]
+  )
+
+  /** Close a tab. The only destructive one of these, so the only guarded one. */
+  const dismissTab = useCallback(
+    (index: number) => {
+      const tab = tabsRef.current[index]
+      if (!tab) return
+      // Only THIS tab is being destroyed, so only this tab is asked.
+      guardTab(tabKey(tab), () => {
+        const next = closeWorkspaceTab(
+          tabsRef.current,
+          tabsRef.current.findIndex((item) => tabKey(item) === tabKey(tab)),
+          activeTabRef.current
+        )
+        commitTabs(next.tabs, next.active)
+        guards.current.delete(tabKey(tab))
+        setTabLimit(false)
+      })
+    },
+    [guardTab, commitTabs]
+  )
+
+  const selectNode = useCallback(
+    (node: NativeNode) => {
+      keepAll(() => {
+        setSelected(node.id)
+        setOpen(null)
+        setCreation(undefined)
+        setAgentView(null)
+        setExpanded((old) => new Set([...old, node.id]))
+        setDrawer(false)
+        showTab({ kind: "project", nodeId: node.id })
+      })
+    },
+    [showTab]
+  )
 
   /** Start a draft of `kind` inside `node`, from the sidebar or the landing. */
   const createContent = useCallback(
@@ -569,7 +949,7 @@ function WorkspaceContent() {
       const returnFocus =
         document.getElementById(menu?.getAttribute("aria-labelledby") ?? "") ??
         active
-      navigationGuard.current(() => {
+      keepAll(() => {
         // The created kind decides the section, so the new item lands and
         // appears under this container in the right list.
         const nextSection = kind === "document" ? "docs" : "team"
@@ -579,11 +959,19 @@ function WorkspaceContent() {
         setOpen(null)
         setAgentView(null)
         setExpanded((old) => new Set([...old, node.id]))
-        setCreation({ kind, request: ++creationNumber.current, returnFocus })
+        setCreation({
+          kind,
+          nodeId: node.id,
+          request: ++creationNumber.current,
+          returnFocus,
+        })
         setDrawer(false)
+        // The draft is written on the project's own page, so that is the tab
+        // that has to be in front.
+        showTab({ kind: "project", nodeId: node.id })
       })
     },
-    []
+    [showTab]
   )
   /**
    * Open a saved agent chat straight into its transcript.
@@ -593,7 +981,7 @@ function WorkspaceContent() {
    */
   const openAgentSession = useCallback(
     (node: NativeNode, session: NeevAgentSession) => {
-      navigationGuard.current(() => {
+      keepAll(() => {
         setSelected(node.id)
         setOpen(null)
         setCreation(undefined)
@@ -603,9 +991,10 @@ function WorkspaceContent() {
         if (user !== undefined && orgId !== undefined)
           setOpenAgentSession(user, orgId, session.id)
         setDrawer(false)
+        showTab({ kind: "agent", sessionId: session.id })
       })
     },
-    [user, orgId]
+    [user, orgId, showTab]
   )
   /**
    * Start a new agent chat: straight to a composer for that provider.
@@ -615,7 +1004,7 @@ function WorkspaceContent() {
    */
   const startAgentChat = useCallback(
     (node: NativeNode, provider: NeevAgentProvider) => {
-      navigationGuard.current(() => {
+      keepAll(() => {
         setSelected(node.id)
         setOpen(null)
         setCreation(undefined)
@@ -626,9 +1015,10 @@ function WorkspaceContent() {
         if (user !== undefined && orgId !== undefined)
           setOpenAgentSession(user, orgId, null)
         setDrawer(false)
+        showTab({ kind: "draft", provider, nodeId: node.id })
       })
     },
-    [user, orgId]
+    [user, orgId, showTab]
   )
   // The resource kind shown for the active section. Agent Chats has no backend
   // resources yet (§5) — the center renders an honest connect/setup surface.
@@ -741,15 +1131,57 @@ function WorkspaceContent() {
     return () => controller.abort()
   }, [org, agentsToken, auth, user, orgId])
 
+  // Saved references only, and only once the first restore has run — writing
+  // an empty list before reading would erase what we are about to read.
+  useEffect(() => {
+    if (!tabsRestored.current || user === undefined || orgId === undefined)
+      return
+    writeTabs(user, orgId, tabs, activeTab)
+  }, [tabs, activeTab, user, orgId])
+  useEffect(() => {
+    if (tabsRestored.current || user === undefined || orgId === undefined)
+      return
+    tabsRestored.current = true
+    const saved = readTabs(user, orgId)
+    if (saved.tabs.length === 0) return
+    commitTabs(saved.tabs, saved.active)
+  }, [user, orgId, commitTabs])
+
+  /** What a tab is called in the strip: the thing itself, never its kind. */
+
+  const tabTitle = useCallback(
+    (tab: WorkspaceTab): string => {
+      if (tab.kind === "project") return nodeById(tab.nodeId)?.name ?? ""
+      if (tab.kind === "resource")
+        return (
+          (itemsByNode[tab.nodeId]?.items ?? []).find(
+            (item) => item.id === tab.resourceId
+          )?.title ?? t("loading")
+        )
+      if (tab.kind === "agent")
+        return (
+          agentSessions.find((item) => item.id === tab.sessionId)?.title ??
+          t("loading")
+        )
+      return c(tab.provider === "claude" ? "newClaudeChat" : "newCodexChat")
+    },
+    [nodeById, itemsByNode, agentSessions, t, c]
+  )
+
   const openResource = useCallback(
     (node: NativeNode, resource: NativeResource) =>
-      navigationGuard.current(() => {
+      keepAll(() => {
         setSelected(node.id)
         setCreation(undefined)
         setOpen({ resource, request: ++openNumber.current })
         setDrawer(false)
+        showTab({
+          kind: "resource",
+          resourceId: resource.id,
+          nodeId: node.id,
+        })
       }),
-    []
+    [showTab]
   )
   // Remember only WHICH resource is open, scoped to this user and org. The
   // pointer confers nothing: it is re-fetched and re-authorized on restore.
@@ -806,6 +1238,12 @@ function WorkspaceContent() {
             (old) => new Set([...old, ...ancestry(nodes, resource.nodeId)])
           )
           setOpen({ resource, request: ++openNumber.current })
+          // Restored into a tab, like every other way of opening something.
+          showTab({
+            kind: "resource",
+            resourceId: resource.id,
+            nodeId: resource.nodeId,
+          })
           void loadItems(resource.nodeId)
         }
       } catch {
@@ -818,7 +1256,7 @@ function WorkspaceContent() {
     }
     void restore()
     return () => controller.abort()
-  }, [loading, user, orgId, section, nodes, loadItems])
+  }, [loading, user, orgId, section, nodes, loadItems, showTab])
   const [editor, setEditor] = useState<Editor | null>(null),
     [name, setName] = useState(""),
     [parent, setParent] = useState<number | null>(null),
@@ -847,7 +1285,6 @@ function WorkspaceContent() {
     return () => controller.abort()
   }, [org, handleError])
   if (!org || !auth.session) return null
-  const selectedNode = nodes.find((node) => node.id === selected)
   function openEditor(value: Editor) {
     const active = document.activeElement as HTMLElement | null
     const menu = active?.closest('[role="menu"]')
@@ -931,30 +1368,83 @@ function WorkspaceContent() {
       setLoading(false)
     }
   }
+  // Where the active tab lives: project, then the thing inside it.
+  const activeTabRef2 = tabs[activeTab]
+  const breadcrumb: string[] = []
+  if (activeTabRef2) {
+    const nodeId =
+      activeTabRef2.kind === "project"
+        ? activeTabRef2.nodeId
+        : activeTabRef2.kind === "resource"
+          ? activeTabRef2.nodeId
+          : activeTabRef2.kind === "draft"
+            ? activeTabRef2.nodeId
+            : (agentSessions.find((item) => item.id === activeTabRef2.sessionId)
+                ?.nodeId ?? null)
+    for (const name of nodeId === null ? [] : trail(nodes, nodeId))
+      breadcrumb.push(name)
+    if (activeTabRef2.kind !== "project")
+      breadcrumb.push(tabTitle(activeTabRef2))
+  }
+
   const sidebar = (
-    <div className="flex h-full min-w-0 flex-col gap-4 p-3">
-      <nav
-        aria-label={t("projects")}
-        className="flex min-h-0 flex-1 flex-col gap-2"
-      >
-        <div className="flex items-center justify-between gap-2 px-2 pt-1">
-          <h2 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    <div className="flex h-full min-w-0 flex-col">
+      {/* The organization is identity, not a banner across the window. */}
+      <div className="flex min-w-0 items-center gap-2 px-2.5 py-2">
+        {org.avatarUrl?.startsWith("data:image/") ? (
+          <span
+            role="img"
+            aria-label={t("organizationLogo")}
+            className="size-5 shrink-0 rounded bg-contain bg-center bg-no-repeat"
+            style={{ backgroundImage: `url(${org.avatarUrl})` }}
+          />
+        ) : (
+          <span
+            aria-hidden
+            className="flex size-5 shrink-0 items-center justify-center rounded bg-sidebar-accent text-[11px] font-semibold"
+          >
+            {org.name.slice(0, 1)}
+          </span>
+        )}
+        <span className="truncate text-sm font-medium" title={org.name}>
+          {org.name}
+        </span>
+      </div>
+      <div className="px-2.5 pb-2">
+        <label className="sr-only" htmlFor="neev-workspace-search">
+          {t("search")}
+        </label>
+        <div className="relative">
+          <Search
+            aria-hidden
+            className="pointer-events-none absolute start-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+          />
+          <input
+            id="neev-workspace-search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("search")}
+            className="h-7 w-full rounded-md bg-sidebar-accent/60 ps-7 pe-2 text-[13px] outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        </div>
+      </div>
+      <nav aria-label={t("projects")} className="flex min-h-0 flex-1 flex-col">
+        <div className="flex items-center justify-between gap-2 px-2.5 pb-1">
+          <h2 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
             {t("projects")}
           </h2>
+          <button
+            aria-label={t("newProject")}
+            title={t("newProject")}
+            onClick={() =>
+              keepAll(() => openEditor({ kind: "project", parentId: null }))
+            }
+            className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Plus aria-hidden className="size-3.5" />
+          </button>
         </div>
-        <Button
-          variant="ghost"
-          className="justify-start gap-2"
-          onClick={() =>
-            navigationGuard.current(() =>
-              openEditor({ kind: "project", parentId: null })
-            )
-          }
-        >
-          <Plus aria-hidden className="size-4" />
-          {t("newProject")}
-        </Button>
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto px-1.5">
           <NativeWorkspaceTree
             nodes={nodes}
             expanded={expanded}
@@ -972,12 +1462,10 @@ function WorkspaceContent() {
               })
             }
             create={(node) =>
-              navigationGuard.current(() =>
-                openEditor({ kind: "folder", parentId: node.id })
-              )
+              keepAll(() => openEditor({ kind: "folder", parentId: node.id }))
             }
             edit={(node) =>
-              navigationGuard.current(() =>
+              keepAll(() =>
                 openEditor({ kind: node.kind, parentId: node.parentId, node })
               )
             }
@@ -992,7 +1480,7 @@ function WorkspaceContent() {
             openAgentSession={openAgentSession}
             startAgentChat={startAgentChat}
           />
-          {!loading && nodes.length === 0 && (
+          {!loading && nodes.length === 0 && !query.trim() && (
             <p className="px-2 text-sm text-muted-foreground">
               {t("emptyProjects")}
             </p>
@@ -1012,255 +1500,337 @@ function WorkspaceContent() {
           <NativeError error={error} />
         </div>
       </nav>
-      <div className="space-y-1 border-t border-sidebar-border pt-3">
-        <Button asChild variant="ghost" className="w-full justify-start gap-2">
-          <Link
-            href="/settings"
-            onClick={(event) => {
-              event.preventDefault()
-              navigationGuard.current(() => router.push("/settings"))
-            }}
-          >
-            <Settings2 aria-hidden className="size-4" />
-            {t("settings")}
-          </Link>
-        </Button>
-        <Button
-          variant="ghost"
-          className="w-full justify-start text-muted-foreground"
-          onClick={() => void auth.logout()}
-        >
-          {t("signOut")}
-        </Button>
+      <div className="border-t border-sidebar-border p-1.5">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-start text-sm hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring">
+              <span
+                aria-hidden
+                className="flex size-5 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-[11px] font-semibold"
+              >
+                {auth.session.user.displayName.slice(0, 1)}
+              </span>
+              <span className="truncate">{auth.session.user.displayName}</span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuItem
+              onSelect={() => guardAll(() => router.push("/settings"))}
+            >
+              <Settings2 aria-hidden className="size-4" />
+              {t("settings")}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            {/* A real control, not a label: the app defaults to dark and there
+                was nowhere to say otherwise. An explicit choice is kept. */}
+            <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+              {t("appearance")}
+            </DropdownMenuLabel>
+            {(["light", "dark", "system"] as const).map((option) => (
+              <DropdownMenuItem key={option} onSelect={() => setTheme(option)}>
+                {option === "light" ? (
+                  <Sun aria-hidden className="size-4" />
+                ) : option === "dark" ? (
+                  <Moon aria-hidden className="size-4" />
+                ) : (
+                  <Monitor aria-hidden className="size-4" />
+                )}
+                {t(
+                  option === "light"
+                    ? "themeLight"
+                    : option === "dark"
+                      ? "themeDark"
+                      : "themeSystem"
+                )}
+                {theme === option && (
+                  <Check aria-hidden className="ms-auto size-4" />
+                )}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => guardAll(() => void auth.logout())}
+            >
+              {t("signOut")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   )
   return (
     <div className="flex h-dvh min-w-0 flex-col overflow-hidden">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b px-2 sm:px-3">
-        {!mobile && (
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label={t("openNavigation")}
-            title={t("openNavigation")}
-            aria-expanded={sidebarOpen}
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-          >
-            <PanelLeft aria-hidden />
-          </Button>
-        )}
-        {mobile && (
-          <Dialog open={drawer} onOpenChange={setDrawer}>
-            <DialogTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                aria-label={t("openNavigation")}
-              >
-                <Menu aria-hidden />
-              </Button>
-            </DialogTrigger>
-            <DialogContent
-              showCloseButton={false}
-              className="h-[calc(100dvh-2rem)] max-w-sm gap-2 p-2"
-            >
-              <DialogTitle className="sr-only">{t("projects")}</DialogTitle>
-              <DialogDescription className="sr-only">
-                {t("navigationDescription")}
-              </DialogDescription>
-              <DialogClose asChild>
-                <Button variant="ghost" className="justify-self-end">
-                  {t("close")}
-                </Button>
-              </DialogClose>
-              {sidebar}
-            </DialogContent>
-          </Dialog>
-        )}
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          {org.avatarUrl?.startsWith("data:image/") ? (
-            <span
-              role="img"
-              aria-label={t("organizationLogo")}
-              className="size-8 shrink-0 rounded-md bg-contain bg-center bg-no-repeat"
-              style={{ backgroundImage: `url(${org.avatarUrl})` }}
-            />
-          ) : (
-            <span
-              aria-hidden
-              className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-sm font-semibold"
-            >
-              {org.name.slice(0, 1)}
-            </span>
-          )}
-          <span className="truncate text-sm font-semibold" title={org.name}>
-            {org.name}
-          </span>
-        </div>
-        <span
-          className="max-w-[35%] truncate text-xs text-muted-foreground"
-          title={auth.session.user.displayName}
-        >
-          {auth.session.user.displayName}
-        </span>
-      </header>
       <div className="flex min-h-0 min-w-0 flex-1">
         {!mobile && sidebarOpen && (
-          <aside className="w-[250px] shrink-0 border-e bg-sidebar text-sidebar-foreground">
+          <aside className="w-[248px] shrink-0 border-e bg-sidebar text-sidebar-foreground">
             {sidebar}
           </aside>
         )}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {section === "agents" && selectedNode && agentView ? (
-            // Saved agent sessions, always inside the project they were opened
-            // from. They are private to their owner and the server files them
-            // under a node (schema 12); this surface never appears without one,
-            // because a global list would be a destination outside Projects.
-            <NativeAgentChats
-              nodeId={selectedNode.id}
-              nodeName={selectedNode.name}
-              sessionId={agentView.sessionId}
-              draftProvider={agentView.provider}
-              onSessionCreated={(session) => {
-                // The tree owns selection, so it learns about the new chat and
-                // selects it; the centre is already showing it.
-                setAgentSessions((old) => [
-                  session,
-                  ...old.filter((item) => item.id !== session.id),
-                ])
-                setAgentView({ sessionId: session.id, provider: null })
-              }}
-              onDraftCancelled={() => setAgentView(null)}
-              onClosed={() => {
-                // Back to the project this chat belongs to, and stop restoring
-                // it on the next reload — the reader has left it.
-                setAgentView(null)
-                if (user !== undefined && orgId !== undefined)
-                  setOpenAgentSession(user, orgId, null)
-              }}
-              onRequestNavigationGuard={registerGuard}
-              onRequestSettings={() =>
-                // Straight to the AI connections, not to Settings' front page:
-                // a Connect button that leaves the user hunting is not one.
-                navigationGuard.current(() =>
-                  router.push("/settings?section=agents")
-                )
-              }
-            />
-          ) : selectedNode && (open || creation) ? (
-            <NativeContent
-              node={selectedNode}
-              chromeless
-              open={open ?? undefined}
-              creation={creation}
-              onCreationCancelled={() => setCreation(undefined)}
-              onRequestNavigationGuard={registerGuard}
-              onOpened={(resource) => {
-                setOpen({ resource, request: ++openNumber.current })
-                setCreation(undefined)
-                setExpanded((old) => new Set([...old, resource.nodeId]))
-                void loadItems(resource.nodeId)
-              }}
-            />
-          ) : (
-            // The landing.
-            //
-            // With a project selected this is that project's contents, because
-            // a workspace with things in it should not open on an invitation to
-            // create more. With nothing selected it is the list of projects,
-            // and only an empty organization gets the empty state.
-            <div className="min-h-0 flex-1 overflow-y-auto">
-              <div className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14">
-                {selectedNode ? (
-                  <>
-                    <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                      {t("projects")}
-                    </p>
-                    <h1 className="mt-2 break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
-                      {selectedNode.name}
-                    </h1>
-                    <ProjectContents
-                      node={selectedNode}
-                      items={itemsByNode[selectedNode.id]?.items ?? []}
-                      loading={itemsByNode[selectedNode.id]?.loading ?? false}
-                      sessions={agentSessions.filter(
-                        (item) => item.nodeId === selectedNode.id
-                      )}
-                      onOpenResource={(resource) =>
-                        openResource(selectedNode, resource)
-                      }
-                      onOpenSession={(session) =>
-                        openAgentSession(selectedNode, session)
-                      }
-                      onCreate={(kind) =>
-                        kind === "folder"
-                          ? navigationGuard.current(() =>
-                              openEditor({
-                                kind: "folder",
-                                parentId: selectedNode.id,
-                              })
-                            )
-                          : kind === "claude" || kind === "codex"
-                            ? startAgentChat(selectedNode, kind)
-                            : createContent(selectedNode, kind)
-                      }
+          {/* Where you are, and what else is open. Two thin bars instead of a
+              window-wide banner repeating the organization and the email. */}
+          <div className="flex h-10 shrink-0 items-center gap-1 px-2">
+            {mobile ? (
+              <Dialog open={drawer} onOpenChange={setDrawer}>
+                <DialogTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    aria-label={t("openNavigation")}
+                  >
+                    <Menu aria-hidden className="size-4" />
+                  </Button>
+                </DialogTrigger>
+                <DialogContent
+                  showCloseButton={false}
+                  className="h-[calc(100dvh-2rem)] max-w-sm gap-0 p-0"
+                >
+                  <DialogTitle className="sr-only">{t("projects")}</DialogTitle>
+                  <DialogDescription className="sr-only">
+                    {t("navigationDescription")}
+                  </DialogDescription>
+                  {sidebar}
+                </DialogContent>
+              </Dialog>
+            ) : (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7"
+                aria-label={t("openNavigation")}
+                title={t("openNavigation")}
+                aria-expanded={sidebarOpen}
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+              >
+                <PanelLeft aria-hidden className="size-4" />
+              </Button>
+            )}
+            <nav
+              aria-label={t("breadcrumb")}
+              className="flex min-w-0 flex-1 items-center gap-1 text-[13px] text-muted-foreground"
+            >
+              {breadcrumb.map((crumb, index) => (
+                <span
+                  key={`${crumb}:${index}`}
+                  className="flex min-w-0 items-center gap-1"
+                >
+                  {index > 0 && (
+                    <ChevronRight
+                      aria-hidden
+                      className="size-3 shrink-0 opacity-60 rtl:rotate-180"
                     />
-                  </>
-                ) : (
-                  <>
-                    <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
-                      {t("projects")}
-                    </h1>
-                    <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                      {nodes.length === 0
-                        ? t("emptyProjects")
-                        : t("projectsLanding")}
-                    </p>
-                    {nodes.length > 0 && (
-                      <ul className="mt-6 space-y-1">
-                        {nodes
-                          .filter((node) => node.parentId === null)
-                          .map((node) => (
-                            <li key={node.id}>
-                              <button
-                                onClick={() =>
-                                  navigationGuard.current(() => {
-                                    setSelected(node.id)
-                                    setExpanded(
-                                      (old) => new Set([...old, node.id])
-                                    )
-                                  })
-                                }
-                                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-start text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                              >
-                                <Layers3
-                                  aria-hidden
-                                  className="size-4 shrink-0 text-muted-foreground"
-                                />
-                                <span className="truncate">{node.name}</span>
-                              </button>
-                            </li>
-                          ))}
-                      </ul>
+                  )}
+                  <span
+                    className={cn(
+                      "truncate",
+                      index === breadcrumb.length - 1 && "text-foreground"
                     )}
-                    <Button
-                      variant="outline"
-                      className="mt-6"
-                      onClick={() =>
-                        navigationGuard.current(() =>
-                          openEditor({ kind: "project", parentId: null })
+                    title={crumb}
+                  >
+                    {crumb}
+                  </span>
+                </span>
+              ))}
+            </nav>
+          </div>
+          {tabLimit && (
+            <p
+              role="status"
+              className="shrink-0 border-b px-3 py-1.5 text-xs text-muted-foreground"
+            >
+              {t("tabLimit")}
+            </p>
+          )}
+          {tabs.length > 0 && (
+            <div
+              role="tablist"
+              aria-label={t("openTabs")}
+              className="flex h-9 shrink-0 items-center gap-0.5 overflow-x-auto border-b px-1.5"
+            >
+              {tabs.map((tab, index) => {
+                const current = index === activeTab
+                return (
+                  <div
+                    key={tabKey(tab)}
+                    className={cn(
+                      "group/tab flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[13px]",
+                      current
+                        ? "bg-accent text-foreground"
+                        : "text-muted-foreground hover:bg-accent/50"
+                    )}
+                  >
+                    <button
+                      role="tab"
+                      aria-selected={current}
+                      onClick={() => {
+                        activeTabRef.current = index
+                        setActiveTab(index)
+                        setVisited(
+                          (old) => new Set([...old, tabKey(tabs[index])])
                         )
-                      }
+                      }}
+                      className="flex min-w-0 items-center gap-1.5 rounded focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      <Plus aria-hidden className="size-4" />
-                      {t("newProject")}
-                    </Button>
-                  </>
-                )}
-              </div>
+                      <TabIcon tab={tab} />
+                      <span className="max-w-40 truncate">{tabTitle(tab)}</span>
+                    </button>
+                    <button
+                      aria-label={t("closeTab", { name: tabTitle(tab) })}
+                      onClick={() => dismissTab(index)}
+                      className="flex size-4 shrink-0 items-center justify-center rounded opacity-0 hover:bg-background/70 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover/tab:opacity-100"
+                    >
+                      <X aria-hidden className="size-3" />
+                    </button>
+                  </div>
+                )
+              })}
             </div>
           )}
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            {tabs.length === 0 ? (
+              <WorkspaceStart
+                nodes={nodes}
+                onOpen={(node) => selectNode(node)}
+                onCreate={() =>
+                  keepAll(() => openEditor({ kind: "project", parentId: null }))
+                }
+              />
+            ) : (
+              tabs.map((tab, index) => (
+                // Every open tab stays MOUNTED. Switching hides a panel rather
+                // than destroying it, so a half-written document or an unsent
+                // message is still there when the reader comes back — without
+                // being asked to discard anything on the way.
+                <NativeTabPanel
+                  key={tabKey(tab)}
+                  hidden={index !== activeTab}
+                  className={cn(
+                    "min-h-0 min-w-0 flex-1 flex-col",
+                    index === activeTab ? "flex" : "hidden"
+                  )}
+                >
+                  {visited.has(tabKey(tab)) &&
+                    (tab.kind === "project" ? (
+                      creation && creation.nodeId === tab.nodeId ? (
+                        <NativeContent
+                          node={nodeById(tab.nodeId) ?? nodes[0]}
+                          chromeless
+                          creation={creation}
+                          onCreationCancelled={() => setCreation(undefined)}
+                          onRequestNavigationGuard={registerGuardFor(
+                            tabKey(tab)
+                          )}
+                          onOpened={(resource) => {
+                            setCreation(undefined)
+                            setExpanded(
+                              (old) => new Set([...old, resource.nodeId])
+                            )
+                            void loadItems(resource.nodeId)
+                            openResource(
+                              nodeById(resource.nodeId) ?? nodes[0],
+                              resource
+                            )
+                          }}
+                        />
+                      ) : (
+                        <ProjectPanel
+                          node={nodeById(tab.nodeId)}
+                          items={itemsByNode[tab.nodeId]?.items ?? []}
+                          loading={itemsByNode[tab.nodeId]?.loading ?? false}
+                          sessions={agentSessions.filter(
+                            (item) => item.nodeId === tab.nodeId
+                          )}
+                          onOpenResource={(resource) => {
+                            const node = nodeById(tab.nodeId)
+                            if (node) openResource(node, resource)
+                          }}
+                          onOpenSession={(session) => {
+                            const node = nodeById(tab.nodeId)
+                            if (node) openAgentSession(node, session)
+                          }}
+                          onCreate={(kind) => {
+                            const node = nodeById(tab.nodeId)
+                            if (!node) return
+                            if (kind === "folder")
+                              keepAll(() =>
+                                openEditor({
+                                  kind: "folder",
+                                  parentId: node.id,
+                                })
+                              )
+                            else if (kind === "claude" || kind === "codex")
+                              startAgentChat(node, kind)
+                            else createContent(node, kind)
+                          }}
+                        />
+                      )
+                    ) : tab.kind === "resource" ? (
+                      <ResourcePanel
+                        orgId={org.id}
+                        resourceId={tab.resourceId}
+                        node={nodeById(tab.nodeId)}
+                        cached={(itemsByNode[tab.nodeId]?.items ?? []).find(
+                          (item) => item.id === tab.resourceId
+                        )}
+                        registerGuard={registerGuardFor(tabKey(tab))}
+                        onGone={() => dropTab(tabKey(tab))}
+                      />
+                    ) : (
+                      <NativeAgentChats
+                        nodeId={
+                          tab.kind === "agent"
+                            ? (agentSessions.find(
+                                (item) => item.id === tab.sessionId
+                              )?.nodeId ?? null)
+                            : tab.nodeId
+                        }
+                        nodeName={
+                          nodeById(
+                            tab.kind === "agent"
+                              ? (agentSessions.find(
+                                  (item) => item.id === tab.sessionId
+                                )?.nodeId ?? -1)
+                              : (tab.nodeId ?? -1)
+                          )?.name
+                        }
+                        sessionId={tab.kind === "agent" ? tab.sessionId : null}
+                        draftProvider={
+                          tab.kind === "draft"
+                            ? (tab.provider as NeevAgentProvider)
+                            : null
+                        }
+                        onSessionCreated={(session) => {
+                          setAgentSessions((old) => [
+                            session,
+                            ...old.filter((item) => item.id !== session.id),
+                          ])
+                          // The draft became a real chat: its tab becomes that
+                          // chat rather than leaving both open.
+                          replaceTab(tabKey(tab), {
+                            kind: "agent",
+                            sessionId: session.id,
+                          })
+                          if (user !== undefined && orgId !== undefined)
+                            setOpenAgentSession(user, orgId, session.id)
+                        }}
+                        onDraftCancelled={() => dropTab(tabKey(tab))}
+                        onClosed={() => dropTab(tabKey(tab))}
+                        onRequestNavigationGuard={registerGuardFor(tabKey(tab))}
+                        onRequestSettings={() =>
+                          // Straight to the AI connections, not to Settings'
+                          // front page: a Connect button that leaves the user
+                          // hunting is not one.
+                          guardAll(() =>
+                            router.push("/settings?section=agents")
+                          )
+                        }
+                      />
+                    ))}
+                </NativeTabPanel>
+              ))
+            )}
+          </div>
         </main>
       </div>
       <Dialog

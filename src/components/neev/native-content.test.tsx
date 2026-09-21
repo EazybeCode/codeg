@@ -1,4 +1,11 @@
-import { render, screen, waitFor, act, fireEvent } from "@testing-library/react"
+import {
+  render,
+  screen,
+  waitFor,
+  within,
+  act,
+  fireEvent,
+} from "@testing-library/react"
 import { StrictMode } from "react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
@@ -836,7 +843,7 @@ it("creates private content only inside the selected node and confirms sharing i
   expect(mock.unknown).toEqual([])
 })
 
-it("guards folder, context-menu, Settings and reload navigation but lets logout erase a dirty draft", async () => {
+it("guards leaving the workspace, and never asks when only switching tabs", async () => {
   const nodes = [
     { ...node, id: 2, kind: "project", parentId: null, name: "Launch" },
     node,
@@ -891,33 +898,111 @@ it("guards folder, context-menu, Settings and reload navigation but lets logout 
   const unload = new Event("beforeunload", { cancelable: true })
   window.dispatchEvent(unload)
   expect(unload.defaultPrevented).toBe(true)
-  // Leaving for the agent chats guards the unsaved draft — the rail is gone, so
-  // this is the surface switch that still exists.
+  // Starting a chat opens ANOTHER tab, so the draft is not in danger and is
+  // not asked about — it is still there, behind its own tab.
   await user.click(
     screen.getAllByRole("button", { name: "Actions for Launch" })[0]
   )
   await user.click(screen.getByRole("menuitem", { name: "New Claude chat" }))
-  expect(screen.getByRole("dialog")).toHaveTextContent(
-    "Discard unsaved changes?"
-  )
-  await user.click(screen.getByRole("button", { name: "Keep editing" }))
+  expect(screen.queryByRole("dialog")).toBeNull()
+  await user.click(screen.getByRole("tab", { name: /Draft document/ }))
   expect(
-    screen.getByRole("textbox", { name: "Document content" })
+    screen.getAllByRole("textbox", { name: "Document content" })[0]
   ).toHaveTextContent("secret draft")
-  await user.click(screen.getByRole("link", { name: "Settings" }))
+  // Leaving the workspace altogether DOES ask: every mounted panel is about to
+  // go, including this one.
+  await user.click(screen.getByRole("button", { name: "Sagar" }))
+  await user.click(screen.getByRole("menuitem", { name: "Settings" }))
   expect(screen.getByRole("dialog")).toBeVisible()
   expect(push).not.toHaveBeenCalled()
   await user.click(screen.getByRole("button", { name: "Keep editing" }))
-  await user.click(screen.getByRole("button", { name: "Actions for Other" }))
-  await user.click(
-    await screen.findByRole("menuitem", { name: "New document" })
-  )
+  await user.click(screen.getByRole("button", { name: "Sagar" }))
+  await user.click(screen.getByRole("menuitem", { name: "Sign out" }))
+  // Signing out leaves every panel, so the dirty one is surfaced and asks
+  // before the draft goes with it.
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "Discard unsaved changes?"
   )
-  await user.click(screen.getByRole("button", { name: "Keep editing" }))
-  await user.click(screen.getByRole("button", { name: "Sign out" }))
+  await user.click(screen.getByRole("button", { name: "Discard changes" }))
   await waitFor(() => expect(screen.queryByText("secret draft")).toBeNull())
+  expect(mock.unknown).toEqual([])
+})
+
+it("shows the draft it is asking about when closing a hidden tab", async () => {
+  // A panel's confirmation renders inside that panel, which is what stops a
+  // hidden tab's menus covering the one in front. The same containment would
+  // hide a confirmation we asked for — an invisible prompt and a Close button
+  // that appears to do nothing.
+  const nodes = [
+    {
+      ...node,
+      id: 2,
+      kind: "project" as const,
+      parentId: null,
+      name: "Launch",
+    },
+    node,
+    { ...node, id: 5, kind: "project" as const, parentId: null, name: "Other" },
+  ]
+  const doc = { ...chat, kind: "document" as const, title: "Draft document" }
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/nodes": () => json({ nodes, nextAfter: null }),
+    "GET /api/neev/nodes/2/documents": () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/2/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/4/documents": () =>
+      json({ items: [doc], nextAfter: null }),
+    "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/5/documents": () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/5/chats": () => json({ items: [], nextAfter: null }),
+    [`GET /api/neev/resources/${chat.id}`]: () => json(doc),
+    [`GET /api/neev/documents/${chat.id}/revisions`]: () =>
+      json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+
+  // Open the document and start writing in it.
+  await user.click(await screen.findByRole("button", { name: "Expand Launch" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Expand Research" })
+  )
+  await user.click(
+    await screen.findByRole("button", { name: /Draft document/ })
+  )
+  const body = await screen.findByRole("textbox", { name: "Document content" })
+  await user.click(body)
+  await user.keyboard("hidden work")
+
+  // Leave it for another project: no prompt, because nothing is destroyed.
+  await user.click(
+    within(screen.getByRole("navigation", { name: "Projects" })).getByRole(
+      "button",
+      { name: "Other" }
+    )
+  )
+  expect(screen.queryByRole("dialog")).toBeNull()
+
+  // Now close the tab that is NOT in front. Its confirmation must be on screen.
+  await user.click(screen.getByRole("button", { name: /Close Draft document/ }))
+  const prompt = await screen.findByRole("dialog")
+  expect(prompt).toHaveTextContent("Discard unsaved changes?")
+  expect(prompt).toBeVisible()
+  // Cancelling keeps the tab, the words in it, and brings it to the front —
+  // the reader is looking at the draft they were asked about.
+  await user.click(screen.getByRole("button", { name: "Keep editing" }))
+  expect(
+    await screen.findByRole("tab", { name: /Draft document/ })
+  ).toHaveAttribute("aria-selected", "true")
+  expect(
+    screen.getByRole("textbox", { name: "Document content" })
+  ).toHaveTextContent("hidden work")
   expect(mock.unknown).toEqual([])
 })
 

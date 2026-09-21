@@ -147,7 +147,14 @@ it("shows the person and organization without GitHub or chat controls", async ()
     await screen.findByRole("menuitem", { name: "New Claude chat" })
   )
   // Straight to a composer for that provider: no list, no naming dialog.
-  expect(await screen.findByText("New Claude chat")).toBeVisible()
+  // Its name is in the tab strip and on the panel, so there are two.
+  expect(
+    (await screen.findAllByText("New Claude chat")).length
+  ).toBeGreaterThanOrEqual(2)
+  expect(screen.getByRole("tab", { name: /New Claude chat/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
   expect(screen.getByRole("textbox", { name: "Message" })).toBeVisible()
   // With no runtime bound it says so rather than letting the user type into
   // something that cannot answer.
@@ -520,18 +527,33 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
     await screen.findByRole("textbox", { name: "Message" }),
     "wip"
   )
-  // Switching to another item guards the unsaved draft.
-  await user.click(screen.getByRole("button", { name: "Beta" }))
-  expect(screen.getByRole("dialog")).toHaveTextContent(
-    "Discard unsaved changes?"
+  // Switching to another item does NOT ask to discard anything, because
+  // nothing is discarded: the first conversation stays mounted behind its tab.
+  await user.click(
+    within(screen.getByRole("navigation", { name: "Projects" })).getByRole(
+      "button",
+      { name: "Beta" }
+    )
   )
-  await user.click(screen.getByRole("button", { name: "Keep editing" }))
-  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("wip")
-  // Discarding opens the other conversation.
-  await user.click(screen.getByRole("button", { name: "Beta" }))
-  await user.click(screen.getByRole("button", { name: "Discard changes" }))
+  expect(screen.queryByRole("dialog")).toBeNull()
+  // Two tabs, and the one in front is the conversation just opened.
+  expect(screen.getByRole("tab", { name: /Beta/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
   await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("")
+    expect(screen.getByRole("tab", { name: /Alpha/ })).toHaveAttribute(
+      "aria-selected",
+      "false"
+    )
+  )
+  // Back to the first: the half-written message is still there, untouched and
+  // never once in danger.
+  await user.click(screen.getByRole("tab", { name: /Alpha/ }))
+  await waitFor(() =>
+    expect(screen.getAllByRole("textbox", { name: "Message" })[0]).toHaveValue(
+      "wip"
+    )
   )
   // Creating a conversation reveals it in the sidebar and opens it.
   await user.click(screen.getByRole("button", { name: "Actions for Space" }))
@@ -905,7 +927,7 @@ it("opens a project's contents by its name, and folds it by its chevron", async 
   mountWorkspace()
 
   const tree = await screen.findByRole("navigation", { name: "Projects" })
-  await user.click(within(tree).getByRole("button", { name: "Space" }))
+  await user.click(await within(tree).findByRole("button", { name: "Space" }))
   // The centre is now that project, and opening it expanded it.
   expect(
     await screen.findByRole("heading", { level: 1, name: "Space" })
@@ -963,6 +985,8 @@ it("keeps documents and team chats in the tree while an agent chat is open", asy
   await user.click(screen.getByRole("menuitem", { name: "New Codex chat" }))
 
   // The composer is open AND the project still shows what it holds.
-  expect(await screen.findByText("New Codex chat")).toBeVisible()
+  expect(
+    (await screen.findAllByText("New Codex chat")).length
+  ).toBeGreaterThanOrEqual(2)
   expect(within(tree).getByRole("button", { name: "Brief" })).toBeVisible()
 })

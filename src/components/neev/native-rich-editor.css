@@ -6,12 +6,31 @@
   min-height: 320px;
   font-family: inherit;
   font-size: 16px;
-  line-height: 1.75;
+  /* Notion's running text: 16px on a 1.65 rhythm. Tighter than 1.75, which
+     made long documents feel loose and pushed the fold up the page. */
+  line-height: 1.65;
   letter-spacing: 0;
 }
 
 .neev-writing-canvas .bn-block-content {
-  padding-block: 4px;
+  padding-block: 3px;
+}
+
+/*
+ * Block tools appear on approach, not permanently.
+ *
+ * BlockNote shows the drag handle and the add button on hover already; this
+ * keeps them quiet until then so the left margin is empty while reading, which
+ * is what makes the canvas feel like paper rather than an editor.
+ */
+.neev-writing-canvas .bn-side-menu {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.neev-writing-canvas .bn-block-outer:hover > * > .bn-side-menu,
+.neev-writing-canvas .bn-side-menu:focus-within {
+  opacity: 1;
 }
 
 .neev-writing-canvas .bn-inline-content {

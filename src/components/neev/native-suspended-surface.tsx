@@ -15,6 +15,54 @@ import { DropdownMenuContent } from "@/components/ui/dropdown-menu"
 
 const PortalContainer = createContext<HTMLElement | null>(null)
 
+/**
+ * A panel that stays MOUNTED while hidden, and takes its overlays with it.
+ *
+ * Unlike [`NativeSuspendedSurface`] this does not use `Activity`: hiding must
+ * not pause the panel's effects, because a hidden tab still has to hold its
+ * unsaved draft and keep the navigation guard it registered. What it does share
+ * is the portal container, so a menu or dialog opened in one tab renders INSIDE
+ * that tab rather than in the shell — otherwise it would still be on screen,
+ * and still clickable, after switching to another tab.
+ *
+ * `inert` covers what `hidden` cannot: a portalled overlay that has not
+ * finished animating out is inside an inert subtree and cannot take focus or
+ * intercept a click meant for the tab in front.
+ */
+export function NativeTabPanel({
+  hidden,
+  children,
+  className,
+}: {
+  hidden: boolean
+  children: ReactNode
+  className?: string
+}) {
+  const [container, setContainer] = useState<HTMLElement | null>(null)
+  const capture = useCallback((node: HTMLDivElement | null) => {
+    if (node) setContainer(node)
+  }, [])
+  useLayoutEffect(() => {
+    const focused = document.activeElement
+    // Focus must not stay inside a tab the reader has left.
+    if (
+      hidden &&
+      focused instanceof HTMLElement &&
+      container?.contains(focused)
+    )
+      focused.blur()
+  }, [container, hidden])
+  return (
+    <div ref={capture} inert={hidden} hidden={hidden} className={className}>
+      {container && (
+        <PortalContainer.Provider value={container}>
+          {children}
+        </PortalContainer.Provider>
+      )}
+    </div>
+  )
+}
+
 /** Owns DOM containment, not drafts. Hidden portals share the inert hidden root. */
 export function NativeSuspendedSurface({
   hidden,

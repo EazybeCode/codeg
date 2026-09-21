@@ -584,7 +584,10 @@ function Document({
     >
       {/* One compact header: context + truthful status + Save/Share + a More menu
           (rename/archive/move/history/reload/width/export) — no stacked rows. */}
-      <header className="sticky top-0 z-10 -mx-7 flex items-center gap-2 border-b bg-background px-7 py-2 sm:-mx-12 sm:px-12">
+      {/* Slim page actions. The title is NOT repeated here: the breadcrumb
+          above already says which document this is, and the page says it in
+          40px a few lines below. */}
+      <header className="sticky top-0 z-10 -mx-6 flex h-10 items-center gap-1 bg-background/95 px-6 backdrop-blur sm:-mx-10 sm:px-10">
         <Button
           variant="ghost"
           size="icon"
@@ -594,12 +597,7 @@ function Document({
         >
           <ArrowLeft aria-hidden />
         </Button>
-        <span
-          className="min-w-0 flex-1 truncate text-sm font-medium"
-          title={latest.title}
-        >
-          {latest.title}
-        </span>
+        <span className="min-w-0 flex-1" />
         <span
           role="status"
           className="hidden text-xs text-muted-foreground sm:inline"
@@ -756,11 +754,12 @@ function Document({
           </DropdownMenuContent>
         </DropdownMenu>
       </header>
-      <div className="space-y-2 pb-4 pt-6">
-        <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+      <div className="pb-2 pt-10">
+        <h1 className="break-words text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em]">
           {latest.title}
         </h1>
-        <p className="text-xs text-muted-foreground">
+        {/* Quiet, and below the title rather than between it and the text. */}
+        <p className="mt-2 text-xs text-muted-foreground/80">
           {t(latest.visibility)}
           {latest.originChatId ? ` · ${t("sourceAudience")}` : ""}
           {latest.archived ? ` · ${t("archived")}` : ""}

@@ -447,6 +447,11 @@ function NewAgentChat({
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
   const [provider, setProvider] = useState<NeevAgentProvider>(initialProvider)
+  // Once the session exists it has a provider and a model, and they are the
+  // ones it was created with. Changing them here would send the next attempt
+  // into that session under a provider it is not — and, worse, with the wrong
+  // credential. A different provider is a different chat.
+  const [frozen, setFrozen] = useState(false)
   const [draft, setDraft] = useState(""),
     [model, setModel] = useState(NEEV_DEFAULT_MODEL),
     [advanced, setAdvanced] = useState(false),
@@ -503,6 +508,7 @@ function NewAgentChat({
       // Remembered BEFORE the turn: if the turn fails the session still
       // exists, and must never be created a second time for this draft.
       created.current = session
+      setFrozen(true)
       await startAgentTurn(session.id, prompt, auth.session.csrf, auth.signal)
       setDraft("")
       draftRef.current = ""
@@ -544,18 +550,18 @@ function NewAgentChat({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex min-h-0 flex-1 items-center justify-center px-6">
-        <div className="w-full max-w-[760px] space-y-2 text-center">
-          <h1 className="text-2xl font-semibold tracking-tight">
+      <div className="flex min-h-0 flex-1 items-end justify-center px-4 pb-2 sm:px-8">
+        <div className="w-full max-w-[832px] pb-4">
+          <h1 className="text-xl font-semibold tracking-tight">
             {t(provider === "claude" ? "newClaudeChat" : "newCodexChat")}
           </h1>
-          <p className="text-sm leading-6 text-muted-foreground">
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">
             {t("agentChatsPrivate")}
           </p>
         </div>
       </div>
-      <div className="border-t px-6 py-4">
-        <div className="mx-auto w-full max-w-[760px] space-y-3">
+      <div className="shrink-0 px-4 pb-3 pt-2 sm:px-8 sm:pb-5">
+        <div className="mx-auto w-full max-w-[832px] rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring">
           <NativeError error={error} />
           {created.current && error !== null && (
             <p role="status" className="text-xs text-muted-foreground">
@@ -593,12 +599,13 @@ function NewAgentChat({
               }
             }}
             placeholder={t("agentPromptPlaceholder")}
-            className="w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+            className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none disabled:opacity-60 sm:text-sm"
           />
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <Select
                 value={provider}
+                disabled={frozen}
                 onValueChange={(next) => setProvider(next as NeevAgentProvider)}
               >
                 <SelectTrigger size="sm" aria-label={t("agentProvider")}>
@@ -619,6 +626,7 @@ function NewAgentChat({
                   </label>
                   <input
                     id="neev-new-agent-model"
+                    disabled={frozen}
                     value={model}
                     onChange={(event) => setModel(event.target.value)}
                     className="h-8 w-44 rounded-lg border bg-background px-2 text-xs focus-visible:ring-2 focus-visible:ring-ring"
@@ -628,6 +636,7 @@ function NewAgentChat({
                 <Button
                   variant="ghost"
                   size="sm"
+                  disabled={frozen}
                   className="text-xs text-muted-foreground"
                   onClick={() => setAdvanced(true)}
                 >
@@ -1066,7 +1075,7 @@ function AgentSessionView({
         <ol
           ref={history}
           aria-label={t("agentTurns")}
-          className="min-h-0 flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 py-4 sm:px-8 sm:py-6"
+          className="mx-auto min-h-0 w-full max-w-[832px] flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 py-6 text-[15px] sm:px-8"
         >
           {turns.map((turn) => (
             <li key={turn.id} className="mx-auto w-full max-w-3xl space-y-3">
@@ -1139,6 +1148,22 @@ function AgentSessionView({
             </p>
           )}
           <div className="flex items-center gap-2">
+            <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+              <Bot aria-hidden className="size-3.5 shrink-0" />
+              <span className="truncate">
+                {t(
+                  session.provider === "claude" ? "claudeLabel" : "codexLabel"
+                )}
+              </span>
+              <span aria-hidden className="opacity-50">
+                ·
+              </span>
+              <span className="truncate">
+                {session.model === NEEV_DEFAULT_MODEL
+                  ? t("providerDefaultModel")
+                  : session.model}
+              </span>
+            </span>
             {running && (
               <Button
                 type="button"
