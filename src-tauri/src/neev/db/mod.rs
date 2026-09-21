@@ -311,6 +311,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
                 gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
                 session_migration::validate(&tx).await?;
                 session_migration::validate_node_link(&tx).await?;
                 return Ok(());
@@ -324,10 +326,12 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         if names != v9_expected && names != v10_expected && names != v11_expected {
             org_code_migration::upgrade(&tx).await?;
         }
-        if names != v10_expected {
+        if names != v10_expected && names != v11_expected {
             image_blob_migration::upgrade(&tx).await?;
         }
-        session_migration::upgrade(&tx).await?;
+        if names != v11_expected {
+            session_migration::upgrade(&tx).await?;
+        }
         session_migration::link_nodes(&tx).await?;
         execute(
             &tx,
