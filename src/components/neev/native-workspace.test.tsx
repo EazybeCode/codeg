@@ -765,7 +765,12 @@ it("remembers the opened resource, and forgets it on the way back", async () => 
   await user.click(
     (await screen.findAllByRole("button", { name: "Roadmap" }))[0]
   )
-  await user.click(await screen.findByRole("button", { name: "Launch plan" }))
+  await user.click(
+    within(screen.getByRole("navigation", { name: "Projects" })).getByRole(
+      "button",
+      { name: "Launch plan" }
+    )
+  )
   // A pointer, not content: just which resource, under which container.
   await waitFor(() =>
     expect(
@@ -870,4 +875,94 @@ it("lands on Projects, never on a global agent list", async () => {
   expect(
     screen.getAllByRole("button", { name: "New project" }).length
   ).toBeGreaterThan(0)
+})
+
+it("opens a project's contents by its name, and folds it by its chevron", async () => {
+  // Clicking the name used to only fold the row, leaving the reader looking at
+  // whatever was open before — the one thing the screen did not show was the
+  // project they had just clicked.
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  const tree = await screen.findByRole("navigation", { name: "Projects" })
+  await user.click(within(tree).getByRole("button", { name: "Space" }))
+  // The centre is now that project, and opening it expanded it.
+  expect(
+    await screen.findByRole("heading", { level: 1, name: "Space" })
+  ).toBeVisible()
+  expect(
+    within(tree).getByRole("button", { name: "Collapse Space" })
+  ).toBeVisible()
+
+  // The chevron still folds, and folding does not throw the reader out.
+  await user.click(within(tree).getByRole("button", { name: "Collapse Space" }))
+  expect(
+    within(tree).getByRole("button", { name: "Expand Space" })
+  ).toBeVisible()
+  expect(screen.getByRole("heading", { level: 1, name: "Space" })).toBeVisible()
+})
+
+it("keeps documents and team chats in the tree while an agent chat is open", async () => {
+  // The tree lists every kind, so opening an agent chat is not a change of
+  // content. Invalidating the cache here emptied a tree that was still right.
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({
+        items: [{ ...resource, kind: "document" as const, title: "Brief" }],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
+    "GET /api/neev/agent/connections": () =>
+      json({ runtimeEnabled: true, connections: [] }),
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  expect(
+    await within(tree).findByRole("button", { name: "Brief" })
+  ).toBeVisible()
+
+  await user.click(screen.getByRole("button", { name: "Actions for Space" }))
+  await user.click(screen.getByRole("menuitem", { name: "New Codex chat" }))
+
+  // The composer is open AND the project still shows what it holds.
+  expect(await screen.findByText("New Codex chat")).toBeVisible()
+  expect(within(tree).getByRole("button", { name: "Brief" })).toBeVisible()
 })

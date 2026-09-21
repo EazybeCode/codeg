@@ -222,6 +222,8 @@ function NativeWorkspaceTree({
   openAgents,
   agentsOpen,
   agentSessions,
+  selectNode,
+  selectedNodeId,
   openAgentSessionId,
   openAgentSession,
   startAgentChat,
@@ -246,6 +248,9 @@ function NativeWorkspaceTree({
   agentsOpen: boolean
   /** The caller's own saved agent chats, already filed under a node. */
   agentSessions: NeevAgentSession[]
+  /** Opening a container shows its contents; the chevron only folds it. */
+  selectNode: (node: NativeNode) => void
+  selectedNodeId: number | null
   openAgentSessionId: string | null
   openAgentSession: (node: NativeNode, session: NeevAgentSession) => void
   startAgentChat: (node: NativeNode, provider: NeevAgentProvider) => void
@@ -285,8 +290,13 @@ function NativeWorkspaceTree({
                   />
                 </button>
                 <button
-                  onClick={() => toggle(node.id)}
-                  className="flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => selectNode(node)}
+                  aria-current={selectedNodeId === node.id ? "page" : undefined}
+                  className={cn(
+                    "flex min-h-9 min-w-0 flex-1 items-center gap-2 rounded text-start text-sm focus-visible:ring-2 focus-visible:ring-ring",
+                    selectedNodeId === node.id &&
+                      "font-medium text-sidebar-accent-foreground"
+                  )}
                 >
                   {node.kind === "project" ? (
                     <Layers3
@@ -381,6 +391,8 @@ function NativeWorkspaceTree({
                     openAgents={openAgents}
                     agentsOpen={agentsOpen}
                     agentSessions={agentSessions}
+                    selectNode={selectNode}
+                    selectedNodeId={selectedNodeId}
                     openAgentSessionId={openAgentSessionId}
                     openAgentSession={openAgentSession}
                     startAgentChat={startAgentChat}
@@ -530,6 +542,25 @@ function WorkspaceContent() {
     },
     [changeSection]
   )
+  /**
+   * Show a container's contents in the centre.
+   *
+   * Clicking the name used to only fold the row, which left the reader looking
+   * at whatever was open before — the project they just clicked was the one
+   * thing the screen did not show. Expanding comes along for the ride, because
+   * opening something you cannot see the inside of is half a gesture.
+   */
+  const selectNode = useCallback((node: NativeNode) => {
+    navigationGuard.current(() => {
+      setSelected(node.id)
+      setOpen(null)
+      setCreation(undefined)
+      setAgentView(null)
+      setExpanded((old) => new Set([...old, node.id]))
+      setDrawer(false)
+    })
+  }, [])
+
   /** Start a draft of `kind` inside `node`, from the sidebar or the landing. */
   const createContent = useCallback(
     (node: NativeNode, kind: NativeResourceKind) => {
@@ -617,12 +648,11 @@ function WorkspaceContent() {
   // effect below stays quiet — the section effect nulls `open` on mount, and
   // writing that through would erase the very pointer we are about to read.
   const restored = useRef(false)
-  // Section switches change the resource kind: drop cached lists + any open item.
-  useEffect(() => {
-    itemsRequest.current += 1
-    setItemsByNode({})
-    setOpen(null)
-  }, [section])
+  // Deliberately NOT invalidated by the section: one tree lists documents and
+  // team chats together, so moving between an agent chat and a document does
+  // not change what a container holds. Dropping the cache here made every
+  // document and team chat vanish the moment an agent chat was opened.
+  // Organization scope still invalidates it, below, where it belongs.
   const loadItems = useCallback(
     async (nodeId: number) => {
       if (!org) return
@@ -668,14 +698,13 @@ function WorkspaceContent() {
     },
     [org, auth]
   )
-  // A section switch keeps containers expanded but invalidates their lists.
-  // Fetch missing lists after invalidation as well as on first expansion.
+  // Fetch any expanded container that has no list yet — in every section,
+  // because the sidebar shows the same tree whatever the centre is showing.
   useEffect(() => {
-    if (section === "agents") return
     for (const id of expanded) {
       if (!itemsByNode[id]) void loadItems(id)
     }
-  }, [expanded, itemsByNode, loadItems, section])
+  }, [expanded, itemsByNode, loadItems])
   // One read for the whole tree. A failure here must not take the workspace
   // down: the sidebar simply shows no agent chats, and the centre surface still
   // reports its own errors.
@@ -957,6 +986,8 @@ function WorkspaceContent() {
             openAgents={openAgents}
             agentsOpen={section === "agents"}
             agentSessions={agentSessions}
+            selectNode={selectNode}
+            selectedNodeId={selected}
             openAgentSessionId={agentView?.sessionId ?? null}
             openAgentSession={openAgentSession}
             startAgentChat={startAgentChat}
@@ -1101,9 +1132,20 @@ function WorkspaceContent() {
                 setAgentView({ sessionId: session.id, provider: null })
               }}
               onDraftCancelled={() => setAgentView(null)}
+              onClosed={() => {
+                // Back to the project this chat belongs to, and stop restoring
+                // it on the next reload — the reader has left it.
+                setAgentView(null)
+                if (user !== undefined && orgId !== undefined)
+                  setOpenAgentSession(user, orgId, null)
+              }}
               onRequestNavigationGuard={registerGuard}
               onRequestSettings={() =>
-                navigationGuard.current(() => router.push("/settings"))
+                // Straight to the AI connections, not to Settings' front page:
+                // a Connect button that leaves the user hunting is not one.
+                navigationGuard.current(() =>
+                  router.push("/settings?section=agents")
+                )
               }
             />
           ) : selectedNode && (open || creation) ? (
@@ -1128,93 +1170,95 @@ function WorkspaceContent() {
             // a workspace with things in it should not open on an invitation to
             // create more. With nothing selected it is the list of projects,
             // and only an empty organization gets the empty state.
-            <div className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14">
-              {selectedNode ? (
-                <>
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                    {t("projects")}
-                  </p>
-                  <h1 className="mt-2 break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
-                    {selectedNode.name}
-                  </h1>
-                  <ProjectContents
-                    node={selectedNode}
-                    items={itemsByNode[selectedNode.id]?.items ?? []}
-                    loading={itemsByNode[selectedNode.id]?.loading ?? false}
-                    sessions={agentSessions.filter(
-                      (item) => item.nodeId === selectedNode.id
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <div className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14">
+                {selectedNode ? (
+                  <>
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                      {t("projects")}
+                    </p>
+                    <h1 className="mt-2 break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+                      {selectedNode.name}
+                    </h1>
+                    <ProjectContents
+                      node={selectedNode}
+                      items={itemsByNode[selectedNode.id]?.items ?? []}
+                      loading={itemsByNode[selectedNode.id]?.loading ?? false}
+                      sessions={agentSessions.filter(
+                        (item) => item.nodeId === selectedNode.id
+                      )}
+                      onOpenResource={(resource) =>
+                        openResource(selectedNode, resource)
+                      }
+                      onOpenSession={(session) =>
+                        openAgentSession(selectedNode, session)
+                      }
+                      onCreate={(kind) =>
+                        kind === "folder"
+                          ? navigationGuard.current(() =>
+                              openEditor({
+                                kind: "folder",
+                                parentId: selectedNode.id,
+                              })
+                            )
+                          : kind === "claude" || kind === "codex"
+                            ? startAgentChat(selectedNode, kind)
+                            : createContent(selectedNode, kind)
+                      }
+                    />
+                  </>
+                ) : (
+                  <>
+                    <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+                      {t("projects")}
+                    </h1>
+                    <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                      {nodes.length === 0
+                        ? t("emptyProjects")
+                        : t("projectsLanding")}
+                    </p>
+                    {nodes.length > 0 && (
+                      <ul className="mt-6 space-y-1">
+                        {nodes
+                          .filter((node) => node.parentId === null)
+                          .map((node) => (
+                            <li key={node.id}>
+                              <button
+                                onClick={() =>
+                                  navigationGuard.current(() => {
+                                    setSelected(node.id)
+                                    setExpanded(
+                                      (old) => new Set([...old, node.id])
+                                    )
+                                  })
+                                }
+                                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-start text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                              >
+                                <Layers3
+                                  aria-hidden
+                                  className="size-4 shrink-0 text-muted-foreground"
+                                />
+                                <span className="truncate">{node.name}</span>
+                              </button>
+                            </li>
+                          ))}
+                      </ul>
                     )}
-                    onOpenResource={(resource) =>
-                      openResource(selectedNode, resource)
-                    }
-                    onOpenSession={(session) =>
-                      openAgentSession(selectedNode, session)
-                    }
-                    onCreate={(kind) =>
-                      kind === "folder"
-                        ? navigationGuard.current(() =>
-                            openEditor({
-                              kind: "folder",
-                              parentId: selectedNode.id,
-                            })
-                          )
-                        : kind === "claude" || kind === "codex"
-                          ? startAgentChat(selectedNode, kind)
-                          : createContent(selectedNode, kind)
-                    }
-                  />
-                </>
-              ) : (
-                <>
-                  <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
-                    {t("projects")}
-                  </h1>
-                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                    {nodes.length === 0
-                      ? t("emptyProjects")
-                      : t("projectsLanding")}
-                  </p>
-                  {nodes.length > 0 && (
-                    <ul className="mt-6 space-y-1">
-                      {nodes
-                        .filter((node) => node.parentId === null)
-                        .map((node) => (
-                          <li key={node.id}>
-                            <button
-                              onClick={() =>
-                                navigationGuard.current(() => {
-                                  setSelected(node.id)
-                                  setExpanded(
-                                    (old) => new Set([...old, node.id])
-                                  )
-                                })
-                              }
-                              className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-start text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              <Layers3
-                                aria-hidden
-                                className="size-4 shrink-0 text-muted-foreground"
-                              />
-                              <span className="truncate">{node.name}</span>
-                            </button>
-                          </li>
-                        ))}
-                    </ul>
-                  )}
-                  <Button
-                    variant="outline"
-                    className="mt-6"
-                    onClick={() =>
-                      navigationGuard.current(() =>
-                        openEditor({ kind: "project", parentId: null })
-                      )
-                    }
-                  >
-                    <Plus aria-hidden className="size-4" />
-                    {t("newProject")}
-                  </Button>
-                </>
-              )}
+                    <Button
+                      variant="outline"
+                      className="mt-6"
+                      onClick={() =>
+                        navigationGuard.current(() =>
+                          openEditor({ kind: "project", parentId: null })
+                        )
+                      }
+                    >
+                      <Plus aria-hidden className="size-4" />
+                      {t("newProject")}
+                    </Button>
+                  </>
+                )}
+              </div>
             </div>
           )}
         </main>

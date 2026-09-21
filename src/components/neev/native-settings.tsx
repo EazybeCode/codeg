@@ -40,6 +40,20 @@ type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
 const SECTIONS = ["organization", "members", "agents", "profile"] as const
 type Section = (typeof SECTIONS)[number]
 
+/**
+ * The section named by `?section=`, if it names one at all.
+ *
+ * Validated against the enum rather than trusted: this is a URL, so it can say
+ * anything, and an unrecognised value simply means no preference. Read once, at
+ * mount — a deep link chooses where the reader lands, it does not keep steering
+ * them while they browse.
+ */
+function requestedSection(): Section | null {
+  if (typeof window === "undefined") return null
+  const raw = new URLSearchParams(window.location.search).get("section")
+  return SECTIONS.includes(raw as Section) ? (raw as Section) : null
+}
+
 // `as const` rather than `Record<Section, string>`: `useTranslations` only
 // accepts a key it can see in the catalogue, so widening these to `string` would
 // give up the compile-time check that each section's label actually exists.
@@ -69,7 +83,9 @@ function SettingsContent() {
     [inviteRole, setInviteRole] = useState<NativeRole>("member"),
     [invites, setInvites] = useState<string[]>([]),
     [remove, setRemove] = useState<NativeMember | null>(null)
-  const [section, setSection] = useState<Section>("organization")
+  const [section, setSection] = useState<Section>(
+    () => requestedSection() ?? "organization"
+  )
   const opener = useRef<HTMLElement | null>(null),
     receipt = useRef<{ digest: string; id: string } | null>(null)
   const tabs = useRef(new Map<Section, HTMLButtonElement | null>())

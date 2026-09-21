@@ -586,3 +586,45 @@ it("hides the connections panel across a section switch instead of discarding it
   expect(checks).toBe(1)
   expect(mock.unknown).toEqual([])
 })
+
+it("opens the section a deep link names, and ignores one it does not", async () => {
+  // The composer's Connect sends the user here for one reason; landing them on
+  // the front page leaves them hunting for the thing they clicked towards.
+  const original = window.location
+  const at = (search: string) => {
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...original, search },
+    })
+  }
+  const restore = () =>
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: original,
+    })
+
+  at("?section=agents")
+  mockNativeSession(orgSession, fixtures())
+  const shown = render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  expect(
+    await screen.findByRole("tab", { name: AGENTS, selected: true })
+  ).toBeVisible()
+  shown.unmount()
+
+  // A URL can say anything; an unrecognised section is simply no preference.
+  at("?section=../evil")
+  mockNativeSession(orgSession, fixtures())
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  expect(
+    await screen.findByRole("tab", { name: ORGANIZATION, selected: true })
+  ).toBeVisible()
+  restore()
+})

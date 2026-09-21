@@ -99,6 +99,14 @@ type Props = {
   /** A session the composer just created, so the tree can select it. */
   onSessionCreated?: (session: NeevAgentSession) => void
   onDraftCancelled?: () => void
+  /**
+   * Leave the open chat.
+   *
+   * The sidebar owns the selection, so clearing it here would change nothing:
+   * `sessionId` would still name the same session and it would re-open on the
+   * next render. Only the parent can actually go back.
+   */
+  onClosed?: () => void
 }
 
 export function NativeAgentChats(props: Props) {
@@ -116,6 +124,7 @@ function AgentChats({
   draftProvider = null,
   onSessionCreated,
   onDraftCancelled,
+  onClosed,
 }: Props) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
@@ -258,7 +267,11 @@ function AgentChats({
       <AgentSessionView
         session={(selected ?? open) as NeevAgentSession}
         connections={connections}
-        onBack={() => setOpen(null)}
+        onBack={() => {
+          setOpen(null)
+          // The parent holds the pointer that decides what is shown.
+          onClosed?.()
+        }}
         onChanged={absorb}
         onGone={() => {
           setOpen(null)
@@ -1112,7 +1125,7 @@ function AgentSessionView({
             <p role="status" className="px-1 text-xs text-muted-foreground">
               {connectionBlocker()}{" "}
               <Link
-                href="/settings"
+                href="/settings?section=agents"
                 onClick={(event) => {
                   if (onRequestSettings) {
                     event.preventDefault()
