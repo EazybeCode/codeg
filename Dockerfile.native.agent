@@ -54,11 +54,12 @@ RUN apt-get update \
 
 # Grant the FIXED-command launch helper exactly the caps the sandbox setup needs
 # (and no more): chown the per-run workdir, drop to the tenant uid/gid, drop the
-# bounding set, create namespaces, wire the egress netns/nft, mkdir under /run.
+# bounding set, create namespaces, wire the egress netns/nft, mkdir under /run,
+# and terminate the uid-dropped child on cancellation (CAP_KILL).
 # The web server (uid 65532) has NO effective caps; it execs this helper, which
 # raises these to the ambient set and execs the launcher. libcap2-bin is only a
 # build-time tool for setcap (the xattr persists in the layer).
-RUN setcap 'cap_chown,cap_dac_override,cap_setgid,cap_setuid,cap_setpcap,cap_net_admin,cap_sys_admin=eip' \
+RUN setcap 'cap_chown,cap_dac_override,cap_kill,cap_setgid,cap_setuid,cap_setpcap,cap_net_admin,cap_sys_admin,cap_mknod=eip' \
       /usr/local/bin/neev-agent-caplaunch \
     && getcap /usr/local/bin/neev-agent-caplaunch \
     # The deploy runs with no-new-privileges:false so the helper's FILE CAPS take
@@ -67,7 +68,7 @@ RUN setcap 'cap_chown,cap_dac_override,cap_setgid,cap_setuid,cap_setpcap,cap_net
     # setuid/setgid bit. This does NOT touch the helper's capability xattrs (file
     # caps are not the setuid mode bit), and the launcher uses non-setuid
     # unshare/setpriv/prlimit/ip/nft via the ambient caps.
-    && find / -xdev -perm /6000 -type f -exec chmod -s {} + 2>/dev/null || true \
+    && { find / -xdev -perm /6000 -type f -exec chmod -s {} + 2>/dev/null || true; } \
     # ASSERT (fail the build, not just display): the ONLY file-capped binary is the
     # helper, and NO setuid/setgid binary remains. With no-new-privileges:false at
     # deploy, either would be a direct escalation path for uid 65532.
@@ -94,6 +95,17 @@ COPY --chown=0:0 scripts/operations/neev_agent_launch.py \
      scripts/operations/neev_provider_egress.py \
      scripts/operations/neev_claude_login_protocol.py \
      scripts/operations/neev_codex_login_protocol.py \
+     scripts/operations/neev_agent_network_bootstrap.py \
+     scripts/operations/neev_agent_supervisor.py \
+     scripts/operations/neev_agent_login_drivers.py \
+     scripts/operations/neev_agent_supervisor_main.py \
+     scripts/operations/neev_agent_container_init.py \
+     scripts/operations/neev_supervisor_dto.py \
+     scripts/operations/neev_supervisor_fence.py \
+     scripts/operations/neev_supervisor_transport.py \
+     scripts/operations/neev_supervisor_wire.py \
+     scripts/operations/neev_supervisor_deployment.py \
+     scripts/operations/neev_slot_proxy.py \
      /opt/neev/scripts/operations/
 RUN chmod 0555 /opt/neev/scripts/operations/*.py
 
