@@ -990,3 +990,86 @@ it("keeps documents and team chats in the tree while an agent chat is open", asy
   ).toBeGreaterThanOrEqual(2)
   expect(within(tree).getByRole("button", { name: "Brief" })).toBeVisible()
 })
+
+it("marks only the active tab's item as current in the tree", async () => {
+  // Panels stay mounted, so the pointers a panel set outlive it. Reading them
+  // for the highlight lit up the last document AND the last agent chat at
+  // once, whichever tab was actually in front.
+  const SESSION = "44444444-4444-4444-8444-444444444444"
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () =>
+      json({
+        sessions: [
+          {
+            id: SESSION,
+            orgId: 3,
+            ownerId: 1,
+            title: "Parser chat",
+            provider: "claude",
+            model: "default",
+            boundChatId: null,
+            nodeId: 7,
+            archived: false,
+            revision: "1",
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+      }),
+    "GET /api/neev/agent/connections": () =>
+      json({ runtimeEnabled: true, connections: [] }),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({
+        items: [{ ...resource, kind: "document" as const, title: "Brief" }],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
+    [`GET /api/neev/documents/${resource.id}/content`]: () =>
+      json({ revision: null, markdown: "", document: null }),
+    [`GET /api/neev/documents/${resource.id}/revisions`]: () =>
+      json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  const tree = await screen.findByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Space" }))
+  await user.click(await within(tree).findByRole("button", { name: "Brief" }))
+  await user.click(
+    await within(tree).findByRole("button", { name: /Parser chat/ })
+  )
+
+  // The chat is in front, so the chat is the only thing marked current.
+  expect(
+    within(tree).getByRole("button", { name: /Parser chat/ })
+  ).toHaveAttribute("aria-current", "page")
+  expect(
+    within(tree).getByRole("button", { name: "Brief" })
+  ).not.toHaveAttribute("aria-current")
+
+  // Back to the document, and the marking follows — one at a time.
+  await user.click(screen.getByRole("tab", { name: /Brief/ }))
+  await waitFor(() =>
+    expect(within(tree).getByRole("button", { name: "Brief" })).toHaveAttribute(
+      "aria-current",
+      "page"
+    )
+  )
+  expect(
+    within(tree).getByRole("button", { name: /Parser chat/ })
+  ).not.toHaveAttribute("aria-current")
+})

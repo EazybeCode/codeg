@@ -425,8 +425,6 @@ function NativeWorkspaceTree({
   edit,
   createContent,
   selectResource,
-  openAgents,
-  agentsOpen,
   agentSessions,
   selectNode,
   selectedNodeId,
@@ -450,8 +448,6 @@ function NativeWorkspaceTree({
   selectResource: (node: NativeNode, resource: NativeResource) => void
   /** Agent chats are private to their owner and filed under a node by the
    *  server (schema 12). Opening them from here moves nothing. */
-  openAgents: (node: NativeNode) => void
-  agentsOpen: boolean
   /** The caller's own saved agent chats, already filed under a node. */
   agentSessions: NeevAgentSession[]
   /** Opening a container shows its contents; the chevron only folds it. */
@@ -594,8 +590,6 @@ function NativeWorkspaceTree({
                     edit={edit}
                     createContent={createContent}
                     selectResource={selectResource}
-                    openAgents={openAgents}
-                    agentsOpen={agentsOpen}
                     agentSessions={agentSessions}
                     selectNode={selectNode}
                     selectedNodeId={selectedNodeId}
@@ -693,12 +687,6 @@ function WorkspaceContent() {
     auth = useNativeAuth(),
     mobile = useIsMobile()
   const router = useRouter()
-  // What the centre is showing when it is showing an agent chat: a saved one,
-  // or a draft for a provider that has no session yet.
-  const [agentView, setAgentView] = useState<{
-    sessionId: string | null
-    provider: NeevAgentProvider | null
-  } | null>(null)
   // The caller's own saved chats, read once for the whole tree rather than per
   // container: they are private, so this is one small list either way.
   const [agentSessions, setAgentSessions] = useState<NeevAgentSession[]>([])
@@ -826,7 +814,6 @@ function WorkspaceContent() {
     [loading, setLoading] = useState(true),
     [error, setError] = useState<unknown>(null)
   const [expanded, setExpanded] = useState(new Set<number>()),
-    [selected, setSelected] = useState<number | null>(null),
     [drawer, setDrawer] = useState(false),
     [sidebarOpen, setSidebarOpen] = useState(true),
     // The primary workspace section (Agent Chats / Team Chat / Documents) lives in
@@ -834,27 +821,6 @@ function WorkspaceContent() {
     // default until the effect reads localStorage.
     [section, setSectionState] = useState<Section>(DEFAULT_SECTION)
   useEffect(() => setSectionState(getActiveSection()), [])
-  const changeSection = useCallback((next: Section) => {
-    keepAll(() => {
-      setSectionState(next)
-      setActiveSection(next)
-      setDrawer(false)
-    })
-  }, [])
-  /**
-   * Open this container's private agent chats.
-   *
-   * Opening changes nothing: the sessions stay private to their owner with the
-   * same sharing, and the server holds which project each one belongs to. A
-   * session is only filed by an explicit move, or by being created here.
-   */
-  const openAgents = useCallback(
-    (node: NativeNode) => {
-      setSelected(node.id)
-      changeSection("agents")
-    },
-    [changeSection]
-  )
   /**
    * Show a container's contents in the centre.
    *
@@ -929,10 +895,8 @@ function WorkspaceContent() {
   const selectNode = useCallback(
     (node: NativeNode) => {
       keepAll(() => {
-        setSelected(node.id)
         setOpen(null)
         setCreation(undefined)
-        setAgentView(null)
         setExpanded((old) => new Set([...old, node.id]))
         setDrawer(false)
         showTab({ kind: "project", nodeId: node.id })
@@ -955,9 +919,7 @@ function WorkspaceContent() {
         const nextSection = kind === "document" ? "docs" : "team"
         setSectionState(nextSection)
         setActiveSection(nextSection)
-        setSelected(node.id)
         setOpen(null)
-        setAgentView(null)
         setExpanded((old) => new Set([...old, node.id]))
         setCreation({
           kind,
@@ -980,12 +942,10 @@ function WorkspaceContent() {
    * centre shows the thing selected, with no intervening list.
    */
   const openAgentSession = useCallback(
-    (node: NativeNode, session: NeevAgentSession) => {
+    (_node: NativeNode, session: NeevAgentSession) => {
       keepAll(() => {
-        setSelected(node.id)
         setOpen(null)
         setCreation(undefined)
-        setAgentView({ sessionId: session.id, provider: null })
         setSectionState("agents")
         setActiveSection("agents")
         if (user !== undefined && orgId !== undefined)
@@ -1005,10 +965,8 @@ function WorkspaceContent() {
   const startAgentChat = useCallback(
     (node: NativeNode, provider: NeevAgentProvider) => {
       keepAll(() => {
-        setSelected(node.id)
         setOpen(null)
         setCreation(undefined)
-        setAgentView({ sessionId: null, provider })
         setSectionState("agents")
         setActiveSection("agents")
         // A draft is not a place to come back to.
@@ -1116,9 +1074,7 @@ function WorkspaceContent() {
               : null
           const session = list.find((item) => item.id === remembered)
           if (session && session.nodeId !== null) {
-            setSelected(session.nodeId)
             setExpanded((old) => new Set([...old, session.nodeId as number]))
-            setAgentView({ sessionId: session.id, provider: null })
           } else if (remembered && user !== undefined && orgId !== undefined)
             setOpenAgentSession(user, orgId, null)
         }
@@ -1171,7 +1127,6 @@ function WorkspaceContent() {
   const openResource = useCallback(
     (node: NativeNode, resource: NativeResource) =>
       keepAll(() => {
-        setSelected(node.id)
         setCreation(undefined)
         setOpen({ resource, request: ++openNumber.current })
         setDrawer(false)
@@ -1233,7 +1188,6 @@ function WorkspaceContent() {
           resource.nodeId === stored.nodeId &&
           nodes.some((node) => node.id === resource.nodeId)
         ) {
-          setSelected(resource.nodeId)
           setExpanded(
             (old) => new Set([...old, ...ancestry(nodes, resource.nodeId)])
           )
@@ -1334,7 +1288,6 @@ function WorkspaceContent() {
           (a, b) => a.id - b.id
         )
       )
-      setSelected(node.id)
       if (node.parentId !== null)
         setExpanded((old) => new Set([...old, node.parentId!]))
       setEditor(null)
@@ -1368,23 +1321,33 @@ function WorkspaceContent() {
       setLoading(false)
     }
   }
+  /**
+   * What the sidebar marks as current.
+   *
+   * Derived from the active tab ALONE. The legacy `open` and `agentView`
+   * pointers outlive the panels that set them — panels stay mounted — so
+   * reading them here lit up the last document AND the last agent chat at once,
+   * whichever tab was actually in front.
+   */
+  const front = tabs[activeTab]
+  const frontNodeId =
+    front === undefined
+      ? null
+      : front.kind === "project" || front.kind === "resource"
+        ? front.nodeId
+        : front.kind === "draft"
+          ? front.nodeId
+          : (agentSessions.find((item) => item.id === front.sessionId)
+              ?.nodeId ?? null)
+  const frontResourceId = front?.kind === "resource" ? front.resourceId : null
+  const frontSessionId = front?.kind === "agent" ? front.sessionId : null
+
   // Where the active tab lives: project, then the thing inside it.
-  const activeTabRef2 = tabs[activeTab]
   const breadcrumb: string[] = []
-  if (activeTabRef2) {
-    const nodeId =
-      activeTabRef2.kind === "project"
-        ? activeTabRef2.nodeId
-        : activeTabRef2.kind === "resource"
-          ? activeTabRef2.nodeId
-          : activeTabRef2.kind === "draft"
-            ? activeTabRef2.nodeId
-            : (agentSessions.find((item) => item.id === activeTabRef2.sessionId)
-                ?.nodeId ?? null)
-    for (const name of nodeId === null ? [] : trail(nodes, nodeId))
+  if (front) {
+    for (const name of frontNodeId === null ? [] : trail(nodes, frontNodeId))
       breadcrumb.push(name)
-    if (activeTabRef2.kind !== "project")
-      breadcrumb.push(tabTitle(activeTabRef2))
+    if (front.kind !== "project") breadcrumb.push(tabTitle(front))
   }
 
   const sidebar = (
@@ -1450,7 +1413,7 @@ function WorkspaceContent() {
             expanded={expanded}
             kind={sectionKind}
             itemsByNode={itemsByNode}
-            openResourceId={open?.resource.id ?? null}
+            openResourceId={frontResourceId}
             toggle={(id) =>
               setExpanded((old) => {
                 const next = new Set(old)
@@ -1471,12 +1434,10 @@ function WorkspaceContent() {
             }
             createContent={createContent}
             selectResource={openResource}
-            openAgents={openAgents}
-            agentsOpen={section === "agents"}
             agentSessions={agentSessions}
             selectNode={selectNode}
-            selectedNodeId={selected}
-            openAgentSessionId={agentView?.sessionId ?? null}
+            selectedNodeId={frontNodeId}
+            openAgentSessionId={frontSessionId}
             openAgentSession={openAgentSession}
             startAgentChat={startAgentChat}
           />
