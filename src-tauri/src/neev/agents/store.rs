@@ -88,7 +88,7 @@ pub(super) fn error_code(value: &str) -> bool {
     )
 }
 
-pub(super) fn provider_name(provider: Provider) -> &'static str {
+pub(crate) fn provider_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude",
         Provider::Codex => "codex",

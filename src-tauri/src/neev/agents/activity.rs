@@ -278,7 +278,13 @@ impl StreamParser {
                                 input: String::new(),
                             },
                         );
-                        Some(Vec::new())
+                        // Announced NOW, with no input yet. A tool that runs
+                        // for thirty seconds was previously invisible until it
+                        // finished, which is the whole of "nothing is
+                        // happening" from the reader's side. The same id is
+                        // re-emitted with the full input once the block closes.
+                        let tool = self.open.get(&index)?;
+                        Some(vec![self.call(tool.id.clone(), tool.name.clone(), "")])
                     }
                     "content_block_delta" => {
                         let delta = event.get("delta")?;
@@ -521,6 +527,12 @@ impl ActivityLog {
 
     /// Record one step at `offset`, or return `None` when a cap refuses it.
     ///
+    /// A tool call announced at its start and re-sent with its arguments when
+    /// the block closes is ONE step, not two: the second push finds the first
+    /// by id and revises it in place, keeping the original `seq` and `offset`.
+    /// The client upserts by `seq`, so it sees the row it already drew fill in
+    /// rather than a duplicate appearing beneath it.
+    ///
     /// The first refusal appends a `truncated` marker (itself the last item),
     /// so a trace that stops early always says that it did.
     ///
@@ -533,6 +545,34 @@ impl ActivityLog {
     pub(crate) fn push(&mut self, draft: ActivityDraft, offset: usize) -> Option<ActivityItem> {
         if self.truncated {
             return None;
+        }
+        if let ActivityKind::ToolCall { .. } = &draft.kind {
+            if let Some(position) = self.items.iter().position(|item| {
+                item.id == draft.id && matches!(item.kind, ActivityKind::ToolCall { .. })
+            }) {
+                // An update GROWS the document: the announcement carried no
+                // arguments and the revision carries all of them. Budgeting the
+                // delta is what stops a chatty tool walking past the cap
+                // through a door the append path guards and this one did not.
+                let existing = &self.items[position];
+                let before = serde_json::to_string(existing).map(|t| t.len()).unwrap_or(0);
+                let revised = ActivityItem {
+                    seq: existing.seq,
+                    offset: existing.offset,
+                    id: existing.id.clone(),
+                    kind: draft.kind,
+                };
+                let after = serde_json::to_string(&revised).map(|t| t.len()).unwrap_or(0);
+                let grown = after.saturating_sub(before);
+                if self.chars + grown + MARKER_RESERVE > MAX_ACTIVITY_CHARS {
+                    // Keep the announcement, which is delivered and still true,
+                    // and record that the trace stopped growing.
+                    return self.mark_truncated(offset);
+                }
+                self.chars += grown;
+                self.items[position] = revised.clone();
+                return Some(revised);
+            }
         }
         let item = ActivityItem {
             seq: self.next_seq,

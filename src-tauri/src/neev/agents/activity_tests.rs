@@ -54,15 +54,151 @@ fn a_claude_tool_call_is_assembled_from_its_streamed_input_fragments() {
         ],
     );
     let drafts = activity(&items);
-    assert_eq!(drafts.len(), 1, "one call, emitted once the block closed");
+    // Two events for one tool: announced when the block opens, revised when it
+    // closes. The log collapses them onto a single seq; the PARSER reports both
+    // because the first is what makes a running tool visible.
+    assert_eq!(drafts.len(), 2, "announced, then completed");
     assert_eq!(drafts[0].id, "toolu_01");
     assert_eq!(
-        drafts[0].kind,
+        drafts[1].kind,
         ActivityKind::ToolCall {
             name: "Bash".into(),
             input: "{\"command\":\"ls -la\"}".into(),
             input_truncated: false,
         }
+    );
+}
+
+#[test]
+fn a_tool_is_announced_when_it_starts_not_when_it_finishes() {
+    let mut parser = parser();
+    // The block opens: the tool is running NOW. Waiting for its input to finish
+    // streaming is what made a long command look like a hung screen.
+    let started = drain(
+        &mut parser,
+        &[
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_7","name":"Bash"}}}"#,
+        ],
+    );
+    let drafts = activity(&started);
+    assert_eq!(drafts.len(), 1, "announced immediately");
+    assert_eq!(
+        drafts[0].kind,
+        ActivityKind::ToolCall {
+            name: "Bash".into(),
+            input: String::new(),
+            input_truncated: false,
+        },
+        "named, with the arguments still unknown"
+    );
+
+    // The same tool, completed. It is the SAME step and must not appear twice.
+    let finished = drain(
+        &mut parser,
+        &[
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls\"}"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+        ],
+    );
+    let drafts = activity(&finished);
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].id, "toolu_7", "same id, so the log revises in place");
+}
+
+#[test]
+fn the_log_revises_a_running_tool_rather_than_listing_it_twice() {
+    let mut log = ActivityLog::new();
+    let announced = log
+        .push(
+            ActivityDraft {
+                id: "toolu_7".into(),
+                kind: ActivityKind::ToolCall {
+                    name: "Bash".into(),
+                    input: String::new(),
+                    input_truncated: false,
+                },
+            },
+            5,
+        )
+        .unwrap();
+    let completed = log
+        .push(
+            ActivityDraft {
+                id: "toolu_7".into(),
+                kind: ActivityKind::ToolCall {
+                    name: "Bash".into(),
+                    input: "{\"command\":\"ls\"}".into(),
+                    input_truncated: false,
+                },
+            },
+            40,
+        )
+        .unwrap();
+    assert_eq!(log.items().len(), 1, "one tool, one row");
+    assert_eq!(
+        completed.seq, announced.seq,
+        "same seq, so a client upserting by seq fills the row it already drew"
+    );
+    assert_eq!(
+        completed.offset, announced.offset,
+        "and it keeps the position it started at, not where it finished"
+    );
+    match &log.items()[0].kind {
+        ActivityKind::ToolCall { input, .. } => assert_eq!(input, "{\"command\":\"ls\"}"),
+        other => panic!("expected the revised call, got {other:?}"),
+    }
+}
+
+#[test]
+fn revisions_are_budgeted_so_announcements_cannot_smuggle_past_the_cap() {
+    // Every tool is announced cheaply (no arguments) and then revised with a
+    // large input. If the revision path skipped the budget, a trace could grow
+    // without limit through the door the append path guards.
+    let mut log = ActivityLog::new();
+    let announced: Vec<_> = (0..40)
+        .filter_map(|index| {
+            log.push(
+                ActivityDraft {
+                    id: format!("toolu_{index}"),
+                    kind: ActivityKind::ToolCall {
+                        name: "Bash".into(),
+                        input: String::new(),
+                        input_truncated: false,
+                    },
+                },
+                index,
+            )
+        })
+        .collect();
+    assert!(!announced.is_empty());
+    let payload = "z".repeat(MAX_INPUT_CHARS);
+    for index in 0..40 {
+        log.push(
+            ActivityDraft {
+                id: format!("toolu_{index}"),
+                kind: ActivityKind::ToolCall {
+                    name: "Bash".into(),
+                    input: payload.clone(),
+                    input_truncated: true,
+                },
+            },
+            index,
+        );
+    }
+    let stored = log.stored().expect("a non-empty trace always stores");
+    assert!(
+        stored.len() <= MAX_ACTIVITY_CHARS,
+        "revisions stayed inside the cap: stored {} bytes",
+        stored.len()
+    );
+    let items = parse_stored(Some(&stored));
+    assert_eq!(
+        items.last().unwrap().kind,
+        ActivityKind::Status {
+            state: STATE_TRUNCATED.into(),
+            detail: None,
+        },
+        "and the trace says it stopped growing"
     );
 }
 
@@ -185,7 +321,9 @@ fn oversized_tool_input_and_output_are_truncated_and_say_so() {
     );
     let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#;
     let items = drain(&mut parser, &[start, &delta, stop]);
-    match &activity(&items)[0].kind {
+    // The LAST draft is the completed call; the first is the announcement,
+    // which carries no arguments and so is never truncated.
+    match &activity(&items).last().unwrap().kind {
         ActivityKind::ToolCall {
             input,
             input_truncated,

@@ -122,6 +122,10 @@ pub(super) async fn run(
         model: payload.model,
         prompt: payload.prompt,
         credential_handle,
+        // The legacy one-shot route carries no session and no placement, so
+        // there is no project to brief from. Left unbriefed rather than given
+        // a half-context that would describe the wrong thing.
+        briefing: None,
     };
     let mut handle = match state.agents.run(request).await {
         Ok(handle) => handle,
