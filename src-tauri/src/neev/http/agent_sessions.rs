@@ -183,6 +183,12 @@ pub(super) struct ListSessionsInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct TeamSessionInput {
+    provider: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct TurnPageInput {
     #[serde(default)]
     after: Option<String>,
@@ -410,6 +416,17 @@ pub(super) async fn start_turn(
     // its creator.
     let (turn, _created) = sessions::begin_turn(&state, &actor, &session_id, &input.prompt, None).await?;
     let composed = sessions::conversation_prompt(&history, &turn.prompt);
+    // Best effort: a run must not fail because its orientation could not be
+    // read. Without it the agent answers about the sandbox it woke up in.
+    let briefing = crate::neev::agents::briefing::build(
+        &state,
+        &actor,
+        crate::neev::agents::briefing::Scope::Session {
+            node_id: session.node_id,
+        },
+        &turn.prompt,
+    )
+    .await;
     let run_request = RunRequest {
         // Server-authoritative identity: never a client-supplied user/org.
         user_id: actor.identity.user_id,
@@ -419,6 +436,7 @@ pub(super) async fn start_turn(
         model: session.model.clone(),
         prompt: composed,
         credential_handle,
+        briefing,
     };
     match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -815,10 +833,13 @@ async fn follow_live(
                 // the same way, or the live view keeps a hole no amount of
                 // client-side dedupe can fill. Re-emitting from the cursor is
                 // safe because items are idempotent by `seq`.
+                // Deliberately NOT filtered by `delivered_seq`: a tool call is
+                // announced when it starts and re-sent with its arguments when
+                // it finishes, under the SAME seq. Skipping seqs already seen
+                // would drop exactly that revision and leave the reader looking
+                // at a tool that never filled in. Re-sending is safe because the
+                // client upserts.
                 for item in attachment.run.activity_snapshot() {
-                    if item.seq <= delivered_seq {
-                        continue;
-                    }
                     if authority.ensure(state).await.is_err() {
                         return;
                     }
@@ -1074,6 +1095,53 @@ struct TeamInvokeDto {
     run_id: String,
 }
 
+/// GET `/api/neev/chats/{chat_id}/agent` — the caller's OWN bound team session
+/// for this chat, if one exists.
+///
+/// Reopening a chat has to show the traces of invocations made in it, and the
+/// session holding them is keyed by a server-side digest the client cannot
+/// compute. This is the discovery step; the existing
+/// `/agent/sessions/{id}/turns` then serves those turns and their activity.
+///
+/// Strictly the caller's own. `owned` scopes by `(org, id, owner)`, so this
+/// cannot reach another member's holder for the same chat even though the chat
+/// itself is shared — one person's tool traces are not the room's.
+pub(super) async fn team_session(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<TeamSessionInput>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let chat_id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&chat_id)?;
+    let input = safe_query(query)?;
+    let provider = provider_of(&input.provider).ok_or(ApiError::Invalid)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    // Prove the CHAT is still readable before resolving anything keyed to it.
+    // The session id is derived from the chat id and `sessions::get` checks
+    // only session ownership, so without this a member who lost access to the
+    // chat — made private, archived, or their membership revoked — could still
+    // enumerate their own past invocations in it. Discovery fails closed with
+    // the chat it belongs to.
+    {
+        let tx = crate::neev::content::resources::begin(&state, &actor).await?;
+        let chat = crate::neev::content::access::authorized(&tx, &actor, &chat_id, false).await?;
+        if chat.kind != crate::neev::content::types::ResourceKind::Chat {
+            return Err(ApiError::NotFound);
+        }
+    }
+    let id = sessions::team_session_id(
+        actor.org_id,
+        actor.identity.user_id,
+        &chat_id,
+        crate::neev::agents::store::provider_name(provider),
+    );
+    Ok(private_json(session_dto(
+        sessions::get(&state, &actor, &id).await?,
+    )))
+}
+
 /// **Explicit** team invocation (spec §5.3).
 ///
 /// Two things are published, in this order and nothing else:
@@ -1165,15 +1233,29 @@ pub(super) async fn team_invoke(
         agent_label: input.provider.clone(),
         turn_id: turn.id.clone(),
     };
+    // The thread is context the invoker is reading right now, so replaying a
+    // bounded tail of it is not a disclosure — it is what makes the answer
+    // about the conversation instead of about one sentence pulled out of it.
+    // The PRIVATE session's own turns are still never composed in.
+    let briefing = crate::neev::agents::briefing::build(
+        &state,
+        &actor,
+        crate::neev::agents::briefing::Scope::Chat { chat_id: &chat_id },
+        &turn.prompt,
+    )
+    .await;
     let run_request = RunRequest {
         user_id: actor.identity.user_id,
         org_id: actor.org_id,
         chat_id: chat_id.clone(),
         provider: session.provider.clone(),
         model: session.model.clone(),
-        // ONLY the explicit prompt. No private session history is composed in.
+        // ONLY the explicit prompt. No private session history is composed in;
+        // the thread's own messages arrive through the briefing, which is
+        // context the invoker can already read.
         prompt: turn.prompt.clone(),
         credential_handle,
+        briefing,
     };
     let turn = match state.agents.run(run_request).await {
         Ok(handle) => {

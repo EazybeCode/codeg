@@ -93,6 +93,7 @@ fn run_request() -> RunRequest {
         // The fake/disabled runtimes used here do not deliver credentials; the
         // sandboxed runtime's requirement is covered in `execution`'s tests.
         credential_handle: None,
+        briefing: None,
     }
 }
 

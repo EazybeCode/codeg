@@ -49,6 +49,11 @@ pub(crate) struct RunRequest {
     /// shared host login or to whatever identity the server process happens to
     /// carry. `None` means "this user has not connected this provider".
     pub(crate) credential_handle: Option<String>,
+    /// Standing instructions plus the workspace context this run is entitled
+    /// to (see `agents::briefing`). Delivered as a SYSTEM prompt, never folded
+    /// into the user's text, so the model can tell the two apart and the
+    /// stored turn stays exactly what the user typed.
+    pub(crate) briefing: Option<String>,
 }
 
 /// A credential handle is 32 hex characters (`neev_credential_store` handle
@@ -116,7 +121,12 @@ pub(crate) enum RunEvent {
 /// is a subcommand (`exec`) and its streaming switch is `--json`, verified
 /// against `codex exec --help` in the deployed agent image. An unknown provider
 /// gets Claude's form, which is what `resolve` already restricts the binary to.
-fn provider_argv(provider: &str, prompt: &str, model: &str) -> Vec<String> {
+fn provider_argv(
+    provider: &str,
+    prompt: &str,
+    model: &str,
+    briefing: Option<&str>,
+) -> Vec<String> {
     let mut argv: Vec<String> = match provider {
         "codex" => vec![
             "exec".into(),
@@ -133,6 +143,21 @@ fn provider_argv(provider: &str, prompt: &str, model: &str) -> Vec<String> {
             "--verbose".into(),
         ],
     };
+    // Claude takes real system instructions. Codex `exec` has no equivalent
+    // switch, so its briefing is prepended to the prompt inside a delimiter —
+    // clearly marked as context rather than as something the user said.
+    if let Some(briefing) = briefing.filter(|text| !text.is_empty()) {
+        match provider {
+            "codex" => {
+                let last = argv.len() - 1;
+                argv[last] = format!("<workspace-context>\n{briefing}\n</workspace-context>\n\n{prompt}");
+            }
+            _ => {
+                argv.push("--append-system-prompt".into());
+                argv.push(briefing.to_owned());
+            }
+        }
+    }
     // An explicitly chosen model is passed through, so the UI's selection is the
     // one the provider actually runs. Codex spells it `-m`.
     if model != "default" {
@@ -295,6 +320,7 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
             &request.provider,
             &request.prompt,
             &request.model,
+            request.briefing.as_deref(),
         ));
         let mut child = command
             .current_dir(&self.workspace)
@@ -594,7 +620,12 @@ impl SandboxedProviderCliRuntime {
         }
         argv.push("--".into());
         argv.push(binary.to_owned());
-        argv.extend(provider_argv(&request.provider, &request.prompt, &request.model));
+        argv.extend(provider_argv(
+            &request.provider,
+            &request.prompt,
+            &request.model,
+            request.briefing.as_deref(),
+        ));
         argv
     }
 
@@ -869,6 +900,7 @@ mod tests {
             model: "default".into(),
             prompt: prompt.into(),
             credential_handle: Some(HANDLE.into()),
+            briefing: None,
         }
     }
 
@@ -1009,7 +1041,7 @@ mod tests {
     #[test]
     fn each_provider_is_invoked_in_its_own_dialect() {
         // Claude Code is headless via `-p` with a streaming output format.
-        let claude = provider_argv("claude", "draft", "default");
+        let claude = provider_argv("claude", "draft", "default", None);
         assert_eq!(&claude[..2], &["-p".to_string(), "draft".to_string()]);
         assert!(claude.contains(&"stream-json".to_string()));
         assert!(claude.contains(&"--include-partial-messages".to_string()));
@@ -1017,7 +1049,7 @@ mod tests {
         // Codex is a SUBCOMMAND with `--json`, verified against `codex exec
         // --help` in the deployed agent image. It rejects Claude's flags
         // outright, which is why sharing them produced no output at all.
-        let codex = provider_argv("codex", "draft", "default");
+        let codex = provider_argv("codex", "draft", "default", None);
         assert_eq!(
             codex,
             vec![
@@ -1030,14 +1062,14 @@ mod tests {
         assert!(!codex.contains(&"--output-format".to_string()));
 
         // Model selection is spelled differently by each.
-        assert!(provider_argv("codex", "d", "gpt-5")
+        assert!(provider_argv("codex", "d", "gpt-5", None)
             .windows(2)
             .any(|pair| pair == ["-m".to_string(), "gpt-5".to_string()]));
-        assert!(provider_argv("claude", "d", "opus")
+        assert!(provider_argv("claude", "d", "opus", None)
             .windows(2)
             .any(|pair| pair == ["--model".to_string(), "opus".to_string()]));
         // "default" means the provider's own default: nothing is passed.
-        assert!(!provider_argv("codex", "d", "default").contains(&"-m".to_string()));
+        assert!(!provider_argv("codex", "d", "default", None).contains(&"-m".to_string()));
     }
 
     #[test]
@@ -1294,6 +1326,7 @@ mod tests {
                 // Dev/test path only: the unsandboxed runtime uses the operator's
                 // own already-authenticated CLI and delivers no credentials.
                 credential_handle: None,
+                briefing: None,
             })
             .await
             .unwrap();

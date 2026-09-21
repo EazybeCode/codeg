@@ -1308,3 +1308,121 @@ async fn testing_a_connection_validates_its_inputs_and_provider() {
         .status_code()
         .is_client_error());
 }
+
+#[tokio::test]
+async fn reopening_a_chat_discovers_only_the_callers_own_bound_session() {
+    let (state, client, database, _org) = fixture(fake(&["Done."])).await;
+    let actor = owner_context(&database, "owner@example.test").await;
+    let (chat_id, revision) = make_chat(&state, &actor).await;
+    let path = format!("/api/neev/chats/{chat_id}/agent?provider=claude");
+
+    // Nothing invoked yet: there is no holder to find, and saying so is the
+    // honest answer rather than inventing an empty session.
+    client
+        .get(&path)
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+
+    let invoked = client
+        .post(&format!("/api/neev/chats/{chat_id}/agent"))
+        .json(&serde_json::json!({
+            "prompt": "summarise the standup",
+            "provider": "claude",
+            "model": "default",
+            "requestId": uuid::Uuid::new_v4().to_string(),
+            "expectedAuthRevision": revision,
+        }))
+        .await;
+    invoked.assert_status(axum::http::StatusCode::CREATED);
+    let session_id = invoked.json::<Value>()["turn"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Now the holder is discoverable, and it is the one the invocation used —
+    // which is what lets a reopened chat replay its turns and their activity.
+    let found = client.get(&path).await;
+    found.assert_status_ok();
+    assert_eq!(found.json::<Value>()["id"], session_id);
+
+    // And its turns are reachable by that id through the existing route.
+    let turns = client
+        .get(&format!("/api/neev/agent/sessions/{session_id}/turns"))
+        .await;
+    turns.assert_status_ok();
+    let items = turns.json::<Value>();
+    assert_eq!(items["items"][0]["prompt"], "summarise the standup");
+    assert!(
+        items["items"][0]["activity"].is_array(),
+        "activity is always present, so the client never has to tell \
+         \"no trace\" apart from \"field missing\""
+    );
+}
+
+#[tokio::test]
+async fn discovery_fails_closed_when_the_chat_is_no_longer_readable() {
+    let (state, client, database, _org) = fixture(fake(&["Done."])).await;
+    let actor = owner_context(&database, "owner@example.test").await;
+    let (chat_id, revision) = make_chat(&state, &actor).await;
+
+    client
+        .post(&format!("/api/neev/chats/{chat_id}/agent"))
+        .json(&serde_json::json!({
+            "prompt": "summarise the standup",
+            "provider": "claude",
+            "model": "default",
+            "requestId": uuid::Uuid::new_v4().to_string(),
+            "expectedAuthRevision": revision,
+        }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    let path = format!("/api/neev/chats/{chat_id}/agent?provider=claude");
+    client.get(&path).await.assert_status_ok();
+
+    // Access is revoked underneath the caller: the chat becomes private to
+    // somebody else. The session id is DERIVED from the chat id and the holder
+    // is still owned by this caller, so without a chat check discovery would
+    // happily keep answering about a chat they can no longer open.
+    let stranger = h::native_account(&database, "stranger", "stranger@example.test").await;
+    crate::neev::db::execute(
+        &database,
+        "UPDATE neev_resources SET visibility='private',creator_id=$1 WHERE id=$2",
+        vec![stranger.into(), chat_id.clone().into()],
+    )
+    .await
+    .unwrap();
+    client
+        .get(&path)
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn one_members_traces_are_not_discoverable_by_another() {
+    let (state, client, database, org) = fixture(fake(&["Done."])).await;
+    let actor = owner_context(&database, "owner@example.test").await;
+    let (chat_id, revision) = make_chat(&state, &actor).await;
+
+    client
+        .post(&format!("/api/neev/chats/{chat_id}/agent"))
+        .json(&serde_json::json!({
+            "prompt": "summarise the standup",
+            "provider": "claude",
+            "model": "default",
+            "requestId": uuid::Uuid::new_v4().to_string(),
+            "expectedAuthRevision": revision,
+        }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    // A second member of the SAME org, who can read the shared chat perfectly
+    // well. The published reply is theirs to read; the invoker's tool traces
+    // are not — a holder is per-person, not per-room.
+    let peer_id = h::native_account(&database, "peer", "peer@example.test").await;
+    h::add_membership(&database, org, peer_id, "member").await;
+    let peer = sign_in(&state, &database, peer_id).await;
+    peer.get(&format!("/api/neev/chats/{chat_id}/agent?provider=claude"))
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}

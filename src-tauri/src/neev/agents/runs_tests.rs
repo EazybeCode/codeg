@@ -66,6 +66,7 @@ impl Harness {
                 model: "default".into(),
                 prompt: prompt.into(),
                 credential_handle: None,
+                briefing: None,
             })
             .await
             .unwrap();

@@ -239,7 +239,7 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         // agent-authored reply into the same chat when the run completes.
         .route(
             "/api/neev/chats/{chat_id}/agent",
-            post(agent_sessions::team_invoke),
+            get(agent_sessions::team_session).post(agent_sessions::team_invoke),
         )
         .route(
             "/api/neev/agent/connections",
