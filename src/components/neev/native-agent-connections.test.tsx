@@ -27,6 +27,20 @@ function connection(state: string, extra: Record<string, unknown> = {}) {
   }
 }
 
+/**
+ * `ReceiptDto` as both `cancel_connect` and `disconnect_provider` actually
+ * return it: the two ids AND the connection as it stands afterwards. The old
+ * fixtures omitted the connection, which is why a disconnect the server had
+ * performed was reported to the user as an unexpected response.
+ */
+function receipt(state: string, generation = "3") {
+  return json({
+    operationId: OPERATION_ID,
+    generation,
+    connection: connection(state),
+  })
+}
+
 function wiring(state: string, runtimeEnabled = true) {
   return { runtimeEnabled, connections: [connection(state)] }
 }
@@ -145,7 +159,7 @@ it("cancels an in-flight sign-in with the attempt it is actually waiting on", as
     [CANCEL]: (init) => {
       canceled = JSON.parse(init.body as string)
       state = "not_signed_in"
-      return json({ operationId: OPERATION_ID, generation: "3" })
+      return receipt("not_signed_in")
     },
   })
   const user = userEvent.setup()
@@ -217,7 +231,7 @@ it("offers reconnect and disconnect for a connection that needs attention", asyn
       body = JSON.parse(init.body as string)
       // Teardown is queued; the server moves the row on from `disconnecting`.
       state = "disconnecting"
-      return json({ operationId: OPERATION_ID, generation: "4" })
+      return receipt("disconnecting", "4")
     },
   })
   const user = userEvent.setup()
@@ -343,7 +357,7 @@ it("picks a sign-in back up after a reload so it stays cancellable", async () =>
     [ATTEMPT]: () => json({ state: "pending", expiresAt: FAR_FUTURE }),
     [CANCEL]: (init) => {
       canceled = JSON.parse(init.body as string)
-      return json({ operationId: OPERATION_ID, generation: "3" })
+      return receipt("not_signed_in")
     },
   })
   const user = userEvent.setup()
@@ -699,7 +713,7 @@ it("keeps a sign-in cancellable when polling gives up", async () => {
     },
     [CANCEL]: (init) => {
       canceled = JSON.parse(init.body as string)
-      return json({ operationId: OPERATION_ID, generation: "3" })
+      return receipt("not_signed_in")
     },
   })
   const user = userEvent.setup()
@@ -778,7 +792,7 @@ it("offers a way out of a sign-in this browser never started", async () => {
     "GET /api/neev/agent/connections": () => json(wiring("connecting")),
     [DISCONNECT]: (init) => {
       disconnected = JSON.parse(init.body as string)
-      return json({ operationId: OPERATION_ID, generation: "3" })
+      return receipt("not_signed_in")
     },
   })
   const user = userEvent.setup()
@@ -902,4 +916,69 @@ it("stops asking for a code once the server has taken one", async () => {
   expect(
     screen.getByRole("button", { name: "Cancel claude sign-in" })
   ).toBeEnabled()
+})
+
+it("tears down before signing in again so reconnect cannot 409", async () => {
+  // A `reconnect_required` row still holds the old credential and the server
+  // refuses a second sign-in over it. Connecting straight away returned 409 and
+  // left the user to press Disconnect and Connect by hand.
+  const order: string[] = []
+  let state = "reconnect_required"
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => {
+      order.push(`list:${state}`)
+      const shown = state
+      // The sweep finishes between polls, as it does on the server.
+      if (state === "disconnecting") state = "not_signed_in"
+      return json(wiring(shown))
+    },
+    [DISCONNECT]: () => {
+      order.push("disconnect")
+      // Queued, not done: the server answers `disconnecting` and sweeps later.
+      state = "disconnecting"
+      return receipt("disconnecting", "4")
+    },
+    [CONNECT]: () => {
+      order.push(`connect:${state}`)
+      state = "connecting"
+      return pendingConnect()
+    },
+    [ATTEMPT]: () => json({ state: "pending", expiresAt: FAR_FUTURE }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(
+    await screen.findByRole("button", { name: "Reconnect claude" })
+  )
+
+  // The sign-in only starts once the server says the credential is gone.
+  await waitFor(() => expect(order).toContain("connect:not_signed_in"))
+  expect(order.indexOf("disconnect")).toBeLessThan(
+    order.indexOf("connect:not_signed_in")
+  )
+  expect(order.filter((step) => step.startsWith("connect:"))).toEqual([
+    "connect:not_signed_in",
+  ])
+  expect(await screen.findByText("Waiting for sign-in…")).toBeVisible()
+})
+
+it("does not sign in again while its own teardown is unfinished", async () => {
+  // Still `disconnecting` when the wait runs out: starting anyway would earn
+  // the 409 this sequence exists to avoid. The row keeps the honest state.
+  let connects = 0
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("disconnecting")),
+    [DISCONNECT]: () => receipt("disconnecting", "4"),
+    [CONNECT]: () => {
+      connects += 1
+      return pendingConnect()
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  // The row is `disconnecting`, so the only action is the orphan cleanup.
+  expect(screen.queryByRole("button", { name: "Reconnect claude" })).toBeNull()
+  await waitFor(() => expect(connects).toBe(0))
+  expect(screen.queryByText("Waiting for sign-in…")).toBeNull()
+  void user
 })

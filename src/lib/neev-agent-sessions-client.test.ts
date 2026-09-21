@@ -4,6 +4,7 @@ import { NativeContentNotFoundError } from "./neev-content-client"
 import {
   cancelAgentRun,
   followAgentRun,
+  disconnectProvider,
   invokeTeamAgent,
   isSupportedModel,
   parseConnectAttempt,
@@ -664,6 +665,71 @@ describe("sign-in approval", () => {
     await expect(
       submitConnectCode("claude", RUN_ID, "ac_abc", "csrf")
     ).rejects.toBeInstanceOf(NativeClientError)
+  })
+
+  it("reads the receipt both teardown routes actually return", async () => {
+    // `ReceiptDto`: the two ids AND the connection afterwards. Demanding only
+    // the ids made a disconnect the server had performed look like an
+    // unexpected response.
+    const row = {
+      provider: "claude",
+      state: "disconnecting",
+      accountLabel: null,
+      checkedAt: null,
+      errorCode: null,
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json({
+          operationId: "fedcba9876543210fedcba9876543210",
+          // A stringified i64: it would not survive JSON as a number.
+          generation: "4",
+          connection: row,
+        })
+      )
+    )
+    expect(await disconnectProvider("claude", RUN_ID, "csrf")).toEqual({
+      operationId: "fedcba9876543210fedcba9876543210",
+      generation: "4",
+      connection: row,
+    })
+  })
+
+  it("still refuses a receipt that is not one", async () => {
+    for (const bad of [
+      { operationId: "fedcba9876543210fedcba9876543210", generation: "4" },
+      {
+        operationId: "fedcba9876543210fedcba9876543210",
+        generation: 4,
+        connection: {
+          provider: "claude",
+          state: "disconnecting",
+          accountLabel: null,
+          checkedAt: null,
+          errorCode: null,
+        },
+      },
+      {
+        operationId: "nope",
+        generation: "4",
+        connection: {
+          provider: "claude",
+          state: "disconnecting",
+          accountLabel: null,
+          checkedAt: null,
+          errorCode: null,
+        },
+      },
+    ]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => json(bad))
+      )
+      await expect(
+        disconnectProvider("claude", RUN_ID, "csrf")
+      ).rejects.toBeInstanceOf(NativeClientError)
+    }
   })
 
   it("refuses an empty, oversized or misrouted code before any request", async () => {
