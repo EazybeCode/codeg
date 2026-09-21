@@ -199,10 +199,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             org_code_migration::upgrade(&tx).await?;
             image_blob_migration::upgrade(&tx).await?;
             session_migration::upgrade(&tx).await?;
+            session_migration::link_nodes(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![session_migration::SCHEMA_VERSION.into()],
+                vec![session_migration::NODE_LINK_SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -293,6 +294,9 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 org_code_migration::validate(&tx).await?;
                 image_blob_migration::validate(&tx).await?;
             }
+            // A v11 database has every session table but not yet the additive
+            // node pointer: validate what exists, then fall through to the tail,
+            // which adds the column and publishes marker12.
             session_migration::SCHEMA_VERSION if names == v11_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
@@ -300,11 +304,20 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 org_code_migration::validate(&tx).await?;
                 image_blob_migration::validate(&tx).await?;
                 session_migration::validate(&tx).await?;
+            }
+            // Current. Validate in place, including the node link, and preserve
+            // every row.
+            session_migration::NODE_LINK_SCHEMA_VERSION if names == v11_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                session_migration::validate(&tx).await?;
+                session_migration::validate_node_link(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
         }
-        // Apply missing additive storage in order, then publish schema 11.
+        // Apply missing additive storage in order, then publish schema 12.
         if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected {
             gateway_migration::upgrade(&tx).await?;
         }
@@ -315,10 +328,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             image_blob_migration::upgrade(&tx).await?;
         }
         session_migration::upgrade(&tx).await?;
+        session_migration::link_nodes(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![session_migration::SCHEMA_VERSION.into()],
+            vec![session_migration::NODE_LINK_SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())

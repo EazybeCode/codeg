@@ -39,6 +39,7 @@ impl Harness {
                 provider: "claude".into(),
                 model: "default".into(),
                 bound_chat_id: None,
+                node_id: None,
                 request_id: uuid::Uuid::new_v4().to_string(),
             },
         )

@@ -52,7 +52,7 @@ async fn fresh_schema_is_version_eleven_with_separate_branding_revision() {
         .unwrap()
         .try_get::<i64>("", "version")
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 
     let user = h::native_account(&db, "schema-owner", "schema@example.test").await;
     let row = db

@@ -38,6 +38,31 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, QueryResult};
 pub(super) const SCHEMA_VERSION: i64 = 11;
 pub(super) const TABLE_NAMES: &[&str] = &["neev_agent_sessions", "neev_agent_turns"];
 
+/// Additive layer 12: the optional pointer from a saved Agent Chat to a node in
+/// the workspace tree, so a session appears under the project it belongs to on
+/// every device rather than only where it was created.
+///
+/// This adds a COLUMN, not a table, so the table inventory is identical to 11's
+/// and the stored marker is the only thing that tells the two apart — the same
+/// situation as `content_migration`'s plain and hardened versions, and handled
+/// the same way in [`super::migrate`].
+///
+/// **No foreign key, deliberately.** `ADD COLUMN` accepts only column
+/// constraints, so the composite `(node_id, org_id)` key that carries the tenant
+/// cannot be declared on a table that already exists; declaring it on Postgres
+/// only would make the two backends diverge the moment node deletion is
+/// implemented. Tenancy is instead checked by the writer inside the same
+/// transaction and re-proved against persisted rows in [`validate_node_link`],
+/// which is the pattern this file already uses for the `author_kind`/
+/// `agent_label` pairing.
+///
+/// The consequence is a contract for whoever adds node deletion: clear the
+/// pointers first, in the deleting transaction, via
+/// `agents::sessions::clear_node_pointers`. Doing so is what keeps the validator
+/// true, and it is also the only behaviour that neither blocks the delete nor
+/// reveals that someone else's PRIVATE session was filed under that node.
+pub(super) const NODE_LINK_SCHEMA_VERSION: i64 = 12;
+
 /// Terminal run failures a turn may record. `interrupted` is reserved for
 /// startup reconciliation (the server died mid-run), which is why a restarted
 /// server can never leave a turn stuck in `running`.
@@ -296,6 +321,17 @@ fn message_columns() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// The additive session columns of layer 12.
+///
+/// Nullable with no default, so every session that exists when this runs keeps
+/// exactly the state it had: NULL means unfiled, which is what all of them are.
+fn session_columns() -> Vec<(&'static str, &'static str)> {
+    vec![(
+        "node_id",
+        "ALTER TABLE neev_agent_sessions ADD COLUMN node_id INTEGER CHECK(node_id IS NULL OR node_id>0)",
+    )]
+}
+
 /// Whether `table.column` already exists. `ADD COLUMN` is not idempotent on
 /// either backend, and this upgrade can meet a `neev_messages` that already
 /// carries the columns (a replayed migration, or a database whose session
@@ -334,6 +370,53 @@ pub(super) async fn upgrade(tx: &DatabaseTransaction) -> Result<(), AuthError> {
         }
     }
     validate(tx).await
+}
+
+/// Apply layer 12. Guarded per column, so a replayed migration — or a database
+/// that already carries `node_id` — is a no-op rather than an error.
+pub(super) async fn link_nodes(tx: &DatabaseTransaction) -> Result<(), AuthError> {
+    for (column, statement) in session_columns() {
+        if !has_column(tx, "neev_agent_sessions", column).await? {
+            super::execute(tx, statement, vec![]).await?;
+        }
+    }
+    validate_node_link(tx).await
+}
+
+/// Prove layer 12's invariants against stored rows.
+///
+/// Separate from [`validate`] because that one describes layer 11, which is a
+/// database without this column: a v11 marker must still validate, so the node
+/// checks can only run once the marker says 12.
+pub(super) async fn validate_node_link<C: ConnectionTrait>(db: &C) -> Result<(), AuthError> {
+    let sqlite = match db.get_database_backend() {
+        DbBackend::Sqlite => true,
+        DbBackend::Postgres => false,
+        _ => return Err(AuthError::Unavailable),
+    };
+    let mut queries = vec![
+        // A filed session points at a node in its OWN org. With no declarable
+        // foreign key this is the check that keeps the pointer from naming
+        // another tenant's project, or a node that no longer exists.
+        "SELECT 1 AS invalid FROM neev_agent_sessions s LEFT JOIN neev_nodes n ON n.org_id=s.org_id AND n.id=s.node_id WHERE s.node_id IS NOT NULL AND n.id IS NULL LIMIT 1",
+        // Only a saved chat can be filed. A `team` holder is internal and is
+        // never listed, so placing one in the tree would surface a session the
+        // user never created.
+        "SELECT 1 AS invalid FROM neev_agent_sessions WHERE node_id IS NOT NULL AND kind<>'chat' LIMIT 1",
+    ];
+    // SQLite accepts any storage class the CHECK happens to satisfy, so a
+    // hand-edited row could hold a string here and still pass `node_id>0`.
+    if sqlite {
+        queries.push(
+            "SELECT 1 AS invalid FROM neev_agent_sessions WHERE node_id IS NOT NULL AND typeof(node_id)<>'integer' LIMIT 1",
+        );
+    }
+    for query in queries {
+        if any(db, query).await? {
+            return Err(AuthError::Unavailable);
+        }
+    }
+    Ok(())
 }
 
 async fn any<C: ConnectionTrait>(db: &C, sql: &str) -> Result<bool, AuthError> {

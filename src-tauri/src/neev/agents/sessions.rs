@@ -190,6 +190,12 @@ pub(crate) struct AgentSession {
     pub(crate) model: String,
     pub(crate) kind: SessionKind,
     pub(crate) bound_chat_id: Option<String>,
+    /// Where this session sits in the workspace tree, or `None` for unfiled.
+    ///
+    /// Server-held so the placement follows the user to another device. Only a
+    /// `chat` session can carry one; a `team` holder is internal and is never
+    /// listed, so it is never in the tree.
+    pub(crate) node_id: Option<i32>,
     pub(crate) archived: bool,
     pub(crate) revision: i64,
     pub(crate) created_at: i64,
@@ -219,10 +225,13 @@ pub(crate) struct SessionInput {
     pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) bound_chat_id: Option<String>,
+    /// Optional placement in the workspace tree. Omitted means unfiled, which is
+    /// what every session created before this existed stays.
+    pub(crate) node_id: Option<i32>,
     pub(crate) request_id: String,
 }
 
-const SESSION_COLUMNS: &str = "org_id,id,owner_id,title,provider,model,kind,bound_chat_id,archived,revision,created_at,updated_at";
+const SESSION_COLUMNS: &str = "org_id,id,owner_id,title,provider,model,kind,bound_chat_id,node_id,archived,revision,created_at,updated_at";
 const TURN_COLUMNS: &str = "org_id,session_id,sequence,id,run_id,prompt,response,status,error_code,provider,model,created_at,updated_at,completed_at";
 
 fn session_row(row: &QueryResult) -> Result<AgentSession, ContentError> {
@@ -238,6 +247,7 @@ fn session_row(row: &QueryResult) -> Result<AgentSession, ContentError> {
         )
         .ok_or(ContentError::Storage)?,
         bound_chat_id: row.try_get("", "bound_chat_id").map_err(database_error)?,
+        node_id: row.try_get("", "node_id").map_err(database_error)?,
         archived: row.try_get("", "archived").map_err(database_error)?,
         revision: row.try_get("", "revision").map_err(database_error)?,
         created_at: row.try_get("", "created_at").map_err(database_error)?,
@@ -350,6 +360,9 @@ pub(crate) async fn create(
         &provider,
         &model,
         input.bound_chat_id.as_deref().unwrap_or(""),
+        // In the digest so a retry that asks for a DIFFERENT placement is a
+        // different request rather than silently resolving to the first one.
+        &input.node_id.map(|id| id.to_string()).unwrap_or_default(),
     ]);
     let tx = resources::begin(state, actor).await?;
     // A committed retry returns the same session rather than creating a second.
@@ -368,6 +381,9 @@ pub(crate) async fn create(
             return Err(ContentError::NotFound);
         }
     }
+    if let Some(node_id) = input.node_id {
+        require_node(&tx, actor, node_id).await?;
+    }
     let count: i64 = db::one(
         &tx,
         "SELECT COUNT(*) AS n FROM neev_agent_sessions WHERE org_id=$1 AND owner_id=$2",
@@ -384,7 +400,7 @@ pub(crate) async fn create(
     let id = uuid::Uuid::new_v4().to_string();
     db::execute(
         &tx,
-        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,archived,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'private','chat',$7,$8,false,1,$9,$9)",
+        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,node_id,archived,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'private','chat',$7,$8,$9,false,1,$10,$10)",
         vec![
             actor.org_id.into(),
             id.clone().into(),
@@ -394,6 +410,7 @@ pub(crate) async fn create(
             model.clone().into(),
             input.bound_chat_id.clone().into(),
             input.bound_chat_id.as_ref().map(|_| "chat").into(),
+            input.node_id.into(),
             now.into(),
         ],
     )
@@ -410,6 +427,7 @@ pub(crate) async fn create(
         model,
         kind: SessionKind::Chat,
         bound_chat_id: input.bound_chat_id,
+        node_id: input.node_id,
         archived: false,
         revision: 1,
         created_at: now,
@@ -504,8 +522,11 @@ pub(crate) async fn turns(
     Ok(crate::neev::content::types::Page { items, next_after })
 }
 
-/// Rename or (un)archive, guarded by the caller's expected revision so two tabs
-/// cannot silently overwrite each other.
+/// Rename, (un)archive or re-file, guarded by the caller's expected revision so
+/// two tabs cannot silently overwrite each other.
+///
+/// `node` names a tree node that must exist in the actor's org, checked inside
+/// this transaction so a node cannot be deleted between the check and the write.
 async fn mutate(
     state: &ServerState,
     actor: &OrgContext,
@@ -513,11 +534,15 @@ async fn mutate(
     expected_revision: i64,
     assignment: &str,
     value: sea_orm::Value,
+    node: Option<i32>,
 ) -> Result<AgentSession, ContentError> {
     let tx = resources::begin(state, actor).await?;
     let current = owned(&tx, actor, id).await?;
     if current.revision != expected_revision {
         return Err(ContentError::Conflict);
+    }
+    if let Some(node_id) = node {
+        require_node(&tx, actor, node_id).await?;
     }
     let now = now(state)?;
     let revision = current.revision.checked_add(1).ok_or(ContentError::Conflict)?;
@@ -559,8 +584,83 @@ pub(crate) async fn rename(
         expected_revision,
         "title",
         new_title.into(),
+        None,
     )
     .await
+}
+
+/// Whether `node_id` is a node in the ACTOR'S OWN org.
+///
+/// The org predicate is the whole point: node ids are globally sequential, so
+/// without it a valid id from another tenant would file a session against that
+/// tenant's project. Node visibility is org membership — `neev_nodes` has no
+/// owner column — so membership, which `resources::begin` already established, is
+/// the correct and only ACL here. Every node kind is allowed; where a session may
+/// sit in the tree is the workspace's decision, not this layer's.
+async fn require_node(
+    tx: &sea_orm::DatabaseTransaction,
+    actor: &OrgContext,
+    node_id: i32,
+) -> Result<(), ContentError> {
+    if node_id <= 0 {
+        return Err(ContentError::Invalid);
+    }
+    db::one(
+        tx,
+        "SELECT 1 AS present FROM neev_nodes WHERE org_id=$1 AND id=$2",
+        vec![actor.org_id.into(), node_id.into()],
+    )
+    .await?
+    .ok_or(ContentError::NotFound)?;
+    Ok(())
+}
+
+/// File a saved session under a node, or unfile it with `None`.
+///
+/// Placement is stored rather than kept per browser, so the session appears in
+/// the same project on the user's other devices. The session's own ACL is
+/// untouched: it stays private to its owner, and filing it under a node that
+/// other members can see does not make the session visible to them.
+pub(crate) async fn move_to_node(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    node_id: Option<i32>,
+    expected_revision: i64,
+) -> Result<AgentSession, ContentError> {
+    mutate(
+        state,
+        actor,
+        id,
+        expected_revision,
+        "node_id",
+        node_id.into(),
+        node_id,
+    )
+    .await
+}
+
+/// Unfile every session pointing at `node_id`, for a transaction that is about to
+/// delete or archive that node.
+///
+/// Node deletion does not exist yet; when it does it MUST call this in its own
+/// transaction, before removing the node. Unfiling rather than refusing is what
+/// keeps someone else's private session from either blocking the delete or
+/// revealing, by blocking it, that a session was filed there at all. Returns
+/// nothing for the same reason: a count would leak how many private sessions
+/// other members had under that node.
+pub(crate) async fn clear_node_pointers(
+    tx: &sea_orm::DatabaseTransaction,
+    org_id: i32,
+    node_id: i32,
+) -> Result<(), ContentError> {
+    db::execute(
+        tx,
+        "UPDATE neev_agent_sessions SET node_id=NULL WHERE org_id=$1 AND node_id=$2",
+        vec![org_id.into(), node_id.into()],
+    )
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn set_archived(
@@ -577,6 +677,7 @@ pub(crate) async fn set_archived(
         expected_revision,
         "archived",
         archived.into(),
+        None,
     )
     .await
 }

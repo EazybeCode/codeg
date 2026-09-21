@@ -56,6 +56,12 @@ struct SessionDto {
     provider: String,
     model: String,
     bound_chat_id: Option<String>,
+    /// Where this session sits in the workspace tree; `null` when unfiled.
+    ///
+    /// Serialised as a JSON number rather than the string treatment `revision`
+    /// gets, because a node id is a plain tree key the client compares for
+    /// equality, not a value it echoes back as an opaque token.
+    node_id: Option<i32>,
     archived: bool,
     revision: String,
     created_at: i64,
@@ -128,6 +134,10 @@ struct CreateSessionInput {
     model: String,
     #[serde(default)]
     bound_chat_id: Option<String>,
+    /// Optional placement. `#[serde(default)]` so a client that predates the
+    /// field still posts a valid body and gets an unfiled session.
+    #[serde(default)]
+    node_id: Option<i32>,
     request_id: String,
 }
 
@@ -138,6 +148,19 @@ struct UpdateSessionInput {
     title: Option<String>,
     #[serde(default)]
     archived: Option<bool>,
+    expected_revision: String,
+}
+
+/// Body of the re-file request.
+///
+/// `node_id` is deliberately NOT `#[serde(default)]`: it must be present, and it
+/// may be `null`. Folding this into `UpdateSessionInput` instead would make
+/// "field omitted" and "explicitly null" indistinguishable, and unfiling a
+/// session is exactly the second one.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MoveSessionInput {
+    node_id: Option<i32>,
     expected_revision: String,
 }
 
@@ -170,6 +193,7 @@ fn session_dto(session: AgentSession) -> SessionDto {
         provider: session.provider,
         model: session.model,
         bound_chat_id: session.bound_chat_id,
+        node_id: session.node_id,
         archived: session.archived,
         revision: session.revision.to_string(),
         created_at: session.created_at,
@@ -260,6 +284,7 @@ pub(super) async fn create_session(
             provider: input.provider,
             model: input.model,
             bound_chat_id: input.bound_chat_id,
+            node_id: input.node_id,
             request_id: input.request_id,
         },
     )
@@ -304,6 +329,28 @@ pub(super) async fn update_session(
         }
         _ => return Err(ApiError::Invalid),
     };
+    Ok(private_json(session_dto(updated)))
+}
+
+/// File a session under a tree node, or unfile it with `"nodeId": null`.
+///
+/// Its own route rather than another arm of `update_session` so the body stays
+/// unambiguous, and so filing carries its own revision: moving a session and
+/// renaming it are separate edits that must not half-apply.
+pub(super) async fn move_session(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<MoveSessionInput>(&state, request, SESSION_BODY_LIMIT)
+            .await?;
+    let expected = catalog::canonical_revision(&input.expected_revision)?;
+    let updated =
+        sessions::move_to_node(&state, &actor, &id, input.node_id, expected).await?;
     Ok(private_json(session_dto(updated)))
 }
 

@@ -104,6 +104,36 @@ async fn seed(db: &DatabaseConnection) -> (i32, i32, String) {
     (org, user, chat.to_owned())
 }
 
+/// The project node `seed` created, which every node-link test files against.
+async fn project_node(db: &DatabaseConnection, org: i32) -> i32 {
+    one(
+        db,
+        "SELECT id FROM neev_nodes WHERE org_id=$1 AND kind='project'",
+        vec![org.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "id")
+    .unwrap()
+}
+
+/// Return a v11 database: current in every way except the additive node column.
+///
+/// Rebuilding the table without `node_id` is the only way to reach that shape
+/// once the column exists, and it is exactly what a server that has not yet run
+/// layer 12 has on disk.
+async fn downgrade_to_eleven(db: &DatabaseConnection) {
+    for statement in [
+        "CREATE TABLE tmp_sessions AS SELECT org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,archived,revision,created_at,updated_at FROM neev_agent_sessions",
+        "DROP TABLE neev_agent_sessions",
+        "ALTER TABLE tmp_sessions RENAME TO neev_agent_sessions",
+        "UPDATE neev_schema_version SET version=11",
+    ] {
+        execute(db, statement, vec![]).await.unwrap();
+    }
+}
+
 async fn insert_session(db: &DatabaseConnection, org: i32, user: i32) {
     execute(
         db,
@@ -139,7 +169,10 @@ async fn insert_turn(db: &DatabaseConnection, org: i32, status: &str) {
 #[tokio::test]
 async fn fresh_install_creates_session_storage_at_version_eleven() {
     let db = h::database().await;
-    assert_eq!(schema_version(&db).await, session_migration::SCHEMA_VERSION);
+    assert_eq!(
+        schema_version(&db).await,
+        session_migration::NODE_LINK_SCHEMA_VERSION
+    );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
     // The additive message columns exist and default existing rows to human.
@@ -168,7 +201,10 @@ async fn nine_to_eleven_upgrade_preserves_every_row() {
 
     assert_eq!(initialize(&db).await, Ok(()));
 
-    assert_eq!(schema_version(&db).await, session_migration::SCHEMA_VERSION);
+    assert_eq!(
+        schema_version(&db).await,
+        session_migration::NODE_LINK_SCHEMA_VERSION
+    );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
     // Pre-existing content survived the additive upgrade untouched.
@@ -219,10 +255,148 @@ async fn upgrade_is_replayable_when_message_columns_already_exist() {
     seed(&db).await;
     downgrade_to_nine(&db).await;
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(schema_version(&db).await, session_migration::SCHEMA_VERSION);
+    assert_eq!(
+        schema_version(&db).await,
+        session_migration::NODE_LINK_SCHEMA_VERSION
+    );
     // Idempotent: initializing an already-current database validates in place.
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(count(&db, "neev_messages").await, 1);
+}
+
+#[tokio::test]
+async fn eleven_to_twelve_adds_the_node_column_and_leaves_sessions_unfiled() {
+    let db = h::database().await;
+    let (org, user, _) = seed(&db).await;
+    insert_session(&db, org, user).await;
+    insert_turn(&db, org, "completed").await;
+    downgrade_to_eleven(&db).await;
+    assert_eq!(schema_version(&db).await, 11);
+
+    assert_eq!(initialize(&db).await, Ok(()));
+
+    assert_eq!(
+        schema_version(&db).await,
+        session_migration::NODE_LINK_SCHEMA_VERSION
+    );
+    // The session that existed before the column did is retained, and reads as
+    // unfiled rather than being dropped or given an invented placement.
+    assert_eq!(count(&db, "neev_agent_sessions").await, 1);
+    assert_eq!(count(&db, "neev_agent_turns").await, 1);
+    let filed: Option<i32> = one(
+        &db,
+        "SELECT node_id FROM neev_agent_sessions WHERE org_id=$1 AND id=$2",
+        vec![org.into(), SESSION.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "node_id")
+    .unwrap();
+    assert_eq!(filed, None);
+    // Replayable: a second pass over a database that already has the column is a
+    // validate-in-place, not a duplicate ADD COLUMN.
+    assert_eq!(initialize(&db).await, Ok(()));
+}
+
+#[tokio::test]
+async fn a_session_filed_under_another_tenants_node_is_rejected() {
+    let db = h::database().await;
+    let (org, user, _) = seed(&db).await;
+    insert_session(&db, org, user).await;
+    // A second org with its own project. Node ids are globally sequential, so
+    // this id is perfectly valid — just not this tenant's.
+    let other_user = h::native_account(&db, "outsider", "outsider@example.test").await;
+    let (other_org, _) = h::organization(&db, other_user, "admin").await;
+    execute(
+        &db,
+        "INSERT INTO neev_nodes(org_id,parent_id,kind,name,revision,created_by) VALUES($1,NULL,'project','Theirs',1,$2)",
+        vec![other_org.into(), other_user.into()],
+    )
+    .await
+    .unwrap();
+    let theirs = project_node(&db, other_org).await;
+    execute(
+        &db,
+        "UPDATE neev_agent_sessions SET node_id=$1 WHERE org_id=$2 AND id=$3",
+        vec![theirs.into(), org.into(), SESSION.into()],
+    )
+    .await
+    .unwrap();
+
+    // No foreign key can express this on a table reached by ADD COLUMN, so the
+    // validator is what stands between a restored dump and a cross-tenant link.
+    assert_eq!(
+        session_migration::validate_node_link(&db).await,
+        Err(AuthError::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn a_filed_team_holder_is_rejected() {
+    let db = h::database().await;
+    let (org, user, chat) = seed(&db).await;
+    let node = project_node(&db, org).await;
+    execute(
+        &db,
+        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,node_id,archived,revision,created_at,updated_at) VALUES($1,$2,$3,'Team','claude','default','private','team',$4,'chat',$5,false,1,1000,1000)",
+        vec![
+            org.into(),
+            SESSION.into(),
+            user.into(),
+            chat.into(),
+            node.into(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    // A team holder is internal and never listed; putting one in the tree would
+    // show the user a session they never created.
+    assert_eq!(
+        session_migration::validate_node_link(&db).await,
+        Err(AuthError::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn a_pointer_to_a_removed_node_is_rejected_and_clearing_it_restores_validity() {
+    let db = h::database().await;
+    let (org, user, _) = seed(&db).await;
+    insert_session(&db, org, user).await;
+    let node = project_node(&db, org).await;
+    execute(
+        &db,
+        "UPDATE neev_agent_sessions SET node_id=$1 WHERE org_id=$2 AND id=$3",
+        vec![node.into(), org.into(), SESSION.into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(session_migration::validate_node_link(&db).await, Ok(()));
+
+    // Simulate the node going away without its pointers being cleared, which is
+    // what a future delete path must not do.
+    execute(
+        &db,
+        "DELETE FROM neev_nodes WHERE org_id=$1 AND id=$2",
+        vec![org.into(), node.into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        session_migration::validate_node_link(&db).await,
+        Err(AuthError::Unavailable)
+    );
+
+    // Unfiling is the fix, and the session itself survives — the user keeps the
+    // conversation, it just no longer claims to live in a project.
+    let tx = db.begin().await.unwrap();
+    crate::neev::agents::sessions::clear_node_pointers(&tx, org, node)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(session_migration::validate_node_link(&db).await, Ok(()));
+    assert_eq!(count(&db, "neev_agent_sessions").await, 1);
 }
 
 #[tokio::test]

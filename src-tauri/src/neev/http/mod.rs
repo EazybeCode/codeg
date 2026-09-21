@@ -223,6 +223,10 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             get(agent_sessions::get_session).patch(agent_sessions::update_session),
         )
         .route(
+            "/api/neev/agent/sessions/{session_id}/node",
+            patch(agent_sessions::move_session),
+        )
+        .route(
             "/api/neev/agent/sessions/{session_id}/turns",
             get(agent_sessions::list_turns).post(agent_sessions::start_turn),
         )
