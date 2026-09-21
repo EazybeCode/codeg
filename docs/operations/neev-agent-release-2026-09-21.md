@@ -68,3 +68,15 @@ The latest private database backup is `/opt/neev-db-backups/neev-before-projects
 - Document canvas uses a 760px focus width, larger title, and more generous spacing; existing rich-editor block styling is preserved. Full Conductor-style tabs/right context pane are not part of this update.
 - Verification: 2,593 frontend tests passed before browser QA refinements; 96 affected tests passed after the refinements; production webpack export passed. Turbopack is blocked by the worktree dependency symlink.
 - Browser checks passed for project navigation, retained mixed sidebar contents during agent chats, Back to folder, saved-chat restoration, and the AI connection deep link. Production first-message creation returned exactly “The new project chat works.” from Claude. Codex remains signed out and was not claimed as verified execution.
+
+## Tabbed workspace release — 2026-09-21
+
+- Frontend commits: `9f08057c`, `28cf485f`, `b49b4eab`. The tabbed shell supersedes the earlier reference-layout limitations above.
+- Candidate/live image: `neev-native-agent:ui-reference-b49b4eab`; workspace artifact SHA-256 `7257261472721999a09a5ff8a28353f3ebf5888cacc4461a088c0413c5e04de1`.
+- Compact Projects tree, breadcrumbs, persistent resource tabs, full-height agent chats and bottom composer. Document tools sit directly under tabs; a 760px paper-like canvas has a 40px title and generous writing space. Account menu offers Light/Dark/System.
+- Switching tabs preserves in-memory drafts. Closing dirty tabs confirms in the correct panel; route changes guard all dirty panels. Restored tabs mount lazily; the twelve-tab limit does not silently evict work. Sidebar selection follows only the active tab.
+- Verification: 101 affected tests passed after core refinements; final selection patch passed 83 tests across three affected suites. TypeScript, ESLint and production webpack export passed. A broad intermediate run had 2,595 passes and two failures (obsolete switch-discard expectation and settings timeout), both resolved in focused verification.
+- Same-host browser checks: document draft survives switching to an agent and back; closing a background dirty document shows its confirmation; cancellation retains draft; discard removes only the unsaved test edit; selected tab and saved tabs restore after reload.
+- Live Claude first-message creation and tab switching passed: a saved conversation returned exactly “Tabbed Claude chat works.” Codex remains signed out; its execution was not verified.
+- Backend, Docmost, schema 12, provider credentials and isolation configuration are unchanged. This release does not claim complete Notion feature parity; team chat retains its existing inner controls.
+- Released at 12:48 UTC; exact canary/live artifact hash matched. Compose backup: `compose.yml.before-ui-reference-20260921-124804`. Prior schema-compatible image remains available for rollback.
