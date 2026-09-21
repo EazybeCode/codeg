@@ -364,7 +364,13 @@ export function NativeAgentConnectionsPanel({
         setApproval(null)
         remember(null)
         refresh()
+        return
       }
+      // Still pending, but the server may already have taken the code and
+      // dropped the challenge. Follow it: leaving the paste prompt up would
+      // invite the user to submit a code nothing is waiting for.
+      setApproval(result.approval)
+      if (!result.approval) setOutcome("pending")
     } catch (cause) {
       setError(cause)
       auth.handleAuthorityError(cause)

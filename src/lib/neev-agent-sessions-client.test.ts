@@ -593,18 +593,77 @@ describe("sign-in approval", () => {
 
   it("posts a bounded code to the attempt that asked for it", async () => {
     const calls: { url: string; init: RequestInit }[] = []
+    // EXACTLY what `submit_attempt_code` answers: 202 with the whole attempt,
+    // not a bare state. Asserting the narrower shape here is what let a working
+    // submission be reported to the user as an unexpected response.
     const fetcher = vi.fn(async (url: string, init: RequestInit) => {
       calls.push({ url, init })
-      return json({ state: "completed" }, 202)
+      return json(
+        { state: "completed", expiresAt: 1_700_000_600, approval: null },
+        202
+      )
     })
     vi.stubGlobal("fetch", fetcher)
     expect(await submitConnectCode("claude", RUN_ID, "ac_abc", "csrf")).toEqual(
-      { state: "completed" }
+      {
+        state: "completed",
+        expiresAt: 1_700_000_600,
+        approval: null,
+      }
     )
     expect(calls[0].url).toBe(
       `/api/neev/agent/connections/claude/attempts/${RUN_ID}/code`
     )
     expect(JSON.parse(calls[0].init.body as string)).toEqual({ code: "ac_abc" })
+  })
+
+  it("reads a still-pending submission the same way the poll does", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json(
+          {
+            state: "pending",
+            expiresAt: 1_700_000_600,
+            approval: {
+              kind: "authorizationCode",
+              verificationUrl: "https://claude.com/cai/oauth/authorize",
+              userCode: null,
+              needsCode: true,
+            },
+          },
+          202
+        )
+      )
+    )
+    expect(await submitConnectCode("claude", RUN_ID, "ac_abc", "csrf")).toEqual(
+      {
+        state: "pending",
+        expiresAt: 1_700_000_600,
+        approval: {
+          kind: "authorization_code",
+          verificationUrl: "https://claude.com/cai/oauth/authorize",
+          needsCode: true,
+        },
+      }
+    )
+  })
+
+  it("still refuses a submission response that is not an attempt", async () => {
+    // Reusing the attempt parser must not mean accepting anything: a response
+    // carrying an unexpected field is a contract that moved.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        json(
+          { state: "completed", expiresAt: 1_700_000_600, token: "secret" },
+          202
+        )
+      )
+    )
+    await expect(
+      submitConnectCode("claude", RUN_ID, "ac_abc", "csrf")
+    ).rejects.toBeInstanceOf(NativeClientError)
   })
 
   it("refuses an empty, oversized or misrouted code before any request", async () => {
