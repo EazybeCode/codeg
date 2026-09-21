@@ -374,8 +374,9 @@ async fn postgres_document_audiences_and_boundaries() {
 
 // The per-document revision ceiling is now generous (MAX_DOCUMENT_REVISIONS),
 // not the old hard 1000 that made autosave unusable: a save AT revision 1000 must
-// SUCCEED (1000 -> 1001), and pagination must not omit or repeat the boundary row.
-// The per-org byte budget stays enforced by the separate quota tests.
+// SUCCEED (1000 -> 1001), pagination must not omit or repeat the boundary row, and
+// the raised ceiling must STILL refuse a save beyond the new bound. The per-org byte
+// budget stays enforced by the separate quota tests.
 async fn revision_limit(database: sea_orm::DatabaseConnection) {
     let h = Harness::new(database).await;
     let doc = shared_document(&h).await;
@@ -420,6 +421,22 @@ async fn revision_limit(database: sea_orm::DatabaseConnection) {
     // Only the two real saves ("" then "past") charge bytes; the raw seeded rows
     // do not, so byte accounting is unaffected by the raised revision ceiling.
     assert_eq!(h.usage("charged_bytes").await, 4);
+    // The raised ceiling is STILL a ceiling. Seed the head straight to the new bound
+    // (metadata only — no 100k-row loop; the guard short-circuits before any insert)
+    // and prove a further save is refused with Quota, exactly as the old 1000 cap did
+    // at its bound. Concurrent last-slot / revision-CAS behaviour at a boundary is
+    // covered by `concurrent_boundaries` (two racing saves -> one wins, one Conflict).
+    db::execute(
+        &h.state.database,
+        "UPDATE neev_resources SET content_revision=100000 WHERE id=$1",
+        vec![doc.id.clone().into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        documents::save(&h.state, &h.creator, &doc.id, input(100000, 2, "beyond")).await,
+        Err(ContentError::Quota)
+    );
 }
 #[tokio::test]
 async fn sqlite_document_revision_limit() {
