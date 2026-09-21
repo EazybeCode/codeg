@@ -109,6 +109,18 @@ def main():
                     # An unexpected clean daemon exit still means the complete
                     # service is unavailable; let the container restart policy act.
                     return code if code > 0 else 1
+            # As PID 1, collect exited descendants adopted when a provider's
+            # parent exits. Poll the two managed children above first; if either
+            # exits in this interval, stop the service rather than lose its status.
+            while True:
+                try:
+                    reaped, _status = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if reaped == 0:
+                    break
+                if any(reaped == child.pid for child in children):
+                    return 1
             time.sleep(0.1)
         return 0
     finally:
