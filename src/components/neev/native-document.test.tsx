@@ -1186,6 +1186,9 @@ it("waits for the save already running before reporting a flush", async () => {
   )
   // The autosave is now in flight and has not been answered.
   await waitFor(() => expect(release).toBeDefined())
+  expect(
+    screen.getByRole("textbox", { name: "Document content" })
+  ).toBeEnabled()
 
   let settled: boolean | null = null
   const pending = flush().then((value) => {
