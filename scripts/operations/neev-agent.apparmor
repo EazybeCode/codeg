@@ -42,19 +42,30 @@ profile neev-agent flags=(attach_disconnected,mediate_deleted) {
   # ---- The ONLY mounts Neev is allowed to perform ----
   # 1. the decrypted LUKS ext4 at each credential store entry's mount dir
   mount fstype=ext4 options=(rw, nodev, nosuid, noexec) -> /var/lib/neev-supervisor/credentials/*/mount/,
-  # 2. make the propagation of the sandbox mount namespace private (ns prelude)
+  # 2. propagation changes of the mount tree: rprivate for the sandbox ns prelude,
+  #    rslave for `ip netns exec`/`ip -n` entering a namespace.
   mount options=(rw, rprivate) -> /,
-  # 3. a private /proc for the sandbox pid namespace (unshare --mount-proc)
+  mount options=(rw, rslave) -> /,
+  mount options=(rw, slave) -> /,
+  # 3. a private /proc for the sandbox pid namespace (unshare --mount-proc) and a
+  #    fresh /sys when `ip netns exec` enters a network namespace.
   mount fstype=proc -> /proc/,
+  mount fstype=sysfs -> /sys/,
   # 4. bind the credential volume onto the run's private, lane-traversable HOME
   mount options=(rw, rbind) /var/lib/neev-supervisor/credentials/*/mount/ -> /data/agents/run-*/home/,
   # 5. per-slot network-namespace management for the runtime egress bootstrap.
   #    `ip netns add` self-binds /run/netns, makes it shared, then binds the process
   #    net namespace into it; the guest/proxy netns setup uses these.
   mount options=(rw, bind) /run/netns/ -> /run/netns/,
+  mount options=(rw, rbind) /run/netns/ -> /run/netns/,
+  mount options=(rw, make-shared) /run/netns/,
   mount options=(rw, shared) -> /run/netns/,
   mount options=(rw, rshared) -> /run/netns/,
-  mount options=(rw, bind) /proc/*/ns/net -> /run/netns/*,
+  # Binding the new network namespace onto its /run/netns/<name> file: the kernel ns
+  # pseudo-source appears to AppArmor as "/", so the source is unconstrained but the
+  # TARGET is pinned under /run/netns/.
+  mount options=(rw, bind) -> /run/netns/*,
+  mount options=(rw, rbind) -> /run/netns/*,
   # ip_forward is provisioned by `docker --sysctl` (not written here); the profile
   # deliberately does NOT allow /proc/sys writes.
 
