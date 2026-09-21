@@ -70,6 +70,19 @@ IPC_DIRECTORY_MODE = 0o750
 KEY_MODE = 0o440
 KEY_SIZE = 32
 
+# The NATIVE coordinator's own epoch files, owned by the web server, not by the
+# supervisor. Mirrors `agents/control_coordinator.rs`: magic, big-endian epoch,
+# SHA-256 over the first sixteen bytes.
+COORDINATOR_LOCK_BASENAME = "coordinator.lock"
+COORDINATOR_EPOCH_BASENAME = "coordinator.epoch"
+COORDINATOR_DIRECTORY_MODE = 0o750
+COORDINATOR_FILE_MODE = 0o600
+COORDINATOR_EPOCH_SIZE = 48
+COORDINATOR_EPOCH_MAGIC = b"NEEVEPC1"
+# Epoch 0 is not representable: `encode_epoch` refuses it, so a fresh deployment
+# starts at 1 and the native side increments from there on each acquire.
+COORDINATOR_INITIAL_EPOCH = 1
+
 
 class DeploymentError(Exception):
     """A deployment that cannot be trusted. Never carries a path or key."""
@@ -90,6 +103,10 @@ class DeploymentPolicy:
     peer_gid: int = DEFAULT_PEER_GID
     fence_directory_mode: int = FENCE_DIRECTORY_MODE
     ipc_directory_mode: int = IPC_DIRECTORY_MODE
+    # The coordinator's epoch files belong to the web server, which is the peer.
+    coordinator_uid: int = DEFAULT_PEER_UID
+    coordinator_gid: int = DEFAULT_PEER_GID
+    coordinator_directory_mode: int = COORDINATOR_DIRECTORY_MODE
 
     def for_current_process(self) -> "DeploymentPolicy":
         """The same policy owned by whoever is running. Test/dev convenience:
@@ -99,6 +116,10 @@ class DeploymentPolicy:
             supervisor_uid=os.geteuid(),
             supervisor_gid=os.getegid(),
             control_gid=os.getegid(),
+            peer_uid=os.geteuid(),
+            peer_gid=os.getegid(),
+            coordinator_uid=os.geteuid(),
+            coordinator_gid=os.getegid(),
         )
 
 
@@ -508,3 +529,155 @@ def from_config(config) -> tuple:
         peer_gid=int(getattr(config, "peer_gid")),
     )
     return DeploymentPaths(fence_directory=fence_dir, ipc_directory=ipc_directory), policy
+
+
+# --------------------------------------------------------------------------- #
+# Native coordinator epoch files
+# --------------------------------------------------------------------------- #
+
+
+def encode_coordinator_epoch(epoch: int) -> bytes:
+    """The 48-byte record `control_coordinator.rs::encode_epoch` writes.
+
+    Magic, big-endian epoch, then SHA-256 over those first sixteen bytes. Epoch
+    must be positive: the Rust encoder refuses anything else, so there is no
+    "zero" record to fall back on.
+    """
+    if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch <= 0:
+        _fail("invalid")
+    if epoch > (1 << 63) - 1:
+        _fail("invalid")
+    head = COORDINATOR_EPOCH_MAGIC + epoch.to_bytes(8, "big")
+    record = head + hashlib.sha256(head).digest()
+    if len(record) != COORDINATOR_EPOCH_SIZE:
+        _fail("invalid")
+    return record
+
+
+def decode_coordinator_epoch(raw: bytes) -> int:
+    """The positive epoch in a valid record, or `DeploymentError`.
+
+    Mirrors the Rust decoder exactly, so a record this accepts is one the
+    coordinator will accept — and a corrupt one is reported rather than
+    silently replaced.
+    """
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) != COORDINATOR_EPOCH_SIZE:
+        _fail("metadata")
+    raw = bytes(raw)
+    if raw[:8] != COORDINATOR_EPOCH_MAGIC:
+        _fail("metadata")
+    if raw[16:] != hashlib.sha256(raw[:16]).digest():
+        _fail("metadata")
+    epoch = int.from_bytes(raw[8:16], "big")
+    if epoch <= 0 or epoch > (1 << 63) - 1:
+        _fail("metadata")
+    return epoch
+
+
+def provision_coordinator_epoch(
+    directory: str, policy: Optional[DeploymentPolicy] = None
+) -> int:
+    """Provision the NATIVE coordinator's lock and epoch files. Returns the epoch.
+
+    Separate from the supervisor's own fence on purpose: these belong to the web
+    server (`coordinator_uid:coordinator_gid`, 0600) inside a directory the
+    service group may traverse but not write (root:`coordinator_gid`, 0750). The
+    supervisor's fence stays root-private and is provisioned by `provision`.
+
+    Create-only, and emphatically never a reset. A fresh deployment starts at
+    epoch 1 — epoch 0 is not representable, the Rust encoder refuses it. An
+    existing record is validated and PRESERVED at whatever epoch it has reached;
+    the native side increments it on each acquire, and rewriting it would hand a
+    stale coordinator an epoch the supervisor has already fenced past. A record
+    that fails validation is reported, not repaired: losing a live epoch is
+    worse than refusing to boot.
+    """
+    policy = policy or DeploymentPolicy()
+    # Parent is root-owned like every other protected directory; the service
+    # group needs traverse, never write. `control_coordinator.rs` enforces uid 0
+    # on this directory, so provisioning it any other way would only fail later.
+    _ensure_directory(
+        directory,
+        policy.supervisor_uid,
+        policy.coordinator_gid,
+        policy.coordinator_directory_mode,
+    )
+    fd = _open_directory(directory)
+    try:
+        _create_only(
+            fd,
+            COORDINATOR_LOCK_BASENAME,
+            b"",
+            policy.coordinator_uid,
+            policy.coordinator_gid,
+            COORDINATOR_FILE_MODE,
+        )
+        _create_only(
+            fd,
+            COORDINATOR_EPOCH_BASENAME,
+            encode_coordinator_epoch(COORDINATOR_INITIAL_EPOCH),
+            policy.coordinator_uid,
+            policy.coordinator_gid,
+            COORDINATOR_FILE_MODE,
+        )
+        return _verify_coordinator_locked(fd, policy)
+    finally:
+        os.close(fd)
+
+
+def verify_coordinator_epoch(
+    directory: str, policy: Optional[DeploymentPolicy] = None
+) -> int:
+    """The current epoch, after re-proving every file on disk. Never writes."""
+    policy = policy or DeploymentPolicy()
+    fd = _open_directory(directory)
+    try:
+        parent = os.fstat(fd)
+        if not stat_module.S_ISDIR(parent.st_mode):
+            _fail("metadata")
+        if (parent.st_uid, parent.st_gid) != (
+            policy.supervisor_uid,
+            policy.coordinator_gid,
+        ):
+            _fail("owner")
+        if (
+            stat_module.S_IMODE(parent.st_mode) != policy.coordinator_directory_mode
+            or parent.st_mode & 0o022
+        ):
+            _fail("metadata")
+        return _verify_coordinator_locked(fd, policy)
+    finally:
+        os.close(fd)
+
+
+def _verify_coordinator_locked(parent_fd: int, policy: DeploymentPolicy) -> int:
+    """Validate both coordinator files against the native rules; return the epoch."""
+    lock = _stat_file(parent_fd, COORDINATOR_LOCK_BASENAME)
+    epoch_info = _stat_file(parent_fd, COORDINATOR_EPOCH_BASENAME)
+    if _identity(lock) == _identity(epoch_info):
+        _fail("metadata")
+    for info, size in ((lock, 0), (epoch_info, COORDINATOR_EPOCH_SIZE)):
+        # Exactly what `validate_coordinator_file_metadata` demands: regular,
+        # one link, service-owned, 0600, exact size.
+        if (info.st_uid, info.st_gid) != (
+            policy.coordinator_uid,
+            policy.coordinator_gid,
+        ):
+            _fail("owner")
+        if stat_module.S_IMODE(info.st_mode) != COORDINATOR_FILE_MODE:
+            _fail("metadata")
+        if info.st_size != size:
+            _fail("metadata")
+    try:
+        fd = os.open(
+            COORDINATOR_EPOCH_BASENAME,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        _fail("metadata")
+    try:
+        raw = os.read(fd, COORDINATOR_EPOCH_SIZE + 1)
+    finally:
+        os.close(fd)
+    return decode_coordinator_epoch(raw)

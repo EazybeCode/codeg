@@ -401,5 +401,160 @@ class FromConfigTests(unittest.TestCase):
                     deploy.from_config(self.Config(**override))
 
 
+class CoordinatorEpochTests(unittest.TestCase):
+    """The native coordinator's own epoch files, provisioned before the web server.
+
+    The record format is pinned against `agents/control_coordinator.rs`:
+    `NEEVEPC1` + big-endian u64 epoch + SHA-256 of those first sixteen bytes,
+    48 bytes total, and epoch 0 is not representable.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.root = os.path.realpath(self._dir.name)
+        self.directory = os.path.join(self.root, "coordinator")
+        self.addCleanup(self._dir.cleanup)
+
+    def epoch_path(self):
+        return os.path.join(self.directory, deploy.COORDINATOR_EPOCH_BASENAME)
+
+    def read_epoch(self):
+        with open(self.epoch_path(), "rb") as handle:
+            return handle.read()
+
+    # -- record codec, pinned to the Rust encoder ------------------------- #
+
+    def test_the_record_is_byte_for_byte_what_the_native_encoder_writes(self):
+        import hashlib
+
+        record = deploy.encode_coordinator_epoch(1)
+        self.assertEqual(len(record), 48)
+        self.assertEqual(record[:8], b"NEEVEPC1")
+        self.assertEqual(record[8:16], (1).to_bytes(8, "big"))
+        self.assertEqual(record[16:], hashlib.sha256(record[:16]).digest())
+        self.assertEqual(deploy.decode_coordinator_epoch(record), 1)
+        self.assertEqual(
+            deploy.decode_coordinator_epoch(deploy.encode_coordinator_epoch(9)), 9
+        )
+
+    def test_epoch_zero_and_below_are_not_representable(self):
+        # `encode_epoch` in Rust refuses these, so there is no zero record to
+        # fall back on and none may be invented here.
+        for bad in (0, -1, True):
+            with self.assertRaises(deploy.DeploymentError):
+                deploy.encode_coordinator_epoch(bad)
+
+    def test_a_corrupt_record_is_reported_not_tolerated(self):
+        good = deploy.encode_coordinator_epoch(3)
+        cases = {
+            "wrong magic": b"XEEVEPC1" + good[8:],
+            "tampered epoch": good[:8] + (4).to_bytes(8, "big") + good[16:],
+            "tampered digest": good[:16] + bytes(32),
+            "short": good[:-1],
+            "long": good + b"\x00",
+            "zero epoch": (
+                lambda head: head + __import__("hashlib").sha256(head).digest()
+            )(b"NEEVEPC1" + bytes(8)),
+        }
+        for name, raw in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(deploy.DeploymentError):
+                    deploy.decode_coordinator_epoch(raw)
+
+    # -- provisioning ------------------------------------------------------ #
+
+    def test_provisions_the_directory_and_both_files_at_epoch_one(self):
+        epoch = deploy.provision_coordinator_epoch(self.directory, policy())
+        self.assertEqual(epoch, 1)
+        parent = os.lstat(self.directory)
+        lock = os.lstat(os.path.join(self.directory, deploy.COORDINATOR_LOCK_BASENAME))
+        record = os.lstat(self.epoch_path())
+        # Service group traverses; nobody outside root writes.
+        self.assertEqual(stat.S_IMODE(parent.st_mode), 0o750)
+        self.assertFalse(parent.st_mode & 0o022)
+        self.assertEqual(stat.S_IMODE(lock.st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(record.st_mode), 0o600)
+        self.assertEqual(lock.st_size, 0)
+        self.assertEqual(record.st_size, 48)
+        self.assertEqual(lock.st_nlink, 1)
+        self.assertEqual(record.st_nlink, 1)
+        self.assertEqual(deploy.decode_coordinator_epoch(self.read_epoch()), 1)
+
+    def test_reprovisioning_preserves_an_advanced_epoch(self):
+        deploy.provision_coordinator_epoch(self.directory, policy())
+        # The native side increments on acquire; pretend it has reached 12.
+        with open(self.epoch_path(), "r+b") as handle:
+            handle.write(deploy.encode_coordinator_epoch(12))
+
+        again = deploy.provision_coordinator_epoch(self.directory, policy())
+
+        # Resetting would hand a stale coordinator an epoch the supervisor has
+        # already fenced past.
+        self.assertEqual(again, 12)
+        self.assertEqual(deploy.decode_coordinator_epoch(self.read_epoch()), 12)
+
+    def test_a_corrupt_existing_record_refuses_rather_than_resetting(self):
+        deploy.provision_coordinator_epoch(self.directory, policy())
+        with open(self.epoch_path(), "r+b") as handle:
+            handle.write(b"\x00" * 48)
+        with self.assertRaises(deploy.DeploymentError):
+            deploy.provision_coordinator_epoch(self.directory, policy())
+        # Left exactly as found; a human decides, not the provisioner.
+        self.assertEqual(self.read_epoch(), b"\x00" * 48)
+
+    def test_the_socket_and_the_supervisor_fence_are_not_touched_here(self):
+        deploy.provision_coordinator_epoch(self.directory, policy())
+        self.assertEqual(
+            sorted(os.listdir(self.directory)),
+            ["coordinator.epoch", "coordinator.lock"],
+        )
+
+    # -- refusals ---------------------------------------------------------- #
+
+    def test_a_symlinked_coordinator_directory_is_refused(self):
+        real = os.path.join(self.root, "real")
+        os.mkdir(real, 0o750)
+        linked = os.path.join(self.root, "linked")
+        os.symlink(real, linked)
+        with self.assertRaises(deploy.DeploymentError):
+            deploy.provision_coordinator_epoch(linked, policy())
+
+    def test_verification_refuses_a_wrong_mode_owner_or_link_count(self):
+        deploy.provision_coordinator_epoch(self.directory, policy())
+        from dataclasses import replace as _replace
+
+        # Mode widened.
+        os.chmod(self.epoch_path(), 0o640)
+        with self.assertRaises(deploy.DeploymentError):
+            deploy.verify_coordinator_epoch(self.directory, policy())
+        os.chmod(self.epoch_path(), 0o600)
+
+        # A second name for the epoch record is a second way to write it.
+        os.link(self.epoch_path(), os.path.join(self.directory, "epoch.bak"))
+        with self.assertRaises(deploy.DeploymentError):
+            deploy.verify_coordinator_epoch(self.directory, policy())
+        os.unlink(os.path.join(self.directory, "epoch.bak"))
+
+        # A policy naming an owner the files do not have.
+        wrong = _replace(policy(), coordinator_uid=os.geteuid() + 1)
+        with self.assertRaises(deploy.DeploymentError):
+            deploy.verify_coordinator_epoch(self.directory, wrong)
+
+        # And the untouched deployment still verifies.
+        self.assertEqual(deploy.verify_coordinator_epoch(self.directory, policy()), 1)
+
+    def test_verification_refuses_a_world_writable_directory(self):
+        deploy.provision_coordinator_epoch(self.directory, policy())
+        os.chmod(self.directory, 0o757)
+        with self.assertRaises(deploy.DeploymentError):
+            deploy.verify_coordinator_epoch(self.directory, policy())
+
+    def test_a_missing_file_is_refused_by_verification(self):
+        deploy.provision_coordinator_epoch(self.directory, policy())
+        os.unlink(os.path.join(self.directory, deploy.COORDINATOR_LOCK_BASENAME))
+        with self.assertRaises(deploy.DeploymentError):
+            deploy.verify_coordinator_epoch(self.directory, policy())
+
+
 if __name__ == "__main__":
     unittest.main()
