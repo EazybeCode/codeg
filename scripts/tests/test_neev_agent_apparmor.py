@@ -17,7 +17,10 @@ class ApparmorProfileTests(unittest.TestCase):
 
     def test_allows_receiving_runtime_signals_so_docker_stop_works(self):
         # Without this the container cannot receive the runtime's SIGTERM, so `docker
-        # stop` waits out the full termination grace before resorting to SIGKILL.
+        # stop` waits out the full termination grace before resorting to SIGKILL. The
+        # audit shows the runtime confined as peer="runc", so that exact label must be
+        # allowed; peer=unconfined is retained for hosts that run the runtime unconfined.
+        self.assertIn("signal (receive) peer=runc,", self.text)
         self.assertIn("signal (receive) peer=unconfined,", self.text)
         # Intra-profile signalling (the launcher reaping its own children) stays.
         self.assertIn("signal (receive,send) peer=neev-agent,", self.text)
