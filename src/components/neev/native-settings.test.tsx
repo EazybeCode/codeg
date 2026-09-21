@@ -13,6 +13,29 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
 }))
 afterEach(() => vi.unstubAllGlobals())
+/**
+ * Settings is sectioned, so a test has to say which section it is looking at.
+ *
+ * Inactive panels are hidden rather than unmounted, which is deliberate — see
+ * `native-settings.tsx` — so role queries and `toBeVisible` are the honest
+ * assertions here. A bare `getByText` would also match a section the reader
+ * cannot currently see.
+ */
+async function openSection(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string
+) {
+  await user.click(await screen.findByRole("tab", { name }))
+}
+const MEMBERS = "Members",
+  AGENTS = "Personal AI connections",
+  PROFILE = "Your profile",
+  ORGANIZATION = "Organization"
+function panelOf(section: string) {
+  // `hidden: true` so the query reaches a panel that is currently closed; the
+  // assertion about whether it is *visible* is then the test's own.
+  return screen.getByRole("tabpanel", { name: section, hidden: true })
+}
 function fixtures(owner = 1) {
   return {
     "GET /api/neev/organization": () =>
@@ -39,15 +62,18 @@ function fixtures(owner = 1) {
 }
 it("protects the owner, exposes only own sign-in methods, and keeps back navigation", async () => {
   const mock = mockNativeSession(orgSession, fixtures())
+  const user = userEvent.setup()
   render(
     <NativeTestRoot>
       <NativeSettings />
     </NativeTestRoot>
   )
-  expect(await screen.findByText("Maya")).toBeVisible()
+  // Back navigation is page furniture, not part of a section.
   expect(
-    screen.getByRole("link", { name: "Back to workspace" })
+    await screen.findByRole("link", { name: "Back to workspace" })
   ).toHaveAttribute("href", "/workspace")
+  await openSection(user, MEMBERS)
+  expect(await screen.findByText("Maya")).toBeVisible()
   expect(screen.queryByRole("button", { name: "Remove Sagar" })).toBeNull()
   expect(screen.getByRole("button", { name: "Remove Maya" })).toBeEnabled()
   expect(screen.getByText("Owner")).toBeVisible()
@@ -69,6 +95,7 @@ it("disables invitations when the native email provider is unavailable", async (
       <NativeSettings />
     </NativeTestRoot>
   )
+  await openSection(user, MEMBERS)
   await user.type(
     await screen.findByLabelText("Invite by email"),
     "invitee@example.test"
@@ -108,12 +135,16 @@ it("hides owner-only role grants from a nonowner admin and protects administrato
         ],
       }),
   })
+  const user = userEvent.setup()
   render(
     <NativeTestRoot>
       <NativeSettings />
     </NativeTestRoot>
   )
+  await openSection(user, MEMBERS)
   await screen.findByText("Owner Maya")
+  // Asserted with Members open, so the absence is a real absence rather than a
+  // section that simply is not on screen yet.
   expect(screen.queryByRole("combobox")).toBeNull()
   expect(screen.queryByRole("button", { name: "Remove Owner Maya" })).toBeNull()
   expect(screen.queryByRole("button", { name: "Remove Admin Isha" })).toBeNull()
@@ -155,6 +186,7 @@ it("loads members past the first100 using the actual members-only page DTO", asy
       <NativeSettings />
     </NativeTestRoot>
   )
+  await openSection(user, MEMBERS)
   await user.click(await screen.findByRole("button", { name: "Load more" }))
   expect(await screen.findByText("Last person")).toBeVisible()
   expect(screen.queryByRole("button", { name: "Load more" })).toBeNull()
@@ -193,11 +225,15 @@ it("loads the shifted final member after a first-page removal without discarding
       <NativeSettings />
     </NativeTestRoot>
   )
-  await screen.findByText("Person 100")
-  expect(screen.queryByText("Person 101")).toBeNull()
-  const name = screen.getByLabelText("Organization name")
+  // The draft is typed on Organization, the removal happens on Members, and the
+  // draft has to survive the round trip — an unsaved edit is not something a
+  // reader expects a section switch to throw away.
+  const name = await screen.findByLabelText("Organization name")
   await user.clear(name)
   await user.type(name, "Unpublished draft")
+  await openSection(user, MEMBERS)
+  await screen.findByText("Person 100")
+  expect(screen.queryByText("Person 101")).toBeNull()
   await user.click(screen.getByRole("button", { name: "Remove Person 2" }))
   await user.click(
     within(await screen.findByRole("dialog")).getByRole("button", {
@@ -210,7 +246,10 @@ it("loads the shifted final member after a first-page removal without discarding
   expect(await screen.findByText("Person 101")).toBeVisible()
   expect(offsets).toEqual([0, 99])
   expect(screen.queryByRole("button", { name: "Load more" })).toBeNull()
-  expect(name).toHaveValue("Unpublished draft")
+  await openSection(user, ORGANIZATION)
+  expect(screen.getByLabelText("Organization name")).toHaveValue(
+    "Unpublished draft"
+  )
   expect(mock.unknown).toEqual([])
 })
 
@@ -229,6 +268,7 @@ it("requires explicit removal confirmation and surfaces a server permission deni
       <NativeSettings />
     </NativeTestRoot>
   )
+  await openSection(user, MEMBERS)
   const trigger = await screen.findByRole("button", { name: "Remove Maya" })
   await user.click(trigger)
   const dialog = await screen.findByRole("dialog")
@@ -247,15 +287,28 @@ it("requires explicit removal confirmation and surfaces a server permission deni
 })
 it("hides admin mutations from members and still shows organization and personal identity", async () => {
   const mock = mockNativeSession({ ...orgSession, role: "member" }, fixtures())
+  const user = userEvent.setup()
   render(
     <NativeTestRoot>
       <NativeSettings />
     </NativeTestRoot>
   )
-  await screen.findByText("Maya")
+  // Organization opens first, so its admin-only control is checked in place.
+  expect(
+    await screen.findByText(
+      "Only administrators can edit organization branding."
+    )
+  ).toBeVisible()
   expect(screen.queryByRole("button", { name: "Save organization" })).toBeNull()
+  await openSection(user, MEMBERS)
+  await screen.findByText("Maya")
   expect(screen.queryByRole("button", { name: "Invite member" })).toBeNull()
   expect(screen.queryByRole("button", { name: /Remove / })).toBeNull()
+  // Personal identity is still the reader's own, on its own section. Scoped to
+  // the panel: the same name also appears in the (now hidden) member list, and
+  // an unscoped text query would match both.
+  await openSection(user, PROFILE)
+  expect(within(panelOf(PROFILE)).getByText("Sagar")).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
 it("uses brandingRevision and surfaces a stale edit without claiming it saved", async () => {
@@ -355,6 +408,7 @@ it("shows the caller's real provider connections instead of a static notice", as
       <NativeSettings />
     </NativeTestRoot>
   )
+  await openSection(user, AGENTS)
   // Per-user, per-provider state straight from the server — not a fixed
   // "agents are unavailable" paragraph.
   expect(await screen.findByText("Not signed in")).toBeVisible()
@@ -394,11 +448,125 @@ it("never reports a usable connection over a runtime that is not bound", async (
         ],
       }),
   })
+  const user = userEvent.setup()
   render(
     <NativeTestRoot>
       <NativeSettings />
     </NativeTestRoot>
   )
+  await openSection(user, AGENTS)
   expect(await screen.findByText("Agents are turned off.")).toBeVisible()
   expect(screen.queryByText("Connected")).toBeNull()
+})
+
+it("shows one section at a time and moves the selection with it", async () => {
+  const mock = mockNativeSession(orgSession, fixtures())
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  // Organization is where the page opens; the other three are present but not
+  // on screen, which is the whole point of sectioning a page this long.
+  expect(
+    await screen.findByRole("tab", { name: ORGANIZATION })
+  ).toHaveAttribute("aria-selected", "true")
+  expect(panelOf(ORGANIZATION)).toBeVisible()
+  for (const section of [MEMBERS, AGENTS, PROFILE]) {
+    expect(panelOf(section)).not.toBeVisible()
+  }
+
+  await openSection(user, PROFILE)
+  expect(panelOf(PROFILE)).toBeVisible()
+  expect(panelOf(ORGANIZATION)).not.toBeVisible()
+  expect(screen.getByRole("tab", { name: PROFILE })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
+  expect(screen.getByRole("tab", { name: ORGANIZATION })).toHaveAttribute(
+    "aria-selected",
+    "false"
+  )
+  // Signing out lives with the identity it ends, not loose on the page.
+  expect(
+    within(panelOf(PROFILE)).getByRole("button", { name: "Sign out" })
+  ).toBeVisible()
+  expect(mock.unknown).toEqual([])
+})
+
+it("walks the sections with the arrow, home and end keys", async () => {
+  mockNativeSession(orgSession, fixtures())
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  const first = await screen.findByRole("tab", { name: ORGANIZATION })
+  first.focus()
+  // Either axis works: the nav is a column on a desktop and a row on a phone,
+  // and the component cannot see which one the reader has.
+  await user.keyboard("{ArrowDown}")
+  expect(screen.getByRole("tab", { name: MEMBERS })).toHaveFocus()
+  expect(panelOf(MEMBERS)).toBeVisible()
+  await user.keyboard("{ArrowRight}")
+  expect(screen.getByRole("tab", { name: AGENTS })).toHaveFocus()
+  await user.keyboard("{End}")
+  expect(screen.getByRole("tab", { name: PROFILE })).toHaveFocus()
+  expect(panelOf(PROFILE)).toBeVisible()
+  await user.keyboard("{Home}")
+  expect(first).toHaveFocus()
+  expect(panelOf(ORGANIZATION)).toBeVisible()
+  // Only the selected tab is a tab stop, so Tab leaves the nav rather than
+  // walking every section on the way to the content.
+  expect(first).toHaveAttribute("tabindex", "0")
+  expect(screen.getByRole("tab", { name: MEMBERS })).toHaveAttribute(
+    "tabindex",
+    "-1"
+  )
+})
+
+it("hides the connections panel across a section switch instead of discarding it", async () => {
+  let checks = 0
+  const mock = mockNativeSession(orgSession, {
+    ...fixtures(),
+    "GET /api/neev/agent/connections": () => {
+      checks += 1
+      return json({
+        runtimeEnabled: true,
+        connections: [
+          {
+            provider: "claude",
+            state: "not_signed_in",
+            accountLabel: null,
+            checkedAt: null,
+            errorCode: null,
+          },
+        ],
+      })
+    },
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  await openSection(user, AGENTS)
+  // A node from *inside* the connections panel. React cannot preserve this exact
+  // element across an unmount, so its identity is the assertion.
+  const refresh = await screen.findByRole("button", { name: "Refresh status" })
+
+  await openSection(user, MEMBERS)
+  expect(panelOf(AGENTS)).not.toBeVisible()
+  await openSection(user, AGENTS)
+
+  // The panel that comes back is the same one, still holding whatever sign-in it
+  // had under way. If this ever regresses to conditional rendering, the remount
+  // produces a fresh node here and re-reads the server, and a user part-way
+  // through a provider login silently loses it.
+  expect(screen.getByRole("button", { name: "Refresh status" })).toBe(refresh)
+  expect(checks).toBe(1)
+  expect(mock.unknown).toEqual([])
 })
