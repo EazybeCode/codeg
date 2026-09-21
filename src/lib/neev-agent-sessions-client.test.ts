@@ -219,13 +219,11 @@ describe("agent session requests", () => {
     vi.stubGlobal("fetch", fetcher)
     expect(await listAgentSessions()).toEqual([{ ...session, nodeId: null }])
     await listAgentSessions(true)
-    await listAgentSessions(false, undefined, 7)
+    // No project filter: the server takes `archived` only, and a project view
+    // filters the list it already has.
     expect(urls).toEqual([
       "/api/neev/agent/sessions",
       "/api/neev/agent/sessions?archived=1",
-      // Scoped to one project. Omitting it means every session, which is what
-      // the unfiled organizer needs.
-      "/api/neev/agent/sessions?nodeId=7",
     ])
   })
 

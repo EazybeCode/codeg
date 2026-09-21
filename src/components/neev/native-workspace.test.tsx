@@ -127,14 +127,15 @@ it("shows the person and organization without GitHub or chat controls", async ()
   )
   expect(await screen.findByText("Neev demo")).toBeVisible()
   expect(screen.getByText("Sagar")).toBeVisible()
-  expect(screen.getByRole("button", { name: "New project" })).toBeEnabled()
+  // Two: the sidebar's and the landing's, which are the same action.
+  expect(screen.getAllByRole("button", { name: "New project" })).toHaveLength(2)
   expect(
     screen.queryByRole("button", { name: "New chat" })
   ).not.toBeInTheDocument()
-  // Agent chats are reached from inside a container. The sessions are still
-  // private and unfiled — the project is the way in, not where they live. With
-  // no runtime bound it says so rather than offering a connection that cannot
-  // be exercised.
+  // Agent chats are reached from inside a container, and only from there. The
+  // sessions stay private to their owner; the server holds which project each
+  // belongs to. With no runtime bound it says so rather than offering a
+  // connection that cannot be exercised.
   expect(
     screen.queryByRole("navigation", { name: "Sections" })
   ).not.toBeInTheDocument()
@@ -213,7 +214,9 @@ it("supports keyboard project creation, nested placement and dialog focus restor
       <NativeWorkspace />
     </NativeTestRoot>
   )
-  const trigger = await screen.findByRole("button", { name: "New project" })
+  const [trigger] = await screen.findAllByRole("button", {
+    name: "New project",
+  })
   trigger.focus()
   await user.keyboard("{Enter}")
   expect(await screen.findByRole("dialog")).toBeVisible()
@@ -343,7 +346,7 @@ it.each(["Cancel", "Escape"])(
     )
     expect(trigger).toHaveFocus()
     expect(
-      screen.getByText("Select an item from the sidebar, or create one.")
+      screen.getByText("Open a project to work in it, or create one.")
     ).toBeVisible()
     expect(mock.unknown).toEqual([])
   }
@@ -791,4 +794,47 @@ it("reveals a restored resource nested under collapsed ancestors", async () => {
   await waitFor(() =>
     expect(screen.getAllByTitle("Nested team chat").length).toBeGreaterThan(1)
   )
+})
+
+it("lands on Projects, never on a global agent list", async () => {
+  // The rail used to persist a section, so a reload could land straight on a
+  // global Agent Chats surface with its own New agent chat — a destination
+  // outside Projects, which is the one thing the workspace should not have.
+  localStorage.setItem("neev.ws.section", "agents")
+  mockNativeSession(undefined, {
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
+  })
+  mountWorkspace()
+
+  // Level 1: the landing's own heading, not the sidebar's section label.
+  expect(
+    await screen.findByRole("heading", { level: 1, name: "Projects" })
+  ).toBeVisible()
+  // Once the tree has loaded, the copy points at the projects that exist.
+  expect(
+    await screen.findByText("Open a project to work in it, or create one.")
+  ).toBeVisible()
+  // No agent surface, and nothing offering to start one from nowhere.
+  expect(screen.queryByRole("button", { name: "New agent chat" })).toBeNull()
+  expect(screen.queryByText(/No saved agent chats yet/)).toBeNull()
+  // The landing's own way to start.
+  expect(
+    screen.getAllByRole("button", { name: "New project" }).length
+  ).toBeGreaterThan(0)
 })

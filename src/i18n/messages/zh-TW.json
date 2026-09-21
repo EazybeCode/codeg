@@ -206,6 +206,7 @@
     "newProject": "新增專案",
     "newSubfolder": "新增子資料夾",
     "emptyProjects": "建立專案，為團隊工作安排一個歸屬。",
+    "projectsLanding": "開啟一個專案開始工作，或新建一個。",
     "expand": "展開{name}",
     "collapse": "摺疊{name}",
     "actions": "{name}的操作",

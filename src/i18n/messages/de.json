@@ -206,6 +206,7 @@
     "newProject": "Neues Projekt",
     "newSubfolder": "Neuer Unterordner",
     "emptyProjects": "Erstellen Sie ein Projekt als Ort für die Arbeit Ihres Teams.",
+    "projectsLanding": "Öffne ein Projekt, um darin zu arbeiten, oder erstelle eines.",
     "expand": "{name} aufklappen",
     "collapse": "{name} zuklappen",
     "actions": "Aktionen für {name}",

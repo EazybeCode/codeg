@@ -206,6 +206,7 @@
     "newProject": "مشروع جديد",
     "newSubfolder": "مجلد فرعي جديد",
     "emptyProjects": "أنشئ مشروعًا لتنظيم عمل فريقك.",
+    "projectsLanding": "افتح مشروعًا للعمل فيه، أو أنشئ مشروعًا جديدًا.",
     "expand": "توسيع {name}",
     "collapse": "طي {name}",
     "actions": "إجراءات {name}",

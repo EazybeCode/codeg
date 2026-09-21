@@ -9,6 +9,7 @@ import {
   ChevronRight,
   FileText,
   Folder,
+  FolderTree,
   Layers3,
   Menu,
   MessagesSquare,
@@ -125,8 +126,8 @@ function NativeWorkspaceTree({
   edit: (node: NativeNode) => void
   createContent: (node: NativeNode, kind: NativeResourceKind) => void
   selectResource: (node: NativeNode, resource: NativeResource) => void
-  /** Agent chats are private and unfiled; a container is the way IN, not where
-   *  they are stored. Opening them from here moves nothing. */
+  /** Agent chats are private to their owner and filed under a node by the
+   *  server (schema 12). Opening them from here moves nothing. */
   openAgents: (node: NativeNode) => void
   agentsOpen: boolean
 }) {
@@ -329,8 +330,7 @@ function WorkspaceContent() {
   const t = useTranslations("Native"),
     auth = useNativeAuth(),
     mobile = useIsMobile()
-  const router = useRouter(),
-    c = useTranslations("NativeContent")
+  const router = useRouter()
   const navigationGuard = useRef<ContentNavigationGuard>((action) => action())
   const registerGuard = useCallback((guard: ContentNavigationGuard) => {
     navigationGuard.current = guard
@@ -360,11 +360,11 @@ function WorkspaceContent() {
     })
   }, [])
   /**
-   * Open the private agent chats from inside a container.
+   * Open this container's private agent chats.
    *
-   * The sessions are NOT filed under the container and nothing about them is
-   * changed by this: they stay private to their owner, in their own store, with
-   * the same sharing. The project is the way in, not where they live.
+   * Opening changes nothing: the sessions stay private to their owner with the
+   * same sharing, and the server holds which project each one belongs to. A
+   * session is only filed by an explicit move, or by being created here.
    */
   const openAgents = useCallback(
     (node: NativeNode) => {
@@ -840,13 +840,14 @@ function WorkspaceContent() {
           </aside>
         )}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {section === "agents" ? (
-            // Saved, server-owned agent sessions (spec §5). They are private to
-            // the owner and are not filed under a project/folder, so this
-            // surface is available whatever the rail has selected.
+          {section === "agents" && selectedNode ? (
+            // Saved agent sessions, always inside the project they were opened
+            // from. They are private to their owner and the server files them
+            // under a node (schema 12); this surface never appears without one,
+            // because a global list would be a destination outside Projects.
             <NativeAgentChats
-              nodeId={selectedNode?.id ?? null}
-              nodeName={selectedNode?.name}
+              nodeId={selectedNode.id}
+              nodeName={selectedNode.name}
               onRequestNavigationGuard={registerGuard}
               onRequestSettings={() =>
                 navigationGuard.current(() => router.push("/settings"))
@@ -868,26 +869,32 @@ function WorkspaceContent() {
               }}
             />
           ) : (
+            // The landing. There is nothing above a project to land on, so
+            // this names the one thing to do rather than a section that no
+            // longer exists.
             <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 px-6 py-24 text-center">
               <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
-                {section === "docs" ? (
-                  <FileText
-                    aria-hidden
-                    className="size-5 text-muted-foreground"
-                  />
-                ) : (
-                  <MessagesSquare
-                    aria-hidden
-                    className="size-5 text-muted-foreground"
-                  />
-                )}
+                <FolderTree
+                  aria-hidden
+                  className="size-5 text-muted-foreground"
+                />
               </div>
               <h1 className="text-xl font-semibold tracking-tight">
-                {section === "docs" ? c("documents") : c("teamChat")}
+                {t("projects")}
               </h1>
               <p className="max-w-sm text-sm leading-6 text-muted-foreground">
-                {t("sectionEmpty")}
+                {nodes.length === 0 ? t("emptyProjects") : t("projectsLanding")}
               </p>
+              <Button
+                onClick={() =>
+                  navigationGuard.current(() =>
+                    openEditor({ kind: "project", parentId: null })
+                  )
+                }
+              >
+                <Plus aria-hidden className="size-4" />
+                {t("newProject")}
+              </Button>
             </div>
           )}
         </main>

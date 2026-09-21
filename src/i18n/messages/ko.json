@@ -206,6 +206,7 @@
     "newProject": "새 프로젝트",
     "newSubfolder": "새 하위 폴더",
     "emptyProjects": "프로젝트를 만들어 팀의 업무를 정리하세요.",
+    "projectsLanding": "작업할 프로젝트를 열거나 새로 만드세요.",
     "expand": "{name} 펼치기",
     "collapse": "{name} 접기",
     "actions": "{name} 작업",

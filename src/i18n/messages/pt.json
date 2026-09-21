@@ -206,6 +206,7 @@
     "newProject": "Novo projeto",
     "newSubfolder": "Nova subpasta",
     "emptyProjects": "Crie um projeto para organizar o trabalho da sua equipe.",
+    "projectsLanding": "Abra um projeto para trabalhar nele ou crie um.",
     "expand": "Expandir {name}",
     "collapse": "Recolher {name}",
     "actions": "Ações de {name}",
