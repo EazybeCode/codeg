@@ -22,10 +22,13 @@ class EndpointTableTests(unittest.TestCase):
     def test_observed_login_hosts(self):
         self.assertEqual(endpoints.hosts("codex", "login"), {"auth.openai.com"})
         claude_login = endpoints.hosts("claude", "login")
-        # Observed authorize origin + officially-required auth/token hosts.
+        # Observed authorize origin + officially-required auth/token hosts, plus
+        # api.anthropic.com which the pinned CLI fetches its role/profile from to COMPLETE
+        # login (/api/oauth/claude_cli/roles) after the code exchange.
         self.assertEqual(
             claude_login,
-            {"claude.com", "claude.ai", "console.anthropic.com", "platform.claude.com"},
+            {"claude.com", "claude.ai", "console.anthropic.com",
+             "platform.claude.com", "api.anthropic.com"},
         )
         # platform.claude.com is required for token refresh at runtime too.
         self.assertIn("platform.claude.com", endpoints.hosts("claude", "run"))

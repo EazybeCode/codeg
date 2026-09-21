@@ -51,6 +51,7 @@ class FakeDriver(sup.LoginDriver):
         self.account_label = "Acct"
         self.started = False
         self.canceled = False
+        self.released = False
         self.submitted = None
         self.logout_result = "confirmed"
         if provider is dto.Provider.CODEX:
@@ -80,6 +81,9 @@ class FakeDriver(sup.LoginDriver):
 
     def logout(self):
         return self.logout_result
+
+    def release(self):
+        self.released = True
 
 
 class FakeVolumes:
@@ -206,6 +210,30 @@ class LoginFlowTests(SupervisorTestBase):
         )
         phases = {entry.phase for entry in page.body.entries}
         self.assertIn(dto.RegistryPhase.COMMITTED, phases)
+
+    def test_settle_releases_login_resources_and_preserves_credentials(self):
+        # Committing a login must free its transient resources (slot proxy + scope run
+        # lock, via driver.release) WITHOUT revoking/logging out — the creds must persist,
+        # and the freed slot/lock are what let the health probe + next runtime run proceed
+        # (their absence caused UNAVAILABLE + a ~120s "provider failed to answer").
+        self.ok(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+        handle = self.volumes.created[0][1]
+        driver = self.drivers[handle]
+        driver.phase = "prepared"
+        observe = request(dto.ObserveLoginRequest(binding(dto.Provider.CODEX)), seq="2", rid="b" * 32)
+        receipt = self.ok(observe).body.receipt_id.value
+        witness = dto.CommittedLoginWitnessDto(
+            dto.WitnessKind.COMPLETED_CONNECT, binding(dto.Provider.CODEX),
+            dto.Id(handle), dto.UnixSec(1500),
+        )
+        self.ok(request(dto.SettleLoginRequest(dto.Id(receipt), witness), seq="3", rid="c" * 32))
+        self.assertTrue(driver.released)             # transient resources freed on commit
+        self.assertEqual(self.volumes.revoked, [])   # credentials PRESERVED (no revoke)
+        self.assertEqual(self.volumes.closed, [])    # not closed/logged-out on commit
+        # Idempotent: a replayed settle still reports COMMITTED and does not re-release.
+        driver.released = False
+        self.ok(request(dto.SettleLoginRequest(dto.Id(receipt), witness), seq="4", rid="d" * 32))
+        self.assertFalse(driver.released)
 
     def test_start_conflict_and_observe_not_found(self):
         self.ok(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))

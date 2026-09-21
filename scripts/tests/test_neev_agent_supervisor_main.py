@@ -2,6 +2,7 @@
 probes with FIXED provider argv), and the abandoned-run purge. The fence/socket/serve
 glue + LoginChannel lifecycle are Linux-only."""
 
+import json
 import os
 import sys
 import tempfile
@@ -141,6 +142,46 @@ class SlotQuarantineTests(unittest.TestCase):
             channel._workdir = "/data/agents/run-xyz"
             channel.terminate()  # no raise
             self.assertFalse(slot_proxy.is_quarantined("a", directory=qdir))
+
+
+class CredentialPresentTests(unittest.TestCase):
+    """Only a real Claude OAuth record counts — not the pre-created dir, not a file
+    count (a failed login still drops settings/debug files)."""
+
+    def _present(self, tmp, write):
+        env = dict(_full_env("/data/agents"), NEEV_SUPERVISOR_STORE_ROOT=tmp)
+        config = main.config_from_env(env)
+        handle = "h" * 32
+        claude = os.path.join(tmp, handle, "mount", ".claude")
+        os.makedirs(claude)
+        write(claude)
+        return main._credential_present(config, handle, dto.Provider.CLAUDE)()
+
+    def test_empty_precreated_dir_is_not_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self._present(tmp, lambda d: None))
+
+    def test_incidental_settings_file_is_not_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self._present(
+                tmp, lambda d: open(os.path.join(d, "settings.json"), "w").write("{}")))
+
+    def test_real_oauth_record_is_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def write(d):
+                with open(os.path.join(d, ".credentials.json"), "w") as fp:
+                    json.dump({"claudeAiOauth": {"accessToken": "a", "refreshToken": "r"}}, fp)
+            self.assertTrue(self._present(tmp, write))
+
+    def test_empty_token_or_bad_json_is_not_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def write(d):
+                with open(os.path.join(d, ".credentials.json"), "w") as fp:
+                    json.dump({"claudeAiOauth": {"accessToken": "", "refreshToken": "r"}}, fp)
+            self.assertFalse(self._present(tmp, write))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self._present(
+                tmp, lambda d: open(os.path.join(d, ".credentials.json"), "w").write("not json")))
 
 
 class PurgeTests(unittest.TestCase):

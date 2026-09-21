@@ -195,6 +195,11 @@ class CodexLoginDriver(sup.LoginDriver):
         self._channel.terminate()
         return "not_needed"
 
+    def release(self) -> None:
+        # Committed: the app-server has exited; free the channel's transient resources
+        # (slot proxy + run lock + workdir) WITHOUT revoking the credential volume.
+        self._channel.terminate()
+
 
 # --------------------------------------------------------------------------- #
 # Claude browser + paste-code driver
@@ -229,10 +234,14 @@ class ClaudeLoginDriver(sup.LoginDriver):
             except claude_proto.ProtocolError:
                 self._state, self._failure = "failed", "provider_unavailable"
                 return
-        if self._state not in ("prepared", "failed") and self._channel.returncode() is not None:
-            # The CLI exited: success iff a code was submitted AND credentials landed
-            # in the volume (the authoritative signal — not a TUI banner).
-            if self._submitted and self._credential_present():
+        returncode = self._channel.returncode()
+        if self._state not in ("prepared", "failed") and returncode is not None:
+            # The CLI exited: success iff a code was submitted, the CLI exited CLEANLY
+            # (rc 0 — a suppressed nonzero, e.g. a denied post-exchange profile fetch,
+            # is NOT success), AND real credentials landed in the volume. The rc-0 gate
+            # is essential: the config dir is pre-created by credential delivery, so a
+            # dir-presence check alone would falsely report prepared on a failed login.
+            if self._submitted and returncode == 0 and self._credential_present():
                 self._state = "prepared"
             else:
                 self._state, self._failure = "failed", (
@@ -257,6 +266,11 @@ class ClaudeLoginDriver(sup.LoginDriver):
     def logout(self) -> str:
         self._channel.terminate()
         return "not_needed"
+
+    def release(self) -> None:
+        # Committed: the CLI has exited; free the channel's transient resources (slot
+        # proxy + run lock + workdir) WITHOUT revoking the credential volume.
+        self._channel.terminate()
 
 
 # --------------------------------------------------------------------------- #

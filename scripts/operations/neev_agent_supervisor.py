@@ -122,6 +122,12 @@ class LoginDriver(abc.ABC):
     def logout(self) -> str:
         """Return a `dto.LogoutResult` value (confirmed|not_confirmed|not_needed)."""
 
+    def release(self) -> None:
+        """Free the login's TRANSIENT resources after a durable commit — the slot proxy,
+        the per-scope run lock, the run workdir — WITHOUT revoking or logging out (the
+        committed credentials must persist). Default no-op for in-memory drivers; the
+        production drivers tear their channel down. Idempotent."""
+
 
 class AccountProbe(abc.ABC):
     """A fresh, login-driver-INDEPENDENT probe of a committed connection's stored
@@ -161,6 +167,7 @@ class _Attempt:
     state: str = "starting"
     receipt_id: Optional[str] = None
     committed: bool = False
+    released: bool = False  # transient login resources freed after commit (idempotent)
     entry_id: Optional[str] = None
     driver: Optional[LoginDriver] = None
 
@@ -497,6 +504,13 @@ class Supervisor:
             attempt.committed = True
             attempt.state = "committed"
             self._promote_entry(attempt, dto.RegistryPhase.COMMITTED)
+            # The provider has finished and the credentials are durably committed, so
+            # free the login's TRANSIENT resources now — the slot proxy, the per-scope
+            # run lock and the run workdir — WITHOUT revoke/logout (the creds persist).
+            # Without this the channel keeps holding the slot lock (the health probe hits
+            # a busy slot -> UNAVAILABLE) and the scope run lock (the next runtime run
+            # waits it out ~120s then fails "provider failed to answer").
+            self._release_committed(attempt)
         elif (
             attempt.receipt_id != request.body.receipt_id.value
             or attempt.storage_handle != witness.storage_handle.value
@@ -506,6 +520,22 @@ class Supervisor:
             dto.CommittedState.COMMITTED, dto.Id(attempt.receipt_id),
             dto.Id(attempt.storage_handle),
         )
+
+    def _release_committed(self, attempt: _Attempt) -> None:
+        """Release a committed login's transient resources ONCE (the `released` flag makes
+        a replayed settle a no-op). The driver reference is KEPT so a later
+        cleanup_connection can still logout/teardown (a second channel teardown is an
+        idempotent no-op). The durable commit has already happened, so a release failure
+        never undoes it — it is swallowed here, and the channel itself quarantines the
+        slot on a teardown it cannot confirm clean. Preserves the credential volume: no
+        revoke, no logout."""
+        if attempt.released or attempt.driver is None:
+            return
+        attempt.released = True
+        try:
+            attempt.driver.release()
+        except Exception:
+            pass  # commit stands; a bad teardown has already quarantined the slot
 
     def _check_connection(self, request: dto.Request):
         ticket = request.body.ticket

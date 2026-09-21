@@ -136,6 +136,28 @@ class ClaudeDriverTests(unittest.TestCase):
         self.assertEqual(state.phase, "failed")
         self.assertEqual(state.failure, "reauth_required")
 
+    def test_submit_then_NONZERO_exit_is_failed_even_with_dir_present(self):
+        # A suppressed nonzero exit (e.g. a denied post-exchange profile fetch) must NOT
+        # be treated as success just because the config dir exists (it is pre-created by
+        # credential delivery). rc must be 0.
+        channel = FakeChannel([self._preamble()])
+        driver = drivers.ClaudeLoginDriver(channel, credential_present=lambda: True)
+        driver.start()
+        driver.poll()
+        driver.submit_code("code")
+        channel.exit(1)
+        state = driver.poll()
+        self.assertEqual(state.phase, "failed")
+        self.assertEqual(state.failure, "reauth_required")
+
+    def test_release_terminates_the_channel_without_logout(self):
+        channel = FakeChannel([])
+        drivers.ClaudeLoginDriver(channel, credential_present=lambda: True).release()
+        self.assertTrue(channel.terminated)
+        codex_channel = FakeChannel([])
+        drivers.CodexLoginDriver(codex_channel).release()
+        self.assertTrue(codex_channel.terminated)
+
 
 class AccountProbeTests(unittest.TestCase):
     def test_codex_probe_reads_supported_account(self):

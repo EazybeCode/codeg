@@ -88,6 +88,11 @@ _ENDPOINTS = {
         Endpoint("claude.ai", 443, True),             # official auth (redirect target)
         Endpoint("console.anthropic.com", 443, True),  # official --console flow
         Endpoint("platform.claude.com", 443, True),   # official OAuth token exchange
+        # The pinned CLI completes login by fetching its role/profile from
+        # api.anthropic.com/api/oauth/claude_cli/roles AFTER the code exchange; without
+        # this host that call is denied, the CLI exits nonzero, and login never lands
+        # credentials. Precise host, login purpose only — no wildcard.
+        Endpoint("api.anthropic.com", 443, True),
     ),
     ("claude", "run"): (
         Endpoint("api.anthropic.com", 443, True),     # official Messages API

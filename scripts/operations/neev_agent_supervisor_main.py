@@ -22,6 +22,7 @@ tested; the fence open / socket adopt / serve loop are Linux-only.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -293,12 +294,47 @@ def _login_env(config, provider, home, proxy_env):
     return env
 
 
+_MAX_CREDS_BYTES = 1 << 20
+
+
 def _credential_present(config, handle, provider):
-    """A completed login leaves the provider's config dir in the volume (read by the
-    euid-0 daemon at the store mount path)."""
-    sub = ".codex" if provider is dto.Provider.CODEX else ".claude"
-    mount = os.path.join(config.store_root, handle, "mount", sub)
-    return lambda: os.path.isdir(mount)
+    """True only when a REAL Claude OAuth credential record is stored.
+
+    Used ONLY for Claude (the Codex driver proves completion via account/read). Neither
+    the config dir's existence nor a file COUNT proves a login succeeded: the dir is
+    pre-created by credential delivery (Codex needs $CODEX_HOME), and a FAILED login
+    still drops settings/debug files. The credential RECORD is what matters — the pinned
+    CLI writes it to `.claude/.credentials.json` as a `claudeAiOauth` object — so require
+    that file to parse (bounded) to a claudeAiOauth object with non-empty accessToken AND
+    refreshToken. Reads only at the euid-0 daemon's store mount path; checks presence and
+    shape, NEVER token values. Secondary to the driver's rc-0 gate."""
+    creds_path = os.path.join(
+        config.store_root, handle, "mount", ".claude", ".credentials.json"
+    )
+
+    def present():
+        try:
+            with open(creds_path, "rb") as fp:
+                raw = fp.read(_MAX_CREDS_BYTES + 1)
+        except OSError:
+            return False
+        if not raw or len(raw) > _MAX_CREDS_BYTES:
+            return False
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            return False
+        oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+        if not isinstance(oauth, dict):
+            return False
+        access = oauth.get("accessToken")
+        refresh = oauth.get("refreshToken")
+        return (
+            isinstance(access, str) and bool(access)
+            and isinstance(refresh, str) and bool(refresh)
+        )
+
+    return present
 
 
 # --------------------------------------------------------------------------- #
