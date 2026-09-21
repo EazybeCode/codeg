@@ -332,6 +332,16 @@ class CredentialVolumes:
 
     def close(self, scope: Scope, handle: str) -> None:
         with self._store.locked():
+            entry = self._store.entry_path(handle)
+            if not os.path.lexists(str(entry)):
+                # The entry is already gone (e.g. a crash after revoke deleted it but
+                # before the caller recorded the disposal, then a retry). Converge:
+                # there is nothing to unmount. But NEVER leave a dangling mapping — if a
+                # dm mapping for this handle somehow survives the deleted entry, refuse
+                # so it is surfaced rather than silently ignored.
+                if os.path.lexists(str(MAPPER_ROOT / self._mapping_name(handle))):
+                    raise StoreError("conflict")
+                return
             manifest, image, mountpoint = self._ready_entry(scope, handle)
             self._require_uuid(image, manifest["luks_uuid"])
             mapping = self._mapping_name(handle)
@@ -360,22 +370,34 @@ class CredentialVolumes:
         `close` then `revoke`; the absence of this method was silently turning every
         `cleanup_connection` into a QUARANTINE (nothing durably deleted).
 
-        Fail closed and idempotent:
+        Own-scope authenticated, fail closed, idempotent:
 
-          * a still-mapped volume is a `busy` error — never force-delete the entry out
-            from under a live dm mapping (the ext4 lives on `/dev/mapper/<name>`, so no
-            mapping means no possible live mount);
-          * a missing entry is a no-op, so a cleanup retried after a partial failure
-            still converges.
+          * a PRESENT entry is authenticated with `read_manifest(scope, handle)` FIRST,
+            so a handle for another user/provider cannot delete this entry (an unused
+            scope parameter would have let a wrong scope delete by handle alone);
+          * a still-MOUNTED volume is `busy` — checked via `findmnt`, not merely the
+            absence of the mapper node (a node accidentally removed while a mount
+            lingered would otherwise let us delete live data);
+          * a still-MAPPED volume is `busy` — never force-delete under a live dm mapping;
+          * a MISSING entry is a no-op, so a cleanup retried after a crash between the
+            durable delete and the caller's disposal record still converges;
+          * the parent directory is fsync'd after removal so the delete is durable.
         """
         with self._store.locked():
             entry = self._store.entry_path(handle)
             if not os.path.lexists(str(entry)):
-                return  # already revoked
-            mapping_path = MAPPER_ROOT / self._mapping_name(handle)
-            if os.path.lexists(str(mapping_path)):
-                raise StoreError("busy")  # still open; the caller must close() first
+                return  # idempotent: already revoked (retry converges)
+            # Authenticate ownership before any destructive action. Any phase is
+            # revocable (even a partially-provisioned entry), so this uses the raw
+            # manifest read, not `_ready_entry`'s ready-only check.
+            self._store.read_manifest(scope, handle)  # raises on scope/handle mismatch
+            mountpoint = entry / _MOUNT_NAME
+            if self._mounts(mountpoint):
+                raise StoreError("busy")  # still mounted; the caller must close() first
+            if os.path.lexists(str(MAPPER_ROOT / self._mapping_name(handle))):
+                raise StoreError("busy")  # still mapped
             self._remove_entry_tree(entry)
+            self._fsync_directory(entry.parent)
 
     @staticmethod
     def _remove_entry_tree(entry: Path) -> None:
@@ -389,6 +411,19 @@ class CredentialVolumes:
             raise
         except OSError:
             raise StoreError("unavailable") from None
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        """fsync a directory so a child's removal is durable across a crash."""
+        directory_fd = None
+        try:
+            directory_fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            os.fsync(directory_fd)
+        except OSError:
+            raise StoreError("unavailable") from None
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
 
     def status(self, scope: Scope, handle: str) -> str:
         with self._store.locked():

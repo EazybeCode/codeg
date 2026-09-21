@@ -415,14 +415,47 @@ class CredentialVolumeTests(unittest.TestCase):
         self.assertFalse(entry.exists())          # the whole entry tree is gone
         self.volumes.revoke(self.scope, handle)   # idempotent: missing entry is a no-op
 
-    def test_revoke_refuses_while_still_mapped(self):
+    def test_revoke_refuses_while_still_mounted_or_mapped(self):
         handle = self.create()
         entry = self.store.entry_path(handle)
-        self.volumes.open(self.scope, handle)     # still mapped (+ mounted)
+        self.volumes.open(self.scope, handle)     # mounted AND mapped
         with self.assertRaises(self.store_module.StoreError) as caught:
             self.volumes.revoke(self.scope, handle)
         self.assertEqual(caught.exception.code, "busy")
-        self.assertTrue(entry.exists())           # not deleted out from under a mapping
+        self.assertTrue(entry.exists())           # never deleted under a live mount/mapping
+
+    def test_revoke_refuses_wrong_scope_and_preserves_entry(self):
+        handle = self.create()
+        entry = self.store.entry_path(handle)
+        self.volumes.open(self.scope, handle)
+        self.volumes.close(self.scope, handle)
+        other = self.store_module.Scope(self.scope.org_id, self.scope.user_id + 1, "claude")
+        with self.assertRaises(self.store_module.StoreError):
+            self.volumes.revoke(other, handle)    # authenticated by manifest, not handle alone
+        self.assertTrue(entry.exists())           # a foreign scope cannot delete it
+        self.volumes.revoke(self.scope, handle)   # the true owner still can
+        self.assertFalse(entry.exists())
+
+    def test_full_close_then_revoke_cleanup_converges_on_retry(self):
+        # Exactly the supervisor's cleanup order (close THEN revoke), run TWICE: the
+        # second pass models a crash after the durable delete but before the disposal
+        # record. It must converge (no exception) rather than quarantine forever.
+        handle = self.create()
+        self.volumes.open(self.scope, handle)
+        self.volumes.close(self.scope, handle)
+        self.volumes.revoke(self.scope, handle)
+        self.assertFalse(self.store.entry_path(handle).exists())
+        self.volumes.close(self.scope, handle)    # entry absent -> no-op, not an error
+        self.volumes.revoke(self.scope, handle)   # entry absent -> no-op
+
+    def test_close_refuses_absent_entry_with_dangling_mapping(self):
+        handle = self.create()
+        self.volumes.revoke(self.scope, handle)   # entry gone
+        # Simulate a dangling dm mapping surviving the deleted entry.
+        (self.mapper_root / ("neev-credential-" + handle)).touch(mode=0o600)
+        with self.assertRaises(self.store_module.StoreError) as caught:
+            self.volumes.close(self.scope, handle)
+        self.assertEqual(caught.exception.code, "conflict")
 
     def test_close_owned_volume_and_idempotent_locked_status(self):
         handle = self.create()
