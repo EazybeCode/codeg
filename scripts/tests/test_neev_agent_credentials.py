@@ -63,6 +63,9 @@ class RecordingChown:
 
 
 def deliver(volumes, tenant, provider, handle, run_uid, run_gid, lock_dir, **kw):
+    # These tests use fake mount paths, so default the provider-config-dir creation to a
+    # no-op; the real behaviour is covered by test_ensure_provider_home_* below.
+    kw.setdefault("ensure_provider_home", lambda home, prov: None)
     return credentials.deliver(
         volumes, tenant, provider, handle, run_uid, run_gid,
         lock_dir=lock_dir, **kw,
@@ -89,6 +92,28 @@ class ProviderEnvTests(unittest.TestCase):
         self.assertEqual(claude, {"HOME": "/vol", "CLAUDE_CONFIG_DIR": "/vol/.claude"})
         codex = credentials.provider_env("/vol", "codex")
         self.assertEqual(codex, {"HOME": "/vol", "CODEX_HOME": "/vol/.codex"})
+
+    def test_ensure_provider_home_creates_config_dir_and_is_idempotent(self):
+        # Codex refuses to start when $CODEX_HOME is absent, so deliver pre-creates it.
+        with tempfile.TemporaryDirectory() as home:
+            credentials._ensure_provider_home(home, "codex")
+            self.assertTrue(os.path.isdir(os.path.join(home, ".codex")))
+            credentials._ensure_provider_home(home, "codex")  # idempotent
+            credentials._ensure_provider_home(home, "claude")
+            self.assertTrue(os.path.isdir(os.path.join(home, ".claude")))
+
+    def test_deliver_creates_provider_home_on_the_physical_mount(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mount = os.path.join(tmp, "mount")
+            os.mkdir(mount, 0o700)
+            volumes = FakeVolumes({(3, 7, "codex", "h1"): mount})
+            with deliver(
+                volumes, "org:3/user:7", "codex", "h1", 61000, 61000,
+                os.path.join(tmp, "locks"),
+                chown_tree=RecordingChown(), stat_fn=fake_stat(),
+                ensure_provider_home=credentials._ensure_provider_home,  # the real one
+            ):
+                self.assertTrue(os.path.isdir(os.path.join(mount, ".codex")))
 
 
 class DeliverTests(unittest.TestCase):

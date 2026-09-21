@@ -99,6 +99,9 @@ def scope_of(tenant: str, provider: str) -> Scope:
     return Scope(org_id, user_id, provider)
 
 
+_PROVIDER_CONFIG_SUBDIR = {"claude": ".claude", "codex": ".codex"}
+
+
 def provider_env(home: str, provider: str) -> Dict[str, str]:
     """The environment binding the provider's config strictly to the sandbox HOME."""
     if provider not in PROVIDERS:
@@ -109,6 +112,26 @@ def provider_env(home: str, provider: str) -> Dict[str, str]:
     else:
         env["CODEX_HOME"] = os.path.join(home, ".codex")
     return env
+
+
+def _ensure_provider_home(home: str, provider: str) -> None:
+    """Create the provider's config dir inside the delivered HOME if it is absent.
+
+    The Codex app-server REFUSES to start when $CODEX_HOME does not exist — it errors
+    ("CODEX_HOME points to ... but that path does not exist") and exits rather than
+    creating it — so a FRESH login volume (empty HOME) can never reach the device-code
+    challenge without this. Claude tolerates a missing dir, but we create both for
+    consistency. Made under the held run lock as the (root) owner; the subsequent lend
+    chown makes it writable by the provider's lane uid."""
+    subdir = _PROVIDER_CONFIG_SUBDIR.get(provider)
+    if subdir is None:
+        return
+    try:
+        os.mkdir(os.path.join(home, subdir), 0o700)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise CredentialError("credentials") from error
 
 
 @dataclass(frozen=True)
@@ -190,6 +213,7 @@ def deliver(
     home_as: str = None,
     chown_tree: Callable[[str, int, int], None] = _chown_tree,
     stat_fn: Callable[..., os.stat_result] = os.stat,
+    ensure_provider_home: Callable[[str, str], None] = _ensure_provider_home,
 ) -> Iterator[Delivery]:
     """Open the caller's own credential volume, lend it to the run's lane uid under a
     per-scope lock, yield the HOME + env to run with, and restore the canonical owner
@@ -238,6 +262,10 @@ def deliver(
         # other lane can ever hold or read the volume concurrently, so there is no
         # chown race and refresh writes cannot interleave.
         chown_tree(home, CANONICAL_OWNER_UID, CANONICAL_OWNER_GID)
+        # The provider's config dir must exist before it launches (Codex refuses to
+        # start otherwise). Create it under the lock, before the lend, so the following
+        # chown makes it owned by (writable to) this run's lane uid.
+        ensure_provider_home(home, provider)
         chown_tree(home, run_uid, run_gid)
         seen_home = home if home_as is None else home_as
         try:

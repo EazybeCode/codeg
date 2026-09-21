@@ -312,8 +312,9 @@ class CodexLoginProtocol:
             return self._handle_response(value)
         if "method" not in value:
             self._fatal("invalid")
-        if self._state != "ready":
-            self._fatal("invalid")
+        # Notifications are fire-and-forget and may arrive in ANY state (the app-server
+        # emits unsolicited ones — e.g. configWarning — before initialize completes), so
+        # they are not gated on "ready"; unmodelled ones are ignored below.
         return self._handle_notification(value)
 
     def _handle_response(self, value: Dict[str, Any]) -> Event:
@@ -363,21 +364,27 @@ class CodexLoginProtocol:
         self._fatal("invalid")
 
     def _handle_notification(self, value: Dict[str, Any]) -> Optional[Event]:
-        if not _exact_keys(value, frozenset(("method", "params"))):
-            self._fatal("invalid")
-        method = value["method"]
+        method = value.get("method")
         if type(method) is not str:
             self._fatal("invalid")
+        # Only the notifications we act on are validated; the envelope is NOT key-exact
+        # so extra fields (e.g. emittedAtMs) are tolerated. Unknown/unsolicited
+        # notifications (configWarning, remoteControl/status/changed, ...) are IGNORED
+        # rather than fataling the session — required for forward-compatibility with an
+        # app-server that emits more than the two we consume.
         if method == "account/login/completed":
-            return self._handle_completion(value["params"])
+            return self._handle_completion(value.get("params"))
         if method == "account/updated":
-            self._validate_account_update(value["params"])
+            self._validate_account_update(value.get("params"))
             return None
-        self._fatal("invalid")
+        return None
 
     def _handle_completion(self, params: Any) -> Optional[Event]:
         required = frozenset(("success",))
-        optional = frozenset(("loginId", "error", "onboardingEntrypoint"))
+        # emittedAtMs is present on ALL real app-server notifications (0.155.1) though
+        # the official schema omits it; tolerate it while still requiring `success` and
+        # validating the fields we act on.
+        optional = frozenset(("loginId", "error", "onboardingEntrypoint", "emittedAtMs"))
         if not _exact_keys(params, required, optional):
             self._fatal("invalid")
         if type(params["success"]) is not bool:
@@ -402,15 +409,19 @@ class CodexLoginProtocol:
         return Event("login_failed")
 
     def _validate_initialize(self, result: Any) -> None:
+        # The pinned app-server (0.155.1) returns userAgent, codexHome, platformFamily,
+        # platformOs; only userAgent is required, the rest are informational profile
+        # strings we do not act on. Tolerate all of them (and validate the ones present)
+        # rather than rejecting the whole handshake on an unmodelled profile field.
         if not _exact_keys(
             result,
             frozenset(("userAgent",)),
-            frozenset(("platformFamily", "platformOs")),
+            frozenset(("platformFamily", "platformOs", "codexHome")),
         ):
             self._fatal("invalid")
         if not _bounded_string(result["userAgent"], MAX_PROFILE_STRING):
             self._fatal("invalid")
-        for key in ("platformFamily", "platformOs"):
+        for key in ("platformFamily", "platformOs", "codexHome"):
             if key in result and not _bounded_string(result[key], MAX_PROFILE_STRING):
                 self._fatal("invalid")
 
@@ -488,7 +499,8 @@ class CodexLoginProtocol:
         if not _exact_keys(
             params,
             frozenset(),
-            frozenset(("authMode", "planType")),
+            # emittedAtMs rides on every real notification (0.155.1); tolerate it.
+            frozenset(("authMode", "planType", "emittedAtMs")),
         ):
             self._fatal("invalid")
         auth_mode = params.get("authMode")

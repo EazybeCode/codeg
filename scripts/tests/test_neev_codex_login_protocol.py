@@ -244,6 +244,17 @@ class CodexLoginProtocolTests(unittest.TestCase):
                 request = json.loads(protocol.initialize())
                 self.assert_protocol_error("invalid", lambda: protocol.receive(frame({"id": request["id"], "result": result})))
 
+    def test_initialize_accepts_the_real_four_field_result(self):
+        # 0.155.1 returns userAgent, codexHome, platformFamily, platformOs; all are
+        # tolerated (codexHome is informational and must not reject the handshake).
+        protocol = self.module.CodexLoginProtocol()
+        request = json.loads(protocol.initialize())
+        events = protocol.receive(frame({"id": request["id"], "result": {
+            "userAgent": "codex/0.155.1", "codexHome": "/home/user/.codex",
+            "platformFamily": "linux", "platformOs": "debian",
+        }}))
+        self.assertEqual([event.kind for event in events], ["initialized"])
+
     def test_device_result_is_exact_and_rejects_url_and_code_attacks(self):
         self.initialize()
         invalid = (
@@ -586,15 +597,37 @@ class CodexLoginProtocolTests(unittest.TestCase):
                     ),
                 )
 
-        invalid = (
-            {"method": "unknown/event", "params": {}},
-            {"id": 88, "method": "account/read", "params": {}},
+        # A server->client REQUEST (has BOTH id and method) is still fatal.
+        protocol = self.module.CodexLoginProtocol()
+        self.initialize_protocol(protocol)
+        self.assert_protocol_error(
+            "invalid",
+            lambda: protocol.receive(frame({"id": 88, "method": "account/read", "params": {}})),
         )
-        for value in invalid:
-            with self.subTest(value=value):
-                protocol = self.module.CodexLoginProtocol()
-                self.initialize_protocol(protocol)
-                self.assert_protocol_error("invalid", lambda: protocol.receive(frame(value)))
+
+    def test_unsolicited_and_unknown_notifications_are_ignored_with_extra_fields(self):
+        # The real app-server (0.155.1) emits notifications we do not model — and every
+        # notification carries emittedAtMs though the schema omits it. These must be
+        # IGNORED (not fatal), even before initialize completes, or the session dies.
+        protocol = self.module.CodexLoginProtocol()
+        # Before initialize: an unsolicited configWarning must not fatal.
+        self.assertEqual(
+            protocol.receive(frame({"method": "configWarning", "params": {"emittedAtMs": 1}})), []
+        )
+        self.initialize_protocol(protocol)
+        for value in (
+            {"method": "remoteControl/status/changed", "params": {"x": 1}, "emittedAtMs": 9},
+            {"method": "unknown/event", "params": {}},
+        ):
+            self.assertEqual(protocol.receive(frame(value)), [])
+        # A KNOWN notification with the extra emittedAtMs is still accepted + validated.
+        self.assertEqual(
+            protocol.receive(frame({
+                "method": "account/updated",
+                "params": {"authMode": "chatgpt", "emittedAtMs": 3},
+            })),
+            [],
+        )
 
     def initialize_protocol(self, protocol):
         request = json.loads(protocol.initialize())
