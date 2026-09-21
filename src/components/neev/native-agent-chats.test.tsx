@@ -125,8 +125,6 @@ function mount(project?: { nodeId: number; nodeName?: string }) {
   )
 }
 
-/** The per-user, per-org map the surface reads. Matches `scopeKey` 1:3. */
-const PROJECT_KEY = "neev.agent.project.1:3"
 const SECOND_ID = "33333333-3333-4333-8333-333333333333"
 const second = {
   ...session,
@@ -134,6 +132,7 @@ const second = {
   title: "Audit the parser",
   updatedAt: 1_700_000_100,
 }
+const NODE_PATCH = `PATCH /api/neev/agent/sessions/${SESSION_ID}/node`
 
 afterEach(() => {
   vi.useRealTimers()
@@ -406,12 +405,14 @@ it("reports a run it can no longer follow and offers an explicit reattach", asyn
 it("shows a project only the agent chats filed under it", async () => {
   // Showing the same global list under every project would tell the user each
   // of them contains all of it.
-  localStorage.setItem(
-    PROJECT_KEY,
-    JSON.stringify({ [SESSION_ID]: 7, [SECOND_ID]: 9 })
-  )
   mockNativeSession(undefined, {
-    "GET /api/neev/agent/sessions": () => json({ sessions: [session, second] }),
+    "GET /api/neev/agent/sessions": () =>
+      json({
+        sessions: [
+          { ...session, nodeId: 7 },
+          { ...second, nodeId: 9 },
+        ],
+      }),
     "GET /api/neev/agent/connections": () =>
       json({ runtimeEnabled: true, connections: [] }),
   })
@@ -427,36 +428,46 @@ it("shows a project only the agent chats filed under it", async () => {
   expect(screen.queryByText(/Not in a project/)).toBeNull()
 })
 
-it("keeps a session's project across a reload", async () => {
+it("files an unfiled session against its revision, and it stays filed", async () => {
+  let filed = false
+  let moved: Record<string, unknown> | null = null
   mockNativeSession(undefined, {
-    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/sessions": () =>
+      json({ sessions: [{ ...session, nodeId: filed ? 7 : null }] }),
     "GET /api/neev/agent/connections": () =>
       json({ runtimeEnabled: true, connections: [] }),
+    [NODE_PATCH]: (init) => {
+      moved = JSON.parse(init.body as string)
+      filed = true
+      return json({ ...session, nodeId: 7, revision: "2" })
+    },
   })
   const user = userEvent.setup()
   const first = mount({ nodeId: 7, nodeName: "Launch" })
 
-  // It starts unfiled — it existed before any of this — and filing it is an
+  // It starts unfiled — it predates the association — and filing it is an
   // explicit act, not something the project does on its arrival.
   await user.click(
     await screen.findByRole("button", { name: /Not in a project/ })
   )
   await user.click(await screen.findByRole("button", { name: "Move here" }))
-  expect(JSON.parse(localStorage.getItem(PROJECT_KEY) as string)).toEqual({
-    [SESSION_ID]: 7,
-  })
+  // Against the revision it was read at, so a concurrent rename is not lost.
+  await waitFor(() =>
+    expect(moved).toEqual({ nodeId: 7, expectedRevision: "1" })
+  )
+  expect(await screen.findByText("Refactor the parser")).toBeVisible()
   first.unmount()
 
-  // Reload: still in this project …
+  // The server holds it now, so it survives more than a reload.
   mount({ nodeId: 7, nodeName: "Launch" })
   expect(await screen.findByText("Refactor the parser")).toBeVisible()
   expect(screen.queryByText(/Not in a project/)).toBeNull()
 })
 
 it("does not show one project's agent chats under another", async () => {
-  localStorage.setItem(PROJECT_KEY, JSON.stringify({ [SESSION_ID]: 7 }))
   mockNativeSession(undefined, {
-    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/sessions": () =>
+      json({ sessions: [{ ...session, nodeId: 7 }] }),
     "GET /api/neev/agent/connections": () =>
       json({ runtimeEnabled: true, connections: [] }),
   })
@@ -469,9 +480,9 @@ it("does not show one project's agent chats under another", async () => {
 it("never hides a session from its owner outside a project", async () => {
   // The filing is a view, not an access rule: with no project selected every
   // session the server returned is listed, filed or not.
-  localStorage.setItem(PROJECT_KEY, JSON.stringify({ [SESSION_ID]: 7 }))
   mockNativeSession(undefined, {
-    "GET /api/neev/agent/sessions": () => json({ sessions: [session, second] }),
+    "GET /api/neev/agent/sessions": () =>
+      json({ sessions: [{ ...session, nodeId: 7 }, second] }),
     "GET /api/neev/agent/connections": () =>
       json({ runtimeEnabled: true, connections: [] }),
   })
@@ -483,16 +494,9 @@ it("never hides a session from its owner outside a project", async () => {
   expect(screen.queryByText(/Not in a project/)).toBeNull()
 })
 
-it("ignores a stored map that could not have been written by this app", async () => {
-  // localStorage is writable by another tab, an extension or an older build.
-  localStorage.setItem(
-    PROJECT_KEY,
-    JSON.stringify({
-      "not-a-uuid": 7,
-      [SESSION_ID]: "7",
-      [SECOND_ID]: -1,
-    })
-  )
+it("treats a server that does not send nodeId as unfiled, not as ours", async () => {
+  // A pre-schema-12 server omits the field entirely. Those sessions are
+  // offered to the project, never silently adopted into it.
   mockNativeSession(undefined, {
     "GET /api/neev/agent/sessions": () => json({ sessions: [session, second] }),
     "GET /api/neev/agent/connections": () =>
@@ -500,10 +504,32 @@ it("ignores a stored map that could not have been written by this app", async ()
   })
   mount({ nodeId: 7, nodeName: "Launch" })
 
-  // Every pointer was malformed, so both sessions read as unfiled — offered,
-  // never silently adopted into the project.
   expect(await screen.findByText("Agent chats in Launch")).toBeVisible()
   expect(
     screen.getByRole("button", { name: /Not in a project \(2\)/ })
+  ).toBeVisible()
+  // …and none of them is shown as belonging to this project.
+  expect(screen.queryByText("Refactor the parser")).toBeNull()
+})
+
+it("keeps the session where it was when a move is refused", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () =>
+      json({ runtimeEnabled: true, connections: [] }),
+    // The revision moved underneath: the server refuses rather than clobber.
+    [NODE_PATCH]: () => json({ code: "conflict" }, 409),
+  })
+  const user = userEvent.setup()
+  mount({ nodeId: 7, nodeName: "Launch" })
+
+  await user.click(
+    await screen.findByRole("button", { name: /Not in a project/ })
+  )
+  await user.click(await screen.findByRole("button", { name: "Move here" }))
+  expect(await screen.findByRole("alert")).toBeVisible()
+  // Still offered, still unfiled — the UI does not pretend the move happened.
+  expect(
+    screen.getByRole("button", { name: /Not in a project \(1\)/ })
   ).toBeVisible()
 })

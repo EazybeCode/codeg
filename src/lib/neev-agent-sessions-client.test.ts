@@ -8,6 +8,7 @@ import {
   invokeTeamAgent,
   isSupportedModel,
   parseConnectAttempt,
+  setAgentSessionNode,
   submitConnectCode,
   createAgentSession,
   listAgentSessions,
@@ -83,7 +84,15 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe("agent session wire validation", () => {
   it("accepts the server's session and turn shapes", () => {
-    expect(parseAgentSession(session)).toEqual(session)
+    // A pre-schema-12 server sends no `nodeId`; it reads as unfiled rather
+    // than being refused for saying less than we now expect.
+    expect(parseAgentSession(session)).toEqual({ ...session, nodeId: null })
+    expect(parseAgentSession({ ...session, nodeId: null }).nodeId).toBeNull()
+    expect(parseAgentSession({ ...session, nodeId: 7 }).nodeId).toBe(7)
+    for (const bad of [0, -1, 1.5, "7", {}])
+      expect(() => parseAgentSession({ ...session, nodeId: bad })).toThrow(
+        NativeClientError
+      )
     expect(parseAgentTurn(turn)).toEqual(turn)
     expect(parseAgentTurn(settled)).toEqual(settled)
   })
@@ -208,11 +217,15 @@ describe("agent session requests", () => {
       return json({ sessions: [session] })
     })
     vi.stubGlobal("fetch", fetcher)
-    expect(await listAgentSessions()).toEqual([session])
+    expect(await listAgentSessions()).toEqual([{ ...session, nodeId: null }])
     await listAgentSessions(true)
+    await listAgentSessions(false, undefined, 7)
     expect(urls).toEqual([
       "/api/neev/agent/sessions",
       "/api/neev/agent/sessions?archived=1",
+      // Scoped to one project. Omitting it means every session, which is what
+      // the unfiled organizer needs.
+      "/api/neev/agent/sessions?nodeId=7",
     ])
   })
 
@@ -236,6 +249,74 @@ describe("agent session requests", () => {
       model: "default",
       requestId: SESSION_ID,
     })
+  })
+
+  it("files a session under a project, and unfiles it, by revision", async () => {
+    const calls: { url: string; init: RequestInit }[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, init })
+        return json({ ...session, nodeId: 7 })
+      })
+    )
+    expect((await setAgentSessionNode(SESSION_ID, 7, "1", "csrf")).nodeId).toBe(
+      7
+    )
+    expect(calls[0].url).toBe(`/api/neev/agent/sessions/${SESSION_ID}/node`)
+    expect(calls[0].init.method).toBe("PATCH")
+    // A decimal STRING, like every other revision on this DTO.
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      nodeId: 7,
+      expectedRevision: "1",
+    })
+    await setAgentSessionNode(SESSION_ID, null, "2", "csrf")
+    expect(JSON.parse(calls[1].init.body as string)).toEqual({
+      nodeId: null,
+      expectedRevision: "2",
+    })
+  })
+
+  it("refuses a move that could not be one before any request", async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal("fetch", fetcher)
+    for (const [id, node, revision] of [
+      ["not-a-uuid", 7, "1"],
+      [SESSION_ID, 0, "1"],
+      [SESSION_ID, -1, "1"],
+      [SESSION_ID, 1.5, "1"],
+      [SESSION_ID, 7, ""],
+      [SESSION_ID, 7, "01"],
+      [SESSION_ID, 7, "-1"],
+    ] as const)
+      await expect(
+        setAgentSessionNode(id, node, revision, "csrf")
+      ).rejects.toBeInstanceOf(NativeClientError)
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it("sends nodeId on creation only when there is one", async () => {
+    const bodies: unknown[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(init.body as string))
+        return json(session, 201)
+      })
+    )
+    const base = {
+      title: "New",
+      provider: "claude" as const,
+      model: "default",
+      requestId: SESSION_ID,
+    }
+    await createAgentSession(base, "csrf")
+    await createAgentSession({ ...base, nodeId: null }, "csrf")
+    await createAgentSession({ ...base, nodeId: 7 }, "csrf")
+    // `deny_unknown_fields` accepts an absent optional but not a stray null.
+    expect(bodies[0]).toEqual(base)
+    expect(bodies[1]).toEqual(base)
+    expect(bodies[2]).toEqual({ ...base, nodeId: 7 })
   })
 
   it("refuses an unsupported provider before any request", async () => {

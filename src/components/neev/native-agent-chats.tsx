@@ -26,13 +26,9 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { NativeClientError } from "@/lib/neev-client"
 import {
-  assignSessionProject,
-  forgetSessionProjects,
-  readSessionProjects,
-} from "@/lib/neev-agent-session-projects"
-import {
   cancelAgentRun,
   createAgentSession,
+  setAgentSessionNode,
   followAgentRun,
   listAgentSessions,
   listAgentTurns,
@@ -104,22 +100,12 @@ function AgentChats({
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
-  // The scope the filing is stored under. NOT `auth.scopeKey`: that carries a
-  // revalidation generation, so the map would be lost on every refresh. User
-  // and organization are what actually scope it.
-  const projectScope =
-    auth.session && auth.session.organization
-      ? `${auth.session.user.id}:${auth.session.organization.id}`
-      : null
-
   const [sessions, setSessions] = useState<NeevAgentSession[] | null>(null),
     [connections, setConnections] = useState<NeevAgentConnections | null>(null),
     [showArchived, setShowArchived] = useState(false),
     [open, setOpen] = useState<NeevAgentSession | null>(null),
-    // Which project each session is filed under. Local, per user+org, and never
-    // a claim about who may read anything — see neev-agent-session-projects.
-    [projects, setProjects] = useState(() => readSessionProjects(projectScope)),
     [showUnfiled, setShowUnfiled] = useState(false),
+    [filing, setFiling] = useState<string | null>(null),
     [creating, setCreating] = useState(false),
     [error, setError] = useState<unknown>(null)
 
@@ -138,16 +124,6 @@ function AgentChats({
         if (controller.signal.aborted) return
         setSessions(list)
         setConnections(wiring)
-        // Pointers to sessions the server no longer lists would outlive what
-        // they point at. Archived rows are hidden rather than gone, so only
-        // prune when looking at the full list.
-        if (showArchived)
-          setProjects(
-            forgetSessionProjects(
-              projectScope,
-              list.map((session) => session.id)
-            )
-          )
         setError(null)
       } catch (cause) {
         if (controller.signal.aborted) return
@@ -158,7 +134,7 @@ function AgentChats({
     }
     void load()
     return () => controller.abort()
-  }, [showArchived, refreshToken, auth, projectScope])
+  }, [showArchived, refreshToken, auth])
 
   /**
    * What this project shows, and what is not in any project yet.
@@ -168,19 +144,9 @@ function AgentChats({
    * would say each of them contains all of it, which is not true.
    */
   const shown = (sessions ?? []).filter(
-    (session) => nodeId === null || projects[session.id] === nodeId
+    (session) => nodeId === null || session.nodeId === nodeId
   )
-  const unfiled = (sessions ?? []).filter(
-    (session) => projects[session.id] === undefined
-  )
-  const file = useCallback(
-    (session: NeevAgentSession) => {
-      if (nodeId === null) return
-      // A local pointer only: the session is not moved, copied or re-shared.
-      setProjects(assignSessionProject(projectScope, session.id, nodeId))
-    },
-    [projectScope, nodeId]
-  )
+  const unfiled = (sessions ?? []).filter((session) => session.nodeId === null)
 
   // Keep the freshly-changed session visible without a round trip; the server's
   // own row is what we store, so nothing here is optimistic.
@@ -191,6 +157,38 @@ function AgentChats({
     })
     setOpen((current) => (current?.id === session.id ? session : current))
   }, [])
+
+  /**
+   * File an unfiled session under this project.
+   *
+   * `expectedRevision` is what makes this safe: the server refuses the move if
+   * the session changed underneath, so a concurrent rename is never silently
+   * overwritten. The server's own row comes back and replaces ours.
+   */
+  const file = useCallback(
+    async (session: NeevAgentSession) => {
+      if (nodeId === null || !auth.session || filing) return
+      setFiling(session.id)
+      setError(null)
+      try {
+        absorb(
+          await setAgentSessionNode(
+            session.id,
+            nodeId,
+            session.revision,
+            auth.session.csrf,
+            auth.signal
+          )
+        )
+      } catch (cause) {
+        setError(cause)
+        auth.handleAuthorityError(cause)
+      } finally {
+        setFiling(null)
+      }
+    },
+    [auth, nodeId, filing, absorb]
+  )
 
   if (open)
     return (
@@ -308,7 +306,8 @@ function AgentChats({
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => file(session)}
+                    disabled={filing !== null}
+                    onClick={() => void file(session)}
                   >
                     {t("moveAgentChatHere")}
                   </Button>
@@ -321,11 +320,9 @@ function AgentChats({
       <CreateSessionDialog
         open={creating}
         onClose={() => setCreating(false)}
+        nodeId={nodeId}
         onCreated={(session) => {
           absorb(session)
-          // Created from a project, so it belongs to that project.
-          if (nodeId !== null)
-            setProjects(assignSessionProject(projectScope, session.id, nodeId))
           setCreating(false)
           setOpen(session)
         }}
@@ -338,10 +335,13 @@ function CreateSessionDialog({
   open,
   onClose,
   onCreated,
+  nodeId,
 }: {
   open: boolean
   onClose: () => void
   onCreated: (session: NeevAgentSession) => void
+  /** Started inside a project, so the server files it there on creation. */
+  nodeId: number | null
 }) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
@@ -371,6 +371,7 @@ function CreateSessionDialog({
         await createAgentSession(
           {
             title: title.trim(),
+            nodeId,
             provider,
             model,
             requestId: request.current,

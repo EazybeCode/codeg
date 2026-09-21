@@ -70,6 +70,14 @@ export interface NeevAgentSession {
   model: string
   boundChatId: string | null
   archived: boolean
+  /**
+   * The project this session is filed under, or null for one that is not.
+   *
+   * Filing is presentation, never permission: a session is private to its owner
+   * whatever it points at, and the server's list remains the only thing that
+   * decides which sessions the caller can see.
+   */
+  nodeId: number | null
   revision: string
   createdAt: number
   updatedAt: number
@@ -114,6 +122,8 @@ export interface CreateNeevAgentSessionInput {
   provider: NeevAgentProvider
   model: string
   boundChatId?: string | null
+  /** File it under a project on creation, so it opens where it was started. */
+  nodeId?: number | null
   requestId: string
 }
 
@@ -239,7 +249,10 @@ function nullableCode(value: unknown): string | null {
 }
 
 export function parseAgentSession(value: unknown): NeevAgentSession {
-  const object = exact(value, [
+  // `nodeId` is OPTIONAL: a server that predates schema 12 does not send it and
+  // must keep working, and one that does must not be refused for saying more
+  // than we used to expect. Absent reads as unfiled.
+  const FIELDS = [
     "id",
     "orgId",
     "ownerId",
@@ -251,7 +264,9 @@ export function parseAgentSession(value: unknown): NeevAgentSession {
     "revision",
     "createdAt",
     "updatedAt",
-  ])
+  ]
+  const filed = record(value).nodeId !== undefined
+  const object = exact(value, filed ? [...FIELDS, "nodeId"] : FIELDS)
   if (typeof object.archived !== "boolean") return invalid()
   const title = text(object.title)
   if (
@@ -271,6 +286,10 @@ export function parseAgentSession(value: unknown): NeevAgentSession {
     model,
     boundChatId: object.boundChatId === null ? null : uuid(object.boundChatId),
     archived: object.archived,
+    nodeId:
+      object.nodeId === undefined || object.nodeId === null
+        ? null
+        : positiveId(object.nodeId),
     revision: integerString(object.revision),
     createdAt: timestamp(object.createdAt),
     updatedAt: timestamp(object.updatedAt),
@@ -401,12 +420,51 @@ function assertRunId(value: string): void {
 
 export async function listAgentSessions(
   includeArchived = false,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  nodeId?: number | null
 ): Promise<NeevAgentSession[]> {
+  const query = new URLSearchParams()
+  if (includeArchived) query.set("archived", "1")
+  // Omitted entirely means every session, which is what the unfiled organizer
+  // and the no-project view both need.
+  if (nodeId !== undefined && nodeId !== null) {
+    if (!Number.isSafeInteger(nodeId) || nodeId <= 0) invalidRequest()
+    query.set("nodeId", String(nodeId))
+  }
+  const suffix = query.toString()
   return parseAgentSessions(
     await contentGet(
-      `/api/neev/agent/sessions${includeArchived ? "?archived=1" : ""}`,
+      `/api/neev/agent/sessions${suffix ? `?${suffix}` : ""}`,
       signal
+    )
+  )
+}
+
+/**
+ * File a session under a project, or unfile it with null.
+ *
+ * `expectedRevision` is the decimal string every other revision on this DTO is,
+ * and it is what makes this safe against a concurrent edit: the server refuses
+ * the move if the session has changed underneath.
+ */
+export async function setAgentSessionNode(
+  sessionId: string,
+  nodeId: number | null,
+  expectedRevision: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevAgentSession> {
+  assertUuid(sessionId)
+  if (nodeId !== null && (!Number.isSafeInteger(nodeId) || nodeId <= 0))
+    invalidRequest()
+  if (!/^(0|[1-9]\d{0,18})$/.test(expectedRevision)) invalidRequest()
+  return parseAgentSession(
+    await contentMutation(
+      `/api/neev/agent/sessions/${sessionId}/node`,
+      { nodeId, expectedRevision },
+      csrf,
+      signal,
+      "PATCH"
     )
   )
 }
@@ -432,8 +490,13 @@ export async function createAgentSession(
     requestId: input.requestId,
   }
   // `deny_unknown_fields` accepts an absent optional but not an unexpected one,
-  // so only send the binding when there is one.
+  // so only send these when there is something to send.
   if (input.boundChatId) body.boundChatId = input.boundChatId
+  if (input.nodeId !== undefined && input.nodeId !== null) {
+    if (!Number.isSafeInteger(input.nodeId) || input.nodeId <= 0)
+      invalidRequest()
+    body.nodeId = input.nodeId
+  }
   return parseAgentSession(
     await contentMutation("/api/neev/agent/sessions", body, csrf, signal)
   )
