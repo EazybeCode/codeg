@@ -615,6 +615,56 @@ export const cases = [
   },
 
   {
+    name: "comments are reachable, or the comment UI is a dead button",
+    async run({ owner, outsider, fixtures }) {
+      const { resource } = await createDocument(
+        owner,
+        fixtures.projectNodeId,
+        "Acceptance — comments"
+      )
+      if (!resource?.id) return skip("could not create a document to comment on")
+
+      /**
+       * Upstream decides whether commenting is offered, through
+       * `abilities.comment`, and the editor shows the Add comment button on the
+       * strength of it. So if the ability says yes and the API is unreachable,
+       * the button is visibly broken rather than absent — the user clicks and
+       * nothing happens. That is the state worth failing on, and it is why this
+       * case checks the ability first: `comment: false` would make an
+       * unreachable API perfectly consistent.
+       */
+      const doc = await engineApi(owner, `documents/${resource.id}/`)
+      const offered = doc.body?.abilities?.comment
+      if (offered !== true)
+        return skip(`upstream does not offer commenting here (comment: ${offered})`)
+
+      const list = await engineApi(owner, `documents/${resource.id}/threads/`)
+      if (list.status !== 200)
+        return no(
+          `commenting is offered but GET threads/ is ${list.status} — the Add comment button will fail`,
+          { comment: offered, threads: list.status, body: JSON.stringify(list.body).slice(0, 80) }
+        )
+
+      const created = await engineApi(owner, `documents/${resource.id}/threads/`, {
+        method: "POST",
+        body: JSON.stringify({ body: "acceptance comment" }),
+      })
+      if (created.status >= 400)
+        return no(`creating a thread is ${created.status}`, {
+          create: created.status,
+        })
+
+      // And the boundary: another organization must not reach them.
+      const theirs = await engineApi(outsider, `documents/${resource.id}/threads/`)
+      return theirs.status >= 400
+        ? ok({ list: list.status, create: created.status, outsider: theirs.status })
+        : no(`an outsider read the threads (${theirs.status})`, {
+            outsider: theirs.status,
+          })
+    },
+  },
+
+  {
     name: "another organization is refused, on the page and on the API",
     async run({ owner, outsider, fixtures, socketsWork }) {
       const { resource } = await createDocument(
