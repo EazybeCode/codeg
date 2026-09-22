@@ -52,6 +52,10 @@ exactly this purpose and is the compatible fallback from here on.
   document page; conversation header one row; compact Model / Reasoning /
   Standard-Fast controls with no standing helper paragraphs. Checked at
   375x812, where the privacy lock stays visible and the controls stay on screen.
+- Live, after deployment: the new header, tab icons and compact controls were
+  confirmed on https://app.neev.so, and a column resize there reached Saved with
+  no error. This is the check that matters most, because it is the only one run
+  against production data and the real proxy rather than a canary.
 - Rollback rehearsed against real width data: with the resized document present,
   the canary was rolled from the candidate back to `ux-table-55408df5`. It
   served, schema stayed 14, and every row count was unchanged. No migration is
@@ -71,6 +75,10 @@ at `/opt/neev-db-backups/neev-before-table-20260922-074140.sql` (135,975 bytes);
 previous compose retained as `compose.yml.before-table-20260922-074140`.
 
 Rollback target from here: `neev-native-agent:ux-table-55408df5`.
+
+A production resize has now been saved, so `neev-native-agent:ux-controls-cb464684`
+is retired as a rollback target as of this release rather than in principle: it
+would reject the document that resize produced.
 
 ## Release tooling
 
