@@ -270,6 +270,8 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
     let document = api.strip_prefix("documents/")?;
     let (id, action) = document.split_once('/')?;
     let resource = resource_id(id)?;
+    // Resolved once, before the match, rather than twice through a guard.
+    let comment_tree = thread_route(action, method);
     let (write, body) = match (action, method) {
         // Retrieve the document the editor is about to render.
         ("", "GET") => (false, Body::None),
@@ -298,9 +300,7 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
         ("versions/", "GET") => (false, Body::None),
         (version, "GET") if version_of(version).is_some() => (false, Body::None),
         // Comments — **currently denied**; see COMMENTS_ENABLED.
-        (action, method) if COMMENTS_ENABLED && thread_route(action, method).is_some() => {
-            thread_route(action, method)?
-        }
+        _ if COMMENTS_ENABLED && comment_tree.is_some() => comment_tree?,
         // Attachments.
         ("attachment-upload/", "POST") => (true, Body::Attachment),
         ("media-check/", "GET") => {
@@ -328,25 +328,7 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
     })
 }
 
-/// Whether the comment tree is reachable. **Off.**
-///
-/// The routes below are audited, bounded and ready, and they are still not
-/// served, because the missing control is not one this proxy can supply.
-/// Upstream's `CommentViewSetMixin.get_document_or_404` resolves the document
-/// from `kwargs["resource_id"]` — the id in the URL — and then operates on the
-/// thread or comment named later in that URL **without checking the two belong
-/// together**. So `/documents/<mine>/threads/<someone-else's>/comments/` passes
-/// the document-level ability check against a document the caller really does
-/// own, and writes into a thread they do not.
-///
-/// Every check this proxy makes is about the document in the path, and in that
-/// request the document in the path is legitimately the caller's. Authorizing
-/// the parent therefore cannot close it: the proxy would have to know which
-/// document each thread and comment belongs to, which means reading Docs' own
-/// tables — a second source of truth, and the thing this design exists to
-/// avoid.
-///
-/// **On** since the bridge made the pairing a precondition: a thread that does
+/// Whether the comment tree is reachable. **On** since the bridge made the pairing a precondition: a thread that does
 /// not belong to the document in the path returns the same 404 upstream uses
 /// for a thread it cannot find, enforced above every nested route and with a
 /// boot invariant that refuses to start if the guard is missing from the
@@ -365,6 +347,17 @@ const COMMENTS_ENABLED: bool = true;
 /// Enumerated rather than matched loosely, so a future upstream action nested
 /// under `threads/` is not admitted by accident — the point of an allowlist is
 /// that new surfaces arrive denied.
+///
+/// **Only authors can moderate, and that is a consequence rather than a rule
+/// written here.** `Thread.get_abilities` grants write access to the creator or
+/// to a document OWNER/ADMIN, and in this design no human ever holds either —
+/// the service principal owns every document, deliberately, so that a leaked
+/// Docs control cannot reconfigure sharing. The effect is that `resolve`,
+/// `unresolve` and thread deletion succeed only for the thread's own author,
+/// and a comment edit or delete only for the comment's author. Nobody can
+/// moderate anyone else's. That follows from the no-human-owner decision and is
+/// the right trade, but a UI that renders those controls for everyone renders
+/// controls that always fail.
 fn thread_route(action: &str, method: &str) -> Option<(bool, Body)> {
     let rest = action.strip_prefix("threads/")?;
     // The collection itself, before any thread id. Handled first because
