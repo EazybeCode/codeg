@@ -466,23 +466,30 @@ pub(crate) async fn handle(
 /// Runs before anything is sent upstream, so a caller Neev would refuse never
 /// changes the Docs title and then fails.
 ///
-/// **The check is deliberately access-and-archived, not creator.** Neev's
-/// native model lets any actor who can see a resource rename it —
-/// `resources::update` restricts only visibility, archive and node moves to the
-/// creator — so requiring creatorship here would be this bridge inventing a
-/// stricter policy than the product has, and a shared editor would find the
-/// title read-only for no reason they could see. Consistency with the native
-/// model is the point; it is not a gap. Archived resources are read-only, and
-/// that is the one refusal this adds.
+/// **The check is access, and nothing else.** Two policies this bridge must not
+/// invent, both of which it briefly did:
+///
+/// - *not creator-only*. Neev lets any actor who can see a resource rename it;
+///   `resources::update` restricts only visibility, archive and node moves to
+///   the creator. Requiring creatorship would make the title read-only for a
+///   shared editor with nothing to explain it.
+/// - *not archived-refusing*. `resources::update` deliberately permits metadata
+///   changes on an archived resource — unarchiving is itself one — so refusing
+///   a rename here would have broken that. "Archived is read-only" is about the
+///   document **body**, not its metadata, and conflating the two would have
+///   quietly removed a native capability.
+///
+/// The Docs-side rename of an archived document is still refused, but by the
+/// grant rather than by anything here: an archived resource yields `Grant::Read`
+/// and a write target, which is a read-only refusal. That is the editor being
+/// read-only, which is correct and is a different statement from the metadata
+/// being immutable.
 async fn precheck_rename(
     state: &ServerState,
     actor: &OrgContext,
     resource_id: &str,
 ) -> Result<i64, ApiError> {
     let current = crate::neev::content::resources::get(state, actor, resource_id).await?;
-    if current.archived {
-        return Err(ApiError::Archived);
-    }
     Ok(current.auth_revision)
 }
 
