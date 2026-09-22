@@ -195,6 +195,31 @@ Three measured facts that a media implementation has to handle, none of them obv
 The object GET also returns `x-amz-meta-owner`, `x-amz-meta-status` and `x-amz-meta-is_unsafe`.
 `owner` is a Docs user id; a proxy that copies response headers blindly hands it to the browser.
 
+## The request the editor blocks on
+
+`GET /api/v1.0/documents/<id>/content/` is not optional and is easy to miss: `useDocContent.tsx`
+fetches it with `accept: text/plain,application/json`, and `useCollaboration.tsx:86` will not create
+a collaboration provider while the result is `undefined`. Refuse that GET and **no websocket is ever
+attempted** — every socket-level problem downstream of it is unreachable, which makes it look like a
+collaboration bug.
+
+It exists upstream at this version (`viewsets.py:2147`, `@content.mapping.get`, implemented by
+`content_retrieve`), and behaves like this — measured, not inferred:
+
+| case | response |
+|---|---|
+| document nobody has written yet | **200**, `text/plain`, **empty body**, no ETag |
+| after content has been written | 200 with `Content-Length`, `ETag`, `Last-Modified`, `Cache-Control: private, no-cache` |
+| repeat with `If-None-Match` | **304**, bodyless |
+| projected reader | 200 |
+| no access | 403 |
+
+The empty-body 200 is the one to be careful with: it is how a brand-new document opens at all.
+Nothing should turn it into a 404, and no blank fallback needs inventing — upstream already returns
+one. A proxy in front of this has to forward `If-None-Match`/`If-Modified-Since`, relay the
+validators back, pass a 304 through without a body, and stream rather than buffer, since this is the
+whole document.
+
 ## Install
 
 ```bash

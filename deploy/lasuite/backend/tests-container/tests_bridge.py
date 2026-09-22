@@ -13,6 +13,7 @@ projection, the settings module itself, and the endpoints end to end.
 Run with `tests-container/run.sh`, from a stack directory.
 """
 
+import base64
 import json
 import threading
 import urllib.parse
@@ -567,6 +568,78 @@ class MediaRelayTests(TestCase):
         document.save(update_fields=["attachments"])
 
         self.assertEqual(self.fetch(key).status_code, 404)
+
+
+class ContentReadTests(TransactionTestCase):
+    """`GET documents/<id>/content/` — the request the editor blocks on.
+
+    `TransactionTestCase`, not `TestCase`, because `content_retrieve` closes the
+    database connection on purpose before it touches the object store
+    (`viewsets.py:2166`, to avoid a connection storm during websocket
+    reconnection bursts). Inside `TestCase`'s outer atomic block that leaves the
+    test with a dead transaction; without one, Django simply reconnects.
+
+    `useDocContent.tsx` fetches this before `useCollaboration.tsx` will create a
+    collaboration provider, so if it fails no websocket is ever attempted. The
+    route is upstream's (`viewsets.py:2147`, `@content.mapping.get`); these tests
+    exist because the bridge's settings must not break it, and because the
+    empty-document case is easy to mistake for an error and "fix" into a 404.
+    """
+
+    CONTENT_PATH = "/api/v1.0/documents/{}/content/"
+
+    def setUp(self):
+        self.document_id = new_id()
+        service.provision_document(self.document_id, "Content", OWNER)
+        service.project_access(self.document_id, MEMBER, choices.RoleChoices.READER)
+
+    def get_content(self, subject=OWNER, **extra):
+        return self.client.get(
+            self.CONTENT_PATH.format(self.document_id),
+            secure=True,
+            HTTP_ACCEPT="text/plain,application/json",
+            **identity(subject, **extra),
+        )
+
+    @staticmethod
+    def body_of(response):
+        if response.streaming:
+            return b"".join(response.streaming_content)
+        return response.content
+
+    def test_a_document_nobody_has_written_returns_an_empty_200(self):
+        """The first-open case: a defined value is what lets the editor start."""
+        response = self.get_content()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.body_of(response), b"")
+        self.assertTrue(response["Content-Type"].startswith("text/plain"))
+
+    def test_a_projected_reader_may_read_the_content(self):
+        self.assertEqual(self.get_content(subject=MEMBER).status_code, 200)
+
+    def test_a_subject_without_access_may_not(self):
+        self.assertIn(self.get_content(subject="neev:7:909").status_code, (403, 404))
+
+    def test_content_survives_a_write_and_revalidates(self):
+        """Write through upstream's own PATCH, then read it back."""
+        from core.models import Document
+
+        document = Document.objects.get(pk=self.document_id)
+        document.content = base64.b64encode(b"probe-content").decode()
+        document.save()
+
+        response = self.get_content()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.body_of(response), base64.b64encode(b"probe-content")
+        )
+        etag = response.get("ETag")
+        self.assertTrue(etag, "no ETag, so the editor cannot revalidate")
+
+        again = self.get_content(HTTP_IF_NONE_MATCH=etag)
+        self.assertEqual(
+            again.status_code, 304, "a matching ETag must revalidate, not re-send"
+        )
 
 
 class TitleProjectionTests(TestCase):
