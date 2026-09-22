@@ -51,15 +51,32 @@ export function isSupportedModel(value: string): boolean {
  * Deliberately a bare `string` and not a union: the levels differ per provider
  * (`max` is Claude's, `minimal` is Codex's) and codex-cli types its own as "a
  * non-empty reasoning effort value advertised by the model", so a closed list
- * here would refuse a level the server had just been taught. The shape is
- * checked — a short lowercase token, nothing that could read as a flag — and
- * membership is decided by the catalogue, which is the only thing that knows.
+ * here would refuse a level the server had just been taught. Membership is
+ * decided by the catalogue, which is the only thing that knows.
  */
 export type NeevEffort = string
 
-/** `null` is not a level: it means "pass no flag", i.e. the provider default. */
+/**
+ * Mirrors `safe_effort` server-side, and mirrors it EXACTLY: 1–32 ASCII bytes
+ * of alphanumerics, dot, dash or underscore, never leading with a dash so it
+ * cannot read as a flag.
+ *
+ * It used to be narrower — lowercase only, 31 characters, no dot — which is the
+ * wrong kind of wrong for an open vocabulary. The server is the validator; a
+ * client stricter than the server does not prevent a bad value, it refuses a
+ * GOOD one, and here that means silently dropping a level the runner would have
+ * accepted out of a menu the server had just advertised.
+ *
+ * `null` is not a level: it means "pass no flag", i.e. the provider default.
+ */
 export function isSupportedEffort(value: unknown): value is NeevEffort {
-  return typeof value === "string" && /^[a-z][a-z0-9_-]{0,30}$/.test(value)
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 32 &&
+    !value.startsWith("-") &&
+    /^[A-Za-z0-9._-]+$/.test(value)
+  )
 }
 
 export type NeevTurnStatus = "running" | "completed" | "failed" | "canceled"
@@ -506,6 +523,15 @@ export interface NeevAgentCapabilities {
 /** A catalogue big enough for any real runner and small enough to render. */
 const MAX_MODELS = 50
 const MAX_EFFORTS = 20
+/**
+ * The server sanitises a catalogue label to 100 characters, so this reads 100.
+ *
+ * Same reasoning as `isSupportedEffort`: a client stricter than the server
+ * refuses good data, not bad. An 81-character model name would have failed the
+ * whole payload and emptied the menu — the controls would have gone blank over
+ * a label that was perfectly valid.
+ */
+const MAX_LABEL = 100
 
 function effortList(value: unknown): NeevEffort[] {
   if (!Array.isArray(value) || value.length > MAX_EFFORTS) return invalid()
@@ -528,7 +554,7 @@ function agentModel(value: unknown): NeevAgentModel {
   if (
     !isSupportedModel(id) ||
     label.length === 0 ||
-    [...label].length > 80 ||
+    [...label].length > MAX_LABEL ||
     [...label].some((character) => /\p{Cc}/u.test(character)) ||
     typeof object.default !== "boolean" ||
     typeof object.supportsSpeed !== "boolean"
@@ -594,7 +620,7 @@ function providerCatalog(value: unknown): NeevAgentProviderCatalog {
   if (
     !NEEV_AGENT_PROVIDERS.includes(provider as NeevAgentProvider) ||
     label.length === 0 ||
-    [...label].length > 80 ||
+    [...label].length > MAX_LABEL ||
     typeof object.supportsSpeed !== "boolean" ||
     !Array.isArray(object.models) ||
     // A provider with no models could not start a chat; an empty menu with a
