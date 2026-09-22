@@ -73,6 +73,15 @@ function socketFor(actor) {
   return class extends WebSocket {
     constructor(url) {
       super(url, [], { headers })
+      /**
+       * An `error` event with no listener is thrown, and on an EventEmitter
+       * that takes the whole process down — one refused upgrade during a
+       * teardown and the entire run dies with a stack trace instead of a
+       * result table. Every outcome here is decided from close codes and
+       * authentication callbacks, so the error itself carries nothing this
+       * harness needs; what matters is that it cannot be fatal.
+       */
+      this.on("error", () => {})
     }
   }
 }
