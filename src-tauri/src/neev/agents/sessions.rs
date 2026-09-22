@@ -188,6 +188,17 @@ pub(crate) struct AgentSession {
     pub(crate) title: String,
     pub(crate) provider: String,
     pub(crate) model: String,
+    /// The reasoning effort this session runs at, or `None` for the provider's
+    /// own default.
+    ///
+    /// Stored so the choice survives a reload and is re-applied on every later
+    /// turn: a control that has to be re-picked each time is not a setting, and
+    /// a resumed conversation that quietly drops back to the default would be
+    /// reporting a configuration it is not running.
+    pub(crate) effort: Option<String>,
+    /// Whether this session runs in the provider's fast mode. Never inherited:
+    /// false unless the reader turned it on for this session.
+    pub(crate) fast: bool,
     pub(crate) kind: SessionKind,
     pub(crate) bound_chat_id: Option<String>,
     /// Where this session sits in the workspace tree, or `None` for unfiled.
@@ -230,10 +241,16 @@ pub(crate) struct SessionInput {
     /// Optional placement in the workspace tree. Omitted means unfiled, which is
     /// what every session created before this existed stays.
     pub(crate) node_id: Option<i32>,
+    /// Reasoning effort, or `None` for the provider's own default. Validated
+    /// against what this provider's CLI accepts before it is stored, so a
+    /// session cannot hold a level its every run would silently ignore.
+    pub(crate) effort: Option<String>,
+    /// Fast mode. Validated against the chosen MODEL, not just the provider.
+    pub(crate) fast: bool,
     pub(crate) request_id: String,
 }
 
-const SESSION_COLUMNS: &str = "org_id,id,owner_id,title,provider,model,kind,bound_chat_id,node_id,archived,revision,created_at,updated_at";
+const SESSION_COLUMNS: &str = "org_id,id,owner_id,title,provider,model,effort,fast,kind,bound_chat_id,node_id,archived,revision,created_at,updated_at";
 const TURN_COLUMNS: &str = "org_id,session_id,sequence,id,run_id,prompt,response,activity,status,error_code,provider,model,created_at,updated_at,completed_at";
 
 fn session_row(row: &QueryResult) -> Result<AgentSession, ContentError> {
@@ -244,6 +261,8 @@ fn session_row(row: &QueryResult) -> Result<AgentSession, ContentError> {
         title: row.try_get("", "title").map_err(database_error)?,
         provider: row.try_get("", "provider").map_err(database_error)?,
         model: row.try_get("", "model").map_err(database_error)?,
+        effort: row.try_get("", "effort").map_err(database_error)?,
+        fast: row.try_get("", "fast").map_err(database_error)?,
         kind: SessionKind::parse(
             &row.try_get::<String>("", "kind").map_err(database_error)?,
         )
@@ -359,6 +378,16 @@ pub(crate) async fn create(
     let title = title(&input.title)?;
     let provider = provider(&input.provider)?.to_owned();
     let model = model(&input.model)?.to_owned();
+    // Refused at creation, not at run time: a session stored with a level its
+    // provider ignores would look configured and behave as though it were not.
+    let effort = super::capabilities::validated_effort(&provider, input.effort.as_deref())
+        .map_err(|_| ContentError::Invalid)?
+        .map(|level| level.name().to_owned());
+    // Refused, never coerced by switching the model: Fast on a model that
+    // cannot run it is two requests, and honouring one by overriding the other
+    // spends money the reader did not agree to.
+    let fast = super::capabilities::validated_speed(&provider, &model, input.fast)
+        .map_err(|_| ContentError::Invalid)?;
     let request = org::normalize_request_id(&input.request_id).map_err(|_| ContentError::Invalid)?;
     let hash = org::digest_parts(&[
         "agent.session.create",
@@ -407,7 +436,7 @@ pub(crate) async fn create(
     let id = uuid::Uuid::new_v4().to_string();
     db::execute(
         &tx,
-        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,node_id,archived,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'private','chat',$7,$8,$9,false,1,$10,$10)",
+        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,effort,fast,visibility,kind,bound_chat_id,bound_kind,node_id,archived,revision,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'private','chat',$9,$10,$11,false,1,$12,$12)",
         vec![
             actor.org_id.into(),
             id.clone().into(),
@@ -415,6 +444,8 @@ pub(crate) async fn create(
             title.clone().into(),
             provider.clone().into(),
             model.clone().into(),
+            effort.clone().into(),
+            fast.into(),
             input.bound_chat_id.clone().into(),
             input.bound_chat_id.as_ref().map(|_| "chat").into(),
             input.node_id.into(),
@@ -432,6 +463,8 @@ pub(crate) async fn create(
         title,
         provider,
         model,
+        effort,
+        fast,
         kind: SessionKind::Chat,
         bound_chat_id: input.bound_chat_id,
         node_id: input.node_id,
@@ -574,6 +607,126 @@ async fn mutate(
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(updated)
+}
+
+/// Change the session's reasoning effort.
+///
+/// Validated against what THIS session's provider accepts, because the CLI will
+/// not do it: `claude` warns about an unknown level and runs at its default, so
+/// an unchecked value would present as a working setting while changing
+/// nothing. Refused rather than coerced to the nearest level — silently running
+/// at an effort the reader did not pick is the same failure in a different coat.
+/// Replace the session's model, effort and speed in ONE revision.
+///
+/// The whole triple is sent and validated together, so a caller can never leave
+/// the session in a pairing no run could honour — Fast still on after moving to
+/// a model that cannot do it — and two people changing settings at once cannot
+/// interleave three separate bumps into a combination neither chose.
+///
+/// The provider is deliberately NOT changeable. A turn may never contradict its
+/// session's provider (the schema validator proves it by join), and a team
+/// holder's identity is derived from its provider, so switching it would
+/// rewrite history that already ran. Changing provider means a new chat.
+pub(crate) async fn set_settings(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    model_name: &str,
+    effort: Option<&str>,
+    fast: bool,
+    expected_revision: i64,
+) -> Result<AgentSession, ContentError> {
+    let current = get(state, actor, id).await?;
+    let model_name = model(model_name)?.to_owned();
+    let (level, fast) =
+        super::capabilities::validated_settings(&current.provider, &model_name, effort, fast)
+            .map_err(|_| ContentError::Invalid)?;
+    let tx = resources::begin(state, actor).await?;
+    let held = owned(&tx, actor, id).await?;
+    if held.revision != expected_revision {
+        return Err(ContentError::Conflict);
+    }
+    if held.archived {
+        return Err(ContentError::Archived);
+    }
+    let now = now(state)?;
+    let revision = held
+        .revision
+        .checked_add(1)
+        .ok_or(ContentError::Conflict)?;
+    let changed = db::execute(
+        &tx,
+        "UPDATE neev_agent_sessions SET model=$1,effort=$2,fast=$3,revision=$4,updated_at=$5 WHERE org_id=$6 AND id=$7 AND owner_id=$8 AND revision=$9",
+        vec![
+            model_name.clone().into(),
+            level.map(|value| value.name().to_owned()).into(),
+            fast.into(),
+            revision.into(),
+            now.into(),
+            actor.org_id.into(),
+            id.into(),
+            actor.identity.user_id.into(),
+            expected_revision.into(),
+        ],
+    )
+    .await?;
+    if changed.rows_affected() != 1 {
+        return Err(ContentError::Conflict);
+    }
+    let updated = owned(&tx, actor, id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(updated)
+}
+
+/// Change the session's fast mode.
+///
+/// Validated against the session's CURRENT model, so turning Fast on beside a
+/// model that cannot run it is refused here rather than discovered as a failed
+/// run — or worse, quietly served by a different model.
+pub(crate) async fn set_fast(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    fast: bool,
+    expected_revision: i64,
+) -> Result<AgentSession, ContentError> {
+    let current = get(state, actor, id).await?;
+    let validated = super::capabilities::validated_speed(&current.provider, &current.model, fast)
+        .map_err(|_| ContentError::Invalid)?;
+    mutate(
+        state,
+        actor,
+        id,
+        expected_revision,
+        "fast",
+        validated.into(),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn set_effort(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+    effort: Option<&str>,
+    expected_revision: i64,
+) -> Result<AgentSession, ContentError> {
+    let current = get(state, actor, id).await?;
+    let validated = super::capabilities::validated_effort(&current.provider, effort)
+        .map_err(|_| ContentError::Invalid)?;
+    mutate(
+        state,
+        actor,
+        id,
+        expected_revision,
+        "effort",
+        validated.map(|level| level.name().to_owned()).into(),
+        // Not a placement change: the session stays where it is filed.
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn rename(

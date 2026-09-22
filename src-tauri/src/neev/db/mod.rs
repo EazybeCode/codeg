@@ -202,11 +202,12 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             session_migration::upgrade(&tx).await?;
             session_migration::link_nodes(&tx).await?;
             session_migration::record_activity(&tx).await?;
+            session_migration::record_effort(&tx).await?;
             content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![session_migration::ACTIVITY_SCHEMA_VERSION.into()],
+                vec![session_migration::EFFORT_SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -319,7 +320,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 session_migration::validate(&tx).await?;
                 session_migration::validate_node_link(&tx).await?;
             }
-            // Current. Validate in place and preserve every row.
+            // A v13 database has the activity column but not the effort one:
+            // validate what exists, then fall through to the tail.
             session_migration::ACTIVITY_SCHEMA_VERSION if names == v11_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
@@ -330,11 +332,24 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 session_migration::validate_node_link(&tx).await?;
                 session_migration::validate_activity(&tx).await?;
                 content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
+            }
+            // Current. Validate in place and preserve every row.
+            session_migration::EFFORT_SCHEMA_VERSION if names == v11_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
+                session_migration::validate(&tx).await?;
+                session_migration::validate_node_link(&tx).await?;
+                session_migration::validate_activity(&tx).await?;
+                session_migration::validate_effort(&tx).await?;
+                content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
         }
-        // Apply missing additive storage in order, then publish schema 13.
+        // Apply missing additive storage in order, then publish schema 14.
         if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected {
             gateway_migration::upgrade(&tx).await?;
         }
@@ -351,11 +366,12 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         // and a database that already has them is unchanged.
         session_migration::link_nodes(&tx).await?;
         session_migration::record_activity(&tx).await?;
+        session_migration::record_effort(&tx).await?;
         content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![session_migration::ACTIVITY_SCHEMA_VERSION.into()],
+            vec![session_migration::EFFORT_SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -498,35 +514,39 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         // caller, `content::backup`, refuses to export or restore it.
         session_migration::SCHEMA_VERSION
         | session_migration::NODE_LINK_SCHEMA_VERSION
-        | session_migration::ACTIVITY_SCHEMA_VERSION => names == session_expected,
+        | session_migration::ACTIVITY_SCHEMA_VERSION
+        | session_migration::EFFORT_SCHEMA_VERSION => names == session_expected,
         _ => false,
     };
     if !valid {
         return Err(AuthError::Unavailable);
     }
-    if matches!(version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13) {
+    if matches!(version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14) {
         document_format_migration::validate(db).await?;
     }
-    if matches!(version, 7 | 8 | 9 | 10 | 11 | 12 | 13) {
+    if matches!(version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14) {
         agent_status_migration::validate(db).await?;
     }
-    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13) {
+    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14) {
         gateway_migration::validate(db).await?;
     }
-    if matches!(version, 9 | 10 | 11 | 12 | 13) {
+    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14) {
         org_code_migration::validate(db).await?;
     }
-    if matches!(version, 10 | 11 | 12 | 13) {
+    if matches!(version, 10 | 11 | 12 | 13 | 14) {
         image_blob_migration::validate(db).await?;
     }
-    if matches!(version, 11 | 12 | 13) {
+    if matches!(version, 11 | 12 | 13 | 14) {
         session_migration::validate(db).await?;
     }
-    if matches!(version, 12 | 13) {
+    if matches!(version, 12 | 13 | 14) {
         session_migration::validate_node_link(db).await?;
     }
-    if version == session_migration::ACTIVITY_SCHEMA_VERSION {
+    if matches!(version, 13 | 14) {
         session_migration::validate_activity(db).await?;
+    }
+    if version == session_migration::EFFORT_SCHEMA_VERSION {
+        session_migration::validate_effort(db).await?;
         // 13 only. A schema-12 snapshot still has the historical 1000 bound and
         // is valid as itself; requiring the raised cap before the upgrade step
         // would refuse a database that is correct for its version.

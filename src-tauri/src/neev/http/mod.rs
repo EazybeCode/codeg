@@ -227,6 +227,22 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             patch(agent_sessions::move_session),
         )
         .route(
+            "/api/neev/agent/capabilities",
+            get(agent_sessions::capabilities),
+        )
+        .route(
+            "/api/neev/agent/sessions/{session_id}/settings",
+            patch(agent_sessions::set_settings),
+        )
+        .route(
+            "/api/neev/agent/sessions/{session_id}/effort",
+            patch(agent_sessions::set_effort),
+        )
+        .route(
+            "/api/neev/agent/sessions/{session_id}/speed",
+            patch(agent_sessions::set_speed),
+        )
+        .route(
             "/api/neev/agent/sessions/{session_id}/turns",
             get(agent_sessions::list_turns).post(agent_sessions::start_turn),
         )

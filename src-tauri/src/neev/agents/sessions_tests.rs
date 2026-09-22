@@ -60,6 +60,8 @@ impl Harness {
                 model: "default".into(),
                 bound_chat_id: None,
                 node_id: None,
+                effort: None,
+                fast: false,
                 request_id: uuid::Uuid::new_v4().to_string(),
             },
         )
@@ -172,6 +174,8 @@ async fn create_is_idempotent_for_a_repeated_request_id() {
         model: "default".into(),
         bound_chat_id: None,
         node_id: None,
+        effort: None,
+        fast: false,
         request_id: request_id.clone(),
     };
     let first = create(&h.state, &h.owner, input()).await.unwrap();
@@ -410,6 +414,8 @@ async fn binding_a_chat_requires_current_read_access_to_it() {
                 model: "default".into(),
                 bound_chat_id: Some(private_chat),
                 node_id: None,
+                effort: None,
+                fast: false,
                 request_id: uuid::Uuid::new_v4().to_string(),
             },
         )
@@ -428,6 +434,8 @@ async fn binding_a_chat_requires_current_read_access_to_it() {
             model: "default".into(),
             bound_chat_id: Some(shared_chat.clone()),
             node_id: None,
+            effort: None,
+            fast: false,
             request_id: uuid::Uuid::new_v4().to_string(),
         },
     )
@@ -450,6 +458,8 @@ async fn unknown_provider_or_model_is_refused() {
                     model: model.into(),
                     bound_chat_id: None,
                     node_id: None,
+                    effort: None,
+                    fast: false,
                     request_id: uuid::Uuid::new_v4().to_string(),
                 },
             )
@@ -484,6 +494,8 @@ async fn a_session_cannot_be_created_with_a_model_its_runs_would_refuse() {
                     model: bad.into(),
                     bound_chat_id: None,
                     node_id: None,
+                    effort: None,
+                    fast: false,
                     request_id: uuid::Uuid::new_v4().to_string(),
                 },
             )
@@ -509,6 +521,8 @@ async fn a_session_cannot_be_created_with_a_model_its_runs_would_refuse() {
                     model: good.into(),
                     bound_chat_id: None,
                     node_id: None,
+                    effort: None,
+                    fast: false,
                     request_id: uuid::Uuid::new_v4().to_string(),
                 },
             )

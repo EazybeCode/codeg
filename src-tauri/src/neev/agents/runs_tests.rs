@@ -40,6 +40,8 @@ impl Harness {
                 model: "default".into(),
                 bound_chat_id: None,
                 node_id: None,
+                effort: None,
+                fast: false,
                 request_id: uuid::Uuid::new_v4().to_string(),
             },
         )
@@ -67,6 +69,8 @@ impl Harness {
                 prompt: prompt.into(),
                 credential_handle: None,
                 briefing: None,
+                effort: None,
+                fast: false,
             })
             .await
             .unwrap();

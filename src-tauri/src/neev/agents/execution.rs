@@ -54,6 +54,14 @@ pub(crate) struct RunRequest {
     /// into the user's text, so the model can tell the two apart and the
     /// stored turn stays exactly what the user typed.
     pub(crate) briefing: Option<String>,
+    /// Reasoning effort, already validated against what THIS provider's CLI
+    /// accepts. `None` passes no flag at all, leaving the provider on its own
+    /// default rather than on one we chose for the reader.
+    pub(crate) effort: Option<String>,
+    /// Run in the provider's fast mode. Already validated against the chosen
+    /// MODEL, because Claude's Fast is Opus-only and switching the model to
+    /// satisfy a toggle would answer a question the reader did not ask.
+    pub(crate) fast: bool,
 }
 
 /// A credential handle is 32 hex characters (`neev_credential_store` handle
@@ -126,6 +134,8 @@ fn provider_argv(
     prompt: &str,
     model: &str,
     briefing: Option<&str>,
+    effort: Option<&str>,
+    fast: bool,
 ) -> Vec<String> {
     let mut argv: Vec<String> = match provider {
         "codex" => vec![
@@ -156,6 +166,42 @@ fn provider_argv(
                 argv.push("--append-system-prompt".into());
                 argv.push(briefing.to_owned());
             }
+        }
+    }
+    // Effort, in each CLI's own spelling. Claude gained a native `--effort` in
+    // 2.1.267; Codex takes it as a config override. Validation happened before
+    // this point on purpose: `claude` does NOT reject an unknown level, it warns
+    // and runs at its default, so an unchecked value would look like it worked
+    // while quietly ignoring the reader's choice.
+    if let Some(effort) = effort.filter(|value| !value.is_empty()) {
+        match provider {
+            "codex" => {
+                argv.push("-c".into());
+                argv.push(format!("model_reasoning_effort=\"{effort}\""));
+            }
+            _ => {
+                argv.push("--effort".into());
+                argv.push(effort.to_owned());
+            }
+        }
+    }
+    // Speed. Neither CLI takes a flag for this, which is why searching `--help`
+    // for one finds nothing: it is settings on Claude and config overrides on
+    // Codex. Sent EXPLICITLY in both states so a run can never inherit a fast
+    // mode from ambient config the reader cannot see.
+    match provider {
+        "codex" => {
+            argv.push("-c".into());
+            argv.push(format!(
+                "service_tier=\"{}\"",
+                if fast { "fast" } else { "default" }
+            ));
+            argv.push("-c".into());
+            argv.push(format!("features.fast_mode={fast}"));
+        }
+        _ => {
+            argv.push("--settings".into());
+            argv.push(format!("{{\"fastMode\":{fast}}}"));
         }
     }
     // An explicitly chosen model is passed through, so the UI's selection is the
@@ -321,6 +367,8 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
             &request.prompt,
             &request.model,
             request.briefing.as_deref(),
+            request.effort.as_deref(),
+            request.fast,
         ));
         let mut child = command
             .current_dir(&self.workspace)
@@ -625,6 +673,8 @@ impl SandboxedProviderCliRuntime {
             &request.prompt,
             &request.model,
             request.briefing.as_deref(),
+            request.effort.as_deref(),
+            request.fast,
         ));
         argv
     }
@@ -901,6 +951,8 @@ mod tests {
             prompt: prompt.into(),
             credential_handle: Some(HANDLE.into()),
             briefing: None,
+            effort: None,
+            fast: false,
         }
     }
 
@@ -1041,7 +1093,7 @@ mod tests {
     #[test]
     fn each_provider_is_invoked_in_its_own_dialect() {
         // Claude Code is headless via `-p` with a streaming output format.
-        let claude = provider_argv("claude", "draft", "default", None);
+        let claude = provider_argv("claude", "draft", "default", None, None, false);
         assert_eq!(&claude[..2], &["-p".to_string(), "draft".to_string()]);
         assert!(claude.contains(&"stream-json".to_string()));
         assert!(claude.contains(&"--include-partial-messages".to_string()));
@@ -1049,10 +1101,12 @@ mod tests {
         // Codex is a SUBCOMMAND with `--json`, verified against `codex exec
         // --help` in the deployed agent image. It rejects Claude's flags
         // outright, which is why sharing them produced no output at all.
-        let codex = provider_argv("codex", "draft", "default", None);
+        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        // Speed is always stated, so the codex argv carries its two config
+        // overrides even when nothing was switched on.
         assert_eq!(
-            codex,
-            vec![
+            &codex[..3],
+            &[
                 "exec".to_string(),
                 "--json".to_string(),
                 "draft".to_string()
@@ -1062,14 +1116,73 @@ mod tests {
         assert!(!codex.contains(&"--output-format".to_string()));
 
         // Model selection is spelled differently by each.
-        assert!(provider_argv("codex", "d", "gpt-5", None)
+        assert!(provider_argv("codex", "d", "gpt-5", None, None, false)
             .windows(2)
             .any(|pair| pair == ["-m".to_string(), "gpt-5".to_string()]));
-        assert!(provider_argv("claude", "d", "opus", None)
+        assert!(provider_argv("claude", "d", "opus", None, None, false)
             .windows(2)
             .any(|pair| pair == ["--model".to_string(), "opus".to_string()]));
         // "default" means the provider's own default: nothing is passed.
-        assert!(!provider_argv("codex", "d", "default", None).contains(&"-m".to_string()));
+        assert!(!provider_argv("codex", "d", "default", None, None, false).contains(&"-m".to_string()));
+    }
+
+    #[test]
+    fn effort_and_speed_reach_each_cli_in_its_own_spelling() {
+        // Claude: a native flag for effort, settings for speed.
+        let claude = provider_argv("claude", "draft", "opus", None, Some("xhigh"), true);
+        assert!(claude
+            .windows(2)
+            .any(|pair| pair == ["--effort".to_string(), "xhigh".to_string()]));
+        assert!(claude
+            .windows(2)
+            .any(|pair| pair
+                == ["--settings".to_string(), "{\"fastMode\":true}".to_string()]));
+
+        // Codex: config overrides for both. `service_tier` and
+        // `features.fast_mode` are the two the docs pair together.
+        let codex = provider_argv("codex", "draft", "default", None, Some("minimal"), true);
+        assert!(codex.windows(2).any(|pair| pair
+            == [
+                "-c".to_string(),
+                "model_reasoning_effort=\"minimal\"".to_string()
+            ]));
+        assert!(codex
+            .windows(2)
+            .any(|pair| pair == ["-c".to_string(), "service_tier=\"fast\"".to_string()]));
+        assert!(codex
+            .windows(2)
+            .any(|pair| pair == ["-c".to_string(), "features.fast_mode=true".to_string()]));
+    }
+
+    #[test]
+    fn speed_off_is_sent_explicitly_rather_than_left_to_ambient_config() {
+        // A run that inherited fast mode from a config file the reader cannot
+        // see would be spending their money on a setting they never chose, so
+        // the OFF state is stated rather than omitted.
+        let claude = provider_argv("claude", "draft", "opus", None, None, false);
+        assert!(claude
+            .windows(2)
+            .any(|pair| pair
+                == ["--settings".to_string(), "{\"fastMode\":false}".to_string()]));
+        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        assert!(codex
+            .windows(2)
+            .any(|pair| pair == ["-c".to_string(), "service_tier=\"default\"".to_string()]));
+        assert!(codex
+            .windows(2)
+            .any(|pair| pair == ["-c".to_string(), "features.fast_mode=false".to_string()]));
+    }
+
+    #[test]
+    fn an_unset_effort_passes_no_effort_argument_at_all() {
+        // Unset means the provider's own default, which is not the same as any
+        // level we could name for them.
+        let claude = provider_argv("claude", "draft", "default", None, None, false);
+        assert!(!claude.contains(&"--effort".to_string()));
+        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        assert!(!codex
+            .iter()
+            .any(|arg| arg.starts_with("model_reasoning_effort")));
     }
 
     #[test]
@@ -1327,6 +1440,8 @@ mod tests {
                 // own already-authenticated CLI and delivers no credentials.
                 credential_handle: None,
                 briefing: None,
+                effort: None,
+                fast: false,
             })
             .await
             .unwrap();
