@@ -58,6 +58,16 @@ Two things in here are not preference, they are forced by upstream's code:
   and hand the browser a fresh `docs_sessionid` and CSRF token each time. Parallel requests would
   race and the collaboration socket would authenticate with a session that no longer exists.
   `tests/test_middleware.py` asserts stability both ways: ours is stable, and the stock one rotates.
+- **Docs' onboarding is switched off for bridge-managed accounts.**
+  `core.models.User.is_first_connection` defaults to True and the frontend mounts
+  `<FirstConnection/>` on it (`features/auth/components/Auth.tsx:117`), which opens Docs' own
+  onboarding modal over the editor. Dismissing it calls `users/onboarding-done/`, a route the
+  proxy's allowlist does not contain, so in the embed the modal cannot be dismissed for good and
+  returns on every load — and its slides reference `/assets/on-boarding` without the engine prefix,
+  so they would 404 regardless. Onboarding is Neev's. The bridge sets the flag false on creation and
+  normalises accounts that predate that on their next request, so no migration and no third frontend
+  rebuild is needed. Only subjects the bridge resolves are touched: a non-Neev account keeps
+  upstream's behaviour.
 - **The middleware is persistent (no header is not a logout).** `y-provider` forwards only `cookie`,
   `origin` and `X-Y-Provider-Key` to the backend, so the identity header is absent by design on
   every collaboration callback.

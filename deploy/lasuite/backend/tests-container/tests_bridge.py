@@ -720,6 +720,36 @@ class RemoteIdentityRequestTests(TestCase):
         self.assertEqual(response.json()["full_name"], "A Person")
         self.assertEqual(response.json()["email"], "person@example.test")
 
+    def test_users_me_reports_onboarding_as_already_done(self):
+        """Docs' onboarding modal must never mount in the embed.
+
+        `Auth.tsx:117` renders `<FirstConnection/>` whenever `/users/me/` reports
+        `is_first_connection`, and upstream's model defaults it to True. Closing
+        that modal calls `users/onboarding-done/`, which the proxy's allowlist
+        does not contain, so it would reappear on every load with no way to
+        dismiss it — and its slides reference `/assets/on-boarding` without the
+        engine prefix, so they would 404 regardless. Onboarding is Neev's.
+        """
+        response = self.get_me(Client(), OWNER)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["is_first_connection"])
+
+    def test_an_account_predating_the_fix_is_normalised(self):
+        user = make_user(MEMBER, is_first_connection=True)
+        self.assertTrue(user.is_first_connection)
+
+        response = self.get_me(Client(), MEMBER)
+        self.assertFalse(response.json()["is_first_connection"])
+        user.refresh_from_db()
+        self.assertFalse(user.is_first_connection)
+
+    def test_a_non_bridge_account_keeps_upstream_behaviour(self):
+        """Only subjects the bridge resolves are touched."""
+        stranger = make_user("some-oidc-sub", is_first_connection=True)
+        self.get_me(Client(), OWNER)
+        stranger.refresh_from_db()
+        self.assertTrue(stranger.is_first_connection)
+
     def test_no_identity_and_no_cookie_is_unauthenticated(self):
         self.assertIn(self.get_me(Client()).status_code, (401, 403))
 

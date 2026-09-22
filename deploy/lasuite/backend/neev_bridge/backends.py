@@ -90,9 +90,13 @@ def get_or_create_user_by_subject(subject, profile=None):
     user = user_model.objects.filter(sub=subject.raw).first()
     if user is not None:
         refresh_profile(user, profile, defaults)
+        clear_first_connection(user)
         return user, False
 
     user = user_model(sub=subject.raw, **{**defaults, **profile})
+    # Onboarding is Neev's, not Docs'. See `clear_first_connection`.
+    if hasattr(user, "is_first_connection"):
+        user.is_first_connection = False
     user.set_unusable_password()
     try:
         with transaction.atomic():
@@ -111,6 +115,35 @@ def get_or_create_user_by_subject(subject, profile=None):
         refresh_profile(user, profile, defaults)
         return user, False
     return user, True
+
+
+def clear_first_connection(user):
+    """Turn off Docs' onboarding for a bridge-managed account.
+
+    `core.models.User.is_first_connection` defaults to True, and the frontend
+    mounts `<FirstConnection/>` on it
+    (`features/auth/components/Auth.tsx:117`), which opens Docs' own onboarding
+    modal over the editor. Closing it calls `users/onboarding-done/`
+    (`features/auth/api/useOnboardingDone.tsx:17`), a route the proxy's
+    allowlist does not contain — so in the embed the modal cannot be dismissed
+    for good and comes back on every load. Its slides also reference
+    `/assets/on-boarding` without the engine prefix, so they would 404 anyway.
+
+    Onboarding belongs to Neev, which is why this is switched off rather than
+    proxied: the alternative is exposing an onboarding API and rebuilding the
+    frontend to fix asset paths, for a flow the product does not use.
+
+    Applied on creation and, for accounts that predate this, on the next
+    request — normalising existing rows without a migration. Only users the
+    bridge resolves are touched, and it only ever resolves validated `neev:`
+    subjects, so a non-Neev account (an operator's, say) keeps Docs' behaviour.
+    """
+    if getattr(user, "is_first_connection", False) is not True:
+        return False
+    user.is_first_connection = False
+    with transaction.atomic():
+        user.save(update_fields=["is_first_connection"])
+    return True
 
 
 def refresh_profile(user, profile, defaults=None):

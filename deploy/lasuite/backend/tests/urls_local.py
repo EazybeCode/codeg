@@ -19,6 +19,7 @@ def whoami(request):
             "email": getattr(user, "email", None),
             "full_name": getattr(user, "full_name", None),
             "short_name": getattr(user, "short_name", None),
+            "is_first_connection": getattr(user, "is_first_connection", None),
             "session_key": request.session.session_key,
             "csrf_cookie": request.META.get("CSRF_COOKIE"),
         }

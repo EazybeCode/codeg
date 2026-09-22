@@ -249,6 +249,27 @@ class ConcurrentFirstContactTests(TestCase):
         self.assertFalse(get_user_model().objects.filter(sub="neev:7:99").exists())
 
 
+class OnboardingTests(TestCase):
+    """Docs' own onboarding modal must never appear in the embed.
+
+    `Auth.tsx:117` mounts it on `is_first_connection`, which upstream defaults to
+    True, and dismissing it calls `users/onboarding-done/` — a route the proxy's
+    allowlist does not contain. So the modal would reappear on every load with no
+    way to close it for good.
+    """
+
+    def test_a_new_user_has_onboarding_off(self):
+        self.assertFalse(get(Client(), SUBJECT).json()["is_first_connection"])
+
+    def test_an_existing_user_is_normalised_on_the_next_request(self):
+        """Accounts created before this fix are repaired without a migration."""
+        make_user(SUBJECT, is_first_connection=True)
+        self.assertFalse(get(Client(), SUBJECT).json()["is_first_connection"])
+        self.assertFalse(
+            get_user_model().objects.get(sub=SUBJECT).is_first_connection
+        )
+
+
 class DisplayNameTests(TestCase):
     """Upstream reads `email.split("@")` when a name is empty; it must not be.
 

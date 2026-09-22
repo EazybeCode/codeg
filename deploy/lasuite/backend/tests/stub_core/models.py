@@ -9,7 +9,9 @@ because they are exactly what the bridge has to cope with:
 * `sub` is a nullable, unique CharField — the real identity key;
 * `save()` calls `full_clean()`, as upstream's `BaseModel` does. That one is
   here because the in-image run caught what its absence hid: a user created
-  without a password passes on a plain model and is rejected by upstream's.
+  without a password passes on a plain model and is rejected by upstream's;
+* `is_first_connection` defaults to True, as upstream's does — the default the
+  bridge has to turn off, because the embed cannot dismiss Docs' onboarding.
 
 Everything else upstream's model carries (timezone, language, OIDC bookkeeping)
 is irrelevant here and left out rather than approximated.
@@ -27,6 +29,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     short_name = models.CharField(max_length=100, blank=True, null=True)
     email = models.EmailField(blank=True, null=True)
     admin_email = models.EmailField(unique=True, blank=True, null=True)
+    is_first_connection = models.BooleanField(default=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
 
