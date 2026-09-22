@@ -747,3 +747,75 @@ describe("a line break where one cannot go", () => {
     )
   })
 })
+
+/**
+ * jsdom has no `ClipboardEvent`, and ProseMirror's `pasteHTML` synthesises one.
+ * A minimal stand-in is enough: the event carries no data on this path, it only
+ * has to exist.
+ */
+class StubClipboardEvent extends Event {
+  clipboardData: unknown = null
+}
+
+/**
+ * `blocksToFullHTML` uses `Array.prototype.toReversed`, which arrived in
+ * ES2023. Node 18 does not have it, so this verifies on Node 20+ and says
+ * plainly that it was skipped otherwise rather than passing vacuously.
+ */
+const hasToReversed =
+  typeof (Array.prototype as { toReversed?: unknown }).toReversed === "function"
+
+describe.skipIf(!hasToReversed)("a multi-block paste at the cursor", () => {
+  it("replaces the selection and splits the paragraph around it", () => {
+    // The behaviour the old insert-after path could not produce: pasting two
+    // paragraphs over "cd" in "ab[cd]ef" has to leave "abone" / "twoef", not
+    // "abef" followed by the pasted blocks.
+    ;(globalThis as { ClipboardEvent?: unknown }).ClipboardEvent ??=
+      StubClipboardEvent
+    const editor = BlockNoteEditor.create({
+      schema: richSchema,
+      trailingBlock: false,
+      tables: {
+        splitCells: false,
+        cellBackgroundColor: false,
+        cellTextColor: false,
+        headers: false,
+      },
+    })
+    const host = document.createElement("div")
+    document.body.appendChild(host)
+    editor.mount(host)
+    try {
+      editor.replaceBlocks(editor.document, [
+        { type: "paragraph", content: "abcdef" },
+      ] as never)
+      let at = -1
+      editor._tiptapEditor.state.doc.descendants((node, pos) => {
+        if (node.isText && node.text === "abcdef") at = pos
+      })
+      editor._tiptapEditor.commands.setTextSelection({
+        from: at + 2,
+        to: at + 4,
+      })
+      expect(editor.getSelectedText()).toBe("cd")
+
+      // Exactly the two calls the paste handler makes for `kind: "blocks"`.
+      editor.pasteHTML(
+        editor.blocksToFullHTML([
+          { type: "paragraph", content: "one" },
+          { type: "paragraph", content: "two" },
+        ] as Parameters<typeof editor.blocksToFullHTML>[0])
+      )
+      expect(
+        editor.document.map((block) =>
+          ((block.content as { text?: string }[]) ?? [])
+            .map((run) => run.text ?? "")
+            .join("")
+        )
+      ).toEqual(["abone", "twoef"])
+    } finally {
+      editor.unmount()
+      host.remove()
+    }
+  })
+})
