@@ -26,17 +26,25 @@
 #   docker compose run --rm backend python manage.py migrate
 #   docker compose up -d --wait --wait-timeout 180
 
-name: neev-document-engine
+# Every name below is derived from STACK_NAME, set in the stack's own .env by
+# generate-env.sh. Two stacks on one host — a canary and production — must not
+# share a compose project, a private network or a volume: sharing the project
+# would make `up` in one directory recreate the other's containers, and sharing
+# the private network would put both backends in one DNS namespace, where
+# `backend:8000` resolves to whichever container answers first. Volumes are
+# prefixed with the project name by compose, so STACK_NAME separates those too.
+name: ${STACK_NAME:?STACK_NAME must be set (generate-env.sh writes it to .env)}
 
 networks:
-  # Internal to the stack. Nothing here is reachable from outside the host.
+  # Internal to this stack. Nothing here is reachable from outside the host.
   engine:
-    name: neev-document-engine
+    name: ${STACK_NAME}-internal
   # The network the Neev container is already on. Only the backend and
-  # y-provider join it, and only so Neev's proxy can reach them by name.
+  # y-provider join it, and only so Neev's proxy can reach them by name. This
+  # one is deliberately shared — it is the one trust edge the stack has.
   neev:
     external: true
-    name: ${NEEV_NETWORK:-neev}
+    name: ${NEEV_NETWORK:?NEEV_NETWORK must be set (generate-env.sh writes it to .env)}
 
 volumes:
   postgres:

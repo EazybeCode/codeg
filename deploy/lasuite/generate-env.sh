@@ -28,6 +28,9 @@ if [ "$mode" = "canary" ]; then
   target="${1:-/opt/neev-document-engine-canary}"
   origin="${2:-http://127.0.0.1:3100}"
   configuration="NeevCanary"
+  # Distinct from production's, deliberately: the compose project name, the
+  # private network and every volume are derived from it.
+  stack_name="${STACK_NAME:-neev-document-engine-canary}"
   # Comma-separated, NOT JSON. django-configurations' ListValue splits on ",",
   # so a JSON array is stored verbatim as broken strings — verified against the
   # real image, where '["a","b"]' became ['["a"', '"b"]'] and every CSRF origin
@@ -37,6 +40,7 @@ else
   target="${1:-/opt/neev-document-engine}"
   origin="${2:-https://app.neev.so}"
   configuration="NeevProduction"
+  stack_name="${STACK_NAME:-neev-document-engine-prod}"
   # Comma-separated, NOT JSON — see the canary branch above for why.
   allowed_hosts="$(printf '%s' "$origin" | sed -e 's|^https\?://||' -e 's|/.*$||'),backend"
 fi
@@ -155,6 +159,10 @@ else
   neev_network="${NEEV_NETWORK:-neev}"
 fi
 cat >"$target/.env" <<EOF
+# Every compose name this stack owns derives from STACK_NAME: the project, the
+# private network (\${STACK_NAME}-internal) and the volume prefix. A second
+# stack on this host MUST have a different one.
+STACK_NAME=$stack_name
 NEEV_NETWORK=$neev_network
 EOF
 
@@ -169,7 +177,36 @@ chmod 644 "$target/.env"
 chmod 700 "$target/env.d"
 chmod 600 "$target"/env.d/*
 
-echo "written to $target  (mode: $mode, origin: $origin)"
+# Show what compose actually resolved, rather than what this script intended.
+# A stack that silently shares a project or a private network with another one
+# is the failure this guards against, and it is invisible until `up` recreates
+# somebody else's containers.
+if command -v docker >/dev/null 2>&1 &&
+   docker compose --project-directory "$target" config >/dev/null 2>&1; then
+  echo "resolved compose names — must differ from every other stack on this host:"
+  docker compose --project-directory "$target" config --format json 2>/dev/null |
+    python3 -c '
+import json, sys
+
+config = json.load(sys.stdin)
+project = config.get("name")
+print("  project    %s" % project)
+for key, network in sorted((config.get("networks") or {}).items()):
+    kind = "external — shared on purpose" if network.get("external") else "private"
+    print("  network    %-8s %-32s [%s]" % (key, network.get("name"), kind))
+for key in sorted(config.get("volumes") or {}):
+    print("  volume     %-8s %s_%s" % (key, project, key))
+' || echo "  (could not resolve; check docker compose config by hand)"
+  echo
+  if docker network ls --format '{{.Name}}' 2>/dev/null |
+       grep -qx "${stack_name}-internal"; then
+    echo "  NOTE: the private network ${stack_name}-internal already exists on this host."
+    echo "        If that belongs to another stack, choose a different STACK_NAME."
+    echo
+  fi
+fi
+
+echo "written to $target  (mode: $mode, stack: $stack_name, origin: $origin)"
 echo "  env.d/{common,backend,postgresql,minio,yprovider}"
 echo "    directory 700, files 600 — root only, never read by a container"
 echo "  compose.yaml (644), backend/neev_bridge/*.py (644 in a 755 directory)"

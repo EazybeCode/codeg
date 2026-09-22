@@ -101,6 +101,54 @@ and forwards *instead of* the browser's cookie; `sessions/resolve` answers "whos
 for verification and tests. The proxy uses one of the two, and caches a minted key per subject until
 roughly half of `expires_in` so sessions do not proliferate.
 
+## Media — how attachments actually work at v5.7.0
+
+Measured against the running canary, not read off the docs. Every status below was
+observed.
+
+```
+POST /api/v1.0/documents/<id>/attachment-upload/   multipart, session cookie + X-CSRFToken + Origin
+  -> 201 {"file": "/api/v1.0/documents/<id>/media-check/?key=<URL-ENCODED key>"}
+  -> 403 without a CSRF token                       (upstream's CSRF is live on this route)
+
+GET  /api/v1.0/documents/<id>/media-check/?key=…    -> 200 {"status":"ready","file":"/media/<key>"}
+
+GET  /media/<key>                                   -> 404 FROM DJANGO. Django never serves media
+                                                       in production; upstream's nginx does.
+
+GET  /api/v1.0/documents/media-auth/                 header X-Original-URL: /media/<key>
+  -> 200 "authorized" + Authorization, X-Amz-Date, X-Amz-Content-SHA256   (SigV4, no URL, no expiry)
+  -> 403 for a user without access, anonymous, a missing X-Original-URL, or a traversal path
+
+GET  http://minio:9000/<bucket>/<key>  with those three headers
+  -> 200, the bytes, Content-Type from libmagic      anonymous: 403
+```
+
+So the bytes are fetched **server-side** with headers Django computes per request. There is no
+presigned URL and no redirect anywhere in the flow, and that is the point: authorization is
+re-evaluated on every single fetch, and nothing shareable is ever minted. Any implementation that
+redirects a browser to the object store — presigned or not — replaces realtime authorization with a
+bearer URL and must not be built.
+
+Three measured facts that a media implementation has to handle, none of them obvious:
+
+- **`media-auth` needs only the identity header.** No Docs session cookie is required (verified:
+  200 with the header alone), which keeps the subrequest cheap and stateless.
+- **`Content-Disposition` is not on the object.** Upload stores it, and then the malware-detection
+  callback (`core/malware_detection.py`, default `DummyBackend`) rewrites the metadata with
+  `copy_object(..., MetadataDirective="REPLACE")` without carrying it over — proven directly:
+  present after upload, `None` after the copy. Every attachment therefore loses its disposition at
+  the exact moment it becomes readable, including the ones upstream marked unsafe. Whatever serves
+  `/media/` must set the disposition itself.
+- **SVG is not treated as unsafe.** `image/svg+xml` is absent from `DOCUMENT_UNSAFE_MIME_TYPES`, so
+  an SVG carrying `<script>` uploads with `is_unsafe` false and `Content-Type: image/svg+xml`.
+  Served same-origin and navigated to directly, it executes in the Neev origin. `text/html` *is*
+  flagged (key suffixed `-unsafe`), and a disguised upload is caught by libmagic rather than by the
+  declared type — a `.png` containing HTML is stored as `text/html` and marked unsafe.
+
+The object GET also returns `x-amz-meta-owner`, `x-amz-meta-status` and `x-amz-meta-is_unsafe`.
+`owner` is a Docs user id; a proxy that copies response headers blindly hands it to the browser.
+
 ## Install
 
 ```bash
@@ -121,6 +169,26 @@ docker compose up -d --wait --wait-timeout 180
 
 Migrations first: the backend's healthcheck is `manage.py check`, which needs a schema, so bringing
 everything up at once can time out as unhealthy.
+
+### Two stacks on one host
+
+Every compose name the stack owns derives from `STACK_NAME` in its `.env`: the project, the private
+network (`${STACK_NAME}-internal`) and the volume prefix. The generator picks
+`neev-document-engine-prod` or `neev-document-engine-canary`, and prints what compose resolved:
+
+```
+resolved compose names — must differ from every other stack on this host:
+  project    neev-document-engine-canary
+  network    engine   neev-document-engine-canary-internal [private]
+  network    neev     neev-docs-native-test                [external — shared on purpose]
+  volume     postgres neev-document-engine-canary_postgres
+```
+
+This is not tidiness. Two stacks sharing a compose project means `up` in one directory recreates
+the other's containers; two sharing a private network means both backends answer to `backend:8000`
+and which one a request reaches is a race. Only the external Neev network is shared, deliberately,
+and it is the stack's one trust edge. A stack that is already running keeps the name it was created
+with — changing `STACK_NAME` on a live stack orphans its containers, network and volumes.
 
 ### Env format — one trap worth knowing
 
