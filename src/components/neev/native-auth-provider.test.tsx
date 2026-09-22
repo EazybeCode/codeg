@@ -7,6 +7,7 @@ import { NativeWorkspace } from "./native-workspace"
 import {
   json,
   mockNativeSession,
+  nativeCapabilities,
   NativeTestRoot,
   orgSession,
 } from "./test-helpers"
@@ -18,7 +19,20 @@ afterEach(() => {
 })
 function StatusProbe() {
   const auth = useNativeAuth()
-  return <span data-testid="auth-status">{auth.status}</span>
+  return (
+    <>
+      <span data-testid="auth-status">{auth.status}</span>
+      <span data-testid="auth-providers">
+        {auth.capabilities
+          ? Object.entries(auth.capabilities.providers)
+              .filter(([, on]) => on)
+              .map(([name]) => name)
+              .join(",")
+          : "none"}
+      </span>
+      <span data-testid="auth-session">{auth.session ? "held" : "none"}</span>
+    </>
+  )
 }
 function Controls() {
   const auth = useNativeAuth()
@@ -429,5 +443,80 @@ it(
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"))
     expect(screen.queryByDisplayValue("unsaved sentence")).toBeNull()
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
+  }
+)
+
+/** Bootstrap with the public answer and the private one under test. */
+function bootstrap(routes: Record<string, () => Response | Promise<Response>>) {
+  mockNativeSession(undefined, routes)
+  return render(
+    <NativeTestRoot>
+      <StatusProbe />
+    </NativeTestRoot>
+  )
+}
+
+it.each([
+  ["the refusal arrives first", true],
+  ["the capabilities arrive first", false],
+])(
+  "publishes the public capabilities to a signed-out visitor when %s",
+  async (_label, refusalFirst) => {
+    // The two answers race, and the order they land in must not decide whether
+    // the sign-in page knows how to sign anyone in.
+    let releaseCaps!: (value: Response) => void
+    const held = new Promise<Response>((resolve) => {
+      releaseCaps = resolve
+    })
+    const caps = json({
+      ...nativeCapabilities,
+      providers: { google: true, email: true, github: false },
+    })
+    bootstrap({
+      "GET /api/workos/capabilities": () => (refusalFirst ? held : caps),
+      "GET /api/neev/session": () => json({ code: "unauthorized" }, 401),
+    })
+    if (refusalFirst) {
+      // Let the 401 land alone first, then answer the public question.
+      await waitFor(() =>
+        expect(screen.getByTestId("auth-status")).toHaveTextContent("loading")
+      )
+      await act(async () => releaseCaps(caps))
+    }
+    await waitFor(() =>
+      expect(screen.getByTestId("auth-status")).toHaveTextContent(
+        "unauthenticated"
+      )
+    )
+    expect(screen.getByTestId("auth-providers")).toHaveTextContent(
+      "google,email"
+    )
+    // Signed out is signed out: nothing put a private session back.
+    expect(screen.getByTestId("auth-session")).toHaveTextContent("none")
+  }
+)
+
+it.each([
+  ["they cannot be read", () => json({ code: "unavailable" }, 503)],
+  [
+    "they come from something that is not this server",
+    () => json({ ...nativeCapabilities, identityMode: "workos" }),
+  ],
+  ["they are malformed", () => json({ nonsense: true })],
+])(
+  "publishes nothing and fails closed when %s",
+  async (_label, capabilities) => {
+    // A server whose capabilities cannot be trusted cannot be signed in to, and
+    // the page says so rather than guessing at a method.
+    bootstrap({
+      "GET /api/workos/capabilities": capabilities,
+      "GET /api/neev/session": () => json(orgSession),
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("auth-status")).toHaveTextContent("unavailable")
+    )
+    expect(screen.getByTestId("auth-providers")).toHaveTextContent("none")
+    // Not even a session that answered perfectly well beside it.
+    expect(screen.getByTestId("auth-session")).toHaveTextContent("none")
   }
 )

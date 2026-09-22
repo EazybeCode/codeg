@@ -117,38 +117,51 @@ export function NativeAuthProvider({
     if (!mounted.current || logoutPending.current) return
     const next = clear()
     setStatus("loading")
-    try {
-      // Asked for together: both are same-origin reads that do not depend on
-      // each other, and running them nose-to-tail put a whole round trip in
-      // front of every other request the workspace makes. The checks below are
-      // unchanged and still run before anything is believed — a capabilities
-      // response that is not `native` rejects the pair, aborted or superseded
-      // work is still dropped, and nothing is published until both are in.
-      const [caps, value] = await Promise.all([
-        loadServerCapabilities(next.controller.signal),
-        loadNativeSession(next.controller.signal),
-      ])
-      if (caps.mode !== "native")
-        throw new NativeClientError("invalid_response")
-      if (next.controller.signal.aborted || next.generation !== current.current)
-        return
-      setCapabilities(caps)
-      recoveryCsrf.current = value.csrf
-      verified.current = value
-      setSession(value)
+    // Asked for together, because neither depends on the other and running
+    // them nose-to-tail put a whole round trip in front of everything else.
+    //
+    // Settled rather than all, because they are not the same KIND of answer.
+    // The capabilities are public and say how to sign in; the session is
+    // private and says who you are. Requiring both meant a signed-out
+    // visitor's 401 discarded the capabilities alongside it, and the sign-in
+    // page — the one page where having no session is the normal case — went
+    // on to offer no method at all, every one of them labelled unavailable.
+    //
+    // Whichever answer arrives first, both are read here, once, after a single
+    // staleness check: an aborted or superseded load writes nothing.
+    const [capsRead, sessionRead] = await Promise.allSettled([
+      loadServerCapabilities(next.controller.signal),
+      loadNativeSession(next.controller.signal),
+    ])
+    if (next.controller.signal.aborted || next.generation !== current.current)
+      return
+    // Fail closed on the capabilities themselves. Unreadable, or an answer
+    // from something that is not this server, and nothing is published or
+    // believed — including a session that happened to come back beside it.
+    if (capsRead.status !== "fulfilled" || capsRead.value.mode !== "native") {
+      setStatus("unavailable")
+      return
+    }
+    setCapabilities(capsRead.value)
+    if (sessionRead.status === "fulfilled") {
+      recoveryCsrf.current = sessionRead.value.csrf
+      verified.current = sessionRead.value
+      setSession(sessionRead.value)
       setStatus("authenticated")
       setLogoutError(false)
-    } catch (error) {
-      if (next.controller.signal.aborted || next.generation !== current.current)
-        return
-      if (
-        error instanceof NativeClientError &&
-        (error.kind === "unauthorized" || error.kind === "forbidden")
-      ) {
-        recoveryCsrf.current = null
-        setStatus("unauthenticated")
-      } else setStatus("unavailable")
+      return
     }
+    // Having no session is an answer, not a failure, and it restores nothing:
+    // `clear` above already emptied the private half and nothing here puts
+    // anything back. Only what the server says publicly has been published.
+    const error = sessionRead.reason
+    if (
+      error instanceof NativeClientError &&
+      (error.kind === "unauthorized" || error.kind === "forbidden")
+    ) {
+      recoveryCsrf.current = null
+      setStatus("unauthenticated")
+    } else setStatus("unavailable")
   }, [clear])
   const revalidateVisibility = useCallback(async () => {
     if (!mounted.current || logoutPending.current) return

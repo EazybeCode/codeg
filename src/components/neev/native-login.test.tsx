@@ -6,6 +6,7 @@ import { NativeLogin, NativeSignInMethods } from "./native-login"
 import {
   json,
   mockNativeSession,
+  nativeCapabilities,
   NativeTestRoot,
   orgSession,
 } from "./test-helpers"
@@ -129,5 +130,47 @@ it("refreshes browser binding but sends session CSRF for linking and explains co
   await user.click(await screen.findByRole("button", { name: "Link Google" }))
   expect(await screen.findByRole("alert")).toHaveTextContent(/linked/i)
   expect(csrf).toBe("synthetic-csrf")
+  expect(mock.unknown).toEqual([])
+})
+
+it("offers the sign-in methods the public server advertises, to someone with no session", async () => {
+  // The capabilities are PUBLIC and the session is private, and a signed-out
+  // visitor has exactly one of them. Reading the pair as all-or-nothing meant a
+  // 401 on the session threw away the answer that says how to sign in, and
+  // every method on the page rendered unavailable — the one page where being
+  // signed out is the normal case.
+  const mock = mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": () =>
+      json({
+        ...nativeCapabilities,
+        providers: { google: true, email: true, github: false },
+      }),
+    // Nobody is signed in. That is an answer, not a failure.
+    "GET /api/neev/session": () => json({ code: "unauthorized" }, 401),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSignInMethods />
+    </NativeTestRoot>
+  )
+  const google = await screen.findByRole("button", {
+    name: /Continue with Google/,
+  })
+  await waitFor(() => expect(google).toBeEnabled())
+  // The label is the symptom: an unavailable method says so in its own name.
+  expect(google).toHaveAccessibleName("Continue with Google")
+  const email = screen.getByLabelText("Email address")
+  expect(email).toBeEnabled()
+  // The submit waits for an address, not for permission.
+  const send = screen.getByRole("button", { name: /Request sign-in link/ })
+  expect(send).toBeDisabled()
+  await user.type(email, "sagar@eazybe.com")
+  expect(send).toBeEnabled()
+  expect(send).toHaveAccessibleName("Request sign-in link")
+  // GitHub genuinely is not configured on this server, and still says so.
+  const github = screen.getByRole("button", { name: /GitHub/ })
+  expect(github).toBeDisabled()
+  expect(github).toHaveAccessibleName("GitHub (optional) · unavailable")
   expect(mock.unknown).toEqual([])
 })
