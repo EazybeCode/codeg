@@ -367,6 +367,15 @@ const COMMENTS_ENABLED: bool = true;
 /// that new surfaces arrive denied.
 fn thread_route(action: &str, method: &str) -> Option<(bool, Body)> {
     let rest = action.strip_prefix("threads/")?;
+    // The collection itself, before any thread id. Handled first because
+    // `split_once('/')` finds nothing here — folding these two into the id
+    // branch is what dropped them, and the symptom was the exact console error
+    // this route was enabled to fix.
+    match (rest, method) {
+        ("", "GET") => return Some((false, Body::None)),
+        ("", "POST") => return Some((true, Body::CommentBody)),
+        _ => {}
+    }
     let (thread, rest) = rest.split_once('/')?;
     canonical_uuid(thread)?;
     match (rest, method) {
