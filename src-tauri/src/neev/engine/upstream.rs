@@ -119,12 +119,23 @@ pub(crate) struct Upstream {
     /// The browser-facing origin, sent as `Origin` so the bridge sees the same
     /// value a browser would have sent.
     origin: String,
+    /// `host[:port]` of that origin, sent as `Host` on **every** call.
+    ///
+    /// Without it the request carries the container address the socket was
+    /// opened to, Django matches that against `ALLOWED_HOSTS`, and every bridge
+    /// call is refused with `DisallowedHost` — which surfaces as a plain 400
+    /// HTML page, not a bridge error, so it reads like a malformed body rather
+    /// than a rejected host.
+    host: String,
     key: String,
     sessions: Mutex<HashMap<String, Minted>>,
 }
 
 impl Upstream {
     pub(crate) fn new(backend: Url, origin: String, key: String) -> Result<Self, EngineError> {
+        // The public origin decides the Host header; the backend URL only
+        // decides where the socket goes.
+        let backend_host_source = Url::parse(&origin).map_err(|_| EngineError::Invalid)?;
         if !matches!(backend.scheme(), "http" | "https") || backend.cannot_be_a_base() {
             return Err(EngineError::Invalid);
         }
@@ -137,10 +148,16 @@ impl Upstream {
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|_| EngineError::Unavailable)?;
+        let host = match (backend_host_source.host_str(), backend_host_source.port()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            (Some(host), None) => host.to_owned(),
+            _ => return Err(EngineError::Invalid),
+        };
         Ok(Self {
             client,
             backend,
             origin,
+            host,
             key,
             sessions: Mutex::new(HashMap::new()),
         })
@@ -162,6 +179,7 @@ impl Upstream {
             .client
             .request(method, self.endpoint(path)?)
             .header(BRIDGE_KEY, &self.key)
+            .header(reqwest::header::HOST, &self.host)
             .header("X-Forwarded-Proto", "https")
             .header("Origin", &self.origin)
             .json(&body)
@@ -322,6 +340,7 @@ impl Upstream {
             .get(url)
             .header(BRIDGE_KEY, &self.key)
             .header(super::identity::USER, &subject.subject)
+            .header(reqwest::header::HOST, &self.host)
             .header("X-Forwarded-Proto", "https")
             .send()
             .await

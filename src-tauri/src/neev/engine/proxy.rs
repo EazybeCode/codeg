@@ -362,6 +362,31 @@ pub(crate) async fn handle(
     let served = match decision {
         Decision::Refuse(refusal) => Err(refuse(refusal)),
         Decision::Asset => asset(engine, parts.uri.path()),
+        Decision::Shell { resource, role } => {
+            let assertion = assertion(&state, &actor).await;
+            // Project before the shell renders, so the editor's very first API
+            // call already finds the access row it needs.
+            engine
+                .upstream
+                .project(&resource, &assertion, role)
+                .await
+                .map_err(crate::neev::error::AuthError::from)?;
+            // Provisioning is idempotent and the id is the resource's own, so
+            // this repairs a resource whose creation committed natively but
+            // whose upstream document never got made — the "retry converges"
+            // half of having no atomicity across the two stores. Without it
+            // such a document would stay broken for good.
+            let title = crate::neev::content::resources::get(&state, &actor, &resource)
+                .await
+                .map(|resource| resource.title)
+                .unwrap_or_default();
+            engine
+                .upstream
+                .provision(&resource, &title, &assertion)
+                .await
+                .map_err(crate::neev::error::AuthError::from)?;
+            asset(engine, parts.uri.path())
+        }
         Decision::Forward { resource: Some(ref resource), .. }
             if matches!(target, Some(Target::Media { .. })) =>
         {

@@ -59,6 +59,13 @@ pub(crate) enum Decision {
         resource: Option<String>,
         role: Option<Projected>,
     },
+    /// Serve the editor shell for an authorized document.
+    ///
+    /// The shell is a **static file from the export**, not a backend route:
+    /// Django serves nothing under `/docs/`, so forwarding it would 404 every
+    /// document while every asset still loaded. It is a separate outcome from
+    /// `Asset` because it is authorized against a specific document first.
+    Shell { resource: String, role: Projected },
     /// Upgrade the collaboration socket for this document, with the caller
     /// projected at this role.
     Upgrade { resource: String, role: Projected },
@@ -101,15 +108,20 @@ pub(crate) fn decide(
             resource: None,
             role: None,
         },
-        Target::Editor { resource } | Target::Media { resource, .. } => {
-            match guard(grant, false, engine_backed) {
-                Some(refusal) => Decision::Refuse(refusal),
-                None => Decision::Forward {
-                    resource: Some(resource.clone()),
-                    role: Some(Projected::from_neev(grant == Grant::Write)),
-                },
-            }
-        }
+        Target::Editor { resource } => match guard(grant, false, engine_backed) {
+            Some(refusal) => Decision::Refuse(refusal),
+            None => Decision::Shell {
+                resource: resource.clone(),
+                role: Projected::from_neev(grant == Grant::Write),
+            },
+        },
+        Target::Media { resource, .. } => match guard(grant, false, engine_backed) {
+            Some(refusal) => Decision::Refuse(refusal),
+            None => Decision::Forward {
+                resource: Some(resource.clone()),
+                role: Some(Projected::from_neev(grant == Grant::Write)),
+            },
+        },
         Target::Document {
             resource,
             write,
