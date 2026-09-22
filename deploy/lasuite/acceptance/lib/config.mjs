@@ -98,20 +98,52 @@ async function readPrivateJson(path) {
  */
 export async function loadEnvironment() {
   const dir = canaryDir()
-  const actors = await readPrivateJson(`${dir}/actors.json`)
-  const fixtures = await readPrivateJson(`${dir}/fixtures.json`)
+  const raw = await readPrivateJson(`${dir}/actors.json`)
+  const given = await readPrivateJson(`${dir}/fixtures.json`)
 
-  for (const role of ["owner", "member", "outsider"])
-    if (!actors[role]) throw new Error(`actors.json has no "${role}"`)
+  /**
+   * The host writes these files, so this reads its shape rather than asking it
+   * to match one invented here. Actors arrive with an established session — a
+   * cookie jar, not a password — which suits the cases: what is being tested is
+   * what a signed-in person can reach, not how they signed in.
+   */
+  const actors = {}
+  for (const role of ["owner", "member", "outsider"]) {
+    const actor = raw[role]
+    if (!actor) throw new Error(`actors.json has no "${role}"`)
+    if (!actor.cookies || typeof actor.cookies !== "object")
+      throw new Error(`actors.json: "${role}" carries no cookie jar`)
+    actors[role] = {
+      userId: actor.user_id,
+      orgId: actor.org_id,
+      memberId: actor.member_id,
+      cookies: actor.cookies,
+    }
+  }
 
+  // The permission cases are only meaningful if these really are three
+  // different people, two of them together and one apart. An actors file that
+  // quietly collapsed them would let every boundary case pass while testing
+  // nothing at all.
   if (actors.owner.orgId !== actors.member.orgId)
     throw new Error("owner and member must share an organization")
   if (actors.outsider.orgId === actors.owner.orgId)
     throw new Error("outsider must be in a different organization")
+  if (actors.owner.userId === actors.member.userId)
+    throw new Error("owner and member must be different people")
 
-  for (const key of ["projectNodeId", "folderNodeId", "legacyDocumentId"])
-    if (fixtures[key] === undefined)
-      throw new Error(`fixtures.json has no "${key}"`)
+  for (const key of ["project", "folder", "legacy_document"])
+    if (!given[key]) throw new Error(`fixtures.json has no "${key}"`)
+
+  const fixtures = {
+    projectNodeId: given.project.id,
+    folderNodeId: given.folder.id,
+    legacyDocumentId: given.legacy_document.id,
+    legacyDocument: given.legacy_document,
+    legacyContent: given.legacy_content ?? null,
+  }
+  if (fixtures.folderNodeId === fixtures.projectNodeId)
+    throw new Error("the folder fixture must not be the project itself")
 
   return { actors, fixtures }
 }

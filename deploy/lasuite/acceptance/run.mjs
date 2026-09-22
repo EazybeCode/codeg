@@ -1,7 +1,28 @@
 import { BASE_URL, loadEnvironment, redact } from "./lib/config.mjs"
 import { Actor } from "./lib/http.mjs"
+import { connect } from "./lib/collab.mjs"
 import { loadClient } from "./lib/collab.mjs"
 import { cases } from "./lib/cases.mjs"
+import { randomUUID } from "node:crypto"
+
+/** A document the owner certainly may edit, used only to see if sockets work. */
+async function createProbeDocument({ owner, fixtures }) {
+  const created = await owner.json(
+    `/api/neev/nodes/${fixtures.projectNodeId}/documents`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Acceptance — socket probe",
+        requestId: randomUUID(),
+      }),
+    }
+  )
+  if (!created.body?.id)
+    return { ok: false, reason: `could not create a probe document (${created.status})` }
+  const session = await connect(owner, created.body.id)
+  session.destroy()
+  return { ok: session.ok, reason: session.reason ?? null, id: created.body.id }
+}
 
 /**
  * The acceptance runner.
@@ -84,6 +105,25 @@ async function main() {
     throw new Error(
       "owner and member resolved to the same user; a permission test between one person and themselves proves nothing"
     )
+
+  /**
+   * Can a socket be established at all?
+   *
+   * Several cases assert that a socket is REFUSED, and every one of them would
+   * "pass" if collaboration were broken outright — refused and never-works look
+   * identical from the outside. So establish once, against a document the owner
+   * just made and plainly may edit, whether a socket can succeed. If it cannot,
+   * those cases report skipped instead of claiming a boundary they never
+   * reached.
+   */
+  const probe = await createProbeDocument(context)
+  context.socketsWork = probe.ok
+  context.socketProbe = probe
+  say(
+    probe.ok
+      ? "sockets: a known-good connection succeeded"
+      : `sockets: NO connection can be established (${probe.reason}) — refusal cases cannot be trusted and will skip`
+  )
 
   const selected = only ? cases.filter((c) => c.name.includes(only)) : cases
   const results = []

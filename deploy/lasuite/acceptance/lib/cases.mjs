@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { BASE_URL } from "./config.mjs"
-import { engineApi, engineUrl } from "./http.mjs"
+import { engineApi, engineUrl, updateResource } from "./http.mjs"
 import { connect, openWithForeignDocumentName, until } from "./collab.mjs"
 
 /**
@@ -44,11 +44,22 @@ async function titles(actor, id) {
   }
 }
 
-/** A request deliberately carrying no CSRF token, straight past the Actor helper. */
+/**
+ * A request missing the CSRF token and nothing else.
+ *
+ * The Origin header stays, deliberately. Neev refuses an unsafe request with no
+ * Origin as well, so dropping both would make this pass on the wrong one — a
+ * green CSRF case that never exercised CSRF. One variable at a time is the whole
+ * point of the case.
+ */
 function withoutCsrf(actor, path, body) {
   return fetch(new URL(path, BASE_URL), {
     method: "PATCH",
-    headers: { cookie: actor.cookieHeader, "content-type": "application/json" },
+    headers: {
+      cookie: actor.cookieHeader,
+      "content-type": "application/json",
+      origin: new URL(BASE_URL).origin,
+    },
     body: JSON.stringify(body),
     redirect: "manual",
   })
@@ -251,16 +262,14 @@ export const cases = [
       const { resource } = await createDocument(owner, fixtures.projectNodeId, before)
       if (!resource?.id) return skip("could not create a document to share")
 
-      const shared = await owner.json(`/api/neev/resources/${resource.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ visibility: "organization" }),
+      const shared = await updateResource(owner, resource.id, {
+        visibility: "organization",
       })
       if (shared.status >= 400)
         return no(`sharing failed (${shared.status})`, { shared: shared.status })
 
-      const viaNeev = await member.json(`/api/neev/resources/${resource.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ title: "renamed by a member" }),
+      const viaNeev = await updateResource(member, resource.id, {
+        title: "renamed by a member",
       })
       const viaDocs = await engineApi(member, `documents/${resource.id}/`, {
         method: "PATCH",
@@ -351,7 +360,7 @@ export const cases = [
 
   {
     name: "another organization is refused, on the page and on the API",
-    async run({ owner, outsider, fixtures }) {
+    async run({ owner, outsider, fixtures, socketsWork }) {
       const { resource } = await createDocument(
         owner,
         fixtures.projectNodeId,
@@ -372,6 +381,13 @@ export const cases = [
           api: api.status,
         })
 
+      if (!socketsWork)
+        return ok({
+          native: native.status,
+          api: api.status,
+          page: page.status,
+          socket: "not checked — no socket can be established at all",
+        })
       const socket = await connect(outsider, resource.id)
       socket.destroy()
       if (socket.ok)
@@ -399,9 +415,8 @@ export const cases = [
       )
       if (!resource?.id) return skip("could not create a document to share")
 
-      const shared = await owner.json(`/api/neev/resources/${resource.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ visibility: "organization" }),
+      const shared = await updateResource(owner, resource.id, {
+        visibility: "organization",
       })
       if (shared.status >= 400)
         return no(`sharing failed (${shared.status})`, { shared: shared.status })
@@ -449,19 +464,13 @@ export const cases = [
       )
       if (!resource?.id) return skip("could not create a document to revoke")
 
-      await owner.json(`/api/neev/resources/${resource.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ visibility: "organization" }),
-      })
+      await updateResource(owner, resource.id, { visibility: "organization" })
       const before = await connect(member, resource.id)
       before.destroy()
       if (!before.ok)
         return skip(`member could not connect even before revocation: ${before.reason}`)
 
-      await owner.json(`/api/neev/resources/${resource.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ visibility: "private" }),
-      })
+      await updateResource(owner, resource.id, { visibility: "private" })
 
       const after = await connect(member, resource.id)
       after.destroy()
@@ -477,16 +486,18 @@ export const cases = [
 
   {
     name: "a frame naming a different document is refused",
-    async run({ owner, member, fixtures }) {
+    async run({ owner, member, fixtures, socketsWork }) {
+      if (!socketsWork)
+        return skip(
+          "no socket can be established at all, so a refusal here would prove nothing"
+        )
+
       const mine = await createDocument(owner, fixtures.projectNodeId, "Acceptance — mine")
       const theirs = await createDocument(owner, fixtures.projectNodeId, "Acceptance — private")
       if (!mine.resource?.id || !theirs.resource?.id)
         return skip("could not create the two documents this needs")
 
-      await owner.json(`/api/neev/resources/${mine.resource.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ visibility: "organization" }),
-      })
+      await updateResource(owner, mine.resource.id, { visibility: "organization" })
       // `theirs` stays private to the owner.
 
       // The document name is a leading varstring on every frame, so a socket
@@ -511,7 +522,7 @@ export const cases = [
 
   {
     name: "an archived document is read-only, not writable",
-    async run({ owner, fixtures }) {
+    async run({ owner, fixtures, socketsWork }) {
       const { resource } = await createDocument(
         owner,
         fixtures.projectNodeId,
@@ -519,19 +530,19 @@ export const cases = [
       )
       if (!resource?.id) return skip("could not create a document to archive")
 
-      const archived = await owner.json(`/api/neev/resources/${resource.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ archived: true }),
-      })
+      const archived = await updateResource(owner, resource.id, { archived: true })
       if (archived.status >= 400)
         return no(`archiving failed (${archived.status})`, { archived: archived.status })
 
       const session = await connect(owner, resource.id)
       try {
-        if (!session.ok)
-          // Refusing outright is also a defensible answer; it is not read-only,
-          // so it is reported rather than quietly accepted.
+        if (!session.ok) {
+          // Refusing outright is a defensible answer ONLY if sockets otherwise
+          // work; if none do, this says nothing about archiving.
+          if (!socketsWork)
+            return skip("no socket can be established at all")
           return ok({ outcome: "socket refused", reason: session.reason })
+        }
 
         const writable = session.provider.configuration?.readOnly === false
         const engine = await engineApi(owner, `documents/${resource.id}/`)
