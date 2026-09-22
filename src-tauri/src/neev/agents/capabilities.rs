@@ -220,15 +220,34 @@ pub(crate) fn models(provider: &str) -> &'static [Model] {
     }
 }
 
+/// One model as the UI receives it. Owned, because a discovered catalogue is
+/// not a compile-time constant.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelDto {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) default: bool,
+    pub(crate) supports_speed: bool,
+    /// `null` = the provider list applies. `[]` = this model supports none.
+    pub(crate) efforts: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) default_effort: Option<String>,
+}
+
 /// One provider's controls, as the UI should render them.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProviderCapabilities {
     pub(crate) provider: &'static str,
     pub(crate) label: &'static str,
-    pub(crate) models: &'static [Model],
-    /// Effort levels this provider's CLI accepts, least to most.
-    pub(crate) efforts: Vec<&'static str>,
+    pub(crate) models: Vec<ModelDto>,
+    /// Effort levels this provider accepts, least to most.
+    ///
+    /// When models are discovered this is the UNION of what they advertise, so
+    /// every model's own list is a subset of it — the invariant the client
+    /// parser relies on to render a narrowed model against the provider scale.
+    pub(crate) efforts: Vec<String>,
     /// The level used when none is chosen. `None` means "the CLI's own
     /// default", which is what an unset session gets — no flag is passed at all.
     pub(crate) default_effort: Option<&'static str>,
@@ -238,6 +257,10 @@ pub(crate) struct ProviderCapabilities {
     /// Shown when a chosen model cannot run fast, so the reason is visible
     /// rather than the control silently missing.
     pub(crate) speed_unavailable_reason: Option<&'static str>,
+    /// Why this provider's catalogue is the built-in one rather than the
+    /// account's own. `null` when the list came from the provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) discovery_unavailable_reason: Option<String>,
 }
 
 fn label(provider: &str) -> &'static str {
@@ -248,16 +271,37 @@ fn label(provider: &str) -> &'static str {
     }
 }
 
+/// The built-in entries as DTOs, for a provider with nothing discovered.
+fn static_models(provider: &str) -> Vec<ModelDto> {
+    models(provider)
+        .iter()
+        .map(|model| ModelDto {
+            id: model.id.to_owned(),
+            label: model.label.to_owned(),
+            default: model.default,
+            supports_speed: model.supports_speed,
+            efforts: model
+                .efforts
+                .map(|list| list.iter().map(|effort| (*effort).to_owned()).collect()),
+            default_effort: None,
+        })
+        .collect()
+}
+
+fn static_efforts(provider: &str) -> Vec<String> {
+    ALL_EFFORTS
+        .iter()
+        .filter(|effort| effort.supported_by(provider))
+        .map(|effort| effort.name().to_owned())
+        .collect()
+}
+
 pub(crate) fn provider_capabilities(provider: &'static str) -> ProviderCapabilities {
     ProviderCapabilities {
         provider,
         label: label(provider),
-        models: models(provider),
-        efforts: ALL_EFFORTS
-            .iter()
-            .filter(|effort| effort.supported_by(provider))
-            .map(|effort| effort.name())
-            .collect(),
+        models: static_models(provider),
+        efforts: static_efforts(provider),
         // Unset, deliberately: passing no flag leaves the provider on its own
         // default, and a default we invented would be a silent opinion about
         // someone's token spend.
@@ -267,7 +311,153 @@ pub(crate) fn provider_capabilities(provider: &'static str) -> ProviderCapabilit
             "claude" => "Fast mode runs on Opus. Choose Opus to enable it.",
             _ => "Fast mode is not available for this model.",
         }),
+        discovery_unavailable_reason: None,
     }
+}
+
+/// The caller's OWN catalogue for one provider, discovered where possible.
+///
+/// The provider's `efforts` becomes the union of what its models advertise, so
+/// `model.efforts ⊆ provider.efforts` holds for discovered entries exactly as it
+/// does for built-in ones. Without that the client could not place a narrowed
+/// model on the provider's scale.
+pub(crate) async fn provider_for(
+    state: &crate::neev::startup::ServerState,
+    actor: &crate::neev::types::OrgContext,
+    provider: &'static str,
+) -> ProviderCapabilities {
+    let mut capabilities = provider_capabilities(provider);
+    let discovery = super::discovery::catalogue(state, actor, provider).await;
+    if discovery.models.is_empty() {
+        capabilities.discovery_unavailable_reason = discovery.unavailable.map(str::to_owned);
+        return capabilities;
+    }
+    let mut union: Vec<String> = Vec::new();
+    capabilities.models = discovery
+        .models
+        .iter()
+        .map(|model| {
+            if let Some(efforts) = &model.efforts {
+                for effort in efforts {
+                    if !union.contains(effort) {
+                        union.push(effort.clone());
+                    }
+                }
+            }
+            ModelDto {
+                id: model.id.clone(),
+                label: model.label.clone(),
+                default: model.default,
+                supports_speed: model.supports_speed,
+                efforts: model.efforts.clone(),
+                default_effort: model.default_effort.clone(),
+            }
+        })
+        .collect();
+    // A discovered catalogue that named no efforts at all leaves the built-in
+    // scale in place rather than an empty one, which would read as "this
+    // provider has no effort control".
+    if !union.is_empty() {
+        capabilities.efforts = union;
+    }
+    capabilities
+}
+
+/// What a (provider, model) pair actually allows for THIS caller.
+///
+/// Discovery first, built-ins second. The levels are open strings because the
+/// provider says so — its own schema types one as "a non-empty reasoning effort
+/// value advertised by the model" — so this returns the set rather than an enum
+/// nothing outside this file could extend.
+pub(crate) struct Allowed {
+    pub(crate) efforts: Vec<String>,
+    pub(crate) supports_speed: bool,
+    /// Whether the model appeared in a catalogue at all. A deployment-pinned id
+    /// that did not is still runnable; it simply has nothing declared about it.
+    pub(crate) catalogued: bool,
+}
+
+pub(crate) async fn allowed(
+    state: &crate::neev::startup::ServerState,
+    actor: &crate::neev::types::OrgContext,
+    provider: &str,
+    model: &str,
+) -> Allowed {
+    let discovery = match provider {
+        "codex" => Some(super::discovery::catalogue(state, actor, provider).await),
+        _ => None,
+    };
+    if let Some(discovery) = discovery {
+        if let Some(found) = discovery.models.iter().find(|entry| entry.id == model) {
+            let efforts = match &found.efforts {
+                // The model named its own set: that set is the authority, empty
+                // included — an empty list means it supports none.
+                Some(list) => list.clone(),
+                // It named nothing, so the provider's scale applies.
+                None => static_efforts(provider),
+            };
+            return Allowed {
+                efforts,
+                supports_speed: found.supports_speed,
+                catalogued: true,
+            };
+        }
+        if !discovery.models.is_empty() {
+            // A real catalogue that does not contain this id: nothing is
+            // declared about it, so nothing extra is permitted.
+            return Allowed {
+                efforts: static_efforts(provider),
+                supports_speed: false,
+                catalogued: false,
+            };
+        }
+    }
+    let entry = models(provider).iter().find(|entry| entry.id == model);
+    Allowed {
+        efforts: entry
+            .and_then(|entry| entry.efforts)
+            .map(|list| list.iter().map(|effort| (*effort).to_owned()).collect())
+            .unwrap_or_else(|| static_efforts(provider)),
+        supports_speed: entry.is_some_and(|entry| entry.supports_speed),
+        catalogued: entry.is_some(),
+    }
+}
+
+/// A stored effort must be a short, argv-safe, non-empty token. The VOCABULARY
+/// is the provider's; this is only the shape, and it is the SAME shape discovery
+/// applies and the client parses, so a level cannot be accepted by one layer and
+/// refused by another.
+pub(crate) fn safe_effort(value: &str) -> bool {
+    super::discovery::safe_effort_token(value)
+}
+
+/// Validate a whole (model, effort, fast) triple against what this CALLER's
+/// catalogue allows.
+pub(crate) async fn validated_for(
+    state: &crate::neev::startup::ServerState,
+    actor: &crate::neev::types::OrgContext,
+    provider: &str,
+    model: &str,
+    effort: Option<&str>,
+    fast: bool,
+) -> Result<(Option<String>, bool), ()> {
+    if !crate::neev::agents::execution::safe_model(model) {
+        return Err(());
+    }
+    let allowed = allowed(state, actor, provider, model).await;
+    let level = match effort.filter(|value| !value.is_empty()) {
+        None => None,
+        Some(value) => {
+            if !safe_effort(value) || !allowed.efforts.iter().any(|entry| entry == value) {
+                return Err(());
+            }
+            Some(value.to_owned())
+        }
+    };
+    if fast && !allowed.supports_speed {
+        return Err(());
+    }
+    Ok((level, fast))
 }
 
 /// The catalogue the UI renders from.
@@ -286,11 +476,47 @@ pub(crate) fn catalogue() -> Capabilities {
     }
 }
 
+/// The catalogue as THIS caller should see it, with their own account's models.
+pub(crate) async fn catalogue_for(
+    state: &crate::neev::startup::ServerState,
+    actor: &crate::neev::types::OrgContext,
+) -> Capabilities {
+    Capabilities {
+        providers: vec![
+            provider_for(state, actor, "claude").await,
+            provider_for(state, actor, "codex").await,
+        ],
+    }
+}
+
 /// Accept an effort for this provider, or refuse it.
 ///
 /// `None` in means "unset", which is always allowed and sends no flag. A value
 /// this provider cannot honour is refused HERE, because the CLI would accept
 /// the argument and quietly run at its default instead.
+pub(crate) fn validated_effort_for(
+    provider: &str,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<Option<Effort>, ()> {
+    let level = validated_effort(provider, effort)?;
+    // A model may accept fewer levels than its provider advertises. Checking
+    // only the provider's list was safe while every entry declared none, and
+    // stops being safe the moment discovery fills them in — which is exactly
+    // when nobody would be looking at this function again.
+    if let (Some(level), Some(entry)) = (
+        level,
+        models(provider).iter().find(|entry| entry.id == model),
+    ) {
+        if let Some(allowed) = entry.efforts {
+            if !allowed.contains(&level.name()) {
+                return Err(());
+            }
+        }
+    }
+    Ok(level)
+}
+
 pub(crate) fn validated_effort(provider: &str, effort: Option<&str>) -> Result<Option<Effort>, ()> {
     let Some(value) = effort else {
         return Ok(None);
@@ -320,19 +546,7 @@ pub(crate) fn validated_settings(
     if !crate::neev::agents::execution::safe_model(model) {
         return Err(());
     }
-    let level = validated_effort(provider, effort)?;
-    // A model may accept fewer levels than its provider. When it declares a
-    // list, that list is the authority.
-    if let (Some(level), Some(entry)) = (
-        level,
-        models(provider).iter().find(|entry| entry.id == model),
-    ) {
-        if let Some(allowed) = entry.efforts {
-            if !allowed.contains(&level.name()) {
-                return Err(());
-            }
-        }
-    }
+    let level = validated_effort_for(provider, model, effort)?;
     let fast = validated_speed(provider, model, fast)?;
     Ok((level, fast))
 }

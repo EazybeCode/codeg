@@ -1132,6 +1132,16 @@ struct TeamInvokeInput {
     prompt: String,
     provider: String,
     model: String,
+    /// The controls for THIS ask, applied to the holder before it launches.
+    ///
+    /// Carried on the invoke rather than requiring a holder to exist first: the
+    /// reader has to be able to choose model, effort and speed before the first
+    /// paid turn, and a separate "create the holder" round trip would both cost
+    /// a request and leave empty holders behind for asks that never happened.
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    fast: bool,
     request_id: String,
     expected_auth_revision: String,
 }
@@ -1160,9 +1170,11 @@ pub(super) async fn capabilities(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let _permit = catalog::permit(&state)?;
-    let _actor = catalog::organization_get(&state, &headers).await?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    // The CALLER's own catalogue: what a provider offers depends on the account
+    // asking, so a shared one would advertise models some readers cannot run.
     Ok(private_json(
-        crate::neev::agents::capabilities::catalogue(),
+        crate::neev::agents::capabilities::catalogue_for(&state, &actor).await,
     ))
 }
 
@@ -1320,6 +1332,9 @@ pub(super) async fn team_invoke(
     .await?;
 
     // 2. The invoker's own durable holder for this chat + provider.
+    // Applied to the holder before anything launches, so the FIRST ask runs at
+    // the settings the reader chose rather than at defaults they would then be
+    // charged to correct.
     let session = sessions::ensure_team_session(
         &state,
         &actor,
@@ -1327,6 +1342,8 @@ pub(super) async fn team_invoke(
         &input.provider,
         &input.model,
         "Team invocation",
+        input.effort.as_deref(),
+        input.fast,
     )
     .await?;
     // The credential is resolved BEFORE the turn exists. Anything that can fail

@@ -146,11 +146,15 @@ pub(crate) async fn ensure_team_session(
     provider_name: &str,
     model_name: &str,
     title_text: &str,
+    effort: Option<&str>,
+    fast: bool,
 ) -> Result<AgentSession, ContentError> {
     let provider_name = provider(provider_name)?.to_owned();
     let model_name = model(model_name)?.to_owned();
     let title_text = title(title_text)?;
     let id = team_session_id(actor.org_id, actor.identity.user_id, chat_id, &provider_name);
+    let provider_name_owned = provider_name.clone();
+    let model_name_owned = model_name.clone();
     let tx = resources::begin(state, actor).await?;
     // Write authority over the chat is the invoker's right to have an agent
     // speak there; it is re-proved again at publish time.
@@ -174,7 +178,64 @@ pub(crate) async fn ensure_team_session(
         ],
     )
     .await?;
-    let found = owned(&tx, actor, &id).await?;
+    // The chosen controls are applied to the holder INSIDE this transaction,
+    // whether it was just created or already existed, so the first ask in a
+    // bound chat runs at the settings the reader picked. Doing it after the
+    // launch would charge them for a turn at the wrong settings, and doing it
+    // in a second request would leave a window where a holder exists with the
+    // wrong ones.
+    let (level, fast) = super::capabilities::validated_for(
+        state,
+        actor,
+        &provider_name_owned,
+        &model_name_owned,
+        effort,
+        fast,
+    )
+    .await
+    .map_err(|_| ContentError::Invalid)?;
+    // Only when something actually differs, and then WITH a revision bump.
+    //
+    // Writing unconditionally and without bumping made this a hole in the
+    // optimistic-concurrency protocol: a `PATCH /settings` holding a revision
+    // this write had already invalidated would still be accepted, and the two
+    // callers' choices would interleave into a combination neither made. An
+    // invoke that changes nothing leaves the revision alone, so repeating an ask
+    // does not invalidate anybody's open editor either.
+    let current = owned(&tx, actor, &id).await?;
+    let desired_effort = level;
+    let found = if current.model != model_name_owned
+        || current.effort != desired_effort
+        || current.fast != fast
+    {
+        let revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(ContentError::Conflict)?;
+        let changed = db::execute(
+            &tx,
+            "UPDATE neev_agent_sessions SET model=$1,effort=$2,fast=$3,revision=$4,updated_at=$5 WHERE org_id=$6 AND id=$7 AND owner_id=$8 AND revision=$9",
+            vec![
+                model_name_owned.clone().into(),
+                desired_effort.into(),
+                fast.into(),
+                revision.into(),
+                now.into(),
+                actor.org_id.into(),
+                id.clone().into(),
+                actor.identity.user_id.into(),
+                current.revision.into(),
+            ],
+        )
+        .await?;
+        if changed.rows_affected() != 1 {
+            // Somebody changed this holder between the read and the write.
+            return Err(ContentError::Conflict);
+        }
+        owned(&tx, actor, &id).await?
+    } else {
+        current
+    };
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(found)
@@ -380,14 +441,20 @@ pub(crate) async fn create(
     let model = model(&input.model)?.to_owned();
     // Refused at creation, not at run time: a session stored with a level its
     // provider ignores would look configured and behave as though it were not.
-    let effort = super::capabilities::validated_effort(&provider, input.effort.as_deref())
-        .map_err(|_| ContentError::Invalid)?
-        .map(|level| level.name().to_owned());
-    // Refused, never coerced by switching the model: Fast on a model that
-    // cannot run it is two requests, and honouring one by overriding the other
-    // spends money the reader did not agree to.
-    let fast = super::capabilities::validated_speed(&provider, &model, input.fast)
-        .map_err(|_| ContentError::Invalid)?;
+    // Against the CALLER's own catalogue, so a model their account advertises is
+    // accepted and one it does not is refused. Never coerced by switching the
+    // model: Fast on a model that cannot run it is two requests, and honouring
+    // one by overriding the other spends money nobody agreed to.
+    let (effort, fast) = super::capabilities::validated_for(
+        state,
+        actor,
+        &provider,
+        &model,
+        input.effort.as_deref(),
+        input.fast,
+    )
+    .await
+    .map_err(|_| ContentError::Invalid)?;
     let request = org::normalize_request_id(&input.request_id).map_err(|_| ContentError::Invalid)?;
     let hash = org::digest_parts(&[
         "agent.session.create",
@@ -638,9 +705,16 @@ pub(crate) async fn set_settings(
 ) -> Result<AgentSession, ContentError> {
     let current = get(state, actor, id).await?;
     let model_name = model(model_name)?.to_owned();
-    let (level, fast) =
-        super::capabilities::validated_settings(&current.provider, &model_name, effort, fast)
-            .map_err(|_| ContentError::Invalid)?;
+    let (level, fast) = super::capabilities::validated_for(
+        state,
+        actor,
+        &current.provider,
+        &model_name,
+        effort,
+        fast,
+    )
+    .await
+    .map_err(|_| ContentError::Invalid)?;
     let tx = resources::begin(state, actor).await?;
     let held = owned(&tx, actor, id).await?;
     if held.revision != expected_revision {
@@ -659,7 +733,7 @@ pub(crate) async fn set_settings(
         "UPDATE neev_agent_sessions SET model=$1,effort=$2,fast=$3,revision=$4,updated_at=$5 WHERE org_id=$6 AND id=$7 AND owner_id=$8 AND revision=$9",
         vec![
             model_name.clone().into(),
-            level.map(|value| value.name().to_owned()).into(),
+            level.into(),
             fast.into(),
             revision.into(),
             now.into(),
@@ -692,8 +766,16 @@ pub(crate) async fn set_fast(
     expected_revision: i64,
 ) -> Result<AgentSession, ContentError> {
     let current = get(state, actor, id).await?;
-    let validated = super::capabilities::validated_speed(&current.provider, &current.model, fast)
-        .map_err(|_| ContentError::Invalid)?;
+    let (_, validated) = super::capabilities::validated_for(
+        state,
+        actor,
+        &current.provider,
+        &current.model,
+        current.effort.as_deref(),
+        fast,
+    )
+    .await
+    .map_err(|_| ContentError::Invalid)?;
     mutate(
         state,
         actor,
@@ -714,15 +796,26 @@ pub(crate) async fn set_effort(
     expected_revision: i64,
 ) -> Result<AgentSession, ContentError> {
     let current = get(state, actor, id).await?;
-    let validated = super::capabilities::validated_effort(&current.provider, effort)
-        .map_err(|_| ContentError::Invalid)?;
+    // Against the session's CURRENT model and the caller's own catalogue, not
+    // just the provider: otherwise this route stores a level the chosen model
+    // rejects and the run fails later, or refuses one the account advertises.
+    let (validated, _) = super::capabilities::validated_for(
+        state,
+        actor,
+        &current.provider,
+        &current.model,
+        effort,
+        current.fast,
+    )
+    .await
+    .map_err(|_| ContentError::Invalid)?;
     mutate(
         state,
         actor,
         id,
         expected_revision,
         "effort",
-        validated.map(|level| level.name().to_owned()).into(),
+        validated.into(),
         // Not a placement change: the session stays where it is filed.
         None,
     )

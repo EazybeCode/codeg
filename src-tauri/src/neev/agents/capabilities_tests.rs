@@ -96,3 +96,142 @@ fn a_catalogued_model_is_known_and_an_invented_one_is_not() {
     assert!(!known_model("claude", "fable-5.1"));
     assert!(!known_model("codex", "gpt-6-astra"));
 }
+
+#[test]
+fn fast_is_allowed_only_where_the_model_can_actually_run_it() {
+    // The pairing the whole per-model design exists to prevent.
+    assert_eq!(validated_speed("claude", "opus", true), Ok(true));
+    assert!(validated_speed("claude", "haiku", false).is_ok());
+    assert!(
+        validated_speed("claude", "haiku", true).is_err(),
+        "Haiku cannot run Fast, and answering by quietly switching to Opus would \
+         spend money on a model nobody chose"
+    );
+    assert!(validated_speed("claude", "sonnet", true).is_err());
+    // The provider default resolves to whatever the CLI picks, so Fast beside it
+    // would be a promise about a model we have not named.
+    assert!(validated_speed("claude", "default", true).is_err());
+    // A deployment-pinned full name has no established Fast support.
+    assert!(validated_speed("claude", "claude-opus-4-5-20990101", true).is_err());
+    // Off is always fine, whatever the model.
+    assert_eq!(validated_speed("claude", "haiku", false), Ok(false));
+}
+
+#[test]
+fn the_combined_validator_refuses_a_pairing_neither_field_shows_alone() {
+    // Each half is individually fine — Haiku is a real model, Fast is a real
+    // control — and together they are not. Validating them separately is how a
+    // session ends up storing a combination no run can honour.
+    assert!(validated_settings("claude", "haiku", Some("high"), true).is_err());
+    assert_eq!(
+        validated_settings("claude", "haiku", Some("high"), false),
+        Ok((Some(Effort::High), false))
+    );
+    assert_eq!(
+        validated_settings("claude", "opus", Some("max"), true),
+        Ok((Some(Effort::Max), true))
+    );
+    // Provider-level refusals still apply through the combined path.
+    assert!(validated_settings("claude", "opus", Some("minimal"), false).is_err());
+    assert!(validated_settings("codex", "default", Some("max"), false).is_err());
+    // And an id that could be read as a flag never reaches an argv.
+    assert!(validated_settings("claude", "--oops", None, false).is_err());
+}
+
+#[test]
+fn a_models_own_effort_list_narrows_its_providers() {
+    // Every shipped entry declares `None` today, so this pins the branch that
+    // goes live the moment discovery fills `supportedReasoningEfforts` in — the
+    // point at which nobody would think to re-check it.
+    const NARROW: &[&str] = &["low", "medium"];
+    let narrowed = Model {
+        id: "narrow-model",
+        label: "Narrow",
+        default: false,
+        supports_speed: false,
+        efforts: Some(NARROW),
+    };
+    assert!(narrowed.efforts.is_some_and(|list| list.contains(&"low")));
+    assert!(narrowed.efforts.is_some_and(|list| !list.contains(&"xhigh")));
+
+    // And the provider-wide path still accepts what the provider accepts, so a
+    // model with no declared list is not narrowed by accident.
+    assert!(validated_effort_for("claude", "opus", Some("xhigh")).is_ok());
+    assert!(validated_effort_for("claude", "opus", None).is_ok());
+    // An unknown model id is not narrowed either — the CLI decides it.
+    assert!(validated_effort_for("claude", "some-pinned-name", Some("high")).is_ok());
+}
+
+#[test]
+fn the_single_field_effort_path_sees_the_same_rules_as_the_combined_one() {
+    // `validated_effort_for` is what the PATCH /effort route calls. It must not
+    // be a weaker door into the same store than PATCH /settings.
+    for level in ["low", "medium", "high", "xhigh", "max"] {
+        assert_eq!(
+            validated_effort_for("claude", "opus", Some(level)).is_ok(),
+            validated_settings("claude", "opus", Some(level), false).is_ok(),
+            "the two paths disagreed about {level}"
+        );
+    }
+    assert!(validated_effort_for("claude", "opus", Some("minimal")).is_err());
+    assert!(validated_effort_for("codex", "default", Some("max")).is_err());
+}
+
+/// A probe's lane and permit must not come back before its teardown finishes.
+///
+/// The shape under test is the one discovery uses: the work is owned by a
+/// spawned task holding the guards, awaited through a join handle. Dropping that
+/// handle — which is what cancelling the request does — must not release
+/// anything early, because the next run would otherwise take a slot whose
+/// sandbox is still unwinding.
+#[tokio::test]
+async fn cancelling_a_probe_does_not_release_its_slot_until_teardown_finishes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let permits = Arc::new(tokio::sync::Semaphore::new(1));
+    let torn_down = Arc::new(AtomicBool::new(false));
+    let released = Arc::new(AtomicBool::new(false));
+
+    struct Guard {
+        released: Arc<AtomicBool>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.released.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let permit = permits.clone().try_acquire_owned().expect("first permit");
+    let guard = Guard {
+        released: released.clone(),
+    };
+    let teardown = torn_down.clone();
+    let task = tokio::spawn(async move {
+        // Stands in for the launcher's SIGTERM grace.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        teardown.store(true, Ordering::SeqCst);
+        drop(guard);
+        drop(permit);
+    });
+
+    // The caller goes away mid-probe.
+    drop(task);
+    assert!(
+        permits.try_acquire().is_err(),
+        "the slot is still held while the probe tears down"
+    );
+    assert!(!released.load(Ordering::SeqCst));
+
+    // The detached task runs to completion regardless.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        torn_down.load(Ordering::SeqCst),
+        "teardown still ran after the caller was cancelled"
+    );
+    assert!(released.load(Ordering::SeqCst), "and only then released");
+    assert!(
+        permits.try_acquire().is_ok(),
+        "the slot is reusable once, and only once, teardown has finished"
+    );
+}

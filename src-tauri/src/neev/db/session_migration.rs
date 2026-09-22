@@ -92,11 +92,13 @@ pub(super) const ACTIVITY_SCHEMA_VERSION: i64 = 13;
 /// every session that already exists, and a migration is the wrong place to
 /// form one.
 ///
-/// The CHECK lists the union of what the installed CLIs accept. Per-provider
-/// support is narrower (Codex has no `max`, Claude no `minimal`) and is enforced
-/// by `agents::capabilities` at the point of use, because a database constraint
-/// cannot see which provider a row's session belongs to without a join the
-/// writer already does.
+/// The CHECK bounds the SHAPE, not the vocabulary: non-empty and short. It
+/// deliberately does not enumerate levels. Codex advertises efforts per model as
+/// open strings — its own schema types one as "a non-empty reasoning effort
+/// value advertised by the model" — so an enumerated constraint would refuse a
+/// level the provider itself offered, and a migration is the wrong place to
+/// decide what a model supports. `agents::capabilities` owns which values are
+/// allowed, because only it knows the provider and model a row belongs to.
 ///
 /// **Forward/rollback.** 13 -> 14 is an `ADD COLUMN`, guarded so a replay is a
 /// no-op. Rolling back to a 13 binary FAILS CLOSED: its version match has no arm
@@ -385,7 +387,7 @@ fn effort_columns() -> Vec<(&'static str, &'static str)> {
     vec![
         (
             "effort",
-            "ALTER TABLE neev_agent_sessions ADD COLUMN effort TEXT CHECK(effort IS NULL OR effort IN ('minimal','low','medium','high','xhigh','max'))",
+            "ALTER TABLE neev_agent_sessions ADD COLUMN effort TEXT CHECK(effort IS NULL OR (length(effort) BETWEEN 1 AND 32))",
         ),
         // Speed defaults OFF for every session that already exists, and for
         // every new one: fast mode costs more, so inheriting it silently would
@@ -535,16 +537,17 @@ pub(super) async fn validate_effort<C: ConnectionTrait>(db: &C) -> Result<(), Au
         _ => return Err(AuthError::Unavailable),
     };
     let mut queries = vec![
-        // Mirrors the CHECK, re-proved against a restored dump that may never
-        // have carried it.
-        "SELECT 1 AS invalid FROM neev_agent_sessions WHERE effort IS NOT NULL AND effort NOT IN ('minimal','low','medium','high','xhigh','max') LIMIT 1",
+        // Mirrors the CHECK — shape only, for the same reason the CHECK is shape
+        // only: the set of valid levels belongs to the provider, not here.
+        "SELECT 1 AS invalid FROM neev_agent_sessions WHERE effort IS NOT NULL AND length(effort)>32 LIMIT 1",
         // An empty string is not "unset" — NULL is. Storing one would make a
         // session that chose nothing indistinguishable from one that chose
         // something unreadable.
         "SELECT 1 AS invalid FROM neev_agent_sessions WHERE effort IS NOT NULL AND length(effort)=0 LIMIT 1",
-        // A team holder is internal and never carries a reader's selection.
-        "SELECT 1 AS invalid FROM neev_agent_sessions WHERE effort IS NOT NULL AND kind<>'chat' LIMIT 1",
-        "SELECT 1 AS invalid FROM neev_agent_sessions WHERE fast=true AND kind<>'chat' LIMIT 1",
+        // Both kinds carry a selection. A team holder is internal, but the
+        // reader still chooses model/effort/speed for the FIRST ask in a bound
+        // chat — before any paid turn runs — so forbidding it here would make
+        // that impossible rather than safe.
     ];
     if sqlite {
         queries.push(
