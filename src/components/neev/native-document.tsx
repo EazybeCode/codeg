@@ -1014,6 +1014,50 @@ function Document({
         </Button>
       </div>
     )
+  /**
+   * The title IS the control.
+   *
+   * Renaming was a menu item three clicks away, which is why every document
+   * stayed called `Untitled`: the obvious thing to do — click the name and type
+   * — did nothing at all. It lives in a variable so the header row can hold it
+   * beside the audience and the actions instead of above them.
+   */
+  const titleControl = canRename ? (
+    <>
+      <label className="sr-only" htmlFor={titleFieldId}>
+        {t("title")}
+      </label>
+      <input
+        id={titleFieldId}
+        value={titleDraft ?? latest.title}
+        disabled={renaming}
+        maxLength={100}
+        onChange={(event) => editTitle(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) return
+          if (event.key === "Enter") {
+            event.preventDefault()
+            event.currentTarget.blur()
+          }
+          // Escape restores the stored name and gives the page back.
+          // Clearing the ref first is what makes it a cancellation: the
+          // blur below runs the commit, and finds nothing to save.
+          if (event.key === "Escape") {
+            event.preventDefault()
+            editTitle(null)
+            event.currentTarget.blur()
+          }
+        }}
+        onBlur={() => void commitTitle()}
+        className="w-full break-words border-0 bg-transparent p-0 text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em] outline-none placeholder:text-muted-foreground/40 disabled:opacity-70"
+      />
+    </>
+  ) : (
+    <h1 className="break-words text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em]">
+      {latest.title}
+    </h1>
+  )
+
   return (
     <section
       data-doc-width={docWidth}
@@ -1036,228 +1080,208 @@ function Document({
       }}
     >
       {/*
-        One slim row of actions.
-        No Back — the tab strip above is how you leave. No title — the
-        breadcrumb says which document this is and the page says it again in
-        40px a few lines below. No Save — it saves itself; what is left is the
-        truth about whether it did.
+        ONE row: the title, and everything about it.
+        There used to be a standing band above the title whose whole job was to
+        print the word "Private", and then a gap, and then the title. Two bands
+        and a gap to say one short thing, on every document, forever. The title
+        is the row now; the audience, the save state and the few actions sit at
+        its right. Still sticky, because the one thing that must never scroll
+        away is whether the last save landed.
       */}
-      <header className="sticky top-0 z-10 -mx-6 flex h-10 items-center gap-2 bg-background/95 px-6 backdrop-blur sm:-mx-10 sm:px-10">
-        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground/80">
-          {t(latest.visibility)}
-          {latest.originChatId ? ` · ${t("sourceAudience")}` : ""}
-          {latest.archived ? ` · ${t("archived")}` : ""}
-        </span>
-        <span
-          role="status"
-          className="hidden text-xs text-muted-foreground sm:inline"
-        >
-          {saving
-            ? n("working")
-            : saved
-              ? t("saved")
-              : dirty.current
-                ? t("unsaved")
-                : ""}
-        </span>
-        {loaded && stalled && !saving && (
-          // Nothing to press while it is working. This appears whenever a save
-          // did not land — including an ambiguous one that never answered,
-          // which reports no error but has still stopped trying.
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={latest.archived}
-            onClick={() => {
-              setStalled(false)
-              void save()
-            }}
+      <header className="sticky top-0 z-10 -mx-6 flex items-start gap-3 bg-background/95 px-6 pb-1 pt-1 backdrop-blur sm:-mx-10 sm:px-10">
+        <div className="min-w-0 flex-1">{titleControl}</div>
+        <div className="flex shrink-0 items-center gap-0.5 pt-3 sm:gap-1">
+          <span className="hidden min-w-0 truncate text-xs text-muted-foreground/80 sm:inline">
+            {latest.originChatId ? `${t("sourceAudience")} · ` : ""}
+            {t(latest.visibility)}
+            {latest.archived ? ` · ${t("archived")}` : ""}
+          </span>
+          {/* The audience never collapses to nothing. At narrow widths the words
+            go and this stays: it is the one fact here that changes who can read
+            what is being typed, so it cannot be the thing that falls off. */}
+          <span
+            role="img"
+            aria-label={t(latest.visibility)}
+            title={t(latest.visibility)}
+            className="text-muted-foreground/80 sm:hidden"
           >
-            {n("retry")}
-          </Button>
-        )}
-        {actions?.isCreator && actions.shareable && (
-          <>
+            {latest.visibility === "private" ? (
+              <Lock aria-hidden className="size-3.5" />
+            ) : (
+              <Users aria-hidden className="size-3.5" />
+            )}
+          </span>
+          <span
+            role="status"
+            className="hidden text-xs text-muted-foreground sm:inline"
+          >
+            {saving
+              ? n("working")
+              : saved
+                ? t("saved")
+                : dirty.current
+                  ? t("unsaved")
+                  : ""}
+          </span>
+          {loaded && stalled && !saving && (
+            // Nothing to press while it is working. This appears whenever a save
+            // did not land — including an ambiguous one that never answered,
+            // which reports no error but has still stopped trying.
             <Button
-              variant="ghost"
               size="sm"
-              disabled={actions.disabled}
-              // Icon-only on narrow viewports so the title keeps its room; the
-              // accessible name is the full sentence at every width.
-              aria-label={t(
-                actions.visibility === "private" ? "share" : "makePrivate"
-              )}
-              aria-describedby={
-                actions.visibility === "organization"
-                  ? "neev-make-private-warning"
-                  : undefined
-              }
-              onClick={
-                actions.visibility === "private"
-                  ? actions.onShare
-                  : actions.onMakePrivate
-              }
-            >
-              {actions.visibility === "private" ? (
-                <Users aria-hidden />
-              ) : (
-                <Lock aria-hidden />
-              )}
-              <span className="hidden sm:inline">
-                {t(actions.visibility === "private" ? "share" : "makePrivate")}
-              </span>
-            </Button>
-            {actions.visibility === "organization" && (
-              <p id="neev-make-private-warning" className="sr-only">
-                {t("makePrivateWarning")}
-              </p>
-            )}
-          </>
-        )}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={t("resourceActions")}
-            >
-              <MoreHorizontal aria-hidden />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {actions?.isCreator && (
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onRename}
-              >
-                {t("rename")}
-              </DropdownMenuItem>
-            )}
-            {actions?.isCreator && (
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onArchiveToggle}
-              >
-                {t(actions.archived ? "reopen" : "archive")}
-              </DropdownMenuItem>
-            )}
-            {actions?.isCreator && (
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onMove}
-              >
-                {t("move")}
-              </DropdownMenuItem>
-            )}
-            {actions?.isCreator && <DropdownMenuSeparator />}
-            <DropdownMenuItem
-              disabled={!loaded || busy || saving}
-              onSelect={() => setHistory(!history)}
-            >
-              {t("history")}
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={!loaded || busy || saving}
-              onSelect={() => setReload(true)}
-            >
-              {t("reloadLatest")}
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={toggleDocWidth}>
-              {docWidth === "full" ? t("focusWidth") : t("fullWidth")}
-            </DropdownMenuItem>
-            {loaded && draft.format === "markdown" && (
-              <DropdownMenuItem
-                disabled={latest.archived}
-                onSelect={() => {
-                  try {
-                    setConversion(importMarkdown(draft.markdown))
-                    setConversionFailed(false)
-                  } catch {
-                    setConversionFailed(true)
-                  }
-                }}
-              >
-                {t("convertRich")}
-              </DropdownMenuItem>
-            )}
-            {loaded && draft.format === "blocks" && savedExport?.document && (
-              <DropdownMenuItem
-                onSelect={() => {
-                  void navigator.clipboard
-                    .writeText(savedExport.markdown)
-                    .catch(fail)
-                }}
-              >
-                {t("exportSavedMarkdown", {
-                  revision: savedExport.revision.revision,
-                })}
-              </DropdownMenuItem>
-            )}
-            {loaded && dirty.current && (
-              <DropdownMenuItem
-                onSelect={() => {
-                  void navigator.clipboard
-                    .writeText(
-                      draftRef.current.format === "blocks"
-                        ? JSON.stringify(draftRef.current.document)
-                        : draftRef.current.markdown
-                    )
-                    .catch(fail)
-                }}
-              >
-                {t(draft.format === "blocks" ? "copyRichDraft" : "copyDraft")}
-              </DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </header>
-      <div className="pb-1 pt-4">
-        {/*
-          The title IS the control. Renaming was a menu item three clicks away,
-          which is why every document stayed called `Untitled`: the obvious
-          thing to do — click the name and type — did nothing at all.
-        */}
-        {canRename ? (
-          <>
-            <label className="sr-only" htmlFor={titleFieldId}>
-              {t("title")}
-            </label>
-            <input
-              id={titleFieldId}
-              value={titleDraft ?? latest.title}
-              disabled={renaming}
-              maxLength={100}
-              onChange={(event) => editTitle(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.nativeEvent.isComposing) return
-                if (event.key === "Enter") {
-                  event.preventDefault()
-                  event.currentTarget.blur()
-                }
-                // Escape restores the stored name and gives the page back.
-                // Clearing the ref first is what makes it a cancellation: the
-                // blur below runs the commit, and finds nothing to save.
-                if (event.key === "Escape") {
-                  event.preventDefault()
-                  editTitle(null)
-                  event.currentTarget.blur()
-                }
+              variant="outline"
+              disabled={latest.archived}
+              onClick={() => {
+                setStalled(false)
+                void save()
               }}
-              onBlur={() => void commitTitle()}
-              className="w-full break-words border-0 bg-transparent p-0 text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em] outline-none placeholder:text-muted-foreground/40 disabled:opacity-70"
-            />
-          </>
-        ) : (
-          <h1 className="break-words text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em]">
-            {latest.title}
-          </h1>
-        )}
-        {titleError !== null && (
-          <p role="alert" className="mt-1 text-xs text-destructive">
-            {t("renameFailed")}
-          </p>
-        )}
-      </div>
+            >
+              {n("retry")}
+            </Button>
+          )}
+          {actions?.isCreator && actions.shareable && (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={actions.disabled}
+                // Icon-only on narrow viewports so the title keeps its room; the
+                // accessible name is the full sentence at every width.
+                aria-label={t(
+                  actions.visibility === "private" ? "share" : "makePrivate"
+                )}
+                aria-describedby={
+                  actions.visibility === "organization"
+                    ? "neev-make-private-warning"
+                    : undefined
+                }
+                onClick={
+                  actions.visibility === "private"
+                    ? actions.onShare
+                    : actions.onMakePrivate
+                }
+              >
+                {actions.visibility === "private" ? (
+                  <Users aria-hidden />
+                ) : (
+                  <Lock aria-hidden />
+                )}
+                <span className="hidden sm:inline">
+                  {t(
+                    actions.visibility === "private" ? "share" : "makePrivate"
+                  )}
+                </span>
+              </Button>
+              {actions.visibility === "organization" && (
+                <p id="neev-make-private-warning" className="sr-only">
+                  {t("makePrivateWarning")}
+                </p>
+              )}
+            </>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={t("resourceActions")}
+              >
+                <MoreHorizontal aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {actions?.isCreator && (
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onRename}
+                >
+                  {t("rename")}
+                </DropdownMenuItem>
+              )}
+              {actions?.isCreator && (
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onArchiveToggle}
+                >
+                  {t(actions.archived ? "reopen" : "archive")}
+                </DropdownMenuItem>
+              )}
+              {actions?.isCreator && (
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onMove}
+                >
+                  {t("move")}
+                </DropdownMenuItem>
+              )}
+              {actions?.isCreator && <DropdownMenuSeparator />}
+              <DropdownMenuItem
+                disabled={!loaded || busy || saving}
+                onSelect={() => setHistory(!history)}
+              >
+                {t("history")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!loaded || busy || saving}
+                onSelect={() => setReload(true)}
+              >
+                {t("reloadLatest")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={toggleDocWidth}>
+                {docWidth === "full" ? t("focusWidth") : t("fullWidth")}
+              </DropdownMenuItem>
+              {loaded && draft.format === "markdown" && (
+                <DropdownMenuItem
+                  disabled={latest.archived}
+                  onSelect={() => {
+                    try {
+                      setConversion(importMarkdown(draft.markdown))
+                      setConversionFailed(false)
+                    } catch {
+                      setConversionFailed(true)
+                    }
+                  }}
+                >
+                  {t("convertRich")}
+                </DropdownMenuItem>
+              )}
+              {loaded && draft.format === "blocks" && savedExport?.document && (
+                <DropdownMenuItem
+                  onSelect={() => {
+                    void navigator.clipboard
+                      .writeText(savedExport.markdown)
+                      .catch(fail)
+                  }}
+                >
+                  {t("exportSavedMarkdown", {
+                    revision: savedExport.revision.revision,
+                  })}
+                </DropdownMenuItem>
+              )}
+              {loaded && dirty.current && (
+                <DropdownMenuItem
+                  onSelect={() => {
+                    void navigator.clipboard
+                      .writeText(
+                        draftRef.current.format === "blocks"
+                          ? JSON.stringify(draftRef.current.document)
+                          : draftRef.current.markdown
+                      )
+                      .catch(fail)
+                  }}
+                >
+                  {t(draft.format === "blocks" ? "copyRichDraft" : "copyDraft")}
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </header>
+      {titleError !== null && (
+        <p role="alert" className="pb-1 text-xs text-destructive">
+          {t("renameFailed")}
+        </p>
+      )}
       {!loaded ? (
         <div className="space-y-3">
           {loading ? (

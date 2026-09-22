@@ -21,6 +21,7 @@ import {
   ArrowUp,
   Bot,
   ChevronRight,
+  Lock,
   MoreHorizontal,
   Plus,
 } from "lucide-react"
@@ -67,10 +68,7 @@ import {
   type NeevRunPhase,
   type UpdateNeevAgentSessionInput,
 } from "@/lib/neev-agent-sessions-client"
-import {
-  AgentConfigurationSummary,
-  AgentControls,
-} from "./native-agent-controls"
+import { AgentControls } from "./native-agent-controls"
 import { NativeContentNotFoundError } from "@/lib/neev-content-client"
 import type { ContentNavigationGuard } from "./native-content"
 import { useNativeAuth } from "./native-auth-provider"
@@ -1314,7 +1312,7 @@ function AgentSessionView({
       className="flex min-h-0 flex-1 flex-col"
       aria-label={session.title}
     >
-      <div className="flex shrink-0 items-start gap-2 px-4 py-3 sm:gap-3 sm:px-8 sm:py-5">
+      <div className="flex h-9 shrink-0 items-center gap-2 px-4 sm:gap-3 sm:px-8">
         <Button
           variant="ghost"
           size="icon"
@@ -1324,22 +1322,28 @@ function AgentSessionView({
         >
           <ArrowLeft aria-hidden />
         </Button>
-        <div className="min-w-0 flex-1 space-y-0.5">
+        <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2
-            className="truncate text-base font-semibold sm:text-lg"
+            className="shrink truncate text-sm font-medium"
             title={session.title}
           >
             {session.title}
           </h2>
-          <p className="truncate text-xs text-muted-foreground">
-            {/* The live run configuration, read from the session's own row.
-                It names the provider itself, so there is no raw id here. */}
-            <AgentConfigurationSummary
-              settings={live}
-              capabilities={capabilities}
-              provider={session.provider as NeevAgentProvider}
-            />{" "}
-            · {t("private")}
+          {/* The run configuration is CHOSEN a few lines below, in the
+              composer. Repeating it up here in full cost a second header row
+              to restate what the chips already say, so this keeps only what
+              the chips cannot: who can see it, and what the run is doing. */}
+          {/* An agent chat is always private, and says so at every width. */}
+          <span
+            role="img"
+            aria-label={t("private")}
+            title={t("private")}
+            className="shrink-0 text-muted-foreground/80 sm:hidden"
+          >
+            <Lock aria-hidden className="size-3.5" />
+          </span>
+          <p className="hidden min-w-0 shrink-0 truncate text-xs text-muted-foreground/80 sm:block">
+            {t("private")}
             {session.archived ? ` · ${t("archived")}` : ""} ·{" "}
             <span role="status">{runStatusLabel()}</span>
           </p>
@@ -1467,7 +1471,7 @@ function AgentSessionView({
               </Link>
             </p>
           )}
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             <Bot
               aria-hidden
               className="size-3.5 shrink-0 text-muted-foreground"
@@ -1490,16 +1494,18 @@ function AgentSessionView({
               }}
               className="min-w-0 flex-1"
             />
-            {applying && (
-              <span role="status" className="text-xs text-muted-foreground">
-                {t("settingsPending")}
-              </span>
-            )}
-            {!applying && desired !== null && (
-              <span role="status" className="text-xs text-muted-foreground">
-                {t("settingsUnsaved")}
-              </span>
-            )}
+            {/* Announced, not printed. Both states are momentary — a write in
+                flight, or one that has not landed — and giving each a visible
+                word made the row jump width every time a chip was touched. The
+                chips themselves are disabled while `applying`, which is the
+                visible half of the same fact. */}
+            <span role="status" className="sr-only">
+              {applying
+                ? t("settingsPending")
+                : desired !== null
+                  ? t("settingsUnsaved")
+                  : ""}
+            </span>
             {running && (
               <Button
                 type="button"

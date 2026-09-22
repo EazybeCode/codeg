@@ -16,6 +16,7 @@ import { useTranslations } from "next-intl"
 import {
   Bot,
   ChevronRight,
+  File,
   FileText,
   Check,
   Folder,
@@ -143,13 +144,40 @@ function trail(nodes: NativeNode[], nodeId: number): string[] {
   return names
 }
 
-function TabIcon({ tab }: { tab: WorkspaceTab }) {
+/**
+ * What a tab is, drawn from what the thing ACTUALLY is.
+ *
+ * A resource tab used to be a document icon unconditionally, so every team chat
+ * in the strip wore a page — while the same chat one panel away in the sidebar
+ * correctly wore a speech bubble. The two now read from the same fact and use
+ * the same pair of icons, because a reader scanning the strip is using the icon
+ * to tell a conversation from a document.
+ *
+ * `undefined` means the kind is not known YET: a tab is a reference, and its
+ * resource may not be in any loaded list. That gets the neutral sheet rather
+ * than a guess, because guessing is what put a chat behind a page icon.
+ */
+function TabIcon({
+  tab,
+  resourceKind,
+}: {
+  tab: WorkspaceTab
+  resourceKind?: NativeResourceKind
+}) {
   const className = "size-3.5 shrink-0"
   if (tab.kind === "project")
     return <Layers3 aria-hidden className={className} />
   if (tab.kind === "agent" || tab.kind === "draft")
     return <Bot aria-hidden className={className} />
-  return <FileText aria-hidden className={className} />
+  if (resourceKind === "chat")
+    return <MessagesSquare aria-hidden className={className} />
+  if (resourceKind === "document")
+    return <FileText aria-hidden className={className} />
+  // Not resolved yet. In practice a resource tab only exists once something has
+  // answered for it, so this is a floor rather than a state anyone sees — but
+  // it is deliberately NOT the document icon, because defaulting to one of the
+  // two real answers is exactly what put a chat behind a page.
+  return <File aria-hidden className={className} />
 }
 
 /**
@@ -169,6 +197,7 @@ function ResourcePanel({
   registerGuard,
   onGone,
   onChanged,
+  onResolved,
 }: {
   orgId: number
   resourceId: string
@@ -180,6 +209,14 @@ function ResourcePanel({
   onGone: () => void
   /** A rename or re-share, on its way to the lists the chrome reads. */
   onChanged: (resource: NativeResource) => void
+  /**
+   * What this tab turned out to be, whether it was listed or fetched here.
+   *
+   * Separate from `onChanged`, which speaks for an EDIT and only updates a row
+   * the lists already hold. This is the plain fact of the resource's kind, and
+   * the tab strip needs it for a resource that is in no loaded list.
+   */
+  onResolved: (resource: NativeResource) => void
 }) {
   const auth = useNativeAuth(),
     t = useTranslations("Native")
@@ -190,6 +227,9 @@ function ResourcePanel({
   const [error, setError] = useState<unknown>(null)
   const [request, setRequest] = useState(0)
   const resource = loaded ?? cached ?? null
+  useEffect(() => {
+    if (resource) onResolved(resource)
+  }, [resource, onResolved])
   useEffect(() => {
     if (resource || !node) return
     const controller = new AbortController()
@@ -1057,6 +1097,36 @@ function WorkspaceContent() {
 
   /** What a tab is called in the strip: the thing itself, never its kind. */
 
+  /**
+   * Kinds learned from a resource's own read.
+   *
+   * The sidebar's lists are lazy, so a tab restored on a cold start often has
+   * no list entry to consult — and the strip would draw the neutral sheet
+   * forever. `ResourcePanel` already fetches the resource to show it; this just
+   * keeps what it found, so the icon settles as soon as the panel resolves.
+   */
+  const [openedKinds, setOpenedKinds] = useState<
+    Record<string, NativeResourceKind>
+  >({})
+  const noteResource = useCallback((resource: NativeResource) => {
+    setOpenedKinds((old) =>
+      old[resource.id] === resource.kind
+        ? old
+        : { ...old, [resource.id]: resource.kind }
+    )
+  }, [])
+  /** What a resource tab points at, when anything yet knows. */
+  const tabResourceKind = useCallback(
+    (tab: WorkspaceTab): NativeResourceKind | undefined => {
+      if (tab.kind !== "resource") return undefined
+      const listed = (itemsByNode[tab.nodeId]?.items ?? []).find(
+        (item) => item.id === tab.resourceId
+      )
+      return listed?.kind ?? openedKinds[tab.resourceId]
+    },
+    [itemsByNode, openedKinds]
+  )
+
   const tabTitle = useCallback(
     (tab: WorkspaceTab): string => {
       if (tab.kind === "project") return nodeById(tab.nodeId)?.name ?? ""
@@ -1676,7 +1746,7 @@ function WorkspaceContent() {
                       }}
                       className="flex min-w-0 items-center gap-1.5 rounded focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      <TabIcon tab={tab} />
+                      <TabIcon tab={tab} resourceKind={tabResourceKind(tab)} />
                       <span className="max-w-40 truncate">{tabTitle(tab)}</span>
                     </button>
                     <button
@@ -1772,6 +1842,7 @@ function WorkspaceContent() {
                         orgId={org.id}
                         resourceId={tab.resourceId}
                         fresh={tab.fresh === true}
+                        onResolved={noteResource}
                         onChanged={(next) =>
                           setItemsByNode((old) => {
                             const list = old[tab.nodeId]
