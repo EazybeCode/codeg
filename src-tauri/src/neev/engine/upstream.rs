@@ -323,7 +323,8 @@ impl Upstream {
     /// Push Neev's title onto the Docs copy.
     ///
     /// Reconciliation, not a user action: Neev's row is what Projects lists and
-    /// what the ACL is evaluated against, so Neev's value wins. Used when a
+    /// what the ACL is evaluated against, so Neev's value wins. Any actor with
+    /// access may rename — that is the native policy, not a relaxation of one. Used when a
     /// rename was accepted by Docs but then lost a native revision race — Docs
     /// is ahead at that point, and leaving it ahead is the divergence this
     /// pulls back.

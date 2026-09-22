@@ -455,7 +455,16 @@ pub(crate) async fn handle(
 /// revision the later write must present.
 ///
 /// Runs before anything is sent upstream, so a caller Neev would refuse never
-/// changes the Docs title.
+/// changes the Docs title and then fails.
+///
+/// **The check is deliberately access-and-archived, not creator.** Neev's
+/// native model lets any actor who can see a resource rename it —
+/// `resources::update` restricts only visibility, archive and node moves to the
+/// creator — so requiring creatorship here would be this bridge inventing a
+/// stricter policy than the product has, and a shared editor would find the
+/// title read-only for no reason they could see. Consistency with the native
+/// model is the point; it is not a gap. Archived resources are read-only, and
+/// that is the one refusal this adds.
 async fn precheck_rename(
     state: &ServerState,
     actor: &OrgContext,
