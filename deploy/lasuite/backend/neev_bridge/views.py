@@ -155,6 +155,24 @@ def resolve_session(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 @_bridge_view
+def document_title(request, document_id):
+    """POST /_neev/v1/documents/<id>/title — make the Docs title match Neev's.
+
+    For reconciliation after a divergence: a rename upstream rejected, or a
+    native update that lost a revision conflict. Neev's value always wins,
+    because Neev's resource row is the one its ACL and its Projects list are
+    built from.
+    """
+    payload = _load_body(request)
+    document, changed = service.set_title(
+        document_id, payload.get("title"), payload.get("sub")
+    )
+    return JsonResponse({"title": document.title, "changed": changed})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_bridge_view
 def mint_session(request):
     """POST /_neev/v1/sessions/mint — a session the client never supplied.
 

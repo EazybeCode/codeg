@@ -181,6 +181,35 @@ def provision_document(document_id, title, owner_subject, owner_profile=None):
     return document, created
 
 
+@transaction.atomic
+def set_title(document_id, title, subject_value):
+    """Force the Docs title to Neev's, which is the authoritative one.
+
+    Reconciliation, not a user action. Neev owns the title: its resource row is
+    what Projects lists and what its ACL is evaluated against, and the Docs copy
+    exists so the editor shows the right name. They can only diverge when one of
+    the two writes fails after the other succeeded — a rename that upstream
+    rejected, or a native update that lost a revision conflict — and the repair
+    is always the same direction: Neev's value wins.
+
+    Idempotent, so the caller can send it after every divergence it notices
+    without checking first. Returns `(document, changed)`.
+    """
+    document_uuid = parse_document_id(document_id)
+    subject = require_subject(subject_value)
+    service_user = get_service_principal()
+    document = _engine_document_for(document_uuid, service_user, subject)
+
+    new_title = clean_title(title)
+    if document.title == new_title:
+        return document, False
+
+    document.title = new_title
+    # `updated_at` is `auto_now`, so it is only refreshed when named here.
+    document.save(update_fields=["title", "updated_at"])
+    return document, True
+
+
 def _engine_document_for(document_uuid, service_user, subject):
     """Fetch a document the bridge provisioned, for a subject in its org.
 

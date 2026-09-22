@@ -74,6 +74,7 @@ them. Upstream's CSRF protection on every browser-reachable route is untouched.
 | `POST /_neev/v1/documents/provision` | `{id, title, sub, email?, name?}` | `{id, created}` |
 | `POST /_neev/v1/documents/<id>/access` | `{sub, role: reader\|editor, email?, name?}` | `{role, changed}` |
 | `DELETE /_neev/v1/documents/<id>/access` | `{sub}` | `{revoked}` |
+| `POST /_neev/v1/documents/<id>/title` | `{sub, title}` | `{title, changed}` |
 | `POST /_neev/v1/sessions/mint` | `{sub, ttl_seconds?}` | `{cookie_name, session_key, expires_in}` |
 | `POST /_neev/v1/sessions/resolve` | `{session_key}` | `{sub}` or `{sub: null}` |
 | `GET /_neev/v1/health` | — | `{status}` |
@@ -92,6 +93,14 @@ ordinary service principal, `neev:service:engine`. Granting access is an ordinar
 the principal actually making the call — not a request forged in the creator's name — and projected
 roles are only `reader` and `editor`. So even a Docs control that escaped the proxy's allowlist
 could not reconfigure sharing or delete a document: sharing stays a Neev concept.
+
+**The title endpoint is reconciliation, not a rename.** Neev's resource row is authoritative — it
+is what Projects lists and what the ACL is evaluated against — so the two copies can only diverge
+when one of the pair of writes fails after the other succeeded: a rename Docs rejected, or a native
+update that lost a revision conflict. The repair always runs in one direction, Neev's value onto the
+Docs copy, which is why the endpoint takes a title rather than negotiating one. It bounds an
+over-long title to Docs' 255 rather than refusing it, so a legitimate Neev title can never make the
+repair itself fail.
 
 **The websocket gets a session the client never held.** On HTTP the proxy asserts identity per
 request and the middleware repairs a mismatched session. On the socket there is no such step — Docs

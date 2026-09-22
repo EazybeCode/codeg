@@ -371,6 +371,82 @@ class AccessProjectionTests(TestCase):
         self.assertEqual(self.role_of(SERVICE_SUBJECT), choices.RoleChoices.OWNER)
 
 
+class TitleProjectionTests(TestCase):
+    """Neev's title, forced onto the Docs copy after a divergence."""
+
+    def setUp(self):
+        self.document_id = new_id()
+        self.document, _ = service.provision_document(self.document_id, "Original", OWNER)
+
+    def reread(self):
+        return models.Document.objects.get(pk=self.document_id).title
+
+    def test_title_is_projected(self):
+        _document, changed = service.set_title(self.document_id, "Renamed in Neev", OWNER)
+        self.assertTrue(changed)
+        self.assertEqual(self.reread(), "Renamed in Neev")
+
+    def test_projection_is_idempotent(self):
+        service.set_title(self.document_id, "Renamed", OWNER)
+        _document, changed = service.set_title(self.document_id, "Renamed", OWNER)
+        self.assertFalse(changed)
+        self.assertEqual(self.reread(), "Renamed")
+
+    def test_last_projection_wins_so_neev_can_always_repair(self):
+        """Two repairs in a row converge on the newest native title."""
+        service.set_title(self.document_id, "First", OWNER)
+        service.set_title(self.document_id, "Second", OWNER)
+        self.assertEqual(self.reread(), "Second")
+
+    def test_an_over_long_title_is_bounded_not_rejected(self):
+        """Neev's limit is not Docs' 255; the projection must not fail on that."""
+        service.set_title(self.document_id, "x" * 400, OWNER)
+        self.assertEqual(len(self.reread()), 255)
+
+    def test_an_empty_title_clears_it(self):
+        service.set_title(self.document_id, "   ", OWNER)
+        self.assertIsNone(self.reread())
+
+    def test_a_non_string_title_is_refused(self):
+        with self.assertRaises(service.BridgeError) as caught:
+            service.set_title(self.document_id, 42, OWNER)
+        self.assertEqual(caught.exception.code, "invalid_title")
+        self.assertEqual(self.reread(), "Original")
+
+    def test_another_organization_cannot_rename(self):
+        with self.assertRaises(service.BridgeError) as caught:
+            service.set_title(self.document_id, "Hostile", OUTSIDER)
+        self.assertEqual(caught.exception.code, "organization_mismatch")
+        self.assertEqual(self.reread(), "Original")
+
+    def test_unknown_document_is_a_404(self):
+        with self.assertRaises(service.BridgeError) as caught:
+            service.set_title(new_id(), "Anything", OWNER)
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_over_http_with_the_bridge_key(self):
+        response = self.client.post(
+            f"/_neev/v1/documents/{self.document_id}/title",
+            data=json.dumps({"sub": OWNER, "title": "Via HTTP"}),
+            content_type="application/json",
+            secure=True,
+            **{BRIDGE_KEY_HEADER: settings.NEEV_BRIDGE_KEY},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"title": "Via HTTP", "changed": True})
+        self.assertEqual(self.reread(), "Via HTTP")
+
+    def test_without_the_bridge_key_nothing_changes(self):
+        response = self.client.post(
+            f"/_neev/v1/documents/{self.document_id}/title",
+            data=json.dumps({"sub": OWNER, "title": "Forged"}),
+            content_type="application/json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.reread(), "Original")
+
+
 class AbilitiesTests(TestCase):
     """Upstream's own permission computation, not the bridge's opinion of it.
 
