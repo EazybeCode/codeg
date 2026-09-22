@@ -612,7 +612,14 @@ mod tests {
     fn the_signed_in_user_and_frontend_config_are_the_only_document_free_calls() {
         assert_eq!(get(&format!("{PREFIX}/api/v1.0/users/me/")), Some(Target::Account));
         assert_eq!(get(&format!("{PREFIX}/api/v1.0/config/")), Some(Target::Account));
-        // Not a licence for the rest of the user API.
+        // Not a licence for the rest of the user API. `onboarding-done` in
+        // particular stays out **deliberately**, and this is the note for
+        // whoever meets its 404 later: upstream mounts its own onboarding modal
+        // over the editor when `is_first_connection` is true, and dismissing it
+        // posts here. Admitting the route would be admitting a write route for a
+        // flow Neev owns. The bridge sets `is_first_connection=False` when it
+        // creates an account instead, so the modal never opens and there is
+        // nothing to dismiss.
         assert_eq!(
             classify("POST", &format!("{PREFIX}/api/v1.0/users/onboarding-done/"), None),
             None
