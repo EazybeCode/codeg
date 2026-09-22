@@ -261,17 +261,33 @@ Flagged for the pre-release discussion root asked for.
 
 ## Rollback
 
-The feature flag governs **creation only**. Turning it off stops new documents being created on
-the engine; it does not withdraw the ones already created. An engine-backed document stays
-readable and editable whenever the engine is reachable, and never silently falls back to the
-native editor — an engine-backed resource has no native content, so a fallback would render a
-blank document and look like data loss. The legacy routes refuse it instead, explicitly.
+The feature flag (`NEEV_DOCS_CREATE_ENABLED`) governs **creation only**, and it is independent of
+whether the engine services are configured. Turning it off stops new documents being made on the
+engine; it does not withdraw the ones that exist. An engine-backed resource has no native content,
+so routing it back to the native editor would render a blank document — indistinguishable from data
+loss to the person looking at it. The legacy routes refuse it instead, explicitly.
 
-Rolling the Neev image back to schema 14 is now survivable: the database is unchanged, so the old
-image starts normally and every native document behaves exactly as before. Engine-backed documents
-are unreachable from that image — it has no engine code — but they are intact in Docs and return
-when the image rolls forward. That is the honest boundary, and it is a deliberate trade rather
-than a claim that rollback is lossless.
+**Correcting an earlier claim in this document.** It previously said that rolling back to the
+schema-14 image was survivable because the database is unchanged. That is true of *startup* and
+false of *safety*, and the distinction matters. A schema-14 image has no knowledge of the binding
+rows: it would list engine-backed resources as ordinary native documents, render them blank because
+they have no native revisions, and **accept native writes to them**. "The old image boots" is not
+the property that was needed.
+
+So the rollback target is not the pre-engine image. It is **this build with the engine
+unconfigured** — the engine variables absent, so `/document-engine/*` is not a route at all, while
+the binding awareness stays compiled in. In that state:
+
+- engine-backed documents are refused by the legacy routes rather than shown blank, so nobody is
+  presented with an empty document that looks like their content is gone;
+- native writes to them are refused, so a rollback cannot fork a document into two stores;
+- every legacy document behaves exactly as it does today.
+
+That target must be **rehearsed before rollout**, not assumed: bring it up against a database
+containing bound resources and confirm both refusals. Falling back further — to
+`neev-native-agent:ux-table-55408df5` — is only safe once no bound resources exist, and should be
+treated as a data-affecting step rather than a routine rollback. No migration is required for any
+of this; the binding is additive rows the older image simply never queries.
 
 ## What is not settled
 
