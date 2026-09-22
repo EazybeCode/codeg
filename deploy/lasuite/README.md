@@ -312,12 +312,31 @@ docker compose run --rm -v "$PWD/docs-media:/backup" --entrypoint sh createbucke
 The database and the object store must be restored from the same moment: an attachment row without
 its object is a broken image, and an object without its row is unreachable and unaccounted for.
 
-## Not verified here
+## What has been exercised, and what has not
 
-- **Nothing has run in a browser.** Every claim above comes from the test suites and from HTTP calls
-  against the real image, which is not the same as a person opening a document.
-- **Attachment upload was never exercised**, here or in the preview.
-- The production stack has not been deployed; only the isolated canary has been run.
+Verified against the real image on an isolated canary:
+
+- **Attachment upload and retrieval.** Uploads go through upstream's own `attachment-upload`, so the
+  stored objects have production's key shape, libmagic-derived content type and `-unsafe` marking;
+  the relay then serves them. Covered in the in-image suite: owner, member, revoked access,
+  stranger, cross-organization, service principal, missing credential, keys belonging to another
+  document, traversal keys, unrecorded and de-recorded attachments, SVG and disguised uploads.
+  (The preview never exercised this; that is where the claim "never exercised" came from.)
+- **Collaboration, two clients converging.** Two distinct minted sessions against the real
+  y-provider: both authenticated `read-write`, each wrote, each received the other's write, and both
+  documents converged to identical text. Role projection on the socket was checked in the same room
+  — projected editor `read-write`, projected reader `readonly`, no access `permission-denied`.
+  This exercised the Docs side directly, **not** through the Neev proxy.
+
+Still not verified:
+
+- **Nothing has run in a browser.** Every claim above comes from the test suites, from HTTP calls
+  against the real image, and from protocol-level clients — none of which is a person opening a
+  document.
+- **The collaboration path through the Neev proxy.** The two-client test connected straight to
+  y-provider. The proxy leg is the engine's, and is not covered by anything here.
+- The production stack has been built and health-checked but is **stopped and not wired to Neev**;
+  only the isolated canary has been exercised.
 - Django-served responses keep upstream's CSP `frame-ancestors 'none'`. The framed document is the
   static artifact served by the proxy, so `SAMEORIGIN` and `frame-ancestors 'self'` belong **there**
   — Django does not provide them for the embed.
