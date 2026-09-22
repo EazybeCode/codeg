@@ -127,6 +127,11 @@ struct ResourceDto {
     archived: bool,
     created_at: i64,
     updated_at: i64,
+    /// Which editor owns this document: `"lasuite"` for engine-backed documents,
+    /// `"native"` for legacy ones. Additive — an older client that does not know
+    /// the field treats its absence as native and keeps working, which is why
+    /// this is a response field and not a stored column.
+    engine: &'static str,
 }
 
 #[derive(Serialize)]
@@ -217,7 +222,7 @@ async fn list_resources(
         page.after.as_deref(),
     )
     .await?;
-    Ok(private_json(resource_page_dto(page)?))
+    Ok(private_json(resource_page_dto(&state, page).await?))
 }
 
 pub(super) async fn create_chat(
@@ -268,7 +273,8 @@ async fn create_resource(
         },
     )
     .await?;
-    let mut response = private_json(resource_dto(resource)?);
+    let engine_backed = engine_backed(state, &resource).await?;
+    let mut response = private_json(resource_dto(resource, engine_backed)?);
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
 }
@@ -282,9 +288,17 @@ pub(super) async fn get_resource(
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let actor = catalog::organization_get(&state, &headers).await?;
-    Ok(private_json(resource_dto(
-        resources::get(&state, &actor, &id).await?,
-    )?))
+    let resource = resources::get(&state, &actor, &id).await?;
+    let engine_backed = engine_backed(&state, &resource).await?;
+    Ok(private_json(resource_dto(resource, engine_backed)?))
+}
+
+/// Label a resource with the engine that owns it.
+///
+/// A separate point read rather than a join, so the native content path keeps
+/// its exact shape and a legacy document's read is unchanged.
+async fn engine_backed(state: &ServerState, resource: &Resource) -> Result<bool, ApiError> {
+    Ok(crate::neev::engine::binding::bound_now(&state.database, resource).await?)
 }
 
 pub(super) async fn update_resource(
@@ -305,9 +319,9 @@ pub(super) async fn update_resource(
         visibility: input.visibility.into(),
         archived: input.archived,
     };
-    Ok(private_json(resource_dto(
-        resources::update(&state, &actor, &id, patch).await?,
-    )?))
+    let resource = resources::update(&state, &actor, &id, patch).await?;
+    let engine_backed = engine_backed(&state, &resource).await?;
+    Ok(private_json(resource_dto(resource, engine_backed)?))
 }
 
 pub(super) async fn list_messages(
@@ -622,12 +636,20 @@ fn document_body(
     }
 }
 
-fn resource_page_dto(page: Page<Resource>) -> Result<PageDto<ResourceDto>, ApiError> {
+async fn resource_page_dto(
+    state: &ServerState,
+    page: Page<Resource>,
+) -> Result<PageDto<ResourceDto>, ApiError> {
+    // One query for the whole page rather than a round trip per row.
+    let bound = crate::neev::engine::binding::bound_set(&state.database, &page.items).await?;
     Ok(PageDto {
         items: page
             .items
             .into_iter()
-            .map(resource_dto)
+            .map(|resource| {
+                let engine_backed = bound.contains(&resource.id);
+                resource_dto(resource, engine_backed)
+            })
             .collect::<Result<Vec<_>, _>>()?,
         next_after: page.next_after,
     })
@@ -655,7 +677,7 @@ fn revision_page_dto(page: Page<Revision>) -> Result<PageDto<RevisionDto>, ApiEr
     })
 }
 
-fn resource_dto(resource: Resource) -> Result<ResourceDto, ApiError> {
+fn resource_dto(resource: Resource, engine_backed: bool) -> Result<ResourceDto, ApiError> {
     canonical_uuid(&resource.id).map_err(|_| ApiError::StorageUnavailable)?;
     if resource.org_id < 1
         || resource.node_id < 1
@@ -690,6 +712,7 @@ fn resource_dto(resource: Resource) -> Result<ResourceDto, ApiError> {
         archived: resource.archived,
         created_at: resource.created_at,
         updated_at: resource.updated_at,
+        engine: crate::neev::engine::binding::name(engine_backed),
     })
 }
 

@@ -21,12 +21,13 @@
 //! engine-backed.
 
 use crate::neev::{
-    content::types::{ContentError, Resource},
+    content::types::{ContentError, Resource, ResourceKind},
     db,
+    error::database_error,
     org,
     types::OrgContext,
 };
-use sea_orm::DatabaseTransaction;
+use sea_orm::{ConnectionTrait, DatabaseTransaction};
 
 /// The receipt action naming an engine binding. Versioned, because a future
 /// engine must be distinguishable from this one rather than silently inheriting
@@ -101,6 +102,85 @@ pub(crate) async fn bound(
         .try_get("", "resource_id")
         .map_err(crate::neev::error::database_error)?;
     Ok(id == resource.id && stored == digest(resource.org_id, &resource.id))
+}
+
+/// Whether a resource is engine-backed, read outside a resource transaction.
+///
+/// Used by the HTTP layer to label a response. It is a separate point read
+/// rather than a join into the resource query so that nothing in the native
+/// content path changes shape, and so a legacy document's read path is
+/// untouched when the engine is not involved.
+pub(crate) async fn bound_now<C: ConnectionTrait>(
+    db: &C,
+    resource: &Resource,
+) -> Result<bool, ContentError> {
+    let row = db::one(
+        db,
+        "SELECT body_hash,resource_id FROM neev_requests WHERE user_id=$1 AND action=$2 AND request_id=$3",
+        vec![
+            resource.creator_id.into(),
+            ACTION.into(),
+            resource.id.clone().into(),
+        ],
+    )
+    .await?;
+    matches(row, resource)
+}
+
+fn matches(
+    row: Option<sea_orm::QueryResult>,
+    resource: &Resource,
+) -> Result<bool, ContentError> {
+    matches(row, resource)
+}
+
+/// Which of these resources are engine-backed, in **one** query.
+///
+/// A listing must not cost a round trip per row. The digest is still recomputed
+/// and compared for each returned row, so batching does not weaken the check
+/// that a binding belongs to the resource it is read for.
+pub(crate) async fn bound_set<C: ConnectionTrait>(
+    db: &C,
+    resources: &[Resource],
+) -> Result<std::collections::HashSet<String>, ContentError> {
+    let documents: Vec<&Resource> = resources
+        .iter()
+        .filter(|resource| resource.kind == ResourceKind::Document)
+        .collect();
+    if documents.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let mut values: Vec<sea_orm::Value> = vec![ACTION.into()];
+    let mut placeholders = Vec::with_capacity(documents.len());
+    for resource in &documents {
+        values.push(resource.id.clone().into());
+        placeholders.push(format!("${}", values.len()));
+    }
+    let sql = format!(
+        "SELECT user_id,body_hash,resource_id,request_id FROM neev_requests WHERE action=$1 AND request_id IN ({})",
+        placeholders.join(",")
+    );
+    let rows = db
+        .query_all(db::statement(db, &sql, values))
+        .await
+        .map_err(database_error)?;
+    let mut bound = std::collections::HashSet::new();
+    for row in rows {
+        let request_id: String = row.try_get("", "request_id").map_err(database_error)?;
+        let stored: String = row.try_get("", "body_hash").map_err(database_error)?;
+        let resource_id: String = row.try_get("", "resource_id").map_err(database_error)?;
+        let creator: i32 = row.try_get("", "user_id").map_err(database_error)?;
+        let Some(resource) = documents.iter().find(|candidate| candidate.id == request_id) else {
+            continue;
+        };
+        if resource_id == resource.id
+            && creator == resource.creator_id
+            && stored == digest(resource.org_id, &resource.id)
+        {
+            bound.insert(resource.id.clone());
+        }
+    }
+    Ok(bound)
 }
 
 /// The engine a resource is served by, as reported to clients.

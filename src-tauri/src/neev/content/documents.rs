@@ -108,6 +108,14 @@ async fn authorized(
     if resource.kind != ResourceKind::Document {
         return Err(ContentError::NotFound);
     }
+    // Every native document route — read, save, history, restore — funnels
+    // through here, so this is the one place the legacy path has to refuse a
+    // document the engine owns. It must refuse rather than treat it as empty:
+    // an engine-backed resource has no native revisions, so a legacy read would
+    // render a blank document and a legacy write would fork it into two stores.
+    // Refused *after* the access check, so it never reveals that a resource
+    // exists to a caller who could not otherwise see it.
+    crate::neev::engine::binding::refuse_if_bound(tx, &resource).await?;
     Ok(resource)
 }
 

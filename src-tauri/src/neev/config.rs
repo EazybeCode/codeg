@@ -40,6 +40,25 @@ pub(crate) struct ProviderConfig {
     pub(crate) email: Option<MailProvider>,
 }
 
+/// Everything the document engine needs, or nothing.
+///
+/// Deliberately all-or-nothing: a half-configured engine — a backend URL with no
+/// bridge credential, say — would mount routes that cannot authenticate and
+/// would surface as confusing refusals rather than as the misconfiguration it
+/// is. Missing any part leaves the engine off.
+pub(crate) struct EngineConfig {
+    /// Private base URL of the Docs backend, reachable only on the compose
+    /// network.
+    pub(crate) backend: Url,
+    /// Private base URL of the collaboration server (y-provider).
+    pub(crate) collaboration: Url,
+    /// Shared credential for the bridge's `/_neev/v1/…` API.
+    pub(crate) bridge_key: String,
+    /// Directory holding the frontend's static export, served by Neev under the
+    /// engine prefix rather than by an nginx of its own.
+    pub(crate) artifact_root: PathBuf,
+}
+
 pub(crate) struct Config {
     pub(crate) origin: Url,
     pub(crate) origin_header: String,
@@ -65,13 +84,25 @@ pub(crate) struct Config {
     /// the phase-2 rollback switch: the stream route is not mounted and the
     /// capability reports false, so clients fall back to polling. No data change.
     pub(crate) realtime_enabled: bool,
+    /// The document engine, or `None` when it is not configured.
+    ///
+    /// Presence governs **creation only**. Documents already bound to the engine
+    /// stay bound and keep being served; turning the engine off stops new ones
+    /// being made on it and never withdraws the ones that exist, because an
+    /// engine-backed resource has no native content and falling back to the
+    /// native editor would render a blank document.
+    pub(crate) engine: Option<EngineConfig>,
     #[cfg(test)]
     pub(crate) _document_root_guard: Option<tempfile::TempDir>,
 }
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 17] = [
+        const KEYS: [&str; 21] = [
+            "NEEV_DOCS_BACKEND_URL",
+            "NEEV_DOCS_COLLABORATION_URL",
+            "NEEV_DOCS_BRIDGE_KEY",
+            "NEEV_DOCS_ARTIFACT_ROOT",
             "NEEV_APP_ORIGIN",
             "NEEV_DATABASE_URL",
             "NEEV_ENC_KEY",
@@ -190,7 +221,9 @@ impl Config {
         // rather than silently leaving the rollback switch half-applied.
         let realtime_enabled = !optional_bool(values.get("NEEV_REALTIME_DISABLED"))
             .map_err(|_| ConfigError::Provider)?;
+        let engine = engine(values)?;
         Ok(Self {
+            engine,
             origin,
             origin_header,
             google_callback,
@@ -277,6 +310,64 @@ fn required_url(
     error: ConfigError,
 ) -> Result<Url, ConfigError> {
     Url::parse(&required(values, key, error)?).map_err(|_| error)
+}
+
+/// Read the engine settings, all four or none.
+///
+/// A partial configuration is an error rather than a silent "engine off": the
+/// difference between "we chose not to run the engine" and "we meant to run it
+/// and mistyped the credential variable" is exactly what an operator needs told.
+fn engine(values: &HashMap<String, String>) -> Result<Option<EngineConfig>, ConfigError> {
+    let present = [
+        "NEEV_DOCS_BACKEND_URL",
+        "NEEV_DOCS_COLLABORATION_URL",
+        "NEEV_DOCS_BRIDGE_KEY",
+        "NEEV_DOCS_ARTIFACT_ROOT",
+    ]
+    .iter()
+    .filter(|key| values.get(**key).is_some_and(|value| !value.trim().is_empty()))
+    .count();
+    if present == 0 {
+        return Ok(None);
+    }
+    if present < 4 {
+        return Err(ConfigError::Provider);
+    }
+    let private = |key: &str| -> Result<Url, ConfigError> {
+        let url = Url::parse(values.get(key).ok_or(ConfigError::Provider)?)
+            .map_err(|_| ConfigError::Provider)?;
+        // These are container-network addresses. Refusing a credentialled base
+        // URL that is not plain-scheme-and-host keeps a misconfiguration from
+        // pointing the bridge key at something public.
+        if !matches!(url.scheme(), "http" | "https")
+            || url.cannot_be_a_base()
+            || url.host().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err(ConfigError::Provider);
+        }
+        Ok(url)
+    };
+    let bridge_key = values
+        .get("NEEV_DOCS_BRIDGE_KEY")
+        .ok_or(ConfigError::Provider)?
+        .to_owned();
+    // The bridge refuses anything shorter as `bridge_disabled`; rejecting it
+    // here means the failure names the variable instead of arriving as a 503.
+    if bridge_key.len() < 32 || bridge_key.chars().any(char::is_control) {
+        return Err(ConfigError::Provider);
+    }
+    Ok(Some(EngineConfig {
+        backend: private("NEEV_DOCS_BACKEND_URL")?,
+        collaboration: private("NEEV_DOCS_COLLABORATION_URL")?,
+        bridge_key,
+        artifact_root: PathBuf::from(
+            values
+                .get("NEEV_DOCS_ARTIFACT_ROOT")
+                .ok_or(ConfigError::Provider)?,
+        ),
+    }))
 }
 
 fn optional_bool(value: Option<&String>) -> Result<bool, ConfigError> {

@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod binding;
+pub(crate) mod decision;
 pub(crate) mod identity;
 pub(crate) mod routes;
 pub(crate) mod upstream;
