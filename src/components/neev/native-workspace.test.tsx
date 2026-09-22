@@ -1,4 +1,4 @@
-import { act, render, screen, within, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeBoundary } from "./native-boundary"
@@ -763,6 +763,58 @@ function restoringRoutes(resource: () => Response) {
       json({ items: [], nextAfter: null }),
   }
 }
+
+/**
+ * A rename reaching the tab strip when no list holds the document.
+ *
+ * This is the restore path: the tab is reopened from a previous session, the
+ * panel fetches the resource by id, and the node's list may hold nothing for
+ * it. `onChanged` updates that list and nothing else, so on its own it is a
+ * no-op here — the strip kept the name captured when the panel first resolved,
+ * and a rename made inside the document changed the document and nothing else.
+ */
+it("carries a rename to the tab strip on a restored tab", async () => {
+  rememberOpen()
+  const engineDoc = { ...DOC, engine: "lasuite" as const }
+  const renamed = { ...engineDoc, title: "Renamed while restored" }
+  let current: typeof engineDoc = engineDoc
+  mockNativeSession(undefined, {
+    ...restoringRoutes(() => json(current)),
+    // The node lists nothing, which is what makes the tab depend on the
+    // resolved-title fallback rather than on a list row — the restore path.
+    "GET /api/neev/nodes/4/documents": () =>
+      json({ items: [], nextAfter: null }),
+  })
+  mountWorkspace()
+
+  // It starts with the name the panel resolved, not "Loading your workspace…".
+  await screen.findByRole("tab", { name: /Launch plan/ })
+  const frame = await waitFor(() => {
+    // The tab button carries the same title text, so take the frame itself.
+    const found = document.querySelector("iframe")
+    expect(found).not.toBeNull()
+    return found as HTMLIFrameElement
+  })
+  await waitFor(() => expect(frame.contentWindow).toBeTruthy())
+
+  // The editor confirms a rename the way it does in a browser: an id, no title.
+  current = renamed
+  await act(async () => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "neev-doc-metadata-updated", resourceId: DOC_ID },
+        source: frame.contentWindow,
+        origin: window.location.origin,
+      })
+    )
+  })
+
+  // The document was renamed; the strip has to say so, with no list to help it.
+  await waitFor(() => {
+    const names = screen.getAllByRole("tab").map((tab) => tab.textContent ?? "")
+    expect(names.join(" | ")).toContain("Renamed while restored")
+  })
+})
 
 it("gives a restored tab the icon of what it actually is", async () => {
   // Every resource tab used to draw the document icon, so a team chat in the

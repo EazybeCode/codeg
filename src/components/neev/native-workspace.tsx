@@ -273,7 +273,18 @@ function ResourcePanel({
       chromeless
       open={{ resource, request, fresh }}
       onRequestNavigationGuard={registerGuard}
-      onResourceChanged={onChanged}
+      onResourceChanged={(next) => {
+        /*
+         * Keep what this panel believes it is showing in step with the edit.
+         *
+         * `loaded` is read once when the tab resolves, and the effect above
+         * re-publishes it through `onResolved` whenever it changes. Leaving it
+         * stale meant every re-publish restored the name from before the edit,
+         * quietly undoing the update the tab strip had just been given.
+         */
+        setLoaded(next)
+        onChanged(next)
+      }}
     />
   )
 }
@@ -1860,7 +1871,19 @@ function WorkspaceContent() {
                         resourceId={tab.resourceId}
                         fresh={tab.fresh === true}
                         onResolved={noteResource}
-                        onChanged={(next) =>
+                        onChanged={(next) => {
+                          /*
+                           * Record the new name FIRST, and unconditionally.
+                           *
+                           * The list update below is a no-op when no list for
+                           * this node is loaded — which is exactly the restored
+                           * tab's situation — so on its own it leaves the tab
+                           * strip and breadcrumb showing the name captured when
+                           * the panel first resolved. A rename inside the frame
+                           * then updates the document and nothing else, which is
+                           * the bug this closes.
+                           */
+                          noteResource(next)
                           setItemsByNode((old) => {
                             const list = old[tab.nodeId]
                             if (!list) return old
@@ -1874,7 +1897,7 @@ function WorkspaceContent() {
                               },
                             }
                           })
-                        }
+                        }}
                         node={nodeById(tab.nodeId)}
                         cached={(itemsByNode[tab.nodeId]?.items ?? []).find(
                           (item) => item.id === tab.resourceId
