@@ -167,12 +167,18 @@ export function choosePaste({
   // A table run may not hold a line break — the stored model forbids it — so
   // the text goes in as one line and the notice says so. Refusing would lose
   // it; flattening quietly would change it without saying.
-  if (where === "cell")
+  //
+  // All four separators, not just LF and CR: the model rejects U+2028 and
+  // U+2029 in a table run too, so leaving them in would refuse the paste that
+  // this flattening exists to keep. Elsewhere they are ordinary text and stay.
+  if (where === "cell") {
+    const pieces = plain.split(/\r\n?|[\n\u2028\u2029]/u)
     return {
       kind: "inline",
-      content: lines.join(" "),
-      notice: lines.length > 1 ? "celllines" : dropped ? "plaintext" : "none",
+      content: pieces.join(" "),
+      notice: pieces.length > 1 ? "celllines" : dropped ? "plaintext" : "none",
     }
+  }
   if (lines.length === 1)
     return {
       kind: "inline",
