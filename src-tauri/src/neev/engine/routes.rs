@@ -36,7 +36,12 @@ pub(crate) enum Target {
     /// A file from the frontend's static export. Served by Neev from the build
     /// artifact — never proxied — so it needs a live Neev session but no
     /// per-document decision.
-    Asset,
+    ///
+    /// `path` is the artifact-relative path, already percent-decoded **once**
+    /// and traversal-checked after decoding. The export contains literal
+    /// bracketed names like `docs/[id]/`, which the browser requests
+    /// percent-encoded, so serving the raw request path would miss the file.
+    Asset { path: String },
     /// The editor page for one document.
     Editor { resource: String },
     /// A document-scoped backend call. `write` selects the read/write decision
@@ -138,7 +143,15 @@ pub(crate) fn classify(method: &str, path: &str, query: Option<&str>) -> Option<
     let rest = if rest.is_empty() { "/" } else { rest };
     // Checked on the remainder *before* the leading slash is removed, so
     // `/document-engine//api/...` is still seen as the double slash it is.
-    if traversable(rest) {
+    //
+    // Structured routes — ids, API paths, the socket — are held to the strict
+    // form and refuse percent-encoding outright, because an encoded id is an
+    // ambiguity nobody needs and every spelling of one is a chance for two
+    // layers to disagree. Static assets cannot be held to that rule: the export
+    // genuinely contains `[id]` in filenames, so they are decoded first and
+    // checked after. The decision of which rule applies is made below, per
+    // branch, rather than once for everything.
+    if traversable(rest) && !is_asset_candidate(rest) {
         return None;
     }
     let rest = rest.strip_prefix('/')?;
@@ -198,7 +211,17 @@ pub(crate) fn classify(method: &str, path: &str, query: Option<&str>) -> Option<
     // Anything else under the prefix is a static file from the export. It is
     // read from the artifact directory, so a name that is not in the artifact is
     // simply absent rather than reaching Docs.
-    read.then_some(Target::Asset)
+    if !read {
+        return None;
+    }
+    // Decoded exactly once, then checked. Checking before decoding would let
+    // `%2e%2e%2f` past a traversal test that never saw a `..`; decoding twice
+    // would let `%252e%252e` become one.
+    let decoded = percent_decode(rest)?;
+    if traversable(&decoded) || decoded.starts_with('/') {
+        return None;
+    }
+    Some(Target::Asset { path: decoded })
 }
 
 fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Option<Target> {
@@ -266,6 +289,21 @@ fn version_of(action: &str) -> Option<&str> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._+-=~".contains(&b));
     valid.then_some(id)
+}
+
+/// Whether a path is a candidate for the static export rather than a structured
+/// route. Used only to decide which traversal rule applies; the asset branch
+/// still decodes and re-checks before anything is served.
+fn is_asset_candidate(rest: &str) -> bool {
+    let trimmed = rest.trim_start_matches('/');
+    !RESERVED
+        .iter()
+        .any(|prefix| trimmed == prefix.trim_end_matches('/') || trimmed.starts_with(prefix))
+        && !trimmed.starts_with("docs/")
+        // A doubled slash or a backslash is never a legitimate asset name, so
+        // those stay refused for assets too.
+        && !rest.contains("//")
+        && !rest.contains('\\')
 }
 
 /// One decoded query parameter by name, from anywhere in the query string.
@@ -598,11 +636,36 @@ mod tests {
         }
     }
 
+    fn asset(path: &str) -> Option<Target> {
+        Some(Target::Asset { path: path.into() })
+    }
+
+    #[test]
+    fn a_percent_encoded_asset_name_resolves_to_the_file_on_disk() {
+        // The export contains literal bracketed names — `docs/[id]/` — and the
+        // browser requests them percent-encoded. Refusing `%` outright, as the
+        // structured routes do, 404s the editor's own page chunk and the app
+        // never starts.
+        assert_eq!(
+            get(&format!("{PREFIX}/_next/static/chunks/pages/docs/%5Bid%5D-b6e91aea.js")),
+            asset("_next/static/chunks/pages/docs/[id]-b6e91aea.js")
+        );
+        // Decoded exactly once: a doubly-encoded traversal must not survive one
+        // decode into a live one.
+        assert_eq!(get(&format!("{PREFIX}/_next/%252e%252e/secret")), None);
+        assert_eq!(get(&format!("{PREFIX}/_next/%2e%2e/secret")), None);
+        assert_eq!(get(&format!("{PREFIX}/_next/%2fetc%2fpasswd")), None);
+        // Structured routes stay strict — an encoded id is an ambiguity that
+        // buys nothing and invites two layers to disagree.
+        assert_eq!(get(&format!("{PREFIX}/docs/%2e%2e/")), None);
+        assert_eq!(get(&format!("{PREFIX}/api/v1.0/documents/%2e%2e/")), None);
+    }
+
     #[test]
     fn the_static_export_is_reachable_for_reads_only() {
-        assert_eq!(get(&format!("{PREFIX}/_next/static/chunk.js")), Some(Target::Asset));
-        assert_eq!(get(&format!("{PREFIX}/favicon.ico")), Some(Target::Asset));
-        assert_eq!(get(PREFIX), Some(Target::Asset));
+        assert_eq!(get(&format!("{PREFIX}/_next/static/chunk.js")), asset("_next/static/chunk.js"));
+        assert_eq!(get(&format!("{PREFIX}/favicon.ico")), asset("favicon.ico"));
+        assert_eq!(get(PREFIX), asset(""));
         // An asset route must never become a way to send a body to Docs.
         assert_eq!(classify("POST", &format!("{PREFIX}/_next/static/chunk.js"), None), None);
         assert_eq!(classify("PUT", &format!("{PREFIX}/anything"), None), None);

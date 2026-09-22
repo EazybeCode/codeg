@@ -361,7 +361,7 @@ pub(crate) async fn handle(
 
     let served = match decision {
         Decision::Refuse(refusal) => Err(refuse(refusal)),
-        Decision::Asset => asset(engine, parts.uri.path()),
+        Decision::Asset { ref path } => asset(engine, path),
         Decision::Shell { resource, role } => {
             let assertion = assertion(&state, &actor).await;
             // Project before the shell renders, so the editor's very first API
@@ -385,7 +385,7 @@ pub(crate) async fn handle(
                 .provision(&resource, &title, &assertion)
                 .await
                 .map_err(crate::neev::error::AuthError::from)?;
-            asset(engine, parts.uri.path())
+            asset(engine, &shell_path(parts.uri.path()))
         }
         Decision::Forward { resource: Some(ref resource), .. }
             if matches!(target, Some(Target::Media { .. })) =>
@@ -642,14 +642,18 @@ async fn media(
 ///
 /// Read from the artifact directory and never proxied, so a name that is not in
 /// the artifact is absent rather than something that reaches Docs.
-fn asset(engine: &Engine, path: &str) -> Result<Response, ApiError> {
-    let relative = path
-        .strip_prefix(routes::PREFIX)
-        .unwrap_or("")
-        .trim_start_matches('/');
+fn asset(engine: &Engine, relative: &str) -> Result<Response, ApiError> {
     let mut response = super::assets::serve(&engine.artifact_root, relative)?;
     framing(response.headers_mut());
     Ok(response)
+}
+
+/// The artifact-relative path for an editor shell request.
+fn shell_path(path: &str) -> String {
+    path.strip_prefix(routes::PREFIX)
+        .unwrap_or("")
+        .trim_start_matches('/')
+        .to_owned()
 }
 
 async fn upgrade(

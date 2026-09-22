@@ -47,7 +47,7 @@ pub(crate) enum Refusal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Decision {
     /// Serve a file from the frontend's static export. Never proxied.
-    Asset,
+    Asset { path: String },
     /// Forward to the Docs backend, asserting the caller's identity.
     ///
     /// `role` is present whenever the request names a document. It must be
@@ -102,7 +102,7 @@ pub(crate) fn decide(
     match target {
         // An asset is the same bytes for everyone and names no document, so a
         // live session is the whole requirement.
-        Target::Asset => Decision::Asset,
+        Target::Asset { path } => Decision::Asset { path: path.clone() },
         // The signed-in user and the frontend's configuration carry no document.
         Target::Account => Decision::Forward {
             resource: None,
@@ -201,7 +201,7 @@ mod tests {
     fn an_unauthenticated_request_learns_nothing_about_which_routes_exist() {
         // Same refusal for an allowed route, a denied route and no route at all.
         for target in [
-            Some(&Target::Asset),
+            Some(&Target::Asset { path: "index.html".into() }),
             Some(&document(false, Body::None)),
             None,
         ] {
@@ -344,7 +344,16 @@ mod tests {
 
     #[test]
     fn assets_and_account_calls_need_a_session_and_nothing_more() {
-        assert_eq!(decide(Some(&Target::Asset), true, Grant::None, false, &[]), Decision::Asset);
+        assert_eq!(
+            decide(
+                Some(&Target::Asset { path: "index.html".into() }),
+                true,
+                Grant::None,
+                false,
+                &[]
+            ),
+            Decision::Asset { path: "index.html".into() }
+        );
         assert_eq!(
             decide(Some(&Target::Account), true, Grant::None, false, &[]),
             Decision::Forward { resource: None, role: None }
