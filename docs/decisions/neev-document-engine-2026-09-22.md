@@ -106,13 +106,19 @@ the enforced answer disagree.
   projected just-in-time into the Docs access row for that user, inside the same authorization
   step, immediately before the upgrade is forwarded, and only written when it differs. It is
   re-derived on every connect — a projection, never a second source of truth.
-- **The socket is bound to one document, and every frame is checked.** Authorizing the handshake
-  is not sufficient: the Hocuspocus wire format names a document in each message, so one socket
-  can address documents the handshake never covered. The proxy binds the connection to the single
-  document id it authorized, decodes the leading document-name field of every frame in **both**
-  directions, and closes the connection on any other name. This decodes one leading field of an
-  existing format to enforce a boundary; it does not reimplement the protocol, and the official
-  client and server stay on both ends.
+- **The socket addresses exactly one document, pinned by the proxy — not by the client.** The
+  concern that one socket could name other documents per message is real for multiplexing
+  Hocuspocus versions, but **not** at the pinned 3.4.4: `Hocuspocus.getDocumentNameFromRequest`
+  derives the document name from the request **URL path** once, at connection time, and
+  `MessageReceiver.apply` reads a message *type* as the first field — there is no per-frame
+  document name to validate. Upstream's own `onConnect` additionally rejects a mismatch between
+  the path and the `room` parameter. So the enforceable boundary is the handshake URL, and the
+  proxy makes it unforgeable by **constructing the upstream URL itself** — path and `room` — from
+  the resource id it just authorized, discarding whatever the client asked for. That is stronger
+  than inspecting frames: the client never gets to name a document at all. A frame decoder is
+  therefore deliberately not written; it would validate a field that does not exist and would
+  invite drift if upstream's framing changed under it. The version assumption is pinned and
+  re-checked on any upstream bump.
 - **Revocation.** The proxy holds the socket and re-runs the same recheck on a bounded interval and
   on inbound and outbound data, following the pattern `neev/http/realtime.rs` already uses for chat
   SSE (session + org + resource recheck before every delivery, plus heartbeat). Loss of access,
