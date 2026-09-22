@@ -182,7 +182,10 @@
     "renameFailed": "이 이름을 저장하지 못했습니다.",
     "activityWorking": "작업 중…",
     "activityRunningTool": "{name} 실행 중…",
-    "activityElapsed": "{number}초"
+    "activityElapsed": "{number}초",
+    "richTooLarge": "붙여넣기가 거부되었습니다: 이 내용은 문서 하나에 담을 수 있는 크기를 넘습니다. 나누어 붙여넣으세요.",
+    "pastedCellLines": "한 줄로 붙여넣었습니다: 표 셀에는 줄 바꿈을 넣을 수 없습니다.",
+    "cellNoLineBreak": "표 셀에는 줄 바꿈을 넣을 수 없습니다. 새 행을 사용하거나 한 줄로 작성하세요."
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

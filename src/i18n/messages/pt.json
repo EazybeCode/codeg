@@ -182,7 +182,10 @@
     "renameFailed": "Não foi possível guardar esse nome.",
     "activityWorking": "A trabalhar…",
     "activityRunningTool": "A executar {name}…",
-    "activityElapsed": "{number}s"
+    "activityElapsed": "{number}s",
+    "richTooLarge": "Colagem recusada: este conteúdo é maior do que um documento comporta. Cole-o em partes menores.",
+    "pastedCellLines": "Colado numa só linha: uma célula de tabela não comporta quebras de linha.",
+    "cellNoLineBreak": "Uma célula de tabela não comporta quebras de linha. Use uma nova linha ou escreva o texto numa só linha."
   },
   "Native": {
     "callbackConflict": "Este método de acesso entra em conflito com uma conta existente. Use seu método de acesso original e abra Configurações para vincular outro método. As contas nunca são mescladas automaticamente.",

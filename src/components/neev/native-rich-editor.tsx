@@ -30,7 +30,12 @@ import { BlockNoteView } from "@blocknote/shadcn"
 import { EditorState } from "@tiptap/pm/state"
 import "@blocknote/shadcn/style.css"
 import "./native-rich-editor.css"
-import { fromNeev, importMarkdown, toNeev } from "@/lib/neev-rich-adapter"
+import {
+  fromNeev,
+  importMarkdown,
+  RichTooLargeError,
+  toNeev,
+} from "@/lib/neev-rich-adapter"
 import type { RichDocument } from "@/lib/neev-rich-document"
 
 export const richSchema = BlockNoteSchema.create({
@@ -60,6 +65,157 @@ export const richSchema = BlockNoteSchema.create({
     code: defaultStyleSpecs.code,
   },
 })
+/**
+ * What the last action did.
+ *
+ * `unsupported` and `toolarge` mean nothing was inserted; `plaintext` and
+ * `celllines` mean it was, with something named lost on the way in.
+ */
+type Notice =
+  | "none"
+  | "unsupported"
+  | "toolarge"
+  | "plaintext"
+  | "celllines"
+  | "cellbreak"
+
+/** A run as the adapter emits it: text, or a link wrapping text. */
+type InlineRun = { text?: string; content?: InlineRun[] }
+
+/** Whether any run carries a line break, link content included. */
+function runsBreak(runs: InlineRun[] | undefined): boolean {
+  return (runs ?? []).some((run) =>
+    run.content
+      ? runsBreak(run.content)
+      : /[\n\r\u2028\u2029]/u.test(run.text ?? "")
+  )
+}
+
+/** What a paste should do, decided before anything touches the document. */
+export type PasteAction =
+  | { kind: "inline"; content: unknown; notice: Notice }
+  | { kind: "blocks"; blocks: unknown[]; notice: Notice }
+  | { kind: "refuse"; notice: "unsupported" | "toolarge" }
+
+/**
+ * Where a paste goes, and what it costs to put it there.
+ *
+ * Pure, because the interesting part is the decision rather than the insertion:
+ * whether the text can keep its structure, whether it is going somewhere that
+ * can hold structure at all, and what was lost on the way in.
+ */
+export function choosePaste({
+  plain,
+  onlyPlain,
+  where,
+}: {
+  plain: string
+  onlyPlain: boolean
+  /**
+   * What the cursor is inside.
+   *
+   * `cell` and `code` cannot hold blocks, and a cursor in either reports its
+   * CONTAINER as the block — so inserting "after" it lands outside the thing
+   * the reader was typing in. They differ in what they can hold: a code block
+   * keeps line breaks, a table run may not contain one at all.
+   */
+  where: "body" | "cell" | "code"
+}): PasteAction {
+  // Formatting was on offer and we are not taking it.
+  const dropped = !onlyPlain
+  if (!plain) return { kind: "refuse", notice: "unsupported" }
+  const lines = plain.replace(/\r\n?/g, "\n").split("\n")
+  // A code block takes text literally — it holds its own line breaks, and
+  // Markdown read inside code would be the one place it means nothing.
+  if (where === "code")
+    return {
+      kind: "inline",
+      content: lines.join("\n"),
+      notice: dropped ? "plaintext" : "none",
+    }
+  // Plain text alone is read as our restricted Markdown, so pasted structure
+  // survives when it is representable.
+  if (onlyPlain) {
+    try {
+      const parsed = fromNeev(importMarkdown(plain))
+      const [only] = parsed
+      const content = only?.content as InlineRun[] | undefined
+      const flat =
+        parsed.length === 1 &&
+        only.type === "paragraph" &&
+        !only.children?.length
+      // A line break can hide inside a link's own content, where a probe of
+      // the top-level run reads nothing at all — and a table run may not hold
+      // one, so missing it means the guard refuses the paste we were trying to
+      // keep.
+      const unbroken = where !== "cell" || !runsBreak(content)
+      // An empty paragraph is what Markdown makes of whitespace. Both paths
+      // below would replace the selection with nothing, so the literal text
+      // takes the plain path instead.
+      const empty = flat && !content?.length
+      if (flat && unbroken && !empty)
+        return { kind: "inline", content, notice: "none" }
+      if (where === "body" && !empty)
+        return { kind: "blocks", blocks: parsed, notice: "none" }
+    } catch (cause) {
+      // The plain-text path below carries the same bytes, so name the limit
+      // that was hit instead of blaming the formatting.
+      if (cause instanceof RichTooLargeError)
+        return { kind: "refuse", notice: "toolarge" }
+    }
+  }
+  // A table run may not hold a line break — the stored model forbids it — so
+  // the text goes in as one line and the notice says so. Refusing would lose
+  // it; flattening quietly would change it without saying.
+  if (where === "cell")
+    return {
+      kind: "inline",
+      content: lines.join(" "),
+      notice: lines.length > 1 ? "celllines" : dropped ? "plaintext" : "none",
+    }
+  if (lines.length === 1)
+    return {
+      kind: "inline",
+      content: lines[0],
+      notice: dropped ? "plaintext" : "none",
+    }
+  return {
+    kind: "blocks",
+    blocks: lines.map((line) => ({
+      type: "paragraph" as const,
+      content: line,
+    })),
+    notice: "plaintext",
+  }
+}
+
+/**
+ * Whether this keystroke would put a line break where one cannot go.
+ *
+ * Shift+Enter in a table cell is the shortest path to the refusal people
+ * actually hit: the break is rejected by the stored model, and what they saw
+ * was a banner about unsupported formatting, files and HTML — none of which
+ * they had used. Catching the keystroke says the true and much smaller thing.
+ */
+export function refusesLineBreak({
+  key,
+  shiftKey,
+  where,
+}: {
+  key: string
+  shiftKey: boolean
+  where: "body" | "cell" | "code"
+}): boolean {
+  return key === "Enter" && shiftKey && where === "cell"
+}
+
+/** Which of the three kinds of place the cursor is in. */
+function placeOf(type: string): "body" | "cell" | "code" {
+  if (type === "table") return "cell"
+  if (type === "codeBlock") return "code"
+  return "body"
+}
+
 export type NativeRichEditorProps = {
   document: RichDocument
   readOnly: boolean
@@ -88,12 +244,27 @@ export function NativeRichEditor({
 }: NativeRichEditorProps) {
   const t = useTranslations("NativeContent")
   const { resolvedTheme } = useTheme()
-  // "unsupported" = paste/edit refused (nothing inserted); "plaintext" = rich
-  // content fell back to a plain-text paste (formatting removed). Truthful copy
-  // per state — never claim text was kept when nothing was inserted.
-  const [notice, setNotice] = useState<"none" | "unsupported" | "plaintext">(
-    "none"
-  )
+  // What the LAST action did, and nothing older than that. "unsupported" =
+  // refused, nothing inserted; "toolarge" = refused for size rather than shape,
+  // which is a different thing to tell someone; "plaintext" = inserted, but
+  // formatting was dropped on the way in. Truthful copy per state — never claim
+  // text was kept when nothing was inserted.
+  //
+  // It clears when the next edit succeeds. Latching it forever meant one
+  // refused paste left a red "editing refused" banner over a document that was
+  // taking every keystroke perfectly well, which is how a stale notice becomes
+  // a bug report about the editor being broken.
+  const [notice, setNotice] = useState<Notice>("none")
+  /**
+   * Whether the edit guard refused the transaction we just asked for.
+   *
+   * Set inside `onBeforeChange`, which ProseMirror runs synchronously while the
+   * insert call below is still on the stack — so the paste can report what
+   * actually happened rather than what it intended. A held object rather than a
+   * ref, because the paste handler is built during render and reading a ref
+   * there is exactly what the refs rule forbids.
+   */
+  const [edits] = useState(() => ({ refused: false }))
   const localDrag = useRef(false)
   const callback = useRef(onChange)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -124,51 +295,46 @@ export function NativeRichEditor({
       pasteHandler: ({ event, editor }) => {
         event.preventDefault()
         const data = event.clipboardData
-        const plain = data ? data.getData("text/plain") : ""
-        const richOnly =
-          !!data &&
-          !data.files.length &&
-          Array.from(data.types).every((type) => type === "text/plain")
-        // First choice: parse text/plain as our restricted Markdown so pasted
-        // structure (lists, headings) is preserved when it is representable.
-        if (richOnly && plain) {
-          try {
-            const candidate = importMarkdown(plain)
-            setNotice("none")
-            editor.insertBlocks(
-              fromNeev(candidate) as Parameters<typeof editor.insertBlocks>[0],
-              editor.getTextCursorPosition().block,
-              "after"
-            )
-            return true
-          } catch {
-            // Not representable as our Markdown — fall through to plain text.
-          }
+        const action = choosePaste({
+          plain: data ? data.getData("text/plain") : "",
+          onlyPlain:
+            !!data &&
+            !data.files.length &&
+            Array.from(data.types).every((type) => type === "text/plain"),
+          where: placeOf(editor.getTextCursorPosition().block.type),
+        })
+        if (action.kind === "refuse") {
+          setNotice(action.notice)
+          return false
         }
-        // Fallback: if there is ANY plain text, paste it as plain paragraphs
-        // (formatting removed). Set the notice before inserting so the edit guard
-        // can override to "unsupported" if the result would exceed doc limits.
-        if (plain) {
-          try {
-            const paragraphs = plain
-              .replace(/\r\n?/g, "\n")
-              .split("\n")
-              .map((line) => ({ type: "paragraph" as const, content: line }))
-            setNotice("plaintext")
-            editor.insertBlocks(
-              paragraphs as Parameters<typeof editor.insertBlocks>[0],
-              editor.getTextCursorPosition().block,
-              "after"
+        edits.refused = false
+        try {
+          if (action.kind === "inline")
+            editor.insertInlineContent(
+              action.content as Parameters<typeof editor.insertInlineContent>[0]
             )
-            return true
-          } catch {
-            setNotice("unsupported")
-            return false
-          }
+          else
+            // Through the editor's own serializer and paste pipeline: one
+            // transaction that replaces the selection and splits the block at
+            // the cursor, rather than an insert bolted on after it.
+            // `pasteHTML` calls the ProseMirror view directly, so this handler
+            // is not re-entered.
+            editor.pasteHTML(
+              editor.blocksToFullHTML(
+                action.blocks as Parameters<typeof editor.blocksToFullHTML>[0]
+              )
+            )
+        } catch {
+          // Serializing or inserting can fail on content nothing anticipated.
+          // Say so where the reader is looking, rather than throwing out of a
+          // paste handler and taking the editor down with it.
+          setNotice("unsupported")
+          return false
         }
-        // No usable text (files-only / empty clipboard): refuse, insert nothing.
-        setNotice("unsupported")
-        return false
+        // The guard runs inside the insert above, so report what happened
+        // rather than what was intended.
+        setNotice(edits.refused ? "unsupported" : action.notice)
+        return true
       },
     })
     editor.replaceBlocks(
@@ -219,11 +385,17 @@ export function NativeRichEditor({
         try {
           toNeev(docToBlocks(tr.doc))
         } catch {
+          edits.refused = true
           setNotice("unsupported")
           return false
         }
+        // This edit was fine, so whatever the last one said is no longer true.
+        // The paste handler sets its own notice after its insert returns, so
+        // clearing here cannot erase a report about the paste in progress.
+        edits.refused = false
+        setNotice("none")
       }),
-    [editor]
+    [editor, edits]
   )
   const focused = useRef(false)
   useEffect(() => {
@@ -292,15 +464,39 @@ export function NativeRichEditor({
     <div
       ref={ownHost}
       className="neev-writing-canvas min-w-0 bg-background py-4"
+      onKeyDownCapture={(event) => {
+        if (readOnly) return
+        let where: "body" | "cell" | "code" = "body"
+        try {
+          where = placeOf(editor.getTextCursorPosition().block.type)
+        } catch {
+          // No cursor to speak of; nothing to refuse.
+          return
+        }
+        if (
+          !refusesLineBreak({ key: event.key, shiftKey: event.shiftKey, where })
+        )
+          return
+        // Refuse the keystroke itself rather than letting it build a document
+        // the guard will reject with a far vaguer complaint.
+        event.preventDefault()
+        event.stopPropagation()
+        setNotice("cellbreak")
+      }}
     >
-      {notice === "unsupported" && (
+      {(notice === "unsupported" || notice === "toolarge") && (
         <p role="alert" className="px-4 pb-3 text-sm text-destructive">
-          {t("richUnsupported")}
+          {t(notice === "toolarge" ? "richTooLarge" : "richUnsupported")}
         </p>
       )}
-      {notice === "plaintext" && (
+      {notice === "cellbreak" && (
         <p role="status" className="px-4 pb-3 text-sm text-muted-foreground">
-          {t("pastedPlainText")}
+          {t("cellNoLineBreak")}
+        </p>
+      )}
+      {(notice === "plaintext" || notice === "celllines") && (
+        <p role="status" className="px-4 pb-3 text-sm text-muted-foreground">
+          {t(notice === "celllines" ? "pastedCellLines" : "pastedPlainText")}
         </p>
       )}
       <input

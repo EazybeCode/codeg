@@ -182,7 +182,10 @@
     "renameFailed": "この名前は保存できませんでした。",
     "activityWorking": "作業中…",
     "activityRunningTool": "{name} を実行中…",
-    "activityElapsed": "{number}秒"
+    "activityElapsed": "{number}秒",
+    "richTooLarge": "貼り付けを拒否しました: この内容は1つのドキュメントの上限を超えています。分割して貼り付けてください。",
+    "pastedCellLines": "1行として貼り付けました: 表のセルは改行を保持できません。",
+    "cellNoLineBreak": "表のセルには改行を入れられません。新しい行を使うか、1行で記述してください。"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

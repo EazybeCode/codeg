@@ -182,7 +182,10 @@
     "renameFailed": "Dieser Name konnte nicht gespeichert werden.",
     "activityWorking": "Arbeitet…",
     "activityRunningTool": "Führt {name} aus…",
-    "activityElapsed": "{number}s"
+    "activityElapsed": "{number}s",
+    "richTooLarge": "Einfügen abgelehnt: Dieser Inhalt ist größer, als ein einzelnes Dokument fassen kann. Füge ihn in kleineren Teilen ein.",
+    "pastedCellLines": "Als eine Zeile eingefügt: Eine Tabellenzelle kann keine Zeilenumbrüche enthalten.",
+    "cellNoLineBreak": "Eine Tabellenzelle kann keinen Zeilenumbruch enthalten. Nutze eine neue Zeile oder schreibe den Text einzeilig."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

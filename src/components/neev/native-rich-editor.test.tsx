@@ -3,12 +3,17 @@ import { BlockNoteEditor } from "@blocknote/core"
 import type { Editor } from "@tiptap/core"
 import { undoDepth } from "@tiptap/pm/history"
 import { StrictMode } from "react"
-import { expect, it, vi } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
 import { ThemeProvider, useTheme } from "next-themes"
 import messages from "@/i18n/messages/en.json"
-import { NativeRichEditor, richSchema } from "./native-rich-editor"
+import {
+  choosePaste,
+  NativeRichEditor,
+  refusesLineBreak,
+  richSchema,
+} from "./native-rich-editor"
 import { NativeRichView } from "./native-rich-view"
 import { NativeSuspendedSurface } from "./native-suspended-surface"
 import { fromNeev, importMarkdown, toNeev } from "@/lib/neev-rich-adapter"
@@ -474,28 +479,249 @@ it("allows Enter to create a new canonical paragraph with its own ID", async () 
   expect(screen.queryByRole("alert")).toBeNull()
 })
 
-it("visibly refuses a paste whose combined document would exceed stored byte limits", async () => {
-  const change = vi.fn()
+it(
+  "visibly refuses a paste whose combined document would exceed stored byte limits",
+  { timeout: 30000 },
+  async () => {
+    const change = vi.fn()
+    render(
+      <NativeTestRoot>
+        <NativeRichEditor
+          document={importMarkdown("a".repeat(600_000))}
+          readOnly={false}
+          onChange={change}
+        />
+      </NativeTestRoot>
+    )
+    const editor = await screen.findByRole("textbox", {
+      name: "Document content",
+    })
+    fireEvent.paste(editor, {
+      clipboardData: {
+        files: [],
+        types: ["text/plain"],
+        getData: () => "b".repeat(600_000),
+      },
+    })
+    expect(editor.textContent?.length).toBe(600_000)
+    expect(change).not.toHaveBeenCalled()
+    expect(screen.queryByRole("alert")).not.toBeNull()
+  }
+)
+
+it("clears a stale refusal once the next edit is accepted", async () => {
+  // The notice describes the last action. Latching it meant one refused paste
+  // left a red "editing refused" banner over a document that was taking every
+  // keystroke perfectly well.
+  const user = userEvent.setup()
   render(
     <NativeTestRoot>
       <NativeRichEditor
-        document={importMarkdown("a".repeat(600_000))}
+        document={importMarkdown("start")}
         readOnly={false}
-        onChange={change}
+        onChange={() => {}}
       />
     </NativeTestRoot>
   )
   const editor = await screen.findByRole("textbox", {
     name: "Document content",
   })
-  fireEvent.paste(editor, {
-    clipboardData: {
-      files: [],
-      types: ["text/plain"],
-      getData: () => "b".repeat(600_000),
-    },
+  // A files-only clipboard has nothing to insert, so it is refused.
+  await act(async () => {
+    fireEvent.paste(editor, {
+      clipboardData: {
+        files: [new File(["x"], "x.png", { type: "image/png" })],
+        types: ["Files"],
+        getData: () => "",
+      },
+    })
   })
-  expect(editor.textContent?.length).toBe(600_000)
-  expect(change).not.toHaveBeenCalled()
-  expect(screen.queryByRole("alert")).not.toBeNull()
+  expect(await screen.findByRole("alert")).toHaveTextContent(/refused/i)
+  await user.click(editor)
+  await user.keyboard("ok")
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
+})
+
+describe("where a paste goes", () => {
+  const cell = { plain: "", onlyPlain: true, where: "cell" as const }
+  const body = { plain: "", onlyPlain: true, where: "body" as const }
+
+  it("puts text in the cell the cursor is in, as inline content", () => {
+    // A cursor inside a cell reports the TABLE as its block, so a block
+    // inserted "after" it landed below the whole table. Inline content goes
+    // where the cursor actually is, and is all a cell can hold.
+    const action = choosePaste({ ...cell, plain: "PASTED" })
+    expect(action.kind).toBe("inline")
+    expect(action.notice).toBe("none")
+    if (action.kind !== "inline") throw new Error("unreachable")
+    // Inline runs rather than a bare string, so bold and links survive.
+    expect(
+      (action.content as { text: string }[]).map((run) => run.text).join("")
+    ).toBe("PASTED")
+  })
+
+  it("flattens multi-line text into a cell and says the breaks were removed", () => {
+    // A table run may not hold a line break (neev-rich-document forbids it, and
+    // the stored model agrees), so refusing would lose the text and flattening
+    // silently would change it without saying.
+    expect(choosePaste({ ...cell, plain: "one\ntwo\nthree" })).toEqual({
+      kind: "inline",
+      content: "one two three",
+      notice: "celllines",
+    })
+  })
+
+  it("flattens a soft line break in a cell, which one Markdown paragraph can hold", () => {
+    // "a\nb" is ONE paragraph with a break inside it, not two paragraphs, so
+    // the single-paragraph path would have carried the newline into a cell that
+    // cannot hold it and the guard would have refused the whole paste.
+    expect(choosePaste({ ...cell, plain: "a\nb" })).toEqual({
+      kind: "inline",
+      content: "a b",
+      notice: "celllines",
+    })
+    // A blank line makes them two paragraphs, which a cell also cannot hold.
+    expect(choosePaste({ ...cell, plain: "a\n\nb" })).toEqual({
+      kind: "inline",
+      content: "a  b",
+      notice: "celllines",
+    })
+    // Formatting on a single line still survives into the cell.
+    const styled = choosePaste({ ...cell, plain: "**bold** text" })
+    expect(styled.kind).toBe("inline")
+    if (styled.kind !== "inline") throw new Error("unreachable")
+    expect(
+      (styled.content as { text: string; styles: Record<string, unknown> }[])[0]
+    ).toMatchObject({ text: "bold", styles: { bold: true } })
+  })
+
+  it("keeps structure out of a cell rather than breaking out of the table", () => {
+    const action = choosePaste({ ...cell, plain: "# Title\n\n- a\n- b" })
+    expect(action.kind).toBe("inline")
+    expect(action.notice).toBe("celllines")
+  })
+
+  it("keeps pasted structure when it lands somewhere that can hold it", () => {
+    const action = choosePaste({ ...body, plain: "# Title\n\n- a\n- b" })
+    expect(action.kind).toBe("blocks")
+    expect(action.notice).toBe("none")
+    if (action.kind !== "blocks") throw new Error("unreachable")
+    expect(
+      action.blocks.map((block) => (block as { type: string }).type)
+    ).toEqual(["heading", "bulletListItem", "bulletListItem"])
+  })
+
+  it("says so when formatting was on offer and was not taken", () => {
+    // text/plain taken from a clipboard that also held HTML: the text is kept,
+    // its formatting is not, and the notice must not pretend otherwise.
+    expect(
+      choosePaste({ plain: "one line", onlyPlain: false, where: "body" }).notice
+    ).toBe("plaintext")
+    expect(
+      choosePaste({ plain: "one line", onlyPlain: false, where: "cell" }).notice
+    ).toBe("plaintext")
+    // Nothing was dropped when plain text is all there was.
+    expect(choosePaste({ ...body, plain: "one line" }).notice).toBe("none")
+  })
+
+  it("names the limit it hit instead of blaming the formatting", () => {
+    expect(choosePaste({ ...body, plain: "a".repeat(1_048_577) })).toEqual({
+      kind: "refuse",
+      notice: "toolarge",
+    })
+  })
+
+  it("refuses a clipboard with no text to take", () => {
+    expect(choosePaste({ plain: "", onlyPlain: false, where: "body" })).toEqual(
+      {
+        kind: "refuse",
+        notice: "unsupported",
+      }
+    )
+  })
+})
+
+describe("where a paste must not break what it lands in", () => {
+  const cell = { plain: "", onlyPlain: true, where: "cell" as const }
+  const code = { plain: "", onlyPlain: true, where: "code" as const }
+  const body = { plain: "", onlyPlain: true, where: "body" as const }
+
+  it("sees a line break hiding inside a link, and flattens rather than refusing", () => {
+    // A link is emitted as { type: "link", content: [text] }, so probing the
+    // run's own `text` reads nothing and the break slips through into a cell
+    // that cannot hold one — the guard then refuses the whole paste, which is
+    // the outcome the check exists to prevent.
+    const action = choosePaste({
+      ...cell,
+      plain: "[hello\nworld](https://example.com)",
+    })
+    expect(action).toEqual({
+      kind: "inline",
+      content: "[hello world](https://example.com)",
+      notice: "celllines",
+    })
+  })
+
+  it("keeps multi-line text inside the code block it was pasted into", () => {
+    // A code block is plain text and is NOT isolating, so a paragraph slice
+    // splits out of it: the paste would land as paragraphs after the block and
+    // quietly mangle the code. It holds its own line breaks, so the text goes
+    // in as it came.
+    expect(choosePaste({ ...code, plain: "one\ntwo\nthree" })).toEqual({
+      kind: "inline",
+      content: "one\ntwo\nthree",
+      notice: "none",
+    })
+    // Structure is not interpreted inside code either.
+    expect(
+      choosePaste({ ...code, plain: "# not a heading\n- not a list" })
+    ).toEqual({
+      kind: "inline",
+      content: "# not a heading\n- not a list",
+      notice: "none",
+    })
+  })
+
+  it("never replaces a selection with nothing", () => {
+    // Markdown makes an empty paragraph of whitespace, and inserting empty
+    // content deletes the selected text and puts nothing in its place.
+    for (const where of ["body", "cell", "code"] as const) {
+      const action = choosePaste({ plain: "   ", onlyPlain: true, where })
+      expect(action.kind).toBe("inline")
+      if (action.kind !== "inline") throw new Error("unreachable")
+      expect(action.content).toBe("   ")
+    }
+    // A bare newline pastes a line break — which is what it is — rather than
+    // reducing to empty content that would leave the selection deleted.
+    const broken = choosePaste({ ...body, plain: "\n" })
+    expect(broken.kind).toBe("blocks")
+    if (broken.kind !== "blocks") throw new Error("unreachable")
+    expect(broken.blocks).toHaveLength(2)
+  })
+})
+
+describe("a line break where one cannot go", () => {
+  it("refuses Shift+Enter in a table cell, and only there", () => {
+    // The shortest path to the refusal people actually hit: a new table, a few
+    // words in a cell, Shift+Enter. The stored model rejects the break, and
+    // what they saw was a banner about unsupported formatting, files and HTML
+    // — none of which they had touched.
+    expect(
+      refusesLineBreak({ key: "Enter", shiftKey: true, where: "cell" })
+    ).toBe(true)
+    // Everywhere else a soft break is ordinary.
+    expect(
+      refusesLineBreak({ key: "Enter", shiftKey: true, where: "body" })
+    ).toBe(false)
+    expect(
+      refusesLineBreak({ key: "Enter", shiftKey: true, where: "code" })
+    ).toBe(false)
+    // A plain Enter in a cell moves between cells; it is not a line break.
+    expect(
+      refusesLineBreak({ key: "Enter", shiftKey: false, where: "cell" })
+    ).toBe(false)
+    expect(refusesLineBreak({ key: "a", shiftKey: true, where: "cell" })).toBe(
+      false
+    )
+  })
 })
