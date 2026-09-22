@@ -37,15 +37,29 @@ async function preflight() {
   if (reachable.error)
     return { ready: false, why: `nothing answering on ${BASE_URL}: ${reachable.error.code ?? reachable.error.message}` }
 
-  const page = await fetch(new URL("/document-engine/", BASE_URL), {
+  /**
+   * Probe the engine's API, not the bare prefix.
+   *
+   * `/document-engine/` itself 404s on a perfectly healthy candidate — the
+   * export has no page at the bare prefix and the proxy has no route for it.
+   * Using that as the liveness check made this refuse to run against a live
+   * engine, which is the worst way for a preflight to be wrong: it looks like
+   * a considered decision not to run.
+   *
+   * The API path distinguishes the two states properly. A candidate answers it,
+   * with 401 when unauthenticated — which is a *present* engine refusing, and
+   * is exactly what a correctly gated deployment should say. Only a 404 there
+   * means nothing is mounted.
+   */
+  const probe = await fetch(new URL("/document-engine/api/v1.0/config/", BASE_URL), {
     redirect: "manual",
   }).catch(() => null)
-  if (!page || page.status === 404)
+  if (!probe || probe.status === 404)
     return {
       ready: false,
-      why: "/document-engine/ is not served — this looks like the baseline, not the candidate",
+      why: "/document-engine/api/v1.0/ is not mounted — this looks like the baseline, not the candidate",
     }
-  return { ready: true }
+  return { ready: true, engineProbe: probe.status }
 }
 
 async function main() {
