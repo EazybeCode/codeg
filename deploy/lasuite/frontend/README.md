@@ -41,7 +41,7 @@ a = (e = '1.0') => `${i()}/api/v${e}/`
 
 and, for the socket, `"wss":"ws"}://${window.location.host}/document-engine/collaboration/ws`.
 
-### What the backend must not do
+### What the backend must not do — agreed, and now enforced there
 
 The prefix is added on this side, once. Two ways to break that:
 
@@ -58,6 +58,20 @@ The prefix is added on this side, once. Two ways to break that:
 `NEXT_PUBLIC_API_ORIGIN` keeps its upstream meaning: an origin, scheme and host
 only, never a path. The embedded build leaves it empty. The prefix lives in
 `NEXT_PUBLIC_BACKEND_BASE_PATH`.
+
+Both are settled rather than assumed. The backend work (`deploy/lasuite/backend`,
+commit `e6b06bbb`) confirmed the concatenation semantics and went further than
+agreement: it leaves `MEDIA_BASE_URL` and `COLLABORATION_WS_URL` unset, verified
+in the running image (`MEDIA_URL == "/media/"`, `MEDIA_BASE_URL is None`), and
+**refuses to start** if either is set, with the reason on stderr. So the
+double-prefix failure is not a convention someone has to remember — it is a
+container that will not boot.
+
+`SESSION_COOKIE_NAME` stays `docs_sessionid` (y-provider looks for that exact
+string), with cookies scoped `Path=/document-engine/`, `SameSite=Lax`, `Secure`
+in production. No Docs frontend or nginx service exists in that compose, and
+nothing in it publishes a port: Neev serves this artifact and is the sole public
+entry.
 
 ## The patch series
 
@@ -209,4 +223,10 @@ Stated plainly, because a gap read as covered is worse than a gap:
 - **The full existing test suite never completed** — the disk filled during the
   run. Only the 13 new tests, the type-check and the lint were run to completion.
 - **Attachment upload is untested**, as it was in the preview.
-- The serving config in `serving/` has not been run by an nginx anywhere.
+- The serving config in `serving/` has not been run by an nginx anywhere. It is
+  a statement of what the artifact needs, not a tested file — and the framing
+  headers in it are load-bearing. The framed document is the static export, so
+  `frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN` have to be set
+  there; the backend keeps upstream's `frame-ancestors 'none'`, which is
+  harmless only because its responses are fetched, never framed. Point the
+  iframe at a backend-served URL and that policy refuses it.
