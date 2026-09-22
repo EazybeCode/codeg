@@ -149,7 +149,7 @@ pub(super) async fn update(
     Ok(private_json(node_dto(updated)?))
 }
 
-pub(super) async fn organization_get(
+pub(crate) async fn organization_get(
     state: &ServerState,
     headers: &HeaderMap,
 ) -> Result<OrgContext, ApiError> {

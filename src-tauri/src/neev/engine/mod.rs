@@ -13,10 +13,13 @@
 //! native engine and are not migrated.
 #![allow(dead_code)]
 
+pub(crate) mod assets;
 pub(crate) mod binding;
 pub(crate) mod decision;
 pub(crate) mod identity;
+pub(crate) mod proxy;
 pub(crate) mod routes;
+pub(crate) mod transport;
 pub(crate) mod upstream;
 
 #[cfg(test)]

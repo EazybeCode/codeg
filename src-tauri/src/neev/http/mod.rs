@@ -4,7 +4,7 @@ use axum::{
     extract::State,
     http::{header, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, patch, post},
+    routing::{any, delete, get, patch, post},
     Json, Router,
 };
 use serde::Serialize;
@@ -14,7 +14,7 @@ use crate::neev::{auth::github, error::AuthError, startup::ServerState};
 mod agent;
 mod agent_sessions;
 mod auth;
-mod catalog;
+pub(crate) mod catalog;
 mod content;
 #[cfg(test)]
 mod content_tests;
@@ -303,6 +303,21 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/neev-auth/confirm.css", get(static_files::asset))
         .route("/neev-auth/invite.js", get(static_files::asset))
         .route("/neev-auth/invite.css", get(static_files::asset));
+
+    // The document engine owns one prefix and is mounted only when configured.
+    // Unmounted, `/document-engine/*` is simply not a route, so an engine that
+    // is off cannot be probed for what it would have served. Caddy already
+    // proxies every app path to this server, so no vhost change is needed.
+    if state.engine.is_some() {
+        router = router.route(
+            "/document-engine/{*rest}",
+            any(crate::neev::engine::proxy::handle),
+        );
+        router = router.route(
+            "/document-engine",
+            any(crate::neev::engine::proxy::handle),
+        );
+    }
     if email_available {
         router = router
             .route("/api/neev/email/login", post(auth::email_login))

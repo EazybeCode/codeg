@@ -31,6 +31,10 @@ pub(crate) struct ServerState {
     pub(crate) oauth: oauth::Service,
     pub(crate) magic: Option<magic::Service>,
     pub(crate) mail: Option<mail::Service>,
+    /// The document engine, built once at startup when it is configured.
+    /// Holds the forwarding client and the minted-session cache, so it must be
+    /// shared state rather than rebuilt per request.
+    pub(crate) engine: Option<super::engine::proxy::Engine>,
     /// Personal-agent execution runtime. Production is always `Disabled` (the
     /// config layer refuses `NEEV_RUNTIME_ENABLED`); tests inject a runtime.
     pub(crate) agents: Arc<super::agents::execution::AgentRuntime>,
@@ -84,6 +88,16 @@ impl ServerState {
                 mail.clone(),
             )
         });
+        // Built once, because it owns the forwarding client and the
+        // minted-session cache. A configured-but-unbuildable engine is a
+        // startup failure rather than a silently absent one, so a bad artifact
+        // root or credential is noticed here and not as confusing 404s later.
+        let engine = config
+            .engine
+            .as_ref()
+            .map(|engine| super::engine::proxy::Engine::new(engine, &config.origin))
+            .transpose()
+            .map_err(|_| ContentError::Storage)?;
         Ok(Self {
             database,
             config,
@@ -100,6 +114,7 @@ impl ServerState {
             oauth,
             magic,
             mail,
+            engine,
         })
     }
 
@@ -127,6 +142,7 @@ impl ServerState {
             oauth,
             magic: None,
             mail: None,
+            engine: None,
         }
     }
 
@@ -155,6 +171,7 @@ impl ServerState {
             oauth,
             magic: Some(magic),
             mail: None,
+            engine: None,
         })
     }
 
@@ -183,6 +200,7 @@ impl ServerState {
             oauth,
             magic: None,
             mail: Some(mail),
+            engine: None,
         })
     }
 
