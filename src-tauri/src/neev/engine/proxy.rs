@@ -288,19 +288,21 @@ pub(crate) async fn authorize(
         | Some(Target::Media { resource, .. }) => grant_for(state, actor, resource).await?,
         _ => (Grant::None, false),
     };
-    let keys = match target {
-        // Only the JSON policies inspect a body. An attachment upload is
-        // multipart, so parsing it as JSON would fail and refuse every upload —
-        // it is bounded by size and by its own route instead.
-        Some(Target::Document {
-            body: routes::Body::TitleOnly,
-            ..
-        })
-        | Some(Target::Document {
-            body: routes::Body::Content,
-            ..
-        }) => body_keys(body),
-        _ => Some(Vec::new()),
+    // Which policy applies, if any. Derived from the target rather than
+    // enumerated per variant: listing the JSON policies by name meant a policy
+    // added later was silently never inspected, which is exactly what happened
+    // to the comment bodies — they were bounded on paper and forwarded
+    // unchecked in fact.
+    let policy = match target {
+        Some(Target::Document { body, .. }) | Some(Target::AccountWrite { body }) => Some(*body),
+        _ => None,
+    };
+    let keys = match policy {
+        // An attachment upload is multipart, so parsing it as JSON would fail
+        // and refuse every upload; it is bounded by size and by its own route.
+        // A policy that permits nothing has nothing to check.
+        None | Some(routes::Body::Attachment) | Some(routes::Body::None) => Some(Vec::new()),
+        Some(_) => body_keys(body),
     };
     // A body we could not parse into a checkable key set is refused where a
     // field policy applies, rather than forwarded unchecked.
