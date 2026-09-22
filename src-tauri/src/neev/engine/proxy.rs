@@ -270,27 +270,25 @@ pub(crate) async fn assertion(state: &ServerState, actor: &OrgContext) -> Assert
     identity::assertion(&state.database, actor).await
 }
 
-/// Classify, authorize and decide. Separated from the forwarding so the handler
-/// and the socket upgrade share one path to a decision.
+/// Authorize a classified request once the body (if any) is in hand.
+///
+/// Split from classification deliberately: the caller authenticates and
+/// classifies **before** reading a body, so an unauthenticated or unroutable
+/// request never causes bytes to be buffered on its behalf.
 pub(crate) async fn authorize(
     state: &ServerState,
-    actor: Option<&OrgContext>,
-    method: &Method,
-    uri: &Uri,
+    actor: &OrgContext,
+    target: Option<&Target>,
     body: &[u8],
-) -> Result<(Decision, Option<Target>), ApiError> {
-    let target = routes::classify(method.as_str(), uri.path(), uri.query());
-    let Some(actor) = actor else {
-        return Ok((Decision::Refuse(Refusal::Unauthenticated), target));
-    };
-    let (grant, engine_backed) = match target.as_ref() {
+) -> Result<Decision, ApiError> {
+    let (grant, engine_backed) = match target {
         Some(Target::Editor { resource })
         | Some(Target::Document { resource, .. })
         | Some(Target::Collaboration { resource })
         | Some(Target::Media { resource, .. }) => grant_for(state, actor, resource).await?,
         _ => (Grant::None, false),
     };
-    let keys = match target.as_ref() {
+    let keys = match target {
         // Only the JSON policies inspect a body. An attachment upload is
         // multipart, so parsing it as JSON would fail and refuse every upload —
         // it is bounded by size and by its own route instead.
@@ -307,12 +305,9 @@ pub(crate) async fn authorize(
     // A body we could not parse into a checkable key set is refused where a
     // field policy applies, rather than forwarded unchecked.
     let Some(keys) = keys else {
-        return Ok((Decision::Refuse(Refusal::Body), target));
+        return Ok(Decision::Refuse(Refusal::Body));
     };
-    Ok((
-        decide(target.as_ref(), true, grant, engine_backed, &keys),
-        target,
-    ))
+    Ok(decide(target, true, grant, engine_backed, &keys))
 }
 
 /// The engine's HTTP handler.
@@ -325,34 +320,44 @@ pub(crate) async fn handle(
     strip(&mut parts.headers);
     let engine = state.engine.as_ref().ok_or(ApiError::NotFound)?;
 
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
-        .await
-        .map_err(|_| ApiError::Invalid)?;
-
-    let actor = crate::neev::http::catalog::organization_get(&state, &parts.headers)
-        .await
-        .ok();
-    let (decision, target) = authorize(
-        &state,
-        actor.as_ref(),
-        &parts.method,
-        &parts.uri,
-        bytes.as_ref(),
-    )
-    .await?;
-
-    if !origin_ok(engine, &parts.method, target.as_ref(), &parts.headers) {
-        return Err(ApiError::Forbidden);
-    }
-
+    // Classify and authenticate **before** the body is read. An unauthenticated
+    // caller, or one naming a route that is not on the allowlist, must not be
+    // able to make this process buffer megabytes on their behalf.
+    let target = routes::classify(parts.method.as_str(), parts.uri.path(), parts.uri.query());
     // The editor shell is the one route whose failures are rendered inside an
     // iframe, where a JSON body reads as a blank document.
     let shell = matches!(target, Some(Target::Editor { .. }));
-    if shell {
-        if let Decision::Refuse(refusal) = decision {
-            return Ok(editor_error(refuse(refusal)));
+    let fail = |error: ApiError| -> Result<Response, ApiError> {
+        if shell {
+            Ok(editor_error(error))
+        } else {
+            Err(error)
         }
+    };
+
+    if target.is_none() {
+        return fail(ApiError::NotFound);
     }
+    let Some(actor) = crate::neev::http::catalog::organization_get(&state, &parts.headers)
+        .await
+        .ok()
+    else {
+        return fail(ApiError::Unauthorized);
+    };
+    if !origin_ok(engine, &parts.method, target.as_ref(), &parts.headers) {
+        return fail(ApiError::Forbidden);
+    }
+
+    // Only now, with a known route and a known caller.
+    let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
+        Ok(bytes) => bytes,
+        Err(_) => return fail(ApiError::Invalid),
+    };
+
+    let decision = match authorize(&state, &actor, target.as_ref(), bytes.as_ref()).await {
+        Ok(decision) => decision,
+        Err(error) => return fail(error),
+    };
 
     let served = match decision {
         Decision::Refuse(refusal) => Err(refuse(refusal)),
@@ -360,14 +365,12 @@ pub(crate) async fn handle(
         Decision::Forward { resource: Some(ref resource), .. }
             if matches!(target, Some(Target::Media { .. })) =>
         {
-            let actor = actor.ok_or(ApiError::Unauthorized)?;
             let Some(Target::Media { key, .. }) = target.as_ref() else {
-                return Err(ApiError::NotFound);
+                return fail(ApiError::NotFound);
             };
             media(engine, resource, key, &assertion(&state, &actor).await).await
         }
         Decision::Forward { resource, role } => {
-            let actor = actor.ok_or(ApiError::Unauthorized)?;
             let assertion = assertion(&state, &actor).await;
             // Project before forwarding, not only before a socket. A non-creator
             // has no Docs access row of their own, so upstream would answer 403
@@ -414,7 +417,6 @@ pub(crate) async fn handle(
             Ok(response)
         }
         Decision::Upgrade { resource, role } => {
-            let actor = actor.ok_or(ApiError::Unauthorized)?;
             upgrade(&state, parts, actor, resource, role).await
         }
     };
