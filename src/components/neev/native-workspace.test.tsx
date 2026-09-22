@@ -594,8 +594,10 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
     await screen.findByRole("textbox", { name: "Message" }),
     "wip"
   )
-  // Switching to another item does NOT ask to discard anything, because
-  // nothing is discarded: the first conversation stays mounted behind its tab.
+  // A second tab is asked for, so the first conversation stays mounted behind
+  // its own tab and nothing is discarded — hence no question. Browsing without
+  // asking would REPLACE this panel, and that path is guarded instead.
+  await user.click(screen.getByRole("button", { name: "New tab" }))
   await user.click(
     within(screen.getByRole("navigation", { name: "Projects" })).getByRole(
       "button",
@@ -622,6 +624,9 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
       "wip"
     )
   )
+  // Creating fills the tab in front, so step off the half-written one first —
+  // the guarded path that would ask about it has a test of its own.
+  await user.click(screen.getByRole("tab", { name: /Beta/ }))
   // Creating a conversation makes it at once — no name asked for — and
   // reveals it in the sidebar under the placeholder it was given.
   await user.click(screen.getByRole("button", { name: "Actions for Space" }))
@@ -630,6 +635,242 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
   await within(screen.getByRole("navigation", { name: "Projects" })).findByRole(
     "button",
     { name: "New chat" }
+  )
+  expect(mock.unknown).toEqual([])
+})
+
+/** Two conversations in one project, which is all the navigation tests need. */
+function twoChats() {
+  const chatA = resource
+  const chatB = {
+    ...resource,
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    title: "Beta",
+  }
+  return {
+    chatA,
+    chatB,
+    routes: {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+      "GET /api/neev/nodes/7/documents": () =>
+        json({ items: [], nextAfter: null }),
+      "GET /api/neev/nodes": () =>
+        json({
+          nodes: [
+            {
+              id: 7,
+              orgId: 3,
+              kind: "project",
+              parentId: null,
+              name: "Space",
+              revision: "1",
+            },
+          ],
+          nextAfter: null,
+        }),
+      "GET /api/neev/nodes/7/chats": () =>
+        json({ items: [chatA, chatB], nextAfter: null }),
+      [`GET /api/neev/resources/${chatA.id}`]: () => json(chatA),
+      [`GET /api/neev/resources/${chatB.id}`]: () => json(chatB),
+      [`GET /api/neev/chats/${chatA.id}/messages`]: () =>
+        json({ items: [], nextAfter: null }),
+      [`GET /api/neev/chats/${chatB.id}/messages`]: () =>
+        json({ items: [], nextAfter: null }),
+    },
+  }
+}
+
+it("asks before browsing away from an unsent message, and means both answers", async () => {
+  // Browsing replaces the panel in front, which unmounts it — exactly as
+  // destructive as closing the tab, so it asks the same question.
+  const mock = mockNativeSession(undefined, twoChats().routes)
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Alpha" }))
+  await user.type(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "half a thought"
+  )
+
+  // Going to what is ALREADY in front destroys nothing, so it asks nothing.
+  await user.click(within(tree).getByRole("button", { name: "Alpha" }))
+  expect(screen.queryByRole("dialog")).toBeNull()
+
+  // Going somewhere else does ask — and Keep editing means keep: the message,
+  // the tab, and the place in the strip are all exactly as they were.
+  await user.click(within(tree).getByRole("button", { name: "Beta" }))
+  expect(await screen.findByRole("dialog")).toHaveTextContent(
+    "Discard unsaved changes?"
+  )
+  await user.click(screen.getByRole("button", { name: "Keep editing" }))
+  expect(screen.getAllByRole("tab")).toHaveLength(1)
+  expect(screen.getByRole("tab", { name: /Alpha/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+    "half a thought"
+  )
+
+  // Asked again, and answered the other way: the conversation is replaced in
+  // place rather than opened beside what was there.
+  await user.click(within(tree).getByRole("button", { name: "Beta" }))
+  expect(await screen.findByRole("dialog")).toBeVisible()
+  await user.click(screen.getByRole("button", { name: "Discard changes" }))
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: /Beta/ })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    )
+  )
+  expect(screen.getAllByRole("tab")).toHaveLength(1)
+  expect(screen.queryByRole("tab", { name: /Alpha/ })).toBeNull()
+  expect(mock.unknown).toEqual([])
+})
+
+it("asks before browsing away from an unsent agent prompt", async () => {
+  // An unsent prompt is work in progress too: the tab it is written in is
+  // replaced by browsing, so the same question is put about it.
+  const SESSION = "44444444-4444-4444-8444-444444444444"
+  const mock = mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () =>
+      json({
+        sessions: [
+          {
+            id: SESSION,
+            orgId: 3,
+            ownerId: 1,
+            title: "Parser chat",
+            provider: "claude",
+            model: "default",
+            boundChatId: null,
+            nodeId: 7,
+            archived: false,
+            revision: "1",
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ],
+      }),
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [
+          {
+            provider: "claude",
+            state: "connected",
+            accountLabel: "sagar@example.test",
+            checkedAt: 1,
+            errorCode: null,
+          },
+        ],
+      }),
+    [`GET /api/neev/agent/sessions/${SESSION}/turns`]: () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  const tree = await screen.findByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Space" }))
+  await user.click(
+    await within(tree).findByRole("button", { name: /Parser chat/ })
+  )
+  await user.type(
+    await screen.findByRole("textbox", { name: "Ask the agent" }),
+    "half a prompt"
+  )
+
+  await user.click(within(tree).getByRole("button", { name: "Space" }))
+  expect(await screen.findByRole("dialog")).toHaveTextContent(
+    "Discard unsaved changes?"
+  )
+  await user.click(screen.getByRole("button", { name: "Keep editing" }))
+  expect(screen.getByRole("tab", { name: /Parser chat/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
+  expect(screen.getByRole("textbox", { name: "Ask the agent" })).toHaveValue(
+    "half a prompt"
+  )
+
+  await user.click(within(tree).getByRole("button", { name: "Space" }))
+  await user.click(
+    await screen.findByRole("button", { name: "Discard changes" })
+  )
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: /Space/ })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    )
+  )
+  expect(screen.queryByRole("tab", { name: /Parser chat/ })).toBeNull()
+  expect(mock.unknown).toEqual([])
+})
+
+it("consumes the blank tab when the thing chosen is already open", async () => {
+  // Ask for somewhere to put something, choose something already open, and
+  // the blank goes with it: an orphan nobody asked to keep is worse than the
+  // second tab they did.
+  const mock = mockNativeSession(undefined, twoChats().routes)
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Alpha" }))
+  await user.click(screen.getByRole("button", { name: "New tab" }))
+  // The blank says what it is rather than looking like a panel that failed.
+  expect(screen.getByRole("tab", { name: "New tab" })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
+  expect(
+    screen.getByText("Choose a document or a chat to open here.")
+  ).toBeVisible()
+
+  await user.click(within(tree).getByRole("button", { name: "Alpha" }))
+  await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(1))
+  expect(screen.queryByRole("tab", { name: "New tab" })).toBeNull()
+  expect(screen.getByRole("tab", { name: /Alpha/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
+
+  // Filled rather than added to: a blank asked for and then used up leaves the
+  // strip one tab longer, not two.
+  await user.click(screen.getByRole("button", { name: "New tab" }))
+  await user.click(within(tree).getByRole("button", { name: "Beta" }))
+  await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2))
+  expect(screen.getByRole("tab", { name: /Beta/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
   )
   expect(mock.unknown).toEqual([])
 })
@@ -832,6 +1073,8 @@ it("gives a restored tab the icon of what it actually is", async () => {
   mountWorkspace()
   // The document tab is the restored one; the chat is opened from the tree.
   await screen.findByRole("tab", { name: /Launch plan/ })
+  // A second tab is asked for; browsing alone replaces what is in front.
+  await user.click(screen.getByRole("button", { name: "New tab" }))
   await user.click(await screen.findByRole("button", { name: "New chat" }))
 
   const iconOf = (name: RegExp) => {
@@ -1228,6 +1471,8 @@ it("marks only the active tab's item as current in the tree", async () => {
   const tree = await screen.findByRole("navigation", { name: "Projects" })
   await user.click(await within(tree).findByRole("button", { name: "Space" }))
   await user.click(await within(tree).findByRole("button", { name: "Brief" }))
+  // Browsing replaces what is in front, so a SECOND tab is asked for.
+  await user.click(screen.getByRole("button", { name: "New tab" }))
   await user.click(
     await within(tree).findByRole("button", { name: /Parser chat/ })
   )

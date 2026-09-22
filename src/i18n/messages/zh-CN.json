@@ -335,7 +335,10 @@
     "joinedOrgNotice": "已加入 {name}。",
     "switchToJoinedOrg": "切换到 {name}",
     "joinAnother": "加入其他",
-    "invalidJoinCode": "该代码无效、已停用或不可用。"
+    "invalidJoinCode": "该代码无效、已停用或不可用。",
+    "newTab": "新建标签",
+    "emptyTab": "新建标签",
+    "emptyTabHint": "选择要在这里打开的文档或聊天。"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作区聊天上下文不可用。",

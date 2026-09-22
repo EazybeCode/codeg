@@ -7,6 +7,8 @@ import {
   closeTab as closeWorkspaceTab,
   closeTabByKey,
   openTab as openWorkspaceTab,
+  sameTab as sameWorkspaceTab,
+  openTabInPlace as openWorkspaceTabInPlace,
   readTabs,
   tabKey,
   writeTabs,
@@ -165,6 +167,9 @@ function TabIcon({
   resourceKind?: NativeResourceKind
 }) {
   const className = "size-3.5 shrink-0"
+  // Nothing in it yet, so it shows the gesture that made it rather than
+  // borrowing the icon of a kind it has not been given.
+  if (tab.kind === "empty") return <Plus aria-hidden className={className} />
   if (tab.kind === "project")
     return <Layers3 aria-hidden className={className} />
   if (tab.kind === "agent" || tab.kind === "draft")
@@ -792,10 +797,14 @@ function WorkspaceContent() {
   /**
    * Do it. Nothing is being destroyed.
    *
-   * Opening a tab, switching to one, or opening a dialog leaves every other
-   * panel mounted and holding its draft, so there is nothing to ask the reader
-   * about. Only closing a tab (`guardTab`) or leaving the workspace
-   * (`guardAll`) destroys anything.
+   * Switching between open tabs, asking for a blank one, or opening a dialog
+   * leaves every panel mounted and holding its draft, so there is nothing to
+   * ask the reader about.
+   *
+   * NOT for navigation any more. `showTab` replaces the front tab, which
+   * unmounts its panel, so it guards that tab itself — see the note there.
+   * Closing (`guardTab`) and leaving the workspace (`guardAll`) still destroy
+   * things, and still ask.
    */
   const keepAll = (action: () => void) => action()
   const guards = useRef(new Map<string, ContentNavigationGuard>())
@@ -907,23 +916,76 @@ function WorkspaceContent() {
     [commitTabs]
   )
 
-  /** Bring a tab to the front, adding it if it is not open yet. */
+  /**
+   * Go to something.
+   *
+   * Replaces what is in front rather than adding to the strip — browsing a
+   * sidebar should not leave a trail of tabs behind it. Something already open
+   * is brought forward instead of opened twice, and a second tab is a thing
+   * the reader asks for with New tab.
+   */
   const showTab = useCallback(
     (tab: WorkspaceTab) => {
-      const next = openWorkspaceTab(tabsRef.current, tab)
-      // Refused at the limit rather than evicting something that may hold
-      // unsaved work; the reader closes a tab themselves.
-      if (next.refused) {
-        setTabLimit(true)
+      // Captured, not re-read inside `go`. The prompt sits between the two,
+      // and a guard that asked about one tab must not act on another.
+      const open = tabsRef.current
+      const activeIndex = activeTabRef.current
+      const front = open[activeIndex]
+      const alreadyOpen = open.some((item) => sameWorkspaceTab(item, tab))
+      const go = () => {
+        const next = openWorkspaceTabInPlace(open, tab, activeIndex)
+        setTabLimit(false)
+        commitTabs(next.tabs, next.active)
+      }
+
+      /*
+       * Replacing is destroying.
+       *
+       * While this ADDED a tab, nothing was at risk: every panel stayed
+       * mounted and kept its draft, so navigation needed no permission. Now
+       * the front tab is replaced and its panel unmounts, which is exactly as
+       * destructive as closing it — so it asks the same question closing does.
+       *
+       * Only when something actually goes away: going to the tab already in
+       * front, or to one already open elsewhere, destroys nothing.
+       */
+      const replacing =
+        front !== undefined &&
+        !sameWorkspaceTab(front, tab) &&
+        front.kind !== "empty" &&
+        !alreadyOpen
+      if (!replacing) {
+        go()
         return
       }
-      setTabLimit(false)
-      commitTabs(next.tabs, next.active)
+      guardTab(tabKey(front), () => {
+        // Here and only here does a panel actually go away, so here and only
+        // here does its guard. On every other path the tab stays mounted, and
+        // dropping a live guard would let the next replacement through unasked.
+        guards.current.delete(tabKey(front))
+        go()
+      })
     },
-    [commitTabs]
+    [commitTabs, guardTab]
   )
 
-  /** Close a tab. The only destructive one of these, so the only guarded one. */
+  /**
+   * Ask for somewhere else to put the next thing.
+   *
+   * The only way the strip grows. It stands empty until something is chosen,
+   * and that choice fills it rather than opening yet another tab.
+   */
+  const addEmptyTab = useCallback(() => {
+    const next = openWorkspaceTab(tabsRef.current, { kind: "empty" })
+    if (next.refused) {
+      setTabLimit(true)
+      return
+    }
+    setTabLimit(false)
+    commitTabs(next.tabs, next.active)
+  }, [commitTabs])
+
+  /** Close a tab. Guarded, like the replacement that `showTab` performs. */
   const dismissTab = useCallback(
     (index: number) => {
       const tab = tabsRef.current[index]
@@ -1169,6 +1231,9 @@ function WorkspaceContent() {
           agentSessions.find((item) => item.id === tab.sessionId)?.title ??
           t("loading")
         )
+      // Asked for and not yet filled. It says what it is, rather than falling
+      // through to the draft's name and claiming to be a chat nobody started.
+      if (tab.kind === "empty") return t("emptyTab")
       // Provider-neutral: which one answers is chosen inside the chat and can
       // change before the first message, so the tab cannot claim one yet.
       return c("newAgentChat")
@@ -1478,8 +1543,10 @@ function WorkspaceContent() {
         ? front.nodeId
         : front.kind === "draft"
           ? front.nodeId
-          : (agentSessions.find((item) => item.id === front.sessionId)
-              ?.nodeId ?? null)
+          : front.kind === "agent"
+            ? (agentSessions.find((item) => item.id === front.sessionId)
+                ?.nodeId ?? null)
+            : null
   const frontResourceId = front?.kind === "resource" ? front.resourceId : null
   const frontSessionId = front?.kind === "agent" ? front.sessionId : null
 
@@ -1745,48 +1812,73 @@ function WorkspaceContent() {
             </p>
           )}
           {tabs.length > 0 && (
-            <div
-              role="tablist"
-              aria-label={t("openTabs")}
-              className="flex h-9 shrink-0 items-center gap-0.5 overflow-x-auto border-b px-1.5"
-            >
-              {tabs.map((tab, index) => {
-                const current = index === activeTab
-                return (
-                  <div
-                    key={tabKey(tab)}
-                    className={cn(
-                      "group/tab flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[13px]",
-                      current
-                        ? "bg-accent text-foreground"
-                        : "text-muted-foreground hover:bg-accent/50"
-                    )}
-                  >
-                    <button
-                      role="tab"
-                      aria-selected={current}
-                      onClick={() => {
-                        activeTabRef.current = index
-                        setActiveTab(index)
-                        setVisited(
-                          (old) => new Set([...old, tabKey(tabs[index])])
-                        )
-                      }}
-                      className="flex min-w-0 items-center gap-1.5 rounded focus-visible:ring-2 focus-visible:ring-ring"
+            <div className="flex h-9 shrink-0 items-center gap-0.5 border-b px-1.5">
+              {/*
+                The list holds tabs and nothing else — New tab is a sibling of
+                it rather than a child, so the strip does not announce a
+                control as one of the things that are open.
+              */}
+              <div
+                role="tablist"
+                aria-label={t("openTabs")}
+                className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
+              >
+                {tabs.map((tab, index) => {
+                  const current = index === activeTab
+                  return (
+                    <div
+                      key={tabKey(tab)}
+                      className={cn(
+                        "group/tab flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[13px]",
+                        current
+                          ? "bg-accent text-foreground"
+                          : "text-muted-foreground hover:bg-accent/50"
+                      )}
                     >
-                      <TabIcon tab={tab} resourceKind={tabResourceKind(tab)} />
-                      <span className="max-w-40 truncate">{tabTitle(tab)}</span>
-                    </button>
-                    <button
-                      aria-label={t("closeTab", { name: tabTitle(tab) })}
-                      onClick={() => dismissTab(index)}
-                      className="flex size-4 shrink-0 items-center justify-center rounded opacity-0 hover:bg-background/70 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover/tab:opacity-100"
-                    >
-                      <X aria-hidden className="size-3" />
-                    </button>
-                  </div>
-                )
-              })}
+                      <button
+                        role="tab"
+                        aria-selected={current}
+                        onClick={() => {
+                          activeTabRef.current = index
+                          setActiveTab(index)
+                          setVisited(
+                            (old) => new Set([...old, tabKey(tabs[index])])
+                          )
+                        }}
+                        className="flex min-w-0 items-center gap-1.5 rounded focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <TabIcon
+                          tab={tab}
+                          resourceKind={tabResourceKind(tab)}
+                        />
+                        <span className="max-w-40 truncate">
+                          {tabTitle(tab)}
+                        </span>
+                      </button>
+                      <button
+                        aria-label={t("closeTab", { name: tabTitle(tab) })}
+                        onClick={() => dismissTab(index)}
+                        className="flex size-4 shrink-0 items-center justify-center rounded opacity-0 hover:bg-background/70 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover/tab:opacity-100"
+                      >
+                        <X aria-hidden className="size-3" />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+              {/*
+                The only control that grows the strip. Everything else replaces
+                what is in front, so opening a second thing is a decision rather
+                than a side effect of browsing.
+              */}
+              <button
+                aria-label={t("newTab")}
+                title={t("newTab")}
+                onClick={addEmptyTab}
+                className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <Plus aria-hidden className="size-3.5" />
+              </button>
             </div>
           )}
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1813,7 +1905,23 @@ function WorkspaceContent() {
                   )}
                 >
                   {visited.has(tabKey(tab)) &&
-                    (tab.kind === "project" ? (
+                    (tab.kind === "empty" ? (
+                      /*
+                       * A tab asked for and not yet filled. It says so rather
+                       * than showing an empty panel, because a blank region
+                       * with no explanation reads as something that failed to
+                       * load.
+                       */
+                      <div
+                        role="status"
+                        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 p-10 text-center"
+                      >
+                        <p className="text-sm font-medium">{t("emptyTab")}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {t("emptyTabHint")}
+                        </p>
+                      </div>
+                    ) : tab.kind === "project" ? (
                       creation && creation.nodeId === tab.nodeId ? (
                         <NativeContent
                           node={nodeById(tab.nodeId) ?? nodes[0]}

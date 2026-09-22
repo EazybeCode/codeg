@@ -957,8 +957,10 @@ it(
     const unload = new Event("beforeunload", { cancelable: true })
     window.dispatchEvent(unload)
     expect(unload.defaultPrevented).toBe(true)
-    // Starting a chat opens ANOTHER tab, so the draft is not in danger and is
+    // Asked for somewhere to put it: starting a chat fills the tab in front,
+    // and the blank one is in front now, so the draft is not in danger and is
     // not asked about — it is still there, behind its own tab.
+    await user.click(screen.getByRole("button", { name: "New tab" }))
     await user.click(
       screen.getAllByRole("button", { name: "Actions for Launch" })[0]
     )
@@ -1058,7 +1060,9 @@ it(
     await user.click(body)
     await user.keyboard("hidden work")
 
-    // Leave it for another project: no prompt, because nothing is destroyed.
+    // Leave it for another project, in a tab asked for first: no prompt,
+    // because the draft keeps its own tab and nothing is destroyed.
+    await user.click(screen.getByRole("button", { name: "New tab" }))
     await user.click(
       within(screen.getByRole("navigation", { name: "Projects" })).getByRole(
         "button",

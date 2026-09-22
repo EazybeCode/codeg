@@ -335,7 +335,10 @@
     "joinedOrgNotice": "Você entrou em {name}.",
     "switchToJoinedOrg": "Mudar para {name}",
     "joinAnother": "Entrar em outra",
-    "invalidJoinCode": "Esse código é inválido, está desativado ou indisponível."
+    "invalidJoinCode": "Esse código é inválido, está desativado ou indisponível.",
+    "newTab": "Nova aba",
+    "emptyTab": "Nova aba",
+    "emptyTabHint": "Escolha um documento ou uma conversa para abrir aqui."
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "O contexto do chat do espaço de trabalho não está disponível.",

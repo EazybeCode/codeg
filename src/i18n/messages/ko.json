@@ -335,7 +335,10 @@
     "joinedOrgNotice": "{name}에 참여했습니다.",
     "switchToJoinedOrg": "{name}(으)로 전환",
     "joinAnother": "다른 조직 참여",
-    "invalidJoinCode": "해당 코드는 유효하지 않거나 비활성화되었거나 사용할 수 없습니다."
+    "invalidJoinCode": "해당 코드는 유효하지 않거나 비활성화되었거나 사용할 수 없습니다.",
+    "newTab": "새 탭",
+    "emptyTab": "새 탭",
+    "emptyTabHint": "여기에서 열 문서나 채팅을 선택하세요."
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "워크스페이스 채팅 정보를 사용할 수 없습니다.",

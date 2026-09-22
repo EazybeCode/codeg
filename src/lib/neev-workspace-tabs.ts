@@ -25,6 +25,17 @@ export type WorkspaceTab =
       fresh?: boolean
     }
   | { kind: "agent"; sessionId: string }
+  /**
+   * A tab asked for and not yet filled.
+   *
+   * Browsing replaces what is in front of you rather than piling up tabs, so
+   * the only way to end up with two things open is to ask for a second place
+   * to put one. This is that place, standing empty until something is chosen.
+   *
+   * Never persisted: an empty tab holds nothing, and restoring one would be
+   * restoring the absence of a decision.
+   */
+  | { kind: "empty" }
   | { kind: "draft"; provider: string; nodeId: number | null }
 
 const UUID =
@@ -47,6 +58,10 @@ export function tabKey(tab: WorkspaceTab): string {
       return `resource:${tab.resourceId}`
     case "agent":
       return `agent:${tab.sessionId}`
+    case "empty":
+      // One at a time. Asking for a second empty tab while one is already
+      // waiting returns to it rather than stacking blanks.
+      return "empty"
     case "draft":
       // One draft per provider per project: a second click on New Claude chat
       // returns to the draft already being written, rather than discarding it.
@@ -76,6 +91,46 @@ export function openTab(
   if (tabs.length >= MAX_TABS)
     return { tabs: [...tabs], active: -1, refused: true }
   return { tabs: [...tabs, tab], active: tabs.length, refused: false }
+}
+
+/**
+ * Show `tab` WITHOUT adding to the strip.
+ *
+ * The ordinary way to move around: already open means go there, and anything
+ * else replaces whatever is in front. Browsing a sidebar should not leave a
+ * trail of tabs behind it — a second tab is something you ask for, with
+ * `openTab`, and this is everything else.
+ *
+ * With nothing open at all there is nothing to replace, so it opens the first.
+ */
+export function openTabInPlace(
+  tabs: readonly WorkspaceTab[],
+  tab: WorkspaceTab,
+  active: number
+): { tabs: WorkspaceTab[]; active: number; refused: boolean } {
+  const existing = tabs.findIndex((item) => sameTab(item, tab))
+  if (existing >= 0) {
+    /*
+     * Already open, so go there — and if the reader was sitting on a blank tab
+     * they asked for, take it away again. Leaving it behind would mean asking
+     * for somewhere to put something, choosing something already open, and
+     * being left with an orphan blank nobody wanted.
+     */
+    const blank = tabs.findIndex((item) => item.kind === "empty")
+    if (blank >= 0 && blank === active && blank !== existing) {
+      const next = tabs.filter((_, index) => index !== blank)
+      return {
+        tabs: next,
+        active: existing > blank ? existing - 1 : existing,
+        refused: false,
+      }
+    }
+    return { tabs: [...tabs], active: existing, refused: false }
+  }
+  if (active < 0 || active >= tabs.length) return openTab(tabs, tab)
+  const next = [...tabs]
+  next[active] = tab
+  return { tabs: next, active, refused: false }
 }
 
 /**
@@ -202,7 +257,9 @@ function parseTab(value: unknown): WorkspaceTab | null {
     UUID.test(tab.sessionId)
   )
     return { kind: "agent", sessionId: tab.sessionId }
-  // Drafts are never read back: see the note at the top of this file.
+  // Drafts are never read back, and neither are empties: one has no
+  // server-side identity, the other has no content. Both are refused here as
+  // well as omitted when writing, because this list is hostile input.
   return null
 }
 
@@ -214,11 +271,16 @@ export function writeTabs(
 ): void {
   if (typeof window === "undefined") return
   try {
-    const saved = tabs.filter((tab) => tab.kind !== "draft").slice(0, MAX_TABS)
+    const saved = tabs
+      .filter((tab) => tab.kind !== "draft" && tab.kind !== "empty")
+      .slice(0, MAX_TABS)
     const front = tabs[active]
     // The identity rather than the index: the saved list omits drafts, so a
     // position in one list is not a position in the other.
-    const selected = front && front.kind !== "draft" ? tabKey(front) : null
+    const selected =
+      front && front.kind !== "draft" && front.kind !== "empty"
+        ? tabKey(front)
+        : null
     window.localStorage.setItem(
       key(userId, orgId),
       JSON.stringify({ tabs: saved, active: selected })

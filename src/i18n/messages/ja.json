@@ -335,7 +335,10 @@
     "joinedOrgNotice": "{name} に参加しました。",
     "switchToJoinedOrg": "{name} に切り替え",
     "joinAnother": "別の組織に参加",
-    "invalidJoinCode": "そのコードは無効、無効化済み、または利用できません。"
+    "invalidJoinCode": "そのコードは無効、無効化済み、または利用できません。",
+    "newTab": "新しいタブ",
+    "emptyTab": "新しいタブ",
+    "emptyTabHint": "ここで開くドキュメントまたはチャットを選んでください。"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "ワークスペースのチャット情報を利用できません。",

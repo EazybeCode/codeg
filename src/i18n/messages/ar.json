@@ -335,7 +335,10 @@
     "joinedOrgNotice": "انضممت إلى {name}.",
     "switchToJoinedOrg": "التبديل إلى {name}",
     "joinAnother": "الانضمام إلى أخرى",
-    "invalidJoinCode": "هذا الرمز غير صالح أو معطّل أو غير متاح."
+    "invalidJoinCode": "هذا الرمز غير صالح أو معطّل أو غير متاح.",
+    "newTab": "علامة تبويب جديدة",
+    "emptyTab": "علامة تبويب جديدة",
+    "emptyTabHint": "اختر مستندًا أو محادثة لفتحها هنا."
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "سياق محادثة مساحة العمل غير متاح.",

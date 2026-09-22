@@ -335,7 +335,10 @@
     "joinedOrgNotice": "Joined {name}.",
     "switchToJoinedOrg": "Switch to {name}",
     "joinAnother": "Join another",
-    "invalidJoinCode": "That code is invalid, disabled, or unavailable."
+    "invalidJoinCode": "That code is invalid, disabled, or unavailable.",
+    "newTab": "New tab",
+    "emptyTab": "New tab",
+    "emptyTabHint": "Choose a document or a chat to open here."
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Workspace chat context is unavailable.",

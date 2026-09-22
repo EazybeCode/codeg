@@ -4,6 +4,7 @@ import {
   closeTabByKey,
   MAX_TABS,
   openTab,
+  openTabInPlace,
   readTabs,
   tabKey,
   writeTabs,
@@ -21,6 +22,7 @@ const C: WorkspaceTab = {
   sessionId: "22222222-2222-4222-8222-222222222222",
 }
 const DRAFT: WorkspaceTab = { kind: "draft", provider: "claude", nodeId: 1 }
+const EMPTY: WorkspaceTab = { kind: "empty" }
 
 afterEach(() => localStorage.clear())
 
@@ -48,6 +50,78 @@ it("refuses at the limit rather than evicting unsaved work", () => {
   expect(refused.refused).toBe(true)
   expect(refused.tabs).toHaveLength(MAX_TABS)
   expect(refused.tabs[0]).toEqual({ kind: "project", nodeId: 1 })
+})
+
+it("replaces what is in front rather than piling tabs up", () => {
+  // Browsing leaves no trail: the strip stays one tab long however many
+  // things are looked at.
+  const first = openTabInPlace([], A, -1)
+  expect(first).toEqual({ tabs: [A], active: 0, refused: false })
+  const second = openTabInPlace(first.tabs, B, 0)
+  expect(second).toEqual({ tabs: [B], active: 0, refused: false })
+  // Something already open is gone to, not opened a second time.
+  const both = openTab(second.tabs, C)
+  expect(openTabInPlace(both.tabs, B, 1)).toEqual({
+    tabs: [B, C],
+    active: 0,
+    refused: false,
+  })
+})
+
+it("asks for one blank tab at a time, and fills it with the next choice", () => {
+  const asked = openTab([A], EMPTY)
+  expect(asked).toEqual({ tabs: [A, EMPTY], active: 1, refused: false })
+  // A second New tab returns to the blank already waiting rather than
+  // stacking another one behind it.
+  expect(openTab(asked.tabs, { kind: "empty" })).toEqual({
+    tabs: [A, EMPTY],
+    active: 1,
+    refused: false,
+  })
+  // And the next thing chosen fills it.
+  expect(openTabInPlace(asked.tabs, B, 1)).toEqual({
+    tabs: [A, B],
+    active: 1,
+    refused: false,
+  })
+})
+
+it("takes the blank back when the thing chosen is already open", () => {
+  // Otherwise: ask for somewhere to put something, choose something already
+  // open, and be left with an orphan blank nobody asked to keep.
+  expect(openTabInPlace([EMPTY, B, C], C, 0)).toEqual({
+    tabs: [B, C],
+    active: 1,
+    refused: false,
+  })
+  expect(openTabInPlace([A, B, EMPTY], A, 2)).toEqual({
+    tabs: [A, B],
+    active: 0,
+    refused: false,
+  })
+  // A blank that is NOT the one in front is left alone: it is still waiting
+  // for a choice of its own.
+  expect(openTabInPlace([EMPTY, B, C], C, 1)).toEqual({
+    tabs: [EMPTY, B, C],
+    active: 2,
+    refused: false,
+  })
+})
+
+it("never persists a blank tab, and restores onto something real", () => {
+  writeTabs(1, 3, [A, EMPTY], 1)
+  const restored = readTabs(1, 3)
+  // An empty tab holds nothing; restoring one would restore the absence of a
+  // decision. And quitting on it lands on a real tab rather than nowhere.
+  expect(restored.tabs).toEqual([A])
+  expect(restored.active).toBe(0)
+  // Injected by another build or an extension, it is refused on the way in
+  // too — the stored list is hostile input.
+  localStorage.setItem(
+    "neev.ws.tabs.1:3",
+    JSON.stringify({ tabs: [{ kind: "empty" }, A], active: "empty" })
+  )
+  expect(readTabs(1, 3)).toEqual({ tabs: [A], active: 0 })
 })
 
 it("lands on a neighbour when the active tab closes", () => {
