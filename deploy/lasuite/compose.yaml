@@ -130,7 +130,14 @@ services:
       postgresql: {condition: service_healthy, restart: true}
       redis: {condition: service_healthy}
       minio: {condition: service_healthy}
-    networks: [engine, neev]
+    networks:
+      engine:
+      # Stack-qualified on the shared network. `backend` is far too generic a
+      # name to claim on a network Neev and anything else also sit on, and two
+      # stacks claiming it would make `backend:8000` resolve to whichever
+      # container answered first.
+      neev:
+        aliases: ["${STACK_NAME}-backend"]
 
   y-provider:
     image: lasuite/impress-y-provider:v5.7.0@sha256:2b3d03087a9ecb967b0441d69436a2171819f97cd5f3ba99ed049465ba227647
@@ -142,4 +149,7 @@ services:
     mem_limit: 384m
     depends_on:
       backend: {condition: service_healthy}
-    networks: [engine, neev]
+    networks:
+      engine:
+      neev:
+        aliases: ["${STACK_NAME}-y-provider"]

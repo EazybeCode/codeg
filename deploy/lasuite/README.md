@@ -216,6 +216,15 @@ docker compose up -d --wait --wait-timeout 180
 Migrations first: the backend's healthcheck is `manage.py check`, which needs a schema, so bringing
 everything up at once can time out as unhealthy.
 
+**After changing anything under `backend/neev_bridge/`, restart the backend.** `docker compose up -d`
+compares configuration, sees an unchanged one, and leaves the container running with the old modules
+already imported — the bind mount is not a signal it watches. Use `docker compose restart backend`.
+This is easy to lose an hour to: a fix verified by the test suite (which runs in a fresh container)
+appears absent through the running service.
+
+Services claim stack-qualified aliases on the shared network — `${STACK_NAME}-backend` and
+`${STACK_NAME}-y-provider` — so what Neev resolves is unambiguous even with another stack present.
+
 ### Two stacks on one host
 
 Every compose name the stack owns derives from `STACK_NAME` in its `.env`: the project, the private
