@@ -1,0 +1,137 @@
+# Neev document engine — La Suite Docs v5.7.0, behind Neev and nothing else.
+#
+# Derived from the evaluated preview (docs/lasuite-docs-preview/compose.yaml),
+# with the differences that make it a production stack rather than a preview:
+#
+#   - NO PUBLISHED PORTS, on any service. Neev's proxy is the only way in, and
+#     that is what makes header-asserted identity legitimate instead of a
+#     bypass. Publishing a port here would let anything on the host reach the
+#     backend with an unauthenticated X-Neev-Remote-User header. Do not add one,
+#     not even on 127.0.0.1, not even temporarily.
+#   - no Keycloak and no test accounts: identity comes from Neev.
+#   - no frontend/nginx service: Neev serves the static artifact itself.
+#   - the bridge settings package is mounted into the stock image; the image is
+#     used exactly as published.
+#   - its own network, its own volumes, its own database. It shares nothing with
+#     the preview stack, and must never be pointed at the preview's data.
+#
+# Images are pinned by digest, as the preview does — a tag is not a pin, and
+# postgres:16 / redis:8 move within their major. Tags are kept beside the
+# digests for readability only.
+#
+# First start (the backend's healthcheck runs `manage.py check`, which needs a
+# migrated schema, so dependencies and migrations come first):
+#
+#   docker compose up -d --wait --wait-timeout 120 postgresql redis minio
+#   docker compose run --rm backend python manage.py migrate
+#   docker compose up -d --wait --wait-timeout 180
+
+name: neev-document-engine
+
+networks:
+  # Internal to the stack. Nothing here is reachable from outside the host.
+  engine:
+    name: neev-document-engine
+  # The network the Neev container is already on. Only the backend and
+  # y-provider join it, and only so Neev's proxy can reach them by name.
+  neev:
+    external: true
+    name: ${NEEV_NETWORK:-neev}
+
+volumes:
+  postgres:
+  minio:
+
+services:
+  postgresql:
+    image: postgres:16@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
+    env_file: [env.d/postgresql]
+    environment:
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    mem_limit: 384m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    networks: [engine]
+
+  redis:
+    image: redis:8@sha256:718f745deb7dfefeac6eed7041fc7ec9476b50e61b247932682457c41adafa0e
+    mem_limit: 128m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [engine]
+
+  minio:
+    image: quay.io/minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data
+    env_file: [env.d/minio]
+    mem_limit: 448m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - minio:/data
+    networks: [engine]
+
+  createbuckets:
+    image: quay.io/minio/mc:latest@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      minio: {condition: service_healthy}
+    env_file: [env.d/minio]
+    mem_limit: 128m
+    restart: "no"
+    entrypoint: >
+      sh -c "
+      mc alias set engine http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      (mc mb engine/$$BUCKET_NAME || true)
+      "
+    networks: [engine]
+
+  backend:
+    image: lasuite/impress-backend:v5.7.0@sha256:ed2b79ef2915e17ae2ce3a18a9a94005fb532a14dc048e3aacfa85503b9fb5a1
+    user: "1000"
+    restart: unless-stopped
+    env_file:
+      - env.d/common
+      - env.d/backend
+      - env.d/yprovider
+      - env.d/postgresql
+    mem_limit: 896m
+    volumes:
+      # The settings seam. Read-only, and the only thing added to the image.
+      - ./backend/neev_bridge:/app/neev_bridge:ro
+    healthcheck:
+      test: ["CMD", "python", "manage.py", "check"]
+      interval: 15s
+      timeout: 30s
+      retries: 20
+      start_period: 20s
+    depends_on:
+      postgresql: {condition: service_healthy, restart: true}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    networks: [engine, neev]
+
+  y-provider:
+    image: lasuite/impress-y-provider:v5.7.0@sha256:2b3d03087a9ecb967b0441d69436a2171819f97cd5f3ba99ed049465ba227647
+    user: "1000"
+    restart: unless-stopped
+    env_file:
+      - env.d/common
+      - env.d/yprovider
+    mem_limit: 384m
+    depends_on:
+      backend: {condition: service_healthy}
+    networks: [engine, neev]
