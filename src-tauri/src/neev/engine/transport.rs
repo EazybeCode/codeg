@@ -29,6 +29,40 @@ use crate::neev::{http::ApiError, startup::ServerState, types::OrgContext};
 /// delivery.
 const RECHECK: Duration = Duration::from_secs(15);
 
+/// Bound on the upstream handshake. A stalled connect must not outlive the
+/// authorization that permitted it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on a single relayed send. Without it a stalled peer parks the relay
+/// inside `send` where no recheck tick can reach it, which would let a stalled
+/// socket outlive a revocation.
+const SEND_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A socket carrying no traffic at all is closed. Idle sockets otherwise
+/// accumulate against the collaboration server for as long as a tab is open.
+const IDLE_LIMIT: i64 = 30 * 60;
+
+/// Cookies Docs is allowed to see. Everything else in the header — Neev's own
+/// session above all — is dropped rather than forwarded to another service.
+const DOCS_COOKIES: &[&str] = &[super::upstream::SESSION_COOKIE, "csrftoken"];
+
+/// Keep only Docs' cookies from a browser `Cookie` header.
+fn docs_cookies(value: &HeaderValue) -> Option<HeaderValue> {
+    let raw = value.to_str().ok()?;
+    let kept: Vec<&str> = raw
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(name, _)| DOCS_COOKIES.contains(&name.trim()))
+        })
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    HeaderValue::from_str(&kept.join("; ")).ok()
+}
+
 /// Headers that belong to one hop and must not be copied onto the next.
 fn hop_by_hop(name: &str) -> bool {
     matches!(
@@ -74,12 +108,26 @@ pub(crate) async fn forward(
         if hop_by_hop(name.as_str()) || identity::stripped(name.as_str()) {
             continue;
         }
+        if name == header::COOKIE {
+            // Only Docs' own cookies cross to Docs. The browser's cookie header
+            // also carries Neev's session, and handing a different service the
+            // credential that authenticates Neev would be giving away exactly
+            // the thing this proxy exists to hold.
+            if let Some(filtered) = docs_cookies(value) {
+                request = request.header(header::COOKIE, filtered);
+            }
+            continue;
+        }
         request = request.header(name.clone(), value.clone());
     }
     // Set after the copy, so nothing a client sent can survive underneath.
+    // Host and scheme come from the configured public origin: Django checks
+    // Host against ALLOWED_HOSTS and reads the scheme from X-Forwarded-Proto,
+    // so dropping Host or hardcoding https breaks a plain-HTTP loopback canary.
     request = request
         .header(identity::USER, &assertion.subject)
-        .header("X-Forwarded-Proto", "https");
+        .header(header::HOST, engine.public_host.clone())
+        .header("X-Forwarded-Proto", engine.public_scheme);
     if !body.is_empty() {
         request = request.body(body);
     }
@@ -124,6 +172,10 @@ pub(crate) async fn relay(
     state: Arc<ServerState>,
     actor: OrgContext,
     resource: String,
+    // The capability the socket was opened with. A reader's socket must not be
+    // torn down for failing a write check it was never granted, and a writer's
+    // must be torn down the moment it stops being a writer.
+    opened_writable: bool,
 ) {
     let request = match upstream_request(&url, session) {
         Ok(request) => request,
@@ -132,12 +184,15 @@ pub(crate) async fn relay(
             return;
         }
     };
-    let (upstream, _) = match tokio_tungstenite::connect_async(request).await {
-        Ok(connected) => connected,
-        // Unreachable upstream closes the socket. It never becomes a socket that
-        // silently does nothing, which would look like a working editor that
-        // loses edits.
-        Err(_) => {
+    // Bounded, so a stalled connect cannot sit past the point where the
+    // authorization that permitted it has been withdrawn.
+    let connect = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request));
+    let (upstream, _) = match connect.await {
+        Ok(Ok(connected)) => connected,
+        // Unreachable, refused or stalled upstream closes the socket. It never
+        // becomes a socket that silently does nothing, which would look like a
+        // working editor that quietly loses edits.
+        Ok(Err(_)) | Err(_) => {
             close(client).await;
             return;
         }
@@ -147,55 +202,121 @@ pub(crate) async fn relay(
     let mut recheck = tokio::time::interval(RECHECK);
     // The first tick is immediate and would re-ask what we just asked.
     recheck.tick().await;
+    // Rechecking on the timer alone is not enough: a socket that is busy
+    // relaying could carry a whole editing session between two ticks. So each
+    // direction is gated too, rate-limited to RECHECK so a chatty socket does
+    // not become a query storm.
+    let mut checked_at = state.clock.now_unix();
+    let mut active_at = state.clock.now_unix();
 
     loop {
-        tokio::select! {
+        let permitted = tokio::select! {
             incoming = from_client.next() => {
                 let Some(Ok(message)) = incoming else { break };
-                let forwarded = match message {
-                    Message::Binary(bytes) => UpstreamMessage::Binary(bytes.into()),
-                    Message::Text(text) => UpstreamMessage::Text(text.as_str().into()),
-                    Message::Ping(bytes) => UpstreamMessage::Ping(bytes.into()),
-                    Message::Pong(bytes) => UpstreamMessage::Pong(bytes.into()),
-                    Message::Close(_) => break,
-                };
-                if to_upstream.send(forwarded).await.is_err() { break }
+                if gate(&state, &actor, &resource, opened_writable, &mut checked_at).await {
+                    let forwarded = match message {
+                        Message::Binary(bytes) => UpstreamMessage::Binary(bytes.into()),
+                        Message::Text(text) => UpstreamMessage::Text(text.as_str().into()),
+                        Message::Ping(bytes) => UpstreamMessage::Ping(bytes.into()),
+                        Message::Pong(bytes) => UpstreamMessage::Pong(bytes.into()),
+                        Message::Close(_) => break,
+                    };
+                    active_at = state.clock.now_unix();
+                    // Bounded, so a stalled peer cannot hold the relay past the
+                    // point where revocation should have ended it.
+                    match tokio::time::timeout(SEND_TIMEOUT, to_upstream.send(forwarded)).await {
+                        Ok(Ok(())) => true,
+                        _ => break,
+                    }
+                } else {
+                    false
+                }
             }
             outgoing = from_upstream.next() => {
                 let Some(Ok(message)) = outgoing else { break };
-                let forwarded = match message {
-                    UpstreamMessage::Binary(bytes) => Message::Binary(bytes.into()),
-                    UpstreamMessage::Text(text) => Message::Text(text.as_str().into()),
-                    UpstreamMessage::Ping(bytes) => Message::Ping(bytes.into()),
-                    UpstreamMessage::Pong(bytes) => Message::Pong(bytes.into()),
-                    UpstreamMessage::Close(_) => break,
-                    // Raw frames are not produced by a read half.
-                    UpstreamMessage::Frame(_) => continue,
-                };
-                if to_client.send(forwarded).await.is_err() { break }
+                if gate(&state, &actor, &resource, opened_writable, &mut checked_at).await {
+                    let forwarded = match message {
+                        UpstreamMessage::Binary(bytes) => Message::Binary(bytes.into()),
+                        UpstreamMessage::Text(text) => Message::Text(text.as_str().into()),
+                        UpstreamMessage::Ping(bytes) => Message::Ping(bytes.into()),
+                        UpstreamMessage::Pong(bytes) => Message::Pong(bytes.into()),
+                        UpstreamMessage::Close(_) => break,
+                        // Raw frames are not produced by a read half.
+                        UpstreamMessage::Frame(_) => continue,
+                    };
+                    active_at = state.clock.now_unix();
+                    match tokio::time::timeout(SEND_TIMEOUT, to_client.send(forwarded)).await {
+                        Ok(Ok(())) => true,
+                        _ => break,
+                    }
+                } else {
+                    false
+                }
             }
             _ = recheck.tick() => {
-                // Loss of access, session expiry, organization switch or a
-                // downgrade to read-only all end the socket. Anything that
-                // fails to evaluate ends it too — fail-closed, never fail-open.
-                if !still_permitted(&state, &actor, &resource).await { break }
+                if state.clock.now_unix().saturating_sub(active_at) > IDLE_LIMIT {
+                    break;
+                }
+                checked_at = state.clock.now_unix();
+                still_permitted(&state, &actor, &resource, opened_writable).await
             }
+        };
+        if !permitted {
+            break;
         }
     }
     let _ = to_client.close().await;
     let _ = to_upstream.close().await;
 }
 
-/// Re-ask Neev. A downgrade to read-only closes the socket rather than
-/// silently leaving a writable one open: the client reconnects and is projected
-/// as a reader, which is the only way upstream's read-only flag gets reapplied.
-async fn still_permitted(state: &ServerState, actor: &OrgContext, resource: &str) -> bool {
+/// Recheck before relaying a message, rate-limited to [`RECHECK`].
+///
+/// Gating each direction matters because a busy socket can carry an entire
+/// editing session between two timer ticks — the tick alone would make the
+/// revocation bound depend on how quiet the connection happened to be. The rate
+/// limit keeps a chatty socket from turning into a query storm.
+async fn gate(
+    state: &ServerState,
+    actor: &OrgContext,
+    resource: &str,
+    opened_writable: bool,
+    checked_at: &mut i64,
+) -> bool {
+    let now = state.clock.now_unix();
+    if now.saturating_sub(*checked_at) < RECHECK.as_secs() as i64 {
+        return true;
+    }
+    *checked_at = now;
+    still_permitted(state, actor, resource, opened_writable).await
+}
+
+/// Re-ask Neev, against the capability the socket was **opened** with.
+///
+/// Asking for write unconditionally would close every reader's socket on the
+/// first tick — they never had write and never will. A socket opened writable
+/// that is no longer writable *is* closed: the client reconnects and is
+/// projected as a reader, which is the only way upstream's read-only flag gets
+/// reapplied to a live connection.
+async fn still_permitted(
+    state: &ServerState,
+    actor: &OrgContext,
+    resource: &str,
+    opened_writable: bool,
+) -> bool {
     let Ok(tx) = crate::neev::db::begin(&state.database).await else {
+        // Cannot evaluate: close. Fail-closed, never fail-open.
         return false;
     };
-    let permitted = crate::neev::content::access::authorized(&tx, actor, resource, true)
-        .await
-        .is_ok()
+    let permitted = crate::neev::content::access::authorized(
+        &tx,
+        actor,
+        resource,
+        // A reader is rechecked as a reader; a writer as a writer, so a
+        // downgrade ends the socket.
+        opened_writable,
+    )
+    .await
+    .is_ok()
         && crate::neev::auth::session::recheck(&tx, actor, state.clock.now_unix())
             .await
             .is_ok();

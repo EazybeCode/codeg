@@ -26,7 +26,13 @@ use crate::neev::http::ApiError;
 const MAX_ASSET: u64 = 32 * 1024 * 1024;
 
 /// The shell Next.js emits for the dynamic document route.
-const DOCUMENT_SHELL: &str = "docs/[id].html";
+///
+/// With `trailingSlash: true` the export writes the directory form —
+/// `docs/[id]/index.html`, with `[id]` literal — not `docs/[id].html`. Verified
+/// against the staged artifact; getting this wrong makes every document 404
+/// while every asset still loads, which reads as a routing bug rather than a
+/// missing file.
+const DOCUMENT_SHELL: &str = "docs/[id]/index.html";
 
 fn content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|value| value.to_str()) {
@@ -108,7 +114,7 @@ mod tests {
 
     fn artifact() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("docs")).unwrap();
+        std::fs::create_dir_all(root.path().join("docs/[id]")).unwrap();
         std::fs::create_dir_all(root.path().join("_next/static")).unwrap();
         std::fs::write(root.path().join("index.html"), b"home").unwrap();
         std::fs::write(root.path().join(DOCUMENT_SHELL), b"shell").unwrap();

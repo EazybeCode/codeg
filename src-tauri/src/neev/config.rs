@@ -57,6 +57,15 @@ pub(crate) struct EngineConfig {
     /// Directory holding the frontend's static export, served by Neev under the
     /// engine prefix rather than by an nginx of its own.
     pub(crate) artifact_root: PathBuf,
+    /// Whether **new** documents are created on the engine.
+    ///
+    /// Independent of whether the engine services are configured, and that
+    /// independence is the point: turning creation off must leave documents
+    /// already bound to the engine served by the engine. They have no native
+    /// content, so routing them back to the native editor would render a blank
+    /// document — which is indistinguishable from data loss to the person
+    /// looking at it.
+    pub(crate) create_enabled: bool,
 }
 
 pub(crate) struct Config {
@@ -98,11 +107,12 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 21] = [
+        const KEYS: [&str; 22] = [
             "NEEV_DOCS_BACKEND_URL",
             "NEEV_DOCS_COLLABORATION_URL",
             "NEEV_DOCS_BRIDGE_KEY",
             "NEEV_DOCS_ARTIFACT_ROOT",
+            "NEEV_DOCS_CREATE_ENABLED",
             "NEEV_APP_ORIGIN",
             "NEEV_DATABASE_URL",
             "NEEV_ENC_KEY",
@@ -358,7 +368,12 @@ fn engine(values: &HashMap<String, String>) -> Result<Option<EngineConfig>, Conf
     if bridge_key.len() < 32 || bridge_key.chars().any(char::is_control) {
         return Err(ConfigError::Provider);
     }
+    // Defaults to off: configuring the services is a deployment step, choosing
+    // to create new documents on them is a separate decision.
+    let create_enabled = optional_bool(values.get("NEEV_DOCS_CREATE_ENABLED"))
+        .map_err(|_| ConfigError::Provider)?;
     Ok(Some(EngineConfig {
+        create_enabled,
         backend: private("NEEV_DOCS_BACKEND_URL")?,
         collaboration: private("NEEV_DOCS_COLLABORATION_URL")?,
         bridge_key,

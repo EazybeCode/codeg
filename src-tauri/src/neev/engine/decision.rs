@@ -49,7 +49,16 @@ pub(crate) enum Decision {
     /// Serve a file from the frontend's static export. Never proxied.
     Asset,
     /// Forward to the Docs backend, asserting the caller's identity.
-    Forward { resource: Option<String> },
+    ///
+    /// `role` is present whenever the request names a document. It must be
+    /// projected onto the caller's Docs access row *before* the request is
+    /// forwarded: a non-creator has no access row of their own, so upstream
+    /// would answer 403 and the editor would never load — the socket is not the
+    /// only path that needs the projection.
+    Forward {
+        resource: Option<String>,
+        role: Option<Projected>,
+    },
     /// Upgrade the collaboration socket for this document, with the caller
     /// projected at this role.
     Upgrade { resource: String, role: Projected },
@@ -88,12 +97,16 @@ pub(crate) fn decide(
         // live session is the whole requirement.
         Target::Asset => Decision::Asset,
         // The signed-in user and the frontend's configuration carry no document.
-        Target::Account => Decision::Forward { resource: None },
+        Target::Account => Decision::Forward {
+            resource: None,
+            role: None,
+        },
         Target::Editor { resource } | Target::Media { resource, .. } => {
             match guard(grant, false, engine_backed) {
                 Some(refusal) => Decision::Refuse(refusal),
                 None => Decision::Forward {
                     resource: Some(resource.clone()),
+                    role: Some(Projected::from_neev(grant == Grant::Write)),
                 },
             }
         }
@@ -110,6 +123,7 @@ pub(crate) fn decide(
             }
             Decision::Forward {
                 resource: Some(resource.clone()),
+                role: Some(Projected::from_neev(grant == Grant::Write)),
             }
         }
         Target::Collaboration { resource } => {
@@ -211,7 +225,8 @@ mod tests {
         assert_eq!(
             decide(Some(&document(false, Body::None)), true, Grant::Read, true, &[]),
             Decision::Forward {
-                resource: Some(DOC.into())
+                resource: Some(DOC.into()),
+                role: Some(Projected::Reader)
             }
         );
         assert_eq!(
@@ -284,7 +299,8 @@ mod tests {
         assert_eq!(
             decide(Some(&target), true, Grant::Write, true, &keys(&["title"])),
             Decision::Forward {
-                resource: Some(DOC.into())
+                resource: Some(DOC.into()),
+                role: Some(Projected::Reader)
             }
         );
         for smuggled in [
@@ -304,7 +320,8 @@ mod tests {
         assert_eq!(
             decide(Some(&content), true, Grant::Write, true, &keys(&["content", "websocket"])),
             Decision::Forward {
-                resource: Some(DOC.into())
+                resource: Some(DOC.into()),
+                role: Some(Projected::Reader)
             }
         );
         assert_eq!(
@@ -318,7 +335,7 @@ mod tests {
         assert_eq!(decide(Some(&Target::Asset), true, Grant::None, false, &[]), Decision::Asset);
         assert_eq!(
             decide(Some(&Target::Account), true, Grant::None, false, &[]),
-            Decision::Forward { resource: None }
+            Decision::Forward { resource: None, role: None }
         );
     }
 }

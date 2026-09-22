@@ -126,6 +126,25 @@ async fn grant_for(
     Ok(result?)
 }
 
+/// Require an exact `Origin` on anything that changes state or opens a socket.
+///
+/// Django's CSRF check stays on and is passed through untouched; this is an
+/// additional native check, not a replacement. It matters because the engine's
+/// own boundary must not depend on a downstream service's configuration being
+/// right — and because the socket upgrade is not covered by Django's CSRF at
+/// all, since y-provider terminates it.
+fn origin_ok(engine: &Engine, method: &Method, target: Option<&Target>, headers: &HeaderMap) -> bool {
+    let upgrade = matches!(target, Some(Target::Collaboration { .. }));
+    let mutating = !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    if !upgrade && !mutating {
+        return true;
+    }
+    headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == engine.public_origin)
+}
+
 fn refuse(refusal: Refusal) -> ApiError {
     match refusal {
         Refusal::Unauthenticated => ApiError::Unauthorized,
@@ -166,6 +185,16 @@ pub(crate) struct Engine {
     /// Shared client for forwarded requests. Redirects are refused: following
     /// one would carry the asserted identity somewhere it was not meant for.
     pub(crate) client: reqwest::Client,
+    /// `host[:port]` of the configured public origin. Django matches this
+    /// against `ALLOWED_HOSTS`, so it has to be the public name and not the
+    /// container address the request is actually sent to.
+    pub(crate) public_host: String,
+    /// Scheme of the configured public origin, sent as `X-Forwarded-Proto`.
+    /// Hardcoding `https` breaks a plain-HTTP loopback canary.
+    pub(crate) public_scheme: &'static str,
+    /// Serialized origin (`scheme://host[:port]`) that an unsafe request or a
+    /// socket upgrade must declare.
+    pub(crate) public_origin: String,
 }
 
 impl Engine {
@@ -184,12 +213,19 @@ impl Engine {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|_| ApiError::Unavailable)?;
+        let public_host = match origin.port() {
+            Some(port) => format!("{}:{port}", origin.host_str().unwrap_or_default()),
+            None => origin.host_str().unwrap_or_default().to_owned(),
+        };
         Ok(Self {
             upstream: Arc::new(upstream),
             backend: config.backend.clone(),
             collaboration: config.collaboration.clone(),
             artifact_root: config.artifact_root.clone(),
             client,
+            public_host,
+            public_scheme: if origin.scheme() == "http" { "http" } else { "https" },
+            public_origin: origin.origin().ascii_serialization(),
         })
     }
 }
@@ -238,7 +274,17 @@ pub(crate) async fn authorize(
         _ => (Grant::None, false),
     };
     let keys = match target.as_ref() {
-        Some(Target::Document { .. }) => body_keys(body),
+        // Only the JSON policies inspect a body. An attachment upload is
+        // multipart, so parsing it as JSON would fail and refuse every upload —
+        // it is bounded by size and by its own route instead.
+        Some(Target::Document {
+            body: routes::Body::TitleOnly,
+            ..
+        })
+        | Some(Target::Document {
+            body: routes::Body::Content,
+            ..
+        }) => body_keys(body),
         _ => Some(Vec::new()),
     };
     // A body we could not parse into a checkable key set is refused where a
@@ -269,7 +315,7 @@ pub(crate) async fn handle(
     let actor = crate::neev::http::catalog::organization_get(&state, &parts.headers)
         .await
         .ok();
-    let (decision, _) = authorize(
+    let (decision, target) = authorize(
         &state,
         actor.as_ref(),
         &parts.method,
@@ -278,19 +324,102 @@ pub(crate) async fn handle(
     )
     .await?;
 
+    if !origin_ok(engine, &parts.method, target.as_ref(), &parts.headers) {
+        return Err(ApiError::Forbidden);
+    }
+
     match decision {
         Decision::Refuse(refusal) => Err(refuse(refusal)),
         Decision::Asset => asset(engine, parts.uri.path()),
-        Decision::Forward { .. } => {
+        Decision::Forward { resource, role } => {
             let actor = actor.ok_or(ApiError::Unauthorized)?;
             let assertion = assertion(&actor);
-            super::transport::forward(engine, parts, bytes.to_vec(), &assertion).await
+            // Project before forwarding, not only before a socket. A non-creator
+            // has no Docs access row of their own, so upstream would answer 403
+            // on the document GET and the editor would never start — the socket
+            // would then never be reached at all.
+            if let (Some(resource), Some(role)) = (resource.as_ref(), role) {
+                engine
+                    .upstream
+                    .project(resource, &assertion, role)
+                    .await
+                    .map_err(crate::neev::error::AuthError::from)?;
+            }
+            // A rename is recorded natively only **after** upstream has
+            // accepted it. Doing it first would let a request that Django's
+            // CSRF check rejects, or one that never reached an available
+            // backend, still change the native title — a refused write must
+            // have no side effect, and being the source of truth is not
+            // permission to mutate on an unauthorized request.
+            let rename = pending_title(&parts, bytes.as_ref());
+            let response =
+                super::transport::forward(engine, parts, bytes.to_vec(), &assertion).await?;
+            if let (Some(resource), Some(title), true) = (
+                resource.as_ref(),
+                rename,
+                response.status().is_success(),
+            ) {
+                sync_title(&state, &actor, resource, title).await?;
+            }
+            Ok(response)
         }
         Decision::Upgrade { resource, role } => {
             let actor = actor.ok_or(ApiError::Unauthorized)?;
             upgrade(&state, parts, actor, resource, role).await
         }
     }
+}
+
+/// The title a request is trying to set, if it is a rename at all.
+fn pending_title(parts: &axum::http::request::Parts, body: &[u8]) -> Option<String> {
+    if parts.method != Method::PATCH {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get("title")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Record a rename that upstream has already accepted, through Neev's own
+/// resource API so native rename authority, revision conflict handling and the
+/// lease checks are the native ones rather than a second implementation.
+///
+/// Without this the Docs copy and the Neev resource drift apart the first time
+/// anyone renames inside the editor, and the Projects list keeps showing the old
+/// name with nothing to reconcile it.
+///
+/// One retry on a revision conflict, because a concurrent native rename is
+/// ordinary rather than exceptional. A conflict that survives the retry is
+/// reported to the caller instead of being swallowed: the two titles really do
+/// disagree at that point, and hiding it would leave a divergence nobody is told
+/// about.
+async fn sync_title(
+    state: &ServerState,
+    actor: &OrgContext,
+    resource_id: &str,
+    title: String,
+) -> Result<(), ApiError> {
+    for attempt in 0..2 {
+        let current = crate::neev::content::resources::get(state, actor, resource_id).await?;
+        if current.title == title {
+            return Ok(());
+        }
+        let patch = crate::neev::content::types::ResourcePatch {
+            expected_auth_revision: current.auth_revision,
+            title: title.clone(),
+            node_id: current.node_id,
+            visibility: current.visibility,
+            archived: current.archived,
+        };
+        match crate::neev::content::resources::update(state, actor, resource_id, patch).await {
+            Ok(_) => return Ok(()),
+            Err(crate::neev::content::types::ContentError::Conflict) if attempt == 0 => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(ApiError::Conflict)
 }
 
 /// Serve a file from the frontend's static export.
@@ -341,7 +470,16 @@ async fn upgrade(
         .map_err(|_| ApiError::Invalid)?;
     let state = Arc::clone(state);
     let mut response = upgrade.on_upgrade(move |socket| async move {
-        super::transport::relay(socket, url, &session, state, actor, resource).await;
+        super::transport::relay(
+            socket,
+            url,
+            &session,
+            state,
+            actor,
+            resource,
+            matches!(role, Projected::Editor),
+        )
+        .await;
     });
     framing(response.headers_mut());
     Ok(response)

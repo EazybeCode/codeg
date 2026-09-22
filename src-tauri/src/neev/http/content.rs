@@ -261,18 +261,49 @@ async fn create_resource(
     if let Some(origin) = &origin_chat_id {
         canonical_uuid(origin)?;
     }
-    let resource = resources::create(
-        state,
-        &actor,
-        ResourceInput {
-            node_id,
-            kind,
-            title: input.title,
-            origin_chat_id,
-            request_id: input.request_id,
-        },
-    )
-    .await?;
+    // New documents go to the engine only when it is configured *and* creation
+    // is enabled. A chat is never engine-backed, and a document attached to a
+    // chat keeps the native path so its content stays with its conversation.
+    let on_engine = kind == ResourceKind::Document
+        && origin_chat_id.is_none()
+        && state
+            .config
+            .engine
+            .as_ref()
+            .is_some_and(|engine| engine.create_enabled)
+        && state.engine.is_some();
+    let resource_input = ResourceInput {
+        node_id,
+        kind,
+        title: input.title,
+        origin_chat_id,
+        request_id: input.request_id,
+    };
+    let resource = if on_engine {
+        resources::create_engine_document(state, &actor, resource_input).await?
+    } else {
+        resources::create(state, &actor, resource_input).await?
+    };
+    if on_engine {
+        // Outside the native transaction, which is closed by now: the migrator
+        // forbids network calls inside one, and holding the admission guard and
+        // lock set across an upstream round trip would let a slow Docs stall
+        // unrelated native work. There is therefore no atomicity across the two
+        // stores and none is claimed — provisioning uses this resource's own id,
+        // so a failure here leaves a bound resource whose Docs document does not
+        // exist yet and the retry converges rather than making a second one.
+        if let Some(engine) = state.engine.as_ref() {
+            engine
+                .upstream
+                .provision(
+                    &resource.id,
+                    &resource.title,
+                    &crate::neev::engine::proxy::assertion(&actor),
+                )
+                .await
+                .map_err(crate::neev::error::AuthError::from)?;
+        }
+    }
     let engine_backed = engine_backed(state, &resource).await?;
     let mut response = private_json(resource_dto(resource, engine_backed)?);
     *response.status_mut() = StatusCode::CREATED;
