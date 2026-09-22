@@ -55,6 +55,9 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   localStorage.clear()
+  // Undo any activeElement stub, or the next test inherits a frame that is
+  // permanently "focused".
+  delete (document as unknown as { activeElement?: unknown }).activeElement
 })
 
 function alone(value: NativeResource = resource, loadTimeoutMs?: number) {
@@ -215,9 +218,20 @@ it("re-reads the title after focus comes back out of the frame", async () => {
     </NativeTestRoot>
   )
   const frame = await screen.findByTitle("Design document")
-  // Focus moves into the frame: the parent window blurs while the iframe is
-  // what holds focus.
-  frame.focus()
+  /**
+   * Focus moves into the frame: the parent window blurs while the iframe is
+   * what holds focus.
+   *
+   * `activeElement` is asserted rather than assumed. A real browser sets it to
+   * the iframe when focus moves inside, but `HTMLElement.focus()` on an iframe
+   * does not reliably do so in jsdom — and when it does not, the component
+   * correctly decides focus never entered the frame and this test passes while
+   * exercising nothing. Stating it keeps the test about the logic.
+   */
+  Object.defineProperty(document, "activeElement", {
+    configurable: true,
+    get: () => frame,
+  })
   await act(async () => {
     window.dispatchEvent(new Event("blur"))
   })

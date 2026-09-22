@@ -1108,11 +1108,26 @@ function WorkspaceContent() {
   const [openedKinds, setOpenedKinds] = useState<
     Record<string, NativeResourceKind>
   >({})
+  /**
+   * And its name, for the same reason the kind is kept.
+   *
+   * A tab restored from a previous session points at a resource that no loaded
+   * list holds yet — the panel fetches it by id, and the lists may never be
+   * asked for that node at all. Without this the tab strip and breadcrumb fall
+   * back to "Loading your workspace…" and stay there for as long as the tab is
+   * open, while the document itself is on screen and perfectly fine.
+   */
+  const [openedTitles, setOpenedTitles] = useState<Record<string, string>>({})
   const noteResource = useCallback((resource: NativeResource) => {
     setOpenedKinds((old) =>
       old[resource.id] === resource.kind
         ? old
         : { ...old, [resource.id]: resource.kind }
+    )
+    setOpenedTitles((old) =>
+      old[resource.id] === resource.title
+        ? old
+        : { ...old, [resource.id]: resource.title }
     )
   }, [])
   /** What a resource tab points at, when anything yet knows. */
@@ -1134,7 +1149,9 @@ function WorkspaceContent() {
         return (
           (itemsByNode[tab.nodeId]?.items ?? []).find(
             (item) => item.id === tab.resourceId
-          )?.title ?? t("loading")
+          )?.title ??
+          openedTitles[tab.resourceId] ??
+          t("loading")
         )
       if (tab.kind === "agent")
         return (
@@ -1145,7 +1162,7 @@ function WorkspaceContent() {
       // change before the first message, so the tab cannot claim one yet.
       return c("newAgentChat")
     },
-    [nodeById, itemsByNode, agentSessions, t, c]
+    [nodeById, itemsByNode, openedTitles, agentSessions, t, c]
   )
 
   /** Start a draft of `kind` inside `node`, from the sidebar or the landing. */

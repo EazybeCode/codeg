@@ -86,11 +86,16 @@ const ERROR_MARKER = 'meta[name="neev-document-engine-error"]'
 /**
  * Whether the frame is showing a failure rather than the editor.
  *
- * KNOWN GAP, stated rather than hidden: this only detects failures that carry
- * the marker above. Until the proxy emits it, an HTTP error page renders inside
- * the frame as itself and no retry is offered — the timeout only catches a
- * frame that never finishes loading at all. Neither branch has been exercised
- * against a genuinely unavailable upstream in a browser.
+ * Detects only failures that carry the marker above. The proxy does emit it —
+ * an unauthenticated editor route answers 401 with
+ * `<meta name="neev-document-engine-error" content="unauthorized">` — so the
+ * common cases are covered. Anything served without it still renders as itself
+ * with no retry, and the timeout only catches a frame that never finishes
+ * loading at all.
+ *
+ * Neither branch has been exercised against a genuinely unavailable upstream in
+ * a browser; the acceptance harness covers the marker, the tests cover the
+ * component's response to it.
  */
 function failed(element: HTMLIFrameElement | null): boolean {
   if (!element) return false
@@ -149,14 +154,20 @@ function Frame({
   const pending = useRef(false)
 
   /**
-   * Re-read the document's metadata when focus comes back out of the frame.
+   * Re-read the document's metadata when it may have changed.
    *
-   * Deliberately **not** driven by `postMessage`. The frame could send any
-   * title it liked, and believing it would let the content of a document
-   * rewrite the name Neev shows for it. Instead this asks Neev's own API what
-   * the title is, and only when there is reason to think it changed: focus was
-   * inside the frame, and has now left it. That bounds it to at most one
-   * request per visit to the editor rather than a poll.
+   * Two triggers, and the second exists because the first is not enough.
+   * Focus leaving the frame is the cheap signal, but renaming and immediately
+   * clicking something in Neev issues that read BEFORE the save lands — it
+   * answers with the old title and the tab keeps it until a reload. So the
+   * editor also confirms explicitly, once the server has accepted the change.
+   *
+   * **No title is ever read from the frame.** The message carries an id and a
+   * type and nothing else; the value still comes from Neev's own API. That is
+   * the difference between a nudge and a fact, and a frame that could name
+   * itself could name itself anything.
+   *
+   * Both paths are event-driven, so neither can degrade into a poll.
    */
   const orgId = resource.orgId
   const resourceId = resource.id

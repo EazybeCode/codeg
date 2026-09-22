@@ -665,6 +665,135 @@ export const cases = [
   },
 
   {
+    name: "a comment can be written, edited by its author, and reacted to",
+    async run({ owner, member, fixtures }) {
+      const { resource } = await createDocument(
+        owner,
+        fixtures.projectNodeId,
+        "Acceptance — comment lifecycle"
+      )
+      if (!resource?.id) return skip("could not create a document")
+      const shared = await updateResource(owner, resource.id, {
+        visibility: "organization",
+      })
+      if (shared.status >= 400) return skip(`sharing failed (${shared.status})`)
+
+      const thread = await engineApi(owner, `documents/${resource.id}/threads/`, {
+        method: "POST",
+        body: JSON.stringify({ body: "opening comment" }),
+      })
+      if (thread.status >= 400)
+        return no(`creating a thread is ${thread.status}`, { thread: thread.status })
+      const threadId = thread.body?.id
+      const commentId = thread.body?.comments?.[0]?.id
+      if (!threadId) return no("the thread carries no id", { body: thread.body })
+
+      const added = await engineApi(
+        owner,
+        `documents/${resource.id}/threads/${threadId}/comments/`,
+        { method: "POST", body: JSON.stringify({ body: "a reply" }) }
+      )
+
+      /**
+       * PUT, not PATCH. The pinned client sends PUT here
+       * (DocsThreadStore.tsx), so an allowlist admitting only PATCH would leave
+       * editing a comment failing in the browser with exactly the dead-button
+       * symptom the whole exercise is meant to remove.
+       */
+      const edited = commentId
+        ? await engineApi(
+            owner,
+            `documents/${resource.id}/threads/${threadId}/comments/${commentId}/`,
+            { method: "PUT", body: JSON.stringify({ body: "edited by its author" }) }
+          )
+        : { status: null }
+
+      const reacted = commentId
+        ? await engineApi(
+            owner,
+            `documents/${resource.id}/threads/${threadId}/comments/${commentId}/reactions/`,
+            { method: "POST", body: JSON.stringify({ emoji: "👍" }) }
+          )
+        : { status: null }
+
+      // Someone else's comment is not theirs to rewrite.
+      const byOther = commentId
+        ? await engineApi(
+            member,
+            `documents/${resource.id}/threads/${threadId}/comments/${commentId}/`,
+            { method: "PUT", body: JSON.stringify({ body: "not mine to edit" }) }
+          )
+        : { status: null }
+
+      if (edited.status !== null && edited.status >= 400)
+        return no(
+          `the author could not edit their own comment with PUT (${edited.status}) — check the allowlist admits PUT, not only PATCH`,
+          { edit: edited.status }
+        )
+      if (byOther.status !== null && byOther.status < 400)
+        return no(`another editor rewrote someone else's comment (${byOther.status})`, {
+          byOther: byOther.status,
+        })
+
+      return ok({
+        thread: thread.status,
+        addComment: added.status,
+        editOwnWithPut: edited.status,
+        react: reacted.status,
+        editSomeoneElses: byOther.status,
+      })
+    },
+  },
+
+  {
+    name: "a thread from another document is invisible through this one",
+    async run({ owner, fixtures }) {
+      const a = await createDocument(owner, fixtures.projectNodeId, "Acceptance — doc A")
+      const b = await createDocument(owner, fixtures.projectNodeId, "Acceptance — doc B")
+      if (!a.resource?.id || !b.resource?.id)
+        return skip("could not create the two documents this needs")
+
+      const inB = await engineApi(owner, `documents/${b.resource.id}/threads/`, {
+        method: "POST",
+        body: JSON.stringify({ body: "belongs to B" }),
+      })
+      if (inB.status >= 400) return skip(`could not create a thread in B (${inB.status})`)
+      const threadB = inB.body?.id
+      if (!threadB) return skip("thread in B carries no id")
+
+      /**
+       * The same actor holds editor on both documents, so the ONLY variable is
+       * the pairing. Upstream scoped comment READS by thread and document, but
+       * CREATE checked the ability on the document in the URL and took the
+       * thread id from the URL unchecked — so a write could land in a thread
+       * belonging to a document the caller could not open. A 201 here means
+       * that guard is not loaded.
+       */
+      const read = await engineApi(
+        owner,
+        `documents/${a.resource.id}/threads/${threadB}/`
+      )
+      const write = await engineApi(
+        owner,
+        `documents/${a.resource.id}/threads/${threadB}/comments/`,
+        { method: "POST", body: JSON.stringify({ body: "crossing over" }) }
+      )
+
+      if (write.status === 201 || write.status === 200)
+        return no(
+          `a comment was written into another document's thread (${write.status}) — the thread-scope guard is not loaded`,
+          { read: read.status, write: write.status }
+        )
+      return read.status === 404 && write.status === 404
+        ? ok({ read: 404, write: 404, note: "mismatched pair is indistinguishable from absent" })
+        : no("a mismatched pair should be 404 through every route", {
+            read: read.status,
+            write: write.status,
+          })
+    },
+  },
+
+  {
     name: "another organization is refused, on the page and on the API",
     async run({ owner, outsider, fixtures, socketsWork }) {
       const { resource } = await createDocument(
