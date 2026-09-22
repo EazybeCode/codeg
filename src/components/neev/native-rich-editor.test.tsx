@@ -662,6 +662,28 @@ describe("where a paste must not break what it lands in", () => {
     })
   })
 
+  it("flattens every separator a cell rejects, not only the familiar two", () => {
+    // The model rejects U+2028 and U+2029 in a table run exactly as it rejects
+    // LF and CR, so splitting on the familiar two alone left the paste to be
+    // refused by the guard the flattening is meant to satisfy.
+    expect(choosePaste({ ...cell, plain: "one\u2028two\u2029three" })).toEqual({
+      kind: "inline",
+      content: "one two three",
+      notice: "celllines",
+    })
+    expect(choosePaste({ ...cell, plain: "a\r\nb\u2028c" })).toEqual({
+      kind: "inline",
+      content: "a b c",
+      notice: "celllines",
+    })
+    // Outside a cell they are ordinary text and are left alone.
+    expect(choosePaste({ ...code, plain: "one\u2028two" })).toEqual({
+      kind: "inline",
+      content: "one\u2028two",
+      notice: "none",
+    })
+  })
+
   it("keeps multi-line text inside the code block it was pasted into", () => {
     // A code block is plain text and is NOT isolating, so a paragraph slice
     // splits out of it: the paste would land as paragraphs after the block and
