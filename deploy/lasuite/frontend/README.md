@@ -160,13 +160,24 @@ at `/tmp/neev-lasuite-build/neev-document-engine-frontend-v5.7.0.tar.gz`,
 sha256 `47772bd319073f971b2e5c170542646c2463fd074aecd3f7c4bf6c1c97cebf86`.
 Rebuild it with `build.sh` rather than treating that path as durable.
 
-One honest difference between that artifact and what `build.sh` now produces:
-the shipped build was run without upstream's `prebuild` step, so
+One difference between that artifact and what `build.sh` now produces: the
+shipped build was run without upstream's `prebuild` step, so
 `assets/fonts/emoji/` contains only `fallback.png` instead of the full Apple
-emoji set. `build.sh` runs `prebuild`. The omission is inert here — those images
-are referenced only by `useExportAGPL`, which a `PUBLISH_AS_MIT=true` build never
-loads — but it is a difference, and if anyone ever flips that flag to `false`
-they should know those paths are root-relative and would need prefixing too.
+emoji set. `build.sh` runs `prebuild`.
+
+That omission was checked rather than assumed, and it costs the editor nothing:
+
+- the only source reference to `/assets/fonts/emoji/` is in `useExportAGPL`,
+  which `doc-export/hooks/index.ts` loads solely when
+  `NEXT_PUBLIC_PUBLISH_AS_MIT === 'false'`
+- `grep` over the built `out/_next` finds **no reference to that path at all**,
+  so nothing in the shipped bundle can ask for those files
+- the emoji picker in the editor is `@emoji-mart/data`, which is bundled and
+  has nothing to do with these images
+
+So no rebuild was done for it. If anyone ever sets `PUBLISH_AS_MIT=false`, note
+that those paths are root-relative and would need prefixing as well as
+populating.
 
 ## Verification
 

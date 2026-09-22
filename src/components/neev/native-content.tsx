@@ -28,6 +28,7 @@ import {
 import { NativeError } from "./native-boundary"
 import { NativeChat } from "./native-chat"
 import { NativeDocument } from "./native-document"
+import { EngineDocument } from "./engine-document"
 
 export type ContentNavigationGuard = (action: () => void) => void
 export type ContentCreation = {
@@ -750,6 +751,34 @@ function Content({
                 onChanged={changed}
                 onDirtyChange={onDirtyChange}
                 onRequestSettings={() => guard(() => router.push("/settings"))}
+                actions={{
+                  isCreator: selected.creatorId === auth.session?.user.id,
+                  archived: selected.archived,
+                  visibility: selected.visibility,
+                  shareable: !selected.originChatId,
+                  disabled: saving,
+                  onRename: () => open("rename"),
+                  onShare: () => open("share"),
+                  onMakePrivate: () => guardUpdate({ visibility: "private" }),
+                  onArchiveToggle: () =>
+                    guardUpdate({ archived: !selected.archived }),
+                  onMove: () => open("move"),
+                }}
+              />
+            ) : selected.engine === "lasuite" ? (
+              /*
+               * The embedded engine owns the document's content, title and
+               * saving, so none of the native document's saving machinery is
+               * passed to it — no `onRegisterFlush`, no `autosaveMs`, no
+               * `onDirtyChange`. Two writers against one document is the
+               * failure this avoids, and the absence of those props is what
+               * makes it structural rather than a promise.
+               */
+              <EngineDocument
+                key={selected.id}
+                resource={selected}
+                onBack={back}
+                onChanged={changed}
                 actions={{
                   isCreator: selected.creatorId === auth.session?.user.id,
                   archived: selected.archived,

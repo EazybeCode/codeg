@@ -4,6 +4,15 @@ import { parseRichDocument, type RichDocument } from "./neev-rich-document"
 export type NativeResourceKind = "chat" | "document"
 export type NativeVisibility = "private" | "organization"
 
+/**
+ * Which editor owns a document's content.
+ *
+ * `native` is Neev's own editor and is what every existing document is; those
+ * are not migrated and keep it forever. `lasuite` is the embedded La Suite Docs
+ * engine, which owns its own content, title and saving.
+ */
+export type NativeEngine = "native" | "lasuite"
+
 export interface NativeResource {
   id: string
   orgId: number
@@ -18,6 +27,11 @@ export interface NativeResource {
   archived: boolean
   createdAt: number
   updatedAt: number
+  /**
+   * Absent from a server that predates the engine split, and from every chat.
+   * Absent means `native`, so an older server keeps working unchanged.
+   */
+  engine?: NativeEngine
 }
 
 /**
@@ -122,18 +136,33 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>
 }
 
+/**
+ * Every required key present, no key that is neither required nor optional.
+ *
+ * The strictness is deliberate and stays: an unexpected key means the response
+ * is not the shape this client was written against, and guessing is how a
+ * rename becomes silent data loss. Optional keys are the one concession, and
+ * only for fields a server may genuinely not send yet — adding a field to a
+ * response must not break every client that has not learned about it, which
+ * without this would be exactly what happens.
+ */
 function exact(
   value: unknown,
-  keys: readonly string[]
+  keys: readonly string[],
+  optional: readonly string[] = []
 ): Record<string, unknown> {
   const object = record(value)
   const actual = Object.keys(object).sort()
-  const expected = [...keys].sort()
+  const required = [...keys].sort()
   if (
-    actual.length !== expected.length ||
-    actual.some((key, index) => key !== expected[index])
+    actual.length < required.length ||
+    actual.length > required.length + optional.length
   )
     return invalid()
+  const seen = new Set(actual)
+  if (required.some((key) => !seen.has(key))) return invalid()
+  const allowed = new Set([...required, ...optional])
+  if (actual.some((key) => !allowed.has(key))) return invalid()
   return object
 }
 
@@ -203,22 +232,39 @@ function page<T>(
 }
 
 export function parseResource(value: unknown): NativeResource {
-  const object = exact(value, [
-    "id",
-    "orgId",
-    "nodeId",
-    "kind",
-    "creatorId",
-    "title",
-    "visibility",
-    "originChatId",
-    "authRevision",
-    "contentRevision",
-    "archived",
-    "createdAt",
-    "updatedAt",
-  ])
+  const object = exact(
+    value,
+    [
+      "id",
+      "orgId",
+      "nodeId",
+      "kind",
+      "creatorId",
+      "title",
+      "visibility",
+      "originChatId",
+      "authRevision",
+      "contentRevision",
+      "archived",
+      "createdAt",
+      "updatedAt",
+    ],
+    ["engine"]
+  )
   if (object.kind !== "chat" && object.kind !== "document") return invalid()
+  /**
+   * Rejected rather than coerced when it is a value this client does not know.
+   * Falling back to `native` for an unrecognised engine would render Neev's
+   * editor against content it cannot read — a blank document where one exists,
+   * which reads as data loss and invites saving over it. Failing loudly is the
+   * safe direction, and matches how `kind` and `visibility` are handled.
+   */
+  const engine =
+    object.engine === undefined
+      ? undefined
+      : object.engine === "native" || object.engine === "lasuite"
+        ? object.engine
+        : invalid()
   if (object.visibility !== "private" && object.visibility !== "organization")
     return invalid()
   if (typeof object.archived !== "boolean") return invalid()
@@ -246,6 +292,7 @@ export function parseResource(value: unknown): NativeResource {
     archived: object.archived,
     createdAt: timestamp(object.createdAt),
     updatedAt: timestamp(object.updatedAt),
+    ...(engine === undefined ? {} : { engine }),
   }
 }
 
