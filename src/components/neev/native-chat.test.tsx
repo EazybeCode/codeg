@@ -463,6 +463,34 @@ async function typeAsk(user: ReturnType<typeof userEvent.setup>) {
   )
 }
 
+it("carries the audience promise on the control that makes it true", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+  })
+  mount(true)
+  const agent = await screen.findByRole("button", { name: "Ask agent" })
+  const promise =
+    "Your question and the agent's reply are both posted to this conversation."
+  // It used to be a paragraph pinned under the composer: always there, never
+  // changing, true of every send — so it stopped being read. It is now the
+  // description of the toggle someone is deciding about, and its tooltip.
+  expect(
+    document.getElementById(agent.getAttribute("aria-describedby") ?? "")
+  ).toHaveTextContent(promise)
+  expect(agent).toHaveAttribute("title", promise)
+  // Team mode never claims it, because team mode does not do it.
+  expect(screen.getByRole("button", { name: "Team chat" })).not.toHaveAttribute(
+    "aria-describedby"
+  )
+  // And nothing standing is printed under the row for it.
+  expect(
+    screen.queryAllByText(promise).filter((node) => node.tagName === "P")
+  ).toHaveLength(1)
+})
+
 it("opens a new chat in agent mode and an existing one in team mode", async () => {
   mockNativeSession(undefined, {
     "GET /api/workos/capabilities": capable,

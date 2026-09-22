@@ -283,6 +283,13 @@ export function AgentControls({
       ? t("speedNoProvider", { name: view.catalog?.label ?? provider })
       : t("speedNoModel", { name: modelLabel(t, view, settings) })
 
+  // Everything stable the reader might want to know rides on the chip itself —
+  // as a tooltip for a mouse, and as its accessible description for everyone
+  // else. It used to be a paragraph under the row, which meant the composer
+  // grew a second and third line of standing explanation that never changed and
+  // that nobody needed twice.
+  const speedDescription = fastBlocked ? blockedReason : t("speedFastCost")
+
   return (
     <div className={cn("flex min-w-0 flex-wrap items-center gap-1", className)}>
       <DropdownMenu>
@@ -293,9 +300,10 @@ export function AgentControls({
             size="sm"
             disabled={disabled}
             aria-label={t("agentModel")}
-            className="h-7 gap-1 rounded-full px-2 text-xs font-normal"
+            title={providerModelLabel(t, view, settings, provider)}
+            className="h-7 min-w-0 max-w-[9.5rem] shrink gap-1 rounded-full px-2 text-xs font-normal sm:max-w-56"
           >
-            <span className="max-w-56 truncate">
+            <span className="truncate">
               {providerModelLabel(t, view, settings, provider)}
             </span>
             <ChevronDown aria-hidden className="size-3 opacity-60" />
@@ -363,12 +371,11 @@ export function AgentControls({
             size="sm"
             disabled={disabled || view.efforts.length <= 1}
             aria-label={t("agentEffort")}
-            className="h-7 gap-1 rounded-full px-2 text-xs font-normal"
+            title={`${t("agentEffort")}: ${effortLabel(t, settings.effort)}`}
+            className="h-7 max-w-24 shrink-0 gap-1 rounded-full px-2 text-xs font-normal sm:max-w-32"
           >
-            <Gauge aria-hidden className="size-3 opacity-60" />
-            <span className="max-w-28 truncate">
-              {effortLabel(t, settings.effort)}
-            </span>
+            <Gauge aria-hidden className="size-3 shrink-0 opacity-60" />
+            <span className="truncate">{effortLabel(t, settings.effort)}</span>
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-40">
@@ -398,7 +405,7 @@ export function AgentControls({
       <div
         role="group"
         aria-label={t("agentSpeed")}
-        className="flex items-center rounded-full border p-0.5"
+        className="flex shrink-0 items-center rounded-full border p-0.5"
       >
         <Button
           type="button"
@@ -406,6 +413,9 @@ export function AgentControls({
           size="sm"
           disabled={disabled}
           aria-pressed={!settings.fast}
+          // The cheap side of the pair, and the default everywhere. Nothing
+          // here ever turns Fast on by itself.
+          title={t("speedStandard")}
           onClick={() => apply({ ...settings, fast: false }, provider)}
           className="h-6 rounded-full px-2 text-xs font-normal"
         >
@@ -429,47 +439,25 @@ export function AgentControls({
         </Button>
       </div>
 
-      {/* The chip stays visible when Fast is impossible, and says why, rather
-          than disappearing and leaving the reader to wonder where it went. */}
-      {fastBlocked ? (
-        <p
-          id={speedNote}
-          role="status"
-          className="w-full text-xs text-muted-foreground"
-        >
-          {blockedReason}
-        </p>
-      ) : (
-        <p id={speedNote} className="w-full text-xs text-muted-foreground">
-          {t("speedFastCost")}
-        </p>
-      )}
-      {dropped !== "none" && (
-        <p role="status" className="w-full text-xs text-muted-foreground">
-          {dropped === "fast" ? t("speedTurnedOff") : t("effortReset")}
-        </p>
-      )}
+      {/* The chip stays visible when Fast is impossible rather than vanishing,
+          and the reason is on the chip. Not a line of its own: the same words
+          were being printed under every composer whether or not anyone was
+          looking at the speed control. */}
+      <span id={speedNote} className="sr-only">
+        {speedDescription}
+      </span>
+      {/* Announced once, and only when a choice was NOT honoured in full.
+          Turning Fast off because the new model cannot run it is a change
+          nobody asked for, so it is said out loud — but the standing reason now
+          lives on the disabled chip, which is where someone looking for it
+          would point. */}
+      <span role="status" className="sr-only">
+        {dropped === "fast"
+          ? t("speedTurnedOff")
+          : dropped === "effort"
+            ? t("effortReset")
+            : ""}
+      </span>
     </div>
-  )
-}
-
-/** The live run configuration, as one line of prose for a header or a summary. */
-export function AgentConfigurationSummary({
-  settings,
-  capabilities,
-  provider,
-}: {
-  settings: NeevAgentSettings
-  capabilities: NeevAgentCapabilities | null
-  provider: NeevAgentProvider
-}) {
-  const t = useContentTranslations()
-  const view = viewAgentControls(capabilities, provider, settings)
-  return (
-    <>
-      {providerModelLabel(t, view, settings, provider)}
-      {settings.effort !== null ? ` · ${effortLabel(t, settings.effort)}` : ""}
-      {settings.fast ? ` · ${t("speedFast")}` : ""}
-    </>
   )
 }

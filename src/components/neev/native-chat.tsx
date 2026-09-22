@@ -10,7 +10,7 @@ import {
 } from "lucide-react"
 import { NativeMarkdown } from "./native-markdown"
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
@@ -179,6 +179,9 @@ function Chat({
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
+  // Per instance: every open chat tab stays mounted, so a fixed id here would
+  // point every Ask agent toggle at the first chat's description.
+  const postsNote = useId()
   const [latest, setLatest] = useState(resource),
     [messages, setMessages] = useState<NativeMessage[]>([]),
     [draft, setDraft] = useState(""),
@@ -872,9 +875,10 @@ function Chat({
   const sendable = !!draft.trim() && !composerBusy && !latest.archived
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
-      {/* One compact row. The conversation is the page; the header only has to
-          name it, say who can see it, and hold the few actions on it. */}
-      <div className="flex shrink-0 items-center gap-2 px-4 py-1.5 sm:gap-3 sm:px-8">
+      {/* ONE row, title and standing included. It was a title stacked over a
+          metadata line, which cost two rows of height at the top of every
+          conversation to say two short things. The conversation is the page. */}
+      <div className="flex h-9 shrink-0 items-center gap-2 px-4 sm:gap-3 sm:px-8">
         <Button
           variant="ghost"
           size="icon"
@@ -884,11 +888,30 @@ function Chat({
         >
           <ArrowLeft aria-hidden />
         </Button>
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate text-sm font-medium" title={latest.title}>
+        <div className="flex min-w-0 flex-1 items-baseline gap-2">
+          <h2
+            className="shrink truncate text-sm font-medium"
+            title={latest.title}
+          >
             {latest.title}
           </h2>
-          <p className="truncate text-xs text-muted-foreground">
+          {/* The audience never collapses to nothing. At narrow widths the
+              words go and the icon stays: hiding the whole line on mobile meant
+              a shared conversation looked exactly like a private one, which is
+              the one thing here that changes what writing in this box means. */}
+          <span
+            role="img"
+            aria-label={t(latest.visibility)}
+            title={t(latest.visibility)}
+            className="shrink-0 text-muted-foreground/80 sm:hidden"
+          >
+            {latest.visibility === "private" ? (
+              <Lock aria-hidden className="size-3.5" />
+            ) : (
+              <Users aria-hidden className="size-3.5" />
+            )}
+          </span>
+          <p className="hidden min-w-0 shrink-0 truncate text-xs text-muted-foreground/80 sm:block">
             {t(latest.visibility)}
             {latest.archived ? ` · ${t("archived")}` : ""} ·{" "}
             <span role="status">
@@ -1108,9 +1131,12 @@ function Chat({
               {t("reviewAudience")}
             </Button>
           )}
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">
             {/* The mode lives with the composer, not in a header or a side
                 panel, because it changes what pressing Send does. */}
+            <p id={postsNote} className="sr-only">
+              {t("agentPostsToTeam")}
+            </p>
             {(["agent", "team"] as const).map((value) => (
               <Button
                 key={value}
@@ -1118,13 +1144,23 @@ function Chat({
                 size="sm"
                 variant={mode === value ? "secondary" : "ghost"}
                 aria-pressed={mode === value}
-                className={cn("rounded-full", mode !== value && "opacity-70")}
+                // Both the ask and the reply become team-visible messages, so
+                // the control that does that carries the promise (spec §5.3) —
+                // on hover for a mouse, and as its description for everyone.
+                aria-describedby={value === "agent" ? postsNote : undefined}
+                title={
+                  value === "agent" ? t("agentPostsToTeam") : t("teamChat")
+                }
+                className={cn(
+                  "h-7 shrink-0 rounded-full px-2.5 text-xs",
+                  mode !== value && "opacity-70"
+                )}
                 onClick={() => choose(value)}
               >
                 {value === "agent" ? (
-                  <Sparkles aria-hidden />
+                  <Sparkles aria-hidden className="size-3.5" />
                 ) : (
-                  <Users aria-hidden />
+                  <Users aria-hidden className="size-3.5" />
                 )}
                 {t(value === "agent" ? "askAgent" : "teamChat")}
               </Button>
@@ -1198,37 +1234,48 @@ function Chat({
               <ArrowUp aria-hidden />
             </Button>
           </div>
-          {mode === "agent" && (
-            <div className="space-y-1 px-1 pt-1.5 text-xs text-muted-foreground">
-              {/* Both the ask and the reply become team-visible messages, so
-                  the composer must say so before send (spec §5.3). */}
-              <p>{t("agentPostsToTeam")}</p>
-              {!runtimeEnabled ? (
-                <p role="status">{t("agentsOff")}</p>
-              ) : (
-                connection &&
-                connection.state !== "connected" && (
-                  // Honest, and actionable: the one place this can be fixed is
-                  // one link away.
-                  <p role="status">
-                    {t("providerNotConnected", { name: agentProvider })}{" "}
-                    <Link
-                      href="/settings"
-                      onClick={(event) => {
-                        if (onRequestSettings) {
-                          event.preventDefault()
-                          onRequestSettings()
-                        }
-                      }}
-                      className="rounded underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      {n("personalAgents")}
-                    </Link>
-                  </p>
-                )
-              )}
-            </div>
-          )}
+          {/*
+            Only what is ACTIONABLE, and only when it applies.
+            The standing "your question and its reply are posted to the team"
+            line lived here permanently. It never changed, it was true of every
+            send, and it sat under the composer forever — so it stopped being
+            read. It is now the accessible description of the Ask agent toggle
+            that makes it true, which is where someone deciding between Agent
+            and Team is actually looking.
+          */}
+          {mode === "agent" &&
+            (!runtimeEnabled ? (
+              <p
+                role="status"
+                className="px-1 pt-1.5 text-xs text-muted-foreground"
+              >
+                {t("agentsOff")}
+              </p>
+            ) : (
+              connection &&
+              connection.state !== "connected" && (
+                // Honest, and actionable: the one place this can be fixed is
+                // one link away.
+                <p
+                  role="status"
+                  className="px-1 pt-1.5 text-xs text-muted-foreground"
+                >
+                  {t("providerNotConnected", { name: agentProvider })}{" "}
+                  <Link
+                    href="/settings"
+                    onClick={(event) => {
+                      if (onRequestSettings) {
+                        event.preventDefault()
+                        onRequestSettings()
+                      }
+                    }}
+                    className="rounded underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {n("personalAgents")}
+                  </Link>
+                </p>
+              )
+            ))}
         </div>
       </form>
       <Dialog open={review} onOpenChange={setReview}>

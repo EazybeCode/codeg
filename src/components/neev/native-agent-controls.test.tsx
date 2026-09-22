@@ -386,9 +386,16 @@ describe("the controls on a saved agent chat", () => {
     // disabled with the reason, rather than vanishing.
     const fast = screen.getByRole("button", { name: "Fast" })
     expect(fast).toBeDisabled()
-    expect(
-      screen.getByText(/Fast mode is not available for Default/)
-    ).toBeVisible()
+    // The reason rides on the chip — as its description and its tooltip — not
+    // as a standing paragraph under every composer that has one of these rows.
+    const reason = (chip: HTMLElement) =>
+      document.getElementById(chip.getAttribute("aria-describedby") ?? "")
+        ?.textContent ?? ""
+    expect(reason(fast)).toMatch(/Fast mode is not available for Default/)
+    expect(fast).toHaveAttribute(
+      "title",
+      expect.stringMatching(/not available for Default/) as unknown as string
+    )
     // Choosing Opus makes it possible — but does not switch it on.
     await user.click(screen.getByRole("button", { name: "Model" }))
     await user.click(
@@ -403,8 +410,31 @@ describe("the controls on a saved agent chat", () => {
       "aria-pressed",
       "false"
     )
-    // And the cost of using it is stated before it is used.
-    expect(screen.getByText("Fast mode costs more per run.")).toBeVisible()
+    // And the cost of using it is stated before it is used — reachable, and
+    // reachable without a permanent line of copy under the composer.
+    const enabled = screen.getByRole("button", { name: "Fast" })
+    expect(
+      document.getElementById(enabled.getAttribute("aria-describedby") ?? "")
+    ).toHaveTextContent("Fast mode costs more per run.")
+    expect(enabled).toHaveAttribute("title", "Fast mode costs more per run.")
+    // Standard is where it stays until someone chooses otherwise.
+    expect(screen.getByRole("button", { name: "Standard" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    )
+  })
+
+  it("keeps the whole row on one line, with nothing standing under it", async () => {
+    openSaved({})
+    const row = (await screen.findByRole("button", { name: "Model" }))
+      .parentElement!
+    // Model, reasoning and speed, and that is the row. Every explanatory
+    // paragraph that used to sit beneath it is now on the control it explains.
+    expect(
+      [...row.children].filter((child) => child.tagName === "P")
+    ).toHaveLength(0)
+    for (const name of ["Model", "Reasoning", "Standard", "Fast"])
+      expect(screen.getByRole("button", { name })).toBeInTheDocument()
   })
 
   it("re-reads and retries once when someone else changed the session first", async () => {

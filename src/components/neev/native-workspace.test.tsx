@@ -764,6 +764,36 @@ function restoringRoutes(resource: () => Response) {
   }
 }
 
+it("gives a restored tab the icon of what it actually is", async () => {
+  // Every resource tab used to draw the document icon, so a team chat in the
+  // strip wore a page — while the SAME chat in the sidebar one panel away
+  // correctly wore a speech bubble. The strip is scanned to tell a conversation
+  // from a document, so the icon has to follow the resource's real kind.
+  const user = userEvent.setup()
+  rememberOpen()
+  mockNativeSession(undefined, {
+    ...restoringRoutes(() => json(DOC)),
+    // A real chat resource listed beside the document, so both kinds are open.
+    "GET /api/neev/nodes/4/chats": () =>
+      json({ items: [NEW_CHAT], nextAfter: null }),
+  })
+  mountWorkspace()
+  // The document tab is the restored one; the chat is opened from the tree.
+  await screen.findByRole("tab", { name: /Launch plan/ })
+  await user.click(await screen.findByRole("button", { name: "New chat" }))
+
+  const iconOf = (name: RegExp) => {
+    const icon = screen.getByRole("tab", { name }).querySelector("svg")
+    // A tab with no icon at all is the same bug wearing a different hat.
+    expect(icon).not.toBeNull()
+    return icon!.getAttribute("class") ?? ""
+  }
+  await waitFor(() => expect(iconOf(/New chat/)).toMatch(/messages-square/))
+  expect(iconOf(/Launch plan/)).toMatch(/file-text/)
+  // And the two really differ, which is the whole point of the icon.
+  expect(iconOf(/New chat/)).not.toBe(iconOf(/Launch plan/))
+})
+
 function mountWorkspace() {
   return render(
     <NativeTestRoot>
