@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto"
 import { BASE_URL } from "./config.mjs"
 import { engineApi, engineUrl, updateResource } from "./http.mjs"
-import { connect, openWithForeignDocumentName, until } from "./collab.mjs"
+import { connect, explainClose, openWithForeignDocumentName, until } from "./collab.mjs"
 
 /**
  * The acceptance cases.
@@ -94,6 +94,58 @@ export const cases = [
         return no("editor page carries no frame-ancestors", { csp, xfo })
 
       return ok({ id: resource.id, engine: resource.engine, csp, xfo })
+    },
+  },
+
+  {
+    name: "every asset the editor page references actually loads",
+    async run({ owner, fixtures }) {
+      const { resource } = await createDocument(
+        owner,
+        fixtures.projectNodeId,
+        "Acceptance — assets"
+      )
+      const id = resource?.id ?? fixtures.legacyDocumentId
+      const page = await owner.fetch(engineUrl(id))
+      if (page.status !== 200) {
+        await page.arrayBuffer()
+        return skip(`editor page is ${page.status}; nothing to check yet`)
+      }
+      const html = await page.text()
+
+      /**
+       * One missing chunk is enough to leave the editor as its prerendered
+       * loader forever, and it is nearly invisible: the browser reports a
+       * network 404, the application reports nothing, because the application
+       * never starts. The page-specific chunk is the dangerous one — its name
+       * contains the route's literal brackets, so it arrives percent-encoded
+       * and any resolver that does not decode will miss the file that is
+       * sitting right there on disk.
+       */
+      const urls = [
+        ...new Set(
+          [...html.matchAll(/(?:src|href)="(\/document-engine\/_next\/[^"]+)"/g)].map(
+            (m) => m[1]
+          )
+        ),
+      ]
+      if (urls.length === 0) return no("the editor page references no assets at all", {})
+
+      const broken = []
+      for (const url of urls) {
+        const { status, type, error } = await owner.head(url)
+        const wanted = url.endsWith(".css")
+          ? /css/
+          : url.endsWith(".js")
+            ? /javascript/
+            : /./
+        if (status !== 200 || !wanted.test(type))
+          broken.push({ url: url.replace("/document-engine/_next/", "…/"), status, type, error })
+      }
+
+      return broken.length
+        ? no(`${broken.length} of ${urls.length} assets do not load`, { broken })
+        : ok({ checked: urls.length })
     },
   },
 
@@ -400,7 +452,7 @@ export const cases = [
         native: native.status,
         api: api.status,
         page: page.status,
-        socket: socket.reason,
+        socket: explainClose(socket),
       })
     },
   },
@@ -424,8 +476,8 @@ export const cases = [
       const a = await connect(owner, resource.id)
       const b = await connect(member, resource.id)
       try {
-        if (!a.ok) return no("owner could not connect", { reason: a.reason })
-        if (!b.ok) return no("member could not connect", { reason: b.reason })
+        if (!a.ok) return no("owner could not connect", { reason: explainClose(a) })
+        if (!b.ok) return no("member could not connect", { reason: explainClose(b) })
 
         // Both write without waiting for the other, which is the case that
         // distinguishes convergence from taking turns.
@@ -468,7 +520,9 @@ export const cases = [
       const before = await connect(member, resource.id)
       before.destroy()
       if (!before.ok)
-        return skip(`member could not connect even before revocation: ${before.reason}`)
+        return skip(
+          `member could not connect even before revocation: ${explainClose(before)}`
+        )
 
       await updateResource(owner, resource.id, { visibility: "private" })
 
@@ -516,7 +570,7 @@ export const cases = [
             authorised: mine.resource.id,
             named: theirs.resource.id,
           })
-        : ok({ refused: attempt.reason, code: attempt.code ?? null })
+        : ok({ refused: explainClose(attempt), code: attempt.code ?? null })
     },
   },
 
@@ -541,7 +595,7 @@ export const cases = [
           // work; if none do, this says nothing about archiving.
           if (!socketsWork)
             return skip("no socket can be established at all")
-          return ok({ outcome: "socket refused", reason: session.reason })
+          return ok({ outcome: "socket refused", reason: explainClose(session) })
         }
 
         const writable = session.provider.configuration?.readOnly === false

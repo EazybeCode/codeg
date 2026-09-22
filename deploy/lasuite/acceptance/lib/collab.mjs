@@ -65,14 +65,20 @@ export async function connect(actor, documentId, { timeoutMs = 10_000 } = {}) {
     name: documentId,
     document: doc,
     WebSocketPolyfill: WebSocket,
-    // The socket authenticates by cookie; without it the server closes with
-    // `4001 No cookies`, which is a different failure from being refused.
-    headers: { cookie: actor.cookieHeader },
+    // Both headers are required, and each has its own refusal. Without the
+    // cookie the server closes `4001 No cookies`; without an Origin in its
+    // allowed list, `4001 Origin not allowed`. A browser sends both, so the
+    // client that stands in for one has to as well.
+    headers: { cookie: actor.cookieHeader, origin: new URL(BASE_URL).origin },
     preserveConnection: false,
     onAuthenticated: () => settle({ ok: true }),
     onAuthenticationFailed: ({ reason }) => settle({ ok: false, reason }),
+    // Keep the code and the reason separate. Substituting a placeholder string
+    // for an empty reason hides the close code behind it, and the code is the
+    // part that says WHY — 1005 in particular means the upgrade reached a route
+    // the server does not mount.
     onClose: ({ event }) =>
-      settle({ ok: false, reason: event?.reason || "closed", code: event?.code }),
+      settle({ ok: false, reason: event?.reason || null, code: event?.code ?? null }),
   })
 
   const timer = setTimeout(
@@ -128,7 +134,7 @@ export async function openWithForeignDocumentName(
   const socket = new HocuspocusProviderWebsocket({
     url: `${wsUrl()}?room=${authorisedId}`,
     WebSocketPolyfill: WebSocket,
-    headers: { cookie: actor.cookieHeader },
+    headers: { cookie: actor.cookieHeader, origin: new URL(BASE_URL).origin },
   })
 
   let settle
@@ -141,8 +147,12 @@ export async function openWithForeignDocumentName(
     document: new Y.Doc(),
     onAuthenticated: () => settle({ ok: true }),
     onAuthenticationFailed: ({ reason }) => settle({ ok: false, reason }),
+    // Keep the code and the reason separate. Substituting a placeholder string
+    // for an empty reason hides the close code behind it, and the code is the
+    // part that says WHY — 1005 in particular means the upgrade reached a route
+    // the server does not mount.
     onClose: ({ event }) =>
-      settle({ ok: false, reason: event?.reason || "closed", code: event?.code }),
+      settle({ ok: false, reason: event?.reason || null, code: event?.code ?? null }),
   })
 
   const timer = setTimeout(
@@ -161,6 +171,29 @@ export async function openWithForeignDocumentName(
     }
   }
   return { ...result, destroy }
+}
+
+/**
+ * What a refusal actually means, from its close code.
+ *
+ * These are distinguishable and they matter: every one of them produces "the
+ * socket did not work", and asserting on that alone is how a negative case ends
+ * up passing because collaboration is broken rather than because access was
+ * denied. Codes confirmed against the canary's own y-provider.
+ */
+export function explainClose({ code, reason }) {
+  const text = String(reason ?? "")
+  // 1005 and 1006 are the same event seen from the two ends: the server logs
+  // "no status received", the client sees the connection vanish without a close
+  // frame. Both mean the upgrade reached something that is not the socket route.
+  if (code === 1005 || code === 1006)
+    return `closed with code ${code} and no reason — the upgrade reached a route the server does not mount (check the socket path, not authorisation)`
+  if (/origin/i.test(text)) return "Origin header missing or not in the allowed list"
+  if (/no cookies/i.test(text)) return "the session cookie was not forwarded"
+  if (/permission/i.test(text)) return "authorisation refused — a real denial"
+  if (text) return text
+  if (code) return `closed with code ${code}`
+  return "closed with no code and no reason"
 }
 
 /** Wait until `predicate` holds, or give up. Returns whether it held. */

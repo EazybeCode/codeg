@@ -1,7 +1,6 @@
 import { BASE_URL, loadEnvironment, redact } from "./lib/config.mjs"
 import { Actor } from "./lib/http.mjs"
-import { connect } from "./lib/collab.mjs"
-import { loadClient } from "./lib/collab.mjs"
+import { connect, explainClose, loadClient } from "./lib/collab.mjs"
 import { cases } from "./lib/cases.mjs"
 import { randomUUID } from "node:crypto"
 
@@ -21,7 +20,12 @@ async function createProbeDocument({ owner, fixtures }) {
     return { ok: false, reason: `could not create a probe document (${created.status})` }
   const session = await connect(owner, created.body.id)
   session.destroy()
-  return { ok: session.ok, reason: session.reason ?? null, id: created.body.id }
+  return {
+    ok: session.ok,
+    reason: session.ok ? null : explainClose(session),
+    code: session.code ?? null,
+    id: created.body.id,
+  }
 }
 
 /**

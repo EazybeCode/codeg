@@ -77,6 +77,30 @@ export class Actor {
   }
 
   /**
+   * Status and content type, with the body drained and discarded.
+   *
+   * Draining is the point. Node keeps a connection alive until its body is
+   * consumed, so a loop that reads only headers exhausts the pool and then
+   * hangs — which looks like the server stalling rather than like the client
+   * holding sockets open. Learned the hard way: a 17-asset check wedged for ten
+   * minutes and had to be killed.
+   */
+  async head(path, { timeoutMs = 10_000 } = {}) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await this.fetch(path, { signal: controller.signal })
+      const type = response.headers.get("content-type") ?? ""
+      await response.arrayBuffer()
+      return { status: response.status, type }
+    } catch (error) {
+      return { status: 0, type: "", error: error.name === "AbortError" ? "timeout" : error.message }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  /**
    * Take up the session the host prepared, and check it is really this person.
    *
    * The descriptor carries a cookie jar rather than a password, so there is no
