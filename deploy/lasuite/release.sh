@@ -436,7 +436,7 @@ stage_compose() {
   info "  volumes   += ${ARTIFACT_HOST} -> ${ARTIFACT_TARGET} (read-only)"
   confirm "stage and validate the edit" || return 0
 
-  trap 'rm -f "$staged"' RETURN
+  trap "rm -f -- $(printf '%q' "$staged"); trap - RETURN" RETURN
 
   python3 - "$NATIVE_COMPOSE" "$staged" "$NATIVE_SERVICE" "$IMAGE" "$ENGINE_ENV" \
               "$ARTIFACT_HOST" "$ARTIFACT_TARGET" <<'PY'
@@ -576,7 +576,7 @@ import json, subprocess, sys
 container, required, artifact_target = sys.argv[1:4]
 spec = json.loads(subprocess.check_output(["docker", "inspect", container]))[0]
 host = spec["HostConfig"]
-granted = set(host.get("CapAdd") or [])
+granted = {cap.removeprefix("CAP_") for cap in (host.get("CapAdd") or [])}
 missing = [cap for cap in required.split() if cap not in granted]
 if missing:
     raise SystemExit(f"REFUSING: running container lacks {', '.join(missing)}")
@@ -626,7 +626,17 @@ cmd_rollout() {
   require_recent_backup
 
   log "Starting the docs stack"
-  ( cd "$DOCS_DIR" && docker compose up -d --wait --wait-timeout 240 )
+  # createbuckets is a successful one-shot job, not a long-running service.
+  # Waiting on the entire project treats its exit(0) as a failed rollout.
+  ( cd "$DOCS_DIR" && docker compose up -d )
+  ( cd "$DOCS_DIR" && docker compose up -d --no-deps --wait --wait-timeout 240 \
+      postgresql redis minio backend y-provider )
+  local initializer initializer_exit
+  initializer=$(cd "$DOCS_DIR" && docker compose ps -aq createbuckets)
+  [ -n "$initializer" ] || fail "storage initialization container is missing"
+  initializer_exit=$(timeout 240 docker wait "$initializer") ||
+    fail "storage initialization did not finish within 240 seconds"
+  [ "$initializer_exit" = "0" ] || fail "storage initialization failed"
   wait_for_docs
 
   stage_engine_env
@@ -693,7 +703,7 @@ cmd_detach() {
   local staged backup_copy
   staged="${NATIVE_COMPOSE}.staged.$$"
   backup_copy="${NATIVE_COMPOSE}.before-detach-$(date -u +%Y%m%d-%H%M%S)"
-  trap 'rm -f "$staged"' RETURN
+  trap "rm -f -- $(printf '%q' "$staged"); trap - RETURN" RETURN
 
   python3 - "$NATIVE_COMPOSE" "$staged" "$NATIVE_SERVICE" "$ENGINE_ENV" "$ARTIFACT_TARGET" <<'PY'
 import sys, yaml
