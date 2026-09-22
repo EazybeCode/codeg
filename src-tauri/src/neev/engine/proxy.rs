@@ -293,9 +293,21 @@ pub(crate) async fn authorize(
     // added later was silently never inspected, which is exactly what happened
     // to the comment bodies — they were bounded on paper and forwarded
     // unchecked in fact.
+    // Every variant is named. A `_` arm here would be the same defect one level
+    // up from the one it replaced: a Target added later that carries a body
+    // would land in the catch-all, be treated as having no policy, and be
+    // forwarded unchecked — with nothing failing to compile and no test going
+    // red. Enumerated, the next variant has to be decided rather than
+    // defaulted, which is the same discipline `Body::permitted` and `decide`
+    // already hold.
     let policy = match target {
         Some(Target::Document { body, .. }) | Some(Target::AccountWrite { body }) => Some(*body),
-        _ => None,
+        Some(Target::Asset { .. })
+        | Some(Target::Editor { .. })
+        | Some(Target::Account)
+        | Some(Target::Collaboration { .. })
+        | Some(Target::Media { .. })
+        | None => None,
     };
     let keys = match policy {
         // An attachment upload is multipart, so parsing it as JSON would fail
