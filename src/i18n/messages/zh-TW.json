@@ -202,7 +202,8 @@
     "providerIsNewChat": "換一個服務商就是新開一個代理對話，而不是修改這一個。",
     "settingsConflict": "這些設定已在別處變更。請重新開啟對話並再次選擇。",
     "settingsPending": "套用中…",
-    "settingsUnsaved": "尚未套用。"
+    "settingsUnsaved": "尚未套用。",
+    "modelsIncomplete": "無法取得 {name} 的模型清單，這可能不是全部。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

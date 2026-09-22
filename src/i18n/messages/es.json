@@ -202,7 +202,8 @@
     "providerIsNewChat": "Otro proveedor es un chat de agente nuevo, no un cambio en este.",
     "settingsConflict": "Estos ajustes cambiaron en otro sitio. Vuelve a abrir el chat y elige de nuevo.",
     "settingsPending": "Aplicando…",
-    "settingsUnsaved": "Aún no aplicado."
+    "settingsUnsaved": "Aún no aplicado.",
+    "modelsIncomplete": "{name} no pudo listar sus modelos, así que puede que no estén todos."
   },
   "Native": {
     "callbackConflict": "Este método de acceso entra en conflicto con una cuenta existente. Usa tu método de acceso original y luego abre Configuración para vincular otro método. Las cuentas nunca se fusionan automáticamente.",

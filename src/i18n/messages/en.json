@@ -202,7 +202,8 @@
     "providerIsNewChat": "Another provider is a new agent chat, not a change to this one.",
     "settingsConflict": "These settings changed somewhere else. Reopen the chat and choose again.",
     "settingsPending": "Applying…",
-    "settingsUnsaved": "Not applied yet."
+    "settingsUnsaved": "Not applied yet.",
+    "modelsIncomplete": "{name} could not list its models, so this may not be all of them."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

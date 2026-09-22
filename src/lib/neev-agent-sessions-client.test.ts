@@ -1409,6 +1409,66 @@ describe("run configuration", () => {
       expect(() => parseAgentCapabilities(bad)).toThrow(NativeClientError)
   })
 
+  it("knows the difference between a short catalogue and an unread one", () => {
+    const [claude, codex] = catalog.providers
+    // Absent and explicit null both mean discovery SUCCEEDED. An older replica
+    // that has not learned the field yet must never read as a failed one.
+    expect(
+      parseAgentCapabilities({ providers: [claude] }).providers[0]
+        .discoveryUnavailable
+    ).toBe(false)
+    expect(
+      parseAgentCapabilities({
+        providers: [{ ...claude, discoveryUnavailableReason: null }],
+      }).providers[0].discoveryUnavailable
+    ).toBe(false)
+    // A reason means `models` is a fallback, not the whole truth — which is
+    // exactly the state a provider listing only `default` is otherwise
+    // indistinguishable from.
+    expect(
+      parseAgentCapabilities({
+        providers: [
+          {
+            ...codex,
+            discoveryUnavailableReason:
+              "Codex is not connected on this device.",
+          },
+        ],
+      }).providers[0].discoveryUnavailable
+    ).toBe(true)
+    // Still bounded, and still never rendered: a wrong server cannot smuggle
+    // anything into the DOM through a reason string.
+    for (const bad of ["", "x".repeat(201), "line\u0000break"])
+      expect(() =>
+        parseAgentCapabilities({
+          providers: [{ ...claude, discoveryUnavailableReason: bad }],
+        })
+      ).toThrow(NativeClientError)
+  })
+
+  it("keeps an empty model effort list meaning none, not meaning fall back", () => {
+    // The contract distinguishes three things and so does the parser: absent
+    // and null both mean "the provider's list applies", while [] means "this
+    // model takes no level at all". Collapsing the third into the first would
+    // offer levels the server had just said were unavailable.
+    const claude = catalog.providers[0]
+    const read = parseAgentCapabilities({
+      providers: [
+        {
+          ...claude,
+          models: [
+            { ...claude.models[0] },
+            { ...claude.models[1], efforts: null },
+            { ...claude.models[2], efforts: [] },
+          ],
+        },
+      ],
+    }).providers[0]
+    expect(read.models[0].efforts).toBeNull()
+    expect(read.models[1].efforts).toBeNull()
+    expect(read.models[2].efforts).toEqual([])
+  })
+
   it("sends the whole desired state in one revision, never a partial patch", async () => {
     const calls: { url: string; init: RequestInit }[] = []
     vi.stubGlobal(

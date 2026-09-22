@@ -202,7 +202,8 @@
     "providerIsNewChat": "Ein anderer Anbieter ist ein neuer Agent-Chat, keine Änderung an diesem.",
     "settingsConflict": "Diese Einstellungen wurden anderswo geändert. Öffne den Chat erneut und wähle noch einmal.",
     "settingsPending": "Wird angewendet …",
-    "settingsUnsaved": "Noch nicht angewendet."
+    "settingsUnsaved": "Noch nicht angewendet.",
+    "modelsIncomplete": "{name} konnte seine Modelle nicht auflisten – das sind möglicherweise nicht alle."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

@@ -484,6 +484,19 @@ export interface NeevAgentProviderCatalog {
   defaultEffort: NeevEffort | null
   /** Whether the provider has the speed control at all. */
   supportsSpeed: boolean
+  /**
+   * Whether `models` is the WHOLE truth, or only what could be reached.
+   *
+   * `false` means the catalogue was discovered successfully. `true` means it
+   * was not — the provider is not connected, the runner could not be asked, or
+   * discovery has not been wired for it yet — and `models` is a fallback.
+   *
+   * The distinction matters because without it a provider listing only
+   * `default` is indistinguishable from a provider whose discovery failed, and
+   * the menu would silently claim `default` is the only model that exists. That
+   * is a claim the server never made.
+   */
+  discoveryUnavailable: boolean
 }
 
 export interface NeevAgentCapabilities {
@@ -531,12 +544,33 @@ function agentModel(value: unknown): NeevAgentModel {
   }
 }
 
+/**
+ * A reason string the server may send alongside an unavailable capability.
+ *
+ * Bounded and free of control characters so a wrong server cannot smuggle
+ * anything into the DOM through it — but it is never rendered either way: it is
+ * English prose and this app ships ten locales, so what the reader sees is
+ * derived from the catalogue and translated like every other label. Parsing it
+ * is what lets the payload through.
+ */
+function reasonText(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  const parsed = text(value)
+  if (
+    parsed.length === 0 ||
+    [...parsed].length > 200 ||
+    [...parsed].some((character) => /\p{Cc}/u.test(character))
+  )
+    return invalid()
+  return parsed
+}
+
 function providerCatalog(value: unknown): NeevAgentProviderCatalog {
-  // `speedUnavailableReason` is parsed so the payload is accepted, and then
-  // deliberately NOT rendered: it is English prose from the server, and this
-  // app ships ten locales. The reason shown beside a disabled Fast chip is
-  // derived from the catalogue itself and translated like every other label.
-  const object = exact(value, [
+  // `discoveryUnavailableReason` is OPTIONAL: it lands with the discovery
+  // wiring, and a replica that predates it simply has nothing to say. Absent
+  // and null both mean discovery succeeded — an older server must never be read
+  // as a failed one.
+  const KEYS = [
     "provider",
     "label",
     "models",
@@ -544,7 +578,17 @@ function providerCatalog(value: unknown): NeevAgentProviderCatalog {
     "defaultEffort",
     "supportsSpeed",
     "speedUnavailableReason",
-  ])
+  ]
+  const told = record(value).discoveryUnavailableReason !== undefined
+  const object = exact(
+    value,
+    told ? [...KEYS, "discoveryUnavailableReason"] : KEYS
+  )
+  // Both reason strings are validated and then deliberately left unrendered;
+  // see `reasonText`.
+  reasonText(object.speedUnavailableReason)
+  const discoveryUnavailable =
+    reasonText(object.discoveryUnavailableReason) !== null
   const provider = text(object.provider)
   const label = text(object.label)
   if (
@@ -587,6 +631,7 @@ function providerCatalog(value: unknown): NeevAgentProviderCatalog {
     efforts,
     defaultEffort: (object.defaultEffort as string | null) ?? null,
     supportsSpeed: object.supportsSpeed,
+    discoveryUnavailable,
   }
 }
 
