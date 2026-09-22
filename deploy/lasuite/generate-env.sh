@@ -35,14 +35,19 @@ if [ "$mode" = "canary" ]; then
   # so a JSON array is stored verbatim as broken strings — verified against the
   # real image, where '["a","b"]' became ['["a"', '"b"]'] and every CSRF origin
   # check failed. The container tests assert the parsed form.
-  allowed_hosts="127.0.0.1,localhost,backend"
+  allowed_hosts="127.0.0.1,localhost,backend,${stack_name}-backend"
 else
   target="${1:-/opt/neev-document-engine}"
   origin="${2:-https://app.neev.so}"
   configuration="NeevProduction"
   stack_name="${STACK_NAME:-neev-document-engine-prod}"
   # Comma-separated, NOT JSON — see the canary branch above for why.
-  allowed_hosts="$(printf '%s' "$origin" | sed -e 's|^https\?://||' -e 's|/.*$||'),backend"
+  # The stack-qualified alias is here because that is the name the proxy dials
+  # over the shared network, and reqwest derives `Host` from the URL. Upstream's
+  # Production appends `gethostbyname(gethostname())`, but on a container joined
+  # to two networks that resolves to whichever answers first — observed flipping
+  # between the two addresses on consecutive calls — so it cannot be relied on.
+  allowed_hosts="$(printf '%s' "$origin" | sed -e 's|^https\?://||' -e 's|/.*$||'),backend,${stack_name}-backend"
 fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
