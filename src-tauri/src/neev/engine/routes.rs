@@ -234,16 +234,27 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
     match (api, method) {
         ("config/", "GET" | "HEAD") => return Some(Target::Account),
         ("users/me/", "GET" | "HEAD") => return Some(Target::Account),
-        // The stock editor writes the signed-in user's language at boot. Denying
-        // it left a "failed to update the user" error on every load for a write
-        // that only ever touches the caller's own row. Narrowed to `language`,
-        // so it cannot become a general user-object write.
-        ("users/me/", "PATCH") => {
-            return Some(Target::AccountWrite {
-                body: Body::LanguageOnly,
-            })
-        }
         _ => {}
+    }
+    // The stock editor writes the signed-in user's language at boot, and it
+    // does so at `users/<id>/` — its own id, not `me` — and **throws** when the
+    // call fails. Denying it therefore did not merely log an error: it broke
+    // the editor's boot and left the document body on its loading skeleton.
+    //
+    // Two things bound it. The body is narrowed to `language`, so it cannot
+    // become a general user-object write. And upstream's `UserViewSet` carries
+    // `permission_classes = [permissions.IsSelf]`, so an id that is not the
+    // caller's own is refused there — a reliance on upstream that is worth
+    // naming rather than leaving implicit, since this proxy does not itself
+    // know the caller's Docs user id.
+    if let Some(rest) = api.strip_prefix("users/") {
+        if let Some(id) = rest.strip_suffix('/') {
+            if method == "PATCH" && resource_id(id).is_some() {
+                return Some(Target::AccountWrite {
+                    body: Body::LanguageOnly,
+                });
+            }
+        }
     }
     let _ = read;
     let document = api.strip_prefix("documents/")?;
@@ -523,6 +534,9 @@ mod tests {
             format!("{PREFIX}/api/v1.0/documents/{DOC}/cors-proxy/"),
             format!("{PREFIX}/api/v1.0/users/"),
             format!("{PREFIX}/api/v1.0/users/?q=someone"),
+            // A user id that is not a canonical uuid, and the collection
+            // itself, both stay unreachable.
+            format!("{PREFIX}/api/v1.0/users/not-a-uuid/"),
             format!("{PREFIX}/external_api/v1.0/documents/"),
             format!("{PREFIX}/admin/"),
         ] {
@@ -704,6 +718,17 @@ mod tests {
             None
         );
         assert_eq!(get(&format!("{PREFIX}/api/v1.0/users/me")), None); // no trailing slash
+        // The editor's boot write is a self-scoped language change at the
+        // caller's own id. It throws when refused, so denying it broke the boot
+        // rather than merely logging.
+        assert_eq!(
+            classify("PATCH", &format!("{PREFIX}/api/v1.0/users/{DOC}/"), None),
+            Some(Target::AccountWrite { body: Body::LanguageOnly })
+        );
+        assert_eq!(Body::LanguageOnly.permitted(), ["language"]);
+        // Not a licence for anything else on that object.
+        assert_eq!(classify("DELETE", &format!("{PREFIX}/api/v1.0/users/{DOC}/"), None), None);
+        assert_eq!(classify("GET", &format!("{PREFIX}/api/v1.0/users/{DOC}/"), None), None);
     }
 
     #[test]
