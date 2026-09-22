@@ -41,6 +41,31 @@ a = (e = '1.0') => `${i()}/api/v${e}/`
 
 and, for the socket, `"wss":"ws"}://${window.location.host}/document-engine/collaboration/ws`.
 
+### Root-relative asset paths, swept
+
+`basePath` rewrites `next/link`, `next/image` and `/_next/` URLs. It does **not**
+rewrite a bare string literal used as a `src`. Any hardcoded `/assets/…` in the
+source therefore survives into the bundle unprefixed and would 404 under the
+prefix, which is the kind of thing that only shows up in a browser.
+
+The built bundle was swept for exactly that. There are **eleven** such literals
+and no more, and none of them is reachable from the embedded editor route:
+
+| literal(s) | rendered by | reachable in the embed? |
+|---|---|---|
+| `/assets/on-boarding/step_{1..4}_{EN,FR}.{webm,webp}` | `FirstConnection`, mounted from `Auth.tsx` on `is_first_connection` | no — the bridge sets that false for Neev accounts (`05b6e1db`) |
+| `/assets/SC1-{en,fr}.webm` | `HomeContent` | no — the home page is never framed |
+| `/assets/Docs-lottie.json` | `HeaderIcon` ← `HeaderFloatingBar` ← `PageLayout` / `pages/docs/index` | no — the editor route uses `MainLayout`, never `PageLayout` |
+
+Verified by tracing each one to its renderer, not by assuming the embed is
+minimal. `pages/docs/[id]/index.tsx` contains zero references to `PageLayout`.
+
+One honest residue: the error pages (`401`, `404`, `500`) *do* use `PageLayout`,
+so if the editor redirects to one inside the frame, the Lottie animation 404s.
+That is cosmetic — a missing animation on an error page — and it is not worth a
+rebuild, but it is real and it is why this table says "the editor route" rather
+than "the artifact".
+
 ### What the backend must not do — agreed, and now enforced there
 
 The prefix is added on this side, once. Two ways to break that:

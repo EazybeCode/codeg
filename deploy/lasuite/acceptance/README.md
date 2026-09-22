@@ -60,6 +60,9 @@ words that skipped cases proved nothing.
 | retried creation | one document, not two, in Neev **and** on the engine |
 | CSRF | an unsafe request with no token is refused by Neev *and* by Docs through the prefix |
 | rename | a title changed in the engine reaches Neev's metadata — what the UI's focus-return refresh depends on |
+| refused rename | a rejected write left **both** titles as they were, not just returned an error |
+| non-creator rename | a shared member changes neither title |
+| concurrent renames | two at once settle on one title, identical on both sides |
 | other organization | refused on Neev's API, the engine's API, and the socket |
 | second user | shares to the organization, both connect, **both write without waiting**, and converge |
 | revocation | after access is withdrawn, the next connection is refused |
@@ -85,6 +88,21 @@ it has to be, because the provider always names the document it was constructed
 with. Even there the frame is built by the official library, by attaching a
 second provider to the same socket — the library's own multiplexing path. **No
 frame in this harness is hand-assembled.**
+
+**The title cases read both stores, every time.** A title is the one piece of
+state Neev and Docs both display, so "they disagree" is invisible unless
+something looks at both. A refused write that nevertheless landed on one side
+would pass a status-code check and still leave the two out of step.
+
+The non-creator case may legitimately fail, and the message says so rather than
+asserting a verdict. Renaming is creator-only in Neev, but sharing to the
+organization gives a member the `editor` role in Docs, and upstream's editor role
+includes `partial_update` — which covers the title. If that case fails it is a
+policy decision about what a shared editor may do, not a defect to patch blindly.
+
+The concurrent case does **not** require both renames to succeed. A conflict
+response is a perfectly good answer. What it requires is that the two stores
+agree afterwards, on a title somebody actually asked for.
 
 **The revocation case is about new connections only.** Whether an already-open
 socket is dropped at the moment access is revoked is a different question and

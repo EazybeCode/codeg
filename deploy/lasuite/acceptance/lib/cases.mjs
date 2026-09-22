@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { BASE_URL } from "./config.mjs"
 import { engineApi, engineUrl } from "./http.mjs"
 import { connect, openWithForeignDocumentName, until } from "./collab.mjs"
 
@@ -23,6 +24,34 @@ async function createDocument(actor, nodeId, title, requestId = randomUUID()) {
     body: JSON.stringify({ title, requestId }),
   })
   return { status, resource: body, requestId }
+}
+
+/**
+ * The title as each side holds it.
+ *
+ * Read from both stores every time rather than from one and assumed for the
+ * other. A title is the one piece of state both systems display, and "they
+ * disagree" is invisible unless something looks at both.
+ */
+async function titles(actor, id) {
+  const native = await actor.json(`/api/neev/resources/${id}`)
+  const docs = await engineApi(actor, `documents/${id}/`)
+  return {
+    native: native.body?.title ?? null,
+    docs: docs.body?.title ?? null,
+    nativeStatus: native.status,
+    docsStatus: docs.status,
+  }
+}
+
+/** A request deliberately carrying no CSRF token, straight past the Actor helper. */
+function withoutCsrf(actor, path, body) {
+  return fetch(new URL(path, BASE_URL), {
+    method: "PATCH",
+    headers: { cookie: actor.cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify(body),
+    redirect: "manual",
+  })
 }
 
 export const cases = [
@@ -129,15 +158,9 @@ export const cases = [
       if (!resource?.id) return skip("could not create a document to test with")
 
       // Neev: an unsafe request with no CSRF header.
-      const native = await fetch(
-        new URL(`/api/neev/resources/${resource.id}`, owner.descriptor.base ?? "http://127.0.0.1:3100"),
-        {
-          method: "PATCH",
-          headers: { cookie: owner.cookieHeader, "content-type": "application/json" },
-          body: JSON.stringify({ title: "no csrf" }),
-          redirect: "manual",
-        }
-      )
+      const native = await withoutCsrf(owner, `/api/neev/resources/${resource.id}`, {
+        title: "no csrf",
+      })
       if (native.status < 400)
         return no(`Neev accepted a mutation with no CSRF token (${native.status})`, {
           native: native.status,
@@ -145,17 +168,10 @@ export const cases = [
 
       // Docs: same, through the prefix. Upstream's CsrfViewMiddleware is meant
       // to be on; the proxy adds checks but must not have replaced it.
-      const docs = await fetch(
-        new URL(
-          `/document-engine/api/v1.0/documents/${resource.id}/`,
-          owner.descriptor.base ?? "http://127.0.0.1:3100"
-        ),
-        {
-          method: "PATCH",
-          headers: { cookie: owner.cookieHeader, "content-type": "application/json" },
-          body: JSON.stringify({ title: "no csrf" }),
-          redirect: "manual",
-        }
+      const docs = await withoutCsrf(
+        owner,
+        `/document-engine/api/v1.0/documents/${resource.id}/`,
+        { title: "no csrf" }
       )
       if (docs.status < 400)
         return no(`Docs accepted a mutation with no CSRF token (${docs.status})`, {
@@ -195,6 +211,141 @@ export const cases = [
       return synced
         ? ok({ id: resource.id, title: renamed })
         : no("Neev's title never caught up with the engine's", { want: renamed })
+    },
+  },
+
+  {
+    name: "a refused rename leaves both titles as they were",
+    async run({ owner, fixtures }) {
+      const before = `Acceptance — csrf title ${Date.now()}`
+      const { resource } = await createDocument(owner, fixtures.projectNodeId, before)
+      if (!resource?.id) return skip("could not create a document to rename")
+
+      const attempt = await withoutCsrf(
+        owner,
+        `/document-engine/api/v1.0/documents/${resource.id}/`,
+        { title: "renamed without a token" }
+      )
+      if (attempt.status < 400)
+        return no(`Docs accepted a rename with no CSRF token (${attempt.status})`, {
+          attempt: attempt.status,
+        })
+
+      // The refusal is only half of it. A rejected write that nevertheless
+      // landed on one side would leave the two stores disagreeing, and the
+      // status code alone would never show it.
+      const after = await titles(owner, resource.id)
+      if (after.native !== before || after.docs !== before)
+        return no("a refused rename still changed a title", {
+          expected: before,
+          ...after,
+        })
+      return ok({ refused: attempt.status, native: after.native, docs: after.docs })
+    },
+  },
+
+  {
+    name: "a shared non-creator cannot rename, on either side",
+    async run({ owner, member, fixtures }) {
+      const before = `Acceptance — noncreator ${Date.now()}`
+      const { resource } = await createDocument(owner, fixtures.projectNodeId, before)
+      if (!resource?.id) return skip("could not create a document to share")
+
+      const shared = await owner.json(`/api/neev/resources/${resource.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ visibility: "organization" }),
+      })
+      if (shared.status >= 400)
+        return no(`sharing failed (${shared.status})`, { shared: shared.status })
+
+      const viaNeev = await member.json(`/api/neev/resources/${resource.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title: "renamed by a member" }),
+      })
+      const viaDocs = await engineApi(member, `documents/${resource.id}/`, {
+        method: "PATCH",
+        body: JSON.stringify({ title: "renamed by a member" }),
+      })
+
+      const after = await titles(owner, resource.id)
+      const unchanged = after.native === before && after.docs === before
+
+      if (!unchanged)
+        /**
+         * Worth reading carefully before calling this a bug. Renaming is
+         * creator-only in Neev, but sharing to the organization gives a member
+         * the `editor` role in Docs, and upstream's editor role includes
+         * `partial_update` — which covers the title. So the two models can
+         * legitimately disagree here, and if they do it is a policy decision
+         * about what a shared editor may do, not a defect to patch blindly.
+         */
+        return no(
+          "a non-creator changed the title; Neev makes renaming creator-only but the Docs editor role permits it — decide which is intended",
+          { before, ...after, viaNeev: viaNeev.status, viaDocs: viaDocs.status }
+        )
+
+      return ok({
+        viaNeev: viaNeev.status,
+        viaDocs: viaDocs.status,
+        native: after.native,
+        docs: after.docs,
+      })
+    },
+  },
+
+  {
+    name: "two renames at once leave one title, the same on both sides",
+    async run({ owner, fixtures }) {
+      const { resource } = await createDocument(
+        owner,
+        fixtures.projectNodeId,
+        `Acceptance — race ${Date.now()}`
+      )
+      if (!resource?.id) return skip("could not create a document to rename")
+
+      const first = `Acceptance — race A ${randomUUID().slice(0, 6)}`
+      const second = `Acceptance — race B ${randomUUID().slice(0, 6)}`
+
+      // Issued together, not one after the other: the interesting state is the
+      // one where both are in flight.
+      const [a, b] = await Promise.all([
+        engineApi(owner, `documents/${resource.id}/`, {
+          method: "PATCH",
+          body: JSON.stringify({ title: first }),
+        }),
+        engineApi(owner, `documents/${resource.id}/`, {
+          method: "PATCH",
+          body: JSON.stringify({ title: second }),
+        }),
+      ])
+
+      // Either may lose — a conflict response is a perfectly good answer and is
+      // not what this case is about. What matters is that the two stores agree
+      // afterwards, and on a title somebody actually asked for.
+      const settled = await until(async () => {
+        const now = await titles(owner, resource.id)
+        return now.native !== null && now.native === now.docs
+      })
+      const after = await titles(owner, resource.id)
+
+      if (!settled)
+        return no("Neev and the engine ended up with different titles", {
+          a: a.status,
+          b: b.status,
+          ...after,
+        })
+      if (after.native !== first && after.native !== second)
+        return no("the surviving title was one nobody asked for", {
+          survived: after.native,
+          asked: [first, second],
+        })
+
+      return ok({
+        a: a.status,
+        b: b.status,
+        survived: after.native,
+        agreed: after.native === after.docs,
+      })
     },
   },
 
