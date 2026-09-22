@@ -678,8 +678,8 @@ describe("where a paste must not break what it lands in", () => {
     })
     // Outside a cell they are ordinary text and are left alone.
     expect(choosePaste({ ...code, plain: "one\u2028two" })).toEqual({
-      kind: "inline",
-      content: "one\u2028two",
+      kind: "text",
+      text: "one\u2028two",
       notice: "none",
     })
   })
@@ -688,18 +688,18 @@ describe("where a paste must not break what it lands in", () => {
     // A code block is plain text and is NOT isolating, so a paragraph slice
     // splits out of it: the paste would land as paragraphs after the block and
     // quietly mangle the code. It holds its own line breaks, so the text goes
-    // in as it came.
+    // in literally, through the editor's own text paste.
     expect(choosePaste({ ...code, plain: "one\ntwo\nthree" })).toEqual({
-      kind: "inline",
-      content: "one\ntwo\nthree",
+      kind: "text",
+      text: "one\ntwo\nthree",
       notice: "none",
     })
     // Structure is not interpreted inside code either.
     expect(
       choosePaste({ ...code, plain: "# not a heading\n- not a list" })
     ).toEqual({
-      kind: "inline",
-      content: "# not a heading\n- not a list",
+      kind: "text",
+      text: "# not a heading\n- not a list",
       notice: "none",
     })
   })
@@ -709,9 +709,13 @@ describe("where a paste must not break what it lands in", () => {
     // content deletes the selected text and puts nothing in its place.
     for (const where of ["body", "cell", "code"] as const) {
       const action = choosePaste({ plain: "   ", onlyPlain: true, where })
-      expect(action.kind).toBe("inline")
-      if (action.kind !== "inline") throw new Error("unreachable")
-      expect(action.content).toBe("   ")
+      const put =
+        action.kind === "inline"
+          ? action.content
+          : action.kind === "text"
+            ? action.text
+            : null
+      expect(put).toBe("   ")
     }
     // A bare newline pastes a line break — which is what it is — rather than
     // reducing to empty content that would leave the selection deleted.
@@ -813,6 +817,56 @@ describe.skipIf(!hasToReversed)("a multi-block paste at the cursor", () => {
             .join("")
         )
       ).toEqual(["abone", "twoef"])
+    } finally {
+      editor.unmount()
+      host.remove()
+    }
+  })
+})
+
+describe.skipIf(!hasToReversed)("a paste into a code block", () => {
+  it("keeps every line of it, in the block", () => {
+    // The live report: /code, then paste two lines. Inserting the string as
+    // inline content put a hard break where a code block accepts only plain
+    // text, and the block was left EMPTY. A pure decision test cannot see this
+    // — it only shows up once something is actually inserted.
+    ;(globalThis as { ClipboardEvent?: unknown }).ClipboardEvent ??=
+      StubClipboardEvent
+    const source = "const first = 1;\nconst second = 2;"
+    const editor = BlockNoteEditor.create({
+      schema: richSchema,
+      trailingBlock: false,
+      tables: {
+        splitCells: false,
+        cellBackgroundColor: false,
+        cellTextColor: false,
+        headers: false,
+      },
+    })
+    const host = document.createElement("div")
+    document.body.appendChild(host)
+    editor.mount(host)
+    try {
+      editor.replaceBlocks(editor.document, [{ type: "codeBlock" }] as never)
+      editor.setTextCursorPosition(editor.document[0], "end")
+      const action = choosePaste({
+        plain: source,
+        onlyPlain: true,
+        where: "code",
+      })
+      expect(action.kind).toBe("text")
+      if (action.kind !== "text") throw new Error("unreachable")
+      editor.pasteText(action.text)
+
+      const block = editor.document[0]
+      expect(block.type).toBe("codeBlock")
+      const written = (block.content as { text?: string }[])
+        .map((run) => run.text ?? "")
+        .join("")
+      expect(written).toBe(source)
+      expect(written.split("\n")).toHaveLength(2)
+      // And it is representable, so nothing refuses it on the way to storage.
+      expect(() => toNeev(editor.document)).not.toThrow()
     } finally {
       editor.unmount()
       host.remove()
