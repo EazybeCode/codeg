@@ -23,7 +23,7 @@ browser ──► Caddy (app.neev.so) ──► Neev server ──┬─► /doc
                                                   └─► /document-engine/media/   backend-signed S3
 ```
 
-A Neev `document` resource gains a mapping row to a Docs document UUID. The Projects UI embeds
+A Neev `document` resource is backed by a Docs document carrying the same UUID. The Projects UI embeds
 `/document-engine/docs/<uuid>/` in a same-origin iframe at full available height. The upstream
 editor runs unmodified, so the durable save path — `GET/PATCH /api/v1.0/documents/<id>/content/`,
 written by the editor — is preserved exactly as upstream intends.
@@ -52,6 +52,18 @@ The conditions that make it sound, all of which are requirements on this work:
   its own. A forged `X-Neev-*` from the browser must be impossible to distinguish from absent,
   because it is deleted before any handler sees it.
 - Neev authorizes first, forwards second. A request that Neev denies is never forwarded.
+- The identity header is **set** by the proxy from the Neev session, never read from the client.
+  Inbound identity headers — and `X-Forwarded-Proto`, which `Production` trusts via
+  `SECURE_PROXY_SSL_HEADER` — are deleted from the client request before anything else runs, so a
+  forged header is indistinguishable from an absent one.
+- Upstream's CSRF protection stays **on**. Docs uses Django's own `csrftoken` cookie and
+  `X-CSRFToken` header, and the proxy passes both through untouched; it additionally requires an
+  exact `Origin` match and a live Neev actor. Disabling CSRF to make writes work would remove a
+  control upstream already provides — the proxy adds a check, it does not replace one.
+- Session and CSRF cookies are scoped to the engine: `Path=/document-engine/`, `Secure`,
+  `SameSite=Lax`. `SESSION_COOKIE_NAME` is hardcoded upstream to `docs_sessionid` — y-provider
+  looks for exactly that name — so it is not renamed. The cookie is a real Django session created
+  by upstream's own session machinery; nothing is synthesised.
 - A Docs session cookie is not by itself an entitlement. Every proxied request is authorized
   against the caller's **Neev** session, so a still-valid `docs_sessionid` presented without a
   live Neev session is refused at the proxy and never reaches Docs. The Docs cookie is how Docs
@@ -158,9 +170,21 @@ Frontend packaging is owned by a separate worker on `neev-docs-ui-20260922`
 | collaboration socket | `/document-engine/collaboration/ws/` |
 | media | `/document-engine/media/` |
 
-`baseApiUrl()` is `${NEXT_PUBLIC_API_ORIGIN || window.location.origin}/api/v1.0/`, so the API path
-above needs `NEXT_PUBLIC_API_ORIGIN` to carry the prefix; the socket and media URLs come from the
-backend's `COLLABORATION_WS_URL` and media settings, which are mine to configure.
+Upstream's `backendUrl()` is `NEXT_PUBLIC_API_ORIGIN || window.location.origin` — an **origin**
+with no path slot — so the prefix is added by the frontend worker's patch via
+`NEXT_PUBLIC_API_BASE_PATH`. `NEXT_PUBLIC_API_ORIGIN` is therefore left **unset**: setting it to a
+prefixed value as well would apply the prefix twice. Nothing is host-pinned in the bundle, so one
+artifact serves both production HTTPS and a loopback canary.
+
+`COLLABORATION_WS_URL` is likewise left unset on the backend. Upstream's `useCollaborationUrl`
+prefers the backend value and otherwise derives the socket URL from the page origin, which the
+same patch teaches about the prefix and about deriving `ws:`/`wss:` from the page protocol. Unset
+keeps the artifact portable; the backend override still wins if it is ever needed.
+
+Media is prefixed on the **backend** rather than by adding a root-level route: upstream exposes
+`MEDIA_BASE_URL`, so attachment URLs are emitted already carrying `/document-engine`. Answering
+`/media/**` at the origin root would be an unauthenticated path around the engine prefix, which is
+exactly the bypass this design exists to prevent.
 
 Neev's page CSP (`http/static_files.rs::app_csp`) is `default-src 'none'` with `frame-ancestors
 'none'` and no `frame-src`. Embedding needs a narrow `frame-src 'self'` on the document route and a
@@ -185,18 +209,63 @@ document created through the API has **no** Yjs state until the editor's save pa
 preview established this. An empty new document is therefore expected, not evidence of a broken
 create.
 
+## Storage: no schema change, and why that is not a style preference
+
+The obvious design is a `neev_docs_engine` mapping table. **It cannot be used**, and the reason is
+verified in `db/mod.rs`, not assumed.
+
+The migrator does not merely read a version marker. It reads the database's **entire** table
+inventory and matches it by exact set equality against a per-version expected set:
+
+```rust
+let names: BTreeSet<String> = rows.iter().map(...)        // every table in the schema
+match version {
+    session_migration::EFFORT_SCHEMA_VERSION if names == v11_expected => { … }
+    _ => return Err(AuthError::Unavailable),
+}
+```
+
+So a schema-14 image opening a database that carries one extra table matches no arm, returns
+`Unavailable`, and **does not start at all**. The approved rollback image is
+`neev-native-agent:ux-table-55408df5` (the others reject the table widths), and it is a schema-14
+image. Adding any table or column would convert the one available rollback from "engine documents
+are unreachable" into "Neev does not boot" — a strictly worse failure, and one that would only be
+discovered during an incident.
+
+Two things therefore follow.
+
+**The Docs document id is the Neev resource id.** Both are UUIDv4 — `content/access.rs` already
+canonicalises resource ids as UUIDs, and y-provider independently requires a v4
+(`uuidValidate`/`uuidVersion`). Reusing it removes the mapping entirely: there is nothing to
+forge, because a client-supplied id is only ever resolved through `(org_id, resource_id)`, and a
+cross-organization or invented id resolves to nothing and is denied before any forwarding.
+
+**The engine binding is a durable row in `neev_requests`,** the existing receipt table, keyed
+`(user_id = resource creator, action = engine binding, request_id = resource id)` — which is
+exactly that table's primary key, so the lookup is a point read and not a scan, and the resource
+row already carries `creator_id` by the time the question is asked. A schema-14 image never
+queries that action and is unaffected by the rows.
+
+This is a receipts table carrying a binding fact, and that is worth saying out loud rather than
+dressing up. It is chosen because the alternative is a rollback that bricks the service, and
+because it is the only change shape — additive rows, no DDL — that the exact-inventory migrator
+tolerates. If a mapping table is wanted later, the safe order is: first ship an image that
+tolerates the new inventory, establish *that* as the rollback target, and only then add the table.
+Flagged for the pre-release discussion root asked for.
+
 ## Rollback
 
 The feature flag governs **creation only**. Turning it off stops new documents being created on
 the engine; it does not withdraw the ones already created. An engine-backed document stays
 readable and editable whenever the engine is reachable, and never silently falls back to the
-native editor — a mapped resource has no native content, so a fallback would render a blank
-document and look like data loss.
+native editor — an engine-backed resource has no native content, so a fallback would render a
+blank document and look like data loss. The legacy routes refuse it instead, explicitly.
 
-Rolling the Neev image back must therefore leave engine-backed documents working, which means the
-mapping schema has to be readable by the previous image rather than merely present. The schema
-change is additive and the prior image must tolerate it; that is a property to rehearse, not to
-assert, and the rehearsal is part of acceptance below.
+Rolling the Neev image back to schema 14 is now survivable: the database is unchanged, so the old
+image starts normally and every native document behaves exactly as before. Engine-backed documents
+are unreachable from that image — it has no engine code — but they are intact in Docs and return
+when the image rolls forward. That is the honest boundary, and it is a deliberate trade rather
+than a claim that rollback is lossless.
 
 ## What is not settled
 
