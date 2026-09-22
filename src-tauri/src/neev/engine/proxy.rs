@@ -685,6 +685,7 @@ async fn upgrade(
         .await
         .map_err(|_| ApiError::Invalid)?;
     let state = Arc::clone(state);
+    let origin = engine.public_origin.clone();
     let mut response = upgrade.on_upgrade(move |socket| async move {
         super::transport::relay(
             socket,
@@ -694,6 +695,7 @@ async fn upgrade(
             actor,
             resource,
             matches!(role, Projected::Editor),
+            origin,
         )
         .await;
     });

@@ -224,8 +224,9 @@ pub(crate) async fn relay(
     // torn down for failing a write check it was never granted, and a writer's
     // must be torn down the moment it stops being a writer.
     opened_writable: bool,
+    origin: String,
 ) {
-    let request = match upstream_request(&url, session) {
+    let request = match upstream_request(&url, session, &origin) {
         Ok(request) => request,
         Err(()) => {
             close(client).await;
@@ -377,6 +378,7 @@ async fn still_permitted(
 fn upstream_request(
     url: &url::Url,
     session: &str,
+    origin: &str,
 ) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, ()> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut request = url.as_str().into_client_request().map_err(|_| ())?;
@@ -384,6 +386,15 @@ fn upstream_request(
     request.headers_mut().insert(
         header::COOKIE,
         HeaderValue::from_str(&cookie).map_err(|_| ())?,
+    );
+    // y-provider forwards `origin` to the backend when it authorizes the
+    // socket, and without it the connection is accepted and then immediately
+    // closed — a 101 followed by a close frame, which surfaces to the browser
+    // as a bare 1005 with nothing to explain it. Measured directly: identical
+    // requests differing only in this header stay open or close.
+    request.headers_mut().insert(
+        header::ORIGIN,
+        HeaderValue::from_str(origin).map_err(|_| ())?,
     );
     Ok(request)
 }
@@ -412,11 +423,14 @@ mod tests {
     #[test]
     fn the_upstream_socket_carries_only_the_minted_cookie() {
         let url = url::Url::parse("ws://y-provider:4444/collaboration/ws/x?room=x").unwrap();
-        let request = upstream_request(&url, "minted-key").unwrap();
+        let request = upstream_request(&url, "minted-key", "http://127.0.0.1:3100").unwrap();
         let cookie = request.headers().get(header::COOKIE).unwrap();
         assert_eq!(cookie, "docs_sessionid=minted-key");
         // Exactly one cookie header, so nothing of the client's can ride along.
         assert_eq!(request.headers().get_all(header::COOKIE).iter().count(), 1);
+        // Absent, y-provider accepts the upgrade and then closes it, which the
+        // browser reports as a bare 1005.
+        assert_eq!(request.headers().get(header::ORIGIN).unwrap(), "http://127.0.0.1:3100");
     }
 
     #[test]
