@@ -9,7 +9,17 @@ import { readFile, stat } from "node:fs/promises"
  */
 
 export const BASE_URL = process.env.NEEV_ACCEPTANCE_BASE ?? "http://127.0.0.1:3100"
-export const CANARY_DIR = process.env.NEEV_ACCEPTANCE_DIR ?? "/opt/neev-docs-canary"
+
+/**
+ * Read at call time, not captured at import.
+ *
+ * Capturing it made the validation below untestable — every attempt to point it
+ * at a crafted directory kept reading the real one and "failed" with ENOENT,
+ * which looks exactly like the guard working. A guard that cannot be exercised
+ * is a guard nobody knows the state of.
+ */
+export const canaryDir = () =>
+  process.env.NEEV_ACCEPTANCE_DIR ?? "/opt/neev-docs-canary"
 
 /** Where the pinned collaboration client lives. Never installed by this harness. */
 export const MODULE_ROOT =
@@ -87,8 +97,9 @@ async function readPrivateJson(path) {
  * it would report success for a boundary nobody checked.
  */
 export async function loadEnvironment() {
-  const actors = await readPrivateJson(`${CANARY_DIR}/actors.json`)
-  const fixtures = await readPrivateJson(`${CANARY_DIR}/fixtures.json`)
+  const dir = canaryDir()
+  const actors = await readPrivateJson(`${dir}/actors.json`)
+  const fixtures = await readPrivateJson(`${dir}/fixtures.json`)
 
   for (const role of ["owner", "member", "outsider"])
     if (!actors[role]) throw new Error(`actors.json has no "${role}"`)
