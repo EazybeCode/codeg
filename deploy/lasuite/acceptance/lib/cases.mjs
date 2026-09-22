@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto"
 import { BASE_URL } from "./config.mjs"
 import { engineApi, engineUrl, updateResource } from "./http.mjs"
-import { connect, explainClose, openWithForeignDocumentName, until } from "./collab.mjs"
+import {
+  connect,
+  explainClose,
+  loadClient,
+  openWithForeignDocumentName,
+  until,
+} from "./collab.mjs"
 
 /**
  * The acceptance cases.
@@ -146,6 +152,89 @@ export const cases = [
       return broken.length
         ? no(`${broken.length} of ${urls.length} assets do not load`, { broken })
         : ok({ checked: urls.length })
+    },
+  },
+
+  {
+    name: "the editor's boot content read succeeds",
+    async run({ owner, fixtures }) {
+      const { resource } = await createDocument(
+        owner,
+        fixtures.projectNodeId,
+        "Acceptance — boot content"
+      )
+      if (!resource?.id) return skip("could not create a document to read")
+
+      /**
+       * This single request decides whether the editor ever starts.
+       *
+       * `useCollaboration` refuses to create the collaboration provider while
+       * `docContent === undefined`, and `useDocContent` fills that in with
+       * `GET documents/<id>/content/`. If the read fails, the query stays in
+       * error, the provider is never created, no socket is ever opened, and the
+       * body sits on its skeleton forever — with nothing in the console to say
+       * why, because nothing threw.
+       *
+       * It is sent with the browser's own Accept header, because that is part
+       * of the request and a proxy may key on it.
+       */
+      const response = await owner.fetch(
+        `/document-engine/api/v1.0/documents/${resource.id}/content/`,
+        { headers: { accept: "text/plain,application/json" } }
+      )
+      const body = await response.text()
+      if (response.status !== 200)
+        return no(
+          `the boot content read is ${response.status} — the editor will never leave its skeleton`,
+          {
+            status: response.status,
+            type: response.headers.get("content-type"),
+            body: body.slice(0, 120),
+          }
+        )
+      // A brand new document legitimately has little or nothing stored yet, so
+      // the assertion is that the read SUCCEEDS, not that it returns content.
+      return ok({ status: 200, bytes: body.length })
+    },
+  },
+
+  {
+    name: "stored content decodes as real Yjs state",
+    async run({ owner, fixtures }) {
+      const response = await owner.fetch(
+        `/document-engine/api/v1.0/documents/${fixtures.legacyDocumentId}/content/`,
+        { headers: { accept: "text/plain,application/json" } }
+      )
+      const body = await response.text()
+      if (response.status !== 200)
+        return skip(`content read is ${response.status}; nothing to decode`)
+      if (body.trim().length === 0)
+        return skip("nothing stored for this document yet")
+
+      /**
+       * Durability cannot be established from here, and this case does not
+       * pretend otherwise. A headless client never runs the editor's save path,
+       * so nothing this harness writes is ever persisted — which is precisely
+       * why convergence and durability are separate claims. What this does
+       * check is narrower and still worth having: that whatever IS stored comes
+       * back as a Yjs update that applies cleanly, rather than as a placeholder
+       * or an error page with a 200 on it.
+       */
+      const { Y } = await loadClient()
+      try {
+        const doc = new Y.Doc()
+        Y.applyUpdate(doc, Buffer.from(body, "base64"))
+        return ok({
+          bytes: body.length,
+          shared: [...doc.share.keys()],
+        })
+      } catch (error) {
+        return no("stored content is not a Yjs update", {
+          bytes: body.length,
+          first: body.slice(0, 60),
+          error: error.message,
+        })
+      }
     },
   },
 

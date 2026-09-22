@@ -49,13 +49,42 @@ const wsUrl = () => {
 }
 
 /**
+ * A WebSocket class that carries one actor's headers.
+ *
+ * `HocuspocusProvider` has no `headers` option — it constructs the socket as
+ * `new WebSocketPolyfill(url)`, one argument, nothing else. Passing `headers`
+ * in the provider configuration is silently ignored, so every socket opened
+ * that way arrives with no cookie and no Origin and is refused at the upgrade.
+ *
+ * That cost real time and, worse, produced misleading evidence: the refusals
+ * surfaced as close 1006, which reads as "the upgrade hit a route the server
+ * does not mount" and was reported as such. The server was answering correctly
+ * the whole time. Binding the headers into the class is the only place they can
+ * go, because the provider controls the call.
+ *
+ * A browser has no equivalent problem: it attaches cookies and Origin itself.
+ */
+function socketFor(actor) {
+  const { WebSocket } = cached
+  const headers = {
+    cookie: actor.cookieHeader,
+    origin: new URL(BASE_URL).origin,
+  }
+  return class extends WebSocket {
+    constructor(url) {
+      super(url, [], { headers })
+    }
+  }
+}
+
+/**
  * Open a collaboration session as one actor, on one document.
  *
  * Resolves to the outcome rather than throwing on refusal: "permission denied"
  * is a result these cases assert, not an error that should abort them.
  */
 export async function connect(actor, documentId, { timeoutMs = 10_000 } = {}) {
-  const { HocuspocusProvider, Y, WebSocket } = await loadClient()
+  const { HocuspocusProvider, Y } = await loadClient()
   const doc = new Y.Doc()
   let settle
   const outcome = new Promise((resolve) => (settle = resolve))
@@ -64,12 +93,10 @@ export async function connect(actor, documentId, { timeoutMs = 10_000 } = {}) {
     url: `${wsUrl()}?room=${documentId}`,
     name: documentId,
     document: doc,
-    WebSocketPolyfill: WebSocket,
-    // Both headers are required, and each has its own refusal. Without the
-    // cookie the server closes `4001 No cookies`; without an Origin in its
-    // allowed list, `4001 Origin not allowed`. A browser sends both, so the
-    // client that stands in for one has to as well.
-    headers: { cookie: actor.cookieHeader, origin: new URL(BASE_URL).origin },
+    // Both headers are required and each has its own refusal — without the
+    // cookie the upgrade is 401, without an allowed Origin it is 403. They ride
+    // on the socket class because the provider offers nowhere else to put them.
+    WebSocketPolyfill: socketFor(actor),
     preserveConnection: false,
     onAuthenticated: () => settle({ ok: true }),
     onAuthenticationFailed: ({ reason }) => settle({ ok: false, reason }),
@@ -128,13 +155,12 @@ export async function openWithForeignDocumentName(
   foreignId,
   { timeoutMs = 10_000 } = {}
 ) {
-  const { HocuspocusProvider, HocuspocusProviderWebsocket, Y, WebSocket } =
+  const { HocuspocusProvider, HocuspocusProviderWebsocket, Y } =
     await loadClient()
 
   const socket = new HocuspocusProviderWebsocket({
     url: `${wsUrl()}?room=${authorisedId}`,
-    WebSocketPolyfill: WebSocket,
-    headers: { cookie: actor.cookieHeader, origin: new URL(BASE_URL).origin },
+    WebSocketPolyfill: socketFor(actor),
   })
 
   let settle
@@ -183,11 +209,18 @@ export async function openWithForeignDocumentName(
  */
 export function explainClose({ code, reason }) {
   const text = String(reason ?? "")
-  // 1005 and 1006 are the same event seen from the two ends: the server logs
-  // "no status received", the client sees the connection vanish without a close
-  // frame. Both mean the upgrade reached something that is not the socket route.
+  /**
+   * 1005 and 1006 say only that the connection ended with no close frame. They
+   * do NOT identify a cause, and an earlier version of this claimed they meant
+   * the socket path was wrong — which sent people looking at routing while the
+   * real answer was that the upgrade had been rejected outright, 401 for a
+   * missing cookie or 403 for a disallowed Origin. A refused HTTP upgrade never
+   * becomes a WebSocket, so there is no close frame to carry a reason.
+   *
+   * Say what is known and name the candidates, rather than picking one.
+   */
   if (code === 1005 || code === 1006)
-    return `closed with code ${code} and no reason — the upgrade reached a route the server does not mount (check the socket path, not authorisation)`
+    return `closed with code ${code} and no close frame — the upgrade itself was refused or the route is not mounted; check the HTTP status of the upgrade (401 = no cookie, 403 = Origin, 404 = route)`
   if (/origin/i.test(text)) return "Origin header missing or not in the allowed list"
   if (/no cookies/i.test(text)) return "the session cookie was not forwarded"
   if (/permission/i.test(text)) return "authorisation refused — a real denial"
