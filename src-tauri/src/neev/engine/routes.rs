@@ -84,6 +84,10 @@ pub(crate) enum Body {
     /// The signed-in user's own display preference. Self-scoped: it can only
     /// ever change the caller's own Docs user row.
     LanguageOnly,
+    /// A comment or thread body, and nothing else.
+    CommentBody,
+    /// A single emoji reaction.
+    Emoji,
 }
 
 impl Body {
@@ -95,6 +99,12 @@ impl Body {
             Body::None | Body::Attachment => &[],
             Body::TitleOnly => &["title"],
             Body::LanguageOnly => &["language"],
+            // `ThreadSerializer` marks creator, abilities and comments
+            // read-only and takes `body` write-only; `CommentSerializer` is the
+            // same shape. So the writable surface upstream exposes is already
+            // just the body — this states it here rather than trusting it.
+            Body::CommentBody => &["body"],
+            Body::Emoji => &["emoji"],
             // `websocket` tells upstream whether the save came from a connected
             // editor; it selects upstream's own read-only guard and is not a
             // permission of ours to grant.
@@ -287,6 +297,10 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
         // history is not one of the authorities this bridge grants.
         ("versions/", "GET") => (false, Body::None),
         (version, "GET") if version_of(version).is_some() => (false, Body::None),
+        // Comments — **currently denied**; see COMMENTS_ENABLED.
+        (action, method) if COMMENTS_ENABLED && thread_route(action, method).is_some() => {
+            thread_route(action, method)?
+        }
         // Attachments.
         ("attachment-upload/", "POST") => (true, Body::Attachment),
         ("media-check/", "GET") => {
@@ -312,6 +326,69 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
         write,
         body,
     })
+}
+
+/// Whether the comment tree is reachable. **Off.**
+///
+/// The routes below are audited, bounded and ready, and they are still not
+/// served, because the missing control is not one this proxy can supply.
+/// Upstream's `CommentViewSetMixin.get_document_or_404` resolves the document
+/// from `kwargs["resource_id"]` — the id in the URL — and then operates on the
+/// thread or comment named later in that URL **without checking the two belong
+/// together**. So `/documents/<mine>/threads/<someone-else's>/comments/` passes
+/// the document-level ability check against a document the caller really does
+/// own, and writes into a thread they do not.
+///
+/// Every check this proxy makes is about the document in the path, and in that
+/// request the document in the path is legitimately the caller's. Authorizing
+/// the parent therefore cannot close it: the proxy would have to know which
+/// document each thread and comment belongs to, which means reading Docs' own
+/// tables — a second source of truth, and the thing this design exists to
+/// avoid.
+///
+/// So this waits for the bridge to enforce belongs-to-document, at which point
+/// this becomes `true` and the routes below are already in place. Shipping it
+/// before then would mean shipping a cross-document write with an allowlist
+/// wrapped around it, which is worse than shipping no comments at all — a
+/// visibly broken "Add comment" button is an honest failure.
+const COMMENTS_ENABLED: bool = false;
+
+/// The comment tree under a document: threads, their comments, and reactions.
+///
+/// Enumerated rather than matched loosely, so a future upstream action nested
+/// under `threads/` is not admitted by accident — the point of an allowlist is
+/// that new surfaces arrive denied.
+fn thread_route(action: &str, method: &str) -> Option<(bool, Body)> {
+    let rest = action.strip_prefix("threads/")?;
+    let (thread, rest) = rest.split_once('/')?;
+    canonical_uuid(thread)?;
+    match (rest, method) {
+        // One thread.
+        ("", "GET") => Some((false, Body::None)),
+        ("", "DELETE") => Some((true, Body::None)),
+        ("resolve/", "POST") | ("unresolve/", "POST") => Some((true, Body::None)),
+        // Comments in a thread.
+        ("comments/", "GET") => Some((false, Body::None)),
+        ("comments/", "POST") => Some((true, Body::CommentBody)),
+        _ => {
+            let rest = rest.strip_prefix("comments/")?;
+            let (comment, rest) = rest.split_once('/')?;
+            canonical_uuid(comment)?;
+            match (rest, method) {
+                ("", "GET") => Some((false, Body::None)),
+                ("", "PUT") | ("", "PATCH") => Some((true, Body::CommentBody)),
+                ("", "DELETE") => Some((true, Body::None)),
+                ("reactions/", "POST") | ("reactions/", "DELETE") => Some((true, Body::Emoji)),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// A canonical UUID used as an id inside the comment tree.
+fn canonical_uuid(value: &str) -> Option<()> {
+    let parsed = uuid::Uuid::parse_str(value).ok()?;
+    (parsed.to_string() == value).then_some(())
 }
 
 /// `versions/<version_id>/`, matched against upstream's own declared character
@@ -560,6 +637,79 @@ mod tests {
         ] {
             for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
                 assert_eq!(classify(method, &path, None), None, "reachable: {method} {path}");
+            }
+        }
+    }
+
+    const THREAD: &str = "22222222-3333-4444-8555-666666666666";
+    const COMMENT: &str = "33333333-4444-4555-8666-777777777777";
+
+    #[test]
+    fn the_comment_tree_is_audited_but_not_yet_served() {
+        // Upstream does not check that a thread belongs to the document in the
+        // path, and this proxy cannot check it without reading Docs' own tables
+        // — a second source of truth. Until the bridge enforces it, the whole
+        // tree stays denied, and this test is what keeps it denied.
+        for path in [
+            format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/"),
+            format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/{THREAD}/"),
+            format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/{THREAD}/comments/"),
+            format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/{THREAD}/comments/{COMMENT}/reactions/"),
+        ] {
+            for method in ["GET", "POST", "PUT", "DELETE"] {
+                assert_eq!(classify(method, &path, None), None, "reachable: {method} {path}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "enable with COMMENTS_ENABLED once the bridge enforces belongs-to-document"]
+    fn the_comment_tree_is_document_scoped_and_body_only() {
+        // Reads need read; writes need a Neev *write* grant, which is stricter
+        // than upstream's own `comment` ability on purpose — a document Neev
+        // considers read-only should not accumulate comments.
+        let cases: &[(&str, &str, bool, Body)] = &[
+            ("GET", "threads/", false, Body::None),
+            ("POST", "threads/", true, Body::CommentBody),
+            ("GET", &format!("threads/{THREAD}/"), false, Body::None),
+            ("DELETE", &format!("threads/{THREAD}/"), true, Body::None),
+            ("POST", &format!("threads/{THREAD}/resolve/"), true, Body::None),
+            ("POST", &format!("threads/{THREAD}/unresolve/"), true, Body::None),
+            ("GET", &format!("threads/{THREAD}/comments/"), false, Body::None),
+            ("POST", &format!("threads/{THREAD}/comments/"), true, Body::CommentBody),
+            ("PUT", &format!("threads/{THREAD}/comments/{COMMENT}/"), true, Body::CommentBody),
+            ("DELETE", &format!("threads/{THREAD}/comments/{COMMENT}/"), true, Body::None),
+            ("POST", &format!("threads/{THREAD}/comments/{COMMENT}/reactions/"), true, Body::Emoji),
+            ("DELETE", &format!("threads/{THREAD}/comments/{COMMENT}/reactions/"), true, Body::Emoji),
+        ];
+        for (method, action, write, body) in cases {
+            assert_eq!(
+                classify(method, &format!("{PREFIX}/api/v1.0/documents/{DOC}/{action}"), None),
+                Some(Target::Document {
+                    resource: DOC.into(),
+                    write: *write,
+                    body: *body
+                }),
+                "not reachable: {method} {action}"
+            );
+        }
+        // A body is bounded to what upstream itself leaves writable.
+        assert_eq!(Body::CommentBody.permitted(), ["body"]);
+        assert_eq!(Body::Emoji.permitted(), ["emoji"]);
+        // New surfaces under threads/ arrive denied — that is the point of an
+        // allowlist, and a loose match would have admitted them.
+        for denied in [
+            format!("threads/{THREAD}/pin/"),
+            format!("threads/{THREAD}/comments/{COMMENT}/flag/"),
+            "threads/not-a-uuid/".into(),
+            format!("threads/{THREAD}/comments/not-a-uuid/"),
+        ] {
+            for method in ["GET", "POST", "PUT", "DELETE"] {
+                assert_eq!(
+                    classify(method, &format!("{PREFIX}/api/v1.0/documents/{DOC}/{denied}"), None),
+                    None,
+                    "reachable: {method} {denied}"
+                );
             }
         }
     }
