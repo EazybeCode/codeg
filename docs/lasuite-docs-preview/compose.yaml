@@ -1,0 +1,148 @@
+# Isolated La Suite Docs preview, pinned to v5.7.0.
+#
+# Derived from upstream's production example (documentation/examples/compose),
+# with four deliberate changes:
+#   - every image pinned by digest to exactly what this evaluation ran against,
+#     so a preview cannot drift between the moment it is validated and the
+#     moment it is reviewed. A tag alone is not a pin: :latest moves, and even
+#     postgres:16 and redis:8 move within their major. The tag is kept beside
+#     each digest for readability only — the digest is what resolves;
+#   - Keycloak and MinIO added, because upstream leaves both as "bring your own"
+#     and this preview must be self-contained;
+#   - mem_limit on every service, sized for a host that is also running the live
+#     Neev stack and an active build;
+#   - ports bound to 127.0.0.1 only.
+#
+# Its network, volumes and database are its own. It reads nothing from Neev.
+
+name: neev-lasuite-preview
+
+networks:
+  preview:
+    name: neev-lasuite-preview
+
+volumes:
+  postgres:
+  minio:
+  keycloak:
+
+services:
+  postgresql:
+    image: postgres:16@sha256:a3b7f434b2dc57ce85a67e171163eb8ab1a1ebcb39d27484661f26b1dfbe30d6
+    env_file: [env.d/postgresql]
+    environment:
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    mem_limit: 320m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    networks: [preview]
+
+  redis:
+    image: redis:8@sha256:718f745deb7dfefeac6eed7041fc7ec9476b50e61b247932682457c41adafa0e
+    mem_limit: 96m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [preview]
+
+  minio:
+    image: quay.io/minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data --console-address ":9001"
+    env_file: [env.d/minio]
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - minio:/data
+    networks: [preview]
+
+  createbuckets:
+    image: quay.io/minio/mc:latest@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      minio: {condition: service_healthy}
+    env_file: [env.d/minio]
+    mem_limit: 128m
+    entrypoint: >
+      sh -c "
+      mc alias set preview http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      (mc mb preview/docs-media-storage || true)
+      "
+    networks: [preview]
+
+  # Upstream's own IdP choice, used as shipped. Proving the product against a
+  # known-good OIDC provider first is the point: a Neev identity surface written
+  # at the same time would make every failure ambiguous.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7@sha256:4388e2379b7e870a447adbe7b80bd61f5fbf04e925832b19669fda4957f05a81
+    command: ["start-dev", "--import-realm", "--http-port=8080", "--hostname=http://localhost:8180", "--hostname-backchannel-dynamic=false"]
+    env_file: [env.d/keycloak]
+    mem_limit: 768m
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+      - keycloak:/opt/keycloak/data
+    ports:
+      - "127.0.0.1:8180:8080"
+    networks: [preview]
+
+  backend:
+    image: lasuite/impress-backend:v5.7.0@sha256:ed2b79ef2915e17ae2ce3a18a9a94005fb532a14dc048e3aacfa85503b9fb5a1
+    user: "1000"
+    restart: always
+    # Deliberately NOT pinned here: an inline value overrides env.d/backend,
+    # which is where the preview selects its configuration.
+    env_file:
+      - env.d/common
+      - env.d/backend
+      - env.d/yprovider
+      - env.d/postgresql
+    mem_limit: 768m
+    volumes:
+      # Production minus three TLS assumptions; see the file for why.
+      - ./preview_settings.py:/app/preview_settings.py:ro
+    healthcheck:
+      test: ["CMD", "python", "manage.py", "check"]
+      interval: 15s
+      timeout: 30s
+      retries: 20
+      start_period: 20s
+    depends_on:
+      postgresql: {condition: service_healthy, restart: true}
+      redis: {condition: service_started}
+    networks: [preview]
+
+  y-provider:
+    image: lasuite/impress-y-provider:v5.7.0@sha256:2b3d03087a9ecb967b0441d69436a2171819f97cd5f3ba99ed049465ba227647
+    user: "1000"
+    env_file:
+      - env.d/common
+      - env.d/yprovider
+    mem_limit: 320m
+    networks: [preview]
+
+  # Serves the app AND routes /api, /admin, /static, /collaboration/ws/ and
+  # /media/. Without the mounted template nothing is proxied and the UI loads
+  # against a backend it cannot reach.
+  frontend:
+    image: lasuite/impress-frontend:v5.7.0@sha256:a4b11fe53fd6d55b2c6193efae385a1ec5eb1bb35df4a1c87a2bb8fe31f519c4
+    user: "101"
+    entrypoint: ["/docker-entrypoint.sh"]
+    command: ["nginx", "-g", "daemon off;"]
+    env_file: [env.d/common]
+    mem_limit: 192m
+    volumes:
+      - ./default.conf.template:/etc/nginx/templates/docs.conf.template:ro
+    ports:
+      - "127.0.0.1:8100:8083"
+    depends_on:
+      backend: {condition: service_healthy}
+    networks: [preview]

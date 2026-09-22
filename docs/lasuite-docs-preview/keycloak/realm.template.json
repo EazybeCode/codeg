@@ -1,0 +1,55 @@
+{
+  "realm": "docs",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "docs",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "__CLIENT_SECRET__",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": [
+        "http://localhost:8100/*",
+        "http://127.0.0.1:8100/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8100",
+        "http://127.0.0.1:8100",
+        "+"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:8100/*##http://127.0.0.1:8100/*"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "alice@preview.invalid",
+      "firstName": "Alice",
+      "lastName": "Preview",
+      "credentials": [
+        { "type": "password", "value": "__USER_ONE_PASSWORD__", "temporary": false }
+      ]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "bob@preview.invalid",
+      "firstName": "Bob",
+      "lastName": "Preview",
+      "credentials": [
+        { "type": "password", "value": "__USER_TWO_PASSWORD__", "temporary": false }
+      ]
+    }
+  ]
+}
