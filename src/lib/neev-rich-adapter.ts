@@ -71,6 +71,13 @@ export function fromNeev(document: RichDocument): PartialBlock[] {
           type: value.type,
           content: {
             type: "tableContent",
+            // Back out in BlockNote's own spelling: it uses `undefined` for a
+            // column that has never been dragged.
+            ...(value.widths
+              ? {
+                  columnWidths: value.widths.map((width) => width ?? undefined),
+                }
+              : {}),
             rows: value.rows.map((row) => ({ cells: row.map(fromRuns) })),
           },
         }
@@ -175,14 +182,28 @@ export function toNeev(value: unknown): RichDocument {
           (content.headerCols !== undefined && content.headerCols !== 0)
         )
           return unsupported()
-        if (
-          content.columnWidths !== undefined &&
-          (!Array.isArray(content.columnWidths) ||
-            content.columnWidths.some((width) => width !== undefined))
-        )
-          return unsupported()
+        // Column widths are kept, not refused. Dragging a border is an
+        // ordinary table operation; rejecting the result made the FIRST resize
+        // break every later save of that document and report it as unsupported
+        // formatting. `undefined` is BlockNote's "never dragged" and becomes
+        // null; the stored model drops the array entirely when none is set.
+        let widths: (number | null)[] | undefined
+        if (content.columnWidths !== undefined) {
+          if (!Array.isArray(content.columnWidths)) return unsupported()
+          widths = content.columnWidths.map((width) => {
+            if (width === undefined || width === null) return null
+            // Rounded rather than refused: a drag is pointer arithmetic and can
+            // land on a fraction, and half a pixel is not a reason to reject
+            // somebody's document. Anything that is not a finite number is.
+            if (typeof width !== "number" || !Number.isFinite(width))
+              return unsupported()
+            return Math.round(width)
+          })
+          if (widths.every((width) => width === null)) widths = undefined
+        }
         return {
           ...common,
+          ...(widths ? { widths } : {}),
           rows: content.rows.map((row) => {
             const parsed = object(row)
             keys(parsed, ["cells"])

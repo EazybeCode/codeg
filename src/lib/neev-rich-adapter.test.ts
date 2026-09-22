@@ -165,3 +165,69 @@ describe("deliberate Markdown conversion", () => {
     ])
   })
 })
+
+const RESIZED_TABLE = {
+  id: "11111111-1111-4111-8111-111111111111",
+  type: "table",
+  props: {},
+  content: {
+    type: "tableContent",
+    columnWidths: [220, undefined],
+    rows: [
+      { cells: [[{ type: "text", text: "a", styles: {} }], []] },
+      { cells: [[], []] },
+    ],
+  },
+  children: [],
+}
+
+it("keeps a resized column width instead of refusing the document", () => {
+  // Dragging a column border writes a real number into `columnWidths`. That was
+  // refused outright, so the FIRST resize made every later save fail and the
+  // reader got a notice about unsupported formatting for an ordinary table
+  // operation — and autosave stopped for that document.
+  const parsed = toNeev([RESIZED_TABLE])
+  const table = parsed.blocks[0]
+  if (table.type !== "table") throw new Error("unreachable")
+  expect(table.widths).toEqual([220, null])
+  // And it comes back out, so reopening the document shows the same table.
+  const back = fromNeev(parsed)[0] as {
+    content: { columnWidths?: (number | undefined)[] }
+  }
+  expect(back.content.columnWidths).toEqual([220, undefined])
+})
+
+it("omits widths entirely for a table nobody has resized", () => {
+  // Byte-identical to what this codec produced before widths existed, which is
+  // what keeps an unresized document readable by a server that predates them.
+  const plain = {
+    ...RESIZED_TABLE,
+    content: { ...RESIZED_TABLE.content, columnWidths: [undefined, undefined] },
+  }
+  const table = toNeev([plain]).blocks[0]
+  if (table.type !== "table") throw new Error("unreachable")
+  expect("widths" in table).toBe(false)
+  const back = fromNeev(toNeev([plain]))[0] as {
+    content: { columnWidths?: unknown }
+  }
+  expect(back.content.columnWidths).toBeUndefined()
+})
+
+it("refuses a width that is not a sane column measurement", () => {
+  const bad = (columnWidths: unknown) =>
+    toNeev([
+      {
+        ...RESIZED_TABLE,
+        content: { ...RESIZED_TABLE.content, columnWidths },
+      },
+    ])
+  // One per column, and a positive bounded number: anything else is not a
+  // width this editor produced.
+  expect(() => bad([220])).toThrow()
+  expect(() => bad([220, 100, 100])).toThrow()
+  expect(() => bad([0, undefined])).toThrow()
+  expect(() => bad([-10, undefined])).toThrow()
+  expect(() => bad([1e9, undefined])).toThrow()
+  expect(() => bad([1.5, undefined])).toThrow()
+  expect(() => bad(["220", undefined])).toThrow()
+})

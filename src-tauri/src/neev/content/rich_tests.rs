@@ -149,6 +149,7 @@ fn rich_rejects_unknown_or_unsafe_contracts() {
             id: "11111111-1111-4111-8111-111111111111".into(),
             children: vec![],
             rows: vec![vec![]],
+            widths: None,
         }],
     };
     assert_eq!(rich::encode(&table), Err(ContentError::Invalid));
@@ -332,6 +333,7 @@ fn rich_enforces_collection_and_variant_limits() {
             id: "11111111-1111-4111-8111-111111111111".into(),
             children: vec![],
             rows: vec![vec![vec![]; 20]; 100],
+            widths: None,
         }],
     };
     assert!(rich::encode(&table).is_ok());
@@ -584,5 +586,42 @@ fn rich_export_parser_keeps_blank_line_paragraphs_inside_list_items() {
                 "{kind}, styles {bits}: {markdown:?}; AST: {tree}"
             );
         }
+    }
+}
+
+#[test]
+fn rich_keeps_a_resized_column_width_and_bounds_it() {
+    // Dragging a column border is an ordinary table operation. Refusing the
+    // width it writes made the FIRST resize break every later save of that
+    // document, reported to the reader as unsupported formatting.
+    let table = |widths: Option<Vec<Option<u32>>>| RichDocument {
+        version: 1,
+        blocks: vec![RichBlock::Table {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            children: vec![],
+            rows: vec![vec![vec![], vec![]], vec![vec![], vec![]]],
+            widths,
+        }],
+    };
+    assert!(rich::encode(&table(Some(vec![Some(220), None]))).is_ok());
+    // A table nobody resized carries no width at all, and serialises exactly as
+    // it did before widths existed — which is what keeps it readable by a
+    // server that predates them.
+    let plain = rich::encode(&table(None)).expect("plain table encodes");
+    assert!(!String::from_utf8_lossy(&plain).contains("widths"));
+    // One per column, within a range a column could actually be.
+    for bad in [
+        vec![Some(220)],
+        vec![Some(220), Some(220), Some(220)],
+        vec![Some(0), None],
+        vec![Some(7), None],
+        vec![Some(4097), None],
+        vec![None, None],
+    ] {
+        assert_eq!(
+            rich::encode(&table(Some(bad))),
+            Err(ContentError::Invalid),
+            "a width that is not a column measurement must be refused"
+        );
     }
 }

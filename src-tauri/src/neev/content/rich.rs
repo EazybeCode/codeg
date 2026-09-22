@@ -70,6 +70,16 @@ pub(crate) enum RichBlock {
         id: String,
         children: Vec<RichBlock>,
         rows: Vec<Vec<Vec<InlineRun>>>,
+        /// One entry per column: a pixel width, or null for "as it comes".
+        ///
+        /// ABSENT when no column has been resized, so a table nobody has
+        /// dragged serialises exactly as it did before widths existed and stays
+        /// readable by a server that predates them. A document that HAS been
+        /// resized is not: `deny_unknown_fields` means an older binary refuses
+        /// the whole document, so rolling back after a resize loses that
+        /// document until the width is stripped.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        widths: Option<Vec<Option<u32>>>,
     },
     #[serde(rename = "divider")]
     Divider {
@@ -107,6 +117,10 @@ fn required_href<'de, D: serde::Deserializer<'de>>(
 }
 
 pub(super) const LIMIT: usize = 1_048_576;
+/// A column narrower than this is not usable; wider than this is not a canvas.
+/// Mirrors `neev-rich-document.ts`, which refuses the same range client-side.
+const MIN_COLUMN_WIDTH: u32 = 8;
+const MAX_COLUMN_WIDTH: u32 = 4096;
 
 impl RichBlock {
     pub(super) fn identity_children(&self) -> (&str, &[RichBlock]) {
@@ -270,7 +284,7 @@ pub(super) fn validate(document: &RichDocument) -> Result<(), ContentError> {
                     return Err(ContentError::Invalid);
                 }
             }
-            RichBlock::Table { rows, .. } => {
+            RichBlock::Table { rows, widths, .. } => {
                 let columns = rows.first().map_or(0, Vec::len);
                 if !children.is_empty() || rows.len() > 100 || !(1..=20).contains(&columns) {
                     return Err(ContentError::Invalid);
@@ -281,6 +295,21 @@ pub(super) fn validate(document: &RichDocument) -> Result<(), ContentError> {
                     }
                     for cell in row {
                         validate_runs(cell, &mut runs, &mut bytes, true)?;
+                    }
+                }
+                // One width per column, so each can be matched to the column it
+                // belongs to, and bounded because a column wider than any canvas
+                // is not a measurement this editor produced. All-null is the
+                // same as never resized and is not stored as a width at all.
+                if let Some(widths) = widths {
+                    if widths.len() != columns
+                        || widths.iter().all(Option::is_none)
+                        || widths
+                            .iter()
+                            .flatten()
+                            .any(|width| !(MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width))
+                    {
+                        return Err(ContentError::Invalid);
                     }
                 }
             }

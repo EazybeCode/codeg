@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { BlockNoteEditor } from "@blocknote/core"
+import { BlockNoteEditor, docToBlocks } from "@blocknote/core"
+import { addColumnAfter, addRowAfter, deleteColumn } from "@tiptap/pm/tables"
 import type { Editor } from "@tiptap/core"
 import { undoDepth } from "@tiptap/pm/history"
 import { StrictMode } from "react"
@@ -867,6 +868,181 @@ describe.skipIf(!hasToReversed)("a paste into a code block", () => {
       expect(written.split("\n")).toHaveLength(2)
       // And it is representable, so nothing refuses it on the way to storage.
       expect(() => toNeev(editor.document)).not.toThrow()
+    } finally {
+      editor.unmount()
+      host.remove()
+    }
+  })
+})
+
+describe.skipIf(!hasToReversed)("a table the reader changes", () => {
+  function mountedTable(widths?: (number | undefined)[]) {
+    ;(globalThis as { ClipboardEvent?: unknown }).ClipboardEvent ??=
+      StubClipboardEvent
+    const editor = BlockNoteEditor.create({
+      schema: richSchema,
+      trailingBlock: false,
+      tables: {
+        splitCells: false,
+        cellBackgroundColor: false,
+        cellTextColor: false,
+        headers: false,
+      },
+    })
+    const host = document.createElement("div")
+    document.body.appendChild(host)
+    editor.mount(host)
+    editor.replaceBlocks(editor.document, [
+      {
+        type: "table",
+        content: {
+          type: "tableContent",
+          ...(widths ? { columnWidths: widths } : {}),
+          rows: [{ cells: [["a"], ["b"]] }, { cells: [["c"], ["d"]] }],
+        },
+      },
+    ] as never)
+    editor.setTextCursorPosition(editor.document[0], "start")
+    return { editor, host }
+  }
+
+  /** What the edit guard does: refuse anything the stored model rejects. */
+  function guarded(editor: ReturnType<typeof mountedTable>["editor"]) {
+    return toNeev(docToBlocks(editor._tiptapEditor.state.doc))
+  }
+
+  it("survives a column resize, and keeps the width", () => {
+    // Dragging a column border is how the reader hit this: the resize wrote a
+    // real number into `columnWidths`, the codec refused the whole document,
+    // and from then on every save of that document failed — reported as
+    // unsupported formatting, which the reader had not used.
+    const { editor, host } = mountedTable()
+    try {
+      const table = editor.document[0] as {
+        id: string
+        content: { rows: unknown[] }
+      }
+      editor.updateBlock(table.id, {
+        type: "table",
+        content: {
+          type: "tableContent",
+          columnWidths: [220, undefined],
+          rows: table.content.rows,
+        },
+      } as never)
+      const parsed = guarded(editor)
+      const stored = parsed.blocks[0]
+      if (stored.type !== "table") throw new Error("unreachable")
+      expect(stored.widths).toEqual([220, null])
+      // The text is still there; a width is not paid for with content.
+      expect(stored.rows[0][0][0].text).toBe("a")
+    } finally {
+      editor.unmount()
+      host.remove()
+    }
+  })
+
+  it("survives adding a row and adding a column", () => {
+    // These already worked, and must keep working: the fix widened what the
+    // codec accepts, and widening is the direction that quietly breaks
+    // neighbours.
+    for (const [label, command] of [
+      ["row", addRowAfter],
+      ["column", addColumnAfter],
+    ] as const) {
+      const { editor, host } = mountedTable()
+      try {
+        const view = editor._tiptapEditor.view
+        command(view.state, view.dispatch)
+        const stored = guarded(editor).blocks[0]
+        if (stored.type !== "table") throw new Error(`unreachable ${label}`)
+        // Three of whichever was added, and every row still the same width.
+        const expected = label === "row" ? 3 : 2
+        expect(stored.rows).toHaveLength(expected)
+        expect(stored.rows[0]).toHaveLength(label === "row" ? 2 : 3)
+        // Nothing resized, so nothing claims a width.
+        expect("widths" in stored).toBe(false)
+      } finally {
+        editor.unmount()
+        host.remove()
+      }
+    }
+  })
+
+  it("keeps working when a RESIZED table is then extended or trimmed", () => {
+    // The reported gesture: resize a column, then carry on using the table.
+    // The width list has to track the column count through each of these, or
+    // the next edit fails the one-width-per-column rule and the reader is back
+    // to a generic refusal on an ordinary operation.
+    const cases = [
+      ["add a column", addColumnAfter, 3, 2],
+      ["delete a column", deleteColumn, 1, 2],
+      ["add a row", addRowAfter, 2, 3],
+    ] as const
+    for (const [label, command, columns, rows] of cases) {
+      const { editor, host } = mountedTable([220, undefined])
+      try {
+        const view = editor._tiptapEditor.view
+        command(view.state, view.dispatch)
+        const stored = guarded(editor).blocks[0]
+        if (stored.type !== "table") throw new Error(`unreachable ${label}`)
+        expect(stored.rows).toHaveLength(rows)
+        expect(stored.rows[0]).toHaveLength(columns)
+        // Either the width survived and matches the new column count, or the
+        // resized column itself was deleted and nothing claims a width.
+        if (stored.widths) expect(stored.widths).toHaveLength(columns)
+        else expect(label).toBe("delete a column")
+      } finally {
+        editor.unmount()
+        host.remove()
+      }
+    }
+  })
+
+  it("rounds a fractional width rather than refusing the document", () => {
+    // A drag is pointer arithmetic and can land on a fraction. Half a pixel is
+    // not a reason to reject somebody's document.
+    const { editor, host } = mountedTable()
+    try {
+      const table = editor.document[0] as {
+        id: string
+        content: { rows: unknown[] }
+      }
+      editor.updateBlock(table.id, {
+        type: "table",
+        content: {
+          type: "tableContent",
+          columnWidths: [220.4, undefined],
+          rows: table.content.rows,
+        },
+      } as never)
+      const stored = guarded(editor).blocks[0]
+      if (stored.type !== "table") throw new Error("unreachable")
+      expect(stored.widths).toEqual([220, null])
+    } finally {
+      editor.unmount()
+      host.remove()
+    }
+  })
+
+  it("refuses a width that is not a column measurement", () => {
+    // The guard still guards: widening it for resizes must not make it a way
+    // to put arbitrary numbers in the stored document.
+    const { editor, host } = mountedTable()
+    try {
+      const table = editor.document[0] as {
+        id: string
+        content: { rows: unknown[] }
+      }
+      editor.updateBlock(table.id, {
+        type: "table",
+        content: {
+          type: "tableContent",
+          columnWidths: [10_000, undefined],
+          rows: table.content.rows,
+        },
+      } as never)
+      expect(() => guarded(editor)).toThrow()
     } finally {
       editor.unmount()
       host.remove()

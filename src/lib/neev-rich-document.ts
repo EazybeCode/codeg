@@ -16,7 +16,18 @@ export type RichBlock = BlockBase &
     | { type: "heading"; content: RichInlineRun[]; level: 1 | 2 | 3 }
     | { type: "checkListItem"; content: RichInlineRun[]; checked: boolean }
     | { type: "codeBlock"; text: string; language: string }
-    | { type: "table"; rows: RichInlineRun[][][] }
+    | {
+        type: "table"
+        rows: RichInlineRun[][][]
+        /**
+         * One entry per column: a pixel width, or null for "as it comes".
+         *
+         * ABSENT when no column has been resized, which is what keeps a table
+         * nobody has dragged byte-identical to what this model produced before
+         * widths existed.
+         */
+        widths?: (number | null)[]
+      }
     | { type: "divider" }
     | { type: "image"; url: string; caption: string }
   )
@@ -26,6 +37,18 @@ export interface RichDocument {
 }
 
 const LIMIT = 1_048_576
+/** A column narrower than this is not usable; wider than this is not a canvas. */
+const MIN_COLUMN_WIDTH = 8
+const MAX_COLUMN_WIDTH = 4096
+
+/** Whether an object carries a key at all, absent being different from null. */
+function hasKey(value: unknown, key: string): boolean {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (value as Record<string, unknown>)[key] !== undefined
+  )
+}
 const encoder = new TextEncoder()
 function invalid(): never {
   throw new NativeClientError("invalid_response")
@@ -155,7 +178,10 @@ export function parseRichDocument(value: unknown): RichDocument {
       type === "codeBlock"
         ? ["text", "language"]
         : type === "table"
-          ? ["rows"]
+          ? // `widths` is optional: a table nobody resized does not carry one.
+            hasKey(value, "widths")
+            ? ["rows", "widths"]
+            : ["rows"]
           : type === "heading"
             ? ["content", "level"]
             : type === "checkListItem"
@@ -231,7 +257,28 @@ export function parseRichDocument(value: unknown): RichDocument {
           if (!Array.isArray(row) || row.length !== columns) return invalid()
           return row.map((cell) => parseRuns(cell, true))
         })
-        return { type, id, children, rows }
+        if (block.widths === undefined) return { type, id, children, rows }
+        // One per column, so a width can always be matched to the column it
+        // belongs to, and bounded because a column wider than any canvas is not
+        // a measurement this editor produced.
+        if (!Array.isArray(block.widths) || block.widths.length !== columns)
+          return invalid()
+        const widths = block.widths.map((width) => {
+          if (width === null) return null
+          if (
+            typeof width !== "number" ||
+            !Number.isInteger(width) ||
+            width < MIN_COLUMN_WIDTH ||
+            width > MAX_COLUMN_WIDTH
+          )
+            return invalid()
+          return width
+        })
+        // All-null is the same as never resized, and is stored as such so the
+        // two cannot drift apart.
+        return widths.every((width) => width === null)
+          ? { type, id, children, rows }
+          : { type, id, children, rows, widths }
       }
       case "divider":
         return { type, id, children }
