@@ -192,49 +192,96 @@ export const cases = [
             body: body.slice(0, 120),
           }
         )
-      // A brand new document legitimately has little or nothing stored yet, so
-      // the assertion is that the read SUCCEEDS, not that it returns content.
-      return ok({ status: 200, bytes: body.length })
+      /**
+       * An EMPTY body with 200 is upstream's correct answer for a document
+       * nobody has written yet, and it is what lets a new document open at all:
+       * the provider is created when `docContent` is defined, and `""` is
+       * defined. A 404 here is not "no content", it is "the editor never
+       * starts" — so the assertion is on the status and on the body existing,
+       * never on it being non-empty.
+       */
+      return ok({
+        status: 200,
+        type: response.headers.get("content-type"),
+        bytes: body.length,
+        note: body.length === 0 ? "empty, which is correct for a fresh document" : "has content",
+      })
     },
   },
 
   {
-    name: "stored content decodes as real Yjs state",
+    name: "written content comes back, byte for byte, and revalidates",
     async run({ owner, fixtures }) {
-      const response = await owner.fetch(
-        `/document-engine/api/v1.0/documents/${fixtures.legacyDocumentId}/content/`,
-        { headers: { accept: "text/plain,application/json" } }
+      const { resource } = await createDocument(
+        owner,
+        fixtures.projectNodeId,
+        "Acceptance — durability"
       )
-      const body = await response.text()
-      if (response.status !== 200)
-        return skip(`content read is ${response.status}; nothing to decode`)
-      if (body.trim().length === 0)
-        return skip("nothing stored for this document yet")
+      if (!resource?.id) return skip("could not create a document to write")
 
       /**
-       * Durability cannot be established from here, and this case does not
-       * pretend otherwise. A headless client never runs the editor's save path,
-       * so nothing this harness writes is ever persisted — which is precisely
-       * why convergence and durability are separate claims. What this does
-       * check is narrower and still worth having: that whatever IS stored comes
-       * back as a Yjs update that applies cleanly, rather than as a placeholder
-       * or an error page with a 200 on it.
+       * A real Yjs update, not invented bytes. Upstream parses what it is given
+       * to extract attachment keys and rejects anything else with 400 "invalid
+       * yjs document", so fabricated content would only ever prove that the
+       * validator works.
+       *
+       * What this establishes is that the STORE round-trips: written, read back
+       * identical, and revalidated. It is NOT the editor's save path — a
+       * headless client never runs that — so it does not show that editing in a
+       * browser persists. Those remain separate claims.
        */
       const { Y } = await loadClient()
-      try {
-        const doc = new Y.Doc()
-        Y.applyUpdate(doc, Buffer.from(body, "base64"))
-        return ok({
-          bytes: body.length,
-          shared: [...doc.share.keys()],
+      const doc = new Y.Doc()
+      doc.getMap("acceptance").set("written", `durability-${randomUUID().slice(0, 8)}`)
+      const content = Buffer.from(Y.encodeStateAsUpdate(doc)).toString("base64")
+
+      const written = await engineApi(owner, `documents/${resource.id}/content/`, {
+        method: "PATCH",
+        body: JSON.stringify({ content, websocket: false }),
+      })
+      if (written.status >= 400)
+        return no(`the content write was refused (${written.status})`, {
+          write: written.status,
         })
-      } catch (error) {
-        return no("stored content is not a Yjs update", {
-          bytes: body.length,
-          first: body.slice(0, 60),
-          error: error.message,
+
+      const read = await owner.fetch(
+        `/document-engine/api/v1.0/documents/${resource.id}/content/`,
+        { headers: { accept: "text/plain,application/json" } }
+      )
+      const back = await read.text()
+      if (read.status !== 200)
+        return no(`reading it back is ${read.status}`, { read: read.status })
+      if (back !== content)
+        return no("what came back is not what was written", {
+          wrote: content.length,
+          got: back.length,
+          identical: false,
         })
+
+      // It must also decode — identical bytes that are not a usable update
+      // would still be a broken store.
+      const round = new Y.Doc()
+      Y.applyUpdate(round, Buffer.from(back, "base64"))
+      const survived = round.getMap("acceptance").get("written")
+
+      const etag = read.headers.get("etag")
+      let revalidated = null
+      if (etag) {
+        const again = await owner.fetch(
+          `/document-engine/api/v1.0/documents/${resource.id}/content/`,
+          { headers: { accept: "text/plain,application/json", "if-none-match": etag } }
+        )
+        await again.arrayBuffer()
+        revalidated = again.status
       }
+
+      return ok({
+        bytes: back.length,
+        identical: true,
+        decoded: survived ?? null,
+        etag: etag ? "present" : "absent",
+        ifNoneMatch: revalidated,
+      })
     },
   },
 
@@ -451,9 +498,9 @@ export const cases = [
   },
 
   {
-    name: "an archived document refuses a rename, and nothing moves",
+    name: "archiving freezes the body, not the metadata",
     async run({ owner, fixtures }) {
-      const before = `Acceptance — archived rename ${Date.now()}`
+      const before = `Acceptance — archived policy ${Date.now()}`
       const { resource } = await createDocument(owner, fixtures.projectNodeId, before)
       if (!resource?.id) return skip("could not create a document to archive")
 
@@ -464,31 +511,47 @@ export const cases = [
         })
 
       /**
-       * Archived is the read-only state, so this is where a rename must stop —
-       * and the refusal has to be real on both sides. A status code alone would
-       * not show a write that was rejected by one store and accepted by the
-       * other, which is the way the two would quietly drift apart.
+       * "Archived is read-only" is about the document BODY, and only that.
+       *
+       * Neev's `resources::update` deliberately still accepts metadata on an
+       * archived resource — it has to, or nothing could ever be unarchived. So
+       * a rename through Neev being accepted here is the existing policy
+       * working, not a hole. An earlier version of this case expected a refusal
+       * and was inventing a restriction the product does not have.
+       *
+       * The two things that must hold are narrower: the body cannot be written,
+       * and whatever the metadata ends up as, both stores agree on it.
        */
-      const viaNeev = await updateResource(owner, resource.id, {
-        title: "renamed while archived",
-      })
-      const viaDocs = await engineApi(owner, `documents/${resource.id}/`, {
-        method: "PATCH",
-        body: JSON.stringify({ title: "renamed while archived" }),
-      })
+      const renamed = `Acceptance — renamed while archived ${randomUUID().slice(0, 6)}`
+      const viaNeev = await updateResource(owner, resource.id, { title: renamed })
+      if (viaNeev.status >= 400)
+        return no(
+          `Neev refused a metadata change on an archived document (${viaNeev.status}) — unarchiving would be impossible`,
+          { viaNeev: viaNeev.status }
+        )
 
+      // The body must be refused. Docs' own abilities are the authority here.
+      const engine = await engineApi(owner, `documents/${resource.id}/`)
+      const abilities = engine.body?.abilities ?? {}
+      if (abilities.content_patch !== false)
+        return no("an archived document still allows a content write", {
+          content_patch: abilities.content_patch,
+        })
+
+      const settled = await until(async () => {
+        const now = await titles(owner, resource.id)
+        return now.native === renamed && now.docs === renamed
+      })
       const after = await titles(owner, resource.id)
-      if (viaNeev.status < 400)
-        return no(`Neev accepted a rename on an archived document (${viaNeev.status})`, {
-          viaNeev: viaNeev.status,
+      if (!settled)
+        return no("the archived rename landed on one store but not the other", {
+          wanted: renamed,
           ...after,
         })
-      if (after.native !== before || after.docs !== before)
-        return no("a refused rename still moved a title", { before, ...after })
 
       return ok({
-        viaNeev: viaNeev.status,
-        viaDocs: viaDocs.status,
+        metadataAccepted: viaNeev.status,
+        bodyFrozen: abilities.content_patch === false,
         native: after.native,
         docs: after.docs,
       })
@@ -676,6 +739,97 @@ export const cases = [
       // open socket is dropped at the moment access is revoked is a different
       // question, and this case does not answer it.
       return ok({ before: "connected", after: after.reason, scope: "new connections only" })
+    },
+  },
+
+  {
+    name: "revoking a LIVE session stops its edits reaching the other side",
+    async run({ owner, member, fixtures, socketsWork }) {
+      if (!socketsWork)
+        return skip("no socket can be established at all")
+
+      const { resource } = await createDocument(
+        owner,
+        fixtures.projectNodeId,
+        "Acceptance — live revocation"
+      )
+      if (!resource?.id) return skip("could not create a document to revoke")
+      const shared = await updateResource(owner, resource.id, {
+        visibility: "organization",
+      })
+      if (shared.status >= 400)
+        return no(`sharing failed (${shared.status})`, { shared: shared.status })
+
+      const a = await connect(owner, resource.id)
+      const b = await connect(member, resource.id)
+      try {
+        if (!a.ok || !b.ok)
+          return skip(
+            `both sides must be connected first: owner ${a.ok}, member ${b.ok}`
+          )
+
+        /**
+         * The preview left this open deliberately: it tested that a NEW
+         * connection is refused after access is withdrawn, and said so, because
+         * whether an ALREADY OPEN socket stops being able to write is a
+         * different question. This is that question.
+         *
+         * The baseline below is what makes the answer mean anything. Proving
+         * that an edit does not arrive is worthless unless an edit DID arrive a
+         * moment earlier over the same pair of sockets — otherwise "nothing got
+         * through" is just as consistent with the channel never having worked.
+         */
+        const before = randomUUID().slice(0, 8)
+        b.doc.getMap("live").set("member", `before-${before}`)
+        const baseline = await until(
+          () => a.doc.getMap("live").get("member") === `before-${before}`
+        )
+        if (!baseline)
+          return skip(
+            "the member's edits were not reaching the owner even before revocation"
+          )
+
+        const revoked = await updateResource(owner, resource.id, {
+          visibility: "private",
+        })
+        if (revoked.status >= 400)
+          return no(`revocation failed (${revoked.status})`, {
+            revoked: revoked.status,
+          })
+
+        // Now write as the member, who should no longer be allowed to.
+        const after = randomUUID().slice(0, 8)
+        b.doc.getMap("live").set("member", `after-${after}`)
+
+        const leaked = await until(
+          () => a.doc.getMap("live").get("member") === `after-${after}`,
+          { timeoutMs: 8_000 }
+        )
+        if (leaked)
+          return no(
+            "an edit made after access was withdrawn still reached the owner",
+            { baseline: `before-${before}`, leaked: `after-${after}` }
+          )
+
+        // And the member's own socket should not linger indefinitely.
+        const closed = await until(() => b.live.closed, { timeoutMs: 20_000 })
+
+        return closed
+          ? ok({
+              baseline: "member's edit reached the owner before revocation",
+              afterRevocation: "not delivered",
+              memberSocket: `closed, code ${b.live.code ?? "none"}`,
+            })
+          : ok({
+              baseline: "member's edit reached the owner before revocation",
+              afterRevocation: "not delivered",
+              memberSocket:
+                "STILL OPEN after 20s — the edit did not propagate, but the session was not cut",
+            })
+      } finally {
+        a.destroy()
+        b.destroy()
+      }
     },
   },
 

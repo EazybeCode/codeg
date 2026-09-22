@@ -89,6 +89,16 @@ export async function connect(actor, documentId, { timeoutMs = 10_000 } = {}) {
   let settle
   const outcome = new Promise((resolve) => (settle = resolve))
 
+  /**
+   * What happened to the socket AFTER it was authenticated.
+   *
+   * `connect` resolves once, on the first outcome, which is all most cases
+   * need. Revoking access on a live session is the exception: the question
+   * there is what becomes of a connection that already succeeded, so the close
+   * that matters arrives long after this function has returned.
+   */
+  const live = { closed: false, code: null, reason: null }
+
   const provider = new HocuspocusProvider({
     url: `${wsUrl()}?room=${documentId}`,
     name: documentId,
@@ -104,8 +114,12 @@ export async function connect(actor, documentId, { timeoutMs = 10_000 } = {}) {
     // for an empty reason hides the close code behind it, and the code is the
     // part that says WHY — 1005 in particular means the upgrade reached a route
     // the server does not mount.
-    onClose: ({ event }) =>
-      settle({ ok: false, reason: event?.reason || null, code: event?.code ?? null }),
+    onClose: ({ event }) => {
+      live.closed = true
+      live.code = event?.code ?? null
+      live.reason = event?.reason || null
+      settle({ ok: false, reason: live.reason, code: live.code })
+    },
   })
 
   const timer = setTimeout(
@@ -119,6 +133,7 @@ export async function connect(actor, documentId, { timeoutMs = 10_000 } = {}) {
     ...result,
     doc,
     provider,
+    live,
     text: () => doc.getXmlFragment("document-store").toString(),
     destroy: () => {
       try {

@@ -65,8 +65,11 @@ words that skipped cases proved nothing.
 | CSRF | an unsafe request with no token is refused by Neev *and* by Docs through the prefix |
 | rename | a title changed in the engine reaches Neev's metadata — what the UI's focus-return refresh depends on |
 | refused rename | a rejected write left **both** titles as they were, not just returned an error |
+| editor boot content read | `GET .../content/` answers 200 — the read that gates whether the editor starts at all |
+| durability | written content comes back byte for byte, decodes as Yjs, and revalidates |
+| live revocation | a connected member's edits stop reaching the owner, and their socket closes |
 | shared-editor rename | a shared member may rename, and both stores follow |
-| archived rename | refused, and neither title moves |
+| archived | the body is frozen; metadata still changes, and both stores follow |
 | concurrent renames | two at once settle on one title, identical on both sides |
 | other organization | refused on Neev's API, the engine's API, and the socket |
 | second user | shares to the organization, both connect, **both write without waiting**, and converge |
@@ -107,9 +110,19 @@ the two models agree rather than diverge — a shared editor renaming a document
 they may already rewrite is consistency, not a bypass.
 
 So the case asserts the rename is **accepted** and that both stores end up
-holding it. The boundary that does exist is archiving: an archived document is
-read-only, and its own case checks that a rename is refused *and* that neither
-title moved.
+holding it.
+
+**Archiving freezes the body, not the metadata**, and the distinction is exact.
+Neev's `resources::update` deliberately still accepts metadata on an archived
+resource — it has to, or nothing could ever be unarchived. So a rename going
+through on an archived document is the policy working, not a hole, and an
+earlier version of this harness expected a refusal and was inventing a
+restriction the product does not have. What must hold is narrower: the **body**
+cannot be written (`content_patch: false`, from the server's own abilities), and
+whatever the metadata becomes, both stores agree on it. Docs separately refuses
+a title write on an archived document because the grant is read-only there; that
+is consistent, and it is not the same claim as "all metadata is immutable",
+which would be false.
 
 The concurrent case does **not** require both renames to succeed. A conflict
 response is a perfectly good answer. What it requires is that the two stores
