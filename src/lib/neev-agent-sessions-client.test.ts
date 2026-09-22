@@ -6,6 +6,7 @@ import {
   followAgentRun,
   disconnectProvider,
   invokeTeamAgent,
+  isSupportedEffort,
   isSupportedModel,
   parseConnectAttempt,
   setAgentSessionNode,
@@ -1389,7 +1390,8 @@ describe("run configuration", () => {
         ],
       },
       // Shapes that could not have come from the server at all.
-      { providers: [{ ...claude, efforts: ["Low"] }] },
+      { providers: [{ ...claude, efforts: ["-low"] }] },
+      { providers: [{ ...claude, efforts: ["low effort"] }] },
       { providers: [{ ...claude, efforts: ["low", "low"] }] },
       { providers: [{ ...claude, supportsSpeed: "yes" }] },
       {
@@ -1444,6 +1446,87 @@ describe("run configuration", () => {
           providers: [{ ...claude, discoveryUnavailableReason: bad }],
         })
       ).toThrow(NativeClientError)
+  })
+
+  it("accepts every level shape the runner does, and no more", () => {
+    // `safe_effort` server-side: 1..32 ASCII bytes of alphanumerics, dot, dash
+    // or underscore, never leading with a dash. The client mirrors it exactly.
+    // Being stricter than the server would not stop a bad value — it would drop
+    // a GOOD one out of a menu the server had just advertised.
+    for (const level of [
+      "low",
+      "xhigh",
+      // Open vocabulary: the catalogue may advertise a spelling this build has
+      // never seen, and codex-cli types its own as any value the model
+      // advertises.
+      "Low",
+      "HIGH",
+      "gpt-5.2-thinking",
+      "very_high",
+      "a",
+      "9",
+      "_leading",
+      ".dotted",
+      "a".repeat(32),
+    ])
+      expect(isSupportedEffort(level)).toBe(true)
+    for (const level of [
+      "",
+      // A leading dash could be read as a flag by the runner.
+      "-high",
+      "a".repeat(33),
+      "low effort",
+      "high\n",
+      "high/../etc",
+      "ハイ",
+      "high;rm",
+      null,
+      7,
+    ])
+      expect(isSupportedEffort(level)).toBe(false)
+    // And the widening reaches the wire, not just the predicate: a level this
+    // build has no translation for still round-trips.
+    expect(
+      parseAgentSession({ ...session, effort: "GPT-5.2.high", fast: false })
+        .effort
+    ).toBe("GPT-5.2.high")
+    expect(
+      parseAgentCapabilities({
+        providers: [
+          {
+            ...catalog.providers[0],
+            // Only the default model here: the parser also checks that a
+            // model's own levels are a subset of its provider's, and Sonnet's
+            // are spelled the old way.
+            models: [catalog.providers[0].models[0]],
+            efforts: ["Low", "gpt-5.2-thinking"],
+          },
+        ],
+      }).providers[0].efforts
+    ).toEqual(["Low", "gpt-5.2-thinking"])
+  })
+
+  it("does not refuse a catalogue label the server would have sanitised", () => {
+    // The server sanitises a label to 100 characters. A client capped lower
+    // would fail the WHOLE payload over one long model name and blank the menu.
+    const claude = catalog.providers[0]
+    const long = "M".repeat(100)
+    expect(
+      parseAgentCapabilities({
+        providers: [
+          {
+            ...claude,
+            label: long,
+            models: [{ ...claude.models[0], label: long }],
+          },
+        ],
+      }).providers[0].models[0].label
+    ).toBe(long)
+    expect(() =>
+      parseAgentCapabilities({
+        providers: [{ ...claude, label: "M".repeat(101) }],
+      })
+    ).toThrow(NativeClientError)
   })
 
   it("keeps an empty model effort list meaning none, not meaning fall back", () => {
