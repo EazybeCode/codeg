@@ -56,6 +56,10 @@ exactly this purpose and is the compatible fallback from here on.
   confirmed on https://app.neev.so, and a column resize there reached Saved with
   no error. This is the check that matters most, because it is the only one run
   against production data and the real proxy rather than a canary.
+- Live reload after deployment: the resized column kept its width and its text,
+  with no error. That closes the loop the original bug opened — a resize that
+  saved, survived a reload, and never told the reader their document was
+  unsupported.
 - Rollback rehearsed against real width data: with the resized document present,
   the canary was rolled from the candidate back to `ux-table-55408df5`. It
   served, schema stayed 14, and every row count was unchanged. No migration is
@@ -79,6 +83,20 @@ Rollback target from here: `neev-native-agent:ux-table-55408df5`.
 A production resize has now been saved, so `neev-native-agent:ux-controls-cb464684`
 is retired as a rollback target as of this release rather than in principle: it
 would reject the document that resize produced.
+
+## Teardown
+
+The temporary review session is revoked and the canary is gone: the
+`neev-canary` and `neev-canary-relay` containers were removed, and
+`neev-canary-pg` was removed **with its volume**. That volume was anonymous and
+used by nothing else, so the whole throwaway canary database went with it —
+including review fixture `577ba525-fa13-4570-8ea8-78fd62036609`. Removing it
+that way needed no SQL and no guessed identifiers, and could not reach
+production. Ports 3100 and 3102 no longer listen, so the proxy and the tunnel
+are stopped.
+
+Production, its fallback image and the pre-swap backup are all untouched by any
+of it.
 
 ## Release tooling
 
