@@ -3,7 +3,7 @@
 New documents use La Suite Docs v5.7.0. Existing native documents remain native;
 no document migration or Docmost change was performed.
 
-## Deployed document engine
+## Initial document-engine deployment
 
 - Backend source: `d9665d3b`; initial released UI: `5ebe10a6`.
 - Runtime image: `neev-native-agent:ux-docs-d9665d3b`, image ID `0eb3ddf10ad1`.
@@ -30,7 +30,8 @@ no document migration or Docmost change was performed.
 - Browser: table expanded from two rows to three without the former formatting
   refusal. Text, expanded table, and a comment survived reload in the canary.
 - Live browser: created a document in Tech, renamed it, entered text, inserted a
-  table, and added a third row without a formatting refusal.
+  table, and added a third row without a formatting refusal. Reload preserved
+  the title, paragraph, all three rows, and the added row's text.
 - Creation-off rollback was rehearsed on the engine-aware image: mapped documents
   stay on La Suite and native content routes cannot overwrite them.
 
@@ -48,3 +49,28 @@ The successful one-shot storage initializer is checked separately from persisten
 services. Docker capability names are normalized before comparison. Temporary-file
 cleanup traps capture their path and remove themselves rather than outliving local
 variables. The final enable-creation command completed with exit 0.
+
+## Current UI: explicit New Tab navigation
+
+- UI source: `2d1ad0da` following `9cb1c03e`; backend remains `d9665d3b`.
+- Live image: `neev-native-agent:ux-docs-tabs-2d1ad0da`, ID `253458a3a684`.
+- Native `workspace.html` SHA-256:
+  `0aaf48bbb42adda1220a32b64123e416d582b5961d2d940a8180bc4e15aa9265`.
+- Ordinary document/chat/project navigation replaces the active view. Explicit
+  New Tab adds an empty tab, which the next selection fills. Selecting an already
+  open item focuses it and consumes the unused blank.
+- Replacing a view uses its unsaved-edit guard. A pending navigation is abandoned
+  if background work changes the tab list while the confirmation is open; the
+  regression fails when that protection is removed and passes when restored.
+- Focused workspace/content/tab tests: 79 passed; coordinator independently ran
+  the workspace/tab suites: 40 passed. TypeScript, ESLint, and production build
+  completed successfully with their actual exit codes captured.
+- Canary browser: opening a chat kept 7 tabs; New Tab increased 7 to 8; creating
+  a document filled the blank at 8; a subsequent document replaced it at 8.
+  Selecting an already open project consumed the unused blank (9 to 8).
+- Live browser: New Tab increased 6 to 7; selecting the existing project returned
+  to 6 with no blank left; opening the review document kept 6 tabs and selected
+  the correct document. Saved document content remained present.
+- Promotion changed only the native image. Live health returned 200, the deployed
+  HTML hash matched, and document creation remained enabled. Rollback image:
+  `neev-native-agent:docs-before-tab-navigation-20260922`.
