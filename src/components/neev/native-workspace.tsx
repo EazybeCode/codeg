@@ -959,6 +959,23 @@ function WorkspaceContent() {
         return
       }
       guardTab(tabKey(front), () => {
+        /*
+         * The strip may have moved while the question was on screen.
+         *
+         * The prompt blocks the READER, not the panels: a draft materialising
+         * into a real chat (`replaceTab`) and a panel finding its subject gone
+         * (`dropTab`) both commit without anyone clicking. Acting on the list
+         * captured before the question would put those back as they were —
+         * resurrecting a closed tab, or reverting a chat that now exists to
+         * the draft it replaced. So a strip that changed underneath abandons
+         * the navigation instead, guard and all: nothing was destroyed, and
+         * the reader can ask again against what is actually open.
+         *
+         * Identity is enough. `commitTabs` assigns a fresh array every time,
+         * so anything that moved the strip changed it.
+         */
+        if (tabsRef.current !== open || activeTabRef.current !== activeIndex)
+          return
         // Here and only here does a panel actually go away, so here and only
         // here does its guard. On every other path the tab stays mounted, and
         // dropping a live guard would let the next replacement through unasked.

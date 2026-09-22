@@ -1,4 +1,11 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeBoundary } from "./native-boundary"
@@ -731,6 +738,81 @@ it("asks before browsing away from an unsent message, and means both answers", a
   )
   expect(screen.getAllByRole("tab")).toHaveLength(1)
   expect(screen.queryByRole("tab", { name: /Alpha/ })).toBeNull()
+  expect(mock.unknown).toEqual([])
+})
+
+it("abandons a navigation whose strip moved while the question was up", async () => {
+  /*
+   * The question blocks the READER, not the panels.
+   *
+   * A panel closing its own tab (`dropTab`, when its subject turns out to be
+   * gone) or swapping one for the chat it became (`replaceTab`) needs no
+   * input, so neither is held back by the prompt. The answer that arrives
+   * afterwards was decided against a strip that no longer exists, and
+   * committing the list captured before it would undo what happened in the
+   * meantime — reopening a closed tab, or reverting a chat to its draft.
+   *
+   * The close below stands in for exactly that: it is dispatched directly,
+   * past the modal, because what it simulates is a panel acting on its own
+   * rather than a reader clicking.
+   */
+  const { chatB, routes } = twoChats()
+  const mock = mockNativeSession(undefined, routes)
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Alpha" }))
+  await user.click(screen.getByRole("button", { name: "New tab" }))
+  await user.click(within(tree).getByRole("button", { name: "Beta" }))
+  await user.click(screen.getByRole("tab", { name: /Alpha/ }))
+  await user.type(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "half a thought"
+  )
+
+  // Ask to go elsewhere; the question comes up about the half-written message.
+  await user.click(within(tree).getByRole("button", { name: "Space" }))
+  expect(await screen.findByRole("dialog")).toHaveTextContent(
+    "Discard unsaved changes?"
+  )
+
+  // The strip moves underneath it, as a panel would move it.
+  fireEvent.click(
+    screen.getByRole("button", { name: `Close ${chatB.title}`, hidden: true })
+  )
+  await waitFor(() =>
+    // Read including hidden nodes: the strip is behind a modal.
+    expect(screen.getAllByRole("tab", { hidden: true })).toHaveLength(1)
+  )
+
+  // Answered now — and abandoned rather than applied to the strip it was
+  // asked about: the closed tab stays closed, and nothing opened over it.
+  await user.click(screen.getByRole("button", { name: "Discard changes" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  expect(screen.getAllByRole("tab")).toHaveLength(1)
+  expect(screen.getByRole("tab", { name: /Alpha/ })).toHaveAttribute(
+    "aria-selected",
+    "true"
+  )
+  expect(screen.queryByRole("tab", { name: /Beta/ })).toBeNull()
+  expect(screen.queryByRole("tab", { name: "Space" })).toBeNull()
+
+  // The guard went nowhere either: asked again, against what is actually
+  // open, it still asks.
+  await user.type(
+    screen.getByRole("textbox", { name: "Message" }),
+    "and another"
+  )
+  await user.click(within(tree).getByRole("button", { name: "Space" }))
+  expect(await screen.findByRole("dialog")).toHaveTextContent(
+    "Discard unsaved changes?"
+  )
+  await user.click(screen.getByRole("button", { name: "Keep editing" }))
   expect(mock.unknown).toEqual([])
 })
 
