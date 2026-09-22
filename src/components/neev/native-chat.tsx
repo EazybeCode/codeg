@@ -41,16 +41,22 @@ import {
   followAgentRun,
   invokeTeamAgent,
   listAgentTurns,
+  loadAgentCapabilities,
   loadAgentConnections,
+  loadAgentSession,
   loadTeamAgentSession,
+  updateAgentSessionSettings,
   NEEV_AGENT_PROVIDERS,
   NEEV_DEFAULT_MODEL,
   type NeevActivityItem,
+  type NeevAgentCapabilities,
   type NeevAgentConnections,
   type NeevAgentProvider,
   type NeevAgentSession,
+  type NeevAgentSettings,
   type NeevAgentTurn,
 } from "@/lib/neev-agent-sessions-client"
+import { AgentControls, reconcileAgentSettings } from "./native-agent-controls"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNeevMessageStream } from "@/hooks/use-neev-message-stream"
 import { useNativeAuth } from "./native-auth-provider"
@@ -192,7 +198,18 @@ function Chat({
     // The caller's own stored turns for this chat: what makes a reopened
     // conversation show the trace it showed before.
     [turns, setTurns] = useState<NeevAgentTurn[]>([]),
-    [connections, setConnections] = useState<NeevAgentConnections | null>(null)
+    [connections, setConnections] = useState<NeevAgentConnections | null>(null),
+    [capabilities, setCapabilities] = useState<NeevAgentCapabilities | null>(
+      null
+    ),
+    // The caller's own holder for this chat, one per provider. It is where the
+    // run configuration lives, so it is what the controls read and write.
+    [holders, setHolders] = useState<NeevAgentSession[]>([]),
+    // A configuration chosen here but not yet stored on the holder, and whether
+    // storing it is in flight. Cleared whenever the provider changes, so a
+    // level only Codex advertises can never ride along into Claude.
+    [desired, setDesired] = useState<NeevAgentSettings | null>(null),
+    [applying, setApplying] = useState(false)
   // A new conversation starts in agent mode; an existing one opens the way
   // this person last used it. Either is one click from the other.
   const [mode, setMode] = useState<ChatMode>(fresh ? "agent" : "team")
@@ -213,6 +230,13 @@ function Chat({
     setMode(stored.mode)
     setAgentProvider(stored.provider)
   }, [storageKey])
+  /**
+   * Point this composer at a mode and a provider.
+   *
+   * It deliberately does NOT touch the pending configuration. The model menu
+   * sets that and switches provider in the same gesture, and a reset in here
+   * would land after it and wipe the choice that caused the switch.
+   */
   function choose(next: ChatMode, provider = agentProvider) {
     chose.current = true
     setMode(next)
@@ -387,6 +411,10 @@ function Chat({
           session !== null && session.ownerId === owner
       )
       if (!scope.isCurrent()) return
+      // Kept, not just walked: the holder carries the model, effort and speed
+      // this chat's agent mode actually runs at, which is what the controls
+      // show and change.
+      setHolders(sessions)
       const merged = new Map(turnsRef.current.map((turn) => [turn.id, turn]))
       for (const session of sessions) {
         let after: string | null = cursors.current.get(session.id) ?? null
@@ -466,9 +494,113 @@ function Chat({
       live = false
     }
   }, [runtimeEnabled, auth.signal])
+  useEffect(() => {
+    if (!runtimeEnabled) return
+    let live = true
+    loadAgentCapabilities(auth.signal)
+      .then((value) => {
+        if (live) setCapabilities(value)
+      })
+      .catch(() => {
+        // An unreadable catalogue offers nothing rather than a menu of guesses.
+      })
+    return () => {
+      live = false
+    }
+  }, [runtimeEnabled, auth.signal])
   const connection =
     connections?.connections.find((item) => item.provider === agentProvider) ??
     null
+  /** This chat's holder for one provider, once that provider has one. */
+  const holderFor = (name: NeevAgentProvider) =>
+    holders.find((item) => item.provider === name) ?? null
+  /**
+   * What a holder runs as, or the defaults when there is not one yet.
+   *
+   * Read from the holder rather than from local state, which is what keeps it
+   * true after a reload. Each provider has its OWN holder, so switching
+   * provider shows that provider's stored configuration and never the other
+   * one's.
+   */
+  const settingsOf = (item: NeevAgentSession | null): NeevAgentSettings =>
+    item
+      ? { model: item.model, effort: item.effort, fast: item.fast }
+      : // No holder yet: the defaults stand, and they are the cheap ones.
+        { model: NEEV_DEFAULT_MODEL, effort: null, fast: false }
+  const holder = holderFor(agentProvider)
+  const live = settingsOf(holder)
+  const shown = desired ?? live
+  // A held choice is released only when a re-read holder actually reports it.
+  // Clearing it on a successful ask instead would claim the server had stored
+  // something before it said so — and if it stored something else, the row
+  // would quietly start describing a configuration nobody chose.
+  useEffect(() => {
+    if (
+      desired &&
+      holder &&
+      holder.model === desired.model &&
+      holder.effort === desired.effort &&
+      holder.fast === desired.fast
+    )
+      setDesired(null)
+  }, [desired, holder])
+
+  /**
+   * Store the chosen configuration on this chat's holder.
+   *
+   * Only reachable once the holder exists, because a holder is created by the
+   * first invocation. That is not a limit on what can be CHOSEN: every control
+   * is live from the start, and before there is a holder the whole triple
+   * travels with the ask itself. This path is what keeps a LATER change in
+   * force, since a run reads the holder rather than the request that follows.
+   *
+   * Returns whether the holder now says what the reader chose, so the caller
+   * can decline to run under something else.
+   */
+  async function applySettings(next: NeevAgentSettings): Promise<boolean> {
+    if (!holder || !auth.session) return false
+    const target = holder.id
+    setApplying(true)
+    try {
+      let revision = holder.revision
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const stored = await updateAgentSessionSettings(
+            target,
+            next,
+            revision,
+            auth.session.csrf,
+            auth.signal
+          )
+          if (!scope.isCurrent()) return false
+          setHolders((old) =>
+            old.map((item) => (item.id === stored.id ? stored : item))
+          )
+          setDesired(null)
+          return true
+        } catch (cause) {
+          // Someone changed this holder while it was open — including this same
+          // reader in another tab. Re-read and try once against what is really
+          // stored, then stop rather than loop against a moving target.
+          const stale =
+            cause instanceof NativeClientError && cause.kind === "conflict"
+          if (!stale || attempt === 1) throw cause
+          const fresh = await loadAgentSession(target, auth.signal)
+          if (!scope.isCurrent()) return false
+          setHolders((old) =>
+            old.map((item) => (item.id === fresh.id ? fresh : item))
+          )
+          revision = fresh.revision
+        }
+      }
+      return false
+    } catch (cause) {
+      if (scope.isCurrent()) fail(cause)
+      return false
+    } finally {
+      if (scope.isCurrent()) setApplying(false)
+    }
+  }
   /**
    * Follow one run to its end, live.
    *
@@ -538,8 +670,18 @@ function Chat({
       setError(new NativeClientError("unavailable"))
       return
     }
-    if (agentBusy || saving || latest.archived || !auth.session) return
+    // A settings write already in flight owns the holder's revision. Starting
+    // a run underneath it would race: the turn could launch against the
+    // configuration being replaced, which is precisely the turn the reader was
+    // configuring.
+    if (agentBusy || saving || applying || latest.archived || !auth.session)
+      return
     const prompt = draft.trim()
+    // The run reads the HOLDER, so an unstored choice would be ignored by the
+    // very turn it was chosen for. Store it first, and if that fails do not
+    // invoke: the prompt stays exactly where it was typed, with the reason
+    // beside it, rather than running under a configuration nobody chose.
+    if (desired && holder && !(await applySettings(desired))) return
     setAgentBusy(true)
     setAgentText("")
     setError(null)
@@ -550,7 +692,13 @@ function Chat({
         {
           prompt,
           provider: agentProvider,
-          model: NEEV_DEFAULT_MODEL,
+          // The whole configuration travels with the ask, because the holder
+          // for (chat, provider) is CREATED by the first one. Sent every time
+          // so the first turn is configured the same way the tenth is, and so
+          // there is never a turn that ran as something nobody chose.
+          model: shown.model,
+          effort: shown.effort,
+          fast: shown.fast,
           requestId: invokeRequest.current,
           expectedAuthRevision: pinned.current,
         },
@@ -716,7 +864,9 @@ function Chat({
     )
   if (loading) return <p role="status">{n("loading")}</p>
   const traces = attachTurns(messages, turns, auth.session?.user.id ?? -1)
-  const composerBusy = saving || agentBusy
+  // `applying` is in here too, so Enter and the Send button are both held
+  // while the configuration is being stored. The textarea stays writable.
+  const composerBusy = saving || agentBusy || applying
   const sendable = !!draft.trim() && !composerBusy && !latest.archived
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
@@ -978,23 +1128,50 @@ function Chat({
               </Button>
             ))}
             {mode === "agent" && (
-              <label className="flex items-center gap-1">
-                <span className="sr-only">{t("agentProvider")}</span>
-                <select
-                  value={agentProvider}
-                  disabled={agentBusy}
-                  onChange={(event) =>
-                    choose("agent", event.target.value as NeevAgentProvider)
-                  }
-                  className="rounded-md border bg-background px-1.5 py-1 text-xs"
-                >
-                  {NEEV_AGENT_PROVIDERS.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <>
+                {/* One grouped menu, not a provider select beside a model
+                    select: the provider heading a model sits under IS the
+                    provider choice, so which agent runs and what it runs as are
+                    one decision in one place. */}
+                <AgentControls
+                  capabilities={capabilities}
+                  provider={agentProvider}
+                  settings={shown}
+                  disabled={agentBusy || applying || latest.archived}
+                  onChange={(next, nextProvider) => {
+                    if (nextProvider !== agentProvider) {
+                      // Each provider keeps its OWN holder. Switching shows
+                      // that holder's stored configuration with the model just
+                      // picked laid over it — carrying the old provider's level
+                      // across would describe a configuration the new holder
+                      // does not have.
+                      setDesired(
+                        reconcileAgentSettings(capabilities, nextProvider, {
+                          ...settingsOf(holderFor(nextProvider)),
+                          model: next.model,
+                        })
+                      )
+                      // Deliberately after: `choose` no longer touches the
+                      // pending choice, so this cannot be undone by the switch
+                      // that caused it.
+                      choose("agent", nextProvider)
+                      return
+                    }
+                    setDesired(next)
+                    // An existing holder is written to now, so the change is in
+                    // force before the next ask. Before the first ask there is
+                    // nothing to write to yet — the choice is held and travels
+                    // WITH that invocation, so the first and costliest turn is
+                    // configurable like every other one.
+                    if (holder) void applySettings(next)
+                  }}
+                />
+                {applying && (
+                  <span role="status" className="text-xs text-muted-foreground">
+                    {t("settingsPending")}
+                  </span>
+                )}
+              </>
             )}
             {agentBusy && (
               <Button

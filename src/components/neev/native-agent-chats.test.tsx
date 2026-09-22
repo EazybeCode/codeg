@@ -180,14 +180,24 @@ it("creates a saved session with a supported provider and opens it", async () =>
     screen.getByRole("textbox", { name: "Title" }),
     "Refactor the parser"
   )
-  // Only providers the runtime can dispatch are offered at all.
+  // The model menu IS the provider choice: one compact menu grouped by
+  // provider, every entry read from the catalogue rather than written here.
+  await user.click(screen.getByRole("button", { name: "Model" }))
   expect(
-    within(screen.getByRole("combobox", { name: "Provider" }))
-      .getAllByRole("option")
-      .map((option) => option.textContent)
-  ).toEqual(["claude", "codex"])
+    within(await screen.findByRole("group", { name: "Claude Code" }))
+      .getAllByRole("menuitemradio")
+      .map((item) => item.textContent)
+  ).toEqual(["Default", "Haiku", "Sonnet", "Opus"])
+  expect(
+    within(screen.getByRole("group", { name: "Codex" }))
+      .getAllByRole("menuitemradio")
+      .map((item) => item.textContent)
+  ).toEqual(["Default"])
+  await user.keyboard("{Escape}")
   await user.click(screen.getByRole("button", { name: "Create" }))
   await waitFor(() => expect(bodies).toHaveLength(1))
+  // `effort` and `fast` are absent, not null and false: nobody chose a level
+  // and nobody asked to pay for fast mode.
   expect(bodies[0]).toEqual({
     title: "Refactor the parser",
     provider: "claude",
@@ -627,8 +637,15 @@ it("will not let a disconnected provider be typed into", async () => {
   await waitFor(() =>
     expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled()
   )
-  await user.click(screen.getByRole("combobox", { name: "Provider" }))
-  await user.click(await screen.findByRole("option", { name: "Codex" }))
+  // Nothing has been created yet, so picking a model under another provider's
+  // heading re-points the whole draft rather than editing a session.
+  await user.click(screen.getByRole("button", { name: "Model" }))
+  await user.click(
+    within(await screen.findByRole("group", { name: "Codex" })).getByRole(
+      "menuitemradio",
+      { name: "Default" }
+    )
+  )
 
   expect(await screen.findByText("codex is not connected yet.")).toBeVisible()
   expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()

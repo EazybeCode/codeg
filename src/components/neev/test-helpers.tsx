@@ -29,6 +29,64 @@ export const identitySession: NativeSession = {
   role: null,
   scope: "identity",
 }
+/**
+ * `GET /api/neev/agent/capabilities` exactly as the deployed runner answers it
+ * (Claude Code 2.1.267, codex-cli 0.155.1), field for field.
+ *
+ * Copied from the backend contract rather than simplified: the controls refuse
+ * a payload that does not match the documented shape, so a fixture that took
+ * liberties would pass tests the real response fails. It carries the two cases
+ * that matter — a model whose `efforts` narrow the provider's, and a provider
+ * where only one model supports speed.
+ */
+export const agentCatalog = {
+  providers: [
+    {
+      provider: "claude",
+      label: "Claude Code",
+      models: [
+        {
+          id: "default",
+          label: "Default",
+          default: true,
+          supportsSpeed: false,
+        },
+        { id: "haiku", label: "Haiku", default: false, supportsSpeed: false },
+        {
+          id: "sonnet",
+          label: "Sonnet",
+          default: false,
+          supportsSpeed: false,
+          efforts: ["low", "medium", "high"],
+        },
+        {
+          id: "opus",
+          label: "Opus",
+          default: false,
+          supportsSpeed: true,
+          efforts: null,
+        },
+      ],
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: null,
+      supportsSpeed: true,
+      speedUnavailableReason:
+        "Fast mode runs on Opus. Choose Opus to enable it.",
+    },
+    {
+      provider: "codex",
+      label: "Codex",
+      models: [
+        { id: "default", label: "Default", default: true, supportsSpeed: true },
+      ],
+      efforts: ["minimal", "low", "medium", "high", "xhigh"],
+      defaultEffort: null,
+      supportsSpeed: true,
+      speedUnavailableReason: "Fast mode is not available for this model.",
+    },
+  ],
+} as const
+
 export type Handler = (init: RequestInit) => Response | Promise<Response>
 export function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -66,6 +124,10 @@ export function mockNativeSession(
           },
         ],
       })
+    // Every agent composer reads the catalogue to render its controls. Default
+    // to the real deployed shape so unrelated tests need not mock it; a test
+    // about the controls themselves overrides it with the case it is about.
+    if (key === "GET /api/neev/agent/capabilities") return json(agentCatalog)
     unknown.push(key)
     throw new Error(`Unexpected fetch: ${key}`)
   })

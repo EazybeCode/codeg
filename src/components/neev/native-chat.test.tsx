@@ -481,10 +481,11 @@ it("opens a new chat in agent mode and an existing one in team mode", async () =
   await user.click(team)
   expect(team).toHaveAttribute("aria-pressed", "true")
   expect(agent).toHaveAttribute("aria-pressed", "false")
-  // The provider lives inside the agent composer, not in a panel beside it.
-  expect(screen.queryByRole("combobox", { name: "Provider" })).toBeNull()
+  // The run configuration lives inside the agent composer, not in a panel
+  // beside it — and team mode carries none of it.
+  expect(screen.queryByRole("button", { name: "Model" })).toBeNull()
   await user.click(agent)
-  expect(screen.getByRole("combobox", { name: "Provider" })).toBeVisible()
+  expect(screen.getByRole("button", { name: "Model" })).toBeVisible()
   view.unmount()
   // Nothing chosen for this chat yet, and no agent history in it: team.
   localStorage.clear()
@@ -505,9 +506,19 @@ it("remembers the chosen mode and provider across a reload", async () => {
   const view = mount()
   // A human-only thread opens in team mode; choosing Agent is a decision.
   await user.click(await screen.findByRole("button", { name: "Ask agent" }))
-  await user.selectOptions(
-    screen.getByRole("combobox", { name: "Provider" }),
-    "codex"
+  // Provider is chosen by picking a model under its heading: one grouped menu
+  // rather than a provider select beside a model select.
+  await user.click(screen.getByRole("button", { name: "Model" }))
+  await user.click(
+    within(await screen.findByRole("group", { name: "Codex" })).getByRole(
+      "menuitemradio",
+      { name: "Default" }
+    )
+  )
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+      "Codex · Default"
+    )
   )
   view.unmount()
   mount()
@@ -516,8 +527,11 @@ it("remembers the chosen mode and provider across a reload", async () => {
   expect(
     await screen.findByRole("button", { name: "Ask agent" })
   ).toHaveAttribute("aria-pressed", "true")
-  expect(screen.getByRole("combobox", { name: "Provider" })).toHaveValue(
-    "codex"
+  // The closed trigger names the provider, because both providers call their
+  // default model "Default": without it nobody could tell which agent their
+  // next turn goes to without opening the menu.
+  expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+    "Codex · Default"
   )
 })
 
@@ -1215,4 +1229,191 @@ it("keeps what was typed while a send was in flight", async () => {
   expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
     "second thought"
   )
+})
+
+it("lets the FIRST ask be configured, and sends that configuration with it", async () => {
+  // The holder for (chat, provider) is created BY this ask. If the controls
+  // waited for it, the first and costliest turn would be the one turn nobody
+  // could configure — so the choice travels with the invocation instead.
+  const invocations: Record<string, unknown>[] = []
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: (init) => {
+      invocations.push(JSON.parse(init.body as string))
+      return json(
+        { message: askMessage, turn: runningTurn, runId: RUN_ID },
+        201
+      )
+    },
+    [RUN_EVENTS]: () =>
+      sseBody(
+        `{"type":"started","runId":"${RUN_ID}","turnId":"${runningTurn.id}"}`,
+        '{"type":"finished","status":"completed","errorCode":null}'
+      ),
+  })
+  const user = userEvent.setup()
+  mount(true)
+
+  // Nothing is disabled and nothing says "ask first": all three controls are
+  // live before a single turn has run.
+  const model = await screen.findByRole("button", { name: "Model" })
+  expect(model).toBeEnabled()
+  expect(screen.getByRole("button", { name: "Reasoning" })).toBeEnabled()
+
+  await user.click(model)
+  await user.click(
+    within(await screen.findByRole("group", { name: "Claude Code" })).getByRole(
+      "menuitemradio",
+      { name: "Opus" }
+    )
+  )
+  // Opus is the Claude model that can do fast mode, so the chip opens up —
+  // but it is still off until it is pressed.
+  const fast = await screen.findByRole("button", { name: "Fast" })
+  await waitFor(() => expect(fast).toBeEnabled())
+  expect(fast).toHaveAttribute("aria-pressed", "false")
+  await user.click(fast)
+  await user.click(screen.getByRole("button", { name: "Reasoning" }))
+  await user.click(
+    await screen.findByRole("menuitemradio", { name: "Very high" })
+  )
+
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+
+  await waitFor(() => expect(invocations).toHaveLength(1))
+  expect(invocations[0]).toEqual({
+    prompt: "help",
+    provider: "claude",
+    model: "opus",
+    effort: "xhigh",
+    fast: true,
+    requestId: expect.any(String),
+    expectedAuthRevision: "1",
+  })
+})
+
+it("keeps the draft and the chosen configuration when the first ask fails", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () => json({ code: "unavailable" }, 503),
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await user.click(await screen.findByRole("button", { name: "Model" }))
+  await user.click(
+    within(await screen.findByRole("group", { name: "Claude Code" })).getByRole(
+      "menuitemradio",
+      { name: "Haiku" }
+    )
+  )
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+
+  // Nothing was persisted, so nothing typed or chosen is thrown away: the ask
+  // can be sent again without re-deciding anything.
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("help")
+  )
+  expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+    "Haiku"
+  )
+})
+
+it("switches provider through the model menu and keeps each holder's own configuration", async () => {
+  // Each provider has its OWN holder for this chat. Switching must show that
+  // holder's stored configuration, never the other one's, or the row would
+  // describe a configuration the run will not use.
+  const CODEX_SESSION_ID = "3c4cd22b-bb13-2882-c4cb-0773b9534435"
+  const invocations: Record<string, unknown>[] = []
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    [TEAM_SESSION("claude")]: () =>
+      json({ ...teamSession, model: "opus", effort: "max", fast: true }),
+    [TEAM_SESSION("codex")]: () =>
+      json({
+        ...teamSession,
+        id: CODEX_SESSION_ID,
+        provider: "codex",
+        model: "default",
+        effort: "minimal",
+        fast: false,
+      }),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`GET /api/neev/agent/sessions/${CODEX_SESSION_ID}/turns`]: () =>
+      json({ items: [], nextAfter: null }),
+    [AGENT_PATH]: (init) => {
+      invocations.push(JSON.parse(init.body as string))
+      return json(
+        { message: askMessage, turn: runningTurn, runId: RUN_ID },
+        201
+      )
+    },
+    [RUN_EVENTS]: () =>
+      sseBody(
+        `{"type":"started","runId":"${RUN_ID}","turnId":"${runningTurn.id}"}`,
+        '{"type":"finished","status":"completed","errorCode":null}'
+      ),
+  })
+  const user = userEvent.setup()
+  mount(true)
+
+  // Claude's holder: Opus, Max, fast.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+      "Claude Code · Opus"
+    )
+  )
+  expect(screen.getByRole("button", { name: "Reasoning" })).toHaveTextContent(
+    "Max"
+  )
+  expect(screen.getByRole("button", { name: "Fast" })).toHaveAttribute(
+    "aria-pressed",
+    "true"
+  )
+
+  await user.click(screen.getByRole("button", { name: "Model" }))
+  await user.click(
+    within(await screen.findByRole("group", { name: "Codex" })).getByRole(
+      "menuitemradio",
+      { name: "Default" }
+    )
+  )
+
+  // Codex's own holder takes over: its level, and its speed. Claude's `max`
+  // could not survive anyway — Codex does not advertise it.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+      "Codex · Default"
+    )
+  )
+  expect(screen.getByRole("button", { name: "Reasoning" })).toHaveTextContent(
+    "Minimal"
+  )
+  expect(screen.getByRole("button", { name: "Fast" })).toHaveAttribute(
+    "aria-pressed",
+    "false"
+  )
+
+  await typeAsk(user)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(invocations).toHaveLength(1))
+  // The ask goes to the provider the menu selected, under that provider's
+  // configuration.
+  expect(invocations[0]).toMatchObject({
+    provider: "codex",
+    model: "default",
+    effort: "minimal",
+  })
+  expect(invocations[0]).not.toHaveProperty("fast")
 })
