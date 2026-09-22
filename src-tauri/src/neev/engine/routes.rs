@@ -346,12 +346,19 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
 /// tables — a second source of truth, and the thing this design exists to
 /// avoid.
 ///
-/// So this waits for the bridge to enforce belongs-to-document, at which point
-/// this becomes `true` and the routes below are already in place. Shipping it
-/// before then would mean shipping a cross-document write with an allowlist
-/// wrapped around it, which is worse than shipping no comments at all — a
-/// visibly broken "Add comment" button is an honest failure.
-const COMMENTS_ENABLED: bool = false;
+/// **On** since the bridge made the pairing a precondition: a thread that does
+/// not belong to the document in the path returns the same 404 upstream uses
+/// for a thread it cannot find, enforced above every nested route and with a
+/// boot invariant that refuses to start if the guard is missing from the
+/// middleware. The measured matrix includes the two writes that were `201`
+/// before and are `404` now.
+///
+/// That guard does not replace anything here. This proxy still classifies every
+/// one of these as **document-scoped**, because that is what binds the request
+/// to Neev's ACL, and it deliberately reads no identity out of the thread or
+/// comment id — those are upstream's namespace, not Neev's, and treating them
+/// as authority would be inventing a second one.
+const COMMENTS_ENABLED: bool = true;
 
 /// The comment tree under a document: threads, their comments, and reactions.
 ///
@@ -645,25 +652,30 @@ mod tests {
     const COMMENT: &str = "33333333-4444-4555-8666-777777777777";
 
     #[test]
-    fn the_comment_tree_is_audited_but_not_yet_served() {
-        // Upstream does not check that a thread belongs to the document in the
-        // path, and this proxy cannot check it without reading Docs' own tables
-        // — a second source of truth. Until the bridge enforces it, the whole
-        // tree stays denied, and this test is what keeps it denied.
+    fn a_thread_id_never_becomes_the_authorized_resource() {
+        // The pairing is enforced upstream by the bridge's guard. What must stay
+        // true *here* is that the proxy reads no authority out of a thread or
+        // comment id: whichever document those belong to, the resource this
+        // request is authorized against is the one in the path. Reading
+        // identity out of an upstream id would be inventing a second source of
+        // it — and would be the one way this proxy could still be talked into
+        // authorizing the wrong document.
+        let other_doc = "11111111-2222-4333-8444-555555555555";
         for path in [
-            format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/"),
             format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/{THREAD}/"),
-            format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/{THREAD}/comments/"),
-            format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/{THREAD}/comments/{COMMENT}/reactions/"),
+            format!("{PREFIX}/api/v1.0/documents/{DOC}/threads/{THREAD}/comments/{COMMENT}/"),
         ] {
-            for method in ["GET", "POST", "PUT", "DELETE"] {
-                assert_eq!(classify(method, &path, None), None, "reachable: {method} {path}");
-            }
+            let Some(Target::Document { resource, .. }) = classify("GET", &path, None) else {
+                panic!("expected a document target for {path}");
+            };
+            assert_eq!(resource, DOC);
+            assert_ne!(resource, other_doc);
+            assert_ne!(resource, THREAD);
+            assert_ne!(resource, COMMENT);
         }
     }
 
     #[test]
-    #[ignore = "enable with COMMENTS_ENABLED once the bridge enforces belongs-to-document"]
     fn the_comment_tree_is_document_scoped_and_body_only() {
         // Reads need read; writes need a Neev *write* grant, which is stricter
         // than upstream's own `comment` ability on purpose — a document Neev

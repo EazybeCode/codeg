@@ -363,38 +363,7 @@ pub(crate) async fn handle(
         Decision::Refuse(refusal) => Err(refuse(refusal)),
         Decision::Asset { ref path } => asset(engine, path),
         Decision::Shell { resource, role } => {
-            let assertion = assertion(&state, &actor).await;
-            // Project before the shell renders, so the editor's very first API
-            // call already finds the access row it needs.
-            engine
-                .upstream
-                .project(&resource, &assertion, role)
-                .await
-                .map_err(crate::neev::error::AuthError::from)?;
-            // Provisioning is idempotent and the id is the resource's own, so
-            // this repairs a resource whose creation committed natively but
-            // whose upstream document never got made — the "retry converges"
-            // half of having no atomicity across the two stores. Without it
-            // such a document would stay broken for good.
-            let title = crate::neev::content::resources::get(&state, &actor, &resource)
-                .await
-                .map(|resource| resource.title)
-                .unwrap_or_default();
-            engine
-                .upstream
-                .provision(&resource, &title, &assertion)
-                .await
-                .map_err(crate::neev::error::AuthError::from)?;
-            // Reconcile the title on every open. Provisioning an existing
-            // document does not touch its title, so without this a rename whose
-            // upstream push failed would stay diverged for good. Neev's row is
-            // what Projects lists and what the ACL is evaluated against, so
-            // Neev's value is the one that wins. Best effort: a document that
-            // opens with a stale title is better than one that will not open.
-            if !title.is_empty() {
-                let _ = engine.upstream.push_title(&resource, &assertion, &title).await;
-            }
-            asset(engine, &shell_path(parts.uri.path()))
+            shell_response(&state, engine, &actor, &resource, role, parts.uri.path()).await
         }
         Decision::Forward { resource: Some(ref resource), .. }
             if matches!(target, Some(Target::Media { .. })) =>
@@ -671,6 +640,64 @@ fn asset(engine: &Engine, relative: &str) -> Result<Response, ApiError> {
     let mut response = super::assets::serve(&engine.artifact_root, relative)?;
     framing(response.headers_mut());
     Ok(response)
+}
+
+/// Serve the editor shell for an authorized document.
+///
+/// A separate function for one reason that matters: `?` here returns from
+/// *this* function, so every failure becomes the caller's `Result` and is
+/// mapped to the HTML error marker. Inline in the handler's match arm, a `?`
+/// returned straight out of the handler and skipped that mapping — which is
+/// exactly what happened, and an unreachable engine answered the iframe with a
+/// JSON 503 the frame could not render. The unavailability rehearsal caught it;
+/// review had not.
+async fn shell_response(
+    state: &Arc<ServerState>,
+    engine: &Engine,
+    actor: &OrgContext,
+    resource: &str,
+    role: Projected,
+    path: &str,
+) -> Result<Response, ApiError> {
+    let assertion = assertion(state, actor).await;
+    // Order matters here, and the obvious order is wrong. Projecting first
+    // reads naturally — put the access row in place before the editor asks for
+    // anything — but if the upstream document is missing, projection fails
+    // against a document that does not exist and the request aborts before
+    // provisioning can create it. The repair this function exists to perform
+    // would then never run, and a resource whose creation committed natively
+    // while its upstream document never got made would stay broken for good.
+    //
+    // So: read the native title, provision, then project. All of it after the
+    // native transaction has committed, because the migrator forbids network
+    // calls inside one.
+    let title = crate::neev::content::resources::get(state, actor, resource)
+        .await
+        .map(|resource| resource.title)
+        .unwrap_or_default();
+    // Idempotent, and keyed on the resource's own id — so this is both the
+    // ordinary no-op on every open and the repair, which is the "a retry
+    // converges" half of having no atomicity across the two stores.
+    engine
+        .upstream
+        .provision(resource, &title, &assertion)
+        .await
+        .map_err(crate::neev::error::AuthError::from)?;
+    // The document certainly exists now, so the access row can be placed on it.
+    engine
+        .upstream
+        .project(resource, &assertion, role)
+        .await
+        .map_err(crate::neev::error::AuthError::from)?;
+    // Reconcile the title on every open. Provisioning an existing document does
+    // not touch its title, so without this a rename whose upstream push failed
+    // would stay diverged for good. Neev's row is what Projects lists and what
+    // the ACL is evaluated against, so Neev's value wins. Best effort: a
+    // document that opens with a stale title beats one that will not open.
+    if !title.is_empty() {
+        let _ = engine.upstream.push_title(resource, &assertion, &title).await;
+    }
+    asset(engine, &shell_path(path))
 }
 
 /// The artifact-relative path for an editor shell request.
