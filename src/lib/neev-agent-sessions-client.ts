@@ -45,6 +45,23 @@ export function isSupportedModel(value: string): boolean {
   )
 }
 
+/**
+ * A reasoning level, as the runner spells it.
+ *
+ * Deliberately a bare `string` and not a union: the levels differ per provider
+ * (`max` is Claude's, `minimal` is Codex's) and codex-cli types its own as "a
+ * non-empty reasoning effort value advertised by the model", so a closed list
+ * here would refuse a level the server had just been taught. The shape is
+ * checked — a short lowercase token, nothing that could read as a flag — and
+ * membership is decided by the catalogue, which is the only thing that knows.
+ */
+export type NeevEffort = string
+
+/** `null` is not a level: it means "pass no flag", i.e. the provider default. */
+export function isSupportedEffort(value: unknown): value is NeevEffort {
+  return typeof value === "string" && /^[a-z][a-z0-9_-]{0,30}$/.test(value)
+}
+
 export type NeevTurnStatus = "running" | "completed" | "failed" | "canceled"
 
 /**
@@ -68,6 +85,14 @@ export interface NeevAgentSession {
   title: string
   provider: string
   model: string
+  /**
+   * The reasoning level this session runs at, or `null` for the provider's own
+   * default (no flag passed). This — not local component state — is the live
+   * run configuration, which is what makes it still true after a reload.
+   */
+  effort: NeevEffort | null
+  /** Whether this session runs in fast mode. Defaults false and never inherited. */
+  fast: boolean
   boundChatId: string | null
   archived: boolean
   /**
@@ -183,10 +208,28 @@ export interface NeevAgentConnections {
   connections: NeevAgentConnection[]
 }
 
+/**
+ * The whole run configuration, which is the only way it may be changed.
+ *
+ * All three together, never one at a time: the server validates them as a
+ * COMBINATION, so patching model and speed in sequence would put the session
+ * through a pairing no run could honour (Fast still on after moving to a model
+ * that cannot do it) and burn two revisions that a second editor can interleave.
+ */
+export interface NeevAgentSettings {
+  model: string
+  effort: NeevEffort | null
+  fast: boolean
+}
+
 export interface CreateNeevAgentSessionInput {
   title: string
   provider: NeevAgentProvider
   model: string
+  /** Omitted when null, which is what asks for the provider's own default. */
+  effort?: NeevEffort | null
+  /** Omitted when false, which is the default everywhere and never inherited. */
+  fast?: boolean
   boundChatId?: string | null
   /** File it under a project on creation, so it opens where it was started. */
   nodeId?: number | null
@@ -343,6 +386,13 @@ export function parseAgentSession(value: unknown): NeevAgentSession {
   // `nodeId` is OPTIONAL: a server that predates schema 12 does not send it and
   // must keep working, and one that does must not be refused for saying more
   // than we used to expect. Absent reads as unfiled.
+  //
+  // `effort` and `fast` are optional for the same reason and only that reason:
+  // during a rolling deployment one replica answers with them and another does
+  // not, and refusing the older one would black out every saved chat mid-roll.
+  // Absent is read as the documented default — no level, not fast — never as
+  // "unknown", so nothing on screen claims a configuration the server did not
+  // send. Once every replica is new these become required.
   const FIELDS = [
     "id",
     "orgId",
@@ -356,9 +406,19 @@ export function parseAgentSession(value: unknown): NeevAgentSession {
     "createdAt",
     "updatedAt",
   ]
-  const filed = record(value).nodeId !== undefined
-  const object = exact(value, filed ? [...FIELDS, "nodeId"] : FIELDS)
+  const present = (["nodeId", "effort", "fast"] as const).filter(
+    (key) => record(value)[key] !== undefined
+  )
+  const object = exact(value, [...FIELDS, ...present])
   if (typeof object.archived !== "boolean") return invalid()
+  if (object.fast !== undefined && typeof object.fast !== "boolean")
+    return invalid()
+  if (
+    object.effort !== undefined &&
+    object.effort !== null &&
+    !isSupportedEffort(object.effort)
+  )
+    return invalid()
   const title = text(object.title)
   if (
     title.length === 0 ||
@@ -376,6 +436,9 @@ export function parseAgentSession(value: unknown): NeevAgentSession {
     title,
     provider: text(object.provider),
     model,
+    effort:
+      object.effort === undefined ? null : (object.effort as string | null),
+    fast: object.fast === true,
     boundChatId: object.boundChatId === null ? null : uuid(object.boundChatId),
     archived: object.archived,
     nodeId:
@@ -386,6 +449,175 @@ export function parseAgentSession(value: unknown): NeevAgentSession {
     createdAt: timestamp(object.createdAt),
     updatedAt: timestamp(object.updatedAt),
   }
+}
+
+/**
+ * One model the runner has been shown to accept.
+ *
+ * `supportsSpeed` is per MODEL, not per provider: Claude's fast mode runs on
+ * Opus and nowhere else, so the chip's availability follows the selection.
+ */
+export interface NeevAgentModel {
+  id: string
+  /** The server's own display name. Never invented here, never translated. */
+  label: string
+  /** The one used when the session says `default`. */
+  isDefault: boolean
+  supportsSpeed: boolean
+  /**
+   * The levels THIS model accepts, or `null` when the provider's list applies.
+   *
+   * `null` is "the provider list applies", not "every level is certainly fine":
+   * Claude's CLI reports one set for the whole provider and nothing per model,
+   * so narrowing it here would be a guess. Codex's app-server does report a set
+   * per model, so discovered entries carry a real one.
+   */
+  efforts: readonly NeevEffort[] | null
+}
+
+export interface NeevAgentProviderCatalog {
+  provider: NeevAgentProvider
+  label: string
+  models: readonly NeevAgentModel[]
+  efforts: readonly NeevEffort[]
+  /** `null` means the CLI's own default, which is a choice and not an absence. */
+  defaultEffort: NeevEffort | null
+  /** Whether the provider has the speed control at all. */
+  supportsSpeed: boolean
+}
+
+export interface NeevAgentCapabilities {
+  providers: readonly NeevAgentProviderCatalog[]
+}
+
+/** A catalogue big enough for any real runner and small enough to render. */
+const MAX_MODELS = 50
+const MAX_EFFORTS = 20
+
+function effortList(value: unknown): NeevEffort[] {
+  if (!Array.isArray(value) || value.length > MAX_EFFORTS) return invalid()
+  const levels = value.map((level) => {
+    if (!isSupportedEffort(level)) return invalid()
+    return level
+  })
+  if (new Set(levels).size !== levels.length) return invalid()
+  return levels
+}
+
+function agentModel(value: unknown): NeevAgentModel {
+  // `efforts` is optional AND nullable: the catalogue omits it for a model
+  // whose provider list applies, and sends an explicit null for the same.
+  const graded = record(value).efforts !== undefined
+  const keys = ["id", "label", "default", "supportsSpeed"]
+  const object = exact(value, graded ? [...keys, "efforts"] : keys)
+  const id = text(object.id)
+  const label = text(object.label)
+  if (
+    !isSupportedModel(id) ||
+    label.length === 0 ||
+    [...label].length > 80 ||
+    [...label].some((character) => /\p{Cc}/u.test(character)) ||
+    typeof object.default !== "boolean" ||
+    typeof object.supportsSpeed !== "boolean"
+  )
+    return invalid()
+  return {
+    id,
+    label,
+    isDefault: object.default,
+    supportsSpeed: object.supportsSpeed,
+    efforts:
+      !graded || object.efforts === null ? null : effortList(object.efforts),
+  }
+}
+
+function providerCatalog(value: unknown): NeevAgentProviderCatalog {
+  // `speedUnavailableReason` is parsed so the payload is accepted, and then
+  // deliberately NOT rendered: it is English prose from the server, and this
+  // app ships ten locales. The reason shown beside a disabled Fast chip is
+  // derived from the catalogue itself and translated like every other label.
+  const object = exact(value, [
+    "provider",
+    "label",
+    "models",
+    "efforts",
+    "defaultEffort",
+    "supportsSpeed",
+    "speedUnavailableReason",
+  ])
+  const provider = text(object.provider)
+  const label = text(object.label)
+  if (
+    !NEEV_AGENT_PROVIDERS.includes(provider as NeevAgentProvider) ||
+    label.length === 0 ||
+    [...label].length > 80 ||
+    typeof object.supportsSpeed !== "boolean" ||
+    !Array.isArray(object.models) ||
+    // A provider with no models could not start a chat; an empty menu with a
+    // heading over it would be worse than saying nothing.
+    object.models.length === 0 ||
+    object.models.length > MAX_MODELS
+  )
+    return invalid()
+  const models = object.models.map(agentModel)
+  if (new Set(models.map((model) => model.id)).size !== models.length)
+    return invalid()
+  const efforts = effortList(object.efforts)
+  if (object.defaultEffort !== null && !isSupportedEffort(object.defaultEffort))
+    return invalid()
+  // A default outside the advertised set is not a level anyone could pick.
+  if (
+    object.defaultEffort !== null &&
+    !efforts.includes(object.defaultEffort as string)
+  )
+    return invalid()
+  // A model narrowing to a level its provider never advertised is a catalogue
+  // that disagrees with itself; rendering it would offer a level the server
+  // would then refuse.
+  if (
+    models.some((model) =>
+      model.efforts?.some((level) => !efforts.includes(level))
+    )
+  )
+    return invalid()
+  return {
+    provider: provider as NeevAgentProvider,
+    label,
+    models,
+    efforts,
+    defaultEffort: (object.defaultEffort as string | null) ?? null,
+    supportsSpeed: object.supportsSpeed,
+  }
+}
+
+/**
+ * The menu, as the server says it is.
+ *
+ * Nothing in the controls is hardcoded: a model or a level absent from this
+ * response is one the runner has not been shown to accept, and offering it
+ * would be offering a failed run.
+ */
+export function parseAgentCapabilities(value: unknown): NeevAgentCapabilities {
+  const object = exact(value, ["providers"])
+  if (
+    !Array.isArray(object.providers) ||
+    object.providers.length > NEEV_AGENT_PROVIDERS.length
+  )
+    return invalid()
+  const providers = object.providers.map(providerCatalog)
+  if (
+    new Set(providers.map((entry) => entry.provider)).size !== providers.length
+  )
+    return invalid()
+  return { providers }
+}
+
+export async function loadAgentCapabilities(
+  signal?: AbortSignal
+): Promise<NeevAgentCapabilities> {
+  return parseAgentCapabilities(
+    await contentGet("/api/neev/agent/capabilities", signal)
+  )
 }
 
 const ACTIVITY_STATES: readonly NeevActivityState[] = [
@@ -685,6 +917,14 @@ export async function createAgentSession(
   // `deny_unknown_fields` accepts an absent optional but not an unexpected one,
   // so only send these when there is something to send.
   if (input.boundChatId) body.boundChatId = input.boundChatId
+  if (input.effort !== undefined && input.effort !== null) {
+    if (!isSupportedEffort(input.effort)) invalidRequest()
+    body.effort = input.effort
+  }
+  // Sent only when it is ON. A server that predates the field must refuse a
+  // request that asked for fast mode rather than quietly run without it, and
+  // must not be refused for a `false` that changes nothing.
+  if (input.fast === true) body.fast = true
   if (input.nodeId !== undefined && input.nodeId !== null) {
     if (!Number.isSafeInteger(input.nodeId) || input.nodeId <= 0)
       invalidRequest()
@@ -731,6 +971,56 @@ export async function updateAgentSession(
     await contentMutation(
       `/api/neev/agent/sessions/${sessionId}`,
       body,
+      csrf,
+      signal,
+      "PATCH"
+    )
+  )
+}
+
+/**
+ * Change what this session runs as, in one revision.
+ *
+ * The full desired state goes up every time — `model`, `effort` and `fast` are
+ * all required — because an omission would have to be guessed at, and because
+ * the server checks the triple as a combination. A run reads the SESSION, so a
+ * change made here applies to every later turn and survives a reload without the
+ * composer resending anything.
+ *
+ * `provider` is deliberately not a parameter: it is immutable. A turn may not
+ * contradict its session's provider and a team holder's id is derived from it,
+ * so changing it would rewrite history that already ran. A different provider
+ * is a different chat.
+ */
+export async function updateAgentSessionSettings(
+  sessionId: string,
+  settings: NeevAgentSettings,
+  expectedRevision: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevAgentSession> {
+  assertSessionId(sessionId)
+  try {
+    integerString(expectedRevision)
+  } catch {
+    invalidRequest()
+  }
+  if (
+    typeof settings.model !== "string" ||
+    !isSupportedModel(settings.model) ||
+    typeof settings.fast !== "boolean" ||
+    (settings.effort !== null && !isSupportedEffort(settings.effort))
+  )
+    invalidRequest()
+  return parseAgentSession(
+    await contentMutation(
+      `/api/neev/agent/sessions/${sessionId}/settings`,
+      {
+        model: settings.model,
+        effort: settings.effort,
+        fast: settings.fast,
+        expectedRevision,
+      },
       csrf,
       signal,
       "PATCH"
@@ -889,6 +1179,17 @@ export interface InvokeTeamAgentInput {
   prompt: string
   provider: NeevAgentProvider
   model: string
+  /**
+   * The level and speed this ask should run at.
+   *
+   * They travel WITH the invocation, not after it, because the holder for
+   * (chat, provider) is created by the first ask: a control that could only be
+   * used once a holder existed would leave the first — and paid — turn the one
+   * turn nobody could configure. Omitted when they are the defaults, so a
+   * server that predates them is not refused over a value that changes nothing.
+   */
+  effort?: NeevEffort | null
+  fast?: boolean
   requestId: string
   expectedAuthRevision: string
 }
@@ -934,19 +1235,22 @@ export async function invokeTeamAgent(
   } catch {
     invalidRequest()
   }
+  const body: Record<string, unknown> = {
+    prompt: input.prompt,
+    provider: input.provider,
+    model: input.model,
+    requestId: input.requestId,
+    expectedAuthRevision: input.expectedAuthRevision,
+  }
+  // Same omission rule as creating a session: a level only when one was picked,
+  // and fast mode only when it was actually asked for.
+  if (input.effort !== undefined && input.effort !== null) {
+    if (!isSupportedEffort(input.effort)) invalidRequest()
+    body.effort = input.effort
+  }
+  if (input.fast === true) body.fast = true
   const invocation = parseTeamInvocation(
-    await contentMutation(
-      `/api/neev/chats/${chatId}/agent`,
-      {
-        prompt: input.prompt,
-        provider: input.provider,
-        model: input.model,
-        requestId: input.requestId,
-        expectedAuthRevision: input.expectedAuthRevision,
-      },
-      csrf,
-      signal
-    )
+    await contentMutation(`/api/neev/chats/${chatId}/agent`, body, csrf, signal)
   )
   // The reply is posted by the server under the invoker's account; a prompt
   // echoed back as agent-authored would mean the wrong row came back.

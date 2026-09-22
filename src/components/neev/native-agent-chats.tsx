@@ -32,13 +32,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import {
   describeToolInput,
   elapsedSeconds,
   mergeActivity,
@@ -57,20 +50,27 @@ import {
   followAgentRun,
   listAgentSessions,
   listAgentTurns,
+  loadAgentCapabilities,
   loadAgentConnections,
+  loadAgentSession,
   startAgentTurn,
   updateAgentSession,
-  NEEV_AGENT_PROVIDERS,
+  updateAgentSessionSettings,
   NEEV_DEFAULT_MODEL,
-  isSupportedModel,
   NEEV_MAX_PROMPT_CHARS,
+  type NeevAgentCapabilities,
   type NeevAgentConnections,
   type NeevAgentProvider,
   type NeevAgentSession,
+  type NeevAgentSettings,
   type NeevAgentTurn,
   type NeevRunPhase,
   type UpdateNeevAgentSessionInput,
 } from "@/lib/neev-agent-sessions-client"
+import {
+  AgentConfigurationSummary,
+  AgentControls,
+} from "./native-agent-controls"
 import { NativeContentNotFoundError } from "@/lib/neev-content-client"
 import type { ContentNavigationGuard } from "./native-content"
 import { useNativeAuth } from "./native-auth-provider"
@@ -149,6 +149,11 @@ function AgentChats({
     n = useTranslations("Native")
   const [sessions, setSessions] = useState<NeevAgentSession[] | null>(null),
     [connections, setConnections] = useState<NeevAgentConnections | null>(null),
+    // What the runner has actually been shown to accept. Read once per scope
+    // rather than with every list refresh: it is a catalogue, not a state.
+    [capabilities, setCapabilities] = useState<NeevAgentCapabilities | null>(
+      null
+    ),
     [showArchived, setShowArchived] = useState(false),
     [open, setOpen] = useState<NeevAgentSession | null>(null),
     [showUnfiled, setShowUnfiled] = useState(false),
@@ -182,6 +187,22 @@ function AgentChats({
     void load()
     return () => controller.abort()
   }, [showArchived, refreshToken, auth])
+
+  // The catalogue is separate from the list on purpose: an unreadable one must
+  // not blank the sessions, and the controls it feeds simply offer nothing
+  // rather than inventing a model menu of their own.
+  useEffect(() => {
+    const controller = new AbortController()
+    loadAgentCapabilities(controller.signal)
+      .then((value) => {
+        if (!controller.signal.aborted) setCapabilities(value)
+      })
+      .catch(() => {
+        // Not knowing what is on offer is not a claim that nothing is; the
+        // composer falls back to showing what the session already runs as.
+      })
+    return () => controller.abort()
+  }, [auth.scopeKey])
 
   /**
    * What this project shows, and what is not in any project yet.
@@ -246,6 +267,7 @@ function AgentChats({
         provider={draftProvider}
         nodeId={nodeId}
         connections={connections}
+        capabilities={capabilities}
         connectionsLoading={connections === null && error === null}
         onRequestNavigationGuard={onRequestNavigationGuard}
         onRequestSettings={onRequestSettings}
@@ -285,6 +307,7 @@ function AgentChats({
       <AgentSessionView
         session={(selected ?? open) as NeevAgentSession}
         connections={connections}
+        capabilities={capabilities}
         onBack={() => {
           setOpen(null)
           // The parent holds the pointer that decides what is shown.
@@ -409,6 +432,7 @@ function AgentChats({
         open={creating}
         onClose={() => setCreating(false)}
         nodeId={nodeId}
+        capabilities={capabilities}
         onCreated={(session) => {
           absorb(session)
           setCreating(false)
@@ -437,15 +461,17 @@ export function deriveSessionTitle(prompt: string): string {
 /**
  * A new agent chat: an empty transcript and a composer, and nothing else.
  *
- * The provider is already decided — it came from the menu item that opened this
- * — so the only decision left here is the model, and `default` is the answer
- * unless the operator has a specific one. The session is created by the first
- * message so that an abandoned draft leaves nothing behind.
+ * The provider arrives from the menu item that opened this, and the rest of the
+ * run configuration is chosen in the same compact row the saved transcript uses.
+ * The session is created by the first message so that an abandoned draft leaves
+ * nothing behind — which also means the whole configuration goes up with the
+ * creation, rather than being patched on afterwards.
  */
 function NewAgentChat({
   provider: initialProvider,
   nodeId,
   connections,
+  capabilities,
   connectionsLoading,
   onCreated,
   onCancel,
@@ -455,6 +481,7 @@ function NewAgentChat({
   provider: NeevAgentProvider
   nodeId: number | null
   connections: NeevAgentConnections | null
+  capabilities: NeevAgentCapabilities | null
   connectionsLoading: boolean
   onCreated: (session: NeevAgentSession) => void
   onCancel: () => void
@@ -465,14 +492,19 @@ function NewAgentChat({
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
   const [provider, setProvider] = useState<NeevAgentProvider>(initialProvider)
-  // Once the session exists it has a provider and a model, and they are the
-  // ones it was created with. Changing them here would send the next attempt
-  // into that session under a provider it is not — and, worse, with the wrong
-  // credential. A different provider is a different chat.
+  // Once the session exists it has a provider, and it is the one it was created
+  // with. Changing it here would send the next attempt into that session under a
+  // provider it is not — and, worse, with the wrong credential. A different
+  // provider is a different chat.
   const [frozen, setFrozen] = useState(false)
   const [draft, setDraft] = useState(""),
-    [model, setModel] = useState(NEEV_DEFAULT_MODEL),
-    [advanced, setAdvanced] = useState(false),
+    [settings, setSettings] = useState<NeevAgentSettings>({
+      model: NEEV_DEFAULT_MODEL,
+      // Never a level nobody picked, and never fast: both are choices about
+      // someone's token spend, and the defaults are the cheap ones.
+      effort: null,
+      fast: false,
+    }),
     [busy, setBusy] = useState(false),
     [error, setError] = useState<unknown>(null)
   // The menu chose a provider; re-opening for another one must follow it.
@@ -517,7 +549,9 @@ function NewAgentChat({
             title: deriveSessionTitle(prompt),
             nodeId,
             provider,
-            model: advanced ? model : NEEV_DEFAULT_MODEL,
+            model: settings.model,
+            effort: settings.effort,
+            fast: settings.fast,
             requestId: request.current,
           },
           auth.session.csrf,
@@ -619,48 +653,21 @@ function NewAgentChat({
             className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none disabled:opacity-60 sm:text-sm"
           />
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <Select
-                value={provider}
-                disabled={frozen}
-                onValueChange={(next) => setProvider(next as NeevAgentProvider)}
-              >
-                <SelectTrigger size="sm" aria-label={t("agentProvider")}>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {NEEV_AGENT_PROVIDERS.map((option) => (
-                    <SelectItem key={option} value={option}>
-                      {t(option === "claude" ? "claudeLabel" : "codexLabel")}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {advanced ? (
-                <>
-                  <label className="sr-only" htmlFor="neev-new-agent-model">
-                    {t("agentModel")}
-                  </label>
-                  <input
-                    id="neev-new-agent-model"
-                    disabled={frozen}
-                    value={model}
-                    onChange={(event) => setModel(event.target.value)}
-                    className="h-8 w-44 rounded-lg border bg-background px-2 text-xs focus-visible:ring-2 focus-visible:ring-ring"
-                  />
-                </>
-              ) : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={frozen}
-                  className="text-xs text-muted-foreground"
-                  onClick={() => setAdvanced(true)}
-                >
-                  {t("providerDefaultModel")}
-                </Button>
-              )}
-            </div>
+            {/* Picking a model under another provider's heading re-points this
+                whole draft — nothing has been created yet, so it is still a
+                choice about which chat to start rather than an edit to one. */}
+            <AgentControls
+              capabilities={capabilities}
+              provider={provider}
+              settings={settings}
+              disabled={frozen}
+              lockProvider={frozen}
+              onChange={(next, nextProvider) => {
+                setSettings(next)
+                setProvider(nextProvider)
+              }}
+              className="min-w-0 flex-1"
+            />
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" onClick={onCancel}>
                 {n("cancel")}
@@ -685,19 +692,25 @@ function CreateSessionDialog({
   onClose,
   onCreated,
   nodeId,
+  capabilities,
 }: {
   open: boolean
   onClose: () => void
   onCreated: (session: NeevAgentSession) => void
   /** Started inside a project, so the server files it there on creation. */
   nodeId: number | null
+  capabilities: NeevAgentCapabilities | null
 }) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
   const [title, setTitle] = useState(""),
     [provider, setProvider] = useState<NeevAgentProvider>("claude"),
-    [model, setModel] = useState(NEEV_DEFAULT_MODEL),
+    [settings, setSettings] = useState<NeevAgentSettings>({
+      model: NEEV_DEFAULT_MODEL,
+      effort: null,
+      fast: false,
+    }),
     [busy, setBusy] = useState(false),
     [error, setError] = useState<unknown>(null)
   const request = useRef<string | null>(null)
@@ -722,7 +735,9 @@ function CreateSessionDialog({
             title: title.trim(),
             nodeId,
             provider,
-            model,
+            model: settings.model,
+            effort: settings.effort,
+            fast: settings.fast,
             requestId: request.current,
           },
           auth.session.csrf,
@@ -758,49 +773,27 @@ function CreateSessionDialog({
               className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
             />
           </label>
-          <label className="block space-y-1">
-            <span className="text-sm font-medium">{t("agentProvider")}</span>
-            <select
-              value={provider}
-              onChange={(event) => {
-                const next = event.target.value as NeevAgentProvider
-                setProvider(next)
-                setModel(NEEV_DEFAULT_MODEL)
-              }}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-            >
-              {/* Only providers the runtime can actually dispatch are offered. */}
-              {NEEV_AGENT_PROVIDERS.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="block space-y-1">
+          <div className="space-y-1">
             <span className="text-sm font-medium">{t("agentModel")}</span>
-            <input
-              value={model}
-              maxLength={80}
-              onChange={(event) => setModel(event.target.value)}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            {/* One row rather than three fields: the provider heading in the
+                model menu is the provider choice, and nothing offered here is
+                a name this UI invented. */}
+            <AgentControls
+              capabilities={capabilities}
+              provider={provider}
+              settings={settings}
+              onChange={(next, nextProvider) => {
+                setSettings(next)
+                setProvider(nextProvider)
+              }}
             />
-            {/* `default` is the provider's own default (no --model at all). The
-                UI does not invent a model menu: the runtime passes any other
-                value straight through, so only the provider knows what exists. */}
-            <span className="block text-xs text-muted-foreground">
-              {t("agentModelHint")}
-            </span>
-          </label>
+          </div>
           <NativeError error={error} />
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={onClose}>
               {n("cancel")}
             </Button>
-            <Button
-              type="submit"
-              disabled={busy || !title.trim() || !isSupportedModel(model)}
-            >
+            <Button type="submit" disabled={busy || !title.trim()}>
               {busy ? n("working") : t("create")}
             </Button>
           </div>
@@ -986,6 +979,7 @@ function oneLineOf(output: string): string {
 function AgentSessionView({
   session,
   connections,
+  capabilities,
   onBack,
   onChanged,
   onGone,
@@ -994,6 +988,7 @@ function AgentSessionView({
 }: {
   session: NeevAgentSession
   connections: NeevAgentConnections | null
+  capabilities: NeevAgentCapabilities | null
   onBack: () => void
   onChanged: (session: NeevAgentSession) => void
   onGone: () => void
@@ -1019,8 +1014,23 @@ function AgentSessionView({
     // Bumped to ask for a fresh attachment to the same run — an explicit
     // reattach, never a re-run.
     [attachNonce, setAttachNonce] = useState(0)
+  // A configuration the reader has chosen but the server has not stored yet,
+  // and whether the last attempt to store it lost a race. `null` means the
+  // controls are showing the session's own row, which is the normal state.
+  const [desired, setDesired] = useState<NeevAgentSettings | null>(null),
+    [applying, setApplying] = useState(false)
   const draftRef = useRef("")
   const history = useRef<HTMLOListElement>(null)
+  // Opening a different chat must not carry this one's unsaved choice into it,
+  // and an answer to a request made for the old one must not be applied to the
+  // new one. The id at the time of asking is checked against the id now.
+  const openSession = useRef(session.id)
+  useEffect(() => {
+    if (openSession.current === session.id) return
+    openSession.current = session.id
+    setDesired(null)
+    setApplying(false)
+  }, [session.id])
   // What the current attachment has streamed so far, readable from the settle
   // handler without making it depend on the rendered value.
   const liveRef = useRef("")
@@ -1160,11 +1170,84 @@ function AgentSessionView({
   )
   const ready = runtimeEnabled && connection?.state === "connected"
   const running = activeRun !== null
+  /**
+   * What this session runs as, from the SESSION — not from local state.
+   *
+   * That is what makes the row still correct after a reload: the run reads the
+   * stored configuration, so the stored configuration is what is shown. A
+   * choice not yet accepted by the server overlays it, and is labelled as not
+   * yet applied rather than drawn as though it were.
+   */
+  const live: NeevAgentSettings = {
+    model: session.model,
+    effort: session.effort,
+    fast: session.fast,
+  }
+  const shown = desired ?? live
+
+  /**
+   * Store the chosen configuration, and say whether it is stored.
+   *
+   * All three fields go up together in one revision: the server validates them
+   * as a combination, so patching them one at a time could put the session
+   * through a pairing no run could honour. A stale revision means someone else
+   * changed this session while it was open — re-read it and try once against
+   * what is actually there, then stop rather than fight a loop.
+   */
+  async function applySettings(next: NeevAgentSettings): Promise<boolean> {
+    if (!auth.session) return false
+    const target = session.id
+    setApplying(true)
+    try {
+      let revision = session.revision
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const stored = await updateAgentSessionSettings(
+            target,
+            next,
+            revision,
+            auth.session.csrf,
+            auth.signal
+          )
+          // The chat moved on underneath us; this answer is about a chat the
+          // reader is no longer looking at, so it changes nothing here.
+          if (openSession.current !== target) return false
+          onChanged(stored)
+          setDesired(null)
+          setError(null)
+          return true
+        } catch (cause) {
+          const stale =
+            cause instanceof NativeClientError && cause.kind === "conflict"
+          if (!stale || attempt === 1) throw cause
+          const fresh = await loadAgentSession(target, auth.signal)
+          if (openSession.current !== target) return false
+          onChanged(fresh)
+          revision = fresh.revision
+        }
+      }
+      return false
+    } catch (cause) {
+      if (openSession.current !== target) return false
+      fail(cause)
+      return false
+    } finally {
+      if (openSession.current === target) setApplying(false)
+    }
+  }
 
   async function send() {
     if (!draft.trim() || sending || running || !auth.session) return
     setSending(true)
     setError(null)
+    // The run reads the SESSION, so an unstored choice would be silently
+    // ignored by the very turn it was chosen for. Store it first, and if that
+    // fails do not send: the prompt stays exactly where it was typed, with the
+    // reason beside it, rather than running under a configuration nobody chose.
+    if (desired && !(await applySettings(desired))) {
+      setSending(false)
+      return
+    }
     try {
       const started = await startAgentTurn(
         session.id,
@@ -1249,7 +1332,14 @@ function AgentSessionView({
             {session.title}
           </h2>
           <p className="truncate text-xs text-muted-foreground">
-            {session.provider} · {session.model} · {t("private")}
+            {/* The live run configuration, read from the session's own row.
+                It names the provider itself, so there is no raw id here. */}
+            <AgentConfigurationSummary
+              settings={live}
+              capabilities={capabilities}
+              provider={session.provider as NeevAgentProvider}
+            />{" "}
+            · {t("private")}
             {session.archived ? ` · ${t("archived")}` : ""} ·{" "}
             <span role="status">{runStatusLabel()}</span>
           </p>
@@ -1377,23 +1467,39 @@ function AgentSessionView({
               </Link>
             </p>
           )}
-          <div className="flex items-center gap-2">
-            <span className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-              <Bot aria-hidden className="size-3.5 shrink-0" />
-              <span className="truncate">
-                {t(
-                  session.provider === "claude" ? "claudeLabel" : "codexLabel"
-                )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Bot
+              aria-hidden
+              className="size-3.5 shrink-0 text-muted-foreground"
+            />
+            {/* The provider is immutable here — a turn may not contradict its
+                session's, and a team holder's id is derived from it — so only
+                this provider's models are offered. */}
+            <AgentControls
+              capabilities={capabilities}
+              provider={session.provider as NeevAgentProvider}
+              settings={shown}
+              lockProvider
+              disabled={applying || session.archived || !ready}
+              onChange={(next) => {
+                // Stored straight away so it is already in force by the time
+                // the next prompt is sent; `send` re-checks in case this is
+                // still in flight or was refused.
+                setDesired(next)
+                void applySettings(next)
+              }}
+              className="min-w-0 flex-1"
+            />
+            {applying && (
+              <span role="status" className="text-xs text-muted-foreground">
+                {t("settingsPending")}
               </span>
-              <span aria-hidden className="opacity-50">
-                ·
+            )}
+            {!applying && desired !== null && (
+              <span role="status" className="text-xs text-muted-foreground">
+                {t("settingsUnsaved")}
               </span>
-              <span className="truncate">
-                {session.model === NEEV_DEFAULT_MODEL
-                  ? t("providerDefaultModel")
-                  : session.model}
-              </span>
-            </span>
+            )}
             {running && (
               <Button
                 type="button"

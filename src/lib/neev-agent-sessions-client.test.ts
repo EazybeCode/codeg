@@ -13,9 +13,11 @@ import {
   createAgentSession,
   listAgentSessions,
   listAgentTurns,
+  loadAgentCapabilities,
   loadAgentConnections,
   loadTeamAgentSession,
   openAgentRunStream,
+  parseAgentCapabilities,
   parseAgentConnections,
   parseAgentSession,
   parseAgentTurn,
@@ -26,6 +28,7 @@ import {
   parseStartedTurn,
   startAgentTurn,
   updateAgentSession,
+  updateAgentSessionSettings,
   type NeevRunEvent,
 } from "./neev-agent-sessions-client"
 
@@ -94,7 +97,15 @@ describe("agent session wire validation", () => {
   it("accepts the server's session and turn shapes", () => {
     // A pre-schema-12 server sends no `nodeId`; it reads as unfiled rather
     // than being refused for saying less than we now expect.
-    expect(parseAgentSession(session)).toEqual({ ...session, nodeId: null })
+    // A server that predates the run-configuration fields is read as the
+    // documented defaults — no level, not fast — rather than refused, so a
+    // rolling deployment does not black out every saved chat mid-roll.
+    expect(parseAgentSession(session)).toEqual({
+      ...session,
+      nodeId: null,
+      effort: null,
+      fast: false,
+    })
     expect(parseAgentSession({ ...session, nodeId: null }).nodeId).toBeNull()
     expect(parseAgentSession({ ...session, nodeId: 7 }).nodeId).toBe(7)
     for (const bad of [0, -1, 1.5, "7", {}])
@@ -225,7 +236,9 @@ describe("agent session requests", () => {
       return json({ sessions: [session] })
     })
     vi.stubGlobal("fetch", fetcher)
-    expect(await listAgentSessions()).toEqual([{ ...session, nodeId: null }])
+    expect(await listAgentSessions()).toEqual([
+      { ...session, nodeId: null, effort: null, fast: false },
+    ])
     await listAgentSessions(true)
     // No project filter: the server takes `archived` only, and a project view
     // filters the list it already has.
@@ -583,6 +596,8 @@ describe("team invocation", () => {
     expect(await loadTeamAgentSession(CHAT_ID, "claude")).toEqual({
       ...bound,
       nodeId: null,
+      effort: null,
+      fast: false,
     })
     // Never invoked with this provider here: an empty history, not a failure.
     expect(await loadTeamAgentSession(CHAT_ID, "codex")).toBeNull()
@@ -1242,5 +1257,303 @@ describe("derived team session ids", () => {
       `/api/neev/chats/${CHAT_ID}/agent?provider=claude`,
       `/api/neev/agent/sessions/${TEAM_SESSION_ID}/turns`,
     ])
+  })
+})
+
+/**
+ * The catalogue the controls are built from, exactly as the deployed runner
+ * answers (Claude Code 2.1.267, codex-cli 0.155.1). Copied from the backend
+ * contract rather than simplified: a fixture that took liberties would pass
+ * tests the real response fails.
+ */
+const catalog = {
+  providers: [
+    {
+      provider: "claude",
+      label: "Claude Code",
+      models: [
+        {
+          id: "default",
+          label: "Default",
+          default: true,
+          supportsSpeed: false,
+        },
+        { id: "haiku", label: "Haiku", default: false, supportsSpeed: false },
+        {
+          id: "sonnet",
+          label: "Sonnet",
+          default: false,
+          supportsSpeed: false,
+          efforts: ["low", "medium", "high"],
+        },
+        {
+          id: "opus",
+          label: "Opus",
+          default: false,
+          supportsSpeed: true,
+          efforts: null,
+        },
+      ],
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: null,
+      supportsSpeed: true,
+      speedUnavailableReason:
+        "Fast mode runs on Opus. Choose Opus to enable it.",
+    },
+    {
+      provider: "codex",
+      label: "Codex",
+      models: [
+        { id: "default", label: "Default", default: true, supportsSpeed: true },
+      ],
+      efforts: ["minimal", "low", "medium", "high", "xhigh"],
+      defaultEffort: null,
+      supportsSpeed: true,
+      speedUnavailableReason: "Fast mode is not available for this model.",
+    },
+  ],
+}
+
+describe("run configuration", () => {
+  const CHAT_ID = "423e4567-e89b-42d3-a456-426614174003"
+  const humanAsk = {
+    id: "523e4567-e89b-42d3-a456-426614174004",
+    sequence: "1",
+    authorId: 9,
+    authorName: "Sagar",
+    body: "Summarise the parser",
+    createdAt: 1_700_000_000,
+    authorKind: "human",
+    agentLabel: null,
+  }
+  const invocation = { message: humanAsk, turn, runId: RUN_ID }
+
+  it("reads the deployed catalogue, including a model that narrows its levels", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => json(catalog))
+    )
+    const read = await loadAgentCapabilities()
+    const claude = read.providers[0]
+    expect(claude.provider).toBe("claude")
+    // The group heading and every model name come from the server. Nothing
+    // here is a name this build chose.
+    expect(claude.label).toBe("Claude Code")
+    expect(claude.models.map((model) => model.id)).toEqual([
+      "default",
+      "haiku",
+      "sonnet",
+      "opus",
+    ])
+    // Effort sets differ per provider: Claude has `max` and no `minimal`.
+    expect(claude.efforts).toEqual(["low", "medium", "high", "xhigh", "max"])
+    expect(read.providers[1].efforts).toEqual([
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ])
+    // `defaultEffort` is null on purpose: picking a level for everybody would
+    // be an opinion about their token spend.
+    expect(claude.defaultEffort).toBeNull()
+    // Absent and explicit null both mean "the provider list applies"; only a
+    // real array is an authority for that model.
+    expect(claude.models[0].efforts).toBeNull()
+    expect(claude.models[3].efforts).toBeNull()
+    expect(claude.models[2].efforts).toEqual(["low", "medium", "high"])
+    // Speed is per MODEL: only Opus can do it under Claude.
+    expect(claude.models.map((model) => model.supportsSpeed)).toEqual([
+      false,
+      false,
+      false,
+      true,
+    ])
+  })
+
+  it("refuses a catalogue that would offer something the server then rejects", async () => {
+    const [claude, codex] = catalog.providers
+    for (const bad of [
+      // A provider with no models is a heading over an empty menu.
+      { providers: [{ ...claude, models: [] }] },
+      // A level outside the provider's own advertised set.
+      { providers: [{ ...claude, defaultEffort: "minimal" }] },
+      // A model narrowing to a level its provider never advertised: the
+      // catalogue disagreeing with itself would offer a refused run.
+      {
+        providers: [
+          {
+            ...claude,
+            models: [{ ...claude.models[2], efforts: ["minimal"] }],
+          },
+        ],
+      },
+      // Shapes that could not have come from the server at all.
+      { providers: [{ ...claude, efforts: ["Low"] }] },
+      { providers: [{ ...claude, efforts: ["low", "low"] }] },
+      { providers: [{ ...claude, supportsSpeed: "yes" }] },
+      {
+        providers: [
+          { ...claude, models: [{ ...claude.models[0], label: "" }] },
+        ],
+      },
+      {
+        providers: [
+          { ...claude, models: [{ ...claude.models[0], id: "--x" }] },
+        ],
+      },
+      { providers: [claude, claude] },
+      { providers: [{ ...claude, provider: "gemini" }] },
+      { providers: [codex], extra: 1 },
+    ])
+      expect(() => parseAgentCapabilities(bad)).toThrow(NativeClientError)
+  })
+
+  it("sends the whole desired state in one revision, never a partial patch", async () => {
+    const calls: { url: string; init: RequestInit }[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, init })
+        return json({ ...session, model: "opus", effort: "xhigh", fast: true })
+      })
+    )
+    const stored = await updateAgentSessionSettings(
+      SESSION_ID,
+      { model: "opus", effort: "xhigh", fast: true },
+      "3",
+      "csrf"
+    )
+    expect(calls[0].url).toBe(`/api/neev/agent/sessions/${SESSION_ID}/settings`)
+    expect(calls[0].init.method).toBe("PATCH")
+    // All three every time: the server validates them as a combination, so an
+    // omission would have to be guessed at.
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      model: "opus",
+      effort: "xhigh",
+      fast: true,
+      expectedRevision: "3",
+    })
+    expect(stored.effort).toBe("xhigh")
+    expect(stored.fast).toBe(true)
+    // `null` is a real value on the wire — "pass no flag" — not an omission.
+    await updateAgentSessionSettings(
+      SESSION_ID,
+      { model: "default", effort: null, fast: false },
+      "4",
+      "csrf"
+    )
+    expect(JSON.parse(calls[1].init.body as string)).toEqual({
+      model: "default",
+      effort: null,
+      fast: false,
+      expectedRevision: "4",
+    })
+  })
+
+  it("refuses a configuration that could not be one before any request", async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal("fetch", fetcher)
+    for (const [settings, revision] of [
+      [{ model: "--flag", effort: null, fast: false }, "1"],
+      [{ model: "default", effort: "Very High", fast: false }, "1"],
+      [{ model: "default", effort: null, fast: "yes" }, "1"],
+      [{ model: "default", effort: null, fast: false }, "0x1"],
+    ] as const)
+      await expect(
+        updateAgentSessionSettings(
+          SESSION_ID,
+          settings as never,
+          revision,
+          "csrf"
+        )
+      ).rejects.toBeInstanceOf(NativeClientError)
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it("asks for a level and for fast mode only when they were chosen", async () => {
+    const bodies: Record<string, unknown>[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(init.body as string))
+        return json(session, 201)
+      })
+    )
+    const base = {
+      title: "New",
+      provider: "claude" as const,
+      model: "default",
+      requestId: SESSION_ID,
+    }
+    await createAgentSession(base, "csrf")
+    await createAgentSession({ ...base, effort: null, fast: false }, "csrf")
+    await createAgentSession({ ...base, effort: "high", fast: true }, "csrf")
+    // The defaults are absent rather than sent: a server that predates the
+    // fields must not be refused for a `false` that changes nothing — but it
+    // MUST refuse a request that actually asked for fast mode, rather than
+    // quietly running without it.
+    expect(bodies[0]).not.toHaveProperty("effort")
+    expect(bodies[0]).not.toHaveProperty("fast")
+    expect(bodies[1]).toEqual(bodies[0])
+    expect(bodies[2]).toEqual({ ...base, effort: "high", fast: true })
+  })
+
+  it("carries the chosen configuration with the ask that creates the holder", async () => {
+    const bodies: Record<string, unknown>[] = []
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(init.body as string))
+        return json(invocation, 201)
+      })
+    )
+    const base = {
+      prompt: "Summarise the parser",
+      provider: "claude" as const,
+      model: "opus",
+      requestId: TURN_ID,
+      expectedAuthRevision: "4",
+    }
+    await invokeTeamAgent(CHAT_ID, base, "csrf")
+    await invokeTeamAgent(
+      CHAT_ID,
+      { ...base, effort: "xhigh", fast: true },
+      "csrf"
+    )
+    // The holder for (chat, provider) is created BY the first ask, so the
+    // configuration has to travel with it — otherwise the first and costliest
+    // turn would be the one turn nobody could configure.
+    expect(bodies[1]).toEqual({ ...base, effort: "xhigh", fast: true })
+    // Defaults stay absent, so a server that predates the fields is not
+    // refused over a value that changes nothing.
+    expect(bodies[0]).not.toHaveProperty("effort")
+    expect(bodies[0]).not.toHaveProperty("fast")
+    await invokeTeamAgent(
+      CHAT_ID,
+      { ...base, effort: null, fast: false },
+      "csrf"
+    )
+    expect(bodies[2]).toEqual(bodies[0])
+    // A level that could not be one is refused before it reaches the wire.
+    await expect(
+      invokeTeamAgent(CHAT_ID, { ...base, effort: "Very High" }, "csrf")
+    ).rejects.toBeInstanceOf(NativeClientError)
+    expect(bodies).toHaveLength(3)
+  })
+
+  it("reads a session's stored configuration, and refuses one it cannot", () => {
+    expect(
+      parseAgentSession({ ...session, effort: "xhigh", fast: true })
+    ).toMatchObject({ effort: "xhigh", fast: true })
+    expect(
+      parseAgentSession({ ...session, effort: null, fast: false })
+    ).toMatchObject({ effort: null, fast: false })
+    for (const bad of [
+      { ...session, effort: "Very High", fast: false },
+      { ...session, effort: 3, fast: false },
+      { ...session, effort: null, fast: "true" },
+    ])
+      expect(() => parseAgentSession(bad)).toThrow(NativeClientError)
   })
 })
