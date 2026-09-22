@@ -92,6 +92,19 @@ impl Body {
     }
 }
 
+/// Path prefixes upstream serves that this proxy never exposes. Listed so they
+/// are refused outright rather than quietly treated as static assets.
+const RESERVED: &[&str] = &[
+    "api/",
+    "external_api/",
+    "admin/",
+    "static/",
+    "media/",
+    "collaboration/",
+    "silk/",
+    "_neev/",
+];
+
 /// A path segment that could change the meaning of the path after we have
 /// classified it. Rejected outright rather than normalised, because normalising
 /// and then forwarding the original is how proxies grow confusion bugs.
@@ -123,10 +136,12 @@ pub(crate) fn classify(method: &str, path: &str, query: Option<&str>) -> Option<
     let rest = path.strip_prefix(PREFIX)?;
     // The prefix must be a whole segment: `/document-engineering/...` is not ours.
     let rest = if rest.is_empty() { "/" } else { rest };
-    let rest = rest.strip_prefix('/')?;
+    // Checked on the remainder *before* the leading slash is removed, so
+    // `/document-engine//api/...` is still seen as the double slash it is.
     if traversable(rest) {
         return None;
     }
+    let rest = rest.strip_prefix('/')?;
     let read = matches!(method, "GET" | "HEAD");
 
     if let Some(api) = rest.strip_prefix("api/v1.0/") {
@@ -170,6 +185,16 @@ pub(crate) fn classify(method: &str, path: &str, query: Option<&str>) -> Option<
             resource: resource_id(document)?,
         });
     }
+    // Upstream owns these prefixes. Falling through to the asset branch would
+    // answer them from the artifact directory — a 404 rather than a breach, but
+    // it would also mean a future upstream surface silently became "an asset"
+    // instead of being refused, which is the opposite of deny-by-default.
+    if RESERVED
+        .iter()
+        .any(|prefix| rest == prefix.trim_end_matches('/') || rest.starts_with(prefix))
+    {
+        return None;
+    }
     // Anything else under the prefix is a static file from the export. It is
     // read from the artifact directory, so a name that is not in the artifact is
     // simply absent rather than reaching Docs.
@@ -211,8 +236,13 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
             // itself a bound on what is asked about. Upstream does check the key
             // against the document's own attachments, but this proxy does not
             // rely on a remote check to keep its own boundary.
-            let key = query?.strip_prefix("key=")?;
-            if !attachment_of(key, &resource) {
+            //
+            // The real client sends it percent-encoded
+            // (`key=<id>%2Fattachments%2F<uuid>.png`), so it is decoded **once**
+            // and then checked. Checking first and decoding after would let
+            // `%2e%2e%2f` past a traversal check that never saw a `..`.
+            let key = query_value(query?, "key")?;
+            if !attachment_of(&key, &resource) {
                 return None;
             }
             (false, Body::None)
@@ -236,6 +266,39 @@ fn version_of(action: &str) -> Option<&str> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._+-=~".contains(&b));
     valid.then_some(id)
+}
+
+/// One decoded query parameter by name, from anywhere in the query string.
+///
+/// Requiring the parameter to come first, as an earlier version did, rejected
+/// the request the real editor makes.
+fn query_value(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| percent_decode(value))?
+    })
+}
+
+/// Decode `%XX` escapes exactly once. Anything malformed yields `None`, so a
+/// truncated or invalid escape is refused rather than guessed at.
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let hex = value.get(index + 1..index + 3)?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                index += 3;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// An attachment key belongs to a document when the document's id is its first

@@ -66,6 +66,12 @@ impl Harness {
         }
     }
 
+    /// Request ids are canonical UUIDv4s, because `normalize_request_id`
+    /// requires it — a readable label is rejected as invalid input.
+    fn request(label: u8) -> String {
+        format!("00000000-0000-4000-8000-0000000000{label:02x}")
+    }
+
     fn input(&self, node_id: i32, request_id: &str) -> ResourceInput {
         ResourceInput {
             node_id,
@@ -92,14 +98,14 @@ async fn an_engine_document_is_bound_and_a_native_one_is_not() {
     let engine = resources::create_engine_document(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "engine-one"),
+        harness.input(harness.node, &Harness::request(1)),
     )
     .await
     .unwrap();
     let native = resources::create(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "native-one"),
+        harness.input(harness.node, &Harness::request(2)),
     )
     .await
     .unwrap();
@@ -123,14 +129,14 @@ async fn retrying_a_creation_returns_the_same_document_and_binds_it_once() {
     let first = resources::create_engine_document(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "retried"),
+        harness.input(harness.node, &Harness::request(3)),
     )
     .await
     .unwrap();
     let second = resources::create_engine_document(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "retried"),
+        harness.input(harness.node, &Harness::request(3)),
     )
     .await
     .unwrap();
@@ -152,14 +158,14 @@ async fn a_request_id_cannot_switch_engines_between_attempts() {
     resources::create_engine_document(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "shared-id"),
+        harness.input(harness.node, &Harness::request(4)),
     )
     .await
     .unwrap();
     let native = resources::create(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "shared-id"),
+        harness.input(harness.node, &Harness::request(4)),
     )
     .await;
 
@@ -181,14 +187,14 @@ async fn a_binding_is_not_readable_as_another_resources_binding() {
     let bound = resources::create_engine_document(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "real"),
+        harness.input(harness.node, &Harness::request(5)),
     )
     .await
     .unwrap();
     let unbound = resources::create(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "plain"),
+        harness.input(harness.node, &Harness::request(6)),
     )
     .await
     .unwrap();
@@ -221,14 +227,14 @@ async fn legacy_content_operations_are_refused_on_an_engine_document() {
     let engine = resources::create_engine_document(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "engine"),
+        harness.input(harness.node, &Harness::request(7)),
     )
     .await
     .unwrap();
     let native = resources::create(
         &harness.state,
         &harness.creator,
-        harness.input(harness.node, "native"),
+        harness.input(harness.node, &Harness::request(8)),
     )
     .await
     .unwrap();

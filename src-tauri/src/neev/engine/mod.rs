@@ -16,6 +16,7 @@
 pub(crate) mod assets;
 pub(crate) mod binding;
 pub(crate) mod decision;
+pub(crate) mod frames;
 pub(crate) mod identity;
 pub(crate) mod proxy;
 pub(crate) mod routes;

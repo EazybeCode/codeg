@@ -267,6 +267,66 @@ impl Upstream {
         }
     }
 
+    /// Push Neev's title onto the Docs copy.
+    ///
+    /// Reconciliation, not a user action: Neev's row is what Projects lists and
+    /// what the ACL is evaluated against, so Neev's value wins. Used when a
+    /// rename was accepted by Docs but then lost a native revision race — Docs
+    /// is ahead at that point, and leaving it ahead is the divergence this
+    /// pulls back.
+    pub(crate) async fn push_title(
+        &self,
+        resource_id: &str,
+        subject: &Assertion,
+        title: &str,
+    ) -> Result<(), EngineError> {
+        let (status, _) = self
+            .private(
+                reqwest::Method::POST,
+                &format!("_neev/v1/documents/{resource_id}/title"),
+                serde_json::json!({ "sub": subject.subject, "title": title }),
+            )
+            .await?;
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(EngineError::Refused)
+        }
+    }
+
+    /// Fetch an attachment through the bridge's private media relay.
+    ///
+    /// The object store is not reachable from here and deliberately so: signing,
+    /// MIME policy and streaming live behind the bridge, which already holds
+    /// upstream's permission logic. Duplicating nginx's `media-auth` → S3 dance
+    /// in Rust would mean maintaining a second copy of upstream's rules.
+    ///
+    /// The browser is never redirected to the object store — that would turn a
+    /// per-request check into a bearer URL that outlives the grant behind it.
+    pub(crate) async fn media(
+        &self,
+        resource_id: &str,
+        key: &str,
+        subject: &Assertion,
+    ) -> Result<reqwest::Response, EngineError> {
+        let mut url = self
+            .endpoint(&format!("_neev/v1/documents/{resource_id}/media"))?;
+        url.query_pairs_mut().append_pair("key", key);
+        let response = self
+            .client
+            .get(url)
+            .header(BRIDGE_KEY, &self.key)
+            .header(super::identity::USER, &subject.subject)
+            .header("X-Forwarded-Proto", "https")
+            .send()
+            .await
+            .map_err(|_| EngineError::Unavailable)?;
+        if response.status().is_server_error() {
+            return Err(EngineError::Unavailable);
+        }
+        Ok(response)
+    }
+
     /// Mint a Docs session **for a named native subject** and return its
     /// `docs_sessionid`.
     ///

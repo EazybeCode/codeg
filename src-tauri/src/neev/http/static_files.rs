@@ -68,7 +68,13 @@ fn app_csp(bytes: &[u8]) -> Result<HeaderValue, ApiError> {
         }
         remaining = &body[close + 9..];
     }
-    let policy = format!("default-src 'none'; script-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'", hashes.into_iter().collect::<Vec<_>>().join(" "));
+    // `frame-src 'self'` admits the document engine's iframe, which is
+    // same-origin under `/document-engine/`. It is the narrowest addition that
+    // lets the editor load at all: without it the frame is blocked by this
+    // policy and the document area is simply empty. Nothing else is relaxed —
+    // the frame's own document carries its own policy, and cross-origin frames
+    // remain impossible because only `'self'` is permitted.
+    let policy = format!("default-src 'none'; script-src 'self' {}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self'; form-action 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'", hashes.into_iter().collect::<Vec<_>>().join(" "));
     HeaderValue::from_str(&policy).map_err(|_| ApiError::Invalid)
 }
 

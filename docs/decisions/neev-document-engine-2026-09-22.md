@@ -106,19 +106,35 @@ the enforced answer disagree.
   projected just-in-time into the Docs access row for that user, inside the same authorization
   step, immediately before the upgrade is forwarded, and only written when it differs. It is
   re-derived on every connect — a projection, never a second source of truth.
-- **The socket addresses exactly one document, pinned by the proxy — not by the client.** The
-  concern that one socket could name other documents per message is real for multiplexing
-  Hocuspocus versions, but **not** at the pinned 3.4.4: `Hocuspocus.getDocumentNameFromRequest`
-  derives the document name from the request **URL path** once, at connection time, and
-  `MessageReceiver.apply` reads a message *type* as the first field — there is no per-frame
-  document name to validate. Upstream's own `onConnect` additionally rejects a mismatch between
-  the path and the `room` parameter. So the enforceable boundary is the handshake URL, and the
-  proxy makes it unforgeable by **constructing the upstream URL itself** — path and `room` — from
-  the resource id it just authorized, discarding whatever the client asked for. That is stronger
-  than inspecting frames: the client never gets to name a document at all. A frame decoder is
-  therefore deliberately not written; it would validate a field that does not exist and would
-  invite drift if upstream's framing changed under it. The version assumption is pinned and
-  re-checked on any upstream bump.
+- **Every binary frame is checked, in both directions.** An earlier version of
+  this document claimed Hocuspocus 3.4.4 carries no per-frame document name and
+  that pinning the handshake URL was therefore sufficient. **That was wrong**,
+  and it was wrong in the direction that matters. It came from reading
+  `Hocuspocus.ts`/`MessageReceiver.ts` on GitHub and missing the layer above
+  them; two independent readings of the *installed* modules corrected it. In the
+  pinned packages, `@hocuspocus/server` `ClientConnection.ts:388-405` reads a
+  leading document name from **every** frame into a `documentConnections` map and
+  hands an unseen name to `setUpNewConnection` — a second document on the same
+  socket — and the client writes that name first in all eight outgoing message
+  types (`provider/src/OutgoingMessages/*.ts`) and dispatches inbound frames by
+  it (`HocuspocusProviderWebsocket.ts:371-379`). `getDocumentNameFromRequest`,
+  which the earlier text cited, does not exist at 3.4.4 at all.
+
+  So a proxy that authorizes one resource at the handshake and then relays bytes
+  is authorizing a socket, not a document. The proxy therefore reads the single
+  leading length-prefixed name from every binary frame in **both** directions and
+  closes the connection on a mismatch, a malformed or truncated prefix, or any
+  text frame. This is not a protocol parser: it decodes one leading string and
+  compares bytes, with everything after that byte range opaque and untouched.
+  Its fixtures are frames a real `@hocuspocus/server` 3.4.4 accepted and answered,
+  which is what makes them evidence rather than assumption.
+
+  Two second lines remain and are treated as exactly that. The upgrade URL is
+  built by the proxy in upstream's own shape — `/collaboration/ws/?room=<id>` —
+  from the authorized resource, and y-provider independently refuses a frame
+  whose document name differs from `room`. That control lives in a
+  digest-pinned image, so it is stable per deployment and must be re-verified on
+  every version bump; it is not a substitute for validating the frames here.
 - **Revocation.** The proxy holds the socket and re-runs the same recheck on a bounded interval and
   on inbound and outbound data, following the pattern `neev/http/realtime.rs` already uses for chat
   SSE (session + org + resource recheck before every delivery, plus heartbeat). Loss of access,

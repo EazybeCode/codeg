@@ -131,7 +131,12 @@ fn matches(
     row: Option<sea_orm::QueryResult>,
     resource: &Resource,
 ) -> Result<bool, ContentError> {
-    matches(row, resource)
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let stored: String = row.try_get("", "body_hash").map_err(database_error)?;
+    let id: String = row.try_get("", "resource_id").map_err(database_error)?;
+    Ok(id == resource.id && stored == digest(resource.org_id, &resource.id))
 }
 
 /// Which of these resources are engine-backed, in **one** query.

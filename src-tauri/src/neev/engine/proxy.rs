@@ -41,7 +41,10 @@ use crate::neev::{
 /// durable Yjs save is the large one; anything past this is refused rather than
 /// forwarded unchecked, because forwarding a body too large to inspect would
 /// make the field policy optional in exactly the case that matters.
-const MAX_BODY: usize = 10 * 1024 * 1024;
+/// Above upstream's own `DOCUMENT_IMAGE_MAX_SIZE` (10 MB) plus multipart
+/// framing, so a legitimate maximum-size attachment is not refused here before
+/// Django ever sees it and gets to give the caller its own error.
+const MAX_BODY: usize = 12 * 1024 * 1024;
 
 /// Framing headers for the engine's own responses.
 ///
@@ -239,10 +242,22 @@ impl Engine {
 /// names a document at all, which is stronger than inspecting frames for a
 /// document field that this version does not carry.
 pub(crate) fn collaboration_url(base: &url::Url, resource: &str) -> Result<url::Url, ApiError> {
+    // The official client's upgrade URL is `/collaboration/ws/?room=<uuid>`; it
+    // appends nothing else. Putting the id in a path segment would be a shape
+    // nothing upstream reads.
     let mut url = base
-        .join(&format!("collaboration/ws/{resource}"))
+        .join("collaboration/ws/")
         .map_err(|_| ApiError::Unavailable)?;
     url.set_query(Some(&format!("room={resource}")));
+    // Deployment configures one private http(s) base; tungstenite accepts only
+    // ws/wss and errors with UnsupportedUrlScheme otherwise, which would have
+    // failed every connect with no diagnostic beyond a closed socket.
+    let scheme = match url.scheme() {
+        "http" | "ws" => "ws",
+        "https" | "wss" => "wss",
+        _ => return Err(ApiError::Unavailable),
+    };
+    url.set_scheme(scheme).map_err(|_| ApiError::Unavailable)?;
     Ok(url)
 }
 
@@ -331,6 +346,15 @@ pub(crate) async fn handle(
     match decision {
         Decision::Refuse(refusal) => Err(refuse(refusal)),
         Decision::Asset => asset(engine, parts.uri.path()),
+        Decision::Forward { resource: Some(ref resource), .. }
+            if matches!(target, Some(Target::Media { .. })) =>
+        {
+            let actor = actor.ok_or(ApiError::Unauthorized)?;
+            let Some(Target::Media { key, .. }) = target.as_ref() else {
+                return Err(ApiError::NotFound);
+            };
+            media(engine, resource, key, &assertion(&actor)).await
+        }
         Decision::Forward { resource, role } => {
             let actor = actor.ok_or(ApiError::Unauthorized)?;
             let assertion = assertion(&actor);
@@ -345,21 +369,36 @@ pub(crate) async fn handle(
                     .await
                     .map_err(crate::neev::error::AuthError::from)?;
             }
-            // A rename is recorded natively only **after** upstream has
-            // accepted it. Doing it first would let a request that Django's
-            // CSRF check rejects, or one that never reached an available
-            // backend, still change the native title — a refused write must
-            // have no side effect, and being the source of truth is not
-            // permission to mutate on an unauthorized request.
+            // A rename needs both orderings at once, and each protects a
+            // different failure.
+            //
+            // The native *precheck* runs first, because a caller Neev would
+            // refuse must not change the Docs title and then fail — that leaves
+            // Docs ahead of a rename that never happened.
+            //
+            // The native *write* runs last, because a request Django's CSRF
+            // check rejects, or one that never reached an available backend,
+            // must not change the native title either. Being the source of
+            // truth is not permission to mutate on a refused write.
+            //
+            // The revision is captured here, before the forward. Reading a
+            // fresh one afterwards would let two concurrent renames each read
+            // a revision after their own forward and both succeed, leaving the
+            // two stores holding each other's titles.
             let rename = pending_title(&parts, bytes.as_ref());
+            let expected = match (resource.as_ref(), rename.as_ref()) {
+                (Some(resource), Some(_)) => Some(precheck_rename(&state, &actor, resource).await?),
+                _ => None,
+            };
             let response =
                 super::transport::forward(engine, parts, bytes.to_vec(), &assertion).await?;
-            if let (Some(resource), Some(title), true) = (
+            if let (Some(resource), Some(title), Some(expected), true) = (
                 resource.as_ref(),
                 rename,
+                expected,
                 response.status().is_success(),
             ) {
-                sync_title(&state, &actor, resource, title).await?;
+                sync_title(&state, engine, &actor, &assertion, resource, title, expected).await?;
             }
             Ok(response)
         }
@@ -368,6 +407,23 @@ pub(crate) async fn handle(
             upgrade(&state, parts, actor, resource, role).await
         }
     }
+}
+
+/// Confirm natively that this caller may rename this resource, and capture the
+/// revision the later write must present.
+///
+/// Runs before anything is sent upstream, so a caller Neev would refuse never
+/// changes the Docs title.
+async fn precheck_rename(
+    state: &ServerState,
+    actor: &OrgContext,
+    resource_id: &str,
+) -> Result<i64, ApiError> {
+    let current = crate::neev::content::resources::get(state, actor, resource_id).await?;
+    if current.archived {
+        return Err(ApiError::Archived);
+    }
+    Ok(current.auth_revision)
 }
 
 /// The title a request is trying to set, if it is a rename at all.
@@ -395,31 +451,96 @@ fn pending_title(parts: &axum::http::request::Parts, body: &[u8]) -> Option<Stri
 /// reported to the caller instead of being swallowed: the two titles really do
 /// disagree at that point, and hiding it would leave a divergence nobody is told
 /// about.
+#[allow(clippy::too_many_arguments)]
 async fn sync_title(
     state: &ServerState,
+    engine: &Engine,
     actor: &OrgContext,
+    assertion: &Assertion,
     resource_id: &str,
     title: String,
+    expected: i64,
 ) -> Result<(), ApiError> {
-    for attempt in 0..2 {
-        let current = crate::neev::content::resources::get(state, actor, resource_id).await?;
-        if current.title == title {
-            return Ok(());
+    let current = crate::neev::content::resources::get(state, actor, resource_id).await?;
+    if current.title == title {
+        return Ok(());
+    }
+    let patch = crate::neev::content::types::ResourcePatch {
+        // The revision captured before the forward, not a fresh read: a fresh
+        // read here is what would let two concurrent renames both win.
+        expected_auth_revision: expected,
+        title: title.clone(),
+        node_id: current.node_id,
+        visibility: current.visibility,
+        archived: current.archived,
+    };
+    match crate::neev::content::resources::update(state, actor, resource_id, patch).await {
+        Ok(_) => Ok(()),
+        Err(crate::neev::content::types::ContentError::Conflict) => {
+            // This rename lost the native race, but Docs already accepted it, so
+            // Docs is now ahead of the value Projects shows. Push the native
+            // title back over it and report the conflict — leaving the two
+            // stores disagreeing silently is the outcome worth avoiding, and
+            // Neev's row is the one the ACL is evaluated against.
+            let winner = crate::neev::content::resources::get(state, actor, resource_id).await?;
+            engine
+                .upstream
+                .push_title(resource_id, assertion, &winner.title)
+                .await
+                .map_err(crate::neev::error::AuthError::from)?;
+            Err(ApiError::Conflict)
         }
-        let patch = crate::neev::content::types::ResourcePatch {
-            expected_auth_revision: current.auth_revision,
-            title: title.clone(),
-            node_id: current.node_id,
-            visibility: current.visibility,
-            archived: current.archived,
-        };
-        match crate::neev::content::resources::update(state, actor, resource_id, patch).await {
-            Ok(_) => return Ok(()),
-            Err(crate::neev::content::types::ContentError::Conflict) if attempt == 0 => continue,
-            Err(error) => return Err(error.into()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Relay an attachment from the bridge's private media endpoint.
+///
+/// The response headers are an **allowlist**, not a filtered copy: the object
+/// GET carries `x-amz-meta-owner`, which is a Docs user id, and anything else
+/// upstream chooses to add later would be relayed by a denylist that had not
+/// been updated for it.
+async fn media(
+    engine: &Engine,
+    resource: &str,
+    key: &str,
+    assertion: &Assertion,
+) -> Result<Response, ApiError> {
+    let upstream = engine
+        .upstream
+        .media(resource, key, assertion)
+        .await
+        .map_err(crate::neev::error::AuthError::from)?;
+    let status = StatusCode::from_u16(upstream.status().as_u16()).map_err(|_| ApiError::Unavailable)?;
+    let mut kept = HeaderMap::new();
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_DISPOSITION,
+        header::CACHE_CONTROL,
+        header::CONTENT_SECURITY_POLICY,
+        HeaderName::from_static("x-content-type-options"),
+    ] {
+        if let Some(value) = upstream.headers().get(&name) {
+            kept.insert(name, value.clone());
         }
     }
-    Err(ApiError::Conflict)
+    // The disposition and the CSP are the XSS control, and they are decided from
+    // the stored content type and the `-unsafe` key marker — neither of which is
+    // visible here. So they are relayed verbatim and never rewritten. If they
+    // are missing on a success, something upstream has changed and serving the
+    // bytes unprotected would be the wrong way to find out.
+    if status.is_success()
+        && !(kept.contains_key(header::CONTENT_SECURITY_POLICY)
+            && kept.contains_key(header::CONTENT_DISPOSITION))
+    {
+        return Err(ApiError::Unavailable);
+    }
+    let bytes = upstream.bytes().await.map_err(|_| ApiError::Unavailable)?;
+    let mut response = Response::new(Body::from(bytes));
+    *response.status_mut() = status;
+    *response.headers_mut() = kept;
+    Ok(response)
 }
 
 /// Serve a file from the frontend's static export.
@@ -533,8 +654,17 @@ mod tests {
     fn the_collaboration_url_is_rebuilt_from_the_authorized_resource() {
         let base = url::Url::parse("http://y-provider:4444/").unwrap();
         let url = collaboration_url(&base, DOC).unwrap();
-        assert_eq!(url.path(), format!("/collaboration/ws/{DOC}"));
+        assert_eq!(url.path(), "/collaboration/ws/");
         assert_eq!(url.query(), Some(format!("room={DOC}").as_str()));
+        // tungstenite accepts only ws/wss; an http base would have failed every
+        // connect with nothing but a closed socket to show for it.
+        assert_eq!(url.scheme(), "ws");
+        assert_eq!(
+            collaboration_url(&url::Url::parse("https://y:4444/").unwrap(), DOC)
+                .unwrap()
+                .scheme(),
+            "wss"
+        );
         // Whatever the client asked for is irrelevant: the URL is a function of
         // the authorized resource alone, so the client never names a document.
         let other = "11111111-2222-4333-8444-555555555555";

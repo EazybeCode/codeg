@@ -300,7 +300,7 @@ mod tests {
             decide(Some(&target), true, Grant::Write, true, &keys(&["title"])),
             Decision::Forward {
                 resource: Some(DOC.into()),
-                role: Some(Projected::Reader)
+                role: Some(Projected::Editor)
             }
         );
         for smuggled in [
@@ -321,7 +321,7 @@ mod tests {
             decide(Some(&content), true, Grant::Write, true, &keys(&["content", "websocket"])),
             Decision::Forward {
                 resource: Some(DOC.into()),
-                role: Some(Projected::Reader)
+                role: Some(Projected::Editor)
             }
         );
         assert_eq!(

@@ -346,9 +346,12 @@ fn engine(values: &HashMap<String, String>) -> Result<Option<EngineConfig>, Conf
     let private = |key: &str| -> Result<Url, ConfigError> {
         let url = Url::parse(values.get(key).ok_or(ConfigError::Provider)?)
             .map_err(|_| ConfigError::Provider)?;
-        // These are container-network addresses. Refusing a credentialled base
-        // URL that is not plain-scheme-and-host keeps a misconfiguration from
-        // pointing the bridge key at something public.
+        // Shape only: scheme, base-ness, a host, and no embedded credentials.
+        // This deliberately does **not** claim to check that the address is
+        // private — `https://evil.example.com/` passes — because the boundary
+        // that keeps the bridge key off the public internet is the compose
+        // network, not this parse. Saying otherwise here would be a comment
+        // that reads as a control and is not one.
         if !matches!(url.scheme(), "http" | "https")
             || url.cannot_be_a_base()
             || url.host().is_none()

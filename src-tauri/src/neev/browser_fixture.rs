@@ -441,6 +441,7 @@ impl Fixture {
             let state = Arc::new(ServerState {
                 database: database.clone(),
                 config,
+                engine: None,
                 blobs: blobs.clone(),
                 clock,
                 auth_limit: Arc::new(tokio::sync::Semaphore::new(32)),

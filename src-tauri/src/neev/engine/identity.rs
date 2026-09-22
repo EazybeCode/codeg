@@ -44,6 +44,15 @@ pub(crate) const STRIPPED: &[&str] = &[
     "remote-user",
     "remote_user",
     "x-remote-user",
+    // Underscore spellings. Django drops these itself (asgi.py refuses the
+    // underscore/hyphen ambiguity) and uvicorn passes them through, so today
+    // they are inert — but the boundary should not rest on one line of someone
+    // else's code that a version bump could change.
+    "x_neev_remote_user",
+    "x_neev_remote_email",
+    "x_neev_remote_name",
+    "x_neev_bridge_key",
+    "x_forwarded_proto",
     "x-forwarded-proto",
     "x-forwarded-host",
     "x-forwarded-for",

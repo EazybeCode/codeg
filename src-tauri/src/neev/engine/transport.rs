@@ -213,14 +213,27 @@ pub(crate) async fn relay(
         let permitted = tokio::select! {
             incoming = from_client.next() => {
                 let Some(Ok(message)) = incoming else { break };
+                // Checked before the gate and before anything is relayed: a
+                // frame naming another document must never reach upstream, and
+                // the recheck answers a different question ("is that
+                // authorization still valid") than this one ("is this frame
+                // about the document we authorized").
+                let forwarded = match message {
+                    Message::Binary(bytes) => {
+                        if super::frames::check_binary_frame(&bytes, &resource).is_err() {
+                            break;
+                        }
+                        UpstreamMessage::Binary(bytes.into())
+                    }
+                    // The protocol is binary. A text frame is either another
+                    // protocol or an attempt to sidestep the check, and neither
+                    // is something to relay.
+                    Message::Text(_) => break,
+                    Message::Ping(bytes) => UpstreamMessage::Ping(bytes.into()),
+                    Message::Pong(bytes) => UpstreamMessage::Pong(bytes.into()),
+                    Message::Close(_) => break,
+                };
                 if gate(&state, &actor, &resource, opened_writable, &mut checked_at).await {
-                    let forwarded = match message {
-                        Message::Binary(bytes) => UpstreamMessage::Binary(bytes.into()),
-                        Message::Text(text) => UpstreamMessage::Text(text.as_str().into()),
-                        Message::Ping(bytes) => UpstreamMessage::Ping(bytes.into()),
-                        Message::Pong(bytes) => UpstreamMessage::Pong(bytes.into()),
-                        Message::Close(_) => break,
-                    };
                     active_at = state.clock.now_unix();
                     // Bounded, so a stalled peer cannot hold the relay past the
                     // point where revocation should have ended it.
@@ -234,16 +247,23 @@ pub(crate) async fn relay(
             }
             outgoing = from_upstream.next() => {
                 let Some(Ok(message)) = outgoing else { break };
+                // A server that starts talking about another document is as
+                // wrong as a client that does, so the same check runs outbound.
+                let forwarded = match message {
+                    UpstreamMessage::Binary(bytes) => {
+                        if super::frames::check_binary_frame(&bytes, &resource).is_err() {
+                            break;
+                        }
+                        Message::Binary(bytes.into())
+                    }
+                    UpstreamMessage::Text(_) => break,
+                    UpstreamMessage::Ping(bytes) => Message::Ping(bytes.into()),
+                    UpstreamMessage::Pong(bytes) => Message::Pong(bytes.into()),
+                    UpstreamMessage::Close(_) => break,
+                    // Raw frames are not produced by a read half.
+                    UpstreamMessage::Frame(_) => continue,
+                };
                 if gate(&state, &actor, &resource, opened_writable, &mut checked_at).await {
-                    let forwarded = match message {
-                        UpstreamMessage::Binary(bytes) => Message::Binary(bytes.into()),
-                        UpstreamMessage::Text(text) => Message::Text(text.as_str().into()),
-                        UpstreamMessage::Ping(bytes) => Message::Ping(bytes.into()),
-                        UpstreamMessage::Pong(bytes) => Message::Pong(bytes.into()),
-                        UpstreamMessage::Close(_) => break,
-                        // Raw frames are not produced by a read half.
-                        UpstreamMessage::Frame(_) => continue,
-                    };
                     active_at = state.clock.now_unix();
                     match tokio::time::timeout(SEND_TIMEOUT, to_client.send(forwarded)).await {
                         Ok(Ok(())) => true,
