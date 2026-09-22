@@ -94,6 +94,8 @@ fn run_request() -> RunRequest {
         // sandboxed runtime's requirement is covered in `execution`'s tests.
         credential_handle: None,
         briefing: None,
+        effort: None,
+        fast: false,
     }
 }
 

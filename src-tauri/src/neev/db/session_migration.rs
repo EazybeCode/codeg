@@ -81,6 +81,34 @@ pub(super) const NODE_LINK_SCHEMA_VERSION: i64 = 12;
 /// previous backend.
 pub(super) const ACTIVITY_SCHEMA_VERSION: i64 = 13;
 
+/// Additive layer 14: the session's chosen reasoning **effort** and **speed**.
+///
+/// A column again, so the inventory is still 11's and the marker distinguishes
+/// it — handled exactly as 12 and 13 are.
+///
+/// Nullable with no default, and NULL means "the provider's own default": no
+/// flag is passed for it at all. That is deliberate rather than lazy. Choosing a
+/// default here would be an opinion about somebody's token spend applied to
+/// every session that already exists, and a migration is the wrong place to
+/// form one.
+///
+/// The CHECK bounds the SHAPE, not the vocabulary: non-empty and short. It
+/// deliberately does not enumerate levels. Codex advertises efforts per model as
+/// open strings — its own schema types one as "a non-empty reasoning effort
+/// value advertised by the model" — so an enumerated constraint would refuse a
+/// level the provider itself offered, and a migration is the wrong place to
+/// decide what a model supports. `agents::capabilities` owns which values are
+/// allowed, because only it knows the provider and model a row belongs to.
+///
+/// **Forward/rollback.** 13 -> 14 is an `ADD COLUMN`, guarded so a replay is a
+/// no-op. Rolling back to a 13 binary FAILS CLOSED: its version match has no arm
+/// for 14 and returns `Unavailable`, so a 13 server refuses a 14 database rather
+/// than running against a shape it does not know. Roll back by deploying the
+/// previous UI against THIS backend. If the binary itself must go back, the
+/// column has to be dropped first — it carries no data another layer depends on,
+/// so dropping it loses only the stored effort selections.
+pub(super) const EFFORT_SCHEMA_VERSION: i64 = 14;
+
 /// Terminal run failures a turn may record. `interrupted` is reserved for
 /// startup reconciliation (the server died mid-run), which is why a restarted
 /// server can never leave a turn stuck in `running`.
@@ -354,6 +382,23 @@ fn session_columns() -> Vec<(&'static str, &'static str)> {
 ///
 /// The length CHECK mirrors `activity::MAX_ACTIVITY_CHARS`, so an oversized
 /// trace is refused by the database as well as by the writer.
+/// The additive session columns of layer 14.
+fn effort_columns() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "effort",
+            "ALTER TABLE neev_agent_sessions ADD COLUMN effort TEXT CHECK(effort IS NULL OR (length(effort) BETWEEN 1 AND 32))",
+        ),
+        // Speed defaults OFF for every session that already exists, and for
+        // every new one: fast mode costs more, so inheriting it silently would
+        // be spending somebody's money on a setting they never chose.
+        (
+            "fast",
+            "ALTER TABLE neev_agent_sessions ADD COLUMN fast BOOLEAN NOT NULL DEFAULT false",
+        ),
+    ]
+}
+
 fn turn_columns() -> Vec<(&'static str, &'static str)> {
     vec![(
         "activity",
@@ -425,6 +470,96 @@ pub(super) async fn record_activity(tx: &DatabaseTransaction) -> Result<(), Auth
         }
     }
     validate_activity(tx).await
+}
+
+/// Apply layer 14. Guarded per column, so a replayed migration is a no-op.
+pub(super) async fn record_effort(tx: &DatabaseTransaction) -> Result<(), AuthError> {
+    for (column, statement) in effort_columns() {
+        if !has_column(tx, "neev_agent_sessions", column).await? {
+            super::execute(tx, statement, vec![]).await?;
+        }
+    }
+    validate_effort(tx).await
+}
+
+/// Take a schema-14 database back to 13, dropping ONLY what 14 added.
+///
+/// Image-only rollback is not enough on its own: a 13 binary refuses a 14
+/// database outright (its version match has no arm for 14), so reverting the
+/// container without reverting the shape leaves a server that will not serve.
+/// This is the narrow inverse — two columns and the marker, nothing else — so a
+/// rollback costs the stored model/effort/speed selections and no other data.
+///
+/// Guarded on being AT 14. Running it against 13 would rewind a marker that is
+/// already correct; running it against 15 would silently strip a layer it does
+/// not understand. Both refuse rather than proceed.
+pub(super) async fn downgrade_effort(tx: &DatabaseTransaction) -> Result<(), AuthError> {
+    let version = super::one(
+        tx,
+        "SELECT version FROM neev_schema_version WHERE id=1",
+        vec![],
+    )
+    .await?
+    .ok_or(AuthError::Unavailable)?
+    .try_get::<i64>("", "version")
+    .map_err(database_error)?;
+    if version != EFFORT_SCHEMA_VERSION {
+        return Err(AuthError::Unavailable);
+    }
+    for column in ["effort", "fast"] {
+        if has_column(tx, "neev_agent_sessions", column).await? {
+            super::execute(
+                tx,
+                &format!("ALTER TABLE neev_agent_sessions DROP COLUMN {column}"),
+                vec![],
+            )
+            .await?;
+        }
+    }
+    super::execute(
+        tx,
+        "UPDATE neev_schema_version SET version=$1 WHERE id=1",
+        vec![ACTIVITY_SCHEMA_VERSION.into()],
+    )
+    .await?;
+    // Everything 13 promises must still hold after the strip, or the rollback
+    // has produced a database the older binary would also refuse.
+    validate(tx).await?;
+    validate_node_link(tx).await?;
+    validate_activity(tx).await
+}
+
+/// Prove layer 14's invariant against stored rows.
+pub(super) async fn validate_effort<C: ConnectionTrait>(db: &C) -> Result<(), AuthError> {
+    let sqlite = match db.get_database_backend() {
+        DbBackend::Sqlite => true,
+        DbBackend::Postgres => false,
+        _ => return Err(AuthError::Unavailable),
+    };
+    let mut queries = vec![
+        // Mirrors the CHECK — shape only, for the same reason the CHECK is shape
+        // only: the set of valid levels belongs to the provider, not here.
+        "SELECT 1 AS invalid FROM neev_agent_sessions WHERE effort IS NOT NULL AND length(effort)>32 LIMIT 1",
+        // An empty string is not "unset" — NULL is. Storing one would make a
+        // session that chose nothing indistinguishable from one that chose
+        // something unreadable.
+        "SELECT 1 AS invalid FROM neev_agent_sessions WHERE effort IS NOT NULL AND length(effort)=0 LIMIT 1",
+        // Both kinds carry a selection. A team holder is internal, but the
+        // reader still chooses model/effort/speed for the FIRST ask in a bound
+        // chat — before any paid turn runs — so forbidding it here would make
+        // that impossible rather than safe.
+    ];
+    if sqlite {
+        queries.push(
+            "SELECT 1 AS invalid FROM neev_agent_sessions WHERE effort IS NOT NULL AND typeof(effort)<>'text' LIMIT 1",
+        );
+    }
+    for query in queries {
+        if any(db, query).await? {
+            return Err(AuthError::Unavailable);
+        }
+    }
+    Ok(())
 }
 
 /// Prove layer 13's invariants. Separate from the others for the same reason

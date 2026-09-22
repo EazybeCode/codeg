@@ -49,6 +49,10 @@ pub(crate) struct ServerState {
     pub(crate) supervisor: std::sync::Arc<super::agents::supervisor::Supervisor>,
     /// Sign-ins this process started, by attempt id.
     pub(crate) agent_logins: super::agents::supervisor::LoginRegistry,
+    /// Per-caller provider model catalogues, cached briefly. Keyed by identity,
+    /// org and connection generation, so a reconnected credential can never be
+    /// served the catalogue read under the previous one.
+    pub(crate) agent_catalogues: super::agents::discovery::Cache,
 }
 
 impl ServerState {
@@ -92,6 +96,7 @@ impl ServerState {
             agent_runs: super::agents::runs::new_registry(),
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
+            agent_catalogues: super::agents::discovery::new_cache(),
             oauth,
             magic,
             mail,
@@ -118,6 +123,7 @@ impl ServerState {
             agent_runs: super::agents::runs::new_registry(),
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
+            agent_catalogues: super::agents::discovery::new_cache(),
             oauth,
             magic: None,
             mail: None,
@@ -145,6 +151,7 @@ impl ServerState {
             agent_runs: super::agents::runs::new_registry(),
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
+            agent_catalogues: super::agents::discovery::new_cache(),
             oauth,
             magic: Some(magic),
             mail: None,
@@ -172,6 +179,7 @@ impl ServerState {
             agent_runs: super::agents::runs::new_registry(),
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
+            agent_catalogues: super::agents::discovery::new_cache(),
             oauth,
             magic: None,
             mail: Some(mail),

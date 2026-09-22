@@ -10,9 +10,10 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::process::Stdio;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
@@ -54,6 +55,14 @@ pub(crate) struct RunRequest {
     /// into the user's text, so the model can tell the two apart and the
     /// stored turn stays exactly what the user typed.
     pub(crate) briefing: Option<String>,
+    /// Reasoning effort, already validated against what THIS provider's CLI
+    /// accepts. `None` passes no flag at all, leaving the provider on its own
+    /// default rather than on one we chose for the reader.
+    pub(crate) effort: Option<String>,
+    /// Run in the provider's fast mode. Already validated against the chosen
+    /// MODEL, because Claude's Fast is Opus-only and switching the model to
+    /// satisfy a toggle would answer a question the reader did not ask.
+    pub(crate) fast: bool,
 }
 
 /// A credential handle is 32 hex characters (`neev_credential_store` handle
@@ -126,6 +135,8 @@ fn provider_argv(
     prompt: &str,
     model: &str,
     briefing: Option<&str>,
+    effort: Option<&str>,
+    fast: bool,
 ) -> Vec<String> {
     let mut argv: Vec<String> = match provider {
         "codex" => vec![
@@ -156,6 +167,42 @@ fn provider_argv(
                 argv.push("--append-system-prompt".into());
                 argv.push(briefing.to_owned());
             }
+        }
+    }
+    // Effort, in each CLI's own spelling. Claude gained a native `--effort` in
+    // 2.1.267; Codex takes it as a config override. Validation happened before
+    // this point on purpose: `claude` does NOT reject an unknown level, it warns
+    // and runs at its default, so an unchecked value would look like it worked
+    // while quietly ignoring the reader's choice.
+    if let Some(effort) = effort.filter(|value| !value.is_empty()) {
+        match provider {
+            "codex" => {
+                argv.push("-c".into());
+                argv.push(format!("model_reasoning_effort=\"{effort}\""));
+            }
+            _ => {
+                argv.push("--effort".into());
+                argv.push(effort.to_owned());
+            }
+        }
+    }
+    // Speed. Neither CLI takes a flag for this, which is why searching `--help`
+    // for one finds nothing: it is settings on Claude and config overrides on
+    // Codex. Sent EXPLICITLY in both states so a run can never inherit a fast
+    // mode from ambient config the reader cannot see.
+    match provider {
+        "codex" => {
+            argv.push("-c".into());
+            argv.push(format!(
+                "service_tier=\"{}\"",
+                if fast { "fast" } else { "default" }
+            ));
+            argv.push("-c".into());
+            argv.push(format!("features.fast_mode={fast}"));
+        }
+        _ => {
+            argv.push("--settings".into());
+            argv.push(format!("{{\"fastMode\":{fast}}}"));
         }
     }
     // An explicitly chosen model is passed through, so the UI's selection is the
@@ -207,10 +254,137 @@ impl RunHandle {
     }
 }
 
+/// A metadata read, scoped exactly like a run: the caller's own credential
+/// volume, inside the same isolation profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscoveryRequest {
+    pub(crate) user_id: i32,
+    pub(crate) org_id: i32,
+    pub(crate) provider: String,
+    pub(crate) credential_handle: Option<String>,
+}
+
+/// Bounds on a discovery probe. It talks to a network service on somebody's
+/// behalf, so it gets a hard ceiling on time and output and is torn down on
+/// every path — including the timeout, which is the one people forget.
+const DISCOVERY_TIMEOUT_SECS: u64 = 10;
+const DISCOVERY_MAX_BYTES: usize = 256 * 1024;
+
+/// Drive one `model/list` exchange against `codex app-server`.
+///
+/// The sequence is the one the pinned binary actually requires, confirmed by
+/// probing it: `initialize`, WAIT for the reply, then the `initialized`
+/// notification, then `model/list`. Queueing all three and closing stdin does
+/// not work — the server answers the handshake before accepting a method, and an
+/// early EOF ends the session before the catalogue exists. stdin therefore stays
+/// open until the answer arrives.
+async fn app_server_models(mut command: Command) -> Result<String, ExecutionError> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| ExecutionError::Provider)?;
+    let pid = child.id();
+    let mut stdin = child.stdin.take().ok_or(ExecutionError::Unavailable)?;
+    let stdout = child.stdout.take().ok_or(ExecutionError::Unavailable)?;
+
+    let exchange = async {
+        stdin
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"neev\",\"version\":\"1\"}}}\n",
+            )
+            .await
+            .map_err(|_| ExecutionError::Provider)?;
+        stdin.flush().await.map_err(|_| ExecutionError::Provider)?;
+
+        let mut reader = BufReader::new(stdout);
+        let mut read_total = 0usize;
+        let mut handshaken = false;
+        loop {
+            // Bounded BEFORE the allocation. `read_line` grows its buffer to
+            // whatever the far end sent and only then could a cap look at it,
+            // which is not a bound.
+            let remaining = DISCOVERY_MAX_BYTES.saturating_sub(read_total);
+            if remaining == 0 {
+                return Err(ExecutionError::Unavailable);
+            }
+            let mut line = Vec::new();
+            let read = (&mut reader)
+                .take(remaining as u64 + 1)
+                .read_until(b'\n', &mut line)
+                .await
+                .map_err(|_| ExecutionError::Provider)?;
+            if read == 0 {
+                break;
+            }
+            if line.len() > remaining {
+                // One oversized message is enough to distrust the whole answer.
+                return Err(ExecutionError::Unavailable);
+            }
+            read_total += line.len();
+            let text = String::from_utf8_lossy(&line).into_owned();
+            let Ok(message) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+                continue; // notifications and chatter are not the answer
+            };
+            let id = message.get("id").and_then(|id| id.as_i64());
+            if id == Some(1) && !handshaken {
+                handshaken = true;
+                stdin
+                    .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}\n")
+                    .await
+                    .map_err(|_| ExecutionError::Provider)?;
+                stdin
+                    .write_all(
+                        b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"model/list\",\"params\":{}}\n",
+                    )
+                    .await
+                    .map_err(|_| ExecutionError::Provider)?;
+                stdin.flush().await.map_err(|_| ExecutionError::Provider)?;
+                continue;
+            }
+            if id == Some(2) {
+                // The catalogue, or a refusal of it. Either ends the exchange.
+                return Ok(text);
+            }
+        }
+        Err(ExecutionError::Provider)
+    };
+
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_secs(DISCOVERY_TIMEOUT_SECS),
+        exchange,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(ExecutionError::Unavailable),
+    };
+    // Teardown. `graceful_stop` is the launcher's own shutdown — SIGTERM, then a
+    // bounded wait — which is what lets it unwind its namespace and egress;
+    // SIGKILL would reap the parent and leak the netns.
+    drop(stdin);
+    graceful_stop(&mut child, pid).await;
+    result
+}
+
+
+
 /// The execution port. The real implementation authorizes (user, org, chat),
 /// binds an isolated per-tenant workspace, spawns via ACP, and maps its stream.
 pub(crate) trait AgentExecutionRuntime: Send + Sync {
     async fn run(&self, request: RunRequest) -> Result<RunHandle, ExecutionError>;
+
+    /// Read the provider's model catalogue under a caller's own credential.
+    ///
+    /// Metadata only: no turn is started and nothing is spent. Defaults to
+    /// `Unsupported` so a runtime that cannot do this says so rather than being
+    /// assumed able — the caller then shows the provider default and why.
+    async fn discover_models(&self, _request: DiscoveryRequest) -> Result<String, ExecutionError> {
+        Err(ExecutionError::Unsupported)
+    }
 }
 
 /// Production default: refuses every run. No unsandboxed multi-tenant execution
@@ -321,6 +495,8 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
             &request.prompt,
             &request.model,
             request.briefing.as_deref(),
+            request.effort.as_deref(),
+            request.fast,
         ));
         let mut child = command
             .current_dir(&self.workspace)
@@ -526,6 +702,13 @@ pub(crate) struct SandboxedProviderCliRuntime {
     /// privileged context).
     cap_helper: Option<String>,
     slots: SlotPool,
+    /// Concurrency budget for metadata probes, separate from the run budget.
+    ///
+    /// Discovery needs an egress lane like a turn does, and there are only two.
+    /// Without a cap of its own, several people opening the model menu could
+    /// hold both lanes and paid turns would queue behind a dropdown. One probe
+    /// at a time means at most one lane is ever spent on metadata.
+    probes: Arc<tokio::sync::Semaphore>,
 }
 
 /// Bounded grace for the launcher to tear down its sandbox + egress on SIGTERM.
@@ -550,6 +733,7 @@ impl SandboxedProviderCliRuntime {
             workspace_root: workspace_root.into(),
             provider_ipv4,
             cap_helper,
+            probes: Arc::new(tokio::sync::Semaphore::new(1)),
             slots: SlotPool::new(),
         }
     }
@@ -625,6 +809,8 @@ impl SandboxedProviderCliRuntime {
             &request.prompt,
             &request.model,
             request.briefing.as_deref(),
+            request.effort.as_deref(),
+            request.fast,
         ));
         argv
     }
@@ -648,6 +834,37 @@ impl SandboxedProviderCliRuntime {
             ],
         };
         argv.extend(self.launcher_args(request, lane, workdir, binary, handle));
+        argv
+    }
+
+    /// The launcher argv up to and including `-- <binary>`, without the
+    /// provider's own arguments.
+    ///
+    /// Discovery appends a metadata subcommand instead of a prompt, and so gets
+    /// the identical sandbox, egress lane, uid and credential mount by
+    /// construction rather than from a second implementation that could drift.
+    fn launch_prefix(
+        &self,
+        request: &RunRequest,
+        lane: Lane,
+        workdir: &Path,
+        binary: &str,
+        handle: &str,
+    ) -> Vec<String> {
+        let mut argv = match &self.cap_helper {
+            Some(helper) => vec![helper.clone()],
+            None => vec![
+                self.python.clone(),
+                self.launcher.to_string_lossy().into_owned(),
+            ],
+        };
+        let full = self.launcher_args(request, lane, workdir, binary, handle);
+        let cut = full
+            .iter()
+            .position(|arg| arg == "--")
+            .map(|index| index + 2)
+            .unwrap_or(full.len());
+        argv.extend(full.into_iter().take(cut));
         argv
     }
 }
@@ -680,6 +897,101 @@ async fn graceful_stop(child: &mut tokio::process::Child, pid: Option<u32>) {
 }
 
 impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
+    /// Read the provider's catalogue inside the SAME isolation profile a turn
+    /// uses: an egress lane, a fresh workdir owned by a dropped uid, and the
+    /// caller's own credential volume mounted as HOME.
+    ///
+    /// Reusing that machinery rather than adding a lighter path is the point. A
+    /// "just metadata" shortcut would be a second way to reach a provider with
+    /// somebody's credentials, and the weaker of two doors is the one worth
+    /// attacking.
+    async fn discover_models(&self, request: DiscoveryRequest) -> Result<String, ExecutionError> {
+        // The same refusals as a run, in the same order, before any resource is
+        // taken: an unknown provider or a caller with no credential of their own
+        // never reaches a process.
+        let binary = self
+            .binaries
+            .resolve(&request.provider)
+            .ok_or(ExecutionError::Unsupported)?
+            .to_owned();
+        let handle = request
+            .credential_handle
+            .as_deref()
+            .filter(|handle| valid_credential_handle(handle))
+            .ok_or(ExecutionError::Unauthorized)?
+            .to_owned();
+        if request.user_id <= 0 || request.org_id <= 0 {
+            return Err(ExecutionError::Unauthorized);
+        }
+        // Taken before a lane and released with this scope. `try_acquire`, not
+        // `acquire`: a reader opening a menu while a probe is already running is
+        // told the catalogue is momentarily unavailable rather than made to wait
+        // on one, and never queues ahead of a paid turn.
+        let permit = self
+            .probes
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ExecutionError::Unavailable)?;
+        // Non-blocking as well, so a probe never waits for a lane a turn wants.
+        let lane = self.slots.acquire().ok_or(ExecutionError::Unavailable)?;
+        let probe_id = uuid::Uuid::new_v4().simple().to_string();
+        let workdir = self.workspace_root.join(format!("probe-{probe_id}"));
+        let guard = LaneGuard {
+            slots: self.slots.clone(),
+            lane,
+            workdir: workdir.clone(),
+        };
+        if std::fs::create_dir_all(&workdir).is_err() {
+            return Err(ExecutionError::Isolation);
+        }
+        let probe = RunRequest {
+            user_id: request.user_id,
+            org_id: request.org_id,
+            chat_id: probe_id.clone(),
+            provider: request.provider.clone(),
+            model: "default".into(),
+            prompt: String::new(),
+            credential_handle: Some(handle.clone()),
+            briefing: None,
+            effort: None,
+            fast: false,
+        };
+        let mut argv = self.launch_prefix(&probe, lane, &workdir, &binary, &handle);
+        argv.push("app-server".into());
+
+        // Run the probe on a TASK that owns the child, the lane guard and the
+        // probe permit.
+        //
+        // If this function's future is cancelled the join handle is dropped, but
+        // the task keeps running: `app_server_models` still performs the
+        // launcher's SIGTERM teardown, and only when that has finished are the
+        // lane and the workdir released. Cancelling therefore cannot orphan a
+        // sandbox, and — the part a PID-based guard got wrong — nothing ever
+        // signals a numeric pid after the child has been reaped, so a recycled
+        // pid cannot be hit.
+        let task = tokio::spawn(async move {
+            let mut command = Command::new(&argv[0]);
+            command
+                .args(&argv[1..])
+                .env_remove("HOME")
+                .env_remove("XDG_CONFIG_HOME")
+                .env_remove("XDG_DATA_HOME")
+                .env_remove("CLAUDE_CONFIG_DIR");
+            let result = app_server_models(command).await;
+            // Held until here on purpose: releasing the lane before teardown
+            // would let the next run take a slot whose sandbox is still
+            // unwinding.
+            drop(guard);
+            drop(permit);
+            result
+        });
+        match task.await {
+            Ok(result) => result,
+            // The task panicked; its guards still dropped, so the lane is back.
+            Err(_) => Err(ExecutionError::Unavailable),
+        }
+    }
+
     async fn run(&self, request: RunRequest) -> Result<RunHandle, ExecutionError> {
         // Everything that can be refused is refused BEFORE a lane, a workdir or
         // a process exists: an unsupported provider or a caller with no
@@ -834,6 +1146,33 @@ impl AgentRuntime {
             Self::Fake(runtime) => runtime.run(request).await,
         }
     }
+
+    /// Read a provider's catalogue for one caller.
+    ///
+    /// The credential is resolved by the CALLER's own lookup before this is
+    /// invoked, so a discovery request can never name somebody else's volume.
+    pub(crate) async fn discover_models(
+        &self,
+        provider: &str,
+        actor: &crate::neev::types::OrgContext,
+        credential_handle: Option<String>,
+    ) -> Result<Vec<super::discovery::DiscoveredModel>, ExecutionError> {
+        let request = DiscoveryRequest {
+            user_id: actor.identity.user_id,
+            org_id: actor.org_id,
+            provider: provider.to_owned(),
+            credential_handle,
+        };
+        let payload = match self {
+            Self::Disabled(runtime) => runtime.discover_models(request).await,
+            #[cfg(any(test, feature = "dev-agent"))]
+            Self::Provider(runtime) => runtime.discover_models(request).await,
+            Self::Sandboxed(runtime) => runtime.discover_models(request).await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.discover_models(request).await,
+        }?;
+        Ok(super::discovery::parse_models(&payload))
+    }
 }
 
 impl RunHandle {
@@ -901,6 +1240,8 @@ mod tests {
             prompt: prompt.into(),
             credential_handle: Some(HANDLE.into()),
             briefing: None,
+            effort: None,
+            fast: false,
         }
     }
 
@@ -1041,7 +1382,7 @@ mod tests {
     #[test]
     fn each_provider_is_invoked_in_its_own_dialect() {
         // Claude Code is headless via `-p` with a streaming output format.
-        let claude = provider_argv("claude", "draft", "default", None);
+        let claude = provider_argv("claude", "draft", "default", None, None, false);
         assert_eq!(&claude[..2], &["-p".to_string(), "draft".to_string()]);
         assert!(claude.contains(&"stream-json".to_string()));
         assert!(claude.contains(&"--include-partial-messages".to_string()));
@@ -1049,10 +1390,12 @@ mod tests {
         // Codex is a SUBCOMMAND with `--json`, verified against `codex exec
         // --help` in the deployed agent image. It rejects Claude's flags
         // outright, which is why sharing them produced no output at all.
-        let codex = provider_argv("codex", "draft", "default", None);
+        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        // Speed is always stated, so the codex argv carries its two config
+        // overrides even when nothing was switched on.
         assert_eq!(
-            codex,
-            vec![
+            &codex[..3],
+            &[
                 "exec".to_string(),
                 "--json".to_string(),
                 "draft".to_string()
@@ -1062,14 +1405,73 @@ mod tests {
         assert!(!codex.contains(&"--output-format".to_string()));
 
         // Model selection is spelled differently by each.
-        assert!(provider_argv("codex", "d", "gpt-5", None)
+        assert!(provider_argv("codex", "d", "gpt-5", None, None, false)
             .windows(2)
             .any(|pair| pair == ["-m".to_string(), "gpt-5".to_string()]));
-        assert!(provider_argv("claude", "d", "opus", None)
+        assert!(provider_argv("claude", "d", "opus", None, None, false)
             .windows(2)
             .any(|pair| pair == ["--model".to_string(), "opus".to_string()]));
         // "default" means the provider's own default: nothing is passed.
-        assert!(!provider_argv("codex", "d", "default", None).contains(&"-m".to_string()));
+        assert!(!provider_argv("codex", "d", "default", None, None, false).contains(&"-m".to_string()));
+    }
+
+    #[test]
+    fn effort_and_speed_reach_each_cli_in_its_own_spelling() {
+        // Claude: a native flag for effort, settings for speed.
+        let claude = provider_argv("claude", "draft", "opus", None, Some("xhigh"), true);
+        assert!(claude
+            .windows(2)
+            .any(|pair| pair == ["--effort".to_string(), "xhigh".to_string()]));
+        assert!(claude
+            .windows(2)
+            .any(|pair| pair
+                == ["--settings".to_string(), "{\"fastMode\":true}".to_string()]));
+
+        // Codex: config overrides for both. `service_tier` and
+        // `features.fast_mode` are the two the docs pair together.
+        let codex = provider_argv("codex", "draft", "default", None, Some("minimal"), true);
+        assert!(codex.windows(2).any(|pair| pair
+            == [
+                "-c".to_string(),
+                "model_reasoning_effort=\"minimal\"".to_string()
+            ]));
+        assert!(codex
+            .windows(2)
+            .any(|pair| pair == ["-c".to_string(), "service_tier=\"fast\"".to_string()]));
+        assert!(codex
+            .windows(2)
+            .any(|pair| pair == ["-c".to_string(), "features.fast_mode=true".to_string()]));
+    }
+
+    #[test]
+    fn speed_off_is_sent_explicitly_rather_than_left_to_ambient_config() {
+        // A run that inherited fast mode from a config file the reader cannot
+        // see would be spending their money on a setting they never chose, so
+        // the OFF state is stated rather than omitted.
+        let claude = provider_argv("claude", "draft", "opus", None, None, false);
+        assert!(claude
+            .windows(2)
+            .any(|pair| pair
+                == ["--settings".to_string(), "{\"fastMode\":false}".to_string()]));
+        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        assert!(codex
+            .windows(2)
+            .any(|pair| pair == ["-c".to_string(), "service_tier=\"default\"".to_string()]));
+        assert!(codex
+            .windows(2)
+            .any(|pair| pair == ["-c".to_string(), "features.fast_mode=false".to_string()]));
+    }
+
+    #[test]
+    fn an_unset_effort_passes_no_effort_argument_at_all() {
+        // Unset means the provider's own default, which is not the same as any
+        // level we could name for them.
+        let claude = provider_argv("claude", "draft", "default", None, None, false);
+        assert!(!claude.contains(&"--effort".to_string()));
+        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        assert!(!codex
+            .iter()
+            .any(|arg| arg.starts_with("model_reasoning_effort")));
     }
 
     #[test]
@@ -1327,6 +1729,8 @@ mod tests {
                 // own already-authenticated CLI and delivers no credentials.
                 credential_handle: None,
                 briefing: None,
+                effort: None,
+                fast: false,
             })
             .await
             .unwrap();

@@ -11,7 +11,7 @@ async fn populated_five_upgrades(database: DatabaseConnection) {
         .unwrap()
         .try_get::<i64>("", "version")
         .unwrap();
-    assert_eq!(exists, 13);
+    assert_eq!(exists, 14);
     for table in ["neev_agent_turns", "neev_agent_sessions"] {
         execute(db, &format!("DROP TABLE {table}"), vec![])
             .await
@@ -54,7 +54,7 @@ async fn populated_five_upgrades(database: DatabaseConnection) {
     execute(db, "INSERT INTO neev_resources(org_id,id,kind,node_id,creator_id,title,visibility,auth_revision,content_revision,archived,created_at,updated_at) VALUES(201,'11111111-1111-4111-8111-111111111111','document',401,101,'History','private',1,1,false,1000,1001)", vec![]).await.unwrap();
     execute(db, "INSERT INTO neev_document_revisions(org_id,document_id,resource_kind,revision,blob_key,sha256,byte_length,author_id,created_at) VALUES(201,'11111111-1111-4111-8111-111111111111','document',1,'preserved-blob',$1,17,101,1001)", vec!["a".repeat(64).into()]).await.unwrap();
     initialize(db).await.unwrap();
-    assert_eq!(validate_content_snapshot(db).await.unwrap(), 13);
+    assert_eq!(validate_content_snapshot(db).await.unwrap(), 14);
     let format = one(
         db,
         "SELECT format,format_version FROM neev_document_formats",

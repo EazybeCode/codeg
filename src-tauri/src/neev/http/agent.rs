@@ -126,6 +126,8 @@ pub(super) async fn run(
         // there is no project to brief from. Left unbriefed rather than given
         // a half-context that would describe the wrong thing.
         briefing: None,
+        effort: None,
+        fast: false,
     };
     let mut handle = match state.agents.run(request).await {
         Ok(handle) => handle,

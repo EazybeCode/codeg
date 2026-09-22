@@ -130,6 +130,8 @@ async fn downgrade_to_eleven(db: &DatabaseConnection) {
     // carries a foreign key to `neev_agent_sessions`, so dropping and
     // recreating them would fail against the turns a session under test owns.
     for statement in [
+        "ALTER TABLE neev_agent_sessions DROP COLUMN fast",
+        "ALTER TABLE neev_agent_sessions DROP COLUMN effort",
         "ALTER TABLE neev_agent_turns DROP COLUMN activity",
         "ALTER TABLE neev_agent_sessions DROP COLUMN node_id",
         "UPDATE neev_schema_version SET version=11",
@@ -175,7 +177,7 @@ async fn fresh_install_creates_session_storage_at_version_eleven() {
     let db = h::database().await;
     assert_eq!(
         schema_version(&db).await,
-        session_migration::ACTIVITY_SCHEMA_VERSION
+        session_migration::EFFORT_SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
@@ -207,7 +209,7 @@ async fn nine_to_eleven_upgrade_preserves_every_row() {
 
     assert_eq!(
         schema_version(&db).await,
-        session_migration::ACTIVITY_SCHEMA_VERSION
+        session_migration::EFFORT_SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
@@ -245,7 +247,7 @@ async fn ten_to_eleven_preserves_content_and_image_inventory() {
         .unwrap();
     assert_eq!(validate_content_snapshot(&db).await, Ok(10));
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(13));
+    assert_eq!(validate_content_snapshot(&db).await, Ok(14));
     assert!(table_exists(&db, "neev_image_blobs").await);
     assert_eq!(count(&db, "neev_messages").await, 1);
     assert_eq!(initialize(&db).await, Ok(()));
@@ -261,7 +263,7 @@ async fn upgrade_is_replayable_when_message_columns_already_exist() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         schema_version(&db).await,
-        session_migration::ACTIVITY_SCHEMA_VERSION
+        session_migration::EFFORT_SCHEMA_VERSION
     );
     // Idempotent: initializing an already-current database validates in place.
     assert_eq!(initialize(&db).await, Ok(()));
@@ -281,7 +283,7 @@ async fn eleven_to_twelve_adds_the_node_column_and_leaves_sessions_unfiled() {
 
     assert_eq!(
         schema_version(&db).await,
-        session_migration::ACTIVITY_SCHEMA_VERSION
+        session_migration::EFFORT_SCHEMA_VERSION
     );
     // The session that existed before the column did is retained, and reads as
     // unfiled rather than being dropped or given an invented placement.
@@ -524,7 +526,7 @@ async fn with_unconstrained<F>(
 // repopulated with a positional `INSERT ... SELECT *`, so a missing or
 // misplaced column is a count/type mismatch rather than a weaker constraint.
 // `node_id` is last because layer 12 adds it with `ALTER TABLE`.
-const SESSION_COLS: &str = "org_id INTEGER NOT NULL,id TEXT NOT NULL,owner_id INTEGER NOT NULL,title TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,visibility TEXT NOT NULL,kind TEXT NOT NULL,bound_chat_id TEXT,bound_kind TEXT,archived BOOLEAN NOT NULL,revision BIGINT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,node_id INTEGER";
+const SESSION_COLS: &str = "org_id INTEGER NOT NULL,id TEXT NOT NULL,owner_id INTEGER NOT NULL,title TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,visibility TEXT NOT NULL,kind TEXT NOT NULL,bound_chat_id TEXT,bound_kind TEXT,archived BOOLEAN NOT NULL,revision BIGINT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,node_id INTEGER,effort TEXT,fast BOOLEAN NOT NULL DEFAULT false";
 const TURN_COLS: &str = "org_id INTEGER NOT NULL,session_id TEXT NOT NULL,sequence BIGINT NOT NULL,id TEXT NOT NULL,run_id TEXT NOT NULL,request_id TEXT,prompt TEXT NOT NULL,response TEXT NOT NULL,status TEXT NOT NULL,error_code TEXT,provider TEXT NOT NULL,model TEXT NOT NULL,created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,completed_at BIGINT,activity TEXT";
 
 fn nothing<'a>(
@@ -548,7 +550,7 @@ async fn validator_rejects_a_session_that_escaped_the_private_default() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','organization','chat',NULL,NULL,0,1,1000,1000,NULL)",
+        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','organization','chat',NULL,NULL,0,1,1000,1000,NULL,NULL,0)",
         vec![],
         nothing,
     )
@@ -560,7 +562,7 @@ async fn validator_rejects_a_session_with_an_unknown_provider() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','gpt','default','private','chat',NULL,NULL,0,1,1000,1000,NULL)",
+        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','gpt','default','private','chat',NULL,NULL,0,1,1000,1000,NULL,NULL,0)",
         vec![],
         nothing,
     )
@@ -574,7 +576,7 @@ async fn validator_rejects_a_session_whose_owner_lost_its_membership() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(4242,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','private','chat',NULL,NULL,0,1,1000,1000,NULL)",
+        "INSERT INTO neev_agent_sessions VALUES(4242,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','private','chat',NULL,NULL,0,1,1000,1000,NULL,NULL,0)",
         vec![],
         nothing,
     )
@@ -586,7 +588,7 @@ async fn validator_rejects_a_session_id_of_the_wrong_storage_class() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(1,777,1,'T','claude','default','private','chat',NULL,NULL,0,1,1000,1000,NULL)",
+        "INSERT INTO neev_agent_sessions VALUES(1,777,1,'T','claude','default','private','chat',NULL,NULL,0,1,1000,1000,NULL,NULL,0)",
         vec![],
         nothing,
     )
@@ -598,7 +600,7 @@ async fn validator_rejects_a_half_bound_session() {
     with_unconstrained(
         "neev_agent_sessions",
         SESSION_COLS,
-        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','private','chat','33333333-3333-4333-8333-333333333333',NULL,0,1,1000,1000,NULL)",
+        "INSERT INTO neev_agent_sessions VALUES(1,'99999999-9999-4999-8999-999999999999',1,'T','claude','default','private','chat','33333333-3333-4333-8333-333333333333',NULL,0,1,1000,1000,NULL,NULL,0)",
         vec![],
         nothing,
     )
@@ -758,5 +760,96 @@ async fn validator_walks_past_the_keyset_page_boundary() {
     assert_eq!(
         session_migration::validate(&db).await,
         Err(AuthError::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn thirteen_to_fourteen_and_back_again_preserves_everything_else() {
+    // The release needs a way back that is not a full restore: an image-only
+    // rollback strands a 13 binary in front of a 14 database it refuses to
+    // open, and a restore would lose every write since the backup.
+    let db = h::database().await;
+    let (org, user, _) = seed(&db).await;
+    insert_session(&db, org, user).await;
+    insert_turn(&db, org, "completed").await;
+    let project = project_node(&db, org).await;
+    execute(
+        &db,
+        "UPDATE neev_agent_sessions SET effort='xhigh',fast=true,node_id=$1 WHERE org_id=$2 AND id=$3",
+        vec![project.into(), org.into(), SESSION.into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        schema_version(&db).await,
+        session_migration::EFFORT_SCHEMA_VERSION
+    );
+
+    // Down to 13: only what 14 added goes.
+    let tx = db.begin().await.unwrap();
+    session_migration::downgrade_effort(&tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        schema_version(&db).await,
+        session_migration::ACTIVITY_SCHEMA_VERSION
+    );
+    // Everything a 13 server cares about survived, including the layer-12 and
+    // layer-13 columns and the turn history.
+    assert_eq!(count(&db, "neev_agent_sessions").await, 1);
+    assert_eq!(count(&db, "neev_agent_turns").await, 1);
+    assert_eq!(count(&db, "neev_messages").await, 1);
+    let node: Option<i32> = one(
+        &db,
+        "SELECT node_id FROM neev_agent_sessions WHERE id=$1",
+        vec![SESSION.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "node_id")
+    .unwrap();
+    assert_eq!(node, Some(project), "the layer-12 placement is untouched");
+    // A 13 database must validate AS 13, or the older binary would refuse it
+    // too and the rollback would have achieved nothing.
+    assert_eq!(validate_content_snapshot(&db).await, Ok(13));
+
+    // And forward again, which is the other half of a safe rollback: the
+    // operator has to be able to roll back FORWARD after fixing whatever sent
+    // them back.
+    assert_eq!(initialize(&db).await, Ok(()));
+    assert_eq!(
+        schema_version(&db).await,
+        session_migration::EFFORT_SCHEMA_VERSION
+    );
+    assert_eq!(count(&db, "neev_agent_sessions").await, 1);
+    // The selections were dropped with the columns and come back unset, which
+    // is the honest outcome: a 13 server could not have stored them.
+    let row = one(
+        &db,
+        "SELECT effort,fast FROM neev_agent_sessions WHERE id=$1",
+        vec![SESSION.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(row.try_get::<Option<String>>("", "effort").unwrap(), None);
+    assert!(!row.try_get::<bool>("", "fast").unwrap());
+    assert_eq!(validate_content_snapshot(&db).await, Ok(14));
+}
+
+#[tokio::test]
+async fn the_downgrade_refuses_a_database_that_is_not_at_fourteen() {
+    // Running it against 13 would rewind a marker that is already right;
+    // against a later layer it would strip something it does not understand.
+    let db = h::database().await;
+    let tx = db.begin().await.unwrap();
+    session_migration::downgrade_effort(&tx).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let tx = db.begin().await.unwrap();
+    assert_eq!(
+        session_migration::downgrade_effort(&tx).await,
+        Err(AuthError::Unavailable),
+        "a second downgrade is refused rather than rewinding further"
     );
 }

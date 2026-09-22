@@ -55,6 +55,11 @@ struct SessionDto {
     title: String,
     provider: String,
     model: String,
+    /// The session's reasoning effort, or `null` for the provider's own default.
+    effort: Option<String>,
+    /// Whether it runs in the provider's fast mode. Always present; never
+    /// inherited, so `false` is the answer for every session that predates it.
+    fast: bool,
     bound_chat_id: Option<String>,
     /// Where this session sits in the workspace tree; `null` when unfiled.
     ///
@@ -142,6 +147,14 @@ struct CreateSessionInput {
     /// field still posts a valid body and gets an unfiled session.
     #[serde(default)]
     node_id: Option<i32>,
+    /// Optional reasoning effort. `#[serde(default)]` so an older client still
+    /// posts a valid body and gets the provider's own default.
+    #[serde(default)]
+    effort: Option<String>,
+    /// Fast mode. `#[serde(default)]` so an older client posts a valid body and
+    /// gets the safe answer: off.
+    #[serde(default)]
+    fast: bool,
     request_id: String,
 }
 
@@ -161,6 +174,39 @@ struct UpdateSessionInput {
 /// may be `null`. Folding this into `UpdateSessionInput` instead would make
 /// "field omitted" and "explicitly null" indistinguishable, and unfiling a
 /// session is exactly the second one.
+/// Body of the effort change.
+///
+/// `effort` is NOT `#[serde(default)]`: it must be present, and may be `null`.
+/// Omitted and explicitly-null would otherwise be indistinguishable, and
+/// clearing a level back to the provider default is exactly the second one.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EffortInput {
+    effort: Option<String>,
+    expected_revision: String,
+}
+
+/// The whole desired control state, replaced atomically.
+///
+/// Every field is required so the request states the full triple rather than a
+/// patch whose omissions have to be guessed at; `effort` may be `null` to mean
+/// the provider's own default.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SettingsInput {
+    model: String,
+    effort: Option<String>,
+    fast: bool,
+    expected_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SpeedInput {
+    fast: bool,
+    expected_revision: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MoveSessionInput {
@@ -202,6 +248,8 @@ fn session_dto(session: AgentSession) -> SessionDto {
         title: session.title,
         provider: session.provider,
         model: session.model,
+        effort: session.effort,
+        fast: session.fast,
         bound_chat_id: session.bound_chat_id,
         node_id: session.node_id,
         archived: session.archived,
@@ -296,6 +344,8 @@ pub(super) async fn create_session(
             model: input.model,
             bound_chat_id: input.bound_chat_id,
             node_id: input.node_id,
+            effort: input.effort.clone(),
+            fast: input.fast,
             request_id: input.request_id,
         },
     )
@@ -437,6 +487,10 @@ pub(super) async fn start_turn(
         prompt: composed,
         credential_handle,
         briefing,
+        // The session's stored choice, re-applied on every turn — which is what
+        // makes it a setting rather than something to re-pick each time.
+        effort: session.effort.clone(),
+        fast: session.fast,
     };
     match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -1078,6 +1132,16 @@ struct TeamInvokeInput {
     prompt: String,
     provider: String,
     model: String,
+    /// The controls for THIS ask, applied to the holder before it launches.
+    ///
+    /// Carried on the invoke rather than requiring a holder to exist first: the
+    /// reader has to be able to choose model, effort and speed before the first
+    /// paid turn, and a separate "create the holder" round trip would both cost
+    /// a request and leave empty holders behind for asks that never happened.
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    fast: bool,
     request_id: String,
     expected_auth_revision: String,
 }
@@ -1093,6 +1157,90 @@ struct TeamInvokeDto {
     /// session uses, so there is one streaming implementation, not two.
     turn: TurnDto,
     run_id: String,
+}
+
+/// GET `/api/neev/agent/capabilities` — what the installed runners accept.
+///
+/// Served rather than hardcoded in the client so the composer can only ever
+/// offer a model or level the runner will honour. Public to any org member: it
+/// describes the deployment's agent capabilities, carries no per-user state and
+/// names no credential.
+pub(super) async fn capabilities(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    // The CALLER's own catalogue: what a provider offers depends on the account
+    // asking, so a shared one would advertise models some readers cannot run.
+    Ok(private_json(
+        crate::neev::agents::capabilities::catalogue_for(&state, &actor).await,
+    ))
+}
+
+/// PATCH `/api/neev/agent/sessions/{id}/settings` — model, effort and speed at
+/// once.
+///
+/// The endpoint the composer should use. The single-field routes below stay for
+/// compatibility, but changing model and speed through them in sequence can pass
+/// through a pairing neither value is valid in.
+pub(super) async fn set_settings(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<SettingsInput>(&state, request, SESSION_BODY_LIMIT).await?;
+    let expected = catalog::canonical_revision(&input.expected_revision)?;
+    Ok(private_json(session_dto(
+        sessions::set_settings(
+            &state,
+            &actor,
+            &id,
+            &input.model,
+            input.effort.as_deref(),
+            input.fast,
+            expected,
+        )
+        .await?,
+    )))
+}
+
+/// PATCH `/api/neev/agent/sessions/{id}/effort` — change the reasoning effort.
+pub(super) async fn set_effort(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<EffortInput>(&state, request, SESSION_BODY_LIMIT).await?;
+    let expected = catalog::canonical_revision(&input.expected_revision)?;
+    Ok(private_json(session_dto(
+        sessions::set_effort(&state, &actor, &id, input.effort.as_deref(), expected).await?,
+    )))
+}
+
+/// PATCH `/api/neev/agent/sessions/{id}/speed` — turn fast mode on or off.
+pub(super) async fn set_speed(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<SpeedInput>(&state, request, SESSION_BODY_LIMIT).await?;
+    let expected = catalog::canonical_revision(&input.expected_revision)?;
+    Ok(private_json(session_dto(
+        sessions::set_fast(&state, &actor, &id, input.fast, expected).await?,
+    )))
 }
 
 /// GET `/api/neev/chats/{chat_id}/agent` — the caller's OWN bound team session
@@ -1184,6 +1332,9 @@ pub(super) async fn team_invoke(
     .await?;
 
     // 2. The invoker's own durable holder for this chat + provider.
+    // Applied to the holder before anything launches, so the FIRST ask runs at
+    // the settings the reader chose rather than at defaults they would then be
+    // charged to correct.
     let session = sessions::ensure_team_session(
         &state,
         &actor,
@@ -1191,6 +1342,8 @@ pub(super) async fn team_invoke(
         &input.provider,
         &input.model,
         "Team invocation",
+        input.effort.as_deref(),
+        input.fast,
     )
     .await?;
     // The credential is resolved BEFORE the turn exists. Anything that can fail
@@ -1256,6 +1409,8 @@ pub(super) async fn team_invoke(
         prompt: turn.prompt.clone(),
         credential_handle,
         briefing,
+        effort: session.effort.clone(),
+        fast: session.fast,
     };
     let turn = match state.agents.run(run_request).await {
         Ok(handle) => {
