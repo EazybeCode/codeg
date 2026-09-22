@@ -1,0 +1,33 @@
+diff --git a/apps/impress/next.config.js b/apps/impress/next.config.js
+index 8786512..2545e17 100644
+--- a/apps/impress/next.config.js
++++ b/apps/impress/next.config.js
+@@ -6,11 +6,20 @@ const { version } = require('./package.json');
+ 
+ const buildId = crypto.randomBytes(256).toString('hex').slice(0, 8);
+ 
++/**
++ * Path prefix the app is served under, e.g. `/document-engine` when Docs is
++ * embedded in Neev. Empty by default, which is upstream's behaviour: served at
++ * the root. Next derives the `/_next/...` asset URLs from `basePath`, so
++ * `assetPrefix` is deliberately not set as well — that would prefix twice.
++ */
++const basePath = process.env.NEXT_PUBLIC_BASE_PATH || '';
++
+ /** @type {import('next').NextConfig} */
+ const nextConfig = {
+   allowedDevOrigins: ['docs.127.0.0.1.nip.io'],
+   output: 'export',
+   trailingSlash: true,
++  ...(basePath ? { basePath } : {}),
+   // `@blocknote/math-block` imports `katex/dist/katex.min.css` from its entry
+   // point; transpiling it lets Next.js accept that global CSS import from
+   // within node_modules.
+@@ -32,6 +41,7 @@ const nextConfig = {
+   env: {
+     NEXT_PUBLIC_BUILD_ID: buildId,
+     NEXT_PUBLIC_APP_VERSION: version,
++    NEXT_PUBLIC_BASE_PATH: basePath,
+   },
+   /**
+    * In dev mode, Next.js doesn't use Webpack, but Turbopack.

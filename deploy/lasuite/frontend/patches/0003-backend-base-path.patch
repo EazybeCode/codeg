@@ -1,0 +1,129 @@
+diff --git a/apps/impress/src/api/__tests__/config.basePath.test.ts b/apps/impress/src/api/__tests__/config.basePath.test.ts
+new file mode 100644
+index 0000000..20e3175
+--- /dev/null
++++ b/apps/impress/src/api/__tests__/config.basePath.test.ts
+@@ -0,0 +1,78 @@
++import { afterEach, beforeEach, describe, expect, it } from 'vitest';
++
++import { backendOrigin, backendUrl, baseApiUrl } from '@/api';
++
++/**
++ * The backend is not always mounted at the root. When Docs is embedded in a
++ * host application it is reverse-proxied under a path prefix, and every
++ * backend-facing URL — REST, media, the collaboration socket — has to carry it.
++ *
++ * The prefix deliberately lives in its own variable rather than being folded
++ * into NEXT_PUBLIC_API_ORIGIN, so the origin stays derived from the page at
++ * runtime and a single build serves any host.
++ *
++ * `.env.test` sets NEXT_PUBLIC_API_ORIGIN=http://test.jest, which these tests
++ * restore rather than assume.
++ */
++describe('backend base path', () => {
++  const originalOrigin = process.env.NEXT_PUBLIC_API_ORIGIN;
++  const originalBasePath = process.env.NEXT_PUBLIC_BACKEND_BASE_PATH;
++
++  beforeEach(() => {
++    delete process.env.NEXT_PUBLIC_BACKEND_BASE_PATH;
++  });
++
++  afterEach(() => {
++    process.env.NEXT_PUBLIC_API_ORIGIN = originalOrigin;
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = originalBasePath;
++  });
++
++  it('is upstream behaviour when no prefix is set', () => {
++    expect(backendUrl()).toBe('http://test.jest');
++    expect(baseApiUrl()).toBe('http://test.jest/api/v1.0/');
++  });
++
++  it('appends the prefix to the configured origin', () => {
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = '/document-engine';
++
++    expect(backendOrigin()).toBe('http://test.jest');
++    expect(backendUrl()).toBe('http://test.jest/document-engine');
++    expect(baseApiUrl()).toBe('http://test.jest/document-engine/api/v1.0/');
++  });
++
++  /**
++   * The embedded build ships with no origin configured, so it is taken from the
++   * page. This is what lets the same artifact serve production HTTPS and a
++   * loopback test without a rebuild.
++   */
++  it('appends the prefix to the runtime origin when none is configured', () => {
++    delete process.env.NEXT_PUBLIC_API_ORIGIN;
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = '/document-engine';
++
++    expect(backendOrigin()).toBe(window.location.origin);
++    expect(baseApiUrl()).toBe(
++      `${window.location.origin}/document-engine/api/v1.0/`,
++    );
++  });
++
++  it('keeps the prefix on non-default API versions', () => {
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = '/document-engine';
++
++    expect(baseApiUrl('2.0')).toBe(
++      'http://test.jest/document-engine/api/v2.0/',
++    );
++  });
++
++  /**
++   * Media URLs are composed as `${backendUrl()}${attachment.file}`, where the
++   * backend returns `file` as a root-relative `/media/...` path. The prefix has
++   * to come from this side, which also means the backend must not add it.
++   */
++  it('produces prefixed media URLs from an unprefixed backend path', () => {
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = '/document-engine';
++
++    expect(`${backendUrl()}/media/doc-id/attachment.png`).toBe(
++      'http://test.jest/document-engine/media/doc-id/attachment.png',
++    );
++  });
++});
+diff --git a/apps/impress/src/api/config.ts b/apps/impress/src/api/config.ts
+index 946b7c9..f10aa99 100644
+--- a/apps/impress/src/api/config.ts
++++ b/apps/impress/src/api/config.ts
+@@ -1,17 +1,37 @@
+ /**
+- * Returns the base URL for the backend API.
++ * Returns the origin the backend is served from.
+  *
+  * Priority:
+  * 1. Uses NEXT_PUBLIC_API_ORIGIN from environment variables if defined.
+  * 2. Falls back to the browser's window.location.origin if in a browser environment.
+  * 3. Defaults to an empty string if executed in a non-browser environment without the env variable.
+  *
+- * @returns The backend base URL as a string.
++ * This is an origin (scheme + host), never a path — see backendUrl().
++ *
++ * @returns The backend origin as a string.
+  */
+-export const backendUrl = () =>
++export const backendOrigin = () =>
+   process.env.NEXT_PUBLIC_API_ORIGIN ||
+   (typeof window !== 'undefined' ? window.location.origin : '');
+ 
++/**
++ * Returns the base URL for the backend, origin plus the path prefix it is
++ * reverse-proxied under.
++ *
++ * Upstream mounts the backend at the root, so NEXT_PUBLIC_BACKEND_BASE_PATH is
++ * empty by default and this is identical to the origin. When Docs is embedded
++ * under a prefix (Neev serves it at `/document-engine`), the prefix is set here
++ * rather than folded into NEXT_PUBLIC_API_ORIGIN, so the origin stays
++ * runtime-derived and one build serves any host.
++ *
++ * Every backend-facing URL is composed from this: the REST base below, and the
++ * media URLs in doc-editor/hook/useUploadFile.
++ *
++ * @returns The backend base URL as a string, with no trailing slash.
++ */
++export const backendUrl = () =>
++  `${backendOrigin()}${process.env.NEXT_PUBLIC_BACKEND_BASE_PATH || ''}`;
++
+ /**
+  * Constructs the full base API URL, including the versioned path (e.g., `/api/v1.0/`).
+  *

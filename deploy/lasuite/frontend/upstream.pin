@@ -1,0 +1,23 @@
+# La Suite Docs — pinned upstream source for the Neev document engine.
+#
+# Sourced as a release tarball rather than a clone: the frontend workspace is
+# 23 MB and the full history is not, and nothing here needs history.
+
+UPSTREAM_REPO=https://github.com/suitenumerique/docs
+UPSTREAM_TAG=v5.7.0
+UPSTREAM_TARBALL=https://github.com/suitenumerique/docs/archive/refs/tags/v5.7.0.tar.gz
+
+# Verified on 2026-09-22 against the tarball GitHub serves for that tag.
+UPSTREAM_TARBALL_SHA256=0ae48e9a179edbbf9966a66bc824070840f29a72b46e18594508a37d8d506b9d
+
+# Only this subtree is extracted and built.
+UPSTREAM_SUBTREE=docs-5.7.0/src/frontend
+
+# Upstream's own toolchain. Not pnpm — the repo pins yarn 1 in packageManager
+# and the workspace layout depends on it.
+NODE_VERSION=22
+YARN_VERSION=1.22.22
+
+# Upstream licenses the core MIT. PUBLISH_AS_MIT=true excludes the optional
+# @blocknote/xl-* modules, which carry a different licence.
+LICENSE=MIT

@@ -1,0 +1,131 @@
+diff --git a/apps/impress/src/core/config/hooks/__tests__/useCollaborationUrl.test.tsx b/apps/impress/src/core/config/hooks/__tests__/useCollaborationUrl.test.tsx
+new file mode 100644
+index 0000000..45fa769
+--- /dev/null
++++ b/apps/impress/src/core/config/hooks/__tests__/useCollaborationUrl.test.tsx
+@@ -0,0 +1,97 @@
++import { renderHook } from '@testing-library/react';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++
++import { useCollaborationUrl } from '../useCollaborationUrl';
++
++const useConfig = vi.hoisted(() => vi.fn());
++
++vi.mock('../../api', () => ({ useConfig }));
++
++const ROOM = '11111111-1111-4111-8111-111111111111';
++
++const setLocation = (href: string) => {
++  window.history.replaceState({}, '', '/');
++  Object.defineProperty(window, 'location', {
++    configurable: true,
++    value: new URL(href),
++  });
++};
++
++/**
++ * Upstream's fallback hardcodes `wss://` and the root `/collaboration/ws/`.
++ * Neither holds once Docs is embedded behind a proxy prefix, and the hardcoded
++ * scheme also makes the socket unreachable over a plain-HTTP loopback
++ * deployment. A backend-supplied COLLABORATION_WS_URL must still win, because
++ * that is how a separately-hosted collaboration service is pointed at.
++ */
++describe('useCollaborationUrl', () => {
++  const originalLocation = window.location;
++  const originalBasePath = process.env.NEXT_PUBLIC_BACKEND_BASE_PATH;
++
++  beforeEach(() => {
++    useConfig.mockReturnValue({ data: undefined });
++    delete process.env.NEXT_PUBLIC_BACKEND_BASE_PATH;
++  });
++
++  afterEach(() => {
++    Object.defineProperty(window, 'location', {
++      configurable: true,
++      value: originalLocation,
++    });
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = originalBasePath;
++    vi.clearAllMocks();
++  });
++
++  it('returns nothing without a room', () => {
++    const { result } = renderHook(() => useCollaborationUrl(undefined));
++
++    expect(result.current).toBeUndefined();
++  });
++
++  it('is upstream behaviour on https with no prefix set', () => {
++    setLocation('https://docs.example.com/docs/abc/');
++
++    const { result } = renderHook(() => useCollaborationUrl(ROOM));
++
++    expect(result.current).toBe(
++      `wss://docs.example.com/collaboration/ws/?room=${ROOM}`,
++    );
++  });
++
++  it('carries the prefix the backend is proxied under', () => {
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = '/document-engine';
++    setLocation('https://neev.example.com/document-engine/docs/abc/');
++
++    const { result } = renderHook(() => useCollaborationUrl(ROOM));
++
++    expect(result.current).toBe(
++      `wss://neev.example.com/document-engine/collaboration/ws/?room=${ROOM}`,
++    );
++  });
++
++  /**
++   * The loopback case: a plain-HTTP page cannot open a `wss:` socket to itself.
++   */
++  it('follows the page scheme so http deployments can connect', () => {
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = '/document-engine';
++    setLocation('http://localhost:8100/document-engine/docs/abc/');
++
++    const { result } = renderHook(() => useCollaborationUrl(ROOM));
++
++    expect(result.current).toBe(
++      `ws://localhost:8100/document-engine/collaboration/ws/?room=${ROOM}`,
++    );
++  });
++
++  it('lets a backend-supplied URL win over the fallback', () => {
++    process.env.NEXT_PUBLIC_BACKEND_BASE_PATH = '/document-engine';
++    setLocation('https://neev.example.com/document-engine/docs/abc/');
++    useConfig.mockReturnValue({
++      data: { COLLABORATION_WS_URL: 'wss://collab.example.com/ws/' },
++    });
++
++    const { result } = renderHook(() => useCollaborationUrl(ROOM));
++
++    expect(result.current).toBe(`wss://collab.example.com/ws/?room=${ROOM}`);
++  });
++});
+diff --git a/apps/impress/src/core/config/hooks/useCollaborationUrl.tsx b/apps/impress/src/core/config/hooks/useCollaborationUrl.tsx
+index b066837..8dc44bc 100644
+--- a/apps/impress/src/core/config/hooks/useCollaborationUrl.tsx
++++ b/apps/impress/src/core/config/hooks/useCollaborationUrl.tsx
+@@ -7,10 +7,22 @@ export const useCollaborationUrl = (room?: string) => {
+     return;
+   }
+ 
++  /**
++   * A backend-supplied COLLABORATION_WS_URL still wins, unchanged.
++   *
++   * The fallback differs from upstream in two ways, both required to embed Docs
++   * behind Neev's proxy:
++   * - the scheme follows the page instead of being hardcoded to `wss:`, so a
++   *   plain-HTTP loopback deployment can reach the socket at all;
++   * - the path carries the prefix the backend is proxied under, so the socket
++   *   is reached at `<prefix>/collaboration/ws/` rather than at the root.
++   */
+   const base =
+     conf?.COLLABORATION_WS_URL ||
+     (typeof window !== 'undefined'
+-      ? `wss://${window.location.host}/collaboration/ws/`
++      ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${
++          window.location.host
++        }${process.env.NEXT_PUBLIC_BACKEND_BASE_PATH || ''}/collaboration/ws/`
+       : '');
+ 
+   return `${base}?room=${room}`;

@@ -1,0 +1,18 @@
+diff --git a/apps/impress/src/custom-next.d.ts b/apps/impress/src/custom-next.d.ts
+index 7db1871..1e27d90 100644
+--- a/apps/impress/src/custom-next.d.ts
++++ b/apps/impress/src/custom-next.d.ts
+@@ -29,5 +29,13 @@ namespace NodeJS {
+     NEXT_PUBLIC_API_ORIGIN?: string;
+     NEXT_PUBLIC_PUBLISH_AS_MIT?: string;
+     NEXT_PUBLIC_SW_DEACTIVATED?: string;
++    /**
++     * Path prefix the backend is reverse-proxied under, e.g. `/document-engine`.
++     * Leading slash, no trailing slash. Empty means mounted at the root, which
++     * is upstream's own behaviour.
++     */
++    NEXT_PUBLIC_BACKEND_BASE_PATH?: string;
++    /** `true` renders the document editor without Docs' own app chrome. */
++    NEXT_PUBLIC_EMBED?: string;
+   }
+ }

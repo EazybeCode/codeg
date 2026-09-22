@@ -1,0 +1,201 @@
+# La Suite Docs as Neev's document engine — the frontend
+
+La Suite Docs v5.7.0, built as a static export that Neev serves at
+`/document-engine/` and frames same-origin. Upstream's editor, save path and
+real-time collaboration are untouched; what changes is where it is mounted and
+how much of its own application it draws.
+
+This directory is the whole frontend side: the pinned source, a five-patch
+series against it, the build script, the environment, and the serving
+requirements. It owns no Neev code. Resource creation, identity, ACL and the
+Neev-side frame wrapper belong to the backend work, not here.
+
+The preview that established this is a sound basis — authentication, the
+permission boundary, two accounts editing concurrently, reconnection,
+server-side persistence — is written up in
+[`docs/lasuite-docs-preview/README.md`](../../../docs/lasuite-docs-preview/README.md).
+Read it before changing anything here; several of the constraints below are
+consequences of what it found.
+
+## The routes contract
+
+| concern | URL |
+|---|---|
+| document page | `/document-engine/docs/<uuid>/` |
+| REST API | `/document-engine/api/v1.0/` |
+| collaboration socket | `ws(s)://<host>/document-engine/collaboration/ws/?room=<uuid>` |
+| media | `/document-engine/media/` |
+
+Every one of them is same-origin and composed at runtime from
+`window.location.origin`. **No origin is baked into the bundle.** That is the
+property that lets one artifact serve production HTTPS and a loopback test
+without a rebuild, and it is worth protecting: the moment a host is compiled in,
+the artifact stops being portable and the test stops resembling production.
+
+Verified in the built output, not just intended — the bundle contains
+
+```js
+i = () => `${window.location.origin}/document-engine`,
+a = (e = '1.0') => `${i()}/api/v${e}/`
+```
+
+and, for the socket, `"wss":"ws"}://${window.location.host}/document-engine/collaboration/ws`.
+
+### What the backend must not do
+
+The prefix is added on this side, once. Two ways to break that:
+
+- **`attachment-upload` must keep returning a root-relative `file`**, i.e.
+  `/media/<...>`. Media URLs are composed client-side as
+  `${backendUrl()}${attachment.file}` (upstream `useUploadFile.tsx:30`, which no
+  patch here touches). If the backend also prefixes it the result is
+  `/document-engine/document-engine/media/...`.
+- **`COLLABORATION_WS_URL` in `/api/v1.0/config/` is best left unset.** The
+  patched fallback already builds the prefixed URL and derives `ws`/`wss` from
+  the page. If it is set it wins, and it must then be a full absolute URL — which
+  re-pins the artifact to one host, giving up the portability above.
+
+`NEXT_PUBLIC_API_ORIGIN` keeps its upstream meaning: an origin, scheme and host
+only, never a path. The embedded build leaves it empty. The prefix lives in
+`NEXT_PUBLIC_BACKEND_BASE_PATH`.
+
+## The patch series
+
+Five patches, 384 insertions, against pinned v5.7.0. Every behavioural change is
+inert unless its environment variable is set, so the patched tree still builds
+and behaves as upstream when built without `env/embed.env`.
+
+| patch | what it does |
+|---|---|
+| `0001-env-typings` | declares the two new `NEXT_PUBLIC_*` variables |
+| `0002-serve-under-a-path-prefix` | `basePath` from `NEXT_PUBLIC_BASE_PATH` |
+| `0003-backend-base-path` | splits `backendOrigin()` from `backendUrl()`; the latter appends the prefix |
+| `0004-collaboration-socket-url` | socket fallback carries the prefix and follows the page scheme |
+| `0005-embed-mode` | renders the editor without Docs' own chrome |
+
+Two of these are worth explaining rather than just listing.
+
+**`0003` is one change that fixes two paths.** Upstream composes both the REST
+base and media URLs from `backendUrl()`, so prefixing that single function covers
+both. Nothing about media needed its own patch, which is why there isn't one.
+
+**`0004` changes the fallback in two ways, and the second is easy to miss.**
+Upstream hardcodes `wss://`. A plain-HTTP loopback deployment cannot open a
+`wss:` socket to itself, so the prefix alone would have left the socket
+unreachable in exactly the environment used to test it.
+
+### Embedded mode
+
+`NEXT_PUBLIC_EMBED=true`. Neev owns navigation, document listing, identity and
+sharing, so Docs does not draw them:
+
+- **gone** — left panel and its resizer, share button, copy-link, share, star,
+  duplicate, move (both), leave, delete
+- **kept** — the editor, title editing, autosave, formatting, comments, the
+  table of contents, present, download, print, history
+
+**Hiding a control is not a permission boundary.** Every hidden action is still
+authorised server-side and a hidden button changes nothing about what a request
+is allowed to do. Nothing here broadens or narrows any ACL, and none of it should
+be read as enforcement — the backend enforces, as it did before.
+
+`isEmbedded()` reads a `NEXT_PUBLIC_*` variable, which Next inlines at build
+time, so the hidden branches are eliminated from the bundle rather than merely
+skipped.
+
+No service worker is registered or emitted. Upstream registers at
+`/service-worker.js` — the root scope — so in an embedded deployment it would
+take over caching for the whole host application rather than just this prefix.
+`NEXT_PUBLIC_SW_DEACTIVATED=true` skips both the registration and workbox's
+`InjectManifest`, so the artifact contains no `service-worker.js` to register.
+
+## Building
+
+```bash
+export PATH=/opt/homebrew/opt/node@22/bin:$PATH
+./build.sh /tmp/neev-lasuite-build          # ~4 min from cold
+KEEP_INSTALL=1 ./build.sh /tmp/neev-lasuite-build   # ~1.5 min, reuses node_modules
+```
+
+Upstream's toolchain is **yarn 1**, not pnpm — the repo pins it in
+`packageManager` and the workspace layout depends on it.
+
+**Budget ~12 GB of free disk**, and check before starting. The yarn fetch cache
+alone expands to ~7.3 GB on top of a 2.0 GB `node_modules` and a 1-2 GB webpack
+cache; the script keeps all of it under the work directory and deletes the two
+caches at the end, but the peak is real. This is not a guess — an earlier run
+filled this Mac's disk completely and took the shell down with it.
+
+Budget 10+ minutes of wall clock, and do not run it under a shorter foreground
+timeout. One run was SIGTERMed mid-install for exactly that reason.
+
+The script verifies the pinned tarball's hash before it builds, and checks the
+output against the routes contract before it packages: the `docs/[id]/index.html`
+the UUID rewrite depends on, prefixed assets, no double prefix, a prefixed
+socket, a runtime-derived API base, and no service worker.
+
+### On reproducibility
+
+The build is **pinned and verifiable, not bit-reproducible**, and the difference
+matters. Upstream derives the Next build id from `crypto.randomBytes`, so chunk
+names and contents differ on every run. Two builds of identical sources will not
+produce identical bytes, and no amount of `tar` flag tuning changes that.
+
+What is guaranteed instead:
+
+- the source is pinned by hash and the build refuses to start on a mismatch
+- the patch series applies cleanly to that pin and reconstructs, exactly, the
+  tree the shipped artifact was built from — verified by extracting the pin
+  fresh, applying the five patches and diffing against the built tree. The only
+  differences were `next-env.d.ts` and `tsconfig.tsbuildinfo`, both generated by
+  Next and tsc.
+- every file in the output is hashed into a manifest, so the bytes deployed can
+  be checked against the bytes built
+
+## The artifact in this directory
+
+`artifact-v5.7.0-b31ca0a86d54.sha256` — a sha256 per file, 367 files, of the
+build described above. The tarball itself is 24 MB and is not committed; it is
+at `/tmp/neev-lasuite-build/neev-document-engine-frontend-v5.7.0.tar.gz`,
+sha256 `47772bd319073f971b2e5c170542646c2463fd074aecd3f7c4bf6c1c97cebf86`.
+Rebuild it with `build.sh` rather than treating that path as durable.
+
+One honest difference between that artifact and what `build.sh` now produces:
+the shipped build was run without upstream's `prebuild` step, so
+`assets/fonts/emoji/` contains only `fallback.png` instead of the full Apple
+emoji set. `build.sh` runs `prebuild`. The omission is inert here — those images
+are referenced only by `useExportAGPL`, which a `PUBLISH_AS_MIT=true` build never
+loads — but it is a difference, and if anyone ever flips that flag to `false`
+they should know those paths are root-relative and would need prefixing too.
+
+## Verification
+
+What actually ran, with results:
+
+| check | result |
+|---|---|
+| `tsc --noEmit` | exit 0 |
+| `eslint .` | exit 0 |
+| 13 new tests, patched | 13 pass |
+| the same 13 against **pristine** upstream | 8 fail, 5 pass |
+| `next build --webpack` | exit 0, 13 routes exported |
+| output vs. routes contract | all checks pass |
+| patch series vs. built tree | identical |
+
+The pristine run is the one that matters. Tests that pass against unpatched
+sources prove nothing about the patches, so they were run both ways: the 8
+failures are the new behaviour, and the 5 that pass on both are deliberate
+regression guards that upstream's unprefixed behaviour is unchanged.
+
+### Not verified
+
+Stated plainly, because a gap read as covered is worse than a gap:
+
+- **Nothing was exercised in a browser.** The editor was not loaded, no document
+  was opened, nothing was typed, saved or collaborated on against this build. The
+  contract is verified by reading the built bundle and by unit tests, which is
+  not the same thing as it working.
+- **The full existing test suite never completed** — the disk filled during the
+  run. Only the 13 new tests, the type-check and the lint were run to completion.
+- **Attachment upload is untested**, as it was in the preview.
+- The serving config in `serving/` has not been run by an nginx anywhere.
