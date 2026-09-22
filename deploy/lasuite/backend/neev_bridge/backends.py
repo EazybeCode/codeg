@@ -12,6 +12,7 @@ to find or match a user.
 import logging
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.contrib.auth.backends import RemoteUserBackend
 from django.db import IntegrityError, transaction
 
@@ -96,9 +97,16 @@ def get_or_create_user_by_subject(subject, profile=None):
     try:
         with transaction.atomic():
             user.save()
-    except IntegrityError:
+    except (IntegrityError, ValidationError):
+        # Both, because a race can surface either one. `sub` is unique, so a
+        # concurrent creation that has already *committed* is found by
+        # `full_clean`'s uniqueness check and raised as a ValidationError, while
+        # one still in flight collides at the constraint and raises
+        # IntegrityError. Catching only the second left the first as a 500 under
+        # exactly the load the retry exists for.
         user = user_model.objects.filter(sub=subject.raw).first()
         if user is None:
+            # Not a race: the record is genuinely invalid.
             raise
         refresh_profile(user, profile, defaults)
         return user, False

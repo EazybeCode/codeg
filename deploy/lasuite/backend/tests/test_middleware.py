@@ -211,6 +211,44 @@ class ProfileTests(TestCase):
         self.assertIsNone(body["email"])
 
 
+class ConcurrentFirstContactTests(TestCase):
+    """The row may already be there by the time we try to write it.
+
+    `core.models.BaseModel.save()` calls `full_clean()`, so a *committed*
+    duplicate is reported as a ValidationError from the uniqueness check, not as
+    an IntegrityError from the constraint. Handling only the latter left the
+    first request of a burst returning 500 — found by the concurrency test
+    running against real PostgreSQL, pinned here so it cannot come back.
+    """
+
+    def test_a_committed_duplicate_is_adopted_not_raised(self):
+        from neev_bridge.backends import get_or_create_user_by_subject
+        from neev_bridge.identity import parse_subject
+
+        subject = parse_subject(SUBJECT)
+        first, created = get_or_create_user_by_subject(subject, {})
+        self.assertTrue(created)
+
+        # A second caller that raced past the existence check.
+        second, created_again = get_or_create_user_by_subject(subject, {})
+        self.assertFalse(created_again)
+        self.assertEqual(first.pk, second.pk)
+        self.assertEqual(get_user_model().objects.filter(sub=SUBJECT).count(), 1)
+
+    def test_a_genuinely_invalid_record_still_raises(self):
+        """The retry must not swallow a real validation failure."""
+        from django.core.exceptions import ValidationError
+
+        from neev_bridge.backends import get_or_create_user_by_subject
+        from neev_bridge.identity import parse_subject
+
+        with self.assertRaises(ValidationError):
+            get_or_create_user_by_subject(
+                parse_subject("neev:7:99"), {"email": "not-an-email"}
+            )
+        self.assertFalse(get_user_model().objects.filter(sub="neev:7:99").exists())
+
+
 class DisplayNameTests(TestCase):
     """Upstream reads `email.split("@")` when a name is empty; it must not be.
 

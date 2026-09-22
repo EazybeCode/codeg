@@ -41,6 +41,11 @@ urlpatterns = [
         name="neev-bridge-access",
     ),
     path(
+        "_neev/v1/documents/<str:document_id>/media",
+        views.document_media,
+        name="neev-bridge-media",
+    ),
+    path(
         "_neev/v1/documents/<str:document_id>/title",
         views.document_title,
         name="neev-bridge-title",

@@ -74,6 +74,7 @@ them. Upstream's CSRF protection on every browser-reachable route is untouched.
 | `POST /_neev/v1/documents/provision` | `{id, title, sub, email?, name?}` | `{id, created}` |
 | `POST /_neev/v1/documents/<id>/access` | `{sub, role: reader\|editor, email?, name?}` | `{role, changed}` |
 | `DELETE /_neev/v1/documents/<id>/access` | `{sub}` | `{revoked}` |
+| `GET /_neev/v1/documents/<id>/media?key=…` | header `X-Neev-Remote-User` | the bytes, streamed |
 | `POST /_neev/v1/documents/<id>/title` | `{sub, title}` | `{title, changed}` |
 | `POST /_neev/v1/sessions/mint` | `{sub, ttl_seconds?}` | `{cookie_name, session_key, expires_in}` |
 | `POST /_neev/v1/sessions/resolve` | `{session_key}` | `{sub}` or `{sub: null}` |
@@ -93,6 +94,32 @@ ordinary service principal, `neev:service:engine`. Granting access is an ordinar
 the principal actually making the call — not a request forged in the creator's name — and projected
 roles are only `reader` and `editor`. So even a Docs control that escaped the proxy's allowlist
 could not reconfigure sharing or delete a document: sharing stays a Neev concept.
+
+**Attachments are relayed here, not signed for.** The media endpoint reads the object and streams
+it back; no redirect and no signed URL is ever produced, so there is nothing shareable to leak and
+authorization is re-evaluated on every single fetch. It lives in the bridge rather than the proxy
+because everything it needs is already here — the object-store client, its credentials, the network
+path to the bucket, and upstream's own `get_abilities`, which decides the answer. Putting it in the
+proxy would mean a second set of storage credentials, a second route to the bucket, and a second
+implementation of a permission rule that already exists.
+
+The proxy still authorizes the public `/document-engine/media/<key>` request against Neev's ACL
+first; this is the second check, expressed in Docs' terms because Docs owns the attachment. What it
+enforces:
+
+* the key must be this document's own attachment, by shape **and** by being recorded in
+  `document.attachments` — the bucket is not a namespace to browse, and an attachment removed from
+  the document stops being readable;
+* `get_abilities(user)["retrieve"]` must be true, so a revoked access ends reads immediately;
+* the subject comes from `X-Neev-Remote-User` and the service principal is refused, so this is
+  never a way to read as the account that owns every document;
+* **inline only for raster images** (`png`, `jpeg`, `gif`, `webp`, `avif`). Everything else —
+  `image/svg+xml` above all, plus anything upstream marked `-unsafe` — is `attachment`. Every
+  response carries `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
+  sandbox` and `Cache-Control: private, no-store`;
+* no `x-amz-*` header is relayed. The object store returns `x-amz-meta-owner`, which is a Docs user
+  id;
+* the stream is bounded in both size and time, because it runs inside a request worker.
 
 **The title endpoint is reconciliation, not a rename.** Neev's resource row is authoritative — it
 is what Projects lists and what the ACL is evaluated against — so the two copies can only diverge

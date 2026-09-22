@@ -21,13 +21,14 @@ import json
 import logging
 
 from django.conf import settings
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.utils.crypto import constant_time_compare
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from neev_bridge import service, session_lookup
 from neev_bridge.backends import profile_from_request
+from neev_bridge.middleware import SUBJECT_HEADER
 from neev_bridge.identity import clean_profile_value
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,57 @@ def resolve_session(request):
     payload = _load_body(request)
     subject = session_lookup.resolve_session(payload.get("session_key"))
     return JsonResponse({"sub": subject})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@_bridge_view
+def document_media(request, document_id):
+    """GET /_neev/v1/documents/<id>/media?key=<key> — stream one attachment.
+
+    The relay exists here rather than in the proxy because everything it needs
+    is already here: the object-store client, the credentials, the network path
+    to the bucket, and — the part that matters — upstream's own `get_abilities`,
+    which decides the answer. Rebuilding that in the proxy would mean a second
+    set of storage credentials, a second network route to the bucket, and a
+    second implementation of a permission rule that already exists.
+
+    The proxy still authorizes the public `/document-engine/media/<key>` request
+    against Neev's ACL first. This endpoint is the *second* check, not the only
+    one, and it is expressed in Docs' terms because Docs owns the attachment.
+
+    No redirect and no signed URL is ever produced: the bytes are read here and
+    relayed. There is nothing shareable to leak.
+    """
+    subject = request.META.get(SUBJECT_HEADER)
+    media = service.open_media(document_id, request.GET.get("key"), subject)
+
+    response = StreamingHttpResponse(
+        media.chunks(), content_type=media.content_type, status=200
+    )
+    disposition = "inline" if media.inline else "attachment"
+    # The filename is the stored key's own, because the uploaded name does not
+    # survive: upstream's malware-detection callback rewrites the object's
+    # metadata and drops the Content-Disposition it had set.
+    response["Content-Disposition"] = (
+        f'{disposition}; filename="{escape_filename(media.filename)}"'
+    )
+    response["Content-Length"] = str(media.length)
+    # Nothing here is a document that may run anything, be framed, or be sniffed
+    # into something more dangerous than it was stored as.
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    response["Cache-Control"] = "private, no-store"
+    # Deliberately absent: every `x-amz-*` header the object store returns.
+    # `x-amz-meta-owner` is a Docs user id, and none of them are the browser's
+    # business.
+    return response
+
+
+def escape_filename(name):
+    """A quoted-string filename with nothing that could end the quoting."""
+    cleaned = "".join(ch for ch in name if ch.isprintable() and ch not in '"\\;\r\n')
+    return cleaned[:120] or "attachment"
 
 
 @csrf_exempt

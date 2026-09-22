@@ -19,12 +19,18 @@ This module imports `core`, so it is only importable inside the Docs image.
 """
 
 import logging
+import time
 import uuid
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.files.storage import default_storage
 from django.db import IntegrityError, transaction
 
-from core import choices, models
+from botocore.exceptions import ClientError
+
+from core import choices, enums, models
+from core.enums import DocumentAttachmentStatus
+from core.utils.s3 import get_s3_client
 from core.utils.treebeard import create_tree_node_with_retry
 
 from neev_bridge.identity import SERVICE_SUBJECT, Subject, parse_subject
@@ -34,6 +40,22 @@ logger = logging.getLogger(__name__)
 # Roles the bridge is allowed to project. Everything else is refused, including
 # `owner`, `administrator` and `commenter`.
 PROJECTABLE_ROLES = (choices.RoleChoices.READER, choices.RoleChoices.EDITOR)
+
+# Types rendered in place. Raster only: every one of these is decoded by an image
+# decoder and cannot carry script. `image/svg+xml` is deliberately absent — it is
+# an image to a browser and a script host to an attacker, and upstream does not
+# classify it as unsafe (`DOCUMENT_UNSAFE_MIME_TYPES` has no SVG entry).
+INLINE_CONTENT_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"}
+)
+
+# Upstream refuses an upload above `DOCUMENT_IMAGE_MAX_SIZE` (10 MB by default);
+# this is that with room for a larger configured limit, and it is a ceiling on
+# what one request can stream, not a policy about what may be stored.
+MAX_MEDIA_BYTES = 12 * 1024 * 1024
+MEDIA_CHUNK_BYTES = 64 * 1024
+# A stalled object store must not hold a request worker indefinitely.
+MEDIA_READ_DEADLINE = 30.0
 
 
 class BridgeError(Exception):
@@ -179,6 +201,147 @@ def provision_document(document_id, title, owner_subject, owner_profile=None):
         defaults={"role": choices.RoleChoices.EDITOR},
     )
     return document, created
+
+
+class MediaObject:
+    """An attachment the caller is allowed to read, ready to stream."""
+
+    __slots__ = ("key", "content_type", "length", "inline", "filename", "chunks")
+
+    def __init__(self, key, content_type, length, inline, filename, chunks):
+        self.key = key
+        self.content_type = content_type
+        self.length = length
+        self.inline = inline
+        self.filename = filename
+        self.chunks = chunks
+
+
+def _attachment_key(document, key):
+    """The key must be this document's attachment, by shape and by record.
+
+    Two checks rather than one. The shape check (`<id>/attachments/…`) is what
+    makes a key authorizable as a document at all; the membership check is what
+    stops a well-shaped key for a *deleted* or never-recorded attachment from
+    being fetched out of the bucket.
+    """
+    if not isinstance(key, str) or not key:
+        raise BridgeError("invalid_key")
+    if "\\" in key or "//" in key or "%" in key:
+        raise BridgeError("invalid_key")
+    if any(segment in {"", ".", ".."} for segment in key.split("/")):
+        raise BridgeError("invalid_key")
+    prefix = f"{document.id!s}/{enums.ATTACHMENTS_FOLDER}/"
+    if not key.startswith(prefix) or "/" in key[len(prefix) :]:
+        raise BridgeError("invalid_key")
+    if key not in (document.attachments or []):
+        # Recorded attachments only: the bucket is not a namespace to browse.
+        raise BridgeError("unknown_attachment", status=404)
+    return key
+
+
+def _disposition_for(content_type, key):
+    """Inline only for raster images that cannot carry script.
+
+    Upstream marks a dangerous upload by suffixing the key with `-unsafe`, and
+    separately stores a `Content-Disposition` — which never survives, because the
+    malware-detection callback rewrites the object's metadata with
+    `MetadataDirective="REPLACE"` and does not carry it over. So the disposition
+    has to be decided here, and it is decided by allowlist: anything not on the
+    raster list is a download, including `image/svg+xml`, which is an image to a
+    browser and a script host to an attacker.
+    """
+    stem = key.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    if stem.endswith("-unsafe"):
+        return False
+    return content_type in INLINE_CONTENT_TYPES
+
+
+def open_media(document_id, key, subject_value):
+    """Authorize an attachment read and return it ready to stream.
+
+    Authorization reuses upstream's own `get_abilities`, so the answer here is
+    the same one every other Docs read path gets — this endpoint adds no ACL
+    policy of its own, it only refuses earlier and more narrowly.
+    """
+    document_uuid = parse_document_id(document_id)
+    subject = require_subject(subject_value)
+    service_user = get_service_principal()
+    document = _engine_document_for(document_uuid, service_user, subject)
+
+    key = _attachment_key(document, key)
+
+    user_model = service_user.__class__
+    user = user_model.objects.filter(sub=subject.raw).first()
+    if user is None or not user.is_active:
+        raise BridgeError("forbidden", status=403)
+    # Upstream's own permission computation, not a second implementation of it.
+    if not document.get_abilities(user).get("retrieve"):
+        raise BridgeError("forbidden", status=403)
+
+    client = get_s3_client()
+    bucket = default_storage.bucket_name
+    try:
+        head = client.head_object(Bucket=bucket, Key=key)
+    except ClientError as err:
+        raise BridgeError("unknown_attachment", status=404) from err
+
+    metadata = {name.lower(): value for name, value in head.get("Metadata", {}).items()}
+    # Same readiness rule upstream's media-auth applies: an attachment still
+    # being scanned is not readable yet.
+    if metadata.get("status", DocumentAttachmentStatus.READY) != (
+        DocumentAttachmentStatus.READY
+    ):
+        raise BridgeError("not_ready", status=409)
+
+    length = head.get("ContentLength")
+    if length is None or length > MAX_MEDIA_BYTES:
+        raise BridgeError("too_large", status=413)
+
+    content_type = head.get("ContentType") or "application/octet-stream"
+    inline = _disposition_for(content_type, key)
+    if metadata.get("is_unsafe") == "true":
+        inline = False
+
+    return MediaObject(
+        key=key,
+        content_type=content_type,
+        length=length,
+        inline=inline,
+        filename=key.rsplit("/", 1)[-1],
+        chunks=_stream(client, bucket, key, length),
+    )
+
+
+def _stream(client, bucket, key, expected_length):
+    """Yield the object in bounded chunks, bounded in time as well as size.
+
+    Both bounds exist because this runs inside a request worker: an object store
+    that stalls mid-body would otherwise hold the worker for as long as it liked,
+    and a body longer than its own `ContentLength` would be relayed in full.
+    """
+
+    def generator():
+        started = time.monotonic()
+        served = 0
+        body = client.get_object(Bucket=bucket, Key=key)["Body"]
+        try:
+            while True:
+                chunk = body.read(MEDIA_CHUNK_BYTES)
+                if not chunk:
+                    return
+                served += len(chunk)
+                if served > expected_length or served > MAX_MEDIA_BYTES:
+                    logger.warning("neev-bridge: attachment exceeded its own length")
+                    return
+                if time.monotonic() - started > MEDIA_READ_DEADLINE:
+                    logger.warning("neev-bridge: attachment read exceeded its deadline")
+                    return
+                yield chunk
+        finally:
+            body.close()
+
+    return generator
 
 
 @transaction.atomic

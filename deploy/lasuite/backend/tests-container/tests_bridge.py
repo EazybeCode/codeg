@@ -15,10 +15,12 @@ Run with `tests-container/run.sh`, from a stack directory.
 
 import json
 import threading
+import urllib.parse
 import uuid
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connections
 from django.test import Client, SimpleTestCase, TestCase, TransactionTestCase
 from django.urls import Resolver404, resolve
@@ -369,6 +371,202 @@ class AccessProjectionTests(TestCase):
             service.revoke_access(self.document_id, SERVICE_SUBJECT)
         self.assertEqual(caught.exception.code, "invalid_subject")
         self.assertEqual(self.role_of(SERVICE_SUBJECT), choices.RoleChoices.OWNER)
+
+
+PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000a49444154789c6360000002000100ffff03000006000557bfabd400"
+    "00000049454e44ae426082"
+)
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(1)</script></svg>'
+HTML = b"<html><body><script>alert(document.domain)</script></body></html>"
+
+
+class MediaRelayTests(TestCase):
+    """Attachments, read through the bridge instead of a signed URL.
+
+    Uploads go through upstream's own `attachment-upload` so the objects under
+    test are stored exactly as production stores them — same key shape, same
+    libmagic-derived content type, same `-unsafe` marking, same metadata rewrite
+    by the malware-detection callback.
+    """
+
+    def setUp(self):
+        self.document_id = new_id()
+        self.document, _ = service.provision_document(self.document_id, "Media", OWNER)
+        service.project_access(self.document_id, MEMBER, choices.RoleChoices.READER)
+        self.session = Client()
+        self.session.get("/api/v1.0/users/me/", secure=True, **identity(OWNER))
+
+    def upload(self, filename, content, declared="application/octet-stream"):
+        """Upload through upstream's endpoint and return the stored key."""
+        upload = SimpleUploadedFile(filename, content, content_type=declared)
+        response = self.session.post(
+            f"/api/v1.0/documents/{self.document_id}/attachment-upload/",
+            data={"file": upload},
+            secure=True,
+            HTTP_X_CSRFTOKEN=self.session.cookies["csrftoken"].value,
+            HTTP_ORIGIN=f"https://{settings.ALLOWED_HOSTS[0]}",
+            **identity(OWNER),
+        )
+        self.assertEqual(response.status_code, 201, response.content[:200])
+        query = urllib.parse.urlparse(response.json()["file"]).query
+        return urllib.parse.parse_qs(query)["key"][0]
+
+    def fetch(self, key, subject=OWNER, document_id=None, key_header=True):
+        headers = {BRIDGE_KEY_HEADER: settings.NEEV_BRIDGE_KEY} if key_header else {}
+        if subject is not None:
+            headers["HTTP_X_NEEV_REMOTE_USER"] = subject
+        # `key=None` is the omitted-parameter case; the test client cannot encode
+        # it, and omitting it is what the endpoint would actually receive.
+        query = {} if key is None else {"key": key}
+        return self.client.get(
+            f"/_neev/v1/documents/{document_id or self.document_id}/media",
+            query,
+            secure=True,
+            **headers,
+        )
+
+    @staticmethod
+    def body(response):
+        return b"".join(response.streaming_content)
+
+    def test_owner_gets_the_bytes(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.body(response), PNG)
+
+    def test_a_raster_image_is_inline(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertTrue(response["Content-Disposition"].startswith("inline;"))
+
+    def test_an_svg_is_never_inline(self):
+        """The whole point: an SVG is an image to a browser and a script host."""
+        key = self.upload("payload.svg", SVG, "image/svg+xml")
+        response = self.fetch(key)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(
+            response["Content-Disposition"].startswith("attachment;"),
+            "an SVG was served inline",
+        )
+
+    def test_html_is_never_inline(self):
+        key = self.upload("payload.html", HTML, "text/html")
+        self.assertIn("-unsafe", key, "upstream should mark HTML unsafe")
+        response = self.fetch(key)
+        self.assertTrue(response["Content-Disposition"].startswith("attachment;"))
+
+    def test_a_disguised_upload_is_still_not_inline(self):
+        """Declared image/png, HTML bytes: libmagic decides, and so do we."""
+        key = self.upload("disguise.png", HTML, "image/png")
+        response = self.fetch(key)
+        self.assertTrue(response["Content-Disposition"].startswith("attachment;"))
+
+    def test_every_response_carries_the_neutralising_headers(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key)
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(
+            response["Content-Security-Policy"], "default-src 'none'; sandbox"
+        )
+        self.assertEqual(response["Cache-Control"], "private, no-store")
+        self.assertEqual(response["Content-Length"], str(len(PNG)))
+
+    def test_no_object_store_metadata_reaches_the_client(self):
+        """`x-amz-meta-owner` is a Docs user id; none of it is the browser's business."""
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key)
+        leaked = [name for name in response.headers if name.lower().startswith("x-amz")]
+        self.assertEqual(leaked, [])
+
+    def test_nothing_is_ever_a_redirect(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Location", response.headers)
+
+    def test_a_member_with_access_may_read(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        self.assertEqual(self.fetch(key, subject=MEMBER).status_code, 200)
+
+    def test_revoking_access_ends_the_reads(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        self.assertEqual(self.fetch(key, subject=MEMBER).status_code, 200)
+
+        service.revoke_access(self.document_id, MEMBER)
+        response = self.fetch(key, subject=MEMBER)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "forbidden")
+
+    def test_a_stranger_is_refused(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key, subject="neev:7:404")
+        self.assertEqual(response.status_code, 403)
+
+    def test_another_organization_is_refused(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key, subject=OUTSIDER)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"], "organization_mismatch")
+
+    def test_the_service_principal_cannot_read_through_this_endpoint(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key, subject=SERVICE_SUBJECT)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_subject")
+
+    def test_a_missing_subject_is_refused(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        self.assertEqual(self.fetch(key, subject=None).status_code, 400)
+
+    def test_without_the_bridge_credential_nothing_is_served(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key, key_header=False)
+        self.assertEqual(response.status_code, 401)
+
+    def test_a_key_belonging_to_another_document_is_refused(self):
+        """The key names its own document; asking through a second one fails."""
+        other_id = new_id()
+        service.provision_document(other_id, "Other", OWNER)
+        key = self.upload("probe.png", PNG, "image/png")
+        response = self.fetch(key, document_id=other_id)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "invalid_key")
+
+    def test_malformed_keys_are_refused(self):
+        self.upload("probe.png", PNG, "image/png")
+        for key in [
+            None,
+            "",
+            f"{self.document_id}/attachments/../../etc/passwd",
+            f"{self.document_id}/attachments/nested/file.png",
+            f"{self.document_id}/other-folder/file.png",
+            f"{self.document_id}/attachments/",
+            "../secret",
+            f"{self.document_id}//attachments/file.png",
+        ]:
+            with self.subTest(key=key):
+                self.assertEqual(self.fetch(key).status_code, 400)
+
+    def test_an_unrecorded_attachment_is_not_fetchable(self):
+        """Well-shaped, never uploaded: the bucket is not a namespace to browse."""
+        key = f"{self.document_id}/attachments/{uuid.uuid4()}.png"
+        response = self.fetch(key)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"], "unknown_attachment")
+
+    def test_an_attachment_removed_from_the_document_stops_being_readable(self):
+        key = self.upload("probe.png", PNG, "image/png")
+        self.assertEqual(self.fetch(key).status_code, 200)
+
+        document = models.Document.objects.get(pk=self.document_id)
+        document.attachments.remove(key)
+        document.save(update_fields=["attachments"])
+
+        self.assertEqual(self.fetch(key).status_code, 404)
 
 
 class TitleProjectionTests(TestCase):
