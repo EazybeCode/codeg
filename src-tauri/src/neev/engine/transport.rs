@@ -38,6 +38,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// socket outlive a revocation.
 const SEND_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Largest response body buffered from upstream.
+///
+/// `MAX_BODY` bounds the *request*; it says nothing about what upstream sends
+/// back. Without a cap here a single reply could be read into memory whole, and
+/// one reply per concurrent request. The durable Yjs content read is the large
+/// one, so this is generous rather than tight — the point is that it is bounded
+/// at all, and that the bound is applied while reading rather than after.
+const MAX_RESPONSE: usize = 16 * 1024 * 1024;
+
 /// A socket carrying no traffic at all is closed. Idle sockets otherwise
 /// accumulate against the collaboration server for as long as a tab is open.
 const IDLE_LIMIT: i64 = 30 * 60;
@@ -160,11 +169,42 @@ pub(crate) async fn forward(
             headers.append(name, value);
         }
     }
-    let bytes = response.bytes().await.map_err(|_| ApiError::Unavailable)?;
+    let bytes = read_bounded(response, MAX_RESPONSE).await?;
     let mut out = Response::new(Body::from(bytes));
     *out.status_mut() = status;
     *out.headers_mut() = headers;
     Ok(out)
+}
+
+/// Read a response body with an explicit cap, checked **before** each chunk is
+/// appended rather than after the whole body is in memory.
+///
+/// `Content-Length` is consulted first so an oversized reply is refused without
+/// reading it, but it is not trusted as the bound: a chunked reply has none, and
+/// a wrong one would make the cap advisory.
+pub(crate) async fn read_bounded(
+    response: reqwest::Response,
+    cap: usize,
+) -> Result<Vec<u8>, ApiError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > cap as u64)
+    {
+        return Err(ApiError::Invalid);
+    }
+    let mut body = Vec::new();
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ApiError::Unavailable)?
+    {
+        if body.len().saturating_add(chunk.len()) > cap {
+            return Err(ApiError::Invalid);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Relay an authorized socket to the collaboration server.
@@ -210,11 +250,15 @@ pub(crate) async fn relay(
     let mut recheck = tokio::time::interval(RECHECK);
     // The first tick is immediate and would re-ask what we just asked.
     recheck.tick().await;
-    // Rechecking on the timer alone is not enough: a socket that is busy
-    // relaying could carry a whole editing session between two ticks. So each
-    // direction is gated too, rate-limited to RECHECK so a chatty socket does
-    // not become a query storm.
-    let mut checked_at = state.clock.now_unix();
+    // Every data frame is authorized, in both directions, with **no positive
+    // cache**. An earlier version rate-limited this to RECHECK, which meant a
+    // revoked user kept relaying for up to fifteen seconds — the cache was the
+    // revocation window. The timer below still runs, but only so a quiet socket
+    // is closed too; it is not the bound on a busy one.
+    //
+    // This is a point read per frame. That is affordable at this deployment's
+    // size, and weakening authorization ahead of a load problem nobody has
+    // measured would be trading a real guarantee for a hypothetical one.
     let mut active_at = state.clock.now_unix();
 
     loop {
@@ -241,7 +285,7 @@ pub(crate) async fn relay(
                     Message::Pong(bytes) => UpstreamMessage::Pong(bytes.into()),
                     Message::Close(_) => break,
                 };
-                if gate(&state, &actor, &resource, opened_writable, &mut checked_at).await {
+                if still_permitted(&state, &actor, &resource, opened_writable).await {
                     active_at = state.clock.now_unix();
                     // Bounded, so a stalled peer cannot hold the relay past the
                     // point where revocation should have ended it.
@@ -271,7 +315,7 @@ pub(crate) async fn relay(
                     // Raw frames are not produced by a read half.
                     UpstreamMessage::Frame(_) => continue,
                 };
-                if gate(&state, &actor, &resource, opened_writable, &mut checked_at).await {
+                if still_permitted(&state, &actor, &resource, opened_writable).await {
                     active_at = state.clock.now_unix();
                     match tokio::time::timeout(SEND_TIMEOUT, to_client.send(forwarded)).await {
                         Ok(Ok(())) => true,
@@ -285,7 +329,6 @@ pub(crate) async fn relay(
                 if state.clock.now_unix().saturating_sub(active_at) > IDLE_LIMIT {
                     break;
                 }
-                checked_at = state.clock.now_unix();
                 still_permitted(&state, &actor, &resource, opened_writable).await
             }
         };
@@ -295,27 +338,6 @@ pub(crate) async fn relay(
     }
     let _ = to_client.close().await;
     let _ = to_upstream.close().await;
-}
-
-/// Recheck before relaying a message, rate-limited to [`RECHECK`].
-///
-/// Gating each direction matters because a busy socket can carry an entire
-/// editing session between two timer ticks — the tick alone would make the
-/// revocation bound depend on how quiet the connection happened to be. The rate
-/// limit keeps a chatty socket from turning into a query storm.
-async fn gate(
-    state: &ServerState,
-    actor: &OrgContext,
-    resource: &str,
-    opened_writable: bool,
-    checked_at: &mut i64,
-) -> bool {
-    let now = state.clock.now_unix();
-    if now.saturating_sub(*checked_at) < RECHECK.as_secs() as i64 {
-        return true;
-    }
-    *checked_at = now;
-    still_permitted(state, actor, resource, opened_writable).await
 }
 
 /// Re-ask Neev, against the capability the socket was **opened** with.

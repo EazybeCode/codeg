@@ -46,6 +46,9 @@ use crate::neev::{
 /// Django ever sees it and gets to give the caller its own error.
 const MAX_BODY: usize = 12 * 1024 * 1024;
 
+/// Largest attachment relayed. Matches the bridge's own stream bound.
+const MAX_MEDIA: usize = 12 * 1024 * 1024;
+
 /// Framing headers for the engine's own responses.
 ///
 /// Django keeps upstream's `frame-ancestors 'none'`, and the framed page is the
@@ -342,7 +345,16 @@ pub(crate) async fn handle(
         return Err(ApiError::Forbidden);
     }
 
-    match decision {
+    // The editor shell is the one route whose failures are rendered inside an
+    // iframe, where a JSON body reads as a blank document.
+    let shell = matches!(target, Some(Target::Editor { .. }));
+    if shell {
+        if let Decision::Refuse(refusal) = decision {
+            return Ok(editor_error(refuse(refusal)));
+        }
+    }
+
+    let served = match decision {
         Decision::Refuse(refusal) => Err(refuse(refusal)),
         Decision::Asset => asset(engine, parts.uri.path()),
         Decision::Forward { resource: Some(ref resource), .. }
@@ -405,6 +417,10 @@ pub(crate) async fn handle(
             let actor = actor.ok_or(ApiError::Unauthorized)?;
             upgrade(&state, parts, actor, resource, role).await
         }
+    };
+    match served {
+        Err(error) if shell => Ok(editor_error(error)),
+        other => other,
     }
 }
 
@@ -493,6 +509,56 @@ async fn sync_title(
     }
 }
 
+/// The marker the Neev UI looks for to tell an engine failure apart from an
+/// ordinary page, so it can offer a retry instead of showing an empty frame.
+const ERROR_MARKER: &str = "neev-document-engine-error";
+
+/// Render an editor-shell failure as HTML carrying [`ERROR_MARKER`].
+///
+/// The editor loads in an iframe, so a JSON error body is invisible: the frame
+/// renders it as text or renders nothing, and the failure reads as a blank
+/// document. That is the worst available outcome — indistinguishable from a
+/// document whose content is gone. This returns a real HTML document instead,
+/// with the failure named in a `<meta>` the UI can read and a human-readable
+/// line for anyone who sees the frame directly.
+///
+/// The status is preserved rather than flattened to 200: the marker is for the
+/// UI, and the status is still the truth about what happened.
+fn editor_error(error: ApiError) -> Response {
+    let (status, code) = match error {
+        ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+        ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+        ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+        ApiError::Archived => (StatusCode::CONFLICT, "archived"),
+        ApiError::Conflict => (StatusCode::CONFLICT, "conflict"),
+        ApiError::Limited => (StatusCode::TOO_MANY_REQUESTS, "limited"),
+        ApiError::Invalid => (StatusCode::BAD_REQUEST, "invalid"),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
+    };
+    // Retryable states are the ones where trying again can plausibly succeed;
+    // a refusal is not one of them, and offering a retry button for it would be
+    // a lie the user pays for in repeated clicks.
+    let retryable = matches!(
+        error,
+        ApiError::Unavailable | ApiError::StorageUnavailable | ApiError::RequestTimeout
+    );
+    let body = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"{ERROR_MARKER}\" content=\"{code}\">\
+<meta name=\"{ERROR_MARKER}-retryable\" content=\"{retryable}\">\
+<title>Document unavailable</title></head>\
+<body><p>This document could not be opened ({code}).</p></body></html>"
+    );
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    framing(response.headers_mut());
+    response
+}
+
 /// Relay an attachment from the bridge's private media endpoint.
 ///
 /// The response headers are an **allowlist**, not a filtered copy: the object
@@ -535,7 +601,10 @@ async fn media(
     {
         return Err(ApiError::Unavailable);
     }
-    let bytes = upstream.bytes().await.map_err(|_| ApiError::Unavailable)?;
+    // The bridge bounds its own stream at 12 MiB; this is the same bound applied
+    // on this side, so an upstream that stopped enforcing it could not make this
+    // process read an unbounded attachment into memory.
+    let bytes = super::transport::read_bounded(upstream, MAX_MEDIA).await?;
     let mut response = Response::new(Body::from(bytes));
     *response.status_mut() = status;
     *response.headers_mut() = kept;
