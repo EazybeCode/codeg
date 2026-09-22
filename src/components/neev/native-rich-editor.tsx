@@ -94,6 +94,8 @@ function runsBreak(runs: InlineRun[] | undefined): boolean {
 /** What a paste should do, decided before anything touches the document. */
 export type PasteAction =
   | { kind: "inline"; content: unknown; notice: Notice }
+  /** Literal text, inserted the way the editor pastes text. */
+  | { kind: "text"; text: string; notice: Notice }
   | { kind: "blocks"; blocks: unknown[]; notice: Notice }
   | { kind: "refuse"; notice: "unsupported" | "toolarge" }
 
@@ -127,10 +129,15 @@ export function choosePaste({
   const lines = plain.replace(/\r\n?/g, "\n").split("\n")
   // A code block takes text literally — it holds its own line breaks, and
   // Markdown read inside code would be the one place it means nothing.
+  //
+  // Through the editor's own text paste, which is what upstream does for a code
+  // selection. Inserting the same string as inline content dropped it entirely:
+  // a line break there is a hard break, a code block holds plain text and
+  // nothing else, and the result was an empty block.
   if (where === "code")
     return {
-      kind: "inline",
-      content: lines.join("\n"),
+      kind: "text",
+      text: lines.join("\n"),
       notice: dropped ? "plaintext" : "none",
     }
   // Plain text alone is read as our restricted Markdown, so pasted structure
@@ -319,6 +326,7 @@ export function NativeRichEditor({
             editor.insertInlineContent(
               action.content as Parameters<typeof editor.insertInlineContent>[0]
             )
+          else if (action.kind === "text") editor.pasteText(action.text)
           else
             // Through the editor's own serializer and paste pipeline: one
             // transaction that replaces the selection and splits the block at
