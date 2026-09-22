@@ -182,7 +182,10 @@
     "renameFailed": "無法儲存該名稱。",
     "activityWorking": "處理中…",
     "activityRunningTool": "正在執行 {name}…",
-    "activityElapsed": "{number} 秒"
+    "activityElapsed": "{number} 秒",
+    "richTooLarge": "已拒絕貼上：此內容超出單一文件的容量上限。請分批貼上。",
+    "pastedCellLines": "已作為單行貼上：表格儲存格不能包含換行。",
+    "cellNoLineBreak": "表格儲存格不能包含換行。請另起一列，或將文字寫在同一行。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

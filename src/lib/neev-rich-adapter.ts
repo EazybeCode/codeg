@@ -18,6 +18,19 @@ import {
 function unsupported(): never {
   throw new Error("Unsupported rich document content")
 }
+/**
+ * Too much, rather than the wrong shape.
+ *
+ * Worth its own type because it is worth its own sentence: "this is bigger than
+ * a document can hold" tells someone to paste less, while "unsupported
+ * formatting" sends them looking for a stray table they do not have.
+ */
+export class RichTooLargeError extends Error {
+  constructor() {
+    super("Rich content exceeds the document limit")
+    this.name = "RichTooLargeError"
+  }
+}
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     return unsupported()
@@ -256,7 +269,7 @@ export function toNeev(value: unknown): RichDocument {
 /** Conservative CommonMark import: unsupported syntax is a visible refusal. */
 export function importMarkdown(markdown: string): RichDocument {
   if (new TextEncoder().encode(markdown).length > 1_048_576)
-    return unsupported()
+    throw new RichTooLargeError()
   // Recognize unsupported extensions as syntax, without rejecting code/literals.
   const tree = unified().use(remarkParse).use(remarkGfm).parse(markdown)
   type Node = {

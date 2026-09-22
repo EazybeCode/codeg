@@ -182,7 +182,10 @@
     "renameFailed": "No se pudo guardar ese nombre.",
     "activityWorking": "Trabajando…",
     "activityRunningTool": "Ejecutando {name}…",
-    "activityElapsed": "{number}s"
+    "activityElapsed": "{number}s",
+    "richTooLarge": "Pegado rechazado: este contenido supera lo que cabe en un documento. Pégalo por partes.",
+    "pastedCellLines": "Pegado en una sola línea: una celda de tabla no admite saltos de línea.",
+    "cellNoLineBreak": "Una celda de tabla no admite saltos de línea. Usa una fila nueva o escribe el texto en una sola línea."
   },
   "Native": {
     "callbackConflict": "Este método de acceso entra en conflicto con una cuenta existente. Usa tu método de acceso original y luego abre Configuración para vincular otro método. Las cuentas nunca se fusionan automáticamente.",
