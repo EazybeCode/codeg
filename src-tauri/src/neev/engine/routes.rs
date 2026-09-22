@@ -261,12 +261,20 @@ fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Opt
     let (id, action) = document.split_once('/')?;
     let resource = resource_id(id)?;
     let (write, body) = match (action, method) {
-        // Retrieve the document the editor is about to render. This is also the
-        // durable *read* path: upstream's `content` action is PATCH-only, and
-        // `DocumentSerializer` carries no `content` field, so the stored Yjs
-        // state is loaded by y-provider from the object store rather than
-        // fetched over this API by the browser.
+        // Retrieve the document the editor is about to render.
         ("", "GET") => (false, Body::None),
+        // The durable Yjs read. The editor blocks on this before it will create
+        // the collaboration provider at all — `useCollaboration` returns early
+        // until the content query resolves — so refusing it does not degrade
+        // the editor, it stops the socket from ever being opened and leaves the
+        // body on its loading skeleton.
+        //
+        // An earlier version of this file asserted `content` was PATCH-only,
+        // reading the action decorator and stopping there. The backend answers
+        // `allow: GET, PATCH, HEAD, OPTIONS`, measured against the running
+        // service. Serving a blank document instead was never an option: it is
+        // indistinguishable from content that is gone.
+        ("content/", "GET") => (false, Body::None),
         // Rename. Narrowed to `title` because this endpoint would otherwise
         // accept the sharing fields the allowlist exists to withhold.
         ("", "PATCH") => (true, Body::TitleOnly),
@@ -503,11 +511,21 @@ mod tests {
         );
         assert_eq!(classify("DELETE", &path, None), None);
         assert_eq!(classify("POST", &path, None), None);
-        // `content` is PATCH-only at v5.7.0 — the action is declared
-        // `methods=["patch"]` — so a GET of it is not silently treated as a read
-        // of a route upstream would answer with 405.
+        // `content` answers GET as well as PATCH — verified against the running
+        // backend, which advertises `allow: GET, PATCH, HEAD, OPTIONS`. The
+        // editor blocks on this read before creating the provider, so denying
+        // it stops the socket from ever opening.
         assert_eq!(
             classify("GET", &format!("{PREFIX}/api/v1.0/documents/{DOC}/content/"), None),
+            Some(Target::Document {
+                resource: DOC.into(),
+                write: false,
+                body: Body::None
+            })
+        );
+        // Still not a licence for other methods on it.
+        assert_eq!(
+            classify("DELETE", &format!("{PREFIX}/api/v1.0/documents/{DOC}/content/"), None),
             None
         );
     }
