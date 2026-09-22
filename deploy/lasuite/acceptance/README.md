@@ -4,8 +4,9 @@ Runs against an isolated canary over loopback and asks whether the engine
 actually behaves: documents get created on it, permissions hold, two people can
 edit at once, and the things Neev kept doing still work.
 
-**Status: prepared, not yet run.** The canary is still the baseline, so no case
-here has produced a result. Nothing below should be read as a passing test.
+**Status: run against the canary.** Last run 10 passed, 3 failed, 4 skipped —
+the failures are real and tracked (a page chunk that 404s, and collaboration
+sockets that never open). Skipped is not passed; see below.
 
 ```bash
 ./run.sh                 # against http://127.0.0.1:3100
@@ -23,7 +24,9 @@ NEEV_ACCEPTANCE_BASE=http://127.0.0.1:3100 ./run.sh
 ## What it refuses to do
 
 **It will not run against a baseline.** The preflight checks that something
-answers on the base URL *and* that `/document-engine/` is served. If the
+answers on the base URL *and* that `/document-engine/api/v1.0/` is mounted — not
+the bare prefix, which 404s on a perfectly healthy candidate and once made this
+refuse to run against a live engine. If the
 candidate is not installed it exits **2** — not 1 — so "could not run" is
 distinguishable from "ran and failed" by anything scripting it. A wall of red
 that means "nobody deployed yet" is worse than no output: it teaches people to
@@ -56,12 +59,14 @@ words that skipped cases proved nothing.
 | | what it establishes |
 |---|---|
 | new document in a project | created on the engine, editor page reachable, and it carries `frame-ancestors` — without which the iframe has no policy at all |
+| editor assets | every asset the page references loads, with the right MIME — one missing chunk leaves the editor as a spinner forever |
 | new document in a subfolder | the same, and it lands in the node asked for |
 | retried creation | one document, not two, in Neev **and** on the engine |
 | CSRF | an unsafe request with no token is refused by Neev *and* by Docs through the prefix |
 | rename | a title changed in the engine reaches Neev's metadata — what the UI's focus-return refresh depends on |
 | refused rename | a rejected write left **both** titles as they were, not just returned an error |
-| non-creator rename | a shared member changes neither title |
+| shared-editor rename | a shared member may rename, and both stores follow |
+| archived rename | refused, and neither title moves |
 | concurrent renames | two at once settle on one title, identical on both sides |
 | other organization | refused on Neev's API, the engine's API, and the socket |
 | second user | shares to the organization, both connect, **both write without waiting**, and converge |
@@ -94,11 +99,17 @@ state Neev and Docs both display, so "they disagree" is invisible unless
 something looks at both. A refused write that nevertheless landed on one side
 would pass a status-code check and still leave the two out of step.
 
-The non-creator case may legitimately fail, and the message says so rather than
-asserting a verdict. Renaming is creator-only in Neev, but sharing to the
-organization gives a member the `editor` role in Docs, and upstream's editor role
-includes `partial_update` — which covers the title. If that case fails it is a
-policy decision about what a shared editor may do, not a defect to patch blindly.
+**Renaming is deliberately not creator-only**, and an earlier version of this
+harness asserted the opposite. Neev's `resources::update` restricts visibility,
+archiving and moving to the creator; the title is left to anyone who may edit the
+document. That matches the Docs editor role, which includes `partial_update`, so
+the two models agree rather than diverge — a shared editor renaming a document
+they may already rewrite is consistency, not a bypass.
+
+So the case asserts the rename is **accepted** and that both stores end up
+holding it. The boundary that does exist is archiving: an archived document is
+read-only, and its own case checks that a rename is refused *and* that neither
+title moved.
 
 The concurrent case does **not** require both renames to succeed. A conflict
 response is a perfectly good answer. What it requires is that the two stores
@@ -123,15 +134,46 @@ preview evaluation left the same question open and it has not been closed since.
   (`NEEV_ACCEPTANCE_ENGINE_STOPPED=1`); otherwise it skips rather than inventing
   a result.
 
-## Verified so far
+## What the last run established
 
-Without a canary, only the harness itself:
+Against the canary, with real actors:
 
-- all five modules parse; `run.sh` parses
-- the official provider, its websocket constructor, Yjs and the `ws` polyfill all
-  load from the pinned tree, and a `Y.Doc` round-trips
-- the version gate **fires** — pointed at a decoy tree declaring provider 3.0.0
-  it refuses to run, so the assertion is not vacuous
-- both preflight branches fire: nothing listening → exit 2 with the reason; and a
-  stand-in server answering Neev but 404ing `/document-engine/` → "this looks
-  like the baseline, not the candidate", exit 2
+- documents are created on the engine in a project and in a subfolder, and a
+  retried creation makes one document, known to both sides
+- CSRF is enforced on **both** Neev and Docs, and the token is genuinely what is
+  checked — with an Origin present and the token absent the answer is 401
+- a rename in the engine reaches Neev's metadata, which is what the UI's
+  focus-return refresh depends on
+- a refused rename leaves both titles untouched, and two concurrent renames
+  settle on one title that both stores agree on
+- another organization is refused on Neev's API, the engine's API and the page
+- the legacy document is untouched, still `native`, still readable
+- Neev's own save and restore refuse an engine document
+
+Open failures at that run: one page chunk 404s because its percent-encoded name
+is not decoded before the file is looked up, and no collaboration socket can be
+established at all.
+
+The harness's own guards were checked too, since a guard nobody has seen fire is
+a guard nobody knows the state of: the version gate refuses a decoy tree
+declaring provider 3.0.0, both preflight branches fire, and each fixture
+validation refuses on its own reason rather than on a missing file.
+
+### Four harness bugs that had been reporting as product failures
+
+Worth recording, because each was indistinguishable from a real defect:
+
+- **no `Origin` header.** Node's fetch sends none and a browser always does, and
+  Neev checks it. Identical request: without Origin 403, with Origin 201. Three
+  cases failed and twelve skipped behind them.
+- **Docs has its own CSRF**, a `csrftoken` cookie echoed in `X-CSRFToken`.
+  Neev's `x-neev-csrf` means nothing to it, so every engine-side write was
+  refused.
+- **Neev's resource update takes the whole record**, not the field being
+  changed. Sending one key is a 400 that reads exactly like a refusal to share.
+- **socket failures all looked alike.** Every one reported "closed", so the
+  cases asserting a socket is *refused* were passing because collaboration was
+  broken. They now skip unless a known-good socket opens first, and close codes
+  are reported: 1005/1006 means the path, `4001 Origin not allowed` means the
+  header, `4001 No cookies` means the cookie, `permission denied` means a real
+  denial.

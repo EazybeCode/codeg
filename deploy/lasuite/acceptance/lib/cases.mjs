@@ -308,9 +308,9 @@ export const cases = [
   },
 
   {
-    name: "a shared non-creator cannot rename, on either side",
+    name: "a shared editor may rename, and both stores follow",
     async run({ owner, member, fixtures }) {
-      const before = `Acceptance — noncreator ${Date.now()}`
+      const before = `Acceptance — shared editor ${Date.now()}`
       const { resource } = await createDocument(owner, fixtures.projectNodeId, before)
       if (!resource?.id) return skip("could not create a document to share")
 
@@ -320,30 +320,82 @@ export const cases = [
       if (shared.status >= 400)
         return no(`sharing failed (${shared.status})`, { shared: shared.status })
 
-      const viaNeev = await updateResource(member, resource.id, {
-        title: "renamed by a member",
+      /**
+       * Renaming is deliberately NOT creator-only.
+       *
+       * Neev's `resources::update` restricts visibility, archiving and moving to
+       * the creator; the title is left to anyone who may edit the document. That
+       * lines up with the Docs editor role, which includes `partial_update`, so
+       * the two models agree rather than diverge — and a shared editor renaming
+       * a document they may already rewrite is not a bypass of anything.
+       *
+       * What matters is that the two stores do not disagree afterwards, which is
+       * what this asserts. An earlier version of this case asserted the opposite
+       * on the assumption that renaming was creator-only; that assumption was
+       * simply wrong about the product.
+       */
+      const renamed = `Acceptance — renamed by a member ${randomUUID().slice(0, 6)}`
+      const viaNeev = await updateResource(member, resource.id, { title: renamed })
+      if (viaNeev.status >= 400)
+        return no(`a shared editor was refused a rename (${viaNeev.status})`, {
+          viaNeev: viaNeev.status,
+        })
+
+      const settled = await until(async () => {
+        const now = await titles(owner, resource.id)
+        return now.native === renamed && now.docs === renamed
       })
-      const viaDocs = await engineApi(member, `documents/${resource.id}/`, {
+      const after = await titles(owner, resource.id)
+      if (!settled)
+        return no("the rename landed on one store but not the other", {
+          wanted: renamed,
+          ...after,
+        })
+
+      return ok({
+        viaNeev: viaNeev.status,
+        native: after.native,
+        docs: after.docs,
+        agreed: after.native === after.docs,
+      })
+    },
+  },
+
+  {
+    name: "an archived document refuses a rename, and nothing moves",
+    async run({ owner, fixtures }) {
+      const before = `Acceptance — archived rename ${Date.now()}`
+      const { resource } = await createDocument(owner, fixtures.projectNodeId, before)
+      if (!resource?.id) return skip("could not create a document to archive")
+
+      const archived = await updateResource(owner, resource.id, { archived: true })
+      if (archived.status >= 400)
+        return no(`archiving failed (${archived.status})`, {
+          archived: archived.status,
+        })
+
+      /**
+       * Archived is the read-only state, so this is where a rename must stop —
+       * and the refusal has to be real on both sides. A status code alone would
+       * not show a write that was rejected by one store and accepted by the
+       * other, which is the way the two would quietly drift apart.
+       */
+      const viaNeev = await updateResource(owner, resource.id, {
+        title: "renamed while archived",
+      })
+      const viaDocs = await engineApi(owner, `documents/${resource.id}/`, {
         method: "PATCH",
-        body: JSON.stringify({ title: "renamed by a member" }),
+        body: JSON.stringify({ title: "renamed while archived" }),
       })
 
       const after = await titles(owner, resource.id)
-      const unchanged = after.native === before && after.docs === before
-
-      if (!unchanged)
-        /**
-         * Worth reading carefully before calling this a bug. Renaming is
-         * creator-only in Neev, but sharing to the organization gives a member
-         * the `editor` role in Docs, and upstream's editor role includes
-         * `partial_update` — which covers the title. So the two models can
-         * legitimately disagree here, and if they do it is a policy decision
-         * about what a shared editor may do, not a defect to patch blindly.
-         */
-        return no(
-          "a non-creator changed the title; Neev makes renaming creator-only but the Docs editor role permits it — decide which is intended",
-          { before, ...after, viaNeev: viaNeev.status, viaDocs: viaDocs.status }
-        )
+      if (viaNeev.status < 400)
+        return no(`Neev accepted a rename on an archived document (${viaNeev.status})`, {
+          viaNeev: viaNeev.status,
+          ...after,
+        })
+      if (after.native !== before || after.docs !== before)
+        return no("a refused rename still moved a title", { before, ...after })
 
       return ok({
         viaNeev: viaNeev.status,
