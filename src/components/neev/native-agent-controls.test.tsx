@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeAgentChats } from "./native-agent-chats"
 import { NativeBoundary } from "./native-boundary"
 import {
+  AgentControls,
   reconcileAgentSettings,
   viewAgentControls,
 } from "./native-agent-controls"
@@ -198,6 +199,46 @@ function openSaved(routes: Record<string, () => Response>) {
   )
 }
 
+describe("more than one of these on a page", () => {
+  it("gives each row its own description, so a chip never points at another chat's", () => {
+    // Several composers are mounted at once — one per open tab. A hardcoded id
+    // would make every Fast chip resolve to the FIRST row's description, so a
+    // reader would be told about a model they are not looking at.
+    render(
+      <NativeTestRoot>
+        <AgentControls
+          capabilities={capabilities}
+          provider="claude"
+          settings={{ model: "haiku", effort: null, fast: false }}
+          onChange={() => {}}
+        />
+        <AgentControls
+          capabilities={capabilities}
+          provider="codex"
+          settings={{ model: "default", effort: null, fast: false }}
+          onChange={() => {}}
+        />
+      </NativeTestRoot>
+    )
+    const described = screen
+      .getAllByRole("button", { name: "Fast" })
+      .map((chip) => chip.getAttribute("aria-describedby"))
+    expect(described[0]).toBeTruthy()
+    expect(described[0]).not.toBe(described[1])
+    // Every id resolves, and to exactly one element.
+    for (const id of described)
+      expect(document.querySelectorAll(`[id="${id}"]`)).toHaveLength(1)
+    // And each really describes its OWN row: Haiku cannot do fast mode, the
+    // Codex default can.
+    expect(document.getElementById(described[0]!)).toHaveTextContent(
+      /not available for Haiku/
+    )
+    expect(document.getElementById(described[1]!)).toHaveTextContent(
+      "Fast mode costs more per run."
+    )
+  })
+})
+
 describe("the controls on a saved agent chat", () => {
   it("shows what the session actually runs as, from the server's own row", async () => {
     // Restored on reload because it is read from the SessionDto, not from a
@@ -263,6 +304,63 @@ describe("the controls on a saved agent chat", () => {
       fast: false,
       expectedRevision: "1",
     })
+  })
+
+  it("does not pass off an unread catalogue as a one-model provider", async () => {
+    // A provider whose discovery failed lists only `default` — exactly what a
+    // provider that genuinely has one model lists. Without saying so the menu
+    // would claim Default is all there is, which the server never said.
+    const user = userEvent.setup()
+    mockNativeSession(undefined, {
+      "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+      "GET /api/neev/agent/connections": () => json(connected),
+      [TURNS]: () => json({ items: [], nextAfter: null }),
+      "GET /api/neev/agent/capabilities": () =>
+        json({
+          providers: [
+            {
+              ...agentCatalog.providers[0],
+              models: [agentCatalog.providers[0].models[0]],
+              discoveryUnavailableReason:
+                "The runner could not be asked for its models.",
+            },
+          ],
+        }),
+    })
+    render(
+      <NativeTestRoot>
+        <NativeBoundary>
+          <NativeAgentChats sessionId={SESSION_ID} />
+        </NativeBoundary>
+      </NativeTestRoot>
+    )
+    await user.click(await screen.findByRole("button", { name: "Model" }))
+    expect(
+      await screen.findByText(
+        "Claude Code could not list its models, so this may not be all of them."
+      )
+    ).toBeVisible()
+    // The server's own English prose is never rendered; the reader gets a
+    // translated sentence instead.
+    expect(screen.queryByText(/runner could not be asked/)).toBeNull()
+    // And what IS listed stays usable: a catalogue that could not be read must
+    // not block a run that would have worked.
+    expect(
+      within(screen.getByRole("group", { name: "Claude Code" })).getByRole(
+        "menuitemradio",
+        { name: "Default" }
+      )
+    ).toBeEnabled()
+  })
+
+  it("says nothing about discovery when the catalogue was read", async () => {
+    const user = userEvent.setup()
+    openSaved({})
+    await user.click(await screen.findByRole("button", { name: "Model" }))
+    await screen.findByRole("group", { name: "Claude Code" })
+    // Absent field = discovery succeeded. A note here would invent a doubt the
+    // server never expressed.
+    expect(screen.queryByText(/may not be all of them/)).toBeNull()
   })
 
   it("will not offer a different provider, because that is a different chat", async () => {

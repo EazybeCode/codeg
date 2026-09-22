@@ -205,7 +205,8 @@
     "providerIsNewChat": "다른 공급자는 이 대화의 변경이 아니라 새 에이전트 대화입니다.",
     "settingsConflict": "이 설정이 다른 곳에서 변경되었습니다. 대화를 다시 열고 선택하세요.",
     "settingsPending": "적용 중…",
-    "settingsUnsaved": "아직 적용되지 않았습니다."
+    "settingsUnsaved": "아직 적용되지 않았습니다.",
+    "modelsIncomplete": "{name}의 모델 목록을 가져오지 못했습니다. 이것이 전부가 아닐 수 있습니다."
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

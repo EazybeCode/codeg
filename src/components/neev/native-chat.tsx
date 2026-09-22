@@ -530,10 +530,12 @@ function Chat({
   const holder = holderFor(agentProvider)
   const live = settingsOf(holder)
   const shown = desired ?? live
-  // A held choice is released only when a re-read holder actually reports it.
-  // Clearing it on a successful ask instead would claim the server had stored
-  // something before it said so — and if it stored something else, the row
-  // would quietly start describing a configuration nobody chose.
+  // A held choice is released when the SERVER'S OWN ROW reports it — which
+  // arrives either as the response to `applySettings` or, for a choice that
+  // travelled with an ask, on the next holder read. Clearing it on a successful
+  // request instead would claim the server had stored something before it said
+  // so, and if it stored something else the row would quietly start describing
+  // a configuration nobody chose.
   useEffect(() => {
     if (
       desired &&

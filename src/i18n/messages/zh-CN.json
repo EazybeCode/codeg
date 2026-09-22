@@ -205,7 +205,8 @@
     "providerIsNewChat": "换一个服务商就是新建一个智能体对话，而不是修改当前对话。",
     "settingsConflict": "这些设置已在别处更改。请重新打开对话并再次选择。",
     "settingsPending": "正在应用…",
-    "settingsUnsaved": "尚未应用。"
+    "settingsUnsaved": "尚未应用。",
+    "modelsIncomplete": "无法获取 {name} 的模型列表，这可能不是全部。"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

@@ -16,7 +16,7 @@
 //  - What is shown is the SESSION's stored configuration, not local state, so it
 //    is still accurate after a reload.
 
-import { useState } from "react"
+import { useId, useState } from "react"
 import { ChevronDown, Gauge, Zap } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
@@ -109,6 +109,12 @@ export function viewAgentControls(
   // A model's own list is the authority when it has one; otherwise the
   // provider's applies. Neither means "every level certainly works" — it means
   // "this is what the server said it would accept".
+  //
+  // Nullish coalescing, and that is the contract, not a shorthand: `null` and
+  // absent mean "fall back to the provider's list", while an EMPTY array means
+  // "this model takes no level at all" and must NOT fall back. Rewriting this
+  // as a truthiness check would turn the second case silently into the first
+  // and offer levels the server had just said were unavailable.
   const efforts: (NeevEffort | null)[] = [
     null,
     ...(model?.efforts ?? catalog?.efforts ?? []),
@@ -233,6 +239,11 @@ export function AgentControls({
   // Set when a change we were asked for could not be honoured in full, so the
   // row can say what it did instead of quietly doing something else.
   const [dropped, setDropped] = useState<"none" | "fast" | "effort">("none")
+  // Unique per mounted row. Several of these can be on the page at once — one
+  // per open tab — and a hardcoded id would mean every Fast chip pointed at the
+  // FIRST row's description, so a reader would be told about another chat's
+  // model. `aria-describedby` resolves by id, so the ids have to be real.
+  const speedNote = useId()
 
   function apply(next: NeevAgentSettings, nextProvider: NeevAgentProvider) {
     const settled = reconcileAgentSettings(capabilities, nextProvider, next)
@@ -315,6 +326,19 @@ export function AgentControls({
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>
+              {/* Without this, a provider whose discovery failed looks exactly
+                  like a provider that genuinely has one model — so the menu
+                  would claim Default is all there is, which the server never
+                  said. What IS listed stays selectable: a catalogue that could
+                  not be read must not block a run that would have worked. */}
+              {group.discoveryUnavailable && (
+                <p
+                  role="status"
+                  className="px-2 py-1.5 text-xs text-muted-foreground"
+                >
+                  {t("modelsIncomplete", { name: group.label })}
+                </p>
+              )}
             </div>
           ))}
           {lockProvider && (
@@ -395,9 +419,7 @@ export function AgentControls({
           aria-pressed={settings.fast}
           // Both states are described: the reason it cannot be used, or what
           // using it costs. Neither is discoverable from the word "Fast".
-          aria-describedby={
-            fastBlocked ? "neev-speed-blocked" : "neev-speed-cost"
-          }
+          aria-describedby={speedNote}
           title={fastBlocked ? blockedReason : t("speedFastCost")}
           onClick={() => apply({ ...settings, fast: true }, provider)}
           className="h-6 gap-1 rounded-full px-2 text-xs font-normal"
@@ -411,17 +433,14 @@ export function AgentControls({
           than disappearing and leaving the reader to wonder where it went. */}
       {fastBlocked ? (
         <p
-          id="neev-speed-blocked"
+          id={speedNote}
           role="status"
           className="w-full text-xs text-muted-foreground"
         >
           {blockedReason}
         </p>
       ) : (
-        <p
-          id="neev-speed-cost"
-          className="w-full text-xs text-muted-foreground"
-        >
+        <p id={speedNote} className="w-full text-xs text-muted-foreground">
           {t("speedFastCost")}
         </p>
       )}
