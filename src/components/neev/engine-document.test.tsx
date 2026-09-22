@@ -116,15 +116,50 @@ it("renders no second title, because upstream owns the title", async () => {
   expect(screen.queryByRole("textbox")).not.toBeInTheDocument()
 })
 
-it("offers a retry rather than a blank panel when the frame never loads", async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true })
-  alone(resource, 1000)
-  await screen.findByTitle("Design document")
+/**
+ * A frame that does not come up must read as retryable rather than as a blank
+ * panel with nothing to press.
+ *
+ * Driven through the marker the proxy puts on its error pages, because that is
+ * the real failure: an HTTP error is a response, so the frame loads it and
+ * `onError` never fires. An earlier version waited for a load that never came,
+ * which only held while jsdom happened not to fire one.
+ */
+it("offers a retry when the frame loads an engine error page", async () => {
+  alone()
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  // Stand in for an error page carrying the marker the component looks for.
+  Object.defineProperty(frame, "contentDocument", {
+    configurable: true,
+    value: {
+      querySelector: (selector: string) =>
+        selector.includes("neev-document-engine-error") ? {} : null,
+    },
+  })
   await act(async () => {
-    vi.advanceTimersByTime(1500)
+    fireEvent.load(frame)
   })
   expect(await screen.findByRole("alert")).toBeInTheDocument()
   expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument()
+})
+
+it("stays ready when the frame loads an ordinary page", async () => {
+  alone()
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  Object.defineProperty(frame, "contentDocument", {
+    configurable: true,
+    value: { querySelector: () => null },
+  })
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+  // No marker, no alert — a document that merely mentions an error is still a
+  // document, which is why the component reads one marker and never the body.
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument()
 })
 
 it("renders nothing for a resource from another organization", async () => {
@@ -216,6 +251,166 @@ it("does not re-read anything when focus never entered the frame", async () => {
   // switch into a request.
   await act(async () => {
     window.dispatchEvent(new Event("focus"))
+  })
+  expect(onChanged).not.toHaveBeenCalled()
+  expect(
+    fetcher.mock.calls.some(([path]) =>
+      String(path).includes(`/resources/${resource.id}`)
+    )
+  ).toBe(false)
+})
+
+/**
+ * The race that made renaming feel broken: rename, then immediately click
+ * something in Neev. The focus-driven read is issued before the save lands, so
+ * it answers with the OLD title — and if the editor's confirmation is dropped
+ * because that read is still in flight, the stale title is the last word.
+ */
+it("re-reads again when a confirmation arrives during an in-flight read", async () => {
+  const onChanged = vi.fn()
+  let release: () => void = () => {}
+  const deferred = new Promise<void>((resolve) => (release = resolve))
+  let call = 0
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: async () => {
+      call += 1
+      // The first read is the focus one: issued before the save landed, so it
+      // answers with the old title — and only after the confirmation arrives.
+      if (call === 1) {
+        await deferred
+        return json({ ...resource, title: "Design document" })
+      }
+      return json({ ...resource, title: "Renamed in the editor" })
+    },
+  })
+  render(
+    <NativeTestRoot>
+      <EngineDocument
+        resource={resource}
+        onBack={vi.fn()}
+        onChanged={onChanged}
+      />
+    </NativeTestRoot>
+  )
+  const frame = await screen.findByTitle("Design document")
+
+  // Focus leaves and returns: a read starts and does not finish yet.
+  frame.focus()
+  await act(async () => {
+    window.dispatchEvent(new Event("blur"))
+  })
+  await act(async () => {
+    window.dispatchEvent(new Event("focus"))
+  })
+
+  // The editor confirms the rename WHILE that read is still in flight.
+  await act(async () => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "neev-doc-metadata-updated", resourceId: resource.id },
+        source: (frame as HTMLIFrameElement).contentWindow,
+        origin: window.location.origin,
+      })
+    )
+  })
+
+  // Now let the stale read finish.
+  await act(async () => {
+    release()
+    await Promise.resolve()
+  })
+
+  await waitFor(() =>
+    expect(onChanged).toHaveBeenLastCalledWith(
+      expect.objectContaining({ title: "Renamed in the editor" })
+    )
+  )
+})
+
+it("re-reads on a confirmation from the frame, without waiting for focus", async () => {
+  const onChanged = vi.fn()
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () =>
+      json({ ...resource, title: "Renamed in the editor" }),
+  })
+  render(
+    <NativeTestRoot>
+      <EngineDocument
+        resource={resource}
+        onBack={vi.fn()}
+        onChanged={onChanged}
+      />
+    </NativeTestRoot>
+  )
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  // The frame's window is what the component compares against, and jsdom does
+  // not always have it ready the instant the element exists. Waiting for it
+  // keeps this a test of the origin check rather than of load timing.
+  await waitFor(() => expect(frame.contentWindow).toBeTruthy())
+  await act(async () => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "neev-doc-metadata-updated", resourceId: resource.id },
+        source: frame.contentWindow,
+        origin: window.location.origin,
+      })
+    )
+  })
+  await waitFor(() =>
+    expect(onChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Renamed in the editor" })
+    )
+  )
+})
+
+type SpoofedMessage = {
+  origin: string | null
+  useSource: boolean
+  id?: string
+}
+
+it.each<[string, SpoofedMessage]>([
+  [
+    "a different origin",
+    { origin: "https://evil.example.com", useSource: true },
+  ],
+  ["a window that is not the frame", { origin: null, useSource: false }],
+  [
+    "a different document's id",
+    {
+      origin: null,
+      useSource: true,
+      id: "22222222-2222-4222-8222-222222222222",
+    },
+  ],
+])("ignores a confirmation from %s", async (_label, options) => {
+  const onChanged = vi.fn()
+  const { fetcher } = mockNativeSession()
+  render(
+    <NativeTestRoot>
+      <EngineDocument
+        resource={resource}
+        onBack={vi.fn()}
+        onChanged={onChanged}
+      />
+    </NativeTestRoot>
+  )
+  const frame = await screen.findByTitle("Design document")
+  await act(async () => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "neev-doc-metadata-updated",
+          resourceId: options.id ?? resource.id,
+        },
+        source: options.useSource
+          ? (frame as HTMLIFrameElement).contentWindow
+          : window,
+        origin: options.origin ?? window.location.origin,
+      })
+    )
   })
   expect(onChanged).not.toHaveBeenCalled()
   expect(

@@ -137,6 +137,16 @@ function Frame({
   // refresh that the rename depends on would silently never happen.
   const wasInside = useRef(false)
   const busy = useRef(false)
+  /**
+   * A confirmed change that arrived while a read was already in flight.
+   *
+   * Dropping it would reintroduce the exact race it exists to close: the read
+   * already running was started before the save landed, so it answers with the
+   * OLD title, publishes it, and nothing ever asks again. One queued follow-up
+   * is enough — it is triggered by a confirmed event rather than by a timer, so
+   * it cannot become a poll.
+   */
+  const pending = useRef(false)
 
   /**
    * Re-read the document's metadata when focus comes back out of the frame.
@@ -161,8 +171,15 @@ function Frame({
       // the editor has it.
       if (document.activeElement === frame.current) wasInside.current = true
     }
-    async function returned() {
-      if (!wasInside.current || busy.current || cancelled) return
+    async function reread({ force = false } = {}) {
+      if (cancelled) return
+      if (!force && !wasInside.current) return
+      if (busy.current) {
+        // A read is already running and may have been issued before the change
+        // landed. Remember that it is now stale rather than dropping the news.
+        if (force) pending.current = true
+        return
+      }
       wasInside.current = false
       busy.current = true
       try {
@@ -176,16 +193,58 @@ function Frame({
         if (!cancelled) handleError(error)
       } finally {
         busy.current = false
+        if (pending.current && !cancelled) {
+          pending.current = false
+          void reread({ force: true })
+        }
       }
     }
 
+    /**
+     * The editor says "something about this document changed" once the server
+     * has confirmed it.
+     *
+     * Focus alone is not enough. Renaming and then immediately clicking
+     * something in Neev makes the focus-driven re-read race the save, and it
+     * loses — the tab keeps the old title until a reload. That is the bug this
+     * closes.
+     *
+     * Three things are checked before it counts, and all three matter:
+     *
+     * - `event.source` must be this frame's own window. Any other frame or
+     *   window on the page can post here, and only this one is showing this
+     *   document.
+     * - `event.origin` must be our own origin. The embed is same-origin by
+     *   design, so anything else is not the editor.
+     * - the `resourceId` must be the document this component is showing,
+     *   which stops a stale message from a previous document landing here.
+     *
+     * The message carries no title, and none is read from it. It says only
+     * "go and look"; the answer comes from Neev's own API, as before. A frame
+     * that could name itself could name itself anything.
+     */
+    function onMessage(event: MessageEvent) {
+      if (event.source !== frame.current?.contentWindow) return
+      if (event.origin !== window.location.origin) return
+      const data = event.data as { type?: unknown; resourceId?: unknown } | null
+      if (!data || data.type !== "neev-doc-metadata-updated") return
+      if (data.resourceId !== resourceId) return
+      void reread({ force: true })
+    }
+
+    // Named, because removeEventListener compares by reference — a fresh
+    // arrow function here would register a listener that is never removed.
+    const onFocus = () => void reread()
+
     window.addEventListener("blur", left)
-    window.addEventListener("focus", returned)
+    window.addEventListener("focus", onFocus)
+    window.addEventListener("message", onMessage)
     return () => {
       cancelled = true
       controller.abort()
       window.removeEventListener("blur", left)
-      window.removeEventListener("focus", returned)
+      window.removeEventListener("focus", onFocus)
+      window.removeEventListener("message", onMessage)
     }
   }, [onChanged, orgId, resourceId, handleError])
 

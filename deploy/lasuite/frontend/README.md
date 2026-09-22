@@ -5,7 +5,7 @@ La Suite Docs v5.7.0, built as a static export that Neev serves at
 real-time collaboration are untouched; what changes is where it is mounted and
 how much of its own application it draws.
 
-This directory is the whole frontend side: the pinned source, a five-patch
+This directory is the whole frontend side: the pinned source, a seven-patch
 series against it, the build script, the environment, and the serving
 requirements. It owns no Neev code. Resource creation, identity, ACL and the
 Neev-side frame wrapper belong to the backend work, not here.
@@ -100,9 +100,9 @@ entry.
 
 ## The patch series
 
-Five patches, 384 insertions, against pinned v5.7.0. Every behavioural change is
-inert unless its environment variable is set, so the patched tree still builds
-and behaves as upstream when built without `env/embed.env`.
+Seven patches against pinned v5.7.0. Every behavioural change is inert unless
+its environment variable is set, so the patched tree still builds and behaves as
+upstream when built without `env/embed.env`.
 
 | patch | what it does |
 |---|---|
@@ -111,6 +111,8 @@ and behaves as upstream when built without `env/embed.env`.
 | `0003-backend-base-path` | splits `backendOrigin()` from `backendUrl()`; the latter appends the prefix |
 | `0004-collaboration-socket-url` | socket fallback carries the prefix and follows the page scheme |
 | `0005-embed-mode` | renders the editor without Docs' own chrome |
+| `0006-embed-compact-header` | embed-only: a shorter floating bar and document header, and no role/last-updated row |
+| `0007-embed-host-metadata-signal` | tells the host, after the server confirms, that a document's metadata changed |
 
 Two of these are worth explaining rather than just listing.
 
@@ -122,6 +124,16 @@ both. Nothing about media needed its own patch, which is why there isn't one.
 Upstream hardcodes `wss://`. A plain-HTTP loopback deployment cannot open a
 `wss:` socket to itself, so the prefix alone would have left the socket
 unreachable in exactly the environment used to test it.
+
+**`0007` sends an identity, never a title.** The host shows the title too and
+cannot see a rename that happened inside the frame. Waiting for focus to leave
+is not enough either — renaming and immediately clicking something in the host
+makes the host's re-read race the save and lose, which is how a tab keeps the
+old name until a reload. So the editor posts `neev-doc-metadata-updated` with
+the resource id once the **server has confirmed**, and nothing else. A frame
+that could name itself could name itself anything; the message says "go and
+ask", and the host answers from its own API. `targetOrigin` is the page's own
+origin rather than `'*'`, so only a same-origin embedder ever receives it.
 
 ### Embedded mode
 
@@ -193,30 +205,19 @@ What is guaranteed instead:
 
 ## The artifact in this directory
 
-`artifact-v5.7.0-b31ca0a86d54.sha256` — a sha256 per file, 367 files, of the
-build described above. The tarball itself is 24 MB and is not committed; it is
-at `/tmp/neev-lasuite-build/neev-document-engine-frontend-v5.7.0.tar.gz`,
-sha256 `47772bd319073f971b2e5c170542646c2463fd074aecd3f7c4bf6c1c97cebf86`.
-Rebuild it with `build.sh` rather than treating that path as durable.
+`artifact-v5.7.0-2d1a0c74feb3.sha256` — a sha256 per file, **4160 files**, of
+the build described above. The tarball is 43 MB and is not committed; it is at
+`/tmp/neev-document-engine-frontend-v5.7.0-2d1a0c74feb3.tar.gz`, sha256
+`4ff116449ca90cd9328234e02527a601b03f141efd6b70a31d84be76dde1a8ac`. Rebuild it
+with `build.sh` rather than treating that path as durable.
 
-One difference between that artifact and what `build.sh` now produces: the
-shipped build was run without upstream's `prebuild` step, so
-`assets/fonts/emoji/` contains only `fallback.png` instead of the full Apple
-emoji set. `build.sh` runs `prebuild`.
-
-That omission was checked rather than assumed, and it costs the editor nothing:
-
-- the only source reference to `/assets/fonts/emoji/` is in `useExportAGPL`,
-  which `doc-export/hooks/index.ts` loads solely when
-  `NEXT_PUBLIC_PUBLISH_AS_MIT === 'false'`
-- `grep` over the built `out/_next` finds **no reference to that path at all**,
-  so nothing in the shipped bundle can ask for those files
-- the emoji picker in the editor is `@emoji-mart/data`, which is bundled and
-  has nothing to do with these images
-
-So no rebuild was done for it. If anyone ever sets `PUBLISH_AS_MIT=false`, note
-that those paths are root-relative and would need prefixing as well as
-populating.
+It is larger than the first artifact (24 MB, 367 files) for one reason: this
+build runs upstream's `prebuild`, which copies the Apple emoji set into
+`assets/fonts/emoji/`. That is ~3800 small files and is the whole difference.
+They are still unreferenced by a `PUBLISH_AS_MIT=true` bundle — see the sweep
+above — so the growth buys nothing except fidelity to upstream's own build.
+Dropping `prebuild` would take it back to 24 MB if the size ever matters more
+than that fidelity.
 
 ## Verification
 

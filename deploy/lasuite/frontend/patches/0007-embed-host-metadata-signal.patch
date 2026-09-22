@@ -1,0 +1,73 @@
+diff --git a/apps/impress/src/core/embed-host.ts b/apps/impress/src/core/embed-host.ts
+new file mode 100644
+index 0000000..3560b54
+--- /dev/null
++++ b/apps/impress/src/core/embed-host.ts
+@@ -0,0 +1,43 @@
++import { isEmbedded } from './embed';
++
++/**
++ * Tell the host application that a document's metadata changed.
++ *
++ * The host shows the title too — in a tab, a breadcrumb, a sidebar — and it has
++ * no way to notice a rename that happened in here. Waiting for focus to leave
++ * the frame is not enough either: a reader can rename and immediately click
++ * something in the host, and the host's re-read then races the save and loses,
++ * leaving the old title on screen until a reload.
++ *
++ * So this fires when the server has **confirmed** the change, and carries only
++ * the identity of what changed.
++ *
++ * **It deliberately does not send the title.** A frame that could name itself
++ * could name itself anything, and the host would be rendering a string chosen
++ * by a document's contents. The message is a nudge to go and ask, not a fact to
++ * believe: the host re-reads its own API and trusts that.
++ *
++ * `targetOrigin` is this page's own origin rather than `'*'`, so the message is
++ * delivered only to a same-origin embedder and never to some other host that
++ * happens to have framed this page.
++ */
++export const HOST_METADATA_EVENT = 'neev-doc-metadata-updated';
++
++export function notifyHostMetadataChanged(resourceId: string): void {
++  if (!isEmbedded() || typeof window === 'undefined') {
++    return;
++  }
++  if (window.parent === window) {
++    return;
++  }
++
++  try {
++    window.parent.postMessage(
++      { type: HOST_METADATA_EVENT, resourceId },
++      window.location.origin,
++    );
++  } catch {
++    // A host that cannot receive it is not this document's problem, and the
++    // rename itself has already succeeded.
++  }
++}
+diff --git a/apps/impress/src/features/docs/doc-management/hooks/useDocTitleUpdate.tsx b/apps/impress/src/features/docs/doc-management/hooks/useDocTitleUpdate.tsx
+index 22d2590..3844062 100644
+--- a/apps/impress/src/features/docs/doc-management/hooks/useDocTitleUpdate.tsx
++++ b/apps/impress/src/features/docs/doc-management/hooks/useDocTitleUpdate.tsx
+@@ -1,6 +1,7 @@
+ import { useTreeContext } from '@gouvfr-lasuite/ui-components';
+ import { useCallback } from 'react';
+ 
++import { notifyHostMetadataChanged } from '@/core/embed-host';
+ import { useBroadcastStore } from '@/stores/useBroadcastStore';
+ 
+ import { KEY_DOC, KEY_LIST_DOC, useUpdateDoc } from '../api';
+@@ -22,6 +23,11 @@ export const useDocTitleUpdate = (options?: UseDocUpdateOptions) => {
+       // Broadcast to every user connected to the document
+       broadcast(`${KEY_DOC}-${updatedDoc.id}`);
+ 
++      // And, when embedded, to the host application — which shows this title
++      // too and cannot see a rename that happened in here. Sent only once the
++      // server has confirmed, so the host's re-read cannot race the save.
++      notifyHostMetadataChanged(updatedDoc.id);
++
+       if (treeContext) {
+         if (treeContext.root?.id === updatedDoc.id) {
+           treeContext?.setRoot(updatedDoc);

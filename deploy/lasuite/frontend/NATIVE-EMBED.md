@@ -77,10 +77,37 @@ Bounded on purpose: at most one request per visit to the editor, not a poll, and
 only when focus was actually inside the frame — a bare window focus is someone
 returning to the browser tab, not someone leaving the editor.
 
-**Not driven by `postMessage`.** The frame could announce any title it liked, and
-believing it would let a document's contents rename it in Neev's chrome. The
-title is read back from Neev's own API or not at all. There is a test that a
-`message` event claiming a title changes nothing.
+### Focus alone was not enough
+
+Rename, then immediately click something in Neev, and the focus-driven read is
+issued *before* the save lands. It answers with the old title, publishes it, and
+the tab keeps the stale name until a reload. That is a real bug and it was found
+in a browser, not in a test.
+
+So the editor also says so directly: once the **server has confirmed** a title
+change, it posts `neev-doc-metadata-updated` with the resource id to its parent
+(upstream patch `0007`).
+
+**The message carries no title, and none is read from it.** A frame that could
+name itself could name itself anything, and Neev would be rendering a string
+chosen by a document's contents. The signal says "go and ask"; the answer still
+comes from Neev's own API. Three things are checked before it counts:
+
+- `event.source` is this frame's own window — any frame on the page can post
+- `event.origin` is our own origin — the embed is same-origin by design
+- the `resourceId` is the document this component is showing — so a stale
+  message from a previously-open document cannot land here
+
+The earlier rule here said "not driven by `postMessage`". That was too broad: the
+thing never to trust is a frame-supplied **title**, not every message. An
+origin-verified, invalidate-only signal is safe, and is what closes the race.
+
+**A confirmation arriving mid-read is queued, not dropped.** If a read is already
+in flight when the message lands, that read was issued before the change and will
+answer with the old title — so dropping the signal would reinstate exactly the
+race it exists to close. One follow-up is queued and runs when the in-flight read
+settles. It is triggered by a confirmed event rather than a timer, so it cannot
+become a poll. There is a test for precisely that interleaving.
 
 ## Audit of the document creation paths
 
@@ -118,7 +145,7 @@ someone titles it in the editor.
 
 ## Tests
 
-`src/components/neev/engine-document.test.tsx`, 21 tests. The ones that carry
+`src/components/neev/engine-document.test.tsx`, 27 tests. The ones that carry
 weight:
 
 - **no content, revision or autosave request at all** — asserted against *every*
@@ -130,11 +157,19 @@ weight:
 - the parser accepts `engine` on documents *and* on chats, still accepts a
   response without it, refuses an engine it cannot render, and still refuses both
   an unexpected field and a missing required one
-- the title is re-read on focus returning out of the frame; not re-read when
-  focus never entered it; and not changed by a `postMessage`
+- the title is re-read on focus returning out of the frame, and not re-read when
+  focus never entered it
+- a confirmation from the frame re-reads without waiting for focus, and one that
+  arrives **while a read is already in flight** still produces a follow-up that
+  publishes the new title — the interleaving that caused the original bug
+- a confirmation is ignored from a different origin, from a window that is not
+  the frame, and for a different document's id; a `message` claiming a title
+  still changes nothing
 - sharing, archive and move survive; rename does not; an organization member sees
   neither the menu nor the share button
-- a frame that never loads offers a retry instead of a blank panel
+- a frame that loads the proxy's error page offers a retry instead of a blank
+  panel, and an ordinary page does not — the component reads one marker and
+  never the body, so a document that merely mentions an error is still a document
 
 ## Known gaps — not covered, and not to be read as covered
 

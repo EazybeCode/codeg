@@ -1,0 +1,81 @@
+diff --git a/apps/impress/src/components/FloatingBar.tsx b/apps/impress/src/components/FloatingBar.tsx
+index 4ac75e0..dccc511 100644
+--- a/apps/impress/src/components/FloatingBar.tsx
++++ b/apps/impress/src/components/FloatingBar.tsx
+@@ -1,9 +1,20 @@
+ import { PropsWithChildren } from 'react';
+ import { css } from 'styled-components';
+ 
++import { isEmbedded } from '@/core/embed';
++
+ import { Box, BoxType } from './Box';
+ import { Card } from './Card';
+ 
++/**
++ * Embedded, this bar sits below the host application's own chrome, so its
++ * height is added to a header the reader has already paid for. Standalone it is
++ * the only thing above the document and 68px is right; inside a frame the same
++ * 68px is the difference between the title being on screen and being pushed
++ * under the fold.
++ */
++const BAR_MIN_HEIGHT = isEmbedded() ? '44px' : '68px';
++
+ const FLOATING_STYLES = css`
+   position: sticky;
+   top: 0;
+@@ -12,7 +23,7 @@ const FLOATING_STYLES = css`
+   width: 100%;
+   z-index: 10; // Under editor select box but above other elements (e.g., doc title, suggestion menu)
+   isolation: isolate;
+-  min-height: 68px;
++  min-height: ${BAR_MIN_HEIGHT};
+ 
+   &::before {
+     content: '';
+diff --git a/apps/impress/src/features/docs/doc-header/components/DocHeader.tsx b/apps/impress/src/features/docs/doc-header/components/DocHeader.tsx
+index eaaa307..70db986 100644
+--- a/apps/impress/src/features/docs/doc-header/components/DocHeader.tsx
++++ b/apps/impress/src/features/docs/doc-header/components/DocHeader.tsx
+@@ -6,6 +6,7 @@ import { css } from 'styled-components';
+ import RemoveEmojiSVG from '@/assets/icons/ui-kit/face-remove.svg';
+ import AddEmojiSVG from '@/assets/icons/ui-kit/face.svg';
+ import { Box, HorizontalSeparator } from '@/components';
++import { isEmbedded } from '@/core/embed';
+ import {
+   Doc,
+   getEmojiAndTitle,
+@@ -44,7 +45,14 @@ export const DocHeader = ({ doc }: DocHeaderProps) => {
+         $width="100%"
+         aria-label={t('It is the card information about the document.')}
+         className="--docs--doc-header"
+-        $minHeight="125px"
++        /*
++         * Embedded, the host application already spends vertical space on its
++         * own chrome before this begins, and the reader asked for more of the
++         * screen to be the document. 125px reserves room for an emoji button
++         * that is usually absent and a metadata row that is hidden below, so
++         * standalone it is reasonable and in a frame it is mostly empty.
++         */
++        $minHeight={isEmbedded() ? '56px' : '125px'}
+         $css={css`
+           .--docs--doc-header-emoji-button {
+             opacity: 0;
+@@ -109,9 +117,16 @@ export const DocHeader = ({ doc }: DocHeaderProps) => {
+               latestTitleRef.current = title;
+             }}
+           />
+-          <DocHeaderInfo doc={doc} />
++          {/*
++            The role and last-updated row. Neev shows visibility in its own
++            chrome and the frame's height is scarce, so it goes — the document
++            is what the space should be spent on.
++          */}
++          {!isEmbedded() && <DocHeaderInfo doc={doc} />}
+         </Box>
+-        <HorizontalSeparator $margin={{ top: '24px' }} />
++        <HorizontalSeparator
++          $margin={{ top: isEmbedded() ? '12px' : '24px' }}
++        />
+       </Box>
+     </>
+   );
