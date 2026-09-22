@@ -43,6 +43,8 @@ from neev_bridge.settings_support import (
 OWNER = "neev:7:1"
 MEMBER = "neev:7:2"
 OUTSIDER = "neev:8:9"
+# Same organization, but no access to the document under test.
+OUTSIDER_SAME_ORG = "neev:7:77"
 
 BRIDGE_KEY_HEADER = "HTTP_X_NEEV_BRIDGE_KEY"
 
@@ -568,6 +570,98 @@ class MediaRelayTests(TestCase):
         document.save(update_fields=["attachments"])
 
         self.assertEqual(self.fetch(key).status_code, 404)
+
+
+class ThreadScopeTests(TestCase):
+    """A thread route must mean what its URL says.
+
+    Upstream scopes comment *reads* by `thread__document`, but the create path
+    does not go through that queryset: `CommentPermission` checks the document
+    in the URL and the serializer takes `thread_id` from the URL without
+    checking the pairing. Measured against v5.7.0 on the canary, a user with no
+    access to a document posted a comment into one of its threads through their
+    own document's URL, got 201, and the text was readable by the document's
+    owner. The guard makes the pairing a precondition instead.
+    """
+
+    def setUp(self):
+        self.private = new_id()
+        self.outsiders = new_id()
+        service.provision_document(self.private, "Private", OWNER)
+        service.project_access(self.private, OWNER, choices.RoleChoices.EDITOR)
+        service.provision_document(self.outsiders, "Outsider's own", OUTSIDER_SAME_ORG)
+        service.project_access(
+            self.outsiders, OUTSIDER_SAME_ORG, choices.RoleChoices.EDITOR
+        )
+
+        self.owner = Client()
+        self.owner.get("/api/v1.0/users/me/", secure=True, **identity(OWNER))
+        response = self.post_json(
+            self.owner,
+            f"/api/v1.0/documents/{self.private}/threads/",
+            {"body": {"type": "doc", "text": "private discussion"}},
+            OWNER,
+        )
+        self.assertEqual(response.status_code, 201, response.content[:200])
+        self.thread = response.json()["id"]
+
+    def post_json(self, client, path, payload, subject):
+        return client.post(
+            path,
+            data=json.dumps(payload),
+            content_type="application/json",
+            secure=True,
+            HTTP_X_CSRFTOKEN=client.cookies["csrftoken"].value,
+            HTTP_ORIGIN=f"https://{settings.ALLOWED_HOSTS[0]}",
+            **identity(subject),
+        )
+
+    def test_a_thread_from_another_document_is_not_reachable(self):
+        outsider = Client()
+        outsider.get("/api/v1.0/users/me/", secure=True, **identity(OUTSIDER_SAME_ORG))
+        response = self.post_json(
+            outsider,
+            f"/api/v1.0/documents/{self.outsiders}/threads/{self.thread}/comments/",
+            {"body": {"type": "doc", "text": "written from outside"}},
+            OUTSIDER_SAME_ORG,
+        )
+        self.assertEqual(
+            response.status_code, 404,
+            "a comment was written into a thread of a document the caller cannot read",
+        )
+
+    def test_nothing_foreign_reaches_the_private_thread(self):
+        outsider = Client()
+        outsider.get("/api/v1.0/users/me/", secure=True, **identity(OUTSIDER_SAME_ORG))
+        self.post_json(
+            outsider,
+            f"/api/v1.0/documents/{self.outsiders}/threads/{self.thread}/comments/",
+            {"body": {"type": "doc", "text": "written from outside"}},
+            OUTSIDER_SAME_ORG,
+        )
+        listing = self.owner.get(
+            f"/api/v1.0/documents/{self.private}/threads/{self.thread}/comments/",
+            secure=True, **identity(OWNER),
+        )
+        self.assertEqual(listing.status_code, 200)
+        bodies = json.dumps(listing.json())
+        self.assertNotIn("written from outside", bodies)
+
+    def test_the_owners_own_route_still_works(self):
+        response = self.post_json(
+            self.owner,
+            f"/api/v1.0/documents/{self.private}/threads/{self.thread}/comments/",
+            {"body": {"type": "doc", "text": "a legitimate reply"}},
+            OWNER,
+        )
+        self.assertEqual(response.status_code, 201, "the guard broke a valid route")
+
+    def test_listing_threads_is_untouched_by_the_guard(self):
+        """The list route carries no thread id, so the guard must not touch it."""
+        response = self.owner.get(
+            f"/api/v1.0/documents/{self.private}/threads/", secure=True, **identity(OWNER)
+        )
+        self.assertEqual(response.status_code, 200)
 
 
 class ContentReadTests(TransactionTestCase):

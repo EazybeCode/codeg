@@ -7,6 +7,7 @@ a container that boots with the middleware in the wrong place.
 
 AUTH_MIDDLEWARE = "django.contrib.auth.middleware.AuthenticationMiddleware"
 REMOTE_USER_MIDDLEWARE = "neev_bridge.middleware.NeevRemoteUserMiddleware"
+THREAD_SCOPE_MIDDLEWARE = "neev_bridge.thread_scope.NeevThreadScopeMiddleware"
 UPSTREAM_FORCE_SESSION = "core.middleware.ForceSessionMiddleware"
 NEEV_FORCE_SESSION = "neev_bridge.force_session.NeevForceSessionMiddleware"
 CSRF_MIDDLEWARE = "django.middleware.csrf.CsrfViewMiddleware"
@@ -60,7 +61,10 @@ def build_middleware(upstream):
     removes or reorders it.
     """
     wired = replace_entry(upstream, UPSTREAM_FORCE_SESSION, NEEV_FORCE_SESSION)
-    return insert_after(wired, AUTH_MIDDLEWARE, REMOTE_USER_MIDDLEWARE)
+    wired = insert_after(wired, AUTH_MIDDLEWARE, REMOTE_USER_MIDDLEWARE)
+    # After the identity is established, so a refusal is attributable in logs,
+    # and before any view runs.
+    return insert_after(wired, REMOTE_USER_MIDDLEWARE, THREAD_SCOPE_MIDDLEWARE)
 
 
 def build_authentication_backends(upstream):
@@ -88,6 +92,8 @@ def check_wiring(middleware, backends):
         problems.append("remote-user middleware runs before AuthenticationMiddleware")
     if CSRF_MIDDLEWARE not in middleware:
         problems.append("CsrfViewMiddleware has been removed")
+    if THREAD_SCOPE_MIDDLEWARE not in middleware:
+        problems.append("the thread-scope guard is not installed")
     if UPSTREAM_FORCE_SESSION in middleware:
         problems.append("upstream ForceSessionMiddleware was not replaced")
     if backends[:1] != [REMOTE_USER_BACKEND]:

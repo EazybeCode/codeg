@@ -15,6 +15,7 @@ from neev_bridge.settings_support import (
     OIDC_BACKEND,
     REMOTE_USER_BACKEND,
     REMOTE_USER_MIDDLEWARE,
+    THREAD_SCOPE_MIDDLEWARE,
     UPSTREAM_FORCE_SESSION,
     build_authentication_backends,
     build_middleware,
@@ -70,13 +71,25 @@ class MiddlewareWiringTests(SimpleTestCase):
 
     def test_force_session_is_replaced_not_removed(self):
         self.assertNotIn(UPSTREAM_FORCE_SESSION, self.wired)
+        # Two bridge entries are inserted above it, so it shifts by exactly two.
         self.assertEqual(
             self.wired.index(NEEV_FORCE_SESSION),
-            UPSTREAM_MIDDLEWARE.index(UPSTREAM_FORCE_SESSION) + 1,
+            UPSTREAM_MIDDLEWARE.index(UPSTREAM_FORCE_SESSION) + 2,
+        )
+
+    def test_the_thread_scope_guard_runs_after_identity_and_before_the_view(self):
+        self.assertGreater(
+            self.wired.index(THREAD_SCOPE_MIDDLEWARE),
+            self.wired.index(REMOTE_USER_MIDDLEWARE),
+        )
+        self.assertLess(
+            self.wired.index(THREAD_SCOPE_MIDDLEWARE),
+            self.wired.index(NEEV_FORCE_SESSION),
         )
 
     def test_every_other_upstream_entry_is_preserved_in_order(self):
-        kept = [m for m in self.wired if m != REMOTE_USER_MIDDLEWARE]
+        inserted = {REMOTE_USER_MIDDLEWARE, THREAD_SCOPE_MIDDLEWARE}
+        kept = [m for m in self.wired if m not in inserted]
         expected = [
             NEEV_FORCE_SESSION if m == UPSTREAM_FORCE_SESSION else m
             for m in UPSTREAM_MIDDLEWARE
@@ -117,6 +130,14 @@ class WiringCheckTests(SimpleTestCase):
                 build_authentication_backends(UPSTREAM_BACKENDS),
             ),
             [],
+        )
+
+    def test_detects_a_missing_thread_scope_guard(self):
+        broken = [m for m in build_middleware(UPSTREAM_MIDDLEWARE)
+                  if m != THREAD_SCOPE_MIDDLEWARE]
+        self.assertIn(
+            "the thread-scope guard is not installed",
+            check_wiring(broken, build_authentication_backends(UPSTREAM_BACKENDS)),
         )
 
     def test_detects_removed_csrf_middleware(self):
