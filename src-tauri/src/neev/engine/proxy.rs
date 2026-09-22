@@ -261,11 +261,10 @@ pub(crate) fn collaboration_url(base: &url::Url, resource: &str) -> Result<url::
     Ok(url)
 }
 
-/// Identity for the caller, derived from the Neev session and nothing else.
-pub(crate) fn assertion(actor: &OrgContext) -> Assertion {
-    Assertion {
-        subject: identity::subject(actor),
-    }
+/// Identity for the caller, derived from the Neev session and Neev's own tables
+/// — never from a request header.
+pub(crate) async fn assertion(state: &ServerState, actor: &OrgContext) -> Assertion {
+    identity::assertion(&state.database, actor).await
 }
 
 /// Classify, authorize and decide. Separated from the forwarding so the handler
@@ -353,11 +352,11 @@ pub(crate) async fn handle(
             let Some(Target::Media { key, .. }) = target.as_ref() else {
                 return Err(ApiError::NotFound);
             };
-            media(engine, resource, key, &assertion(&actor)).await
+            media(engine, resource, key, &assertion(&state, &actor).await).await
         }
         Decision::Forward { resource, role } => {
             let actor = actor.ok_or(ApiError::Unauthorized)?;
-            let assertion = assertion(&actor);
+            let assertion = assertion(&state, &actor).await;
             // Project before forwarding, not only before a socket. A non-creator
             // has no Docs access row of their own, so upstream would answer 403
             // on the document GET and the editor would never start — the socket
@@ -568,7 +567,7 @@ async fn upgrade(
     use axum::extract::FromRequestParts;
 
     let engine = state.engine.as_ref().ok_or(ApiError::NotFound)?;
-    let assertion = assertion(&actor);
+    let assertion = assertion(state, &actor).await;
     // Project the caller's role *before* the socket exists, so upstream's
     // read-only flag is decided from Neev's current answer rather than from
     // whatever access row happened to be left behind by an earlier connect.

@@ -67,8 +67,54 @@ pub(crate) const STRIPPED: &[&str] = &[
 /// What the proxy asserts about the caller on a forwarded request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Assertion {
-    /// Becomes Docs' `User.sub`.
+    /// Becomes Docs' `User.sub`. The identity.
     pub(crate) subject: String,
+    /// Advisory display name, so collaborators appear under the name they
+    /// already have in Neev rather than a numeric fallback. Never identity: the
+    /// bridge refreshes it without rotating a session, and nothing is resolved
+    /// by it.
+    pub(crate) name: Option<String>,
+}
+
+/// Build the assertion for an actor, reading the display name from the native
+/// account row.
+///
+/// Read **server-side from Neev's own tables**, never from a request header —
+/// the same rule as the subject. A browser-supplied name would let anyone
+/// choose how they appear to everyone else in a shared document, which is a
+/// small lie with a large blast radius in a collaborative editor.
+///
+/// A missing or unreadable name is simply absent: the display name is a
+/// convenience, and failing a document request over it would be the wrong
+/// trade. Email is deliberately not forwarded — the bridge no longer needs it,
+/// and it is not this proxy's to hand out.
+pub(crate) async fn assertion<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    actor: &OrgContext,
+) -> Assertion {
+    Assertion {
+        subject: subject(actor),
+        name: display_name(db, actor).await,
+    }
+}
+
+async fn display_name<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    actor: &OrgContext,
+) -> Option<String> {
+    let row = crate::neev::db::one(
+        db,
+        "SELECT display_name FROM neev_accounts WHERE id=$1",
+        vec![actor.identity.user_id.into()],
+    )
+    .await
+    .ok()??;
+    let name: String = row.try_get("", "display_name").ok()?;
+    let name = name.trim();
+    // The bridge bounds it to 255 and refuses control characters; matching that
+    // here means a malformed row is dropped rather than sent and rejected.
+    (!name.is_empty() && name.chars().count() <= 200 && !name.chars().any(char::is_control))
+        .then(|| name.to_owned())
 }
 
 /// Derive the Docs subject for a Neev actor.
@@ -152,6 +198,35 @@ mod tests {
         assert_ne!(subject(&actor(7, 42)), subject(&actor(8, 42)));
         // Different accounts never collide.
         assert_ne!(subject(&actor(7, 42)), subject(&actor(7, 43)));
+    }
+
+    #[test]
+    fn a_display_name_is_advisory_and_never_part_of_the_identity() {
+        // The name is what collaborators see; the subject is what Docs resolves
+        // the user by. Renaming an account must not move a user to a different
+        // Docs identity — that would silently detach them from every access row
+        // they hold, and read as "my permissions disappeared when I changed my
+        // name".
+        let actor = actor(7, 42);
+        let before = Assertion {
+            subject: subject(&actor),
+            name: Some("Ada Lovelace".into()),
+        };
+        let after = Assertion {
+            subject: subject(&actor),
+            name: Some("Ada King".into()),
+        };
+        assert_eq!(before.subject, after.subject);
+        assert_ne!(before.name, after.name);
+
+        // An absent name is a normal state, not a failure: identity still
+        // resolves, and the editor falls back to showing the subject.
+        let anonymous = Assertion {
+            subject: subject(&actor),
+            name: None,
+        };
+        assert_eq!(anonymous.subject, before.subject);
+        assert!(well_formed(&anonymous.subject));
     }
 
     #[test]

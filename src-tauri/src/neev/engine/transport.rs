@@ -128,6 +128,14 @@ pub(crate) async fn forward(
         .header(identity::USER, &assertion.subject)
         .header(header::HOST, engine.public_host.clone())
         .header("X-Forwarded-Proto", engine.public_scheme);
+    // Advisory only. Sent on every forward rather than just the bootstrap, so a
+    // name changed in Neev reaches Docs on the next request instead of waiting
+    // for a new session — the bridge refreshes it without rotating one.
+    if let Some(name) = assertion.name.as_deref() {
+        if let Ok(value) = HeaderValue::from_str(name) {
+            request = request.header(identity::NAME, value);
+        }
+    }
     if !body.is_empty() {
         request = request.body(body);
     }

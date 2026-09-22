@@ -298,7 +298,7 @@ async fn create_resource(
                 .provision(
                     &resource.id,
                     &resource.title,
-                    &crate::neev::engine::proxy::assertion(&actor),
+                    &crate::neev::engine::proxy::assertion(state, &actor).await,
                 )
                 .await
                 .map_err(crate::neev::error::AuthError::from)?;

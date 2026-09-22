@@ -202,6 +202,7 @@ impl Upstream {
                     "id": resource_id,
                     "title": title,
                     "sub": creator.subject,
+                    "name": creator.name,
                 }),
             )
             .await?;
@@ -232,7 +233,11 @@ impl Upstream {
             .private(
                 reqwest::Method::POST,
                 &format!("_neev/v1/documents/{resource_id}/access"),
-                serde_json::json!({ "sub": subject.subject, "role": role.role() }),
+                serde_json::json!({
+                    "sub": subject.subject,
+                    "role": role.role(),
+                    "name": subject.name,
+                }),
             )
             .await?;
         match status {
