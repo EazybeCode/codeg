@@ -8,6 +8,7 @@ pub(crate) mod clock;
 pub(crate) mod config;
 pub(crate) mod content;
 pub(crate) mod db;
+pub(crate) mod engine;
 pub(crate) mod error;
 mod gateway;
 pub(crate) mod http;

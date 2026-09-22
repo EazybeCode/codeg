@@ -83,10 +83,44 @@ pub(super) async fn initialize_usage(
     Ok(())
 }
 
+/// Create a resource on the native engine — the behaviour every existing caller
+/// already has.
 pub(crate) async fn create(
     state: &ServerState,
     actor: &OrgContext,
     input: ResourceInput,
+) -> Result<Resource, ContentError> {
+    create_on(state, actor, input, false).await
+}
+
+/// Create a document backed by the La Suite engine.
+///
+/// The binding is written inside the **same** transaction as the resource row,
+/// so the two commit together or not at all. Any gap between them would leave a
+/// resource that presents as a legacy document with no native content — a blank
+/// editor indistinguishable from data loss.
+///
+/// Idempotency is the existing receipt, not new machinery: a repeated
+/// `request_id` returns the original resource, and a repeated `request_id` with
+/// a different body is a conflict. A retry therefore cannot produce a second
+/// resource, and because the Docs document is provisioned with this resource's
+/// own id, it cannot produce a second Docs document either.
+pub(crate) async fn create_engine_document(
+    state: &ServerState,
+    actor: &OrgContext,
+    input: ResourceInput,
+) -> Result<Resource, ContentError> {
+    if input.kind != ResourceKind::Document {
+        return Err(ContentError::Invalid);
+    }
+    create_on(state, actor, input, true).await
+}
+
+async fn create_on(
+    state: &ServerState,
+    actor: &OrgContext,
+    input: ResourceInput,
+    engine: bool,
 ) -> Result<Resource, ContentError> {
     let title = title(&input.title)?;
     let request =
@@ -101,6 +135,11 @@ pub(crate) async fn create(
         access::kind_name(input.kind),
         &title,
         input.origin_chat_id.as_deref().unwrap_or(""),
+        // The engine is part of the request identity. Without it, retrying a
+        // native create with a request id already used for an engine create
+        // would silently return the other kind of document rather than the
+        // conflict it is.
+        if engine { "engine.lasuite" } else { "native" },
     ]);
     let tx = begin(state, actor).await?;
     node(&tx, actor.org_id, input.node_id).await?;
@@ -137,6 +176,9 @@ pub(crate) async fn create(
     }
     db::execute(&tx,"INSERT INTO neev_resources(org_id,id,kind,node_id,creator_id,title,visibility,origin_chat_id,origin_kind,auth_revision,content_revision,archived,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,0,false,$10,$10)",vec![actor.org_id.into(),id.clone().into(),access::kind_name(input.kind).into(),input.node_id.into(),actor.identity.user_id.into(),title.into(),access::visibility_name(visibility).into(),input.origin_chat_id.clone().into(),input.origin_chat_id.as_ref().map(|_|"chat".to_string()).into(),now.into()]).await?;
     record_receipt(&tx, actor, "content.resource.create", &request, &hash, &id).await?;
+    if engine {
+        crate::neev::engine::binding::bind(&tx, actor.org_id, actor.identity.user_id, &id).await?;
+    }
     let result = access::authorized(&tx, actor, &id, false).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
