@@ -80,6 +80,39 @@ impl Projected {
     }
 }
 
+/// Error codes the bridge returns for genuinely invalid *input*. Anything else
+/// it answers — a Django `DisallowedHost` page, a proxy error, an unexpected
+/// status with no typed code — is infrastructure, and reporting infrastructure
+/// as invalid input is how a misconfiguration ends up blaming the user. That is
+/// not hypothetical: a missing Host header produced a bare Django 400, which
+/// this layer called `Invalid`, which the UI rendered as "names must be 1-100
+/// characters" for a name that was fine.
+const INPUT_ERRORS: &[&str] = &[
+    "invalid_json",
+    "invalid_subject",
+    "invalid_document_id",
+    "invalid_title",
+    "invalid_role",
+    "invalid_key",
+    "body_too_large",
+];
+
+/// Classify a failed bridge response: typed input error, or infrastructure.
+fn failure(status: StatusCode, body: &serde_json::Value) -> EngineError {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => EngineError::Refused,
+        _ => {
+            let code = body.get("error").and_then(serde_json::Value::as_str);
+            match code {
+                Some(code) if INPUT_ERRORS.contains(&code) => EngineError::Invalid,
+                // Includes every response with no typed code at all, which is
+                // exactly the infrastructure case.
+                _ => EngineError::Unavailable,
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum EngineError {
     /// Docs could not be reached or answered with a server error. Always
@@ -212,7 +245,7 @@ impl Upstream {
         title: &str,
         creator: &Assertion,
     ) -> Result<(), EngineError> {
-        let (status, _) = self
+        let (status, body) = self
             .private(
                 reqwest::Method::POST,
                 "_neev/v1/documents/provision",
@@ -230,8 +263,7 @@ impl Upstream {
             // retry after a partial failure converges instead of producing a
             // second document.
             StatusCode::CREATED | StatusCode::OK => Ok(()),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(EngineError::Refused),
-            _ => Err(EngineError::Invalid),
+            _ => Err(failure(status, &body)),
         }
     }
 
@@ -247,7 +279,7 @@ impl Upstream {
         subject: &Assertion,
         role: Projected,
     ) -> Result<(), EngineError> {
-        let (status, _) = self
+        let (status, body) = self
             .private(
                 reqwest::Method::POST,
                 &format!("_neev/v1/documents/{resource_id}/access"),
@@ -260,8 +292,7 @@ impl Upstream {
             .await?;
         match status {
             StatusCode::OK | StatusCode::CREATED | StatusCode::NO_CONTENT => Ok(()),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(EngineError::Refused),
-            _ => Err(EngineError::Invalid),
+            _ => Err(failure(status, &body)),
         }
     }
 
@@ -275,7 +306,7 @@ impl Upstream {
         resource_id: &str,
         subject: &Assertion,
     ) -> Result<(), EngineError> {
-        let (status, _) = self
+        let (status, body) = self
             .private(
                 reqwest::Method::DELETE,
                 &format!("_neev/v1/documents/{resource_id}/access"),
@@ -285,8 +316,7 @@ impl Upstream {
         match status {
             // Already absent is the desired state, not a failure.
             StatusCode::OK | StatusCode::NO_CONTENT | StatusCode::NOT_FOUND => Ok(()),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(EngineError::Refused),
-            _ => Err(EngineError::Invalid),
+            _ => Err(failure(status, &body)),
         }
     }
 
@@ -303,7 +333,7 @@ impl Upstream {
         subject: &Assertion,
         title: &str,
     ) -> Result<(), EngineError> {
-        let (status, _) = self
+        let (status, body) = self
             .private(
                 reqwest::Method::POST,
                 &format!("_neev/v1/documents/{resource_id}/title"),
@@ -313,7 +343,7 @@ impl Upstream {
         if status.is_success() {
             Ok(())
         } else {
-            Err(EngineError::Refused)
+            Err(failure(status, &body))
         }
     }
 
@@ -389,10 +419,7 @@ impl Upstream {
             )
             .await?;
         if !status.is_success() {
-            return Err(match status {
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => EngineError::Refused,
-                _ => EngineError::Invalid,
-            });
+            return Err(failure(status, &body));
         }
         let session = body
             .get("session_key")
