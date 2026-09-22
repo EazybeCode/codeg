@@ -352,6 +352,29 @@ pub(super) async fn update_resource(
     };
     let resource = resources::update(&state, &actor, &id, patch).await?;
     let engine_backed = engine_backed(&state, &resource).await?;
+    // Every native rename of an engine-backed document must reach the engine's
+    // copy, or the two titles diverge the moment anyone renames from the
+    // sidebar — which is what happened: Docs to Neev propagated, Neev to Docs
+    // never did.
+    //
+    // Done here, in the HTTP layer, rather than inside resources::update: the
+    // proxy's own title sync calls that function directly, so a hook inside it
+    // would recurse. And it runs after the transaction has committed, because
+    // the migrator forbids network calls inside one.
+    //
+    // A failed push does not fail the request. The native row is committed and
+    // is the source of truth; failing here would report a rename that did
+    // happen as an error. The divergence is instead repaired the next time the
+    // document is opened, which pushes the native title again.
+    if engine_backed {
+        if let Some(engine) = state.engine.as_ref() {
+            let assertion = crate::neev::engine::proxy::assertion(&state, &actor).await;
+            let _ = engine
+                .upstream
+                .push_title(&resource.id, &assertion, &resource.title)
+                .await;
+        }
+    }
     Ok(private_json(resource_dto(resource, engine_backed)?))
 }
 

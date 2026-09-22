@@ -108,6 +108,15 @@ pub(crate) fn decide(
             resource: None,
             role: None,
         },
+        // Self-scoped, so there is no document grant to consult — only the body
+        // policy bounds it.
+        Target::AccountWrite { body } => match body_allowed(*body, body_keys) {
+            Some(refusal) => Decision::Refuse(refusal),
+            None => Decision::Forward {
+                resource: None,
+                role: None,
+            },
+        },
         Target::Editor { resource } => match guard(grant, false, engine_backed) {
             Some(refusal) => Decision::Refuse(refusal),
             None => Decision::Shell {

@@ -385,6 +385,15 @@ pub(crate) async fn handle(
                 .provision(&resource, &title, &assertion)
                 .await
                 .map_err(crate::neev::error::AuthError::from)?;
+            // Reconcile the title on every open. Provisioning an existing
+            // document does not touch its title, so without this a rename whose
+            // upstream push failed would stay diverged for good. Neev's row is
+            // what Projects lists and what the ACL is evaluated against, so
+            // Neev's value is the one that wins. Best effort: a document that
+            // opens with a stale title is better than one that will not open.
+            if !title.is_empty() {
+                let _ = engine.upstream.push_title(&resource, &assertion, &title).await;
+            }
             asset(engine, &shell_path(parts.uri.path()))
         }
         Decision::Forward { resource: Some(ref resource), .. }

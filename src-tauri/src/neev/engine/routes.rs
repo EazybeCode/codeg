@@ -54,6 +54,8 @@ pub(crate) enum Target {
     /// A backend call carrying no document: the signed-in user and the frontend
     /// configuration. Needs a live Neev session and nothing more.
     Account,
+    /// A self-scoped write on the signed-in user, bounded by `body`.
+    AccountWrite { body: Body },
     /// The collaboration socket for one document.
     Collaboration { resource: String },
     /// An attachment belonging to one document.
@@ -79,6 +81,9 @@ pub(crate) enum Body {
     Content,
     /// A multipart attachment upload, bounded by size rather than by key.
     Attachment,
+    /// The signed-in user's own display preference. Self-scoped: it can only
+    /// ever change the caller's own Docs user row.
+    LanguageOnly,
 }
 
 impl Body {
@@ -89,6 +94,7 @@ impl Body {
         match self {
             Body::None | Body::Attachment => &[],
             Body::TitleOnly => &["title"],
+            Body::LanguageOnly => &["language"],
             // `websocket` tells upstream whether the save came from a connected
             // editor; it selects upstream's own read-only guard and is not a
             // permission of ours to grant.
@@ -225,11 +231,21 @@ pub(crate) fn classify(method: &str, path: &str, query: Option<&str>) -> Option<
 }
 
 fn classify_api(method: &str, read: bool, api: &str, query: Option<&str>) -> Option<Target> {
-    match api {
-        "config/" if read => return Some(Target::Account),
-        "users/me/" if read => return Some(Target::Account),
+    match (api, method) {
+        ("config/", "GET" | "HEAD") => return Some(Target::Account),
+        ("users/me/", "GET" | "HEAD") => return Some(Target::Account),
+        // The stock editor writes the signed-in user's language at boot. Denying
+        // it left a "failed to update the user" error on every load for a write
+        // that only ever touches the caller's own row. Narrowed to `language`,
+        // so it cannot become a general user-object write.
+        ("users/me/", "PATCH") => {
+            return Some(Target::AccountWrite {
+                body: Body::LanguageOnly,
+            })
+        }
         _ => {}
     }
+    let _ = read;
     let document = api.strip_prefix("documents/")?;
     let (id, action) = document.split_once('/')?;
     let resource = resource_id(id)?;
