@@ -754,9 +754,25 @@ async fn a_claimed_level_or_fast_mode_is_still_refused() {
     // ...and one it does not is still refused, catalogue or no catalogue.
     assert_eq!(validate(Some("max"), false).await, Err(()));
     assert_eq!(validate(Some("nonsense"), false).await, Err(()));
-    // Fast mode is a claim too: codex's `default` does not offer it, and an
+    // Fast mode is a claim too, and it is answered from the static profile when
+    // the catalogue cannot be reached: codex's speed controls are provider-wide,
+    // so its `default` does offer it...
+    assert_eq!(validate(None, true).await, Ok((None, true)));
+    // ...while claude's `default` does not, because the CLI picks the model and
+    // offering Fast would promise something about one nobody named. An
     // unreachable catalogue is no licence to enable it.
-    assert_eq!(validate(None, true).await, Err(()));
+    assert_eq!(
+        crate::neev::agents::capabilities::validated_for(
+            &harness.state,
+            &harness.owner,
+            "claude",
+            "default",
+            None,
+            true,
+        )
+        .await,
+        Err(())
+    );
 }
 
 /// An unknown model is not waved through by the short circuit.

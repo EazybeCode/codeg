@@ -2196,4 +2196,93 @@ mod tests {
             "unexpected agent output: {text}"
         );
     }
+
+    /// The catalogue probe must ask the launcher for a workdir it will accept.
+    ///
+    /// The launcher only takes a `run-…` basename
+    /// (`neev_agent_launch._validate_workdir_under_trusted_root`). The probe
+    /// asked for `probe-…`, so every catalogue read was refused with
+    /// `invalid spec` before a sandbox, a credential or a process existed — and
+    /// the reason went to the stderr this caller discards. A pure argv test
+    /// could not have caught it: the name is built here, at the call site.
+    ///
+    /// The fake launcher stands in for the cap helper, records the argv it was
+    /// given, and answers the app-server handshake, so this exercises the real
+    /// `discover_models` path end to end.
+    #[tokio::test]
+    async fn the_catalogue_probe_asks_for_a_workdir_the_launcher_accepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorded = dir.path().join("argv.txt");
+        let helper = dir.path().join("fake-launcher.sh");
+        std::fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {record}\n\
+                 read -r _line\n\
+                 printf '{{\"id\":1,\"result\":{{\"userAgent\":\"fake\"}}}}\\n'\n\
+                 read -r _initialized\n\
+                 read -r _list\n\
+                 printf '{{\"id\":2,\"result\":{{\"data\":[{{\"id\":\"gpt-test\"}}]}}}}\\n'\n",
+                record = recorded.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let workspace = dir.path().join("agents");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let runtime = SandboxedProviderCliRuntime::new(
+            "python3",
+            dir.path().join("unused-launcher.py"),
+            ProviderBinaries {
+                claude: None,
+                codex: Some("/usr/local/bin/codex".into()),
+            },
+            &workspace,
+            Vec::new(),
+            Some(helper.to_string_lossy().into_owned()),
+        );
+
+        let answer = runtime
+            .discover_models(DiscoveryRequest {
+                provider: "codex".into(),
+                user_id: 7,
+                org_id: 3,
+                credential_handle: Some("0123456789abcdef0123456789abcdef".into()),
+            })
+            .await
+            .expect("the probe should reach the provider and return its catalogue");
+        assert!(
+            answer.contains("gpt-test"),
+            "the catalogue should come back: {answer}"
+        );
+
+        let argv: Vec<String> = std::fs::read_to_string(&recorded)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let workdir = argv
+            .iter()
+            .position(|arg| arg == "--workdir")
+            .map(|at| argv[at + 1].clone())
+            .expect("the launcher is always told a workdir");
+        let name = std::path::Path::new(&workdir)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("run-"),
+            "the launcher only accepts a run- workdir, got {name}"
+        );
+        assert!(name.starts_with("run-probe-"), "and it is still identifiable as a probe: {name}");
+        // It drives `app-server`, never a turn the reader would be charged for.
+        assert_eq!(argv.last().map(String::as_str), Some("app-server"));
+        assert!(!argv.iter().any(|arg| arg == "exec"));
+    }
 }
