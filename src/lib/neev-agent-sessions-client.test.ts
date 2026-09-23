@@ -1400,8 +1400,21 @@ describe("run configuration", () => {
             efforts: null,
             defaultEffort: "low",
           },
+          // A level this build has never heard of, as a default. The backend
+          // unions whatever the runner reports, so the client's bound is a
+          // SHAPE — bounded, printable, not a flag — and never a list of
+          // names. A client that knew the names would refuse the next level
+          // the runner ships, which is the same refusal as the one above.
+          {
+            id: "gpt-5.2-codex",
+            label: "gpt-5.2-codex",
+            default: false,
+            supportsSpeed: true,
+            efforts: ["high", "ultra"],
+            defaultEffort: "ultra",
+          },
         ],
-        efforts: ["minimal", "low", "medium", "high", "xhigh"],
+        efforts: ["minimal", "low", "medium", "high", "xhigh", "ultra"],
         defaultEffort: null,
         supportsSpeed: true,
         speedUnavailableReason: null,
@@ -1423,11 +1436,14 @@ describe("run configuration", () => {
     expect(codex.models.map((model) => model.id)).toEqual([
       "gpt-5.1-codex",
       "gpt-5.1-codex-mini",
+      "gpt-5.2-codex",
     ])
     expect(codex.models.map((model) => model.defaultEffort)).toEqual([
       "medium",
       "low",
+      "ultra",
     ])
+    expect(codex.efforts).toContain("ultra")
     // Still absent means null: the hardcoded catalogue omits the key entirely and
     // must keep reading exactly as it did.
     expect(codex.discoveryUnavailable).toBe(false)
