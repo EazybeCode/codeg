@@ -1,0 +1,675 @@
+"use client"
+
+// One editable document per composer: words, a file, more words, another file.
+//
+// The tray this replaces was honest about upload state and dishonest about
+// ORDER. Five files under a box of text say nothing about which sentence each
+// belongs to, and "compare the screenshot with the log" is exactly the ask that
+// needs to say so. Here a file is an atomic node sitting in the text where it
+// was dropped, so the caret walks over it, Backspace deletes it, and the
+// sentence keeps its shape all the way to the provider.
+//
+// The node carries a LOCAL id and nothing else. Bytes, upload state and the
+// server's key stay in the tray, which the chip reads through context — so a
+// file still uploading says so inside the sentence, and a node can never be
+// mistaken for a file the server has.
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
+import { useTranslations } from "next-intl"
+import { Editor, Extension, Node, mergeAttributes } from "@tiptap/core"
+import type { JSONContent } from "@tiptap/core"
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model"
+import { history, redo, undo } from "@tiptap/pm/history"
+import {
+  EditorContent,
+  NodeViewWrapper,
+  ReactNodeViewRenderer,
+  type NodeViewProps,
+} from "@tiptap/react"
+import { X } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
+import { sendsOnEnter } from "@/lib/neev-composer-keys"
+import {
+  filesFromDrop,
+  filesFromPaste,
+  formatBytes,
+  NEEV_MAX_ATTACHMENTS,
+  pasteIsFileOnly,
+} from "@/lib/neev-attachments"
+import {
+  promptIsEmpty,
+  sameSegments,
+  type PromptSegment,
+} from "@/lib/neev-inline-prompt"
+import {
+  AttachmentFailures,
+  AttachmentRejections,
+  AttachmentThumb,
+  type AttachmentTray,
+  type DraftAttachment,
+} from "./native-attachments"
+
+const ATTACHMENT_NODE = "neevAttachment"
+
+/**
+ * How many released files an undo can reach back through.
+ *
+ * Each one is a `File` still held in memory, so this is deliberately smaller
+ * than the number a message may carry: far enough back to cover the mistake
+ * somebody is actually undoing, not a second staging area.
+ */
+const RELEASED_LIMIT = 8
+
+/**
+ * The tray the chips in one editor belong to.
+ *
+ * Node views are rendered by the editor rather than by the composer's own JSX,
+ * so a context is the only way a chip can know whether its bytes are up yet.
+ */
+const TrayContext = createContext<{
+  tray: AttachmentTray
+  disabled: boolean
+} | null>(null)
+
+/** A file, inside the sentence, while it is being written. */
+function AttachmentChip({ node, selected }: NodeViewProps) {
+  const t = useTranslations("NativeContent")
+  const n = useTranslations("Native")
+  const context = useContext(TrayContext)
+  const id = String(node.attrs.localId ?? "")
+  const item = context?.tray.items.find((entry) => entry.id === id)
+  // A node whose file is gone is on its way out — the composer reconciles it
+  // away on this same pass. Drawing a half-chip meanwhile would flash a
+  // nameless box into the sentence.
+  if (!item)
+    return (
+      <NodeViewWrapper as="span" contentEditable={false} className="hidden" />
+    )
+  const failed = item.status === "failed"
+  return (
+    <NodeViewWrapper
+      as="span"
+      contentEditable={false}
+      data-attachment-id={id}
+      className={cn(
+        "mx-0.5 inline-flex max-w-64 select-none items-center gap-1 rounded-md border bg-muted/40 py-0.5 pe-0.5 ps-1 align-middle text-xs",
+        failed && "border-destructive/60",
+        selected && "ring-2 ring-ring"
+      )}
+      title={`${item.name} · ${formatBytes(item.size)}`}
+    >
+      <AttachmentThumb
+        src={item.previewUrl}
+        contentType={item.contentType}
+        name={item.name}
+        className="size-4"
+      />
+      <span className="min-w-0 truncate">{item.name}</span>
+      {item.status === "uploading" && (
+        <span role="status" className="shrink-0 text-muted-foreground">
+          {t("attachmentUploading")}
+        </span>
+      )}
+      {failed && (
+        <>
+          <span className="shrink-0 text-destructive">
+            {t("attachmentFailed")}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-5 shrink-0 px-1 text-[11px]"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => context?.tray.retry(id)}
+          >
+            {n("retry")}
+          </Button>
+        </>
+      )}
+      <Button
+        type="button"
+        size="icon"
+        variant="ghost"
+        className="size-5 shrink-0"
+        aria-label={t("attachmentRemove", { name: item.name })}
+        title={t("attachmentRemove", { name: item.name })}
+        disabled={context?.disabled}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => context?.tray.remove(id)}
+      >
+        <X aria-hidden className="size-3" />
+      </Button>
+    </NodeViewWrapper>
+  )
+}
+
+/**
+ * The schema, written out rather than taken from a starter kit.
+ *
+ * A composer is plain text with files in it. Bold, headings, lists and their
+ * input rules all change what pressing a key does in a box whose only job is to
+ * hold a sentence, so none of them exist here.
+ */
+const AttachmentExtension = Node.create({
+  name: ATTACHMENT_NODE,
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes: () => ({
+    localId: {
+      default: null,
+      parseHTML: (element) => element.getAttribute("data-attachment-id"),
+      renderHTML: (attributes) => ({
+        "data-attachment-id": String(attributes.localId ?? ""),
+      }),
+    },
+  }),
+  parseHTML: () => [{ tag: "span[data-attachment-id]" }],
+  renderHTML: ({ HTMLAttributes }) => [
+    "span",
+    mergeAttributes(HTMLAttributes, { "data-attachment": "" }),
+  ],
+  addNodeView: () => ReactNodeViewRenderer(AttachmentChip, { as: "span" }),
+})
+
+const DocumentExtension = Node.create({
+  name: "doc",
+  topNode: true,
+  content: "paragraph+",
+})
+
+const ParagraphExtension = Node.create({
+  name: "paragraph",
+  group: "block",
+  content: "inline*",
+  parseHTML: () => [{ tag: "p" }],
+  renderHTML: ({ HTMLAttributes }) => ["p", mergeAttributes(HTMLAttributes), 0],
+})
+
+const TextExtension = Node.create({ name: "text", group: "inline" })
+
+const HardBreakExtension = Node.create({
+  name: "hardBreak",
+  group: "inline",
+  inline: true,
+  selectable: false,
+  parseHTML: () => [{ tag: "br" }],
+  renderHTML: ({ HTMLAttributes }) => ["br", mergeAttributes(HTMLAttributes)],
+  addKeyboardShortcuts() {
+    const insert = () =>
+      this.editor.commands.insertContent({ type: "hardBreak" })
+    return { "Shift-Enter": insert, "Mod-Enter": insert }
+  },
+})
+
+/** Undo and redo, which a box someone writes in is expected to have. */
+const HistoryExtension = Extension.create({
+  name: "neevHistory",
+  addProseMirrorPlugins: () => [history()],
+  addKeyboardShortcuts: () => ({
+    "Mod-z": ({ editor }) => undo(editor.state, editor.view.dispatch),
+    "Shift-Mod-z": ({ editor }) => redo(editor.state, editor.view.dispatch),
+    "Mod-y": ({ editor }) => redo(editor.state, editor.view.dispatch),
+  }),
+})
+
+const extensions = [
+  DocumentExtension,
+  ParagraphExtension,
+  TextExtension,
+  HardBreakExtension,
+  AttachmentExtension,
+  HistoryExtension,
+]
+
+/** The document, read back as the ordered thing that gets sent. */
+export function segmentsFromDoc(doc: ProseMirrorNode): PromptSegment[] {
+  const out: PromptSegment[] = []
+  const write = (text: string) => {
+    if (!text) return
+    const last = out[out.length - 1]
+    if (last && last.kind === "text") last.text += text
+    else out.push({ kind: "text", text })
+  }
+  doc.forEach((block, _offset, index) => {
+    // A paragraph boundary is a newline and nothing more: this is a prompt,
+    // not a document.
+    if (index > 0) write("\n")
+    block.forEach((child) => {
+      if (child.isText) write(child.text ?? "")
+      else if (child.type.name === "hardBreak") write("\n")
+      else if (child.type.name === ATTACHMENT_NODE)
+        out.push({ kind: "attachment", id: String(child.attrs.localId ?? "") })
+    })
+  })
+  return out
+}
+
+/** And the same thing the other way, for a draft being put back. */
+export function docFromSegments(
+  segments: readonly PromptSegment[]
+): JSONContent {
+  const paragraphs: JSONContent[][] = [[]]
+  const current = () => paragraphs[paragraphs.length - 1]
+  for (const segment of segments) {
+    if (segment.kind === "attachment") {
+      current().push({ type: ATTACHMENT_NODE, attrs: { localId: segment.id } })
+      continue
+    }
+    segment.text.split("\n").forEach((line, index) => {
+      if (index > 0) paragraphs.push([])
+      if (line) current().push({ type: "text", text: line })
+    })
+  }
+  return {
+    type: "doc",
+    content: paragraphs.map((content) => ({
+      type: "paragraph",
+      ...(content.length ? { content } : {}),
+    })),
+  }
+}
+
+export interface InlineComposerHandle {
+  focus: () => void
+  /** Stage these files and put them where the caret is. */
+  addFiles: (files: readonly File[]) => Promise<void>
+}
+
+export function NativeInlineComposer({
+  ref,
+  value,
+  onChange,
+  tray,
+  label,
+  placeholder,
+  onSubmit,
+  busy = false,
+  readOnly = false,
+  attachDisabled = false,
+  autoFocus = false,
+  maxChars,
+  className,
+}: {
+  ref?: React.Ref<InlineComposerHandle>
+  value: readonly PromptSegment[]
+  onChange: (next: PromptSegment[]) => void
+  tray: AttachmentTray
+  /** The accessible name of the box. */
+  label: string
+  placeholder: string
+  onSubmit: () => void
+  /** Enter must not send right now; it still makes a line. */
+  busy?: boolean
+  /** Archived, revoked: the words are readable but not editable. */
+  readOnly?: boolean
+  /** Editable, but no more files may be staged. */
+  attachDisabled?: boolean
+  autoFocus?: boolean
+  maxChars?: number
+  className?: string
+}) {
+  // Read by editor callbacks, which are registered once and must not close over
+  // the first render's props. Written after the render rather than during it:
+  // nothing here is read while rendering, and a ref written in render is a
+  // render that cannot be replayed.
+  const latest = useRef({ onSubmit, onChange, busy, maxChars, attachDisabled })
+  useEffect(() => {
+    latest.current = { onSubmit, onChange, busy, maxChars, attachDisabled }
+  })
+  const emitted = useRef<readonly PromptSegment[]>(value)
+  // Ids this editor has put in the document and the tray has not confirmed
+  // yet, and ids it HAS confirmed. Anything in the document that is in neither
+  // is not a file: a node undo brought back after its bytes were released, or
+  // one that arrived in pasted HTML. Those are deleted on sight.
+  const pending = useRef(new Set<string>())
+  const confirmed = useRef(new Set<string>())
+  // The tray's files as they were last seen, so a file that has just left it
+  // can still be described — and the ones whose reference was deleted, in the
+  // order they were released.
+  const known = useRef(new Map<string, DraftAttachment>())
+  const released = useRef(new Map<string, DraftAttachment>())
+  const trayRef = useRef(tray)
+  useEffect(() => {
+    trayRef.current = tray
+  })
+
+  /**
+   * Owned here, not by `useEditor`.
+   *
+   * A composer inside a hidden tab is still holding somebody's unsent message.
+   * `useEditor` destroys its editor in an effect cleanup, and `Activity` runs
+   * effect cleanups when it hides — so the draft, and the caret, and the undo
+   * history would all be thrown away by switching tabs. Creating it here means
+   * hiding does nothing to it; `ownHost` below is what notices REAL removal.
+   *
+   * Null on the server: `new Editor` needs a document, and this shell is
+   * prerendered by the static export.
+   */
+  const [editor] = useState<Editor | null>(() =>
+    typeof document === "undefined"
+      ? null
+      : new Editor({
+          extensions,
+          content: docFromSegments(value),
+          editable: !readOnly,
+          autofocus: autoFocus ? "end" : false,
+        })
+  )
+  const insert = useCallback(
+    async (files: readonly File[], at?: { from: number; to: number }) => {
+      // Read BEFORE the await, always: classification reads the whole file, and
+      // the answer must land where the caret was when the gesture happened rather
+      // than wherever it has drifted to since. The file picker is the case this
+      // is really about — it has no event carrying a position of its own.
+      const selection = editor?.state.selection
+      const anchor = at ?? {
+        from: selection?.from ?? 0,
+        to: selection?.to ?? 0,
+      }
+      const staged = await trayRef.current.add(files)
+      const current = editor
+      if (!current || current.isDestroyed || staged.length === 0) return
+      const size = current.state.doc.content.size
+      // Selected text is REPLACED, the way anything else put at a selection is.
+      const range = {
+        from: Math.min(anchor.from, size),
+        to: Math.min(Math.max(anchor.to, anchor.from), size),
+      }
+      const pos = range.from
+      const content: JSONContent[] = staged.map((item) => ({
+        type: ATTACHMENT_NODE,
+        attrs: { localId: item.id },
+      }))
+      // Spaces on either side, so the reference is a word among words — both in
+      // the box and in the sentence the provider is finally asked. Dropping a
+      // file at the end of "Read this" must not produce "Read this[file]".
+      const before = current.state.doc.textBetween(Math.max(pos - 1, 0), pos)
+      if (before.trim()) content.unshift({ type: "text", text: " " })
+      content.push({ type: "text", text: " " })
+      for (const item of staged) pending.current.add(item.id)
+      current.chain().focus().insertContentAt(range, content).run()
+    },
+    [editor]
+  )
+
+  /**
+   * The editor's behaviour, attached after the render that created it.
+   *
+   * These read props and call back into the composer, and a constructor option
+   * is built DURING render — where neither a ref nor a callback declared below
+   * it can be reached. Applied here instead, and re-applied whenever what they
+   * close over changes.
+   */
+  useEffect(() => {
+    if (!editor) return
+    editor.setOptions({
+      editorProps: {
+        attributes: {
+          role: "textbox",
+          "aria-label": label,
+          "aria-multiline": "true",
+          class: cn(
+            "w-full whitespace-pre-wrap break-words px-1 py-1.5 text-base outline-none sm:text-sm [&_p]:m-0 [&_p]:min-h-[1.5em]",
+            className
+          ),
+        },
+        handleKeyDown: (_view, event) => {
+          if (
+            !sendsOnEnter(
+              {
+                key: event.key,
+                shiftKey: event.shiftKey,
+                isComposing: event.isComposing,
+                nativeEvent: {
+                  isComposing: event.isComposing,
+                  keyCode: event.keyCode,
+                },
+              },
+              { busy: latest.current.busy }
+            )
+          )
+            return false
+          event.preventDefault()
+          latest.current.onSubmit()
+          return true
+        },
+        // A ceiling the box enforces rather than one the server refuses.
+        handleTextInput: (view, _from, _to, text) => {
+          const limit = latest.current.maxChars
+          if (limit === undefined) return false
+          return view.state.doc.textContent.length + text.length > limit
+        },
+        // Paste is handled all the way, never handed back to ProseMirror.
+        //
+        // The default would parse the clipboard's HTML, and this schema has a
+        // node that parses from `span[data-attachment-id]` — so pasted markup
+        // could mint a chip carrying any id it liked, next to a file it does not
+        // own. A file gets into this document one way: a gesture that hands over
+        // a real `File`, which the tray admits and holds the bytes for. Everything
+        // else on a clipboard is text.
+        handlePaste: (view, event) => {
+          const files = latest.current.attachDisabled
+            ? []
+            : filesFromPaste(event.clipboardData)
+          // Text alongside the files means the person copied something carrying
+          // both; the text is still theirs to paste.
+          const text =
+            files.length > 0 && pasteIsFileOnly(event.clipboardData)
+              ? ""
+              : (event.clipboardData?.getData("text/plain") ?? "")
+          event.preventDefault()
+          // Text first, replacing the selection, and the files after it — which
+          // is the order they were copied in.
+          if (text)
+            view.dispatch(view.state.tr.insertText(text).scrollIntoView())
+          if (files.length > 0) void insert(files)
+          return true
+        },
+        handleDrop: (view, event) => {
+          if (latest.current.attachDisabled) return false
+          const files = filesFromDrop(event.dataTransfer)
+          if (files.length === 0) return false
+          // The point of dropping ONTO a sentence is landing where the pointer
+          // is, so the position comes from the coordinates rather than from
+          // wherever the caret happened to be.
+          const at = view.posAtCoords({
+            left: event.clientX,
+            top: event.clientY,
+          })
+          const target = at?.pos ?? view.state.selection.to
+          event.preventDefault()
+          // The card around this composer also listens for drops; without this
+          // the same files would be staged twice.
+          event.stopPropagation()
+          void insert(files, { from: target, to: target })
+          return true
+        },
+      },
+    })
+  }, [editor, insert, label, className])
+
+  // Reported from a listener rather than a constructor option: the option is
+  // built during render, and the props it would have to read are not readable
+  // there.
+  useEffect(() => {
+    if (!editor) return
+    const report = () => {
+      const next = segmentsFromDoc(editor.state.doc)
+      emitted.current = next
+      latest.current.onChange(next)
+    }
+    editor.on("update", report)
+    return () => {
+      editor.off("update", report)
+    }
+  }, [editor])
+  // The single live observer, and the one-shot latch that says this editor has
+  // already been released. Mirrors the rich editor, for the same reason:
+  // Activity and Strict Mode detach refs without removing anything.
+  const observerRef = useRef<MutationObserver | null>(null)
+  const releasedRef = useRef(false)
+  const ownHost = useCallback(
+    (host: HTMLDivElement | null) => {
+      if (!host || !editor || observerRef.current || releasedRef.current) return
+      const observer = new MutationObserver(() => {
+        if (host.isConnected) return
+        releasedRef.current = true
+        observer.disconnect()
+        observerRef.current = null
+        editor.destroy()
+      })
+      observerRef.current = observer
+      observer.observe(host.ownerDocument, { childList: true, subtree: true })
+    },
+    [editor]
+  )
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      focus: () => {
+        editor?.commands.focus("end")
+      },
+      addFiles: (files: readonly File[]) => insert(files),
+    }),
+    [editor, insert]
+  )
+
+  // A draft put back from outside — cleared after a send, restored on a tab.
+  // The editor is left alone while it holds what it last reported, or every
+  // keystroke would round-trip through the parent and move the caret.
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    if (sameSegments(value, emitted.current)) return
+    emitted.current = value
+    editor.commands.setContent(docFromSegments(value), { emitUpdate: false })
+  }, [editor, value])
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    editor.setEditable(!readOnly)
+  }, [editor, readOnly])
+
+  // Files whose reference was deleted from the sentence, kept so that undo can
+  // put both back.
+  //
+  // Deleting a word and pressing Ctrl+Z restores the word; deleting a file has
+  // to restore the file, or undo is a promise the composer only half keeps. The
+  // store is small and it forgets: at most `RELEASED_LIMIT` files, oldest
+  // evicted first, and everything dropped the moment the tray is cleared — a
+  // sent message's files are gone, and nothing is holding their bytes waiting
+  // for an undo that can no longer mean anything.
+  useEffect(() => {
+    released.current.clear()
+  }, [tray.generation])
+
+  // The document and the tray, kept honest about each other:
+  //
+  //  - a file dropped from the tray (its own ✕) takes its reference with it;
+  //  - a reference deleted from the sentence releases the file, aborting an
+  //    upload that is still running, and is remembered;
+  //  - a reference undo brings BACK is re-attached to the file it named;
+  //  - a reference this editor cannot account for at all — one that arrived
+  //    inside pasted markup, or whose file is long forgotten — is deleted
+  //    rather than left in the sentence as an invisible thing the caret has to
+  //    step over. Nothing could have been sent for it either way: only a file
+  //    the tray holds becomes a marker.
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    const held = new Map(tray.items.map((item) => [item.id, item]))
+    const inDoc = new Map<string, number>()
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === ATTACHMENT_NODE)
+        inDoc.set(String(node.attrs.localId ?? ""), pos)
+    })
+    for (const [id, item] of held) known.current.set(id, item)
+    for (const id of inDoc.keys()) {
+      if (held.has(id)) {
+        pending.current.delete(id)
+        confirmed.current.add(id)
+        continue
+      }
+      const back = released.current.get(id)
+      if (!back) continue
+      released.current.delete(id)
+      pending.current.add(id)
+      trayRef.current.restore(back)
+    }
+    const stale = [...inDoc.entries()]
+      .filter(
+        ([id]) =>
+          !held.has(id) && !pending.current.has(id) && !released.current.has(id)
+      )
+      .map(([, pos]) => pos)
+      .sort((a, b) => b - a)
+    if (stale.length) {
+      const tr = editor.state.tr
+      for (const pos of stale) tr.delete(pos, pos + 1)
+      editor.view.dispatch(tr)
+      return
+    }
+    for (const id of [...confirmed.current]) {
+      if (inDoc.has(id)) continue
+      confirmed.current.delete(id)
+      if (!held.has(id)) continue
+      const snapshot = known.current.get(id)
+      if (snapshot) {
+        // Re-inserted at the end, so eviction takes the oldest first.
+        released.current.delete(id)
+        released.current.set(id, snapshot)
+        while (released.current.size > RELEASED_LIMIT)
+          released.current.delete(released.current.keys().next().value!)
+      }
+      known.current.delete(id)
+      trayRef.current.remove(id)
+    }
+  }, [editor, tray.items, tray.generation, value])
+
+  const context = useMemo(
+    () => ({ tray, disabled: readOnly }),
+    [tray, readOnly]
+  )
+  const empty = promptIsEmpty(value)
+
+  return (
+    <TrayContext.Provider value={context}>
+      <div className="relative">
+        {empty && (
+          <p
+            aria-hidden
+            className="pointer-events-none absolute left-1 top-1.5 text-base text-muted-foreground sm:text-sm"
+          >
+            {placeholder}
+          </p>
+        )}
+        <div ref={ownHost}>
+          <EditorContent editor={editor} className="max-h-40 overflow-y-auto" />
+        </div>
+      </div>
+      <AttachmentFailures items={tray.items} />
+      <AttachmentRejections
+        rejected={tray.rejected}
+        onDismiss={tray.dismissRejected}
+      />
+    </TrayContext.Provider>
+  )
+}
+
+/** How many more files this composer will take. */
+export function remainingAttachments(tray: AttachmentTray): number {
+  return NEEV_MAX_ATTACHMENTS - tray.items.length
+}

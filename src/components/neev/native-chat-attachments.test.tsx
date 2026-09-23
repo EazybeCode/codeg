@@ -8,6 +8,7 @@ import {
   mockNativeSession,
   nativeCapabilities,
   NativeTestRoot,
+  typeInComposer,
 } from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
 
@@ -90,7 +91,7 @@ async function ready() {
   return box
 }
 
-it("uploads a dropped file and sends the message with its key", async () => {
+it("uploads a dropped file and sends it inside the sentence it was written in", async () => {
   const uploads: RequestInit[] = []
   const posted: Record<string, unknown>[] = []
   mockNativeSession(undefined, {
@@ -117,11 +118,16 @@ it("uploads a dropped file and sends the message with its key", async () => {
   expect(uploads[0].body).toBeInstanceOf(File)
   await screen.findByRole("button", { name: "Remove shot.png" })
 
+  // Words on BOTH sides of the file, which is the whole point: the file is in
+  // the sentence, not in a tray under it.
+  await typeInComposer(box, "Look at ", "start")
+  await typeInComposer(box, "and tell me", "end")
   const user = userEvent.setup()
-  await user.type(box, "Look at this")
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(posted).toHaveLength(1))
-  expect(posted[0].body).toBe("Look at this")
+  // The marker sits where the file sat, and its number is the file's place in
+  // the key list the server stores in order.
+  expect(posted[0].body).toBe("Look at [attachment 1: shot.png] and tell me")
   expect(posted[0].attachmentKeys).toEqual([KEY])
   // Sent means gone from the composer, and shown from the server's own row.
   await waitFor(() =>
@@ -134,7 +140,7 @@ it("uploads a dropped file and sends the message with its key", async () => {
   expect(reference).toHaveAttribute("download", "shot.png")
 })
 
-it("sends files with no words as empty content plus keys", async () => {
+it("sends files with no words as the reference alone plus keys", async () => {
   const posted: Record<string, unknown>[] = []
   mockNativeSession(undefined, {
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
@@ -142,8 +148,7 @@ it("sends files with no words as empty content plus keys", async () => {
     [`POST ${uploadPath}`]: () => json(attachment, 201),
     [`POST ${messagesPath}`]: (init) => {
       posted.push(JSON.parse(init.body as string))
-      // The server is what labels an attachment-only message.
-      return json({ ...sent, body: "" }, 201)
+      return json({ ...sent, body: "[attachment 1: shot.png]" }, 201)
     },
   })
   mount()
@@ -154,7 +159,9 @@ it("sends files with no words as empty content plus keys", async () => {
   expect(send).toBeEnabled()
   await userEvent.setup().click(send)
   await waitFor(() => expect(posted).toHaveLength(1))
-  expect(posted[0].body).toBe("")
+  // Not empty any more: a message that is only a file still SAYS which file,
+  // and that sentence is what the transcript renders the reference from.
+  expect(posted[0].body).toBe("[attachment 1: shot.png]")
   expect(posted[0].attachmentKeys).toEqual([KEY])
 })
 
@@ -179,7 +186,7 @@ it("keeps the files and the request id when the send itself fails", async () => 
   fireEvent.drop(box, { dataTransfer: fileDrag([png()]) })
   await screen.findByRole("button", { name: "Remove shot.png" })
   const user = userEvent.setup()
-  await user.type(box, "Look at this")
+  await typeInComposer(box, "Look at this")
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(posted).toHaveLength(1))
   // The file is still attached and still visible; nothing was silently dropped.
@@ -270,7 +277,7 @@ it("re-mints the ask's request id once its files change after a failure", async 
   const box = await ready()
   const user = userEvent.setup()
   await user.click(screen.getByRole("button", { name: "Ask agent" }))
-  await user.type(box, "Look at this")
+  await typeInComposer(box, "Look at this")
   fireEvent.drop(box, { dataTransfer: fileDrag([png()]) })
   await screen.findByRole("button", { name: "Remove shot.png" })
   await user.click(screen.getByRole("button", { name: "Send" }))

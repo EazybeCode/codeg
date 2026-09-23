@@ -380,7 +380,8 @@
     "showTrash": "Show trash",
     "hideTrash": "Hide trash",
     "loadingItems": "Loading items…",
-    "checkingAccess": "Checking access…"
+    "checkingAccess": "Checking access…",
+    "connectionCheckedAt": "Checked {time}"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Workspace chat context is unavailable.",

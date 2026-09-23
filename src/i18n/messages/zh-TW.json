@@ -380,7 +380,8 @@
     "showTrash": "顯示回收筒",
     "hideTrash": "隱藏回收筒",
     "loadingItems": "正在載入項目…",
-    "checkingAccess": "正在檢查存取權限…"
+    "checkingAccess": "正在檢查存取權限…",
+    "connectionCheckedAt": "檢查於 {time}"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作區聊天內容無法使用。",

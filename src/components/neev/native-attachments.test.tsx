@@ -1,15 +1,20 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { useEffect, useRef, useState } from "react"
 import { expect, it, vi } from "vitest"
 import { NextIntlClientProvider } from "next-intl"
 import messages from "@/i18n/messages/en.json"
 import {
-  AttachmentTrayView,
   SentAttachments,
   useAttachmentTray,
   type AttachmentTray,
   type AttachmentUploader,
 } from "./native-attachments"
+import {
+  NativeInlineComposer,
+  type InlineComposerHandle,
+} from "./native-inline-composer"
+import type { PromptSegment } from "@/lib/neev-inline-prompt"
 import {
   NEEV_MAX_ATTACHMENT_BYTES,
   NEEV_MAX_PREVIEW_BYTES,
@@ -35,34 +40,65 @@ function stored(name: string, index: number) {
   }
 }
 
-/** Renders the real tray and hands the test its live handle. */
+/**
+ * The real tray, bound to the real editor, with the test holding both handles.
+ *
+ * Staging goes through the composer rather than the tray directly, because
+ * that is the only path a person has: a file is admitted AND a node for it is
+ * put in the sentence, or neither happens.
+ */
 function Harness({
   upload,
   onTray,
+  onComposer,
 }: {
   upload: AttachmentUploader | null
   onTray: (tray: AttachmentTray) => void
+  onComposer: (handle: InlineComposerHandle | null) => void
 }) {
   const tray = useAttachmentTray({ upload })
-  onTray(tray)
+  const [draft, setDraft] = useState<PromptSegment[]>([])
+  const composer = useRef<InlineComposerHandle>(null)
+  useEffect(() => {
+    onTray(tray)
+    onComposer(composer.current)
+  })
   return (
     <NextIntlClientProvider locale="en" messages={messages}>
-      <AttachmentTrayView tray={tray} />
+      <NativeInlineComposer
+        ref={composer}
+        value={draft}
+        onChange={setDraft}
+        tray={tray}
+        label="Message"
+        placeholder="Message"
+        onSubmit={() => {}}
+      />
     </NextIntlClientProvider>
   )
 }
 
 function mount(upload: AttachmentUploader | null) {
   let tray!: AttachmentTray
+  let composer: InlineComposerHandle | null = null
   const view = render(
     <Harness
       upload={upload}
       onTray={(value) => {
         tray = value
       }}
+      onComposer={(value) => {
+        if (value) composer = value
+      }}
     />
   )
-  return { view, tray: () => tray }
+  return {
+    view,
+    tray: () => tray,
+    add: (files: readonly File[]) =>
+      (composer as InlineComposerHandle | null)?.addFiles(files) ??
+      Promise.resolve(),
+  }
 }
 
 /** An uploader the test resolves by hand, one call at a time. */
@@ -87,9 +123,9 @@ function deferred() {
 
 it("uploads a staged file once and hands back its key", async () => {
   const upload = vi.fn(async (file: File) => stored(file.name, 1))
-  const { tray } = mount(upload)
+  const { tray, add } = mount(upload)
   await act(async () => {
-    await tray().add([png("shot.png")])
+    await add([png("shot.png")])
   })
   expect(upload).toHaveBeenCalledTimes(1)
   await waitFor(() => expect(tray().uploading).toBe(false))
@@ -101,10 +137,10 @@ it("uploads a staged file once and hands back its key", async () => {
 
 it("never turns an upload that finished after removal into a key", async () => {
   const { calls, upload } = deferred()
-  const { tray } = mount(upload)
+  const { tray, add } = mount(upload)
   let staged!: Promise<void>
   act(() => {
-    staged = tray().add([png("shot.png")])
+    staged = add([png("shot.png")])
   })
   await waitFor(() => expect(calls).toHaveLength(1))
   const id = tray().items[0].id
@@ -121,8 +157,8 @@ it("never turns an upload that finished after removal into a key", async () => {
 
 it("abandons an upload when the composer goes away", async () => {
   const { calls, upload } = deferred()
-  const { view, tray } = mount(upload)
-  act(() => void tray().add([png("shot.png")]))
+  const { view, add } = mount(upload)
+  act(() => void add([png("shot.png")]))
   await waitFor(() => expect(calls).toHaveLength(1))
   view.unmount()
   await act(async () => {
@@ -134,11 +170,11 @@ it("abandons an upload when the composer goes away", async () => {
 
 it("counts overlapping drops against one shared limit", async () => {
   const upload = vi.fn(async (file: File) => stored(file.name, 1))
-  const { tray } = mount(upload)
+  const { tray, add } = mount(upload)
   // Two drops landing together: the second must see what the first staged.
   await act(async () => {
-    const first = tray().add([png("a.png"), png("b.png"), png("c.png")])
-    const second = tray().add([png("d.png"), png("e.png"), png("f.png")])
+    const first = add([png("a.png"), png("b.png"), png("c.png")])
+    const second = add([png("d.png"), png("e.png"), png("f.png")])
     await Promise.all([first, second])
   })
   expect(tray().items).toHaveLength(5)
@@ -150,11 +186,11 @@ it("counts overlapping drops against one shared limit", async () => {
 
 it("says why a file was refused, naming it, and uploads nothing", async () => {
   const upload = vi.fn(async (file: File) => stored(file.name, 1))
-  const { tray } = mount(upload)
+  const { add } = mount(upload)
   const big = png("huge.png")
   Object.defineProperty(big, "size", { value: NEEV_MAX_ATTACHMENT_BYTES + 1 })
   await act(async () => {
-    await tray().add([big, new File([new Uint8Array([0, 1, 2])], "a.bin")])
+    await add([big, new File([new Uint8Array([0, 1, 2])], "a.bin")])
   })
   expect(upload).not.toHaveBeenCalled()
   const alert = await screen.findByRole("alert")
@@ -169,9 +205,9 @@ it("keeps a failed upload visible, retries it, and blocks sending meanwhile", as
     if (attempt === 1) throw new Error("network")
     return stored(file.name, 2)
   })
-  const { tray } = mount(upload)
+  const { tray, add } = mount(upload)
   await act(async () => {
-    await tray().add([png("shot.png")])
+    await add([png("shot.png")])
   })
   await waitFor(() => expect(tray().items[0].status).toBe("failed"))
   // Still staged, so the composer knows a send would drop it.
@@ -184,9 +220,9 @@ it("keeps a failed upload visible, retries it, and blocks sending meanwhile", as
 })
 
 it("uploads at send time when there was nowhere to upload to", async () => {
-  const { tray } = mount(null)
+  const { tray, add } = mount(null)
   await act(async () => {
-    await tray().add([png("shot.png")])
+    await add([png("shot.png")])
   })
   expect(tray().items[0].status).toBe("queued")
   const late = vi.fn(async (file: File) => stored(file.name, 3))
@@ -198,9 +234,9 @@ it("uploads at send time when there was nowhere to upload to", async () => {
 
 it("removes a staged file before it is sent", async () => {
   const upload = vi.fn(async (file: File) => stored(file.name, 1))
-  const { tray } = mount(upload)
+  const { tray, add } = mount(upload)
   await act(async () => {
-    await tray().add([png("shot.png")])
+    await add([png("shot.png")])
   })
   const user = userEvent.setup()
   await user.click(screen.getByRole("button", { name: "Remove shot.png" }))
@@ -213,12 +249,12 @@ it("drops a classification that finished after the chat changed", async () => {
   // is what marks "different conversation now" — including for a drop still
   // being classified, and for one queued behind it.
   const upload = vi.fn(async (file: File) => stored(file.name, 1))
-  const { tray } = mount(upload)
+  const { tray, add } = mount(upload)
   let first!: Promise<void>
   let second!: Promise<void>
   act(() => {
-    first = tray().add([png("a.png")])
-    second = tray().add([png("b.png")])
+    first = add([png("a.png")])
+    second = add([png("b.png")])
     // Same tick as the drops: both are still inside admission.
     tray().clear()
   })
@@ -230,7 +266,7 @@ it("drops a classification that finished after the chat changed", async () => {
   expect(upload).not.toHaveBeenCalled()
   // The tray still works for the conversation that is open now.
   await act(async () => {
-    await tray().add([png("c.png")])
+    await add([png("c.png")])
   })
   expect(tray().items.map((item) => item.name)).toEqual(["c.png"])
 })
@@ -239,9 +275,9 @@ it("says the organization is out of storage rather than blaming the message", as
   const upload = vi.fn(async () => {
     throw new NativeClientError("conflict", 409)
   })
-  const { tray } = mount(upload)
+  const { tray, add } = mount(upload)
   await act(async () => {
-    await tray().add([png("shot.png")])
+    await add([png("shot.png")])
   })
   await waitFor(() => expect(tray().items[0].reason).toBe("quota"))
   expect(screen.getByText(/out of attachment storage/)).toBeVisible()
@@ -249,13 +285,13 @@ it("says the organization is out of storage rather than blaming the message", as
 })
 
 it("caps the refusal list and counts the rest", async () => {
-  const { tray } = mount(null)
+  const { add } = mount(null)
   const junk = Array.from(
     { length: 8 },
     (_, index) => new File([new Uint8Array([0, 1, 2])], `bin-${index}.bin`)
   )
   await act(async () => {
-    await tray().add(junk)
+    await add(junk)
   })
   const alert = await screen.findByRole("alert")
   expect(within(alert).getAllByRole("listitem")).toHaveLength(6)
@@ -301,9 +337,9 @@ it("previews a staged image as data:, never as a blob: the CSP blocks", async ()
   // naturalWidth 0 — so it failed as a broken image with nothing on screen
   // saying why. A data: URL is inside the policy.
   const created = vi.spyOn(URL, "createObjectURL")
-  const { tray } = mount(async (file) => stored(file.name, 1))
+  const { add } = mount(async (file) => stored(file.name, 1))
   await act(async () => {
-    await tray().add([png("shot.png")])
+    await add([png("shot.png")])
   })
   const thumb = await waitFor(() => {
     const found = document.querySelector("img")
@@ -324,9 +360,9 @@ it("stages a large image without a preview, and still sends it", async () => {
   bytes.set(PNG, 0)
   const file = new File([bytes.buffer], "huge.png", { type: "image/png" })
   const upload = vi.fn(async (f: File) => stored(f.name, 1))
-  const { tray } = mount(upload)
+  const { tray, add } = mount(upload)
   await act(async () => {
-    await tray().add([file])
+    await add([file])
   })
   await waitFor(() => expect(tray().uploading).toBe(false))
   expect(tray().items[0].previewUrl).toBeNull()

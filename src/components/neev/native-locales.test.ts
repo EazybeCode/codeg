@@ -52,6 +52,7 @@ it.each([
           audience: "Private",
           revision: "1",
           level: 2,
+          time: "just now",
         })
       ).toBeTruthy()
     }

@@ -13,9 +13,9 @@
 // cannot upload at all until its first message creates one — so the uploader is
 // a parameter, and a tray with no uploader simply holds its files until send.
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
-import { FileText, ImageIcon, ImageOff, Paperclip, X } from "lucide-react"
+import { FileText, ImageIcon, ImageOff, Paperclip } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { NativeClientError } from "@/lib/neev-client"
@@ -35,6 +35,7 @@ import {
   type NeevAttachmentType,
   type NeevRejectedFile,
 } from "@/lib/neev-attachments"
+import { parseSentPrompt } from "@/lib/neev-inline-prompt"
 
 /** Where one file's bytes go. Resolves to the server's own row for them. */
 export type AttachmentUploader = (
@@ -81,11 +82,33 @@ function localId(): string {
 export interface AttachmentTray {
   items: DraftAttachment[]
   rejected: NeevRejectedFile[]
-  /** Take these files, as far as the limits allow, and start uploading them. */
-  add: (files: readonly File[]) => Promise<void>
+  /**
+   * Take these files, as far as the limits allow, and start uploading them.
+   *
+   * Resolves with what was actually staged, in order, because the composer has
+   * to put a node for each one where the caret is — and a file that was refused
+   * must not leave a chip behind in the sentence.
+   */
+  add: (files: readonly File[]) => Promise<DraftAttachment[]>
   remove: (id: string) => void
+  /**
+   * Put a released file back, under the id it already had.
+   *
+   * For undo, and only for undo: a reference that comes back into the sentence
+   * has to come back attached to the same bytes, or it is a reference to
+   * nothing. A file the server already stored keeps its key and is not sent up
+   * a second time.
+   */
+  restore: (item: DraftAttachment) => void
   retry: (id: string) => void
   clear: () => void
+  /**
+   * Bumped by `clear`, and by nothing else.
+   *
+   * What was cleared is gone for good — a sent message's files, or another
+   * chat's — so anything holding on to them for an undo has to let go.
+   */
+  generation: number
   dismissRejected: () => void
   /** An upload is in flight, so sending would race it. */
   uploading: boolean
@@ -99,7 +122,18 @@ export interface AttachmentTray {
    * Throws rather than returning a short list: a message that quietly leaves
    * out the file someone attached is worse than one that refuses to send.
    */
-  takeKeys: (uploader?: AttachmentUploader) => Promise<string[]>
+  takeKeys: (
+    uploader?: AttachmentUploader,
+    /**
+     * Local ids in the order the message mentions them.
+     *
+     * The tray holds files in the order they arrived; the sentence may mention
+     * them in another, and the server stores the keys in the order it is given.
+     * Anything staged but not listed is still uploaded and still sent — the
+     * ordering is a preference, never a filter.
+     */
+    order?: readonly string[]
+  ) => Promise<string[]>
 }
 
 /**
@@ -144,6 +178,7 @@ export function useAttachmentTray(options: {
    * earlier era is dropped instead of landing in the chat that is open now.
    */
   const era = useRef(0)
+  const [generation, setGeneration] = useState(0)
   useEffect(() => {
     alive.current = true
     // The map itself outlives every render; capturing it is what the cleanup
@@ -206,15 +241,15 @@ export function useAttachmentTray(options: {
     async (files: readonly File[], dropped: number) => {
       // Checked on the way in as well as on the way out: a drop that waited in
       // the queue behind another one may already belong to a closed chat.
-      if (disabled || files.length === 0 || !alive.current) return
-      if (dropped !== era.current) return
+      if (disabled || files.length === 0 || !alive.current) return []
+      if (dropped !== era.current) return []
       const { accepted, rejected: refused } = await admitFiles(
         files,
         itemsRef.current
       )
-      if (!alive.current || dropped !== era.current) return
+      if (!alive.current || dropped !== era.current) return []
       if (refused.length) setRejected((old) => [...old, ...refused])
-      if (!accepted.length) return
+      if (!accepted.length) return []
       const staged = accepted.map(({ file, contentType }) => ({
         id: localId(),
         file,
@@ -245,8 +280,13 @@ export function useAttachmentTray(options: {
         })
       )
       const uploader = uploadRef.current
-      if (!uploader) return
-      await Promise.allSettled(staged.map((item) => send(item, uploader)))
+      // Deliberately not awaited: the caller puts a chip in the sentence the
+      // moment the file is admitted, and waiting for the bytes to land first
+      // would leave the caret sitting in front of nothing for the length of an
+      // upload. Each chip says what its own upload is doing.
+      if (uploader)
+        void Promise.allSettled(staged.map((item) => send(item, uploader)))
+      return staged
     },
     [disabled, patch, send]
   )
@@ -273,12 +313,34 @@ export function useAttachmentTray(options: {
     // Anything still being classified or queued belonged to what was just
     // cleared, and must not reappear in whatever is open next.
     era.current += 1
+    setGeneration((value) => value + 1)
     for (const controller of flights.current.values()) controller.abort()
     flights.current.clear()
     itemsRef.current = []
     setItems([])
     setRejected([])
   }, [])
+
+  const restore = useCallback(
+    (item: DraftAttachment) => {
+      if (!alive.current) return
+      if (itemsRef.current.length >= NEEV_MAX_ATTACHMENTS) return
+      if (itemsRef.current.some((entry) => entry.id === item.id)) return
+      // Already stored means already paid for: the key is still good, and
+      // re-sending the bytes would leave a second copy behind.
+      const back: DraftAttachment = item.attachment
+        ? { ...item, status: "uploaded", reason: null, error: null }
+        : { ...item, status: "queued", attachment: null, reason: null }
+      itemsRef.current = [...itemsRef.current, back]
+      setItems(itemsRef.current)
+      const uploader = uploadRef.current
+      if (!back.attachment && uploader)
+        void send(back, uploader).catch(() => {
+          // The chip says so.
+        })
+    },
+    [send]
+  )
 
   const retry = useCallback(
     (id: string) => {
@@ -295,9 +357,18 @@ export function useAttachmentTray(options: {
   )
 
   const takeKeys = useCallback(
-    async (uploader?: AttachmentUploader) => {
-      const staged = itemsRef.current
-      if (staged.length === 0) return []
+    async (uploader?: AttachmentUploader, order?: readonly string[]) => {
+      const held = itemsRef.current
+      if (held.length === 0) return []
+      // The sentence's order first, then anything it did not mention. A file
+      // left out of the list is still someone's file: it goes up and it is
+      // sent, just at the end.
+      const staged = order
+        ? [
+            ...order.flatMap((id) => held.filter((item) => item.id === id)),
+            ...held.filter((item) => !order.includes(item.id)),
+          ]
+        : held
       const using = uploader ?? uploadRef.current
       const keys: string[] = []
       for (const item of staged) {
@@ -320,8 +391,10 @@ export function useAttachmentTray(options: {
     rejected,
     add,
     remove: drop,
+    restore,
     retry,
     clear,
+    generation,
     dismissRejected: () => setRejected([]),
     uploading: items.some((item) => item.status === "uploading"),
     blocked: items.some((item) => item.status !== "uploaded"),
@@ -521,7 +594,7 @@ const SHOWN_REJECTIONS = 5
  *
  * The file is attached and will be sent in all three.
  */
-function AttachmentThumb({
+export function AttachmentThumb({
   src,
   contentType,
   name,
@@ -579,120 +652,80 @@ function AttachmentThumb({
   )
 }
 
-/** What is staged, what it is doing, and how to take it back out. */
-export function AttachmentTrayView({
-  tray,
-  disabled = false,
+/**
+ * The uploads that failed, said in full.
+ *
+ * The chip in the sentence says THAT a file failed and offers the retry; a
+ * whole sentence explaining why would make the line it sits in unreadable. So
+ * the reason is written out once, underneath, where a refusal is written.
+ */
+export function AttachmentFailures({
+  items,
 }: {
-  tray: AttachmentTray
-  disabled?: boolean
+  items: readonly DraftAttachment[]
 }) {
   const t = useTranslations("NativeContent")
-  const n = useTranslations("Native")
-  const listId = useId()
-  if (tray.items.length === 0 && tray.rejected.length === 0) return null
+  const failed = items.filter((item) => item.status === "failed")
+  if (failed.length === 0) return null
   return (
-    <div className="space-y-1.5 px-1 pb-1.5">
-      {tray.items.length > 0 && (
-        <ul
-          id={listId}
-          aria-label={t("attachments")}
-          className="flex flex-wrap gap-1.5"
-        >
-          {tray.items.map((item) => (
-            <li
-              key={item.id}
-              // One line, not a card: a reference to a file, the way the file
-              // is referred to in the sentence being typed above it. Name and
-              // state sit on the SAME line, so five attachments cost one row
-              // of the composer rather than five.
-              className={cn(
-                "flex h-8 max-w-64 items-center gap-1.5 rounded-md border bg-muted/40 pe-0.5 ps-1",
-                item.status === "failed" && "border-destructive/60"
-              )}
-            >
-              <AttachmentThumb
-                src={item.previewUrl}
-                contentType={item.contentType}
-                name={item.name}
-              />
-              <span
-                className="min-w-0 truncate text-xs"
-                title={`${item.name} · ${formatBytes(item.size)}`}
-              >
-                {item.name}
-              </span>
-              <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
-                {item.status === "uploading" ? (
-                  <span role="status">{t("attachmentUploading")}</span>
-                ) : item.status === "failed" ? (
-                  <span className="text-destructive">
-                    {item.reason
-                      ? rejectionMessage(t, item.reason, item.name)
-                      : t("attachmentFailed")}
-                  </span>
-                ) : (
-                  formatBytes(item.size)
-                )}
-              </span>
-              {item.status === "failed" && (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 shrink-0 px-1.5 text-[11px]"
-                  onClick={() => tray.retry(item.id)}
-                >
-                  {n("retry")}
-                </Button>
-              )}
-              <Button
-                type="button"
-                size="icon"
-                variant="ghost"
-                className="size-6 shrink-0"
-                aria-label={t("attachmentRemove", { name: item.name })}
-                title={t("attachmentRemove", { name: item.name })}
-                disabled={disabled}
-                onClick={() => tray.remove(item.id)}
-              >
-                <X aria-hidden className="size-3.5" />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {tray.rejected.length > 0 && (
-        <div className="flex items-start gap-2">
-          <ul role="alert" className="min-w-0 flex-1 space-y-0.5">
-            {tray.rejected.slice(0, SHOWN_REJECTIONS).map((item, index) => (
-              <li
-                key={`${item.name}-${index}`}
-                className="text-[11px] text-muted-foreground"
-              >
-                {rejectionMessage(t, item.reason, item.name)}
-              </li>
-            ))}
-            {tray.rejected.length > SHOWN_REJECTIONS && (
-              // Counted, never silently dropped: the rest are still refusals.
-              <li className="text-[11px] text-muted-foreground">
-                {t("attachmentMoreRejected", {
-                  number: tray.rejected.length - SHOWN_REJECTIONS,
-                })}
-              </li>
-            )}
-          </ul>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="h-6 shrink-0 px-1.5 text-[11px]"
-            onClick={tray.dismissRejected}
+    <ul role="alert" className="space-y-0.5 px-1 pb-1.5">
+      {failed.map((item) => (
+        <li key={item.id} className="text-[11px] text-muted-foreground">
+          {item.reason
+            ? rejectionMessage(t, item.reason, item.name)
+            : t("attachmentFailed")}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * The files this composer refused, and why.
+ *
+ * The staged files themselves are no longer listed here — they are IN the
+ * sentence now, as nodes, which is the whole point. A refusal has no node to
+ * live in: nothing was staged, so the only place left to say so is above the
+ * row of controls, once, with a way to dismiss it.
+ */
+export function AttachmentRejections({
+  rejected,
+  onDismiss,
+}: {
+  rejected: readonly NeevRejectedFile[]
+  onDismiss: () => void
+}) {
+  const t = useTranslations("NativeContent")
+  if (rejected.length === 0) return null
+  return (
+    <div className="flex items-start gap-2 px-1 pb-1.5">
+      <ul role="alert" className="min-w-0 flex-1 space-y-0.5">
+        {rejected.slice(0, SHOWN_REJECTIONS).map((item, index) => (
+          <li
+            key={`${item.name}-${index}`}
+            className="text-[11px] text-muted-foreground"
           >
-            {t("attachmentDismiss")}
-          </Button>
-        </div>
-      )}
+            {rejectionMessage(t, item.reason, item.name)}
+          </li>
+        ))}
+        {rejected.length > SHOWN_REJECTIONS && (
+          // Counted, never silently dropped: the rest are still refusals.
+          <li className="text-[11px] text-muted-foreground">
+            {t("attachmentMoreRejected", {
+              number: rejected.length - SHOWN_REJECTIONS,
+            })}
+          </li>
+        )}
+      </ul>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        className="h-6 shrink-0 px-1.5 text-[11px]"
+        onClick={onDismiss}
+      >
+        {t("attachmentDismiss")}
+      </Button>
     </div>
   )
 }
@@ -717,61 +750,133 @@ export function SentAttachments({
   attachments: readonly NeevAttachment[]
 }) {
   const t = useTranslations("NativeContent")
-  // Built once per list: `attachmentUrl` validates the key and throws on one
-  // that is not shaped like a key, which must not happen mid-render for a
-  // transcript that is otherwise fine.
-  const items = useMemo(
-    () =>
-      attachments.map((item) => {
-        try {
-          return { item, href: attachmentUrl(item.key) }
-        } catch {
-          return { item, href: null }
-        }
-      }),
-    [attachments]
-  )
   if (attachments.length === 0) return null
   return (
     <ul aria-label={t("attachments")} className="flex flex-wrap gap-1.5 py-1">
-      {items.map(({ item, href }) => {
-        const inside = (
-          <>
-            <AttachmentThumb
-              src={href && item.contentType.startsWith("image/") ? href : null}
-              contentType={item.contentType}
-              name={item.fileName}
-            />
-            <span className="min-w-0 truncate text-xs">{item.fileName}</span>
-            <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
-              {formatBytes(item.byteLength)}
-            </span>
-          </>
-        )
-        return (
-          <li key={item.key}>
-            {href ? (
-              // `download`, not a viewer: these are served as attachments with
-              // `nosniff`, so framing one from this origin would be a
-              // different promise than the endpoint makes.
-              <a
-                href={href}
-                download={item.fileName}
-                title={`${item.fileName} · ${formatBytes(item.byteLength)}`}
-                className="flex h-8 max-w-64 items-center gap-1.5 rounded-md border px-1 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {inside}
-              </a>
-            ) : (
-              // Stored metadata this build cannot address. It is still named,
-              // because the file WAS sent and the agent did read it.
-              <span className="flex h-8 max-w-64 items-center gap-1.5 rounded-md border border-dashed px-1 opacity-70">
-                {inside}
-              </span>
-            )}
-          </li>
-        )
-      })}
+      {attachments.map((item) => (
+        <li key={item.key}>
+          <SentReference attachment={item} />
+        </li>
+      ))}
     </ul>
+  )
+}
+
+/** One stored file, as a thing a reader can open. */
+function SentReference({
+  attachment,
+  className,
+}: {
+  attachment: NeevAttachment
+  className?: string
+}) {
+  // `attachmentUrl` validates the key and throws on one that is not shaped
+  // like a key, which must not take down a transcript that is otherwise fine.
+  const href = useMemo(() => {
+    try {
+      return attachmentUrl(attachment.key)
+    } catch {
+      return null
+    }
+  }, [attachment.key])
+  const label = `${attachment.fileName} · ${formatBytes(attachment.byteLength)}`
+  const inside = (
+    <>
+      <AttachmentThumb
+        src={href && attachment.contentType.startsWith("image/") ? href : null}
+        contentType={attachment.contentType}
+        name={attachment.fileName}
+      />
+      <span className="min-w-0 truncate text-xs">{attachment.fileName}</span>
+      <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
+        {formatBytes(attachment.byteLength)}
+      </span>
+    </>
+  )
+  if (!href)
+    // Stored metadata this build cannot address. It is still named, because
+    // the file WAS sent and the agent did read it.
+    return (
+      <span
+        className={cn(
+          "inline-flex h-8 max-w-64 items-center gap-1.5 rounded-md border border-dashed px-1 align-middle opacity-70",
+          className
+        )}
+      >
+        {inside}
+      </span>
+    )
+  return (
+    // `download`, not a viewer: these are served as attachments with
+    // `nosniff`, so framing one from this origin would be a different promise
+    // than the endpoint makes.
+    <a
+      href={href}
+      download={attachment.fileName}
+      title={label}
+      className={cn(
+        "inline-flex h-8 max-w-64 items-center gap-1.5 rounded-md border px-1 align-middle hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring",
+        className
+      )}
+    >
+      {inside}
+    </a>
+  )
+}
+
+/**
+ * A sent message, read back in the order it was written.
+ *
+ * The composer put a numbered marker where each file sat; `parseSentPrompt`
+ * pairs marker N with the Nth stored attachment and refuses to pair anything it
+ * is not sure about. So a message written before this existed, or one where
+ * somebody simply typed square brackets, renders as the text they wrote with
+ * its files listed after it — and a message written here renders as the
+ * sentence they built, files and all, in place.
+ *
+ * Markdown is deliberately not applied to a message that HAS inline files:
+ * block rendering would put each run of text on its own line and destroy the
+ * one thing this is for.
+ */
+export function SentPrompt({
+  body,
+  attachments,
+}: {
+  body: string
+  attachments: readonly NeevAttachment[]
+}) {
+  const t = useTranslations("NativeContent")
+  const { parts, trailing } = useMemo(
+    () => parseSentPrompt(body, attachments),
+    [body, attachments]
+  )
+  return (
+    <>
+      <p className="whitespace-pre-wrap break-words">
+        {parts.map((part, index) =>
+          part.kind === "text" ? (
+            <span key={index}>{part.text}</span>
+          ) : (
+            <SentReference
+              key={index}
+              attachment={attachments[part.index]}
+              className="mx-0.5"
+            />
+          )
+        )}
+      </p>
+      {trailing.length > 0 && (
+        <ul
+          aria-label={t("attachments")}
+          className="flex flex-wrap gap-1.5 py-1"
+        >
+          {trailing.map((index) => (
+            <li key={attachments[index].key}>
+              <SentReference attachment={attachments[index]} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
   )
 }

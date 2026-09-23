@@ -19,6 +19,10 @@ import {
   nativeCapabilities,
   NativeTestRoot,
   orgSession,
+  composerText,
+  composerEditable,
+  typeInComposer,
+  setComposerText,
 } from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
 import { NativeClientError } from "@/lib/neev-client"
@@ -118,6 +122,18 @@ it("opens a chat as a page and restores the folder listing on Back", async () =>
   await user.click(screen.getByRole("button", { name: "Back to folder" }))
   expect(await screen.findByRole("tablist")).toBeVisible()
 })
+/**
+ * Whether the editor under test will take typing.
+ *
+ * The chat composer says so with `contenteditable`; the document editor is
+ * BlockNote's, which this suite does not own and which says it its own way.
+ */
+function writable(box: HTMLElement, kind: "chat" | "document"): boolean {
+  return kind === "chat"
+    ? composerEditable(box)
+    : box.getAttribute("contenteditable") !== "false"
+}
+
 // Activity can suspend synchronously when hiding. Await React's event flush
 // explicitly; user-event's synchronous act wrapper cannot await that suspension.
 const visibilityActions = {
@@ -126,7 +142,15 @@ const visibilityActions = {
       fireEvent.click(element)
     })
   },
+  // The chat composer is a contenteditable now, not a form control, so it has
+  // no value to set — everything else here still does.
+  // An editor is not a form control: it has no value to set, and no separate
+  // clear — writing to it replaces what it holds, which is what every use of
+  // these two here does anyway.
   type: async (element: Element, value: string) => {
+    const box = element as HTMLElement
+    if (box.getAttribute("contenteditable") === "true")
+      return setComposerText(box, value)
     await act(async () => {
       fireEvent.change(element, {
         target: { value: (element as HTMLInputElement).value + value },
@@ -134,6 +158,9 @@ const visibilityActions = {
     })
   },
   clear: async (element: Element) => {
+    const box = element as HTMLElement
+    if (box.getAttribute("contenteditable") === "true")
+      return setComposerText(box, "")
     await act(async () => {
       fireEvent.change(element, { target: { value: "" } })
     })
@@ -179,7 +206,7 @@ it.each([false, true])(
     const user = visibilityActions
     await user.click(await screen.findByRole("button", { name: /Design chat/ }))
     const draft = await screen.findByRole("textbox", { name: "Message" })
-    await user.type(draft, "private retained thought")
+    await typeInComposer(draft, "private retained thought")
     await user.click(screen.getByRole("button", { name: "Back to folder" }))
     const dialog = screen.getByRole("dialog")
     expect(dialog).toBeVisible()
@@ -196,14 +223,12 @@ it.each([false, true])(
     revalidating = false
     await act(async () => releaseResource(json(chat)))
     expect(await screen.findByRole("dialog")).toBeVisible()
-    expect(
-      screen.getByDisplayValue("private retained thought")
-    ).toBeInTheDocument()
+    expect(screen.getByText("private retained thought")).toBeInTheDocument()
     if (strict) {
       await user.click(screen.getByRole("button", { name: "Keep editing" }))
-      expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
-        "private retained thought"
-      )
+      expect(
+        composerText(screen.getByRole("textbox", { name: "Message" }))
+      ).toBe("private retained thought")
     } else {
       await user.click(screen.getByRole("button", { name: "Discard changes" }))
       expect(
@@ -257,7 +282,9 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5000)
       })
-      expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+      expect(
+        composerEditable(screen.getByRole("textbox", { name: "Message" }))
+      ).toBe(false)
     }
     if (action === "Make private") {
       expect(
@@ -299,11 +326,17 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
       screen.getByRole("button", { name: "Share with organization" })
     ).toBeVisible()
     if (action === "Archive") {
-      expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+      expect(
+        composerEditable(screen.getByRole("textbox", { name: "Message" }))
+      ).toBe(false)
     } else {
-      expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled()
+      expect(
+        composerEditable(screen.getByRole("textbox", { name: "Message" }))
+      ).toBe(true)
     }
-    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("")
+    expect(composerText(screen.getByRole("textbox", { name: "Message" }))).toBe(
+      ""
+    )
     // The opposite action is now offered in the Content actions menu.
     await openContentMenu()
     expect(
@@ -411,14 +444,14 @@ it.each([
     mount()
     const user = visibilityActions
     await user.click(await screen.findByRole("button", { name: /Design chat/ }))
-    await user.type(
+    await typeInComposer(
       await screen.findByRole("textbox", { name: "Message" }),
       "must be destroyed"
     )
     refreshed = true
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
     await waitFor(() =>
-      expect(screen.queryByDisplayValue("must be destroyed")).toBeNull()
+      expect(screen.queryByText("must be destroyed")).toBeNull()
     )
     expect(document.body.innerHTML).not.toContain("rotated-proof")
     expect(mock.unknown).toEqual([])
@@ -448,13 +481,13 @@ it.each([403, 404, 503])(
     const user = visibilityActions
     await user.click(await screen.findByRole("button", { name: /Design chat/ }))
     const draft = await screen.findByRole("textbox", { name: "Message" })
-    await user.type(draft, "revoked private thought")
+    await typeInComposer(draft, "revoked private thought")
     revalidating = true
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
     expect(draft).not.toBeVisible()
     await act(async () => release(json({ code: "unavailable" }, status)))
     await waitFor(() =>
-      expect(screen.queryByDisplayValue("revoked private thought")).toBeNull()
+      expect(screen.queryByText("revoked private thought")).toBeNull()
     )
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     expect(mock.unknown).toEqual([])
@@ -525,24 +558,23 @@ it.each(["manual", "broadcast", "401", "logout"])(
     )
     const user = visibilityActions
     await user.click(await screen.findByRole("button", { name: /Design chat/ }))
-    await user.type(
-      await screen.findByRole("textbox", { name: "Message" }),
-      "never revive this draft"
-    )
+    const box = await screen.findByRole("textbox", { name: "Message" })
+    await typeInComposer(box, "never revive this draft")
     phase = "soft"
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
-    expect(
-      screen.getByDisplayValue("never revive this draft")
-    ).not.toBeVisible()
+    // The composer's own element goes with its tab — the editor holds the draft
+    // while it is away, which is what "retained" means here.
+    expect(composerText(box)).toBe("never revive this draft")
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
     phase = "hard"
     await act(async () => {
       await user.click(
         screen.getByRole("button", { name: "Invalidate fixture" })
       )
     })
-    expect(screen.queryByDisplayValue("never revive this draft")).toBeNull()
+    expect(screen.queryByText("never revive this draft")).toBeNull()
     await act(async () => release(json(orgSession)))
-    expect(screen.queryByDisplayValue("never revive this draft")).toBeNull()
+    expect(screen.queryByText("never revive this draft")).toBeNull()
     expect(mock.unknown).toEqual([])
   }
 )
@@ -628,7 +660,9 @@ it.each(["chat", "document"] as const)(
     await waitFor(() => expect(bodies).toHaveLength(1))
     refreshed = true
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
-    expect(screen.getByRole("textbox", { name })).toHaveValue("retained draft")
+    expect(composerText(screen.getByRole("textbox", { name }))).toBe(
+      "retained draft"
+    )
     if (kind === "chat") {
       // A message is sent by hand, so the retry is a second press — and it
       // must carry the SAME request id rather than write twice.
@@ -671,13 +705,15 @@ it.each(["chat", "document"] as const)(
         )
       )
     )
-    expect(screen.getByRole("textbox", { name })).toHaveValue("retained draft")
+    expect(composerText(screen.getByRole("textbox", { name }))).toBe(
+      "retained draft"
+    )
     // A chat's composer stays usable while a send is in flight — an agent run
     // shares this box and can take minutes. What that costs is a race the
     // clear has to win honestly: text typed before the server answers is newer
     // than the send, and survives it.
     if (kind === "chat")
-      expect(screen.getByRole("textbox", { name })).toBeEnabled()
+      expect(writable(screen.getByRole("textbox", { name }), kind)).toBe(true)
     if (releases[1])
       await act(async () =>
         releases[1](
@@ -690,7 +726,7 @@ it.each(["chat", "document"] as const)(
         )
       )
     await waitFor(() =>
-      expect(screen.getByRole("textbox", { name })).toBeEnabled()
+      expect(writable(screen.getByRole("textbox", { name }), kind)).toBe(true)
     )
     expect(mock.unknown).toEqual([])
   }
@@ -742,24 +778,18 @@ it("waits for the entire loaded resource window before revealing a retained draf
     fireEvent.click(screen.getByRole("button", { name: /Design chat/ }))
   })
   const editor = await screen.findByRole("textbox", { name: "Message" })
-  await act(async () => {
-    fireEvent.change(editor, {
-      target: { value: "retained across full window" },
-    })
-  })
+  await setComposerText(editor, "retained across full window")
   resumed = true
   await act(async () => document.dispatchEvent(new Event("visibilitychange")))
-  expect(
-    screen.getByDisplayValue("retained across full window")
-  ).not.toBeVisible()
+  expect(composerText(editor)).toBe("retained across full window")
   expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
   approved = true
   await act(async () =>
     release(json({ items: fresh.slice(100), nextAfter: null }))
   )
-  expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
-    "retained across full window"
-  )
+  expect(
+    composerText(await screen.findByRole("textbox", { name: "Message" }))
+  ).toBe("retained across full window")
   await act(async () => {
     fireEvent.click(screen.getByRole("button", { name: "Back to folder" }))
   })
@@ -796,11 +826,11 @@ it("hard-clears the scope when the loaded window loses authority during revalida
   })
   const editor = await screen.findByRole("textbox", { name: "Message" })
   await act(async () => {
-    fireEvent.change(editor, { target: { value: "window revoked draft" } })
+    await setComposerText(editor, "window revoked draft")
   })
   await act(async () => document.dispatchEvent(new Event("visibilitychange")))
   expect(await screen.findByRole("button", { name: "New chat" })).toBeEnabled()
-  expect(screen.queryByDisplayValue("window revoked draft")).toBeNull()
+  expect(screen.queryByText("window revoked draft")).toBeNull()
   expect(mock.unknown).toEqual([])
 })
 
@@ -1125,14 +1155,18 @@ it("immediately applies creator archive/reopen actions and moves with the curren
   await screen.findByRole("textbox", { name: "Message" })
   await triggerAction(user, "Archive")
   await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+    expect(
+      composerEditable(screen.getByRole("textbox", { name: "Message" }))
+    ).toBe(false)
   )
   await user.click(screen.getByRole("button", { name: "Content actions" }))
   const reopen = await screen.findByRole("menuitem", { name: "Reopen" })
   expect(reopen).toBeEnabled()
   await user.click(reopen)
   await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled()
+    expect(
+      composerEditable(screen.getByRole("textbox", { name: "Message" }))
+    ).toBe(true)
   )
   await triggerAction(user, "Move")
   await screen.findByRole("option", { name: "Destination · #5" })
@@ -1200,7 +1234,7 @@ it("discards the actual draft before opening a creator action on the same resour
   const user = userEvent.setup()
   mount()
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     "discard me"
   )
@@ -1208,12 +1242,12 @@ it("discards the actual draft before opening a creator action on the same resour
     screen.getByRole("button", { name: "Share with organization" })
   )
   await user.click(screen.getByRole("button", { name: "Discard changes" }))
-  expect(screen.queryByDisplayValue("discard me")).toBeNull()
+  expect(screen.queryByText("discard me")).toBeNull()
   expect(screen.getByRole("dialog")).toHaveTextContent("Share full history?")
   await user.click(screen.getByRole("button", { name: "Cancel" }))
-  expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
-    ""
-  )
+  expect(
+    composerText(await screen.findByRole("textbox", { name: "Message" }))
+  ).toBe("")
   expect(mock.unknown).toEqual([])
 })
 
@@ -1231,14 +1265,14 @@ it("guards leaving a dirty page before keyboard switching folder tabs", async ()
   const user = userEvent.setup()
   mount()
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     "dirty"
   )
   expect(screen.queryByRole("tablist")).toBeNull()
   await user.click(screen.getByRole("button", { name: "Back to folder" }))
   await user.click(screen.getByRole("button", { name: "Discard changes" }))
-  expect(screen.queryByDisplayValue("dirty")).toBeNull()
+  expect(screen.queryByText("dirty")).toBeNull()
   screen.getByRole("tab", { name: "Team chat" }).focus()
   await user.keyboard("{ArrowRight}")
   await waitFor(() =>
@@ -1335,7 +1369,7 @@ it("auth invalidation clears a private draft even while its Settings guard is op
   const user = userEvent.setup()
   mount()
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     "secret pending draft"
   )
@@ -1353,7 +1387,7 @@ it("auth invalidation clears a private draft even while its Settings guard is op
     await vi.advanceTimersByTimeAsync(5000)
   })
   expect(screen.queryByRole("dialog")).toBeNull()
-  expect(screen.queryByDisplayValue("secret pending draft")).toBeNull()
+  expect(screen.queryByText("secret pending draft")).toBeNull()
   expect(push).not.toHaveBeenCalled()
   expect(mock.unknown).toEqual([])
 })
@@ -1397,7 +1431,7 @@ it("ignores a delayed PATCH for A after navigating to B and writing a draft", as
   await triggerAction(user, "Archive")
   await user.click(screen.getByRole("button", { name: "Back to folder" }))
   await user.click(await screen.findByRole("button", { name: /Chat B/ }))
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     "B's unsaved draft"
   )
@@ -1405,7 +1439,7 @@ it("ignores a delayed PATCH for A after navigating to B and writing a draft", as
     release(json({ ...chat, archived: true, authRevision: "2" }))
   })
   expect(screen.getByRole("heading", { name: "Chat B" })).toBeVisible()
-  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+  expect(composerText(screen.getByRole("textbox", { name: "Message" }))).toBe(
     "B's unsaved draft"
   )
   expect(mock.unknown).toEqual([])

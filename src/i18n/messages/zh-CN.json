@@ -380,7 +380,8 @@
     "showTrash": "显示回收站",
     "hideTrash": "隐藏回收站",
     "loadingItems": "正在加载内容…",
-    "checkingAccess": "正在检查访问权限…"
+    "checkingAccess": "正在检查访问权限…",
+    "connectionCheckedAt": "检查于 {time}"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作区聊天上下文不可用。",

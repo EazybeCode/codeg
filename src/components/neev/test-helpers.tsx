@@ -1,3 +1,4 @@
+import { act, fireEvent } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { vi } from "vitest"
 import messages from "@/i18n/messages/en.json"
@@ -140,4 +141,80 @@ export function NativeTestRoot({ children }: { children: React.ReactNode }) {
       <NativeAuthProvider>{children}</NativeAuthProvider>
     </NextIntlClientProvider>
   )
+}
+
+/**
+ * Type into the inline composer, where the caret would be.
+ *
+ * `userEvent.type` drives a contenteditable by dispatching keys and letting the
+ * browser do the editing, which jsdom does not — the characters arrive out of
+ * order. ProseMirror reads its own DOM back, so the honest way to type here is
+ * to put the text where it belongs and say the DOM changed. `where` is which
+ * side of what is already there: "start" is typing BEFORE an attachment,
+ * "end" is typing after it.
+ */
+export async function typeInComposer(
+  box: HTMLElement,
+  text: string,
+  where: "start" | "end" = "end"
+) {
+  const paragraph = writableParagraph(box)
+  await act(async () => {
+    const node = document.createTextNode(text)
+    if (where === "start") paragraph.insertBefore(node, paragraph.firstChild)
+    else paragraph.appendChild(node)
+    // Leave the caret after what was just typed, the way typing does — the next
+    // file dropped in lands after these words rather than before them.
+    const range = document.createRange()
+    range.setStart(node, text.length)
+    range.collapse(true)
+    const selection = box.ownerDocument.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+    fireEvent.input(paragraph, { inputType: "insertText", data: text })
+  })
+}
+
+/** The words in an inline composer, the way a `<textarea>`'s value used to be. */
+export function composerText(box: HTMLElement): string {
+  return box.textContent ?? ""
+}
+
+/**
+ * Whether the composer will take typing.
+ *
+ * A contenteditable is not a form control, so it is not `disabled` — it stops
+ * being editable. Same fact, said the way the DOM says it.
+ */
+export function composerEditable(box: HTMLElement): boolean {
+  return box.getAttribute("contenteditable") === "true"
+}
+
+/**
+ * Replace everything in an inline composer.
+ *
+ * The blunt instrument, for tests about a draft's lifetime rather than about
+ * the composer: it does not respect attachment nodes, because the drafts these
+ * tests write have none.
+ */
+export async function setComposerText(box: HTMLElement, text: string) {
+  const paragraph = writableParagraph(box)
+  await act(async () => {
+    paragraph.textContent = text
+    fireEvent.input(paragraph, { inputType: "insertText", data: text })
+  })
+}
+
+/**
+ * Where text goes in an editor.
+ *
+ * A cleared editor can be left with no paragraph at all; putting one back is
+ * what a browser would do on the next keystroke, and the editor re-parses it.
+ */
+function writableParagraph(box: HTMLElement): HTMLElement {
+  const existing = box.querySelector("p")
+  if (existing) return existing
+  const paragraph = box.ownerDocument.createElement("p")
+  box.appendChild(paragraph)
+  return paragraph
 }

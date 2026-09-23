@@ -380,7 +380,8 @@
     "showTrash": "Mostrar papelera",
     "hideTrash": "Ocultar papelera",
     "loadingItems": "Cargando elementos…",
-    "checkingAccess": "Comprobando el acceso…"
+    "checkingAccess": "Comprobando el acceso…",
+    "connectionCheckedAt": "Comprobado {time}"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "El contexto del chat del espacio de trabajo no está disponible.",

@@ -380,7 +380,8 @@
     "showTrash": "إظهار سلة المهملات",
     "hideTrash": "إخفاء سلة المهملات",
     "loadingItems": "جارٍ تحميل العناصر…",
-    "checkingAccess": "جارٍ التحقق من الوصول…"
+    "checkingAccess": "جارٍ التحقق من الوصول…",
+    "connectionCheckedAt": "تم الفحص {time}"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "سياق محادثة مساحة العمل غير متاح.",

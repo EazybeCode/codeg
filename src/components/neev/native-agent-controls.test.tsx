@@ -19,6 +19,8 @@ import {
   json,
   mockNativeSession,
   NativeTestRoot,
+  composerText,
+  typeInComposer,
 } from "./test-helpers"
 import { parseAgentCapabilities } from "@/lib/neev-agent-sessions-client"
 
@@ -649,7 +651,7 @@ describe("the controls on a saved agent chat", () => {
     )
     await pickModel(user, "Opus")
     const box = await screen.findByRole("textbox", { name: "Ask the agent" })
-    await user.type(box, "Summarise the parser")
+    await typeInComposer(box, "Summarise the parser")
     await user.click(screen.getByRole("button", { name: "Send" }))
 
     // A run reads the SESSION, so a turn started here would have run under a
@@ -659,6 +661,6 @@ describe("the controls on a saved agent chat", () => {
     )
     expect(turns).toHaveLength(0)
     // ...and the words the user typed are still exactly where they were.
-    expect(box).toHaveValue("Summarise the parser")
+    expect(composerText(box)).toBe("Summarise the parser")
   })
 })

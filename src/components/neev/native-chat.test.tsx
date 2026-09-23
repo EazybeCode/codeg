@@ -16,6 +16,9 @@ import {
   nativeCapabilities,
   NativeTestRoot,
   orgSession,
+  composerText,
+  composerEditable,
+  typeInComposer,
 } from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
 
@@ -113,7 +116,7 @@ it("brings a successfully sent message into view from older history", async () =
   history.scrollTop = 0
   fireEvent.scroll(history)
   const user = userEvent.setup()
-  await user.type(
+  await typeInComposer(
     screen.getByRole("textbox", { name: "Message" }),
     message.body
   )
@@ -136,13 +139,13 @@ it("retries a committed message with the same request ID and displays its human 
   const user = userEvent.setup()
   mount()
   await ready()
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     message.body
   )
   await user.click(screen.getByRole("button", { name: "Send" }))
   expect(await screen.findByRole("alert")).toBeVisible()
-  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+  expect(composerText(screen.getByRole("textbox", { name: "Message" }))).toBe(
     message.body
   )
   await user.click(screen.getByRole("button", { name: "Send" }))
@@ -178,7 +181,7 @@ it("pins a dirty message audience across polling and explicitly accepts the late
   const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
   mount()
   await ready()
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     message.body
   )
@@ -292,11 +295,10 @@ it.each([403, 404, 401])(
       },
       [`GET ${path}`]: () => json({ items: [message], nextAfter: null }),
     })
-    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
     mount()
     await ready()
     await screen.findByText(message.body)
-    await user.type(
+    await typeInComposer(
       screen.getByRole("textbox", { name: "Message" }),
       "secret unsent"
     )
@@ -305,7 +307,7 @@ it.each([403, 404, 401])(
       await vi.advanceTimersByTimeAsync(5000)
     })
     expect(screen.queryByText(message.body)).toBeNull()
-    expect(screen.queryByDisplayValue("secret unsent")).toBeNull()
+    expect(screen.queryByText("secret unsent")).toBeNull()
     const count = calls
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15000)
@@ -384,7 +386,7 @@ it.each(["1", "9007199254740992"])(
     const user = userEvent.setup()
     mount()
     await ready()
-    await user.type(
+    await typeInComposer(
       await screen.findByRole("textbox", { name: "Message" }),
       "Third"
     )
@@ -476,8 +478,8 @@ function sseBody(...frames: string[]) {
   })
 }
 
-async function typeAsk(user: ReturnType<typeof userEvent.setup>) {
-  await user.type(
+async function typeAsk() {
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     "help"
   )
@@ -613,12 +615,12 @@ it("falls back to team mode and says so when no runtime is bound", async () => {
   await user.click(screen.getByRole("button", { name: "Ask agent" }))
   expect(screen.getByText("Agents are turned off.")).toBeVisible()
   const box = screen.getByRole("textbox", { name: "Message" })
-  await user.type(box, "help")
+  await typeInComposer(box, "help")
   expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
   // Enter does not quietly swallow the prompt: it says why, and keeps it.
   fireEvent.keyDown(box, { key: "Enter" })
   expect(await screen.findByRole("alert")).toBeVisible()
-  expect(box).toHaveValue("help")
+  expect(composerText(box)).toBe("help")
 })
 
 it("stays writable through a long run and keeps what was typed during it", async () => {
@@ -644,14 +646,14 @@ it("stays writable through a long run and keeps what was typed during it", async
   const user = userEvent.setup()
   mount(true)
   await ready()
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   const box = await screen.findByRole("textbox", { name: "Message" })
   // The ask went durable and cleared the box, but the box itself stays open:
   // a run can last minutes and thinking does not pause for it.
-  await waitFor(() => expect(box).toHaveValue(""))
-  expect(box).toBeEnabled()
-  await user.type(box, "and also this")
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  expect(composerEditable(box)).toBe(true)
+  await typeInComposer(box, "and also this")
   act(() =>
     controller.enqueue(
       new TextEncoder().encode(
@@ -665,7 +667,7 @@ it("stays writable through a long run and keeps what was typed during it", async
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Send" })).toBeEnabled()
   )
-  expect(box).toHaveValue("and also this")
+  expect(composerText(box)).toBe("and also this")
 })
 
 it("posts the ask and the persisted agent reply to the one conversation", async () => {
@@ -704,7 +706,7 @@ it("posts the ask and the persisted agent reply to the one conversation", async 
   const user = userEvent.setup()
   mount(true)
   await ready()
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   // The ask carries the audience the composer was pinned to and an idempotent
   // request id, exactly like posting a message.
@@ -748,11 +750,10 @@ it("sends on Enter, keeps Shift+Enter a newline, and never sends mid-composition
     [RUN_EVENTS]: () =>
       sseBody('{"type":"finished","status":"completed","errorCode":null}'),
   })
-  const user = userEvent.setup()
   mount(true)
   await ready()
   const box = await screen.findByRole("textbox", { name: "Message" })
-  await user.type(box, "help")
+  await typeInComposer(box, "help")
   fireEvent.keyDown(box, { key: "Enter", shiftKey: true })
   expect(invocations).toHaveLength(0)
   // An input method is mid-conversion: Enter accepts a candidate, not a send.
@@ -788,7 +789,7 @@ it("names the tool in flight, counts the seconds, and opens the call", async () 
   const user = userEvent.setup()
   mount(true)
   await ready()
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   // Working status is immediate, before any activity has arrived, and it
   // counts from the moment the run started. (The Send button says "Working…"
@@ -859,7 +860,7 @@ it("shows Cancel while the invoked run streams and cancels it by run id", async 
   const user = userEvent.setup()
   mount(true)
   await ready()
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await screen.findByText("partial")
   await user.click(screen.getByRole("button", { name: "Cancel" }))
@@ -893,7 +894,7 @@ it("keeps a refused invocation's ask visible and names the reason", async () => 
   const user = userEvent.setup()
   mount(true)
   await ready()
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   // The question stays team-visible even though no reply came …
   const thread = await screen.findByRole("list", { name: "Messages" })
@@ -914,7 +915,7 @@ it("surfaces an error when the invocation is refused outright (503)", async () =
   const user = userEvent.setup()
   mount(true)
   await ready()
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   expect(await screen.findByRole("alert")).toBeVisible()
 })
@@ -1065,7 +1066,10 @@ it("re-reads only what is new after a run completes", async () => {
   await ready()
   await screen.findByRole("button", { name: /1 tool calls/ })
   expect(reads).toEqual(["all"])
-  await user.type(screen.getByRole("textbox", { name: "Message" }), "and then?")
+  await typeInComposer(
+    screen.getByRole("textbox", { name: "Message" }),
+    "and then?"
+  )
   await user.click(screen.getByRole("button", { name: "Send" }))
   // The settled turn is settled forever, so the next read starts after it
   // rather than pulling the whole history down again.
@@ -1305,20 +1309,20 @@ it("keeps what was typed while a send was in flight", async () => {
   mount()
   await ready()
   const composer = await screen.findByRole("textbox", { name: "Message" })
-  await user.type(composer, "first message")
+  await typeInComposer(composer, "first message")
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(release).toBeDefined())
 
   // Still usable, and used.
-  expect(composer).toBeEnabled()
+  expect(composerEditable(composer)).toBe(true)
   await user.clear(composer)
-  await user.type(composer, "second thought")
+  await typeInComposer(composer, "second thought")
   await act(async () => {
     release(json({ ...message, body: "first message" }, 201))
     await new Promise((resolve) => setTimeout(resolve, 50))
   })
   // The send cleared what it sent, and nothing else.
-  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+  expect(composerText(screen.getByRole("textbox", { name: "Message" }))).toBe(
     "second thought"
   )
 })
@@ -1376,7 +1380,7 @@ it("lets the FIRST ask be configured, and sends that configuration with it", asy
   )
   await user.keyboard("{Escape}")
 
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
 
   await waitFor(() => expect(invocations).toHaveLength(1))
@@ -1409,13 +1413,15 @@ it("keeps the draft and the chosen configuration when the first ask fails", asyn
       { name: "Haiku" }
     )
   )
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
 
   // Nothing was persisted, so nothing typed or chosen is thrown away: the ask
   // can be sent again without re-deciding anything.
   await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("help")
+    expect(composerText(screen.getByRole("textbox", { name: "Message" }))).toBe(
+      "help"
+    )
   )
   expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
     "Haiku"
@@ -1498,7 +1504,7 @@ it("switches provider through the model menu and keeps each holder's own configu
   ).toHaveAttribute("aria-checked", "false")
   await user.keyboard("{Escape}")
 
-  await typeAsk(user)
+  await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(invocations).toHaveLength(1))
   // The ask goes to the provider the menu selected, under that provider's
@@ -1549,8 +1555,8 @@ it("draws the conversation before its history arrives, and posts nothing until t
 
   // Writable immediately, and visibly not sendable yet.
   const user = userEvent.setup()
-  await user.type(composer, message.body)
-  expect(composer).toHaveValue(message.body)
+  await typeInComposer(composer, message.body)
+  expect(composerText(composer)).toBe(message.body)
   expect(screen.getByRole("button", { name: "Working…" })).toBeDisabled()
   expect(posts()).toEqual([])
 

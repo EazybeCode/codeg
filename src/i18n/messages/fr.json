@@ -380,7 +380,8 @@
     "showTrash": "Afficher la corbeille",
     "hideTrash": "Masquer la corbeille",
     "loadingItems": "Chargement des éléments…",
-    "checkingAccess": "Vérification de l'accès…"
+    "checkingAccess": "Vérification de l'accès…",
+    "connectionCheckedAt": "Vérifié {time}"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Le contexte du chat de l’espace de travail est indisponible.",

@@ -2162,22 +2162,6 @@ function WorkspaceContent() {
           />
           {/* Said here, beside the rows it is about. */}
           <NativeError error={mutationError} />
-          {/*
-            The way back out of the trash, and the only reason "Move to trash"
-            is an honest name for what archiving does. It sits under the tree
-            rather than in a menu because it is a view over the tree, and
-            because a reader looking for something they deleted looks here.
-          */}
-          <button
-            onClick={() => setShowTrash((value) => !value)}
-            aria-pressed={showTrash}
-            className="mt-1 flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-sm text-muted-foreground hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <Trash2 aria-hidden className="size-3.5 shrink-0" />
-            <span className="truncate">
-              {t(showTrash ? "hideTrash" : "showTrash")}
-            </span>
-          </button>
           {!loading && nodes.length === 0 && !query.trim() && (
             <p className="px-2 text-sm text-muted-foreground">
               {t("emptyProjects")}
@@ -2202,6 +2186,27 @@ function WorkspaceContent() {
         </div>
       </nav>
       <div className="border-t border-sidebar-border p-1.5">
+        {/*
+          The way back out of the trash, and the only reason "Move to trash" is
+          an honest name for what archiving does.
+
+          It used to sit at the bottom of the project LIST, which put it after
+          however many projects had loaded — so on a full workspace it was below
+          the fold, and it moved every time a page of projects arrived. It is
+          not a project. It belongs with the things that are always there, one
+          row above the account, where the same keyboard walk reaches it no
+          matter how long the tree is.
+        */}
+        <button
+          onClick={() => setShowTrash((value) => !value)}
+          aria-pressed={showTrash}
+          className="flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-sm text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Trash2 aria-hidden className="size-3.5 shrink-0" />
+          <span className="truncate">
+            {t(showTrash ? "hideTrash" : "showTrash")}
+          </span>
+        </button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-start text-sm hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring">

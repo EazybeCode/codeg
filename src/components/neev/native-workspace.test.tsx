@@ -15,6 +15,8 @@ import {
   mockNativeSession,
   NativeTestRoot,
   orgSession,
+  composerText,
+  typeInComposer,
 } from "./test-helpers"
 const viewport = vi.hoisted(() => ({ mobile: false }))
 const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }))
@@ -627,7 +629,7 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
   await user.click(await screen.findByRole("button", { name: "Expand Space" }))
   // Direct selection of a real conversation from the sidebar.
   await user.click(await screen.findByRole("button", { name: "Alpha" }))
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     "wip"
   )
@@ -657,9 +659,9 @@ it("opens conversations from the sidebar, guards switching items, and reveals a 
   // never once in danger.
   await user.click(screen.getByRole("tab", { name: /Alpha/ }))
   await waitFor(() =>
-    expect(screen.getAllByRole("textbox", { name: "Message" })[0]).toHaveValue(
-      "wip"
-    )
+    expect(
+      composerText(screen.getAllByRole("textbox", { name: "Message" })[0])
+    ).toBe("wip")
   )
   // Creating fills the tab in front, so step off the half-written one first —
   // the guarded path that would ask about it has a test of its own.
@@ -730,7 +732,7 @@ it("asks before browsing away from an unsent message, and means both answers", a
   await user.click(await screen.findByRole("button", { name: "Expand Space" }))
   const tree = screen.getByRole("navigation", { name: "Projects" })
   await user.click(await within(tree).findByRole("button", { name: "Alpha" }))
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     "half a thought"
   )
@@ -751,7 +753,7 @@ it("asks before browsing away from an unsent message, and means both answers", a
     "aria-selected",
     "true"
   )
-  expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+  expect(composerText(screen.getByRole("textbox", { name: "Message" }))).toBe(
     "half a thought"
   )
 
@@ -800,7 +802,7 @@ it("abandons a navigation whose strip moved while the question was up", async ()
   await user.click(screen.getByRole("button", { name: "New tab" }))
   await user.click(within(tree).getByRole("button", { name: "Beta" }))
   await user.click(screen.getByRole("tab", { name: /Alpha/ }))
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Message" }),
     "half a thought"
   )
@@ -834,7 +836,7 @@ it("abandons a navigation whose strip moved while the question was up", async ()
 
   // The guard went nowhere either: asked again, against what is actually
   // open, it still asks.
-  await user.type(
+  await typeInComposer(
     screen.getByRole("textbox", { name: "Message" }),
     "and another"
   )
@@ -911,7 +913,7 @@ it("asks before browsing away from an unsent agent prompt", async () => {
   await user.click(
     await within(tree).findByRole("button", { name: /^Parser chat/ })
   )
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Ask the agent" }),
     "half a prompt"
   )
@@ -925,9 +927,9 @@ it("asks before browsing away from an unsent agent prompt", async () => {
     "aria-selected",
     "true"
   )
-  expect(screen.getByRole("textbox", { name: "Ask the agent" })).toHaveValue(
-    "half a prompt"
-  )
+  expect(
+    composerText(screen.getByRole("textbox", { name: "Ask the agent" }))
+  ).toBe("half a prompt")
 
   await user.click(within(tree).getByRole("button", { name: "Space" }))
   await user.click(

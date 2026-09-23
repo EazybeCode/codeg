@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeAgentChats } from "./native-agent-chats"
 import { NativeBoundary } from "./native-boundary"
-import { json, mockNativeSession, NativeTestRoot } from "./test-helpers"
+import {
+  json,
+  mockNativeSession,
+  NativeTestRoot,
+  typeInComposer,
+} from "./test-helpers"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
@@ -161,7 +166,12 @@ it("starts a first chat from a dropped file alone", async () => {
     (uploads[0].headers as Record<string, string>)["X-Neev-Filename"]
   ).toBe("shot.png")
   // Empty prompt, real keys: the server is what labels an attachment-only turn.
-  expect(started).toEqual({ prompt: "", attachmentKeys: [KEY] })
+  // Not an empty prompt any more: an ask that is only a file still names the
+  // file, in the place the file was put.
+  expect(started).toEqual({
+    prompt: "[attachment 1: shot.png]",
+    attachmentKeys: [KEY],
+  })
   // Handed over only after everything was persisted.
   expect(handed).toHaveBeenCalled()
 })
@@ -199,14 +209,14 @@ it("keeps the session and the uploaded file when the first turn fails", async ()
   composer()
   const box = await screen.findByRole("textbox", { name: "Message" })
   await waitFor(() => expect(box).toBeEnabled())
-  await user.type(box, "Read this")
+  await typeInComposer(box, "Read this")
   fireEvent.drop(box, { dataTransfer: fileDrag([png()]) })
   await screen.findByRole("button", { name: "Remove shot.png" })
   await user.click(screen.getByRole("button", { name: "Send" }))
 
   await waitFor(() => expect(attempts).toBe(1))
-  // Words and file both survive a failed turn.
-  expect(box).toHaveValue("Read this")
+  // Words and file both survive a failed turn, in the order they were written.
+  expect(box).toHaveTextContent("Read this")
   expect(screen.getByRole("button", { name: "Remove shot.png" })).toBeVisible()
 
   await user.click(screen.getByRole("button", { name: "Send" }))
@@ -214,7 +224,10 @@ it("keeps the session and the uploaded file when the first turn fails", async ()
   // One session, one upload: a retry repeats neither.
   expect(creations).toBe(1)
   expect(uploads).toBe(1)
-  expect(started[1]).toEqual({ prompt: "Read this", attachmentKeys: [KEY] })
+  expect(started[1]).toEqual({
+    prompt: "Read this [attachment 1: shot.png]",
+    attachmentKeys: [KEY],
+  })
 })
 
 it("uploads into the open session and shows what a stored turn carried", async () => {
@@ -265,7 +278,10 @@ it("uploads into the open session and shows what a stored turn carried", async (
   await waitFor(() => expect(uploads).toEqual(["diagram.png"]))
   await userEvent.setup().click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(started).not.toBeNull())
-  expect(started).toEqual({ prompt: "", attachmentKeys: [KEY] })
+  expect(started).toEqual({
+    prompt: "[attachment 1: diagram.png]",
+    attachmentKeys: [KEY],
+  })
 })
 
 it("asks before leaving with a file staged and nothing typed", async () => {
@@ -356,7 +372,7 @@ it("never carries a file into the chat that was opened next", async () => {
   release()
 
   const user = userEvent.setup()
-  await user.type(
+  await typeInComposer(
     screen.getByRole("textbox", { name: "Ask the agent" }),
     "Different question"
   )

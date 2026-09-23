@@ -380,7 +380,8 @@
     "showTrash": "Papierkorb anzeigen",
     "hideTrash": "Papierkorb ausblenden",
     "loadingItems": "Elemente werden geladen…",
-    "checkingAccess": "Zugriff wird geprüft…"
+    "checkingAccess": "Zugriff wird geprüft…",
+    "connectionCheckedAt": "Geprüft {time}"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Der Chat-Kontext des Arbeitsbereichs ist nicht verfügbar.",

@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import { NativeClientError } from "@/lib/neev-client"
-import { sendsOnEnter } from "@/lib/neev-composer-keys"
 import { firstLineTitle } from "@/lib/neev-first-line-title"
 import { mergeActivity } from "@/lib/neev-agent-activity"
 import type { ResourceActions } from "./native-document"
@@ -60,17 +59,24 @@ import {
 import { AgentControls, reconcileAgentSettings } from "./native-agent-controls"
 import {
   AttachmentButton,
-  AttachmentTrayView,
-  handleAttachmentPaste,
-  SentAttachments,
+  SentPrompt,
   useAttachmentTray,
   useFileDrop,
   type AttachmentUploader,
 } from "./native-attachments"
 import {
-  NEEV_MAX_ATTACHMENTS,
-  uploadChatAttachment,
-} from "@/lib/neev-attachments"
+  NativeInlineComposer,
+  remainingAttachments,
+  type InlineComposerHandle,
+} from "./native-inline-composer"
+import {
+  composeWirePrompt,
+  promptIsEmpty,
+  promptText,
+  sameSegments,
+  type PromptSegment,
+} from "@/lib/neev-inline-prompt"
+import { uploadChatAttachment } from "@/lib/neev-attachments"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNeevMessageStream } from "@/hooks/use-neev-message-stream"
 import { useNativeAuth } from "./native-auth-provider"
@@ -232,7 +238,7 @@ function Chat({
   })
   const [latest, setLatest] = useState(resource),
     [messages, setMessages] = useState<NativeMessage[]>([]),
-    [draft, setDraft] = useState(""),
+    [draft, setDraft] = useState<PromptSegment[]>([]),
     [error, setError] = useState<unknown>(null),
     [loading, setLoading] = useState(true),
     [saving, setSaving] = useState(false),
@@ -283,8 +289,11 @@ function Chat({
     upload: uploader,
     disabled: resource.archived || !auth.session,
   })
+  const composer = useRef<InlineComposerHandle>(null)
   const drop = useFileDrop({
-    onFiles: (files) => void attachments.add(files),
+    // Dropped onto the sentence itself, the editor lands it under the pointer.
+    // This is the rest of the card, where the caret is the honest answer.
+    onFiles: (files) => void composer.current?.addFiles(files),
     disabled: resource.archived || !auth.session,
   })
   // A new conversation starts in agent mode; an existing one opens the way
@@ -419,7 +428,7 @@ function Chat({
       turnsRef.current = []
       cursors.current.clear()
       setTurns([])
-      setDraft("")
+      setDraft([])
       draftRef.current = ""
       retry.current = null
       setReview(false)
@@ -759,8 +768,16 @@ function Chat({
     // Files and no words is a complete ask. The prompt goes up empty and the
     // server says what such a turn was asked to do — this composer does not
     // invent a sentence and attribute it to the person who sent it.
-    const prompt = draft.trim()
-    if ((!prompt && attachments.empty) || !scope.isCurrent()) return
+    // The words and the files in the order they were written: each file leaves
+    // a numbered marker where it sat, and the keys go up in that same order, so
+    // what the provider reads has the reference in the sentence it belongs to.
+    const written = draft
+    const { prompt, ids } = composeWirePrompt(
+      written,
+      new Map(attachments.items.map((item) => [item.id, item.name]))
+    )
+    if ((promptIsEmpty(written) && attachments.empty) || !scope.isCurrent())
+      return
     // Pressing Enter with no runtime bound must SAY so. Failing silently here
     // is how a prompt disappears into nothing, and the draft stays put so
     // nothing typed is lost to it.
@@ -794,7 +811,7 @@ function Chat({
       // can never mention a file that is not there. A failure here leaves the
       // prompt and the files exactly where they are, so pressing Send again is
       // a retry rather than a second ask.
-      const keys = await attachments.takeKeys()
+      const keys = await attachments.takeKeys(undefined, ids)
       if (!scope.isCurrent()) return
       // The same ask keeps its id; a changed one gets a new id, because after a
       // failure the natural next move is to remove a file or reword — and the
@@ -831,12 +848,12 @@ function Chat({
       // The files go with it, and only now — the message the server returned is
       // what carries them from here on.
       invokeRequest.current = null
-      clearSent(prompt)
+      clearSent(written)
       attachments.clear()
       retry.current = null
       followHistory.current = true
       absorb([invocation.message])
-      void nameFromFirstMessage(prompt)
+      void nameFromFirstMessage(promptText(written))
       if (invocation.turn.status !== "running") {
         // Refused before it ever ran; the ask stays visible and the reason is
         // named rather than left as a fake pending state.
@@ -867,9 +884,13 @@ function Chat({
   async function send() {
     // Empty body + files is a message the server accepts and labels; empty
     // body with nothing attached is not a message at all.
-    const body = draft.trim() ? draft : ""
+    const written = draft
+    const { prompt: body, ids } = composeWirePrompt(
+      written,
+      new Map(attachments.items.map((item) => [item.id, item.name]))
+    )
     if (
-      (!body && attachments.empty) ||
+      (promptIsEmpty(written) && attachments.empty) ||
       sending.current ||
       latest.archived ||
       attachments.uploading ||
@@ -890,7 +911,7 @@ function Chat({
       // Nothing is posted until every staged file has a key. A failure here
       // keeps the draft AND the files, so the next Send is the same message
       // again rather than one with its attachments quietly missing.
-      keys = await attachments.takeKeys()
+      keys = await attachments.takeKeys(undefined, ids)
     } catch (cause) {
       if (scope.isCurrent()) {
         setError(cause)
@@ -930,11 +951,11 @@ function Chat({
       followHistory.current = true
       absorb([message])
       // Leave the incremental cursor unchanged: another author's intervening messages may exist.
-      clearSent(input.body)
+      clearSent(written)
       attachments.clear()
       retry.current = null
       pinned.current = latest.authRevision
-      void nameFromFirstMessage(input.body)
+      void nameFromFirstMessage(promptText(written))
     } catch (e) {
       fail(e)
     } finally {
@@ -954,9 +975,12 @@ function Chat({
    * box still holds exactly what was sent, it is emptied; if it holds anything
    * else, that is newer than the send and is left alone.
    */
-  function clearSent(sent: string) {
-    setDraft((current) => (current === sent ? "" : current))
-    if (draftRef.current === sent) {
+  function clearSent(sent: readonly PromptSegment[]) {
+    // Compared as the whole draft, files included: the same words with a
+    // different file in them is a different draft, and emptying the box would
+    // take that file out of a message nobody has sent yet.
+    setDraft((current) => (sameSegments(current, sent) ? [] : current))
+    if (draftRef.current === promptText(sent)) {
       draftRef.current = ""
       onDirtyChange?.(false)
     }
@@ -1052,7 +1076,9 @@ function Chat({
   // Files with no words are a complete message; words with a file still
   // uploading are not, because sending now would drop the file.
   const sendable =
-    (!!draft.trim() || !attachments.empty) && !composerBusy && !latest.archived
+    (!promptIsEmpty(draft) || !attachments.empty) &&
+    !composerBusy &&
+    !latest.archived
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
       {/* ONE row, title and standing included. It was a title stacked over a
@@ -1245,10 +1271,17 @@ function Chat({
                   startedAt={null}
                 />
               )}
-              <NativeMarkdown markdown={message.body} />
-              {/* The server's own record of what was sent with this message,
-                  so a reload shows the files rather than a mention of them. */}
-              <SentAttachments attachments={message.attachments} />
+              {/* A message written here keeps its files where they were put;
+                  anything else — an agent's reply, a message from before this
+                  existed — is the markdown it always was. */}
+              {message.attachments.length > 0 ? (
+                <SentPrompt
+                  body={message.body}
+                  attachments={message.attachments}
+                />
+              ) : (
+                <NativeMarkdown markdown={message.body} />
+              )}
             </div>
           </li>
         ))}
@@ -1297,47 +1330,41 @@ function Chat({
               {t("attachmentDrop")}
             </p>
           )}
-          <label className="block">
-            <span className="sr-only">{t("message")}</span>
-            <textarea
-              autoFocus={fresh}
-              placeholder={
-                mode === "agent" ? t("agentPromptPlaceholder") : t("message")
-              }
-              value={draft}
-              // Writable while a run is in flight. A long run would otherwise
-              // lock the box for minutes, and what is typed during one is kept:
-              // the ask was cleared the moment it became durable, so nothing
-              // the run finishes doing touches this draft.
-              //
-              // Writable during the first read too, now that the composer is
-              // drawn before it finishes. Only sending waits: a box that
-              // refuses the first thing typed into a chat that looks open is
-              // worse than a Send button that says it is not ready yet.
-              disabled={latest.archived}
-              onChange={(event) => {
-                if (!draftRef.current) pinned.current = latest.authRevision
-                draftRef.current = event.target.value
-                setDraft(event.target.value)
-                retry.current = null
-                onDirtyChange?.(!!event.target.value || !attachments.empty)
-              }}
-              onKeyDown={(event) => {
-                if (!sendsOnEnter(event, { busy: composerBusy })) return
-                event.preventDefault()
-                submit()
-              }}
-              onPaste={(event) => {
-                if (latest.archived) return
-                handleAttachmentPaste(
-                  event,
-                  (files) => void attachments.add(files)
-                )
-              }}
-              className="h-16 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-1.5 text-base outline-none sm:text-sm"
-            />
-          </label>
-          <AttachmentTrayView tray={attachments} disabled={latest.archived} />
+          {/* Writable while a run is in flight. A long run would otherwise
+              lock the box for minutes, and what is typed during one is kept:
+              the ask was cleared the moment it became durable, so nothing the
+              run finishes doing touches this draft.
+
+              Writable during the first read too, now that the composer is drawn
+              before it finishes. Only sending waits: a box that refuses the
+              first thing typed into a chat that looks open is worse than a Send
+              button that says it is not ready yet. */}
+          <NativeInlineComposer
+            ref={composer}
+            value={draft}
+            onChange={(next) => {
+              // An editor that re-reports what it already holds — remounting
+              // after a hidden tab is shown again does this — is not an edit,
+              // and must not re-mint the request id of a send in flight.
+              if (sameSegments(next, draft)) return
+              if (!draftRef.current) pinned.current = latest.authRevision
+              draftRef.current = promptText(next)
+              setDraft(next)
+              retry.current = null
+              onDirtyChange?.(!promptIsEmpty(next) || !attachments.empty)
+            }}
+            tray={attachments}
+            label={t("message")}
+            placeholder={
+              mode === "agent" ? t("agentPromptPlaceholder") : t("message")
+            }
+            onSubmit={submit}
+            busy={composerBusy}
+            readOnly={latest.archived}
+            attachDisabled={latest.archived || !auth.session}
+            autoFocus={fresh}
+            className="min-h-14"
+          />
           {/* Send is held while bytes are still going up. Holding it without
               saying so is the "button that looks ready and does nothing" this
               composer refuses everywhere else. */}
@@ -1369,8 +1396,8 @@ function Chat({
             </p>
             <AttachmentButton
               disabled={latest.archived || !auth.session}
-              remaining={NEEV_MAX_ATTACHMENTS - attachments.items.length}
-              onFiles={(files) => void attachments.add(files)}
+              remaining={remainingAttachments(attachments)}
+              onFiles={(files) => void composer.current?.addFiles(files)}
             />
             {/* A segmented pair, not two standing pills. Only the CHOSEN side
                 spells itself out; the other is its icon, with the same

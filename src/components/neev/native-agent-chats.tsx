@@ -43,7 +43,6 @@ import {
 import { type NeevActivityItem } from "@/lib/neev-agent-sessions-client"
 import { cn } from "@/lib/utils"
 import { NativeClientError } from "@/lib/neev-client"
-import { sendsOnEnter } from "@/lib/neev-composer-keys"
 import {
   cancelAgentRun,
   createAgentSession,
@@ -71,17 +70,24 @@ import {
 import { AgentControls } from "./native-agent-controls"
 import {
   AttachmentButton,
-  AttachmentTrayView,
-  handleAttachmentPaste,
-  SentAttachments,
+  SentPrompt,
   useAttachmentTray,
   useFileDrop,
   type AttachmentUploader,
 } from "./native-attachments"
 import {
-  NEEV_MAX_ATTACHMENTS,
-  uploadSessionAttachment,
-} from "@/lib/neev-attachments"
+  NativeInlineComposer,
+  remainingAttachments,
+  type InlineComposerHandle,
+} from "./native-inline-composer"
+import {
+  composeWirePrompt,
+  promptIsEmpty,
+  promptText,
+  sameSegments,
+  type PromptSegment,
+} from "@/lib/neev-inline-prompt"
+import { uploadSessionAttachment } from "@/lib/neev-attachments"
 import { NativeContentNotFoundError } from "@/lib/neev-content-client"
 import type { ContentNavigationGuard } from "./native-content"
 import { useNativeAuth } from "./native-auth-provider"
@@ -511,7 +517,7 @@ function NewAgentChat({
   // provider it is not — and, worse, with the wrong credential. A different
   // provider is a different chat.
   const [frozen, setFrozen] = useState(false)
-  const [draft, setDraft] = useState(""),
+  const [draft, setDraft] = useState<PromptSegment[]>([]),
     [settings, setSettings] = useState<NeevAgentSettings>({
       model: NEEV_DEFAULT_MODEL,
       // Never a level nobody picked, and never fast: both are choices about
@@ -528,7 +534,8 @@ function NewAgentChat({
   // rather than creating a second one for the same draft.
   const created = useRef<NeevAgentSession | null>(null)
   const draftRef = useRef("")
-  draftRef.current = draft
+  draftRef.current = promptText(draft)
+  const composer = useRef<InlineComposerHandle>(null)
 
   // An unsent draft is work; leaving must ask, exactly as a document does.
   useEffect(() => {
@@ -552,16 +559,23 @@ function NewAgentChat({
   // before the turn that carries them.
   const attachments = useAttachmentTray({ upload: null, disabled: !ready })
   const drop = useFileDrop({
-    onFiles: (files) => void attachments.add(files),
+    // Dropped ON the sentence the editor places it exactly where the pointer
+    // was; this is the rest of the card, and the caret is the honest answer.
+    onFiles: (files) => void composer.current?.addFiles(files),
     disabled: !ready,
   })
   const stagedRef = useRef(false)
   stagedRef.current = !attachments.empty
 
   async function start() {
-    const prompt = draft.trim()
+    // The words and the files in the order they were written: each file leaves
+    // a numbered marker where it sat, and the keys go up in that same order.
+    const { prompt, ids } = composeWirePrompt(
+      draft,
+      new Map(attachments.items.map((item) => [item.id, item.name]))
+    )
     if (
-      (!prompt && attachments.empty) ||
+      (promptIsEmpty(draft) && attachments.empty) ||
       busy ||
       !auth.session ||
       !ready ||
@@ -581,7 +595,7 @@ function NewAgentChat({
             // A chat started from files alone takes its name from the first
             // of them: a real thing the person chose, not a placeholder.
             title: deriveSessionTitle(
-              prompt || attachments.items[0]?.name || ""
+              promptText(draft).trim() || attachments.items[0]?.name || ""
             ),
             nodeId,
             provider,
@@ -599,13 +613,15 @@ function NewAgentChat({
       setFrozen(true)
       // Now there is something to upload to. Each file goes up once: a retry
       // after a failed turn reuses the keys rather than sending the bytes again.
-      const keys = await attachments.takeKeys((file, signal) =>
-        uploadSessionAttachment(
-          session.id,
-          file,
-          auth.session!.csrf,
-          signal ?? auth.signal
-        )
+      const keys = await attachments.takeKeys(
+        (file, signal) =>
+          uploadSessionAttachment(
+            session.id,
+            file,
+            auth.session!.csrf,
+            signal ?? auth.signal
+          ),
+        ids
       )
       await startAgentTurn(
         session.id,
@@ -614,7 +630,7 @@ function NewAgentChat({
         auth.signal,
         keys
       )
-      setDraft("")
+      setDraft([])
       draftRef.current = ""
       attachments.clear()
       onCreated(session)
@@ -636,7 +652,7 @@ function NewAgentChat({
         }
         if (landed) {
           // The work was done. Hand over to the transcript that holds it.
-          setDraft("")
+          setDraft([])
           draftRef.current = ""
           attachments.clear()
           onCreated(session)
@@ -680,32 +696,22 @@ function NewAgentChat({
               {t("agentChatKept")}
             </p>
           )}
-          <label className="sr-only" htmlFor="neev-new-agent-chat">
-            {t("message")}
-          </label>
-          <textarea
-            id="neev-new-agent-chat"
+          <NativeInlineComposer
+            ref={composer}
             value={draft}
-            autoFocus
-            rows={3}
-            disabled={!ready}
-            maxLength={NEEV_MAX_PROMPT_CHARS}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (!sendsOnEnter(event, { busy: busy || attachments.uploading }))
-                return
-              event.preventDefault()
-              void start()
+            onChange={(next) => {
+              if (!sameSegments(next, draft)) setDraft(next)
             }}
-            onPaste={(event) => {
-              if (!ready) return
-              handleAttachmentPaste(
-                event,
-                (files) => void attachments.add(files)
-              )
-            }}
+            tray={attachments}
+            label={t("message")}
             placeholder={t("agentPromptPlaceholder")}
-            className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none disabled:opacity-60 sm:text-sm"
+            onSubmit={() => void start()}
+            busy={busy || attachments.uploading}
+            readOnly={!ready}
+            attachDisabled={!ready}
+            autoFocus
+            maxChars={NEEV_MAX_PROMPT_CHARS}
+            className="min-h-16"
           />
           {drop.over && (
             <p
@@ -715,7 +721,6 @@ function NewAgentChat({
               {t("attachmentDrop")}
             </p>
           )}
-          <AttachmentTrayView tray={attachments} disabled={busy} />
           {attachments.uploading && (
             <p role="status" className="px-1 text-xs text-muted-foreground">
               {t("attachmentsPending")}
@@ -724,8 +729,8 @@ function NewAgentChat({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <AttachmentButton
               disabled={!ready || busy}
-              remaining={NEEV_MAX_ATTACHMENTS - attachments.items.length}
-              onFiles={(files) => void attachments.add(files)}
+              remaining={remainingAttachments(attachments)}
+              onFiles={(files) => void composer.current?.addFiles(files)}
             />
             {/* Picking a model under another provider's heading re-points this
                 whole draft — nothing has been created yet, so it is still a
@@ -773,7 +778,7 @@ function NewAgentChat({
               <Button
                 size="sm"
                 disabled={
-                  (!draft.trim() && attachments.empty) ||
+                  (promptIsEmpty(draft) && attachments.empty) ||
                   busy ||
                   !ready ||
                   attachments.uploading
@@ -1105,7 +1110,7 @@ function AgentSessionView({
   // point every Connect control at the first one's description.
   const connectNote = useId()
   const [turns, setTurns] = useState<NeevAgentTurn[] | null>(null),
-    [draft, setDraft] = useState(""),
+    [draft, setDraft] = useState<PromptSegment[]>([]),
     [error, setError] = useState<unknown>(null),
     [sending, setSending] = useState(false),
     [renaming, setRenaming] = useState(false),
@@ -1141,8 +1146,11 @@ function AgentSessionView({
     upload: uploader,
     disabled: session.archived || !auth.session,
   })
+  const composer = useRef<InlineComposerHandle>(null)
   const drop = useFileDrop({
-    onFiles: (files) => void attachments.add(files),
+    // The editor places a file dropped onto the sentence itself; this is the
+    // rest of the card, where the caret is the honest answer.
+    onFiles: (files) => void composer.current?.addFiles(files),
     disabled: session.archived,
   })
   const draftRef = useRef("")
@@ -1375,7 +1383,10 @@ function AgentSessionView({
   async function send() {
     // Files alone are a complete ask: the prompt goes up empty and the server
     // is what says so, rather than this composer inventing a sentence.
-    const prompt = draft.trim()
+    const { prompt, ids } = composeWirePrompt(
+      draft,
+      new Map(attachments.items.map((item) => [item.id, item.name]))
+    )
     if (
       (!prompt && attachments.empty) ||
       sending ||
@@ -1397,7 +1408,7 @@ function AgentSessionView({
     try {
       // Bytes first: a turn only carries files the server already has, and a
       // failure here keeps both the prompt and the files for another try.
-      const keys = await attachments.takeKeys()
+      const keys = await attachments.takeKeys(undefined, ids)
       const started = await startAgentTurn(
         session.id,
         prompt,
@@ -1406,7 +1417,7 @@ function AgentSessionView({
         keys
       )
       setTurns((old) => [...(old ?? []), started.turn])
-      setDraft("")
+      setDraft([])
       draftRef.current = ""
       // Only now: the turn owns them from here.
       attachments.clear()
@@ -1529,9 +1540,9 @@ function AgentSessionView({
           {turns.map((turn) => (
             <li key={turn.id} className="mx-auto w-full max-w-3xl space-y-3">
               <div className="rounded-lg bg-muted/60 px-4 py-3 text-sm">
-                {turn.prompt}
-                {/* What the run was actually given, from the stored turn. */}
-                <SentAttachments attachments={turn.attachments} />
+                {/* The ask as it was written: files where they were put, not
+                    in a row underneath. */}
+                <SentPrompt body={turn.prompt} attachments={turn.attachments} />
               </div>
               <div className="space-y-2">
                 {turn.runId === activeRun ? (
@@ -1595,38 +1606,25 @@ function AgentSessionView({
               {t("attachmentDrop")}
             </p>
           )}
-          <label className="block">
-            <span className="sr-only">{t("agentPrompt")}</span>
-            <textarea
-              placeholder={t("agentPrompt")}
-              value={draft}
-              maxLength={NEEV_MAX_PROMPT_CHARS}
-              disabled={sending || running || session.archived || !ready}
-              onChange={(event) => {
-                draftRef.current = event.target.value
-                setDraft(event.target.value)
-              }}
-              onKeyDown={(event) => {
-                if (
-                  !sendsOnEnter(event, {
-                    busy: sending || running || attachments.uploading,
-                  })
-                )
-                  return
-                event.preventDefault()
-                void send()
-              }}
-              onPaste={(event) => {
-                if (session.archived) return
-                handleAttachmentPaste(
-                  event,
-                  (files) => void attachments.add(files)
-                )
-              }}
-              className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none sm:text-sm"
-            />
-          </label>
-          <AttachmentTrayView tray={attachments} disabled={session.archived} />
+          <NativeInlineComposer
+            ref={composer}
+            value={draft}
+            onChange={(next) => {
+              // Re-reporting what it already holds is not an edit.
+              if (sameSegments(next, draft)) return
+              draftRef.current = promptText(next)
+              setDraft(next)
+            }}
+            tray={attachments}
+            label={t("agentPrompt")}
+            placeholder={t("agentPrompt")}
+            onSubmit={() => void send()}
+            busy={sending || running || attachments.uploading}
+            readOnly={sending || running || session.archived || !ready}
+            attachDisabled={session.archived || !ready}
+            maxChars={NEEV_MAX_PROMPT_CHARS}
+            className="min-h-16"
+          />
           {/* Sending is held while bytes are still going up; say so rather than
               leaving a Send button that does nothing when pressed. */}
           {attachments.uploading && (
@@ -1650,8 +1648,8 @@ function AgentSessionView({
             />
             <AttachmentButton
               disabled={sending || running || session.archived || !ready}
-              remaining={NEEV_MAX_ATTACHMENTS - attachments.items.length}
-              onFiles={(files) => void attachments.add(files)}
+              remaining={remainingAttachments(attachments)}
+              onFiles={(files) => void composer.current?.addFiles(files)}
             />
             {/* The provider is immutable here — a turn may not contradict its
                 session's, and a team holder's id is derived from it — so only
@@ -1753,7 +1751,7 @@ function AgentSessionView({
                 session.archived ||
                 !ready ||
                 attachments.uploading ||
-                (!draft.trim() && attachments.empty)
+                (promptIsEmpty(draft) && attachments.empty)
               }
             >
               <ArrowUp aria-hidden />
@@ -1777,7 +1775,7 @@ function AgentSessionView({
               onClick={() => {
                 const action = pending
                 setPending(null)
-                setDraft("")
+                setDraft([])
                 draftRef.current = ""
                 attachments.clear()
                 action?.()

@@ -380,7 +380,8 @@
     "showTrash": "Mostrar lixeira",
     "hideTrash": "Ocultar lixeira",
     "loadingItems": "Carregando itens…",
-    "checkingAccess": "Verificando o acesso…"
+    "checkingAccess": "Verificando o acesso…",
+    "connectionCheckedAt": "Verificado {time}"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "O contexto do chat do espaço de trabalho não está disponível.",

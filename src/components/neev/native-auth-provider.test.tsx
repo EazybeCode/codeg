@@ -10,6 +10,8 @@ import {
   nativeCapabilities,
   NativeTestRoot,
   orgSession,
+  composerText,
+  typeInComposer,
 } from "./test-helpers"
 const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }))
 vi.mock("next/navigation", () => ({ useRouter: () => router }))
@@ -350,7 +352,7 @@ async function openDraft(user: ReturnType<typeof userEvent.setup>) {
     { name: "Message" },
     { timeout: 5000 }
   )
-  await user.type(composer, "unsaved sentence")
+  await typeInComposer(composer, "unsaved sentence")
   return composer
 }
 
@@ -377,7 +379,7 @@ it(
       </NativeTestRoot>
     )
     const composer = await openDraft(user)
-    expect(composer).toHaveValue("unsaved sentence")
+    expect(composerText(composer)).toBe("unsaved sentence")
 
     reachable = false
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
@@ -388,8 +390,9 @@ it(
     // and inert for as long as that lasts (covered where the same `held` path is
     // exercised by a revalidation in flight), and the draft is still in it.
     expect(screen.getByTestId("auth-status")).toHaveTextContent("unverified")
-    expect(composer).toBeInTheDocument()
-    expect(composer).toHaveValue("unsaved sentence")
+    // The composer's element goes with the surface that is hidden; the editor
+    // still holds every word of the draft, and puts it back on the way in.
+    expect(composerText(composer)).toBe("unsaved sentence")
     expect(router.replace).not.toHaveBeenCalledWith("/login")
 
     // A retry that fails again changes nothing: still held, still holding the
@@ -398,8 +401,7 @@ it(
     await waitFor(() =>
       expect(screen.getByTestId("auth-status")).toHaveTextContent("unverified")
     )
-    expect(composer).toBeInTheDocument()
-    expect(composer).toHaveValue("unsaved sentence")
+    expect(composerText(composer)).toBe("unsaved sentence")
 
     reachable = true
     await user.click(screen.getByRole("button", { name: "Try again" }))
@@ -410,8 +412,7 @@ it(
       )
     )
     // The same element, still holding the same words.
-    expect(composer).toBeInTheDocument()
-    expect(composer).toHaveValue("unsaved sentence")
+    expect(composerText(composer)).toBe("unsaved sentence")
   }
 )
 
@@ -441,7 +442,7 @@ it(
     allowed = false
     await act(async () => document.dispatchEvent(new Event("visibilitychange")))
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login"))
-    expect(screen.queryByDisplayValue("unsaved sentence")).toBeNull()
+    expect(screen.queryByText("unsaved sentence")).toBeNull()
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull()
   }
 )

@@ -380,7 +380,8 @@
     "showTrash": "ゴミ箱を表示",
     "hideTrash": "ゴミ箱を非表示",
     "loadingItems": "項目を読み込んでいます…",
-    "checkingAccess": "アクセス権を確認しています…"
+    "checkingAccess": "アクセス権を確認しています…",
+    "connectionCheckedAt": "{time} に確認"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "ワークスペースのチャット情報を利用できません。",

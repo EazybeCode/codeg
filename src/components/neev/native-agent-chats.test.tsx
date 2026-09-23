@@ -10,7 +10,14 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeAgentChats } from "./native-agent-chats"
 import { NativeBoundary } from "./native-boundary"
-import { json, mockNativeSession, NativeTestRoot } from "./test-helpers"
+import {
+  json,
+  mockNativeSession,
+  NativeTestRoot,
+  composerText,
+  composerEditable,
+  typeInComposer,
+} from "./test-helpers"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
@@ -275,7 +282,7 @@ it("streams a new turn and can cancel it", async () => {
   mount()
   await user.click(await screen.findByText("Refactor the parser"))
   const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
-  await user.type(composer, "Summarise the parser")
+  await typeInComposer(composer, "Summarise the parser")
   await user.click(screen.getByRole("button", { name: "Send" }))
   act(() => stream.push({ type: "chunk", text: "Working on it" }))
   expect(await screen.findByText("Working on it")).toBeVisible()
@@ -310,7 +317,7 @@ it("shows a refused turn's real reason instead of a pending state", async () => 
   const user = userEvent.setup()
   mount()
   await user.click(await screen.findByText("Refactor the parser"))
-  await user.type(
+  await typeInComposer(
     await screen.findByRole("textbox", { name: "Ask the agent" }),
     "Summarise the parser"
   )
@@ -333,8 +340,10 @@ it("refuses to accept a prompt while the provider is not signed in", async () =>
   mount()
   await user.click(await screen.findByText("Refactor the parser"))
   expect(
-    await screen.findByRole("textbox", { name: "Ask the agent" })
-  ).toBeDisabled()
+    composerEditable(
+      await screen.findByRole("textbox", { name: "Ask the agent" })
+    )
+  ).toBe(false)
   // Honest about why, and never a placeholder "Connected".
   expect(screen.getAllByText("Not signed in").length).toBeGreaterThan(0)
   expect(screen.queryByText("Connected")).toBeNull()
@@ -350,8 +359,10 @@ it("says agents are off rather than offering a connection to a dead runtime", as
   mount()
   await user.click(await screen.findByText("Refactor the parser"))
   expect(
-    await screen.findByRole("textbox", { name: "Ask the agent" })
-  ).toBeDisabled()
+    composerEditable(
+      await screen.findByRole("textbox", { name: "Ask the agent" })
+    )
+  ).toBe(false)
   expect(screen.getAllByText("Agents are turned off.").length).toBeGreaterThan(
     0
   )
@@ -625,8 +636,8 @@ it("creates the session from the first message, titled by what was typed", async
 
   expect(screen.queryByRole("textbox", { name: "Title" })).toBeNull()
   const box = await screen.findByRole("textbox", { name: "Message" })
-  await waitFor(() => expect(box).toBeEnabled())
-  await user.type(box, "Explain the parser to me")
+  await waitFor(() => expect(composerEditable(box)).toBe(true))
+  await typeInComposer(box, "Explain the parser to me")
   await user.click(screen.getByRole("button", { name: "Send" }))
 
   await waitFor(() =>
@@ -653,7 +664,9 @@ it("will not let a disconnected provider be typed into", async () => {
   // Claude is connected, so switching to Codex must say so rather than
   // accepting a message nothing can answer.
   await waitFor(() =>
-    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled()
+    expect(
+      composerEditable(screen.getByRole("textbox", { name: "Message" }))
+    ).toBe(true)
   )
   // Nothing has been created yet, so picking a model under another provider's
   // heading re-points the whole draft rather than editing a session.
@@ -670,7 +683,9 @@ it("will not let a disconnected provider be typed into", async () => {
   )
 
   expect(await screen.findByText("codex is not connected yet.")).toBeVisible()
-  expect(screen.getByRole("textbox", { name: "Message" })).toBeDisabled()
+  expect(
+    composerEditable(screen.getByRole("textbox", { name: "Message" }))
+  ).toBe(false)
   // The way out is the real connection flow, never a fake one.
   expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled()
 })
@@ -705,8 +720,8 @@ async function failingFirstTurn(turns: unknown[]) {
     </NativeTestRoot>
   )
   const box = await screen.findByRole("textbox", { name: "Message" })
-  await waitFor(() => expect(box).toBeEnabled())
-  await user.type(box, "Explain the parser")
+  await waitFor(() => expect(composerEditable(box)).toBe(true))
+  await typeInComposer(box, "Explain the parser")
   await user.click(screen.getByRole("button", { name: "Send" }))
   return { onCreated, creates: () => creates, box }
 }
@@ -720,7 +735,7 @@ it("keeps the message when the first turn left no trace", async () => {
   expect(
     screen.getByText(/The chat was created but this message was not sent/)
   ).toBeVisible()
-  expect(box).toHaveValue("Explain the parser")
+  expect(composerText(box)).toBe("Explain the parser")
   // Not resent, and certainly not created again.
   expect(onCreated).not.toHaveBeenCalled()
   expect(creates()).toBe(1)
