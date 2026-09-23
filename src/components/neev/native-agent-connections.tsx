@@ -13,8 +13,16 @@
 //  - An attempt that lapses is reported as expired, not quietly dropped.
 //  - With no runtime bound every provider reads `disabled` and no action is
 //    offered, because none could be exercised.
-//  - There is no "Test connection": the server has no route that could settle
-//    one, and a control whose state can never resolve would be a lie.
+//  - "Test connection" is offered only because the server can actually settle
+//    one. `POST /api/neev/agent/connections/{provider}/test` adopts the status
+//    epoch, admits a check against a specific generation and storage handle,
+//    has the supervisor verify the stored credential against the provider, and
+//    re-proves the row has not moved before recording the observation. A check
+//    it cannot perform is a 503, never a verified-because-we-asked. The row
+//    this returns IS the outcome; nothing here infers one.
+//    (Live 2026-09-23: two checks on a connected Codex row advanced the
+//    server's `checked_at` to 18:38:13Z and 18:38:30Z. Note the check writes no
+//    operation row, so an absent operation is not evidence it did not run.)
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
