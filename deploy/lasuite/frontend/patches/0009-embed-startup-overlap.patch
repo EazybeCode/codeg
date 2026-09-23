@@ -1,0 +1,185 @@
+diff --git a/apps/impress/src/features/docs/doc-management/hooks/__tests__/useWarmDocStartup.test.tsx b/apps/impress/src/features/docs/doc-management/hooks/__tests__/useWarmDocStartup.test.tsx
+new file mode 100644
+index 0000000..6a95b77
+--- /dev/null
++++ b/apps/impress/src/features/docs/doc-management/hooks/__tests__/useWarmDocStartup.test.tsx
+@@ -0,0 +1,95 @@
++import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { renderHook, waitFor } from '@testing-library/react';
++import { PropsWithChildren } from 'react';
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++
++import {
++  KEY_DOC_CONTENT,
++  useDocContent,
++} from '@/docs/doc-management/api/useDocContent';
++
++import { useWarmDocStartup } from '../useWarmDocStartup';
++
++const fetchAPI = vi.fn();
++
++vi.mock('@/api', async () => {
++  const actual = await vi.importActual<Record<string, unknown>>('@/api');
++  return {
++    ...actual,
++    fetchAPI: (...args: unknown[]) => fetchAPI(...args),
++  };
++});
++
++// The editor bundle is the other half of the warm-up, and importing it for
++// real would pull BlockNote into the test run for no added assurance.
++vi.mock('@/docs/doc-editor/components/DocEditor', () => ({
++  DocEditor: () => null,
++}));
++
++const ID = '11111111-1111-4111-8111-111111111111';
++
++function wrapper(client: QueryClient) {
++  return ({ children }: PropsWithChildren) => (
++    <QueryClientProvider client={client}>{children}</QueryClientProvider>
++  );
++}
++
++function client() {
++  return new QueryClient({
++    defaultOptions: { queries: { retry: false } },
++  });
++}
++
++describe('useWarmDocStartup', () => {
++  beforeEach(() => {
++    fetchAPI.mockReset();
++  });
++
++  it('asks for the content before anything has asked for the document', async () => {
++    fetchAPI.mockResolvedValue({ ok: true, text: async () => 'body' });
++    const queryClient = client();
++
++    renderHook(() => useWarmDocStartup(ID), { wrapper: wrapper(queryClient) });
++
++    // No document query has been mounted at all, which is the situation the
++    // page is in while it renders its skeleton.
++    await waitFor(() =>
++      expect(fetchAPI).toHaveBeenCalledWith(
++        `documents/${ID}/content/`,
++        expect.anything(),
++      ),
++    );
++    expect(
++      queryClient.getQueryData([KEY_DOC_CONTENT, { id: ID }]),
++    ).toBe('body');
++  });
++
++  it('is read from the cache by the editor rather than fetched twice', async () => {
++    fetchAPI.mockResolvedValue({ ok: true, text: async () => 'body' });
++    const queryClient = client();
++
++    renderHook(() => useWarmDocStartup(ID), { wrapper: wrapper(queryClient) });
++    await waitFor(() => expect(fetchAPI).toHaveBeenCalledTimes(1));
++
++    // Exactly what `useCollaboration` asks for: same key, same staleTime.
++    const { result } = renderHook(
++      () =>
++        useDocContent(
++          { id: ID },
++          { staleTime: 30000, queryKey: [KEY_DOC_CONTENT, { id: ID }] },
++        ),
++      { wrapper: wrapper(queryClient) },
++    );
++
++    await waitFor(() => expect(result.current.data).toBe('body'));
++    expect(fetchAPI).toHaveBeenCalledTimes(1);
++  });
++
++  it('asks for nothing until there is an id', () => {
++    fetchAPI.mockResolvedValue({ ok: true, text: async () => 'body' });
++    renderHook(() => useWarmDocStartup(undefined), {
++      wrapper: wrapper(client()),
++    });
++    expect(fetchAPI).not.toHaveBeenCalled();
++  });
++});
+diff --git a/apps/impress/src/features/docs/doc-management/hooks/useWarmDocStartup.ts b/apps/impress/src/features/docs/doc-management/hooks/useWarmDocStartup.ts
+new file mode 100644
+index 0000000..82f46a0
+--- /dev/null
++++ b/apps/impress/src/features/docs/doc-management/hooks/useWarmDocStartup.ts
+@@ -0,0 +1,55 @@
++import { useQueryClient } from '@tanstack/react-query';
++import { useEffect } from 'react';
++
++import {
++  KEY_DOC_CONTENT,
++  getDocContent,
++} from '@/docs/doc-management/api/useDocContent';
++
++/**
++ * Start the two slowest parts of opening a document without waiting for it.
++ *
++ * The page renders a skeleton until `GET documents/{id}/` answers, and only
++ * then mounts `DocEditor` — which is a dynamic import, so the editor bundle's
++ * download BEGINS at that point. The editor then asks for the document's
++ * content, and only once that arrives does the collaboration provider connect.
++ * Four legs, strictly one after another, and the expensive one is gated behind
++ * the cheap one.
++ *
++ * None of that ordering is load-bearing. The id comes from the URL and is
++ * known before anything has been asked for, so both of these can be in flight
++ * while the metadata request is still out:
++ *
++ * - the editor chunk, imported by the SAME specifier the `dynamic()` call uses
++ *   so webpack resolves it to the one chunk and nothing is downloaded twice;
++ * - the content, through the SAME query key, function and `staleTime` the
++ *   editor itself uses, so the editor reads the cache instead of asking again.
++ *
++ * Nothing here changes what is authorized. `getDocContent` is the existing
++ * request with the existing credentials, and the server decides as it did
++ * before — a document the reader may not see still refuses, and the only cost
++ * of asking early is that one refusal happens earlier. Failures are swallowed
++ * by `prefetchQuery` by design: this is a head start, and the real request
++ * behind the editor still reports its own errors.
++ */
++export function useWarmDocStartup(id: string | undefined): void {
++  const queryClient = useQueryClient();
++
++  useEffect(() => {
++    if (!id) {
++      return;
++    }
++
++    // Swallowed deliberately: a chunk that fails to preload is not an error
++    // anyone can act on here, and leaving the rejection loose would surface a
++    // flaky network as an unhandled rejection. The real `dynamic()` import
++    // runs later and reports its own failure, with its own retry.
++    import('@/docs/doc-editor/components/DocEditor').catch(() => {});
++
++    void queryClient.prefetchQuery({
++      queryKey: [KEY_DOC_CONTENT, { id }],
++      queryFn: () => getDocContent({ id }),
++      staleTime: 30000,
++    });
++  }, [id, queryClient]);
++}
+diff --git a/apps/impress/src/pages/docs/[id]/index.tsx b/apps/impress/src/pages/docs/[id]/index.tsx
+index bf763ec..f2e032f 100644
+--- a/apps/impress/src/pages/docs/[id]/index.tsx
++++ b/apps/impress/src/pages/docs/[id]/index.tsx
+@@ -17,6 +17,7 @@ import {
+   useDocStore,
+   useTrans,
+ } from '@/docs/doc-management/';
++import { useWarmDocStartup } from '@/docs/doc-management/hooks/useWarmDocStartup';
+ import { KEY_AUTH, setAuthUrl, useAuth } from '@/features/auth';
+ import { PresenterRoot } from '@/features/docs/doc-presenter';
+ import { getDocChildren, subPageToTree } from '@/features/docs/doc-tree/';
+@@ -41,6 +42,10 @@ export function DocLayout() {
+     query: { id },
+   } = useRouter();
+ 
++  // Before the early return, because it is a hook — and before `DocPage` has
++  // asked for anything, which is the entire point of it.
++  useWarmDocStartup(typeof id === 'string' ? id : undefined);
++
+   if (typeof id !== 'string') {
+     return null;
+   }
