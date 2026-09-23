@@ -513,10 +513,12 @@ function Frame({
             <div className="mx-auto w-full max-w-[760px] animate-pulse space-y-6">
               <div className="h-8 w-2/5 rounded-md bg-muted" />
               <div className="space-y-3">
+                {/* Keyed by position: two of these widths are the same, and
+                    the list is fixed, so the index IS the identity. */}
                 {["w-full", "w-11/12", "w-4/5", "w-full", "w-3/5"].map(
-                  (width) => (
+                  (width, index) => (
                     <div
-                      key={width}
+                      key={index}
                       className={`h-3.5 rounded bg-muted/70 ${width}`}
                     />
                   )
