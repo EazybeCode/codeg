@@ -509,6 +509,13 @@ export interface NeevAgentModel {
    * per model, so discovered entries carry a real one.
    */
   efforts: readonly NeevEffort[] | null
+  /**
+   * The level THIS model starts at, or `null` when it does not say.
+   *
+   * Optional on the wire: the compile-time catalogue omits it entirely, and a
+   * discovered one sends it for the models whose runner reports it.
+   */
+  defaultEffort: NeevEffort | null
 }
 
 export interface NeevAgentProviderCatalog {
@@ -565,9 +572,23 @@ function effortList(value: unknown): NeevEffort[] {
 function agentModel(value: unknown): NeevAgentModel {
   // `efforts` is optional AND nullable: the catalogue omits it for a model
   // whose provider list applies, and sends an explicit null for the same.
-  const graded = record(value).efforts !== undefined
+  //
+  // `defaultEffort` is optional and NOT nullable — the server omits the key
+  // rather than sending null for it. Listing it unconditionally would refuse
+  // every compile-time model, which omits it; leaving it out of the list
+  // refused every DISCOVERED model, which is what shipped: one unexpected key
+  // failed `exact`, the whole catalogue with it, and the menu fell back to the
+  // generic provider default with no model to choose. An optional key has to
+  // be asked for optionally, on both sides.
+  const fields = record(value)
+  const graded = fields.efforts !== undefined
+  const starts = fields.defaultEffort !== undefined
   const keys = ["id", "label", "default", "supportsSpeed"]
-  const object = exact(value, graded ? [...keys, "efforts"] : keys)
+  const object = exact(value, [
+    ...keys,
+    ...(graded ? ["efforts"] : []),
+    ...(starts ? ["defaultEffort"] : []),
+  ])
   const id = text(object.id)
   const label = text(object.label)
   if (
@@ -579,13 +600,26 @@ function agentModel(value: unknown): NeevAgentModel {
     typeof object.supportsSpeed !== "boolean"
   )
     return invalid()
+  const efforts =
+    !graded || object.efforts === null ? null : effortList(object.efforts)
+  // Bounded like every other level, and — when this model narrows the set — one
+  // of the levels it actually offers. A default outside its own list is not a
+  // level anyone could pick, which is the same refusal the provider's own
+  // default already gets.
+  if (starts && !isSupportedEffort(object.defaultEffort)) return invalid()
+  if (
+    starts &&
+    efforts !== null &&
+    !efforts.includes(object.defaultEffort as NeevEffort)
+  )
+    return invalid()
   return {
     id,
     label,
     isDefault: object.default,
     supportsSpeed: object.supportsSpeed,
-    efforts:
-      !graded || object.efforts === null ? null : effortList(object.efforts),
+    efforts,
+    defaultEffort: starts ? (object.defaultEffort as NeevEffort) : null,
   }
 }
 
@@ -666,6 +700,17 @@ function providerCatalog(value: unknown): NeevAgentProviderCatalog {
   if (
     models.some((model) =>
       model.efforts?.some((level) => !efforts.includes(level))
+    )
+  )
+    return invalid()
+  // And the same for a model that starts at a level its provider never
+  // advertised, when the model itself did not narrow the set.
+  if (
+    models.some(
+      (model) =>
+        model.efforts === null &&
+        model.defaultEffort !== null &&
+        !efforts.includes(model.defaultEffort)
     )
   )
     return invalid()

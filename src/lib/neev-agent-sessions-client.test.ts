@@ -1373,6 +1373,66 @@ describe("run configuration", () => {
     ])
   })
 
+  /**
+   * A DISCOVERED catalogue, as the runner's own app-server answers it — not the
+   * compile-time fallback. Every model carries the level it starts at, which the
+   * hardcoded list never does.
+   */
+  const discovered = {
+    providers: [
+      {
+        provider: "codex",
+        label: "Codex",
+        models: [
+          {
+            id: "gpt-5.1-codex",
+            label: "gpt-5.1-codex",
+            default: true,
+            supportsSpeed: true,
+            efforts: ["low", "medium", "high"],
+            defaultEffort: "medium",
+          },
+          {
+            id: "gpt-5.1-codex-mini",
+            label: "gpt-5.1-codex-mini",
+            default: false,
+            supportsSpeed: true,
+            efforts: null,
+            defaultEffort: "low",
+          },
+        ],
+        efforts: ["minimal", "low", "medium", "high", "xhigh"],
+        defaultEffort: null,
+        supportsSpeed: true,
+        speedUnavailableReason: null,
+      },
+    ],
+  }
+
+  it("reads a discovered catalogue, whose models say what level they start at", async () => {
+    // The regression this exists for: `defaultEffort` is a key the compile-time
+    // catalogue never sends, so the exact-key check never listed it — and every
+    // model a real runner reported was refused. One unexpected key failed the
+    // whole payload, the menu fell back to the generic provider default, and a
+    // connected Codex offered no model to choose at all.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => json(discovered))
+    )
+    const [codex] = (await loadAgentCapabilities()).providers
+    expect(codex.models.map((model) => model.id)).toEqual([
+      "gpt-5.1-codex",
+      "gpt-5.1-codex-mini",
+    ])
+    expect(codex.models.map((model) => model.defaultEffort)).toEqual([
+      "medium",
+      "low",
+    ])
+    // Still absent means null: the hardcoded catalogue omits the key entirely and
+    // must keep reading exactly as it did.
+    expect(codex.discoveryUnavailable).toBe(false)
+  })
+
   it("refuses a catalogue that would offer something the server then rejects", async () => {
     const [claude, codex] = catalog.providers
     for (const bad of [
@@ -1380,6 +1440,34 @@ describe("run configuration", () => {
       { providers: [{ ...claude, models: [] }] },
       // A level outside the provider's own advertised set.
       { providers: [{ ...claude, defaultEffort: "minimal" }] },
+      // A model starting at a level it does not itself offer, and one starting
+      // at a level its provider never advertised. Both would preselect a run
+      // the server refuses.
+      {
+        providers: [
+          {
+            ...claude,
+            models: [{ ...claude.models[2], defaultEffort: "xhigh" }],
+          },
+        ],
+      },
+      {
+        providers: [
+          {
+            ...claude,
+            models: [{ ...claude.models[3], defaultEffort: "minimal" }],
+          },
+        ],
+      },
+      // Not a level at all.
+      {
+        providers: [
+          {
+            ...claude,
+            models: [{ ...claude.models[0], defaultEffort: "-low" }],
+          },
+        ],
+      },
       // A model narrowing to a level its provider never advertised: the
       // catalogue disagreeing with itself would offer a refused run.
       {
