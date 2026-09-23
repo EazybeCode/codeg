@@ -1,0 +1,14 @@
+# Include inside the app.neev.so site block, before reverse_proxy.
+# Only static editor assets: document HTML, API, media and collaboration remain
+# governed by the native authorization and private-response headers.
+@docsCompressible path /document-engine/_next/static/*
+encode @docsCompressible zstd gzip
+
+@docsImmutable {
+    method GET HEAD
+    path_regexp docsHashed ^/document-engine/_next/static/.*[.-][a-f0-9]{8,}\.(js|css|woff2?|png|jpg|jpeg|webp|svg)$
+}
+header @docsImmutable {
+    Cache-Control "private, max-age=31536000, immutable"
+    match status 200
+}
