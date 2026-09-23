@@ -124,3 +124,22 @@ its existing content. The attempted final timing run lost browser attachment;
 no reliable post-optimization latency is claimed. Before this final overlap
 change, document creation to writable body measured 6335ms (single sample).
 Full initial workspace boot remains distinct from opening an item.
+
+### Compact header follow-up
+
+UI `b2300a16` (integration `79c6a823`) removes normal workspace Back to folder
+controls from document/chat/agent headers. Document toolbar is 32px high with
+28px controls; privacy and item actions remain. Standalone legacy folder view
+retains its necessary exit; error recovery controls remain.
+
+Native production build and TypeScript/ESLint exited 0. Focused assertions:
+196 passed, none failed; runner still exits 1 for the same seven pre-existing
+BlockNote/jsdom elementsFromPoint errors. Live image
+`neev-native-agent:ux-docs-speed-b2300a16`, ID
+`163719c5896f42f524a3ded155ce74694fae5098d20e5a417f8104999c2e02ef`;
+workspace HTML SHA `e046b846dbf1432bc8be84a116238a6e169dbddcd39565be9c0c7014b1b748fb`.
+
+On explicit user request, all eight active legacy-editor documents across their
+two organizations were moved through the product's recoverable trash flow.
+The two La Suite documents remain active. Other organizations outside the
+user's memberships were not modified. No document bodies were deleted.
