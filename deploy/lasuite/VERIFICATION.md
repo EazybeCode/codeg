@@ -40,8 +40,8 @@ no document migration or Docmost change was performed.
 Read-only users retain read-only access; upstream does not provide a separate
 read-only comments role. Full native integration-test compilation requires its
 existing `test-utils` feature; this release does not claim that entire suite passed.
-The native content-menu rename dialog has a pre-existing tab-label refresh issue;
-the new La Suite editor's inline title path is verified.
+The native content-menu rename/tab refresh issue observed at this release was
+subsequently fixed and verified in the September 23 release below.
 
 ## Release-script corrections verified during rollout
 
@@ -74,3 +74,53 @@ variables. The final enable-creation command completed with exit 0.
 - Promotion changed only the native image. Live health returned 200, the deployed
   HTML hash matched, and document creation remained enabled. Rollback image:
   `neev-native-agent:docs-before-tab-navigation-20260922`.
+
+
+## September 23: item actions, compact documents, opening speed
+
+Native UI source `21d9f3c6`; backend remains `d9665d3b`. Live image
+`neev-native-agent:ux-docs-speed-21d9f3c6` (ID
+`30a0b1221a1bcbc4dd3aef1ae86446a53c038cb7fcb35f3a526bc86931376d42`).
+Native workspace HTML SHA-256:
+`7afa6481b287109543495fd940b8477e3133b3460ad1fae98867ad3f976176bd`.
+
+- Sidebar item menus expose Rename and recoverable Move to trash/Restore;
+  Show trash reveals archived items. Header and sidebar mutations update open
+  pane, breadcrumb and tabs in both directions without remounting the editor.
+- Live checks passed: document header rename, chat sidebar/header rename,
+  document trash (body contenteditable=false) and restore (true). All named
+  disposable test items were moved to recoverable trash; user content preserved.
+- Embedded editor title moved from y=210 to 132 and body from y=294 to 180
+  at the tested desktop viewport. At 390px width, controls did not overlap.
+- Chat composer appeared 499ms after New chat in a live browser check. The
+  authorization gate still prevents sending before resource access is verified.
+  Ordinary navigation kept the tab count unchanged.
+- Native production build, TypeScript and ESLint passed. Focused five-file tests:
+  150 assertions passed, no failed assertions, but process exit 1 from seven
+  pre-existing BlockNote/jsdom elementsFromPoint errors. Baseline had 3 failed
+  assertions and 138 passed. Independent engine/tab tests: 43 passed, exit 0.
+  Do not describe the full test runner as clean.
+- Live health 200, document creation enabled, native server binary and file
+  capabilities unchanged. All 30 baseline immutable revision hashes unchanged;
+  schema remains 14. No document migration or Docmost changes.
+- Editor static assets now receive compression and private immutable caching
+  only for successful hash-named assets. Auth failures and HTML/API stay no-store.
+  Exact production Caddy image passed six delivery fixtures before rollout.
+- Existing hashed editor chunks are retained for already-open browser sessions.
+  Original artifact backup remains `/tmp/neev-docs-artifact-before-ux` on host.
+
+### Final editor startup artifact
+
+Patch 0009 (worker `62125297`, integration `a5e55fb6`) starts the exact dynamic
+editor import and existing authenticated content query alongside metadata.
+Query keys/staleTime are unchanged and rejected speculative imports are caught.
+Three focused startup tests passed; final upstream production build v5 exited 0
+(actual child status captured). All 4160 output files matched the SHA-256 manifest
+on the live host after publication; `/healthz` returned 200.
+
+Live browser verified a fresh document had both editable title and body, title
+rename propagated, and Move to trash succeeded. Review document reopened with
+its existing content. The attempted final timing run lost browser attachment;
+no reliable post-optimization latency is claimed. Before this final overlap
+change, document creation to writable body measured 6335ms (single sample).
+Full initial workspace boot remains distinct from opening an item.
