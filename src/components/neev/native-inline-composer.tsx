@@ -82,7 +82,7 @@ const TrayContext = createContext<{
 } | null>(null)
 
 /** A file, inside the sentence, while it is being written. */
-function AttachmentChip({ node, selected }: NodeViewProps) {
+function AttachmentChip({ deleteNode, node, selected }: NodeViewProps) {
   const t = useTranslations("NativeContent")
   const n = useTranslations("Native")
   const context = useContext(TrayContext)
@@ -146,7 +146,14 @@ function AttachmentChip({ node, selected }: NodeViewProps) {
         title={t("attachmentRemove", { name: item.name })}
         disabled={context?.disabled}
         onMouseDown={(event) => event.preventDefault()}
-        onClick={() => context?.tray.remove(id)}
+        // Deletes the REFERENCE, not the file. Taking the file out of the tray
+        // directly would leave the node behind for the reconcile to sweep up as
+        // something it cannot account for — no history entry, and nothing
+        // remembered, so Ctrl+Z had nothing to bring back. Editing the document
+        // is what an edit to the document is: the reconcile then releases the
+        // file and remembers it, exactly as deleting the reference with a
+        // keystroke does.
+        onClick={() => deleteNode()}
       >
         <X aria-hidden className="size-3" />
       </Button>

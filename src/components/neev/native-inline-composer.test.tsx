@@ -181,6 +181,36 @@ it("undoes a deleted reference back into the file it named", async () => {
   expect(names.size).toBe(1)
 })
 
+it("undoes the chip's own ✕ back into the file it named", async () => {
+  // The browser found this one: deleting the reference with a keystroke was
+  // undoable and pressing ✕ was not, because ✕ took the file out of the tray
+  // instead of editing the document — so there was no history entry to undo.
+  const { box, add } = mount()
+  const editor = await box()
+  await typeInComposer(editor, "look at ")
+  await act(async () => {
+    await add([png("shot.png")])
+  })
+  await screen.findByRole("button", { name: "Remove shot.png" })
+  await typeInComposer(editor, "now")
+
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Remove shot.png" }))
+  })
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Remove shot.png" })).toBeNull()
+  )
+  expect(composeWirePrompt(draft, names).ids).toEqual([])
+
+  await undo(editor)
+  await screen.findByRole("button", { name: "Remove shot.png" })
+  await waitFor(() =>
+    expect(composeWirePrompt(draft, names).prompt).toBe(
+      "look at [attachment 1: shot.png] now"
+    )
+  )
+})
+
 it("forgets a released file once the tray is cleared", async () => {
   const { box, add, tray } = mount()
   const editor = await box()
