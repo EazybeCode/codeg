@@ -523,6 +523,17 @@ export function NativeAgentConnectionsPanel({
     }
   }
 
+  /**
+   * When the last check settled, by the server's clock.
+   *
+   * A settled check returns the row as it now stands, so its time is fresher
+   * than the list's until the refresh lands.
+   */
+  function checkedAt(connection: NeevAgentConnection) {
+    return (tested?.provider === connection.provider ? tested : connection)
+      .checkedAt
+  }
+
   async function disconnect(provider: NeevAgentProvider) {
     if (busy || !auth.session) return
     setBusy(provider)
@@ -596,6 +607,22 @@ export function NativeAgentConnectionsPanel({
                   {connection.accountLabel && (
                     <span className="min-w-0 truncate text-xs text-muted-foreground">
                       {connection.accountLabel}
+                    </span>
+                  )}
+                  {/* A check that finds nothing wrong leaves every other word on
+                      this row identical, so without the time it reads as a
+                      button that does nothing. The server's own `checkedAt` is
+                      what moves; `role="status"` announces it. */}
+                  {checkedAt(connection) !== null && (
+                    <span
+                      role="status"
+                      className="text-xs text-muted-foreground"
+                    >
+                      {n("connectionCheckedAt", {
+                        time: new Date(
+                          checkedAt(connection)! * 1000
+                        ).toLocaleTimeString(),
+                      })}
                     </span>
                   )}
                   {attempt?.provider === connection.provider ? (

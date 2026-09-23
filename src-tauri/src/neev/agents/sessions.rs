@@ -155,6 +155,29 @@ pub(crate) async fn ensure_team_session(
     let id = team_session_id(actor.org_id, actor.identity.user_id, chat_id, &provider_name);
     let provider_name_owned = provider_name.clone();
     let model_name_owned = model_name.clone();
+    // Settled BEFORE the transaction opens, like every other caller of
+    // `validated_for` in this file.
+    //
+    // It cannot run inside one. `resources::begin` takes `neev_schema_version`
+    // id=1 `FOR UPDATE` — one global row that serializes every content
+    // transaction — and validation reaches model discovery, which opens its own
+    // transaction (`store::authorized_transaction`) on a DIFFERENT pooled
+    // connection and takes that same row. The inner transaction then waits for a
+    // lock the outer one is holding while the outer waits for the inner: a
+    // deadlock no database can break, because to Postgres the outer session is
+    // simply idle in transaction. Once the provider is connected — and only
+    // then, because before that discovery returns early without touching the
+    // database — every team invocation hit it.
+    let (level, fast) = super::capabilities::validated_for(
+        state,
+        actor,
+        &provider_name_owned,
+        &model_name_owned,
+        effort,
+        fast,
+    )
+    .await
+    .map_err(|_| ContentError::Invalid)?;
     let tx = resources::begin(state, actor).await?;
     // Write authority over the chat is the invoker's right to have an agent
     // speak there; it is re-proved again at publish time.
@@ -183,17 +206,7 @@ pub(crate) async fn ensure_team_session(
     // bound chat runs at the settings the reader picked. Doing it after the
     // launch would charge them for a turn at the wrong settings, and doing it
     // in a second request would leave a window where a holder exists with the
-    // wrong ones.
-    let (level, fast) = super::capabilities::validated_for(
-        state,
-        actor,
-        &provider_name_owned,
-        &model_name_owned,
-        effort,
-        fast,
-    )
-    .await
-    .map_err(|_| ContentError::Invalid)?;
+    // wrong ones. What is applied was validated above.
     // Only when something actually differs, and then WITH a revision bump.
     //
     // Writing unconditionally and without bumping made this a hole in the

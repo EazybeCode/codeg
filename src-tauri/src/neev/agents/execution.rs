@@ -409,6 +409,9 @@ fn provider_argv(
     // mode from ambient config the reader cannot see.
     match provider {
         "codex" => {
+            // Chats run in isolated, per-turn directories, not Git checkouts.
+            // This skips only the repository precondition, not the sandbox.
+            argv.push("--skip-git-repo-check".into());
             argv.push("-c".into());
             argv.push(format!(
                 "service_tier=\"{}\"",
@@ -1186,7 +1189,12 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
         // Non-blocking as well, so a probe never waits for a lane a turn wants.
         let lane = self.slots.acquire().ok_or(ExecutionError::Unavailable)?;
         let probe_id = uuid::Uuid::new_v4().simple().to_string();
-        let workdir = self.workspace_root.join(format!("probe-{probe_id}"));
+        // `run-` prefix required: the launcher only accepts a workdir whose
+        // basename matches `run-…` (`_validate_workdir_under_trusted_root`), so
+        // a `probe-…` dir was refused with `invalid spec` before any sandbox,
+        // credential or process existed — every catalogue read has always
+        // failed this way, and the reason went to the discarded stderr.
+        let workdir = self.workspace_root.join(format!("run-probe-{probe_id}"));
         let guard = LaneGuard {
             slots: self.slots.clone(),
             lane,
@@ -1654,6 +1662,8 @@ mod tests {
                 "draft".to_string()
             ]
         );
+        assert!(codex.contains(&"--skip-git-repo-check".to_string()));
+        assert!(!claude.contains(&"--skip-git-repo-check".to_string()));
         assert!(!codex.contains(&"-p".to_string()));
         assert!(!codex.contains(&"--output-format".to_string()));
 

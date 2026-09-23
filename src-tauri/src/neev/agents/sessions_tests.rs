@@ -682,3 +682,100 @@ fn execution_errors_map_to_stored_codes() {
         assert!(crate::neev::db::TURN_ERROR_CODES.contains(&execution_error_code(&error)));
     }
 }
+
+/// A team invocation must not need the provider's catalogue to start.
+///
+/// Live regression: once Codex was connected, every ask in a team chat answered
+/// 503 with the human's message already posted and no holder or turn behind it.
+/// `ensure_team_session` was the one caller in this file that validated while
+/// holding `resources::begin`'s transaction, and validation reaches discovery,
+/// which opens its own transaction and waits on the `neev_schema_version` row
+/// the outer one is holding. Before the provider was connected discovery
+/// returned early and never touched the database, so connecting is what armed
+/// it.
+///
+/// This test cannot reproduce the deadlock: it needs the Postgres-only
+/// `FOR UPDATE` in `lock_admission_guard`, and the harness runs on SQLite. What
+/// it does pin is the reason the deadlock was reachable — an ask claiming
+/// nothing now settles without consulting the catalogue at all — and that the
+/// narrowing did not turn into a blanket yes.
+#[tokio::test]
+async fn a_team_ask_claiming_nothing_needs_no_catalogue() {
+    let harness = Harness::new().await;
+    let chat = harness.chat(&harness.owner, Visibility::Organization).await;
+
+    // Discovery cannot succeed here (no runtime is bound), which is exactly the
+    // state a caller is in when the probe fails in production.
+    let session = ensure_team_session(
+        &harness.state,
+        &harness.owner,
+        &chat,
+        "codex",
+        "default",
+        "Team invocation",
+        None,
+        false,
+    )
+    .await
+    .expect("a default ask must not depend on the catalogue");
+    assert_eq!(session.provider, "codex");
+    assert_eq!(session.model, "default");
+    assert_eq!(session.effort, None);
+    assert!(!session.fast);
+}
+
+/// The narrowing above is about WHEN the catalogue is consulted, never about
+/// what it decides. Anything actually claimed is still checked.
+#[tokio::test]
+async fn a_claimed_level_or_fast_mode_is_still_refused() {
+    let harness = Harness::new().await;
+    let validate = async |effort: Option<&str>, fast: bool| {
+        crate::neev::agents::capabilities::validated_for(
+            &harness.state,
+            &harness.owner,
+            "codex",
+            "default",
+            effort,
+            fast,
+        )
+        .await
+    };
+
+    // Claiming nothing: settled without the catalogue.
+    assert_eq!(validate(None, false).await, Ok((None, false)));
+    // An empty field is the same statement as an absent one.
+    assert_eq!(validate(Some(""), false).await, Ok((None, false)));
+
+    // A level codex takes is still accepted...
+    assert_eq!(
+        validate(Some("medium"), false).await,
+        Ok((Some("medium".into()), false))
+    );
+    // ...and one it does not is still refused, catalogue or no catalogue.
+    assert_eq!(validate(Some("max"), false).await, Err(()));
+    assert_eq!(validate(Some("nonsense"), false).await, Err(()));
+    // Fast mode is a claim too: codex's `default` does not offer it, and an
+    // unreachable catalogue is no licence to enable it.
+    assert_eq!(validate(None, true).await, Err(()));
+}
+
+/// An unknown model is not waved through by the short circuit.
+#[tokio::test]
+async fn an_unsafe_model_is_refused_before_anything_else() {
+    let harness = Harness::new().await;
+    for model in ["--oops", "", "has space"] {
+        assert_eq!(
+            crate::neev::agents::capabilities::validated_for(
+                &harness.state,
+                &harness.owner,
+                "codex",
+                model,
+                None,
+                false,
+            )
+            .await,
+            Err(()),
+            "{model} must not be accepted"
+        );
+    }
+}

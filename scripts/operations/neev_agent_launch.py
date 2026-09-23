@@ -25,6 +25,7 @@ import os
 import re
 import signal
 import sys
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import neev_agent_sandbox as sandbox
@@ -254,7 +255,10 @@ def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as):
             home_as=home_as,
         ) as delivery:
             rc = _run_child(
-                spec, child_env(delivery, proxy_env), bind_source=delivery.mount
+                spec,
+                child_env(delivery, proxy_env),
+                bind_source=delivery.mount,
+                relay_stdin=is_metadata_probe(args.provider, spec),
             )
     except credentials.CredentialError as error:
         # Honest, non-sensitive reason ("busy" = another run for this user+provider
@@ -319,14 +323,70 @@ def _cleanup_run_workdir(workdir):
         return False
 
 
-def _run_child(spec, env, bind_source=None):
+# The metadata probe is the ONE shape that needs a writable stdin, and it is
+# recognised exactly: provider `codex`, invoked as nothing but `app-server`.
+# `codex exec` runs — every turn a user pays for — keep DEVNULL, so no prompt or
+# provider stream can ever be fed from outside the sandbox.
+_METADATA_ARGV = ("app-server",)
+# Enough for the handshake the reader sends (initialize, initialized, model/list)
+# with room to spare, and far too little to smuggle a payload through.
+_STDIN_RELAY_MAX_BYTES = 64 * 1024
+
+
+def is_metadata_probe(provider, spec):
+    """Pure: does this launch drive the catalogue probe, and nothing else?"""
+    return provider == "codex" and tuple(spec.provider_argv[1:]) == _METADATA_ARGV
+
+
+def _relay_stdin(destination, source, limit=_STDIN_RELAY_MAX_BYTES):
+    """Copy at most `limit` bytes from `source` to `destination`, then close it.
+
+    Bounded and one-way. The reader keeps its end open until the answer arrives,
+    so this returns on EOF, on the cap, or when the child has gone; closing the
+    child's stdin is what lets a well-behaved app-server finish.
+    """
+    written = 0
+    try:
+        while written < limit:
+            chunk = source.read1(min(4096, limit - written)) if hasattr(
+                source, "read1"
+            ) else source.read(min(4096, limit - written))
+            if not chunk:
+                break
+            destination.write(chunk)
+            destination.flush()
+            written += len(chunk)
+    except (BrokenPipeError, ValueError, OSError):
+        pass  # the child exited first; its rc is the outcome, not this
+    finally:
+        try:
+            destination.close()
+        except (BrokenPipeError, OSError):
+            pass
+    return written
+
+
+def _run_child(spec, env, bind_source=None, relay_stdin=False):
     """Launch the provider in the sandbox, forward its stream, and always tear the
     sandbox down. Runs while the credential volume is lent to this run's uid."""
     try:
-        handle = sandbox.launch(spec, env=env, bind_source=bind_source)
+        handle = sandbox.launch(
+            spec, env=env, bind_source=bind_source, stdin_pipe=relay_stdin
+        )
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: launch failed: {error.category}", file=sys.stderr)
         return 3
+
+    # The probe is a conversation: the app-server answers `initialize` before it
+    # will accept a method, so its stdin must stay open until the caller has what
+    # it asked for. Without this the child read EOF immediately and exited, and
+    # the catalogue was never read.
+    if relay_stdin and handle.stdin is not None:
+        threading.Thread(
+            target=_relay_stdin,
+            args=(handle.stdin, sys.stdin.buffer),
+            daemon=True,
+        ).start()
 
     # Keep the signal handler async-signal-safe: do ONLY a fast process-group
     # kill (single syscall) to unblock the stdout read; the heavy teardown

@@ -2,6 +2,7 @@
 Actually spawning the sandbox is Linux-only (`neev_agent_sandbox_acceptance.py`);
 these prove the CLI maps to a correct, validated SandboxSpec + egress policy."""
 
+import io
 import os
 import sys
 import unittest
@@ -89,6 +90,32 @@ class WorkdirTrustTests(unittest.TestCase):
                 os.symlink("/etc", link)
                 with self.assertRaises(sandbox.SandboxError):
                     launch._validate_workdir_under_trusted_root(os.path.join(link, "run-x"))
+            finally:
+                os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
+
+    def test_a_catalogue_probe_workdir_is_accepted_and_a_bare_probe_dir_is_not(self):
+        """The model-catalogue probe launches through this same validator.
+
+        It used to ask for `probe-<id>`, which fails the `run-` rule, so every
+        catalogue read died here with `invalid spec` before a sandbox, a
+        credential or a process existed — and the reason went to the stderr the
+        caller discards, which is why the menu only ever said the models could
+        not be listed. The probe now asks for `run-probe-<id>`; this pins both
+        halves so the prefix cannot be dropped again.
+        """
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as root:
+            os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = root
+            try:
+                launch._validate_workdir_under_trusted_root(
+                    os.path.join(root, "run-probe-0123456789abcdef")
+                )
+                with self.assertRaises(sandbox.SandboxError):
+                    launch._validate_workdir_under_trusted_root(
+                        os.path.join(root, "probe-0123456789abcdef")
+                    )
             finally:
                 os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
 
@@ -198,9 +225,11 @@ class CredentialWiringTests(unittest.TestCase):
                 env={"HOME": "/mnt/vol", "CODEX_HOME": "/mnt/vol/.codex"},
             )
 
-        def fake_launch(spec, env=None, bind_source=None):
+        def fake_launch(spec, env=None, bind_source=None, stdin_pipe=False):
             captured["env"] = env
             captured["bind_source"] = bind_source
+            # A paid `exec` turn is never writable; only the catalogue probe is.
+            captured["stdin_pipe"] = stdin_pipe
             return FakeHandle()
 
         # The runtime now owns the slot's RUN proxy through the slot_proxy CM (real one
@@ -244,6 +273,8 @@ class CredentialWiringTests(unittest.TestCase):
                     os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = saved_root
         self.assertEqual(rc, 0)
         self.assertEqual(captured["proxy_scope"], ("codex", "run", "b"))
+        # A paid turn's stdin stays DEVNULL: only the catalogue probe is written to.
+        self.assertFalse(captured["stdin_pipe"])
         env = captured["env"]
         # Slot "b" proxy, routed through the fixed slot CONNECT proxy, all bypass off.
         self.assertEqual(env["HTTPS_PROXY"], "http://10.203.0.10:3128")
@@ -312,3 +343,90 @@ class CredentialWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Sink:
+    """A child stdin that records instead of closing out from under the test."""
+
+    def __init__(self):
+        self.written = b""
+        self.closed_by_relay = False
+
+    def write(self, chunk):
+        self.written += chunk
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed_by_relay = True
+
+
+class MetadataStdinRelayTests(unittest.TestCase):
+    """The catalogue probe is the only launch that may be written to.
+
+    `_run_child` launched with the default `stdin_pipe=False`, so the provider
+    got DEVNULL. The reader writes `initialize`, waits for the reply, then sends
+    `initialized` + `model/list`; against DEVNULL the app-server saw EOF at once
+    and exited, and no catalogue was ever read. The relay exists for exactly that
+    exchange and must not widen to anything a user pays for.
+    """
+
+    def probe_args(self, provider="codex", tail=("app-server",)):
+        base = [
+            "--tenant", "org:3/user:7",
+            "--slot", "a",
+            "--workdir", "/var/lib/neev-native/agents/run-probe-abc",
+            "--uid", "61000",
+            "--gid", "61000",
+            "--provider", provider,
+            "--credential-handle", "handle-1",
+        ]
+        parsed = launch._parse(base + ["--", "/usr/local/bin/codex", *tail])
+        return parsed, launch.build_spec(parsed)
+
+    def test_only_a_bare_codex_app_server_launch_is_a_metadata_probe(self):
+        parsed, spec = self.probe_args()
+        self.assertTrue(launch.is_metadata_probe(parsed.provider, spec))
+
+        # A paid turn is never writable, however it is shaped.
+        for tail in (
+            ("exec", "--json", "--skip-git-repo-check", "hi"),
+            ("exec", "--json"),
+            ("app-server", "--yolo"),      # extra argument: not the bare probe
+            ("login",),
+        ):
+            parsed, spec = self.probe_args(tail=tail)
+            self.assertFalse(
+                launch.is_metadata_probe(parsed.provider, spec),
+                f"{tail} must not open stdin",
+            )
+        # Right shape, wrong provider.
+        parsed, spec = self.probe_args(provider="claude")
+        self.assertFalse(launch.is_metadata_probe(parsed.provider, spec))
+
+    def test_the_relay_forwards_the_handshake_and_closes_the_childs_stdin(self):
+        frames = (
+            b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+            b'{"jsonrpc":"2.0","method":"initialized","params":{}}\n'
+            b'{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}\n'
+        )
+        sink = _Sink()
+        written = launch._relay_stdin(sink, io.BytesIO(frames))
+        self.assertEqual(written, len(frames))
+        self.assertEqual(sink.written, frames)
+        # Closing is what lets a well-behaved app-server finish.
+        self.assertTrue(sink.closed_by_relay)
+
+    def test_the_relay_is_bounded_and_survives_a_child_that_exits_first(self):
+        sink = _Sink()
+        written = launch._relay_stdin(sink, io.BytesIO(b"x" * 10_000), limit=256)
+        self.assertEqual(written, 256)
+        self.assertEqual(len(sink.written), 256)
+
+        class Gone(_Sink):
+            def write(self, _chunk):
+                raise BrokenPipeError()
+
+        # The child's rc is the outcome; a dead pipe must not raise out of here.
+        self.assertEqual(launch._relay_stdin(Gone(), io.BytesIO(b"frame\n")), 0)

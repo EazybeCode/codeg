@@ -444,8 +444,20 @@ pub(crate) async fn validated_for(
     if !crate::neev::agents::execution::safe_model(model) {
         return Err(());
     }
+    let requested = effort.filter(|value| !value.is_empty());
+    // The catalogue is consulted only when something is actually being claimed
+    // against it. An ask that names no level and no fast mode asserts nothing
+    // discovery could refute, so probing the provider to answer a question
+    // nobody asked would make the common case depend on a network round trip
+    // that can only fail it. This is a narrowing of when discovery runs, NOT of
+    // what it decides: a level or fast mode is still checked against the
+    // caller's own catalogue exactly as before, and an unknown model is still
+    // no licence to enable anything.
+    if requested.is_none() && !fast {
+        return Ok((None, false));
+    }
     let allowed = allowed(state, actor, provider, model).await;
-    let level = match effort.filter(|value| !value.is_empty()) {
+    let level = match requested {
         None => None,
         Some(value) => {
             if !safe_effort(value) || !allowed.efforts.iter().any(|entry| entry == value) {
