@@ -143,3 +143,22 @@ On explicit user request, all eight active legacy-editor documents across their
 two organizations were moved through the product's recoverable trash flow.
 The two La Suite documents remain active. Other organizations outside the
 user's memberships were not modified. No document bodies were deleted.
+
+### Guided provider setup
+
+UI worker `da29ca2c`, integration `d4fcbc12`: Codex prerequisites are explained
+before sign-in with a ChatGPT settings link and official authentication guidance.
+Device approval presents copy-code then browser approval; clipboard absence and
+rejection have visible errors, and copy outcomes are tied to the matching code.
+Provider names are friendly and redundant last-checked timestamps are removed.
+The existing server-confirmed connection and attempt lifecycle is unchanged.
+
+Connections: 31 tests passed; wider connections/controls/chat/settings set:
+98 passed, exit 0. TypeScript, ESLint, and native production build exited 0.
+New image `neev-native-agent:ux-docs-speed-da29ca2c`, ID
+`83482af1f130324d39fdf8ba3096081c4b39bbdf625b7d728d6f18de174b5b3e`;
+HTML SHA `332e78fa13da0707e990b83b26a9b7adbff7000892643b5483ac510012d36254`.
+Provider login completion requires the user to enable the provider prerequisite
+and approve sign-in. No provider permissions were changed or approvals automated.
+The ChatGPT Security deep-link browser check timed out; the UI also gives the
+manual Settings → Security path and the verified official documentation link.
