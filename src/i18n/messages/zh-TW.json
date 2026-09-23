@@ -211,7 +211,19 @@
     "moveToTrash": "移至回收筒",
     "restoreFromTrash": "還原",
     "inTrash": "在回收筒中",
-    "itemActions": "{title} 的操作"
+    "itemActions": "{title} 的操作",
+    "codexSetupTitle": "連接 Codex 之前",
+    "codexSetupBody": "在此裝置上登入需使用一次性代碼。需先在 ChatGPT 的「設定 → 安全性 → 裝置代碼授權」中啟用一次。Neev 無法查看或變更該設定。",
+    "codexSetupAdmin": "在受管理的工作區中，可能需要管理員允許。",
+    "codexSetupDocs": "了解在其他裝置上登入",
+    "copyCode": "複製代碼",
+    "codeCopied": "已複製",
+    "copyCodeFailed": "無法複製。請手動選取並複製該代碼。",
+    "codexSetupHint": "Codex 需要在 ChatGPT 的「設定 → 安全性」中啟用裝置代碼授權。",
+    "codexSetupOpen": "開啟 ChatGPT 設定",
+    "stepCopyCode": "1. 複製此代碼",
+    "stepApprove": "2. 開啟登入頁面並核准",
+    "codeExpiredHint": "如果代碼已過期，請重新連接以取得新代碼。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

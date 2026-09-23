@@ -211,7 +211,19 @@
     "moveToTrash": "移到回收站",
     "restoreFromTrash": "恢复",
     "inTrash": "在回收站中",
-    "itemActions": "{title} 的操作"
+    "itemActions": "{title} 的操作",
+    "codexSetupTitle": "连接 Codex 之前",
+    "codexSetupBody": "在此设备上登录需使用一次性代码。需先在 ChatGPT 的“设置 → 安全 → 设备代码授权”中启用一次。Neev 无法查看或更改该设置。",
+    "codexSetupAdmin": "在受管理的工作区中，可能需要管理员允许。",
+    "codexSetupDocs": "了解在其他设备上登录",
+    "copyCode": "复制代码",
+    "codeCopied": "已复制",
+    "copyCodeFailed": "无法复制。请手动选择并复制该代码。",
+    "codexSetupHint": "Codex 需要在 ChatGPT 的“设置 → 安全”中启用设备代码授权。",
+    "codexSetupOpen": "打开 ChatGPT 设置",
+    "stepCopyCode": "1. 复制此代码",
+    "stepApprove": "2. 打开登录页面并批准",
+    "codeExpiredHint": "如果代码已过期，请重新连接以获取新代码。"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

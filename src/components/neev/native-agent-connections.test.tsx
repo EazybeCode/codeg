@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { cleanup, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeAgentConnectionsPanel } from "./native-agent-connections"
@@ -981,4 +981,113 @@ it("does not sign in again while its own teardown is unfinished", async () => {
   await waitFor(() => expect(connects).toBe(0))
   expect(screen.queryByText("Waiting for sign-in…")).toBeNull()
   void user
+})
+
+/**
+ * The prerequisite Codex does not mention until after a sign-in has already
+ * failed: device code authorization has to be on for the ChatGPT account.
+ *
+ * Said before the button that starts it, and said without claiming to know
+ * whether it is on — Neev can neither read nor change that setting.
+ */
+it("says what Codex needs before connecting, and says it only for Codex", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(codexWiring("not_signed_in")),
+  })
+  mount()
+  expect(
+    await screen.findByText(
+      "Codex needs device code authorization turned on in ChatGPT, under Settings → Security."
+    )
+  ).toBeInTheDocument()
+  // The switch itself, and the provider's own instructions behind it.
+  expect(
+    screen.getByRole("link", { name: "Open ChatGPT settings" })
+  ).toHaveAttribute("href", "https://chatgpt.com/#settings/Security")
+  expect(
+    screen.getByRole("link", { name: "How signing in on another device works" })
+  ).toHaveAttribute(
+    "href",
+    "https://learn.chatgpt.com/docs/auth#login-on-headless-devices"
+  )
+  // It never asserts the setting is on or off.
+  expect(screen.queryByText(/already enabled|not enabled/i)).toBeNull()
+})
+
+it("does not show the Codex prerequisite on another provider, or once connected", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [connection("not_signed_in")],
+      }),
+  })
+  mount()
+  await screen.findByRole("button", { name: "Connect claude" })
+  expect(
+    screen.queryByText(
+      "Codex needs device code authorization turned on in ChatGPT, under Settings → Security."
+    )
+  ).toBeNull()
+
+  cleanup()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(codexWiring("connected")),
+  })
+  mount()
+  await screen.findByRole("button", { name: "Disconnect codex" })
+  expect(
+    screen.queryByText(
+      "Codex needs device code authorization turned on in ChatGPT, under Settings → Security."
+    )
+  ).toBeNull()
+})
+
+/** Drives the device flow to the point where a code is on screen. */
+async function showDeviceCode(user: ReturnType<typeof userEvent.setup>) {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(codexWiring("not_signed_in")),
+    [CODEX_CONNECT]: () => pendingConnect(),
+    [CODEX_ATTEMPT]: () =>
+      json({
+        state: "pending",
+        expiresAt: FAR_FUTURE,
+        approval: DEVICE_APPROVAL,
+      }),
+  })
+  mount()
+  await user.click(await screen.findByRole("button", { name: "Connect codex" }))
+  await screen.findByText("ABCD-EFGH")
+}
+
+it("copies the device code on an explicit click, and asks the server for nothing to do it", async () => {
+  const user = userEvent.setup()
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } })
+  await showDeviceCode(user)
+
+  await user.click(screen.getByRole("button", { name: "Copy code" }))
+  expect(writeText).toHaveBeenCalledWith("ABCD-EFGH")
+  expect(await screen.findByRole("button", { name: "Copied" })).toBeVisible()
+  // Copying is a browser act. Nothing about the attempt or the connection moved.
+  expect(screen.queryByRole("alert")).toBeNull()
+})
+
+/**
+ * `navigator.clipboard` is undefined in a non-secure context, so reading
+ * `.writeText` off it throws before any promise exists to reject. A button
+ * that silently looked like it had worked left the reader pasting nothing.
+ */
+it("says so visibly when the clipboard is unavailable", async () => {
+  const user = userEvent.setup()
+  vi.stubGlobal("navigator", { ...navigator, clipboard: undefined })
+  await showDeviceCode(user)
+
+  await user.click(screen.getByRole("button", { name: "Copy code" }))
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Could not copy it. Select the code and copy it by hand."
+  )
+  // Still offering to try, and never claiming it copied.
+  expect(screen.getByRole("button", { name: "Copy code" })).toBeVisible()
+  expect(screen.queryByRole("button", { name: "Copied" })).toBeNull()
 })

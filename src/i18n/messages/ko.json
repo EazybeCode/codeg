@@ -211,7 +211,19 @@
     "moveToTrash": "휴지통으로 이동",
     "restoreFromTrash": "복원",
     "inTrash": "휴지통에 있음",
-    "itemActions": "{title} 작업"
+    "itemActions": "{title} 작업",
+    "codexSetupTitle": "Codex를 연결하기 전에",
+    "codexSetupBody": "이 기기에서 로그인하려면 일회용 코드가 필요합니다. ChatGPT의 설정 → 보안 → 기기 코드 인증에서 한 번 허용해야 합니다. Neev는 이 설정을 보거나 변경할 수 없습니다.",
+    "codexSetupAdmin": "관리되는 워크스페이스에서는 관리자의 허용이 필요할 수 있습니다.",
+    "codexSetupDocs": "다른 기기에서 로그인하는 방법",
+    "copyCode": "코드 복사",
+    "codeCopied": "복사됨",
+    "copyCodeFailed": "복사하지 못했습니다. 코드를 선택해 직접 복사하세요.",
+    "codexSetupHint": "Codex는 ChatGPT의 설정 → 보안에서 기기 코드 인증을 켜야 합니다.",
+    "codexSetupOpen": "ChatGPT 설정 열기",
+    "stepCopyCode": "1. 이 코드를 복사",
+    "stepApprove": "2. 로그인 페이지를 열고 승인",
+    "codeExpiredHint": "코드가 만료되었으면 다시 연결해 새 코드를 받으세요."
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

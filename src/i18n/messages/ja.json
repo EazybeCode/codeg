@@ -211,7 +211,19 @@
     "moveToTrash": "ゴミ箱に移動",
     "restoreFromTrash": "元に戻す",
     "inTrash": "ゴミ箱内",
-    "itemActions": "{title} の操作"
+    "itemActions": "{title} の操作",
+    "codexSetupTitle": "Codex に接続する前に",
+    "codexSetupBody": "このデバイスでのサインインにはワンタイムコードを使用します。ChatGPT の「設定 → セキュリティ → デバイスコード認証」で一度有効にする必要があります。Neev はこの設定を参照も変更もできません。",
+    "codexSetupAdmin": "管理対象のワークスペースでは、管理者による許可が必要な場合があります。",
+    "codexSetupDocs": "別のデバイスでのサインインについて",
+    "copyCode": "コードをコピー",
+    "codeCopied": "コピーしました",
+    "copyCodeFailed": "コピーできませんでした。コードを選択して手動でコピーしてください。",
+    "codexSetupHint": "Codex には、ChatGPT の「設定 → セキュリティ」でデバイスコード認証を有効にする必要があります。",
+    "codexSetupOpen": "ChatGPT の設定を開く",
+    "stepCopyCode": "1. このコードをコピー",
+    "stepApprove": "2. サインインページを開いて承認",
+    "codeExpiredHint": "コードの有効期限が切れた場合は、もう一度接続して新しいコードを取得してください。"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

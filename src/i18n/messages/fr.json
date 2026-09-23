@@ -211,7 +211,19 @@
     "moveToTrash": "Mettre à la corbeille",
     "restoreFromTrash": "Restaurer",
     "inTrash": "Dans la corbeille",
-    "itemActions": "Actions pour {title}"
+    "itemActions": "Actions pour {title}",
+    "codexSetupTitle": "Avant de connecter Codex",
+    "codexSetupBody": "La connexion sur cet appareil utilise un code à usage unique. Il faut l'autoriser une fois dans ChatGPT, sous Paramètres → Sécurité → autorisation par code d'appareil. Neev ne peut ni voir ni modifier ce réglage.",
+    "codexSetupAdmin": "Dans un espace de travail géré, un administrateur devra peut-être l'autoriser.",
+    "codexSetupDocs": "Comment fonctionne la connexion sur un autre appareil",
+    "copyCode": "Copier le code",
+    "codeCopied": "Copié",
+    "copyCodeFailed": "Copie impossible. Sélectionnez le code et copiez-le à la main.",
+    "codexSetupHint": "Codex nécessite l'autorisation par code d'appareil activée dans ChatGPT, sous Paramètres → Sécurité.",
+    "codexSetupOpen": "Ouvrir les paramètres ChatGPT",
+    "stepCopyCode": "1. Copiez ce code",
+    "stepApprove": "2. Ouvrez la page de connexion et approuvez",
+    "codeExpiredHint": "Si le code a expiré, reconnectez-vous pour en obtenir un nouveau."
   },
   "Native": {
     "callbackConflict": "Cette méthode de connexion entre en conflit avec un compte existant. Utilisez votre méthode de connexion initiale, puis ouvrez les paramètres pour en associer une autre. Les comptes ne sont jamais fusionnés automatiquement.",

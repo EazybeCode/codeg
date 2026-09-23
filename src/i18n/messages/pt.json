@@ -211,7 +211,19 @@
     "moveToTrash": "Mover para a lixeira",
     "restoreFromTrash": "Restaurar",
     "inTrash": "Na lixeira",
-    "itemActions": "Ações para {title}"
+    "itemActions": "Ações para {title}",
+    "codexSetupTitle": "Antes de conectar o Codex",
+    "codexSetupBody": "Entrar neste dispositivo usa um código de uso único. Isso precisa ser permitido uma vez no ChatGPT, em Configurações → Segurança → autorização por código de dispositivo. O Neev não consegue ver nem alterar essa configuração.",
+    "codexSetupAdmin": "Em um espaço de trabalho gerenciado, um administrador pode precisar permitir.",
+    "codexSetupDocs": "Como funciona entrar em outro dispositivo",
+    "copyCode": "Copiar código",
+    "codeCopied": "Copiado",
+    "copyCodeFailed": "Não foi possível copiar. Selecione o código e copie manualmente.",
+    "codexSetupHint": "O Codex precisa da autorização por código de dispositivo ativada no ChatGPT, em Configurações → Segurança.",
+    "codexSetupOpen": "Abrir as configurações do ChatGPT",
+    "stepCopyCode": "1. Copie este código",
+    "stepApprove": "2. Abra a página de login e aprove",
+    "codeExpiredHint": "Se o código expirou, conecte novamente para obter um novo."
   },
   "Native": {
     "callbackConflict": "Este método de acesso entra em conflito com uma conta existente. Use seu método de acesso original e abra Configurações para vincular outro método. As contas nunca são mescladas automaticamente.",

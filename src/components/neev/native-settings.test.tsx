@@ -429,7 +429,8 @@ it("shows the caller's real provider connections instead of a static notice", as
   // "agents are unavailable" paragraph.
   expect(await screen.findByText("Not signed in")).toBeVisible()
   expect(screen.getByText("Reconnect needed")).toBeVisible()
-  expect(screen.getByText("codex")).toBeVisible()
+  // The row names the provider the way people do, not the way it is keyed.
+  expect(screen.getByText("Codex")).toBeVisible()
   // Real per-provider actions, matched to the state the server reports.
   expect(screen.getByRole("button", { name: "Connect claude" })).toBeEnabled()
   expect(screen.getByRole("button", { name: "Reconnect codex" })).toBeEnabled()

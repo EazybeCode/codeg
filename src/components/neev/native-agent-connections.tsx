@@ -108,6 +108,47 @@ function writeStoredAttempt(key: string, attempt: Attempt | null): void {
   }
 }
 
+/**
+ * The prerequisite Codex does not mention until after a failed sign-in.
+ *
+ * Stated up front, beside the button that starts it. It does NOT claim to know
+ * whether the setting is on — Neev can neither read nor change it.
+ */
+function CodexSetupHelp() {
+  const t = useTranslations("NativeContent")
+  const link =
+    "inline-block rounded text-xs underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+  return (
+    <div className="space-y-1.5 rounded-lg border bg-muted/30 px-3 py-2">
+      <p className="text-xs text-muted-foreground">{t("codexSetupHint")}</p>
+      {/* BrowserLink is the only link form that opens outside the webview. */}
+      <BrowserLink
+        href="https://chatgpt.com/#settings/Security"
+        className={link}
+      >
+        {t("codexSetupOpen")}
+      </BrowserLink>
+      <details>
+        <summary className="cursor-pointer text-xs font-medium">
+          {t("codexSetupTitle")}
+        </summary>
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-muted-foreground">{t("codexSetupBody")}</p>
+          <p className="text-xs text-muted-foreground">
+            {t("codexSetupAdmin")}
+          </p>
+          <BrowserLink
+            href="https://learn.chatgpt.com/docs/auth#login-on-headless-devices"
+            className={link}
+          >
+            {t("codexSetupDocs")}
+          </BrowserLink>
+        </div>
+      </details>
+    </div>
+  )
+}
+
 export function NativeAgentConnectionsPanel({
   connections,
   onRefresh,
@@ -528,7 +569,9 @@ export function NativeAgentConnectionsPanel({
             {state.connections.map((connection) => (
               <li key={connection.provider} className="space-y-2">
                 <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-                  <span className="font-medium">{connection.provider}</span>
+                  <span className="font-medium">
+                    {label(connection.provider)}
+                  </span>
                   <span className="text-muted-foreground">
                     {attempt?.provider === connection.provider
                       ? t("awaitingSignIn")
@@ -558,23 +601,12 @@ export function NativeAgentConnectionsPanel({
                         {new Date(attempt.expiresAt * 1000).toLocaleString()}
                       </time>
                     </span>
-                  ) : (
-                    connection.checkedAt !== null && (
-                      <span className="text-xs text-muted-foreground">
-                        {t("lastChecked")}{" "}
-                        <time
-                          dateTime={new Date(
-                            connection.checkedAt * 1000
-                          ).toISOString()}
-                        >
-                          {new Date(
-                            connection.checkedAt * 1000
-                          ).toLocaleString()}
-                        </time>
-                      </span>
-                    )
-                  )}
+                  ) : null}
                 </div>
+                {connection.provider === "codex" &&
+                  connection.state !== "connected" &&
+                  connection.state !== "disabled" &&
+                  connection.state !== "unavailable" && <CodexSetupHelp />}
                 {attempt?.provider === connection.provider &&
                   approval !== null && (
                     <ApprovalPrompt
@@ -610,6 +642,12 @@ export function NativeAgentConnectionsPanel({
     </section>
   )
 
+  /** Friendly name: the rows and accessible names used the raw key. */
+  function label(provider: NeevAgentProvider) {
+    if (provider === "claude") return t("claudeLabel")
+    if (provider === "codex") return t("codexLabel")
+    return provider
+  }
   function actionsFor(connection: NeevAgentConnection) {
     const provider = connection.provider
     const working = busy === provider
@@ -626,8 +664,10 @@ export function NativeAgentConnectionsPanel({
         | "reconnectProvider"
         | "disconnectProvider"
         | "cancelSignIn"
-        | "testConnection"
-    ) => t(`${key}Named`, { name: provider })
+        | "testConnection" // The accessible name keeps the provider key the tests and
+    ) =>
+      // existing semantics use; only the visible row name is friendlier.
+      t(`${key}Named`, { name: provider })
     if (attempt?.provider === provider)
       return (
         <Button
@@ -735,6 +775,15 @@ function ApprovalPrompt({
 }) {
   const t = useTranslations("NativeContent"),
     n = useTranslations("Native")
+  // The outcome is explicit, and it is tagged with the code it was for: a
+  // clipboard promise that settles after the attempt has produced a FRESH code
+  // must not report "Copied" against that new one.
+  const [copy, setCopy] = useState<{
+    code: string
+    status: "copied" | "failed"
+  } | null>(null)
+  const userCode = approval.kind === "device" ? approval.userCode : null
+  const copyStatus = copy && copy.code === userCode ? copy.status : null
   return (
     <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
       <p className="text-xs text-muted-foreground">
@@ -743,19 +792,67 @@ function ApprovalPrompt({
       {/* The user approves in their OWN browser; Neev never drives the
           provider's sign-in page. `BrowserLink` is the only link form that
           actually opens in the desktop webview. */}
-      <BrowserLink
-        href={approval.verificationUrl}
-        className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        {t("openSignInPage")}
-      </BrowserLink>
+      {approval.kind !== "device" && (
+        <BrowserLink
+          href={approval.verificationUrl}
+          className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {t("openSignInPage")}
+        </BrowserLink>
+      )}
       {approval.kind === "device" ? (
-        <p className="text-sm">
-          <span className="text-muted-foreground">{t("signInCodeLabel")} </span>
-          <code className="rounded bg-background px-1.5 py-0.5 font-mono tracking-widest">
-            {approval.userCode}
-          </code>
-        </p>
+        <div className="space-y-1">
+          <p className="text-xs font-medium">{t("stepCopyCode")}</p>
+          <p className="text-sm">
+            <span className="text-muted-foreground">
+              {t("signInCodeLabel")}{" "}
+            </span>
+            <code className="rounded bg-background px-1.5 py-0.5 font-mono tracking-widest">
+              {approval.userCode}
+            </code>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="ms-2 h-7 px-2"
+              onClick={() => {
+                const target = approval.userCode
+                setCopy(null)
+                // Inside the try, because `navigator.clipboard` is undefined
+                // in a non-secure context and reading `.writeText` off it
+                // throws before any `.catch` could see it. A refused clipboard
+                // is said out loud rather than leaving a button that looked
+                // like it worked.
+                void (async () => {
+                  try {
+                    await navigator.clipboard.writeText(target)
+                    setCopy({ code: target, status: "copied" })
+                  } catch {
+                    setCopy({ code: target, status: "failed" })
+                  }
+                })()
+              }}
+            >
+              {copyStatus === "copied" ? t("codeCopied") : t("copyCode")}
+            </Button>
+          </p>
+          {copyStatus === "failed" && (
+            <p role="alert" className="text-xs text-destructive">
+              {t("copyCodeFailed")}
+            </p>
+          )}
+          <p className="pt-1 text-xs font-medium">{t("stepApprove")}</p>
+          <BrowserLink
+            href={approval.verificationUrl}
+            className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {t("openSignInPage")}
+          </BrowserLink>
+          {/* Retrying is the existing Connect: this only says so. Nothing here
+              renews an attempt or touches its lifecycle. */}
+          <p className="text-xs text-muted-foreground">
+            {t("codeExpiredHint")}
+          </p>
+        </div>
       ) : (
         approval.needsCode && (
           <form

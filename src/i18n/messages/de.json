@@ -211,7 +211,19 @@
     "moveToTrash": "In den Papierkorb verschieben",
     "restoreFromTrash": "Wiederherstellen",
     "inTrash": "Im Papierkorb",
-    "itemActions": "Aktionen für {title}"
+    "itemActions": "Aktionen für {title}",
+    "codexSetupTitle": "Bevor Sie Codex verbinden",
+    "codexSetupBody": "Die Anmeldung auf diesem Gerät nutzt einen Einmalcode. Das muss einmalig in ChatGPT unter Einstellungen → Sicherheit → Gerätecode-Autorisierung erlaubt werden. Neev kann diese Einstellung weder sehen noch ändern.",
+    "codexSetupAdmin": "In einem verwalteten Workspace muss das eventuell eine Administratorin oder ein Administrator erlauben.",
+    "codexSetupDocs": "Wie die Anmeldung auf einem anderen Gerät funktioniert",
+    "copyCode": "Code kopieren",
+    "codeCopied": "Kopiert",
+    "copyCodeFailed": "Kopieren nicht möglich. Markieren Sie den Code und kopieren Sie ihn von Hand.",
+    "codexSetupHint": "Codex benötigt die Gerätecode-Autorisierung in ChatGPT unter Einstellungen → Sicherheit.",
+    "codexSetupOpen": "ChatGPT-Einstellungen öffnen",
+    "stepCopyCode": "1. Diesen Code kopieren",
+    "stepApprove": "2. Die Anmeldeseite öffnen und bestätigen",
+    "codeExpiredHint": "Ist der Code abgelaufen, verbinden Sie erneut für einen neuen."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

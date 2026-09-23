@@ -211,7 +211,19 @@
     "moveToTrash": "Move to trash",
     "restoreFromTrash": "Restore",
     "inTrash": "In trash",
-    "itemActions": "Actions for {title}"
+    "itemActions": "Actions for {title}",
+    "codexSetupTitle": "Before connecting Codex",
+    "codexSetupBody": "Signing in on this device uses a one-time code. That has to be allowed once in ChatGPT, under Settings → Security → device code authorization. Neev cannot see or change that setting.",
+    "codexSetupAdmin": "On a managed workspace, an administrator may have to allow it.",
+    "codexSetupDocs": "How signing in on another device works",
+    "copyCode": "Copy code",
+    "codeCopied": "Copied",
+    "copyCodeFailed": "Could not copy it. Select the code and copy it by hand.",
+    "codexSetupHint": "Codex needs device code authorization turned on in ChatGPT, under Settings → Security.",
+    "codexSetupOpen": "Open ChatGPT settings",
+    "stepCopyCode": "1. Copy this code",
+    "stepApprove": "2. Open the sign-in page and approve it",
+    "codeExpiredHint": "If the code has expired, connect again for a fresh one."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",
