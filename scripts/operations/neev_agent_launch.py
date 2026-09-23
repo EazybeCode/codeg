@@ -54,6 +54,51 @@ def _parse(argv):
     return parser.parse_args(argv)
 
 
+# Codex's own flag for this exact situation. Its help: "Skip all confirmation
+# prompts and execute commands without sandboxing. EXTREMELY DANGEROUS. Intended
+# solely for running in environments that are externally sandboxed."
+#
+# This IS that environment, and only here. Codex ships bubblewrap and tries to
+# build a sandbox of its own before running any shell command; inside ours that
+# is not merely redundant, it is impossible. Measured in the real sandbox: user
+# namespaces are available but `CapBnd` is empty, so `CAP_SYS_ADMIN` can never be
+# held even in a namespace the process creates itself, and bwrap dies at
+# `Failed to make / slave: Permission denied`. Every command the model tried to
+# run failed there, which reached the reader as "the shell tool failed".
+#
+# What it turns off is CODEX's sandbox. Ours is untouched and is the actual
+# boundary: fresh mount/uts/ipc/pid namespaces, egress confined to the CONNECT
+# allowlist (or an empty netns), uid 61000, an emptied capability bounding set,
+# `no_new_privs`, and a per-run workdir removed on teardown.
+#
+# It lives here, NOT in the shared Rust `provider_argv`, because reaching this
+# function means `sandbox.launch` is what will run the child. The unsandboxed
+# dev runtime builds the same argv without passing through here and therefore
+# keeps Codex's own protection, which is the only thing standing between it and
+# the developer's machine.
+_EXTERNALLY_SANDBOXED = "--dangerously-bypass-approvals-and-sandbox"
+
+
+def externally_sandboxed_argv(provider, provider_argv):
+    """Pure: add the bypass to a `codex exec` run, and to nothing else.
+
+    Narrow on purpose. `codex app-server` (the metadata probe) and any login
+    flow run no model-generated commands, so they have no nested sandbox to
+    disable, and `claude` is a different CLI entirely. Approvals go with the
+    sandbox because `exec` is non-interactive: a prompt nobody can answer is a
+    turn that hangs rather than a turn that is safe.
+    """
+    argv = list(provider_argv)
+    if provider != "codex" or len(argv) < 2 or argv[1] != "exec":
+        return argv
+    if _EXTERNALLY_SANDBOXED in argv:
+        return argv
+    # Straight after the subcommand: never appended, because `--image` is
+    # variadic and a bare flag after it would be read as another file.
+    argv.insert(2, _EXTERNALLY_SANDBOXED)
+    return argv
+
+
 def build_spec(args):
     """Pure: turn parsed args into a validated SandboxSpec (raises SandboxError)."""
     provider_argv = list(args.provider_argv)
@@ -61,6 +106,7 @@ def build_spec(args):
         provider_argv = provider_argv[1:]
     if not provider_argv:
         raise sandbox.SandboxError("invalid")
+    provider_argv = externally_sandboxed_argv(args.provider, provider_argv)
     egress = (
         sandbox.EgressPolicy.provider_allowlist(args.provider_ipv4)
         if args.provider_ipv4

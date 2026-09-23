@@ -5,6 +5,7 @@ these prove the CLI maps to a correct, validated SandboxSpec + egress policy."""
 import io
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -430,3 +431,170 @@ class MetadataStdinRelayTests(unittest.TestCase):
 
         # The child's rc is the outcome; a dead pipe must not raise out of here.
         self.assertEqual(launch._relay_stdin(Gone(), io.BytesIO(b"frame\n")), 0)
+
+
+class ExternallySandboxedTests(unittest.TestCase):
+    """Codex must not try to sandbox itself inside our sandbox.
+
+    Measured in the real production sandbox: user namespaces are available but
+    the capability bounding set is empty, so `CAP_SYS_ADMIN` can never be held —
+    Codex's bundled bubblewrap dies at `Failed to make / slave: Permission
+    denied` and every model-generated command fails with it. Codex's own help
+    names this case: the flag is "intended solely for running in environments
+    that are externally sandboxed". That is here, and nowhere else.
+    """
+
+    def spec_for(self, provider, tail):
+        parsed = launch._parse([
+            "--tenant", "org:3/user:7",
+            "--slot", "a",
+            "--workdir", "/var/lib/neev-native/agents/run-abc",
+            "--uid", "61000",
+            "--gid", "61000",
+            "--provider", provider,
+            "--credential-handle", "handle-1",
+            "--provider-ipv4", "140.82.112.3",
+            "--", f"/usr/local/bin/{provider}", *tail,
+        ])
+        return launch.build_spec(parsed)
+
+    def test_a_codex_exec_run_is_told_it_is_externally_sandboxed(self):
+        spec = self.spec_for("codex", ["exec", "--json", "hi", "--skip-git-repo-check"])
+        self.assertEqual(spec.provider_argv.count(launch._EXTERNALLY_SANDBOXED), 1)
+        # Straight after the subcommand, with every other argument in order.
+        self.assertEqual(spec.provider_argv[:3],
+                         ("/usr/local/bin/codex", "exec", launch._EXTERNALLY_SANDBOXED))
+        self.assertEqual(spec.provider_argv[3:],
+                         ("--json", "hi", "--skip-git-repo-check"))
+
+    def test_nothing_else_is_given_the_bypass(self):
+        # The metadata probe runs no model-generated command, so it has no
+        # nested sandbox to disable — and it must stay the recognised probe.
+        probe = self.spec_for("codex", ["app-server"])
+        self.assertNotIn(launch._EXTERNALLY_SANDBOXED, probe.provider_argv)
+        self.assertTrue(launch.is_metadata_probe("codex", probe))
+        for provider, tail in (
+            ("codex", ["login"]),
+            ("codex", ["app-server"]),
+            ("claude", ["-p", "hi", "--output-format", "stream-json"]),
+            # `exec` has to be the subcommand, not merely somewhere in the argv.
+            ("claude", ["exec", "--json", "hi"]),
+        ):
+            with self.subTest(provider=provider, tail=tail):
+                spec = self.spec_for(provider, tail)
+                self.assertNotIn(launch._EXTERNALLY_SANDBOXED, spec.provider_argv)
+
+    def test_adding_it_is_idempotent(self):
+        once = launch.externally_sandboxed_argv(
+            "codex", ["/usr/local/bin/codex", "exec", launch._EXTERNALLY_SANDBOXED, "hi"]
+        )
+        self.assertEqual(once.count(launch._EXTERNALLY_SANDBOXED), 1)
+
+    def test_the_outer_boundary_is_untouched_by_the_bypass(self):
+        """The flag disables CODEX's sandbox. Ours must be bit-for-bit the same."""
+        codex = self.spec_for("codex", ["exec", "--json", "hi"])
+        claude = self.spec_for("claude", ["-p", "hi"])
+        for spec in (codex, claude):
+            self.assertEqual(spec.run_uid, 61000)
+            self.assertEqual(spec.run_gid, 61000)
+            self.assertEqual(spec.egress.mode, "provider_allowlist")
+            self.assertEqual(spec.egress.provider_ipv4, ("140.82.112.3",))
+            self.assertEqual(spec.workdir, "/var/lib/neev-native/agents/run-abc")
+            self.assertEqual(spec.tenant, "org:3/user:7")
+            self.assertEqual(spec.slot, "a")
+        # Same limits either way: the bypass buys the child nothing from us.
+        self.assertEqual(codex.limits, claude.limits)
+
+    def test_an_empty_netns_run_still_gets_a_deny_all_policy(self):
+        parsed = launch._parse([
+            "--tenant", "org:3/user:7", "--slot", "a",
+            "--workdir", "/var/lib/neev-native/agents/run-abc",
+            "--uid", "61000", "--gid", "61000",
+            "--provider", "codex", "--credential-handle", "h",
+            "--", "/usr/local/bin/codex", "exec", "--json", "hi",
+        ])
+        spec = launch.build_spec(parsed)
+        self.assertIn(launch._EXTERNALLY_SANDBOXED, spec.provider_argv)
+        self.assertEqual(spec.egress.mode, "deny_all")
+
+
+class RelayWiringTests(unittest.TestCase):
+    """`_run_child` must actually ASK for the pipe, not just be willing to use one.
+
+    The bug was here: `sandbox.launch` was called with its default
+    `stdin_pipe=False`, so the probe's stdin was DEVNULL and the app-server saw
+    EOF before the handshake. The `exec` path already asserts the False case;
+    this pins the True one, which is the half that regressed.
+    """
+
+    def run_child(self, relay_stdin):
+        captured = {}
+        written = []
+
+        class Handle:
+            stdout = None
+
+            class _Stdin:
+                @staticmethod
+                def write(chunk):
+                    written.append(chunk)
+
+                @staticmethod
+                def flush():
+                    pass
+
+                @staticmethod
+                def close():
+                    pass
+
+            stdin = _Stdin()
+
+            @staticmethod
+            def wait():
+                return 0
+
+            @staticmethod
+            def teardown():
+                pass
+
+            pid = os.getpid()
+
+        def fake_launch(spec, env=None, bind_source=None, stdin_pipe=False):
+            captured["stdin_pipe"] = stdin_pipe
+            return Handle()
+
+        real_launch, real_signal = launch.sandbox.launch, launch.signal.signal
+        launch.sandbox.launch = fake_launch
+        launch.signal.signal = lambda *_a: None  # not the main thread under unittest
+        real_stdin = sys.stdin
+        sys.stdin = type("S", (), {"buffer": io.BytesIO(b'{"id":1}\n')})()
+        try:
+            spec = launch.build_spec(launch._parse([
+                "--tenant", "org:3/user:7", "--slot", "a",
+                "--workdir", "/var/lib/neev-native/agents/run-probe-abc",
+                "--uid", "61000", "--gid", "61000",
+                "--provider", "codex", "--credential-handle", "h",
+                "--", "/usr/local/bin/codex", "app-server",
+            ]))
+            rc = launch._run_child(spec, {}, relay_stdin=relay_stdin)
+        finally:
+            launch.sandbox.launch = real_launch
+            launch.signal.signal = real_signal
+            sys.stdin = real_stdin
+        return rc, captured, written
+
+    def test_a_probe_opens_the_pipe_and_the_handshake_reaches_the_child(self):
+        rc, captured, written = self.run_child(relay_stdin=True)
+        self.assertEqual(rc, 0)
+        self.assertTrue(captured["stdin_pipe"], "the probe must be launched with a pipe")
+        # The relay runs on a thread; give it the moment it needs to drain.
+        for _ in range(200):
+            if written:
+                break
+            time.sleep(0.01)
+        self.assertEqual(b"".join(written), b'{"id":1}\n')
+
+    def test_anything_else_is_launched_with_devnull(self):
+        _rc, captured, written = self.run_child(relay_stdin=False)
+        self.assertFalse(captured["stdin_pipe"])
+        self.assertEqual(written, [])
