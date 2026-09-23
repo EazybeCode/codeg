@@ -17,10 +17,10 @@ Every download checks the current parent conversation permissions.
 
 ## Release artifacts
 
-- Runtime: `neev-native-agent:ux-docs-speed-6d3ee9fc`.
+- Runtime: `neev-native-agent:ux-docs-speed-3d010ec6`.
 - Database schema: 15 (additive attachment tables/indexes).
 - Workspace HTML SHA-256: `d0c28bf08c5b84585404a130e3245274324f7705e6d84a9c7c111b747669a6b4`.
-- Compatible UI fallback: `neev-native-agent:attachments-fallback-6d3ee9fc`.
+- Compatible UI fallback: `neev-native-agent:attachments-fallback-3d010ec6`.
   This retains the schema-15 server with the previous UI. A schema-14 image is
   **not** a database-compatible rollback after migration. Do not restore the
   pre-release database over new writes without an explicit recovery procedure.
@@ -53,7 +53,14 @@ Every download checks the current parent conversation permissions.
 - Browser: image paste, upload completion, Enter-to-send, persisted image and
   reload verified in the canary. Live upload of a disposable image succeeded;
   removed from the draft without sending a message.
+- Integrated branch: `cargo check --no-default-features --features test-utils --tests` passed.
+- Combined canary: new documents explicitly reported `engine: lasuite`; document
+  frame and API returned 200; another organization was refused. The 42 attachment
+  assertions passed again and the combined server restarted successfully.
 - Live health returned 200 and deployed HTML matched the release hash.
+- Live document creation opened the La Suite editor with its editable title and
+  document body. The disposable verification document was moved to recoverable
+  trash, and the live chat was left open with Attach files available.
 
 ## Review fixes
 
@@ -78,3 +85,13 @@ symlink; webpack export succeeded without replacing shared dependencies.
 
 Codex is still disconnected in the live user's current chat. This release does not
 resolve the separate request for a simpler subscription sign-in flow.
+
+## Integration correction
+
+The first attachment server was built from a UI-worker checkout that did not
+contain the existing La Suite backend. The mismatch was caught when integrating
+the source. The final server was rebuilt from `workos/team-workspace` commit
+`3d010ec6`, preserving the document engine and adding attachments. A production
+audit found zero document updates during the mismatched server's lifetime.
+Future native-server releases must build from the integrated branch, not an
+individual UI worker checkout.
