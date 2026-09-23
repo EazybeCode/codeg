@@ -1739,3 +1739,168 @@ it("moves a document to the trash and offers it back from the trash view", async
   await user.click(await screen.findByRole("menuitem", { name: "Restore" }))
   await waitFor(() => expect(bodies[1]).toMatchObject({ archived: false }))
 })
+
+/**
+ * Renaming from the open document's own header menu, which is the path the
+ * reader reaches first — and the one that left the rest of the screen stale.
+ *
+ * `NativeContent.update` published its result with `setSelected`, so the
+ * document renamed itself and nothing above it heard: the tab strip and the
+ * breadcrumb kept the old name indefinitely. Everything the chrome reads from
+ * lives above that component, so the result has to go out through
+ * `onResourceChanged`, exactly as an in-frame rename already did.
+ */
+it("renames from the document's own menu, and the tab and breadcrumb follow", async () => {
+  const doc = { ...resource, kind: "document" as const, title: "Brief" }
+  const renamed = { ...doc, title: "Brief, renamed", authRevision: "2" }
+  mockNativeSession(undefined, {
+    ...treeRoutes(doc),
+    [`PATCH /api/neev/resources/${doc.id}`]: () => json(renamed),
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  const tree = await screen.findByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Space" }))
+  await user.click(await within(tree).findByRole("button", { name: "Brief" }))
+  await screen.findByRole("tab", { name: /Brief/ })
+
+  await act(async () => {
+    fireEvent.keyDown(screen.getByRole("button", { name: "Content actions" }), {
+      key: "Enter",
+    })
+  })
+  await user.click(await screen.findByRole("menuitem", { name: "Rename" }))
+  const dialog = await screen.findByRole("dialog")
+  const field = within(dialog).getByLabelText("Title")
+  await user.clear(field)
+  await user.type(field, "Brief, renamed")
+  await user.click(within(dialog).getByRole("button", { name: "Save" }))
+
+  // The chrome, not just the page that was already open.
+  await waitFor(() =>
+    expect(
+      screen.getByRole("tab", { name: /Brief, renamed/ })
+    ).toBeInTheDocument()
+  )
+  expect(
+    within(tree).getByRole("button", { name: "Brief, renamed" })
+  ).toBeInTheDocument()
+})
+
+/**
+ * The other direction: a change made in the sidebar must reach the document
+ * that is already open.
+ *
+ * `NativeContent` keeps its own copy of the open resource and only replaced it
+ * when asked to OPEN something — which a rename or a trashing from the sidebar
+ * is not. So trashing the document you were reading left its header saying
+ * "Private" with no sign it had been trashed, and its editor still writable,
+ * while the sidebar row beside it said "In trash".
+ */
+it("carries a sidebar trashing into the document that is already open", async () => {
+  const doc = { ...resource, kind: "document" as const, title: "Brief" }
+  const trashed = { ...doc, archived: true, authRevision: "2" }
+  const bodies: Record<string, unknown>[] = []
+  mockNativeSession(undefined, {
+    ...treeRoutes(doc),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({ items: bodies.length ? [] : [doc], nextAfter: null }),
+    [`PATCH /api/neev/resources/${doc.id}`]: (init: RequestInit) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json(trashed)
+    },
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  const tree = await screen.findByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Space" }))
+  await user.click(await within(tree).findByRole("button", { name: "Brief" }))
+  await screen.findByRole("tab", { name: /Brief/ })
+  // Not trashed yet, so the open document says nothing about a trash.
+  expect(screen.queryByText(/Archived/)).toBeNull()
+
+  await act(async () => {
+    fireEvent.keyDown(
+      within(tree).getByRole("button", { name: "Actions for Brief" }),
+      { key: "Enter" }
+    )
+  })
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Move to trash" })
+  )
+  await waitFor(() => expect(bodies[0]).toMatchObject({ archived: true }))
+
+  // The open document agrees with the sidebar, without being reopened.
+  await waitFor(() => expect(screen.getByText(/Archived/)).toBeInTheDocument())
+})
+
+/**
+ * The same sync, for a chat. `NativeChat` keeps its own `latest` copy too, so
+ * a sidebar rename updated the row, the tab and the breadcrumb while the
+ * conversation's own heading went on calling itself by its old name.
+ */
+it("carries a sidebar rename into the chat that is already open", async () => {
+  const chat = { ...resource, title: "New chat" }
+  const renamed = { ...chat, title: "Parser notes", authRevision: "2" }
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () =>
+      json({ runtimeEnabled: true, connections: [] }),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/chats": () =>
+      json({ items: [chat], nextAfter: null }),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({ items: [], nextAfter: null }),
+    [`GET /api/neev/resources/${chat.id}`]: () => json(chat),
+    [`GET /api/neev/chats/${chat.id}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+    [`PATCH /api/neev/resources/${chat.id}`]: () => json(renamed),
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  const tree = await screen.findByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Space" }))
+  await user.click(
+    await within(tree).findByRole("button", { name: "New chat" })
+  )
+  // The conversation's own heading, before anything is renamed.
+  await screen.findByRole("heading", { name: "New chat" })
+
+  await act(async () => {
+    fireEvent.keyDown(
+      within(tree).getByRole("button", { name: "Actions for New chat" }),
+      { key: "Enter" }
+    )
+  })
+  await user.click(await screen.findByRole("menuitem", { name: "Rename" }))
+  const dialog = await screen.findByRole("dialog")
+  const field = within(dialog).getByLabelText("Title")
+  await user.clear(field)
+  await user.type(field, "Parser notes")
+  await user.click(within(dialog).getByRole("button", { name: "Save" }))
+
+  await waitFor(() =>
+    expect(
+      screen.getByRole("heading", { name: "Parser notes" })
+    ).toBeInTheDocument()
+  )
+  expect(
+    within(tree).getByRole("button", { name: "Parser notes" })
+  ).toBeInTheDocument()
+})

@@ -346,7 +346,9 @@
     "emptyTabHint": "Wählen Sie ein Dokument oder einen Chat, um es hier zu öffnen.",
     "opening": "Wird geöffnet…",
     "showTrash": "Papierkorb anzeigen",
-    "hideTrash": "Papierkorb ausblenden"
+    "hideTrash": "Papierkorb ausblenden",
+    "loadingItems": "Elemente werden geladen…",
+    "checkingAccess": "Zugriff wird geprüft…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Der Chat-Kontext des Arbeitsbereichs ist nicht verfügbar.",

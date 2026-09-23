@@ -346,7 +346,9 @@
     "emptyTabHint": "Escolha um documento ou uma conversa para abrir aqui.",
     "opening": "Abrindo…",
     "showTrash": "Mostrar lixeira",
-    "hideTrash": "Ocultar lixeira"
+    "hideTrash": "Ocultar lixeira",
+    "loadingItems": "Carregando itens…",
+    "checkingAccess": "Verificando o acesso…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "O contexto do chat do espaço de trabalho não está disponível.",

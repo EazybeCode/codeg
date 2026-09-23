@@ -203,6 +203,36 @@ function Content({
       selectResource(openTarget.resource)
     })
   }, [openTarget, guard, onDirtyChange, selectResource])
+  /**
+   * The same resource, changed from outside this component.
+   *
+   * The effect above only fires when `request` moves, which means "open this",
+   * and it goes through `guard` and resets the draft to do it. A rename or a
+   * trashing from the sidebar is not an open: the reader is already looking at
+   * this document and must keep looking at it, keystrokes intact.
+   *
+   * But the metadata is now wrong here. `selected` is this component's own
+   * copy, and the header reads from it — so trashing from the sidebar left the
+   * open document saying "Private" with no "Archived", and an editor that was
+   * still writable, while the sidebar said it was in the trash.
+   *
+   * Only ever forwards, and only for the resource already open: a strictly
+   * greater `authRevision` on the same id. That makes it safe against a stale
+   * list answer arriving late, and it cannot silently swap one document for
+   * another — which is what the guarded path above is for.
+   */
+  useEffect(() => {
+    const incoming = openTarget?.resource
+    if (!incoming || !selected || incoming.id !== selected.id) return
+    let newer = false
+    try {
+      newer = BigInt(incoming.authRevision) > BigInt(selected.authRevision)
+    } catch {
+      return
+    }
+    if (!newer) return
+    setSelected(incoming)
+  }, [openTarget, selected])
   const changeSection = (
     next: "team" | "agents" | "docs",
     focusTab?: HTMLElement | null
@@ -515,7 +545,13 @@ function Content({
       )
       if (!current()) return
       setDialog(null)
-      setSelected(resource)
+      // `changed`, not `setSelected`: this is the one place a rename, a move or
+      // an archive made from THIS menu becomes true, and the tab strip, the
+      // breadcrumb and the sidebar all read from lists that live above here.
+      // Keeping it local meant the document renamed itself and nothing else
+      // heard about it — the name went stale everywhere but the page you were
+      // already looking at.
+      changed(resource)
       onOpened?.(resource)
       if (resource.nodeId !== node.id) back()
     } catch (e) {
@@ -543,9 +579,13 @@ function Content({
   )
   return (
     <>
+      {/* The pane is hidden while this mount's authority is re-proved — the
+          gate is unchanged and deliberate. Only the words: the sidebar is
+          still on screen, so nothing about the workspace is loading, and
+          saying so sent readers looking for a problem that was not there. */}
       {authorizedSignal !== auth.signal && (
         <p role="status" aria-busy="true">
-          {n("loading")}
+          {n("checkingAccess")}
         </p>
       )}
       <NativeSuspendedSurface
@@ -705,7 +745,9 @@ function Content({
                 </label>
               </div>
               {loading ? (
-                <p role="status">{n("loading")}</p>
+                // This folder's items. The re-authorization notice above is
+                // the one place here that is genuinely about the workspace.
+                <p role="status">{n("loadingItems")}</p>
               ) : items.length === 0 && !unavailable ? (
                 <p className="py-8 text-sm text-muted-foreground">
                   {t(kind === "chat" ? "emptyChats" : "emptyDocuments")}

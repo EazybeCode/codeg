@@ -346,7 +346,9 @@
     "emptyTabHint": "Elige un documento o un chat para abrirlo aquí.",
     "opening": "Abriendo…",
     "showTrash": "Mostrar papelera",
-    "hideTrash": "Ocultar papelera"
+    "hideTrash": "Ocultar papelera",
+    "loadingItems": "Cargando elementos…",
+    "checkingAccess": "Comprobando el acceso…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "El contexto del chat del espacio de trabajo no está disponible.",

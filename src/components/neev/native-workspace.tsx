@@ -509,7 +509,7 @@ function ProjectContents({
       </div>
       {loading && (
         <p role="status" className="text-sm text-muted-foreground">
-          {t("loading")}
+          {t("loadingItems")}
         </p>
       )}
       {empty && (
@@ -856,12 +856,17 @@ function NativeWorkspaceTree({
                           </div>
                         </li>
                       ))}
+                    {/* A folder's own items, not the workspace. This said
+                        "Loading your workspace…" inside an already-loaded
+                        sidebar — including every time the trash was toggled or
+                        something was created, which is a background refresh
+                        and not a boot. */}
                     {list?.loading && (
                       <li
                         role="status"
                         className="px-2 py-1 text-xs text-muted-foreground"
                       >
-                        {t("loading")}
+                        {t("loadingItems")}
                       </li>
                     )}
                     {/* Agent chats are items in the tree, like documents and
@@ -2187,8 +2192,10 @@ function WorkspaceContent() {
               {t("loadMore")}
             </Button>
           )}
+          {/* The project list, including its "Load more" pages. Inside an
+              already-drawn sidebar, so it is not the workspace arriving. */}
           <p role="status" className="px-2 text-xs text-muted-foreground">
-            {loading ? t("loading") : ""}
+            {loading ? t("loadingItems") : ""}
           </p>
           <NativeError error={error} />
           <NativeError error={createError} />

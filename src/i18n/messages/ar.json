@@ -346,7 +346,9 @@
     "emptyTabHint": "اختر مستندًا أو محادثة لفتحها هنا.",
     "opening": "جارٍ الفتح…",
     "showTrash": "إظهار سلة المهملات",
-    "hideTrash": "إخفاء سلة المهملات"
+    "hideTrash": "إخفاء سلة المهملات",
+    "loadingItems": "جارٍ تحميل العناصر…",
+    "checkingAccess": "جارٍ التحقق من الوصول…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "سياق محادثة مساحة العمل غير متاح.",

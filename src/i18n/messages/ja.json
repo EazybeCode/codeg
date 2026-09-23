@@ -346,7 +346,9 @@
     "emptyTabHint": "ここで開くドキュメントまたはチャットを選んでください。",
     "opening": "開いています…",
     "showTrash": "ゴミ箱を表示",
-    "hideTrash": "ゴミ箱を非表示"
+    "hideTrash": "ゴミ箱を非表示",
+    "loadingItems": "項目を読み込んでいます…",
+    "checkingAccess": "アクセス権を確認しています…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "ワークスペースのチャット情報を利用できません。",

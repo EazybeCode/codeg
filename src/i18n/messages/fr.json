@@ -346,7 +346,9 @@
     "emptyTabHint": "Choisissez un document ou une conversation à ouvrir ici.",
     "opening": "Ouverture…",
     "showTrash": "Afficher la corbeille",
-    "hideTrash": "Masquer la corbeille"
+    "hideTrash": "Masquer la corbeille",
+    "loadingItems": "Chargement des éléments…",
+    "checkingAccess": "Vérification de l'accès…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Le contexte du chat de l’espace de travail est indisponible.",

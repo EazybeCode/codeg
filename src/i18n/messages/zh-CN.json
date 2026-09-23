@@ -346,7 +346,9 @@
     "emptyTabHint": "选择要在这里打开的文档或聊天。",
     "opening": "正在打开…",
     "showTrash": "显示回收站",
-    "hideTrash": "隐藏回收站"
+    "hideTrash": "隐藏回收站",
+    "loadingItems": "正在加载内容…",
+    "checkingAccess": "正在检查访问权限…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作区聊天上下文不可用。",

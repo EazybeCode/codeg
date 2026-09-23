@@ -346,7 +346,9 @@
     "emptyTabHint": "選擇要在這裡開啟的文件或聊天。",
     "opening": "正在開啟…",
     "showTrash": "顯示回收筒",
-    "hideTrash": "隱藏回收筒"
+    "hideTrash": "隱藏回收筒",
+    "loadingItems": "正在載入項目…",
+    "checkingAccess": "正在檢查存取權限…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作區聊天內容無法使用。",

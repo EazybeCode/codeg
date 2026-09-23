@@ -346,7 +346,9 @@
     "emptyTabHint": "Choose a document or a chat to open here.",
     "opening": "Opening…",
     "showTrash": "Show trash",
-    "hideTrash": "Hide trash"
+    "hideTrash": "Hide trash",
+    "loadingItems": "Loading items…",
+    "checkingAccess": "Checking access…"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Workspace chat context is unavailable.",
