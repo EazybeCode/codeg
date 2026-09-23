@@ -1374,11 +1374,10 @@ it("auth invalidation clears a private draft even while its Settings guard is op
     "secret pending draft"
   )
   // The link lives with the agent composer now: the mode is the thing that
-  // decides what Send does, so what it needs to work is stated next to it.
+  // decides what Send does, so what it needs to work is offered next to it —
+  // as Connect, the remedy, rather than as a sentence naming the problem.
   await user.click(screen.getByRole("button", { name: "Ask agent" }))
-  await user.click(
-    await screen.findByRole("link", { name: "Personal AI connections" })
-  )
+  await user.click(await screen.findByRole("link", { name: "Connect" }))
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "Discard unsaved changes?"
   )
