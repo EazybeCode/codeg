@@ -282,6 +282,78 @@ class CredentialWiringTests(unittest.TestCase):
         self.assertEqual(env["NO_PROXY"], "")
         self.assertEqual(env["HOME"], "/mnt/vol")
 
+    def test_main_forwards_the_metadata_probe_all_the_way_to_the_pipe(self):
+        """`_deliver_run_cleanup` must pass the probe verdict through.
+
+        The unit test proves `_run_child(relay_stdin=True)` opens the pipe and
+        the argv test proves `app-server` is recognised, but nothing joined
+        them: a `main` that never forwarded the flag would satisfy both and
+        still hand the app-server a DEVNULL stdin, which is exactly the bug.
+        """
+        import contextlib
+        import tempfile
+
+        captured = {}
+
+        class FakeHandle:
+            pid = os.getpid()
+            stdout = None
+            stdin = None
+
+            @staticmethod
+            def wait():
+                return 0
+
+            @staticmethod
+            def teardown():
+                pass
+
+        @contextlib.contextmanager
+        def fake_deliver(*_a, **_k):
+            yield credentials.Delivery(home="/mnt/vol", env={"HOME": "/mnt/vol"})
+
+        def fake_launch(spec, env=None, bind_source=None, stdin_pipe=False):
+            captured["stdin_pipe"] = stdin_pipe
+            captured["argv"] = spec.provider_argv
+            return FakeHandle()
+
+        import neev_login_network_profile as network_profile
+        import neev_slot_proxy as slot_proxy
+
+        @contextlib.contextmanager
+        def fake_slot_proxy(provider, purpose, slot, **kwargs):
+            yield network_profile.proxy_env(slot)
+
+        with tempfile.TemporaryDirectory() as root:
+            run_dir = os.path.join(root, "run-probe-abc")
+            os.mkdir(run_dir)
+            argv = [
+                "--tenant", "org:3/user:7", "--slot", "b", "--workdir", run_dir,
+                "--uid", "61000", "--gid", "61000", "--provider", "codex",
+                "--credential-handle", "h1",
+                "--", "/usr/local/bin/codex", "app-server",
+            ]
+            saved_root = os.environ.get("NEEV_AGENT_WORKSPACE_ROOT")
+            os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = root
+            saved = (credentials.deliver, sandbox.launch, slot_proxy.slot_proxy)
+            credentials.deliver = fake_deliver
+            sandbox.launch = fake_launch
+            slot_proxy.slot_proxy = fake_slot_proxy
+            try:
+                rc = launch.main(argv, volumes=object())
+            finally:
+                credentials.deliver, sandbox.launch, slot_proxy.slot_proxy = saved
+                if saved_root is None:
+                    os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
+                else:
+                    os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = saved_root
+        self.assertEqual(rc, 0)
+        self.assertTrue(
+            captured["stdin_pipe"],
+            "main must forward is_metadata_probe so the probe gets a pipe",
+        )
+        self.assertEqual(captured["argv"], ("/usr/local/bin/codex", "app-server"))
+
     def test_cleanup_run_workdir_removes_tree_and_refuses_outside_root(self):
         import tempfile
 
@@ -461,11 +533,12 @@ class ExternallySandboxedTests(unittest.TestCase):
     def test_a_codex_exec_run_is_told_it_is_externally_sandboxed(self):
         spec = self.spec_for("codex", ["exec", "--json", "hi", "--skip-git-repo-check"])
         self.assertEqual(spec.provider_argv.count(launch._EXTERNALLY_SANDBOXED), 1)
-        # Straight after the subcommand, with every other argument in order.
-        self.assertEqual(spec.provider_argv[:3],
-                         ("/usr/local/bin/codex", "exec", launch._EXTERNALLY_SANDBOXED))
-        self.assertEqual(spec.provider_argv[3:],
-                         ("--json", "hi", "--skip-git-repo-check"))
+        # Straight after the subcommand, with every option in order and the
+        # prompt moved behind the separator (see PromptArgvBoundaryTests).
+        self.assertEqual(spec.provider_argv, (
+            "/usr/local/bin/codex", "exec", launch._EXTERNALLY_SANDBOXED,
+            "--json", "--skip-git-repo-check", "--", "hi",
+        ))
 
     def test_nothing_else_is_given_the_bypass(self):
         # The metadata probe runs no model-generated command, so it has no
@@ -502,8 +575,12 @@ class ExternallySandboxedTests(unittest.TestCase):
             self.assertEqual(spec.workdir, "/var/lib/neev-native/agents/run-abc")
             self.assertEqual(spec.tenant, "org:3/user:7")
             self.assertEqual(spec.slot, "a")
-        # Same limits either way: the bypass buys the child nothing from us.
-        self.assertEqual(codex.limits, claude.limits)
+        # The bypass buys the child nothing from us. Address space is the one
+        # deliberate difference and it belongs to the V8 reservation, not to
+        # this flag (see AddressSpaceTests); every other bound is identical.
+        self.assertEqual(codex.limits.cpu_seconds, claude.limits.cpu_seconds)
+        self.assertEqual(codex.limits.open_files, claude.limits.open_files)
+        self.assertEqual(codex.limits.processes, claude.limits.processes)
 
     def test_an_empty_netns_run_still_gets_a_deny_all_policy(self):
         parsed = launch._parse([
@@ -598,3 +675,139 @@ class RelayWiringTests(unittest.TestCase):
         _rc, captured, written = self.run_child(relay_stdin=False)
         self.assertFalse(captured["stdin_pipe"])
         self.assertEqual(written, [])
+
+
+class PromptArgvBoundaryTests(unittest.TestCase):
+    """A prompt is the user's words, never an option.
+
+    `provider_argv` places it as a bare positional, so a prompt starting with a
+    dash is read as a flag: `--help` printed the help and ran no turn at all,
+    and `-c notify=[...]` would have been taken as a config override. Behind
+    `--` both are just the prompt. The text is MOVED, never parsed, escaped or
+    interpolated.
+    """
+
+    def normalize(self, tail, provider="codex"):
+        return launch.externally_sandboxed_argv(
+            provider, [f"/usr/local/bin/{provider}", *tail]
+        )
+
+    def canonical(self, prompt, extra=()):
+        return self.normalize([
+            "exec", "--json", prompt,
+            "--skip-git-repo-check",
+            "-c", 'service_tier="default"',
+            "-c", "features.fast_mode=false",
+            *extra,
+        ])
+
+    def test_the_prompt_ends_up_last_and_behind_a_separator(self):
+        argv = self.canonical("Reply exactly OK")
+        self.assertEqual(argv[-2:], ["--", "Reply exactly OK"])
+        self.assertEqual(argv[:4], [
+            "/usr/local/bin/codex", "exec",
+            launch._EXTERNALLY_SANDBOXED, "--json",
+        ])
+        # Every option keeps its order and its pairing.
+        self.assertEqual(argv[4:-2], [
+            "--skip-git-repo-check",
+            "-c", 'service_tier="default"',
+            "-c", "features.fast_mode=false",
+        ])
+
+    def test_a_prompt_that_looks_like_a_flag_stays_the_prompt(self):
+        for prompt in (
+            "--help",
+            "-c notify=[\"/bin/sh\"]",
+            "-m gpt-6-astra",
+            "--skip-git-repo-check",
+            "-",
+            "--",
+            # The bypass itself: a user may legitimately type it.
+            launch._EXTERNALLY_SANDBOXED,
+        ):
+            with self.subTest(prompt=prompt):
+                argv = self.canonical(prompt)
+                # Verbatim and last: nothing quoted, escaped or rewritten. A
+                # prompt may legitimately equal a real option, so position is
+                # what is asserted, not how many times the text appears.
+                self.assertEqual(argv[-2:], ["--", prompt])
+                self.assertIs(argv[-1], prompt)
+
+    def test_a_prompt_equal_to_the_bypass_does_not_suppress_the_real_flag(self):
+        """The trap in a naive `if flag in argv` check.
+
+        A prompt is not an option already present. Suppressing the bypass
+        because the user typed its name would silently restore the nested
+        sandbox — and fail every command again.
+        """
+        argv = self.canonical(launch._EXTERNALLY_SANDBOXED)
+        self.assertEqual(argv[2], launch._EXTERNALLY_SANDBOXED)  # the real flag
+        self.assertEqual(argv[-1], launch._EXTERNALLY_SANDBOXED)  # the prompt
+        self.assertEqual(argv.count(launch._EXTERNALLY_SANDBOXED), 2)
+        self.assertEqual(argv[-2], "--")
+
+    def test_native_image_pairs_survive_and_stay_before_the_separator(self):
+        argv = self.canonical(
+            "describe these",
+            extra=["--image", "/w/a b.png", "--image", "/w/--odd.png"],
+        )
+        self.assertEqual(argv[-2:], ["--", "describe these"])
+        at = argv.index("--image")
+        self.assertEqual(argv[at:at + 4],
+                         ["--image", "/w/a b.png", "--image", "/w/--odd.png"])
+
+    def test_it_is_idempotent_and_leaves_an_unknown_shape_alone(self):
+        once = self.canonical("hi")
+        self.assertEqual(launch.externally_sandboxed_argv("codex", once), once)
+        # Not the canonical shape: handed back untouched rather than reordered.
+        for tail in (["exec", "hi"], ["exec"], ["app-server"], ["login", "--json", "x"]):
+            with self.subTest(tail=tail):
+                argv = self.normalize(tail)
+                self.assertEqual(argv, [f"/usr/local/bin/codex", *tail])
+        # Claude is a different CLI and is never rewritten.
+        claude = self.normalize(["exec", "--json", "--help"], provider="claude")
+        self.assertEqual(claude, ["/usr/local/bin/claude", "exec", "--json", "--help"])
+
+
+class AddressSpaceTests(unittest.TestCase):
+    """Codex needs room for V8's reservation; nothing else changes.
+
+    Measured on the pinned binary: the code-mode host's V8 sandbox cage peaks at
+    ~1.35 TiB of RESERVED address space. At 2 GiB it aborted with "Failed to
+    reserve the virtual address space for the V8 sandbox" and at 8 GiB it failed
+    the same way. Physical memory is bounded by the container's cgroup, which
+    RLIMIT_AS was never doing: the cage is reserved and never committed.
+    """
+
+    def test_codex_clears_the_measured_v8_reservation_and_claude_is_unchanged(self):
+        measured_cage_bytes = 1_452_350_852 * 1024
+        codex = launch.address_space_bytes("codex", None)
+        self.assertGreater(codex, measured_cage_bytes)
+        self.assertEqual(codex, 2 * 1024**4)
+        # Finite, not unlimited: a ceiling is still a ceiling.
+        self.assertIsNotNone(codex)
+        self.assertEqual(launch.address_space_bytes("claude", None), 2 * 1024**3)
+
+    def test_an_explicit_operator_value_wins_for_every_provider(self):
+        for provider in ("codex", "claude"):
+            with self.subTest(provider=provider):
+                self.assertEqual(launch.address_space_bytes(provider, 4096), 4096)
+
+    def test_the_spec_carries_the_per_provider_default(self):
+        def spec_for(provider, extra=()):
+            return launch.build_spec(launch._parse([
+                "--tenant", "org:3/user:7", "--slot", "a",
+                "--workdir", "/var/lib/neev-native/agents/run-abc",
+                "--uid", "61000", "--gid", "61000",
+                "--provider", provider, "--credential-handle", "h",
+                *extra,
+                "--", f"/usr/local/bin/{provider}", "exec", "--json", "hi",
+            ]))
+        self.assertEqual(spec_for("codex").limits.address_space_bytes, 2 * 1024**4)
+        self.assertEqual(spec_for("claude").limits.address_space_bytes, 2 * 1024**3)
+        self.assertEqual(
+            spec_for("codex", ["--address-space-bytes", "12345"])
+            .limits.address_space_bytes,
+            12345,
+        )

@@ -46,7 +46,9 @@ def _parse(argv):
     parser.add_argument("--credential-handle", required=True, dest="credential_handle")
     parser.add_argument("--provider-ipv4", action="append", default=[], dest="provider_ipv4")
     parser.add_argument("--cpu-seconds", type=int, default=120)
-    parser.add_argument("--address-space-bytes", type=int, default=2 * 1024 * 1024 * 1024)
+    # `None` means "unset", so an operator's explicit value is never silently
+    # replaced by the per-provider default below.
+    parser.add_argument("--address-space-bytes", type=int, default=None)
     parser.add_argument("--open-files", type=int, default=256)
     parser.add_argument("--processes", type=int, default=64)
     # Everything after `--` is the provider argv.
@@ -78,25 +80,70 @@ def _parse(argv):
 # the developer's machine.
 _EXTERNALLY_SANDBOXED = "--dangerously-bypass-approvals-and-sandbox"
 
+# Address space is RESERVED, not used, and V8 reserves on a scale no general
+# limit anticipates. Codex's code-mode host — which every current model requires,
+# since they all report `tool_mode: code_mode_only` — creates a V8 isolate whose
+# sandbox cage measured 1.35 TiB of virtual address space on the pinned binary.
+# Under the 2 GiB default it died with "Fatal process out of memory: Failed to
+# reserve the virtual address space for the V8 sandbox", its stdout closed, and
+# every command the model tried to run came back as a tool error. 8 GiB failed
+# identically: this is not a number to tune upward a little.
+#
+# So Codex gets a finite ceiling above what V8 asks for, and PHYSICAL memory
+# stays bounded where it already was — the container's own cgroup (`memory.max`
+# 2 GiB, swap capped to match, pids 512). RLIMIT_AS does impose an upper bound;
+# it just cannot distinguish reserved from committed memory, and the cage is
+# reserved `PROT_NONE` and never committed. Claude keeps the 2 GiB default, and
+# an operator's explicit `--address-space-bytes` still wins over both.
+_ADDRESS_SPACE_BYTES = 2 * 1024**3
+_CODEX_ADDRESS_SPACE_BYTES = 2 * 1024**4
+
+
+def address_space_bytes(provider, requested):
+    """Pure: the address-space ceiling for one run. An explicit value wins."""
+    if requested is not None:
+        return requested
+    return _CODEX_ADDRESS_SPACE_BYTES if provider == "codex" else _ADDRESS_SPACE_BYTES
+
 
 def externally_sandboxed_argv(provider, provider_argv):
-    """Pure: add the bypass to a `codex exec` run, and to nothing else.
+    """Pure: add the bypass to a `codex exec` run, and put the prompt behind `--`.
 
     Narrow on purpose. `codex app-server` (the metadata probe) and any login
     flow run no model-generated commands, so they have no nested sandbox to
     disable, and `claude` is a different CLI entirely. Approvals go with the
     sandbox because `exec` is non-interactive: a prompt nobody can answer is a
     turn that hangs rather than a turn that is safe.
+
+    The prompt moves because a bare positional is read as an option when it
+    starts with a dash. A prompt of `--help` printed the help and ran no turn;
+    one shaped like `-c notify=[…]` would have been read as a config override.
+    After `--` both are the prompt and a turn starts. Nothing is parsed,
+    escaped or interpolated: the text is moved, never inspected, and every
+    other argument keeps its position and its pairing, `--image FILE` included.
+
+    Recognising the canonical shape is what makes this safe. If the argv is not
+    exactly what `provider_argv` builds — `exec`, `--json`, the prompt, then
+    options — it is handed back untouched rather than reordered on a guess.
     """
     argv = list(provider_argv)
-    if provider != "codex" or len(argv) < 2 or argv[1] != "exec":
+    if provider != "codex" or len(argv) < 4:
         return argv
-    if _EXTERNALLY_SANDBOXED in argv:
+    if argv[1] != "exec" or argv[2] != "--json":
         return argv
-    # Straight after the subcommand: never appended, because `--image` is
-    # variadic and a bare flag after it would be read as another file.
-    argv.insert(2, _EXTERNALLY_SANDBOXED)
-    return argv
+    # Already normalised: what we produce always ENDS `-- <prompt>`. Testing the
+    # separator's position rather than its presence matters, because a prompt
+    # may itself be the two characters `--`.
+    if argv[-2] == "--":
+        return argv
+    prompt, options = argv[3], argv[4:]
+    head = [argv[0], "exec"]
+    # Checked against the OPTIONS, never the whole argv: a prompt that happens
+    # to read `--dangerously-bypass-approvals-and-sandbox` is a user's words,
+    # not a flag already present, and must not suppress the real one.
+    if _EXTERNALLY_SANDBOXED not in options:
+        head.append(_EXTERNALLY_SANDBOXED)
+    return head + ["--json"] + options + ["--", prompt]
 
 
 def build_spec(args):
@@ -121,7 +168,9 @@ def build_spec(args):
         provider_argv=tuple(provider_argv),
         limits=sandbox.ResourceLimits(
             cpu_seconds=args.cpu_seconds,
-            address_space_bytes=args.address_space_bytes,
+            address_space_bytes=address_space_bytes(
+                args.provider, args.address_space_bytes
+            ),
             open_files=args.open_files,
             processes=args.processes,
         ),
