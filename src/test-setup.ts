@@ -17,6 +17,13 @@ if (typeof Element !== "undefined") {
   Element.prototype.setPointerCapture ??= () => {}
   Element.prototype.releasePointerCapture ??= () => {}
 }
+if (typeof URL !== "undefined") {
+  // jsdom doesn't implement object URLs; the attachment tray makes one per
+  // staged image so a preview needs no round trip, and revokes it on removal.
+  let objectUrls = 0
+  URL.createObjectURL ??= () => `blob:neev/${(objectUrls += 1)}`
+  URL.revokeObjectURL ??= () => {}
+}
 if (typeof globalThis !== "undefined" && !("ResizeObserver" in globalThis)) {
   // jsdom doesn't implement ResizeObserver; cmdk (the command palette used by
   // the branch/folder pickers) constructs one on mount. A no-op stub is enough

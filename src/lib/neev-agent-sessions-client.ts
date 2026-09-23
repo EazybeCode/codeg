@@ -9,6 +9,7 @@
 
 import { NativeClientError } from "./neev-client"
 import {
+  attachmentKeys,
   contentGet,
   contentMutation,
   NativeContentNotFoundError,
@@ -16,6 +17,7 @@ import {
   type NativeMessage,
   type NativePage,
 } from "./neev-content-client"
+import { parseAttachments, type NeevAttachment } from "./neev-attachments"
 
 /** Providers the server will accept for a session (`agents/sessions.rs`). */
 export const NEEV_AGENT_PROVIDERS = ["claude", "codex"] as const
@@ -202,6 +204,11 @@ export interface NeevAgentTurn {
   errorCode: string | null
   provider: string
   model: string
+  /**
+   * The files this turn was run with, as the server stored them. Empty for a
+   * turn that carried none, and for a server that predates attachments.
+   */
+  attachments: NeevAttachment[]
   createdAt: number
   updatedAt: number
   completedAt: number | null
@@ -323,16 +330,28 @@ function record(value: unknown): Record<string, unknown> {
 
 function exact(
   value: unknown,
-  keys: readonly string[]
+  keys: readonly string[],
+  // Keys a server may genuinely not send yet. The strictness everywhere else
+  // stays: an unexpected field means this is not the shape the client was
+  // written against. But a field ADDED to a response must not break every
+  // client that has not learned about it, and without this it would.
+  optional: readonly string[] = []
 ): Record<string, unknown> {
   const object = record(value)
   const actual = Object.keys(object).sort()
   const expected = [...keys].sort()
-  if (
-    actual.length !== expected.length ||
-    actual.some((key, index) => key !== expected[index])
-  )
-    return invalid()
+  if (optional.length === 0) {
+    if (
+      actual.length !== expected.length ||
+      actual.some((key, index) => key !== expected[index])
+    )
+      return invalid()
+    return object
+  }
+  const seen = new Set(actual)
+  if (expected.some((key) => !seen.has(key))) return invalid()
+  const allowed = new Set([...expected, ...optional])
+  if (actual.some((key) => !allowed.has(key))) return invalid()
   return object
 }
 
@@ -782,22 +801,26 @@ export function parseActivityEvent(value: unknown): NeevActivityItem | null {
 }
 
 export function parseAgentTurn(value: unknown): NeevAgentTurn {
-  const object = exact(value, [
-    "id",
-    "sessionId",
-    "sequence",
-    "runId",
-    "prompt",
-    "response",
-    "activity",
-    "status",
-    "errorCode",
-    "provider",
-    "model",
-    "createdAt",
-    "updatedAt",
-    "completedAt",
-  ])
+  const object = exact(
+    value,
+    [
+      "id",
+      "sessionId",
+      "sequence",
+      "runId",
+      "prompt",
+      "response",
+      "activity",
+      "status",
+      "errorCode",
+      "provider",
+      "model",
+      "createdAt",
+      "updatedAt",
+      "completedAt",
+    ],
+    ["attachments"]
+  )
   const status = text(object.status)
   if (!TURN_STATUSES.includes(status as NeevTurnStatus)) return invalid()
   const completedAt = nullableTimestamp(object.completedAt)
@@ -817,6 +840,7 @@ export function parseAgentTurn(value: unknown): NeevAgentTurn {
     errorCode: nullableCode(object.errorCode),
     provider: text(object.provider),
     model: text(object.model),
+    attachments: parseAttachments(object.attachments),
     createdAt: timestamp(object.createdAt),
     updatedAt: timestamp(object.updatedAt),
     completedAt,
@@ -1134,19 +1158,31 @@ export async function startAgentTurn(
   sessionId: string,
   prompt: string,
   csrf: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /**
+   * Keys of files already uploaded to THIS session. The run stages their bytes
+   * into its sandbox; nothing is sent as a bare filename, so a key that failed
+   * to upload simply is not here and the turn is not claimed to carry it.
+   */
+  keys: readonly string[] = []
 ): Promise<NeevStartedTurn> {
   assertSessionId(sessionId)
+  const attachments = attachmentKeys(keys)
+  // Files with no words are a complete ask, and the server says what such a
+  // turn was asked to do. An empty prompt with nothing attached is not.
   if (
     typeof prompt !== "string" ||
-    prompt.length === 0 ||
+    (prompt.length === 0 && attachments.length === 0) ||
     [...prompt].length > NEEV_MAX_PROMPT_CHARS
   )
     invalidRequest()
   const started = parseStartedTurn(
     await contentMutation(
       `/api/neev/agent/sessions/${sessionId}/turns`,
-      { prompt },
+      {
+        prompt,
+        ...(attachments.length ? { attachmentKeys: attachments } : {}),
+      },
       csrf,
       signal
     )
@@ -1261,6 +1297,15 @@ export interface InvokeTeamAgentInput {
    */
   effort?: NeevEffort | null
   fast?: boolean
+  /**
+   * Keys of files already uploaded to THIS chat.
+   *
+   * They are persisted onto the human message the server posts for this ask,
+   * and the run stages them from that message — so what the team sees attached
+   * and what the agent was actually given are the same thing, and there is no
+   * second list of ids that could disagree with it.
+   */
+  attachmentKeys?: readonly string[]
   requestId: string
   expectedAuthRevision: string
 }
@@ -1293,11 +1338,13 @@ export async function invokeTeamAgent(
 ): Promise<NeevTeamInvocation> {
   assertUuid(chatId)
   assertUuid(input.requestId)
+  const keys = attachmentKeys(input.attachmentKeys)
   if (
     !NEEV_AGENT_PROVIDERS.includes(input.provider) ||
     !isSupportedModel(input.model) ||
     typeof input.prompt !== "string" ||
-    input.prompt.length === 0 ||
+    // Attachments alone are an ask; nothing at all is not.
+    (input.prompt.length === 0 && keys.length === 0) ||
     [...input.prompt].length > NEEV_MAX_PROMPT_CHARS
   )
     invalidRequest()
@@ -1320,6 +1367,7 @@ export async function invokeTeamAgent(
     body.effort = input.effort
   }
   if (input.fast === true) body.fast = true
+  if (keys.length) body.attachmentKeys = keys
   const invocation = parseTeamInvocation(
     await contentMutation(`/api/neev/chats/${chatId}/agent`, body, csrf, signal)
   )

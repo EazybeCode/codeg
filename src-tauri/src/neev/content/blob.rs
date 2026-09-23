@@ -7,6 +7,10 @@ const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 /// Uploaded images are larger than text documents but still bounded well below a
 /// photo-library scale; the editor embeds diagrams/screenshots, not galleries.
 pub(crate) const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// One chat attachment. Larger than a document image because the things people
+/// attach to a conversation — a screenshot, a PDF, a log — are larger, and the
+/// per-run total below is what actually bounds a turn.
+pub(crate) const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BlobInfo {
@@ -36,7 +40,7 @@ mod unix {
 
     use sha2::{Digest, Sha256};
 
-    use super::{BlobInfo, ContentError, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES};
+    use super::{BlobInfo, ContentError, MAX_ATTACHMENT_BYTES, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES};
 
     #[cfg(test)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +242,93 @@ mod unix {
                 sha256: format!("{:x}", Sha256::digest(bytes)),
                 byte_length: bytes.len() as i64,
             })
+        }
+
+        /// Store a chat attachment. Byte-for-byte the image path with its own
+        /// suffix and cap, so an attachment can never be served through the
+        /// image route and vice versa.
+        pub(crate) async fn put_attachment(
+            &self,
+            org_id: i32,
+            key: &str,
+            bytes: &[u8],
+        ) -> Result<BlobInfo, ContentError> {
+            validate_location(org_id, key)?;
+            if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+                return Err(ContentError::Invalid);
+            }
+            let directory = self.open_org_directory(org_id, true)?;
+            let temporary_name = c_string(&format!("{key}.att.tmp"))?;
+            let final_name = c_string(&format!("{key}.att"))?;
+            let mut temporary = create_file_at(directory.as_raw_fd(), &temporary_name)?;
+            let mut cleanup = TemporaryEntry::new(directory.as_raw_fd(), temporary_name);
+            temporary
+                .write_all(bytes)
+                .map_err(|_| ContentError::Storage)?;
+            temporary.sync_all().map_err(|_| ContentError::Storage)?;
+            verify_file(&temporary, bytes.len() as i64)?;
+            publish_without_replace(
+                directory.as_raw_fd(),
+                cleanup.name(),
+                directory.as_raw_fd(),
+                &final_name,
+            )?;
+            cleanup.remove()?;
+            directory.sync_all().map_err(|_| ContentError::Storage)?;
+            Ok(BlobInfo {
+                key: key.to_owned(),
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+                byte_length: bytes.len() as i64,
+            })
+        }
+
+        /// Read a stored attachment for the tenant. Bounded by
+        /// `MAX_ATTACHMENT_BYTES`; a missing blob is `NotFound`.
+        pub(crate) async fn read_attachment(
+            &self,
+            org_id: i32,
+            key: &str,
+        ) -> Result<Vec<u8>, ContentError> {
+            validate_location(org_id, key)?;
+            let directory = self.open_org_directory(org_id, false)?;
+            let final_name = c_string(&format!("{key}.att"))?;
+            let mut file = open_file_at(directory.as_raw_fd(), &final_name).map_err(|error| {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                    ContentError::NotFound
+                } else {
+                    error
+                }
+            })?;
+            let mut bytes = Vec::new();
+            (&mut file)
+                .take(MAX_ATTACHMENT_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ContentError::Storage)?;
+            if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+                return Err(ContentError::Storage);
+            }
+            Ok(bytes)
+        }
+
+        /// Delete a stored attachment. A blob that is already gone is not an
+        /// error: the caller is reclaiming, and reclaiming twice is harmless.
+        pub(crate) async fn remove_attachment(
+            &self,
+            org_id: i32,
+            key: &str,
+        ) -> Result<(), ContentError> {
+            validate_location(org_id, key)?;
+            let directory = match self.open_org_directory(org_id, false) {
+                Ok(directory) => directory,
+                Err(_) => return Ok(()),
+            };
+            let final_name = c_string(&format!("{key}.att"))?;
+            if unsafe { libc::unlinkat(directory.as_raw_fd(), final_name.as_ptr(), 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT)
+            {
+                return Err(ContentError::Storage);
+            }
+            Ok(())
         }
 
         /// Read a stored image blob for the tenant. Ownership is the 0700 org
@@ -530,6 +621,31 @@ impl BlobStore {
         _org_id: i32,
         _key: &str,
     ) -> Result<Vec<u8>, ContentError> {
+        Err(ContentError::Storage)
+    }
+
+    pub(crate) async fn put_attachment(
+        &self,
+        _org_id: i32,
+        _key: &str,
+        _bytes: &[u8],
+    ) -> Result<BlobInfo, ContentError> {
+        Err(ContentError::Storage)
+    }
+
+    pub(crate) async fn read_attachment(
+        &self,
+        _org_id: i32,
+        _key: &str,
+    ) -> Result<Vec<u8>, ContentError> {
+        Err(ContentError::Storage)
+    }
+
+    pub(crate) async fn remove_attachment(
+        &self,
+        _org_id: i32,
+        _key: &str,
+    ) -> Result<(), ContentError> {
         Err(ContentError::Storage)
     }
 }

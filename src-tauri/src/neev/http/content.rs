@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::neev::{
     auth::session,
     content::{
+        attachment,
         documents, image, messages, resources, rich,
         types::{
             ContentError, DocumentFormat, Message, Page, Resource, ResourceInput, ResourceKind,
@@ -30,6 +31,9 @@ const MESSAGE_BODY_LIMIT: usize = 6 * 32768 + 4096;
 const DOCUMENT_BODY_LIMIT: usize = 6 * 1048576 + 4096;
 // Matches content::blob::MAX_IMAGE_BYTES; a larger body is rejected before storage.
 const IMAGE_BODY_LIMIT: usize = 5 * 1024 * 1024;
+// Matches content::blob::MAX_ATTACHMENT_BYTES; a larger body is rejected before
+// storage rather than read into memory and then refused.
+const ATTACHMENT_BODY_LIMIT: usize = 10 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +87,10 @@ struct MessageInput {
     request_id: String,
     expected_auth_revision: String,
     body: String,
+    /// Keys of files already uploaded to THIS chat, in send order. Defaulted so
+    /// a client that predates attachments posts exactly the body it always did.
+    #[serde(default)]
+    attachment_keys: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -150,6 +158,10 @@ pub(super) struct MessageDto {
     author_kind: &'static str,
     /// The provider that produced an agent message; `null` for a human one.
     agent_label: Option<String>,
+    /// The files this message was sent with, in the order the sender arranged
+    /// them. Always present, `[]` when none — a client seeding a thread must
+    /// not have to tell "no files" apart from "field missing".
+    attachments: Vec<AttachmentDto>,
 }
 
 #[derive(Serialize)]
@@ -395,9 +407,10 @@ pub(super) async fn list_messages(
         .map(catalog::canonical_revision)
         .transpose()
         .map_err(|_| ApiError::NotFound)?;
-    Ok(private_json(message_page_dto(
-        messages::list(&state, &actor, &id, after).await?,
-    )?))
+    let page = messages::list(&state, &actor, &id, after).await?;
+    Ok(private_json(
+        message_page_dto(&state, &actor, page).await?,
+    ))
 }
 
 pub(super) async fn append_message(
@@ -411,16 +424,22 @@ pub(super) async fn append_message(
     let (input, actor) =
         catalog::organization_mutation::<MessageInput>(&state, request, MESSAGE_BODY_LIMIT).await?;
     canonical_uuid(&input.request_id)?;
-    let message = messages::append(
+    let keys = requested_keys(&input.attachment_keys)?;
+    let body = sent_text(input.body, keys.len());
+    let message = messages::append_with_attachments(
         &state,
         &actor,
         &id,
         &input.request_id,
         catalog::canonical_revision(&input.expected_auth_revision)?,
-        &input.body,
+        &body,
+        &keys,
     )
     .await?;
-    let mut response = private_json(message_dto(message)?);
+    // Read back from the refs the append just committed, so the response
+    // describes what is stored rather than what was asked for.
+    let attachments = message_attachments(&state, &actor, &message.id).await?;
+    let mut response = private_json(message_dto(message, attachment_dtos(attachments))?);
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
 }
@@ -670,6 +689,194 @@ pub(super) async fn serve_image(
     Ok(response)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AttachmentDto {
+    key: String,
+    file_name: String,
+    content_type: &'static str,
+    byte_length: i64,
+}
+
+pub(super) fn attachment_dto(stored: attachment::StoredAttachment) -> AttachmentDto {
+    AttachmentDto {
+        key: stored.key,
+        file_name: stored.file_name,
+        content_type: stored.content_type,
+        byte_length: stored.byte_length,
+    }
+}
+
+pub(super) fn attachment_dtos(stored: Vec<attachment::StoredAttachment>) -> Vec<AttachmentDto> {
+    stored.into_iter().map(attachment_dto).collect()
+}
+
+/// The attachment keys a send may carry, checked before they reach storage.
+///
+/// Shape only — that a key exists, belongs to this conversation and fits the
+/// per-turn budget is proved against storage by `content::attachment`, which is
+/// the only place that can prove it.
+pub(super) fn requested_keys(keys: &[String]) -> Result<Vec<String>, ApiError> {
+    if keys.len() > attachment::MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(ApiError::Invalid);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for key in keys {
+        canonical_uuid(key)?;
+        if !seen.insert(key.as_str()) {
+            return Err(ApiError::Invalid);
+        }
+    }
+    Ok(keys.to_vec())
+}
+
+/// What a send that carried files but no words is recorded as.
+///
+/// The durable row cannot be empty — `byte_length BETWEEN 1 AND 32768` on a
+/// message, `length(prompt) BETWEEN 1 AND 32768` on a turn — so the sentence is
+/// persisted rather than left for the runtime to substitute at launch. It is
+/// the runtime's own constant, so the text a reader sees in the thread and the
+/// text the provider is asked are the same sentence, written once.
+pub(super) fn sent_text(body: String, attachments: usize) -> String {
+    if body.trim().is_empty() && attachments > 0 {
+        return crate::neev::agents::execution::ATTACHMENT_ONLY_PROMPT.to_owned();
+    }
+    body
+}
+
+/// The attachment's name, from `X-Neev-Filename`.
+///
+/// Percent-decoded ONCE and then required to be strict UTF-8. Decoding twice
+/// would let `%252e%252e` arrive as `..`, and the decoded value goes on to name
+/// a file inside the sandbox — so anything that is not a plain single path
+/// segment is refused by `content::attachment`, not repaired here.
+fn attachment_name(headers: &HeaderMap) -> Result<String, ApiError> {
+    let raw = headers
+        .get("x-neev-filename")
+        .ok_or(ApiError::Invalid)?
+        .to_str()
+        .map_err(|_| ApiError::Invalid)?;
+    if raw.len() > 1024 {
+        return Err(ApiError::Invalid);
+    }
+    // Decoded here rather than pulling in a dependency for fifteen lines. ONCE:
+    // a second pass would let `%252e%252e` arrive as `..`.
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(ApiError::Invalid);
+            }
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
+                .map_err(|_| ApiError::Invalid)?;
+            out.push(u8::from_str_radix(hex, 16).map_err(|_| ApiError::Invalid)?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| ApiError::Invalid)
+}
+
+/// Upload an attachment bound to a conversation. Raw bytes in the body; the
+/// declared content type is advisory and the stored type is sniffed.
+pub(super) async fn upload_chat_attachment(
+    state: State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    upload_attachment(state, path, request, false).await
+}
+
+/// The same upload, for an Agent Chat. A session is private to its owner, so
+/// the authorization behind it is ownership rather than a shared audience.
+pub(super) async fn upload_session_attachment(
+    state: State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    upload_attachment(state, path, request, true).await
+}
+
+async fn upload_attachment(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+    session: bool,
+) -> Result<Response, ApiError> {
+    let id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    canonical_uuid(&id)?;
+    let (parts, body) = request.into_parts();
+    if !cookies::exact_origin(&parts.headers, &state.config.origin_header) {
+        return Err(ApiError::Forbidden);
+    }
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let token = cookies::required(&parts.headers, names.session)?;
+    let cookie_csrf = cookies::required(&parts.headers, names.csrf)?;
+    if cookie_csrf != cookies::csrf_header(&parts.headers)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let file_name = attachment_name(&parts.headers)?;
+    let now = state.clock.now_unix();
+    let actor = session::organization(&state.database, token, now).await?;
+    session::validate_csrf(&state.database, &actor.identity, cookie_csrf, now).await?;
+    let bytes = axum::body::to_bytes(body, ATTACHMENT_BODY_LIMIT)
+        .await
+        .map_err(|_| ApiError::Invalid)?;
+    let owner = if session {
+        attachment::Owner::Session(&id)
+    } else {
+        attachment::Owner::Chat(&id)
+    };
+    let stored = attachment::store(&state, &actor, owner, &file_name, bytes.as_ref()).await?;
+    let mut response = private_json(AttachmentDto {
+        key: stored.key,
+        file_name: stored.file_name,
+        content_type: stored.content_type,
+        byte_length: stored.byte_length,
+    });
+    *response.status_mut() = StatusCode::CREATED;
+    Ok(response)
+}
+
+/// Serve an attachment, enforcing the owning conversation's CURRENT read ACL.
+///
+/// Always a download, never an inline document: a PDF or a text file rendered
+/// in the page's own origin would be a same-origin document the uploader chose
+/// the bytes of. Images are safe to point an `<img>` at, which is why the type
+/// is still accurate — but nothing here invites the browser to execute it.
+pub(super) async fn serve_attachment(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let key = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let (bytes, content_type, _name) = attachment::load(&state, &actor, &key).await?;
+    let mut response = Body::from(bytes).into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    // The stored name is deliberately NOT echoed into the header: it would have
+    // to be escaped for a header, and the client already knows what it called
+    // the file. A bare `attachment` is enough to stop inline rendering.
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment"),
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    super::add_private_headers(&mut response);
+    Ok(response)
+}
+
 fn document_body(
     revision: &Revision,
     bytes: Vec<u8>,
@@ -709,15 +916,37 @@ async fn resource_page_dto(
     })
 }
 
-fn message_page_dto(page: Page<Message>) -> Result<PageDto<MessageDto>, ApiError> {
+/// A page of messages with the files each was sent with.
+///
+/// One lookup for the whole page: attachments are a second table, and reading
+/// them per message would make a long thread a round trip per row.
+async fn message_page_dto(
+    state: &ServerState,
+    actor: &crate::neev::types::OrgContext,
+    page: Page<Message>,
+) -> Result<PageDto<MessageDto>, ApiError> {
+    let ids: Vec<String> = page.items.iter().map(|item| item.id.clone()).collect();
+    let mut carried = attachment::for_messages(state, actor, &ids).await?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for message in page.items {
+        let attachments = attachment_dtos(carried.remove(&message.id).unwrap_or_default());
+        items.push(message_dto(message, attachments)?);
+    }
     Ok(PageDto {
-        items: page
-            .items
-            .into_iter()
-            .map(message_dto)
-            .collect::<Result<Vec<_>, _>>()?,
+        items,
         next_after: page.next_after,
     })
+}
+
+/// The files one persisted message carries, for a response that names it.
+pub(super) async fn message_attachments(
+    state: &ServerState,
+    actor: &crate::neev::types::OrgContext,
+    message_id: &str,
+) -> Result<Vec<attachment::StoredAttachment>, ApiError> {
+    let ids = vec![message_id.to_owned()];
+    let mut carried = attachment::for_messages(state, actor, &ids).await?;
+    Ok(carried.remove(message_id).unwrap_or_default())
 }
 
 fn revision_page_dto(page: Page<Revision>) -> Result<PageDto<RevisionDto>, ApiError> {
@@ -770,12 +999,16 @@ fn resource_dto(resource: Resource, engine_backed: bool) -> Result<ResourceDto, 
     })
 }
 
-pub(super) fn message_dto(message: Message) -> Result<MessageDto, ApiError> {
+pub(super) fn message_dto(
+    message: Message,
+    attachments: Vec<AttachmentDto>,
+) -> Result<MessageDto, ApiError> {
     canonical_uuid(&message.id).map_err(|_| ApiError::StorageUnavailable)?;
     if message.sequence < 1 || message.author_id < 1 || message.created_at < 0 {
         return Err(ApiError::StorageUnavailable);
     }
     Ok(MessageDto {
+        attachments,
         id: message.id,
         sequence: message.sequence.to_string(),
         author_id: message.author_id,

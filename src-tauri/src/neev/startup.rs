@@ -20,6 +20,9 @@ const PENDING_SWEEP_SECS: u64 = 60;
 /// that a user who approves in their browser is connected promptly even with
 /// nothing polling, and that a disconnect finishes while they watch.
 const SUPERVISOR_SWEEP_SECS: u64 = 3;
+/// Unreferenced uploads are reclaimed hourly. The retention window is a day, so
+/// the sweep only has to be frequent enough to keep the backlog bounded.
+const ATTACHMENT_SWEEP_SECS: u64 = 3600;
 
 pub(crate) struct ServerState {
     pub(crate) database: DatabaseConnection,
@@ -593,6 +596,20 @@ async fn serve() -> Result<(), ()> {
             tokio::time::sleep(std::time::Duration::from_secs(PENDING_SWEEP_SECS)).await;
             // Only EXPIRED attempts; an in-progress login is untouched.
             let _ = crate::neev::agents::recovery::expire_pending(&sweeper).await;
+        }
+    });
+    // Uploads that were never sent.
+    //
+    // An attachment becomes referenced when the message or turn carrying it is
+    // persisted. One that never was is a draft somebody abandoned, and without
+    // this every cancelled compose would hold its bytes against the tenant's
+    // quota forever. Only unreferenced rows past the retention window are
+    // reclaimed, so nothing in a conversation's history is ever touched.
+    let attachments = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(ATTACHMENT_SWEEP_SECS)).await;
+            let _ = crate::neev::content::attachment::sweep_orphans(&attachments).await;
         }
     });
     // The supervisor lifecycle must not depend on anyone polling.

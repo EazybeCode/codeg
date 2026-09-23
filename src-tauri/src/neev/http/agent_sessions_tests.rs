@@ -1426,3 +1426,118 @@ async fn one_members_traces_are_not_discoverable_by_another() {
         .await
         .assert_status(axum::http::StatusCode::NOT_FOUND);
 }
+
+/// Eight magic bytes and some padding — a real PNG as far as the sniffer is
+/// concerned, which is the only opinion the server has about a file's type.
+fn png(fill: u8) -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&[fill; 24]);
+    bytes
+}
+
+impl Client {
+    async fn upload(&self, path: &str, name: &str, bytes: Vec<u8>) -> Value {
+        let response = self
+            .post(path)
+            .add_header("x-neev-filename", name)
+            .bytes(axum::body::Bytes::from(bytes))
+            .await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        response.json::<Value>()
+    }
+}
+
+/// A turn keeps the files it was started with, and keeps them across a reload.
+///
+/// Also the attachment-only case: sending files with nothing typed is an
+/// ordinary thing to do, and what gets stored is a real ask rather than an
+/// empty prompt the provider would refuse.
+#[tokio::test]
+async fn a_turn_carries_its_files_through_storage_and_a_reload() {
+    let (_state, client, _db, _org) = fixture(fake(&["done"])).await;
+    let session = client.create_session().await;
+    let id = session["id"].as_str().unwrap().to_owned();
+    let stored = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{id}/attachments"),
+            // Percent-encoded once, decoded once: the stored name has the space.
+            "plan%20b.png",
+            png(1),
+        )
+        .await;
+    assert_eq!(stored["fileName"], "plan b.png");
+    assert_eq!(stored["contentType"], "image/png");
+    assert_eq!(stored["byteLength"], 32);
+    let key = stored["key"].as_str().unwrap().to_owned();
+
+    let started = client
+        .post(&format!("/api/neev/agent/sessions/{id}/turns"))
+        .json(&serde_json::json!({"prompt": "", "attachmentKeys": [key.clone()]}))
+        .await;
+    started.assert_status(axum::http::StatusCode::CREATED);
+    let started = started.json::<Value>();
+    assert_eq!(
+        started["turn"]["prompt"],
+        "Please review the attached files."
+    );
+    let carried = started["turn"]["attachments"].as_array().unwrap();
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0]["key"], key.as_str());
+    assert_eq!(carried[0]["fileName"], "plan b.png");
+
+    // Reopening the session reads the same files from storage.
+    let turns = client
+        .get(&format!("/api/neev/agent/sessions/{id}/turns"))
+        .await
+        .json::<Value>();
+    assert_eq!(
+        turns["items"][0]["attachments"],
+        started["turn"]["attachments"]
+    );
+}
+
+/// A key names a file in ONE conversation. Holding it does not make it
+/// carryable into another, even one the same person owns.
+#[tokio::test]
+async fn a_turn_cannot_carry_a_file_from_another_session() {
+    let (_state, client, _db, _org) = fixture(fake(&["done"])).await;
+    let mine = client.create_session().await;
+    let other = client.create_session().await;
+    let mine_id = mine["id"].as_str().unwrap().to_owned();
+    let other_id = other["id"].as_str().unwrap().to_owned();
+    let elsewhere = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{other_id}/attachments"),
+            "other.png",
+            png(2),
+        )
+        .await;
+    let key = elsewhere["key"].as_str().unwrap().to_owned();
+
+    let refused = client
+        .post(&format!("/api/neev/agent/sessions/{mine_id}/turns"))
+        .json(&serde_json::json!({"prompt": "look", "attachmentKeys": [key]}))
+        .await;
+    refused.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    // Refused before the turn existed: nothing was started and nothing has to
+    // be settled as failed.
+    let turns = client
+        .get(&format!("/api/neev/agent/sessions/{mine_id}/turns"))
+        .await
+        .json::<Value>();
+    assert!(turns["items"].as_array().unwrap().is_empty());
+}
+
+/// An empty prompt with no files is still nothing to ask.
+#[tokio::test]
+async fn a_turn_with_neither_words_nor_files_is_refused() {
+    let (_state, client, _db, _org) = fixture(fake(&["done"])).await;
+    let session = client.create_session().await;
+    let id = session["id"].as_str().unwrap();
+    let refused = client
+        .post(&format!("/api/neev/agent/sessions/{id}/turns"))
+        .json(&serde_json::json!({"prompt": ""}))
+        .await;
+    assert!(refused.status_code().is_client_error());
+}

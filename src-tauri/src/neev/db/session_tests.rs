@@ -48,10 +48,17 @@ async fn table_exists(db: &DatabaseConnection, name: &str) -> bool {
     .is_some()
 }
 
-/// Take a fresh (v11) database back to the exact schema-9 shape: drop the two
-/// session tables and rewind the marker. The additive message columns stay —
-/// which is precisely the case `upgrade`'s column guard has to survive.
+/// Take a fresh (v15) database back to the exact schema-9 shape: drop the
+/// attachment and session tables and rewind the marker. The additive message
+/// columns stay — which is precisely the case `upgrade`'s column guard has to
+/// survive.
+///
+/// A schema-9 database has no attachment storage at all, so leaving those two
+/// tables behind would not be a schema-9 fixture: the initializer's inventory
+/// gate would refuse it before any migration ran, and the test would prove
+/// nothing about the 9→current path.
 async fn downgrade_to_nine(db: &DatabaseConnection) {
+    super::tests::drop_attachment_tables(db).await;
     for table in [
         "neev_agent_turns",
         "neev_agent_sessions",
@@ -126,6 +133,9 @@ async fn project_node(db: &DatabaseConnection, org: i32) -> i32 {
 /// ever written, which would test the upgrade against a fixture rather than
 /// against reality.
 async fn downgrade_to_eleven(db: &DatabaseConnection) {
+    // Schema 11 predates attachment storage, so those tables come off first —
+    // and before the columns below, because a reference can hang on a turn.
+    super::tests::drop_attachment_tables(db).await;
     // Drop the columns rather than rebuilding the tables: `neev_agent_turns`
     // carries a foreign key to `neev_agent_sessions`, so dropping and
     // recreating them would fail against the turns a session under test owns.
@@ -177,7 +187,7 @@ async fn fresh_install_creates_session_storage_at_version_eleven() {
     let db = h::database().await;
     assert_eq!(
         schema_version(&db).await,
-        session_migration::EFFORT_SCHEMA_VERSION
+        attachment_migration::SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
@@ -209,7 +219,7 @@ async fn nine_to_eleven_upgrade_preserves_every_row() {
 
     assert_eq!(
         schema_version(&db).await,
-        session_migration::EFFORT_SCHEMA_VERSION
+        attachment_migration::SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
@@ -237,6 +247,8 @@ async fn nine_to_eleven_upgrade_preserves_every_row() {
 async fn ten_to_eleven_preserves_content_and_image_inventory() {
     let db = h::database().await;
     seed(&db).await;
+    // A schema-10 database has neither session nor attachment storage.
+    super::tests::drop_attachment_tables(&db).await;
     for table in ["neev_agent_turns", "neev_agent_sessions"] {
         execute(&db, &format!("DROP TABLE {table}"), vec![])
             .await
@@ -247,7 +259,10 @@ async fn ten_to_eleven_preserves_content_and_image_inventory() {
         .unwrap();
     assert_eq!(validate_content_snapshot(&db).await, Ok(10));
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(validate_content_snapshot(&db).await, Ok(14));
+    assert_eq!(
+        validate_content_snapshot(&db).await,
+        Ok(attachment_migration::SCHEMA_VERSION)
+    );
     assert!(table_exists(&db, "neev_image_blobs").await);
     assert_eq!(count(&db, "neev_messages").await, 1);
     assert_eq!(initialize(&db).await, Ok(()));
@@ -263,7 +278,7 @@ async fn upgrade_is_replayable_when_message_columns_already_exist() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         schema_version(&db).await,
-        session_migration::EFFORT_SCHEMA_VERSION
+        attachment_migration::SCHEMA_VERSION
     );
     // Idempotent: initializing an already-current database validates in place.
     assert_eq!(initialize(&db).await, Ok(()));
@@ -283,7 +298,7 @@ async fn eleven_to_twelve_adds_the_node_column_and_leaves_sessions_unfiled() {
 
     assert_eq!(
         schema_version(&db).await,
-        session_migration::EFFORT_SCHEMA_VERSION
+        attachment_migration::SCHEMA_VERSION
     );
     // The session that existed before the column did is retained, and reads as
     // unfiled rather than being dropped or given an invented placement.
@@ -780,9 +795,28 @@ async fn thirteen_to_fourteen_and_back_again_preserves_everything_else() {
     )
     .await
     .unwrap();
+    // `downgrade_effort` is the 14→13 rung and refuses anything else, so the
+    // fixture has to BE at 14 before it can be exercised. A fresh database is
+    // now 15, so schema 15 comes off first — the tables it added and its
+    // marker — leaving a database that is honestly schema 14 rather than a 15
+    // wearing a 14 marker. This rewind is the test's setup; the 14→13 contract
+    // below is what it is actually about, and is unchanged.
+    super::tests::drop_attachment_tables(&db).await;
+    execute(
+        &db,
+        "UPDATE neev_schema_version SET version=$1",
+        vec![session_migration::EFFORT_SCHEMA_VERSION.into()],
+    )
+    .await
+    .unwrap();
     assert_eq!(
         schema_version(&db).await,
         session_migration::EFFORT_SCHEMA_VERSION
+    );
+    // And it is a real 14, not merely a marker: the 14 validator accepts it.
+    assert_eq!(
+        validate_content_snapshot(&db).await,
+        Ok(session_migration::EFFORT_SCHEMA_VERSION)
     );
 
     // Down to 13: only what 14 added goes.
@@ -816,10 +850,12 @@ async fn thirteen_to_fourteen_and_back_again_preserves_everything_else() {
     // And forward again, which is the other half of a safe rollback: the
     // operator has to be able to roll back FORWARD after fixing whatever sent
     // them back.
+    // Forward goes all the way to CURRENT, not back to 14: a 13 database opened
+    // by today's binary gains the attachment layer too.
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         schema_version(&db).await,
-        session_migration::EFFORT_SCHEMA_VERSION
+        attachment_migration::SCHEMA_VERSION
     );
     assert_eq!(count(&db, "neev_agent_sessions").await, 1);
     // The selections were dropped with the columns and come back unset, which
@@ -834,7 +870,10 @@ async fn thirteen_to_fourteen_and_back_again_preserves_everything_else() {
     .unwrap();
     assert_eq!(row.try_get::<Option<String>>("", "effort").unwrap(), None);
     assert!(!row.try_get::<bool>("", "fast").unwrap());
-    assert_eq!(validate_content_snapshot(&db).await, Ok(14));
+    assert_eq!(
+        validate_content_snapshot(&db).await,
+        Ok(attachment_migration::SCHEMA_VERSION)
+    );
 }
 
 #[tokio::test]
@@ -842,6 +881,33 @@ async fn the_downgrade_refuses_a_database_that_is_not_at_fourteen() {
     // Running it against 13 would rewind a marker that is already right;
     // against a later layer it would strip something it does not understand.
     let db = h::database().await;
+
+    // A LATER layer, which is now a real case rather than a hypothetical one: a
+    // fresh database is 15, and 14's downgrade must not strip a layer it was
+    // written before. This is the contract `downgrade_effort` documents, and
+    // until schema 15 existed nothing could exercise it.
+    let tx = db.begin().await.unwrap();
+    assert_eq!(
+        session_migration::downgrade_effort(&tx).await,
+        Err(AuthError::Unavailable),
+        "the 14 downgrade must refuse a 15 database rather than strip it"
+    );
+    tx.rollback().await.unwrap();
+    // Refused, not half-applied: schema 15 is still intact and still validates.
+    assert_eq!(
+        validate_content_snapshot(&db).await,
+        Ok(attachment_migration::SCHEMA_VERSION)
+    );
+
+    // Now down to a genuine 14, where the downgrade is defined, and take it.
+    super::tests::drop_attachment_tables(&db).await;
+    execute(
+        &db,
+        "UPDATE neev_schema_version SET version=$1",
+        vec![session_migration::EFFORT_SCHEMA_VERSION.into()],
+    )
+    .await
+    .unwrap();
     let tx = db.begin().await.unwrap();
     session_migration::downgrade_effort(&tx).await.unwrap();
     tx.commit().await.unwrap();

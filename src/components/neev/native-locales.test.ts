@@ -46,6 +46,7 @@ it.each([
       expect(
         t(key, {
           name: "Sample",
+          title: "Sample",
           number: 1,
           organization: "Test organization",
           audience: "Private",

@@ -20,6 +20,7 @@ function human(
     createdAt: 1_700_000_000,
     authorKind: "human",
     agentLabel: null,
+    attachments: [],
   }
 }
 
@@ -54,6 +55,7 @@ function turn(
     errorCode: null,
     provider: "claude",
     model: "default",
+    attachments: [],
     createdAt: 1_700_000_000,
     updatedAt: 1_700_000_050,
     completedAt: 1_700_000_050,

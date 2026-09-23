@@ -15,6 +15,7 @@ pub(crate) mod entities;
 mod gateway_migration;
 #[cfg(test)]
 mod gateway_migration_tests;
+mod attachment_migration;
 mod image_blob_migration;
 mod migration;
 mod org_code_migration;
@@ -179,6 +180,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         let v11_expected: std::collections::BTreeSet<String> = v10_expected.iter().cloned()
             .chain(session_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
 
+        // Schema15 adds two tables to the v11 inventory. Every earlier marker
+        // still names the v11 set, so they fall through the tail and gain them.
+        let v15_expected: std::collections::BTreeSet<String> = v11_expected.iter().cloned()
+            .chain(attachment_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
+
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
             for table in migration::tables() {
@@ -204,10 +210,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             session_migration::record_activity(&tx).await?;
             session_migration::record_effort(&tx).await?;
             content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
+            attachment_migration::upgrade(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![session_migration::EFFORT_SCHEMA_VERSION.into()],
+                vec![attachment_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -221,6 +228,12 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             && names != v9_expected
             && names != v10_expected
             && names != v11_expected
+            // Schema15 adds TABLES, so it is the first version since 11 whose
+            // inventory differs. Without it here every restart of a migrated
+            // database was refused by this guard before the match below could
+            // recognise it — the server came up once, migrated, and then never
+            // started again.
+            && names != v15_expected
         {
             return Err(AuthError::Unavailable);
         }
@@ -333,7 +346,9 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 session_migration::validate_activity(&tx).await?;
                 content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
             }
-            // Current. Validate in place and preserve every row.
+            // A v14 database has every column but not the attachment tables:
+            // validate what exists, then fall through to the tail, which adds
+            // them and publishes marker15. Every row is preserved.
             session_migration::EFFORT_SCHEMA_VERSION if names == v11_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
@@ -345,6 +360,20 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 session_migration::validate_activity(&tx).await?;
                 session_migration::validate_effort(&tx).await?;
                 content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
+            }
+            // Current. Validate in place and preserve every row.
+            attachment_migration::SCHEMA_VERSION if names == v15_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
+                session_migration::validate(&tx).await?;
+                session_migration::validate_node_link(&tx).await?;
+                session_migration::validate_activity(&tx).await?;
+                session_migration::validate_effort(&tx).await?;
+                content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
+                attachment_migration::validate(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
@@ -368,10 +397,13 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         session_migration::record_activity(&tx).await?;
         session_migration::record_effort(&tx).await?;
         content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
+        if names != v15_expected {
+            attachment_migration::upgrade(&tx).await?;
+        }
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![session_migration::EFFORT_SCHEMA_VERSION.into()],
+            vec![attachment_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -516,46 +548,67 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         | session_migration::NODE_LINK_SCHEMA_VERSION
         | session_migration::ACTIVITY_SCHEMA_VERSION
         | session_migration::EFFORT_SCHEMA_VERSION => names == session_expected,
+        // 15 adds TABLES, so it has its own inventory.
+        attachment_migration::SCHEMA_VERSION => {
+            names
+                == session_expected
+                    .iter()
+                    .cloned()
+                    .chain(
+                        attachment_migration::TABLE_NAMES
+                            .iter()
+                            .map(|name| (*name).to_owned()),
+                    )
+                    .collect::<std::collections::BTreeSet<String>>()
+        }
         _ => false,
     };
     if !valid {
         return Err(AuthError::Unavailable);
     }
-    if matches!(version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14) {
+    if matches!(version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15) {
         document_format_migration::validate(db).await?;
     }
-    if matches!(version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14) {
+    if matches!(version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15) {
         agent_status_migration::validate(db).await?;
     }
-    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14) {
+    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15) {
         gateway_migration::validate(db).await?;
     }
-    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14) {
+    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15) {
         org_code_migration::validate(db).await?;
     }
-    if matches!(version, 10 | 11 | 12 | 13 | 14) {
+    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15) {
         image_blob_migration::validate(db).await?;
     }
-    if matches!(version, 11 | 12 | 13 | 14) {
+    if matches!(version, 11 | 12 | 13 | 14 | 15) {
         session_migration::validate(db).await?;
     }
-    if matches!(version, 12 | 13 | 14) {
+    if matches!(version, 12 | 13 | 14 | 15) {
         session_migration::validate_node_link(db).await?;
     }
-    if matches!(version, 13 | 14) {
+    if matches!(version, 13 | 14 | 15) {
         session_migration::validate_activity(db).await?;
     }
-    if version == session_migration::EFFORT_SCHEMA_VERSION {
+    if matches!(
+        version,
+        session_migration::EFFORT_SCHEMA_VERSION | attachment_migration::SCHEMA_VERSION
+    ) {
         session_migration::validate_effort(db).await?;
         // 13 only. A schema-12 snapshot still has the historical 1000 bound and
         // is valid as itself; requiring the raised cap before the upgrade step
         // would refuse a database that is correct for its version.
         content_revision_cap_migration::validate_document_revision_cap(db).await?;
     }
+    if version == attachment_migration::SCHEMA_VERSION {
+        attachment_migration::validate(db).await?;
+    }
     Ok(version)
 }
 #[cfg(test)]
 mod agent_tests;
+#[cfg(test)]
+mod attachment_tests;
 #[cfg(test)]
 mod content_tests;
 #[cfg(test)]

@@ -52,7 +52,7 @@ async fn fresh_schema_is_version_eleven_with_separate_branding_revision() {
         .unwrap()
         .try_get::<i64>("", "version")
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, attachment_migration::SCHEMA_VERSION);
 
     let user = h::native_account(&db, "schema-owner", "schema@example.test").await;
     let row = db
@@ -102,4 +102,27 @@ async fn postgres_schema_reinitialization_and_foreign_keys() {
     let result=db.execute(Statement::from_string(db.get_database_backend(),"INSERT INTO neev_memberships(org_id,user_id,role,revision,active) VALUES(999,999,'admin',1,true)")).await;
     assert!(result.is_err());
     h::cleanup_postgres(db, admin, schema).await;
+}
+
+/// Strip schema-15 attachment storage, for a fixture rebuilding an older shape.
+///
+/// Every historical fixture in this directory starts from a FRESH database and
+/// peels layers off until it has the inventory of the version under test. Since
+/// schema 15 that fresh database carries `neev_attachments` and
+/// `neev_attachment_refs`, and a fixture that leaves them behind is not the
+/// historical schema it claims to be: `initialize`'s inventory gate refuses the
+/// unexpected tables outright, so the migration the test exists to exercise
+/// never runs and the failure says nothing about the path under test.
+///
+/// Order is not incidental. `neev_attachment_refs` carries foreign keys to
+/// `neev_attachments`, `neev_messages` and `neev_agent_turns`, so the references
+/// go first and the attachments they point at second. Dropping the other way
+/// round — or dropping the session and message tables before either — leaves a
+/// referencing table pointing at a parent that is gone.
+pub(super) async fn drop_attachment_tables(db: &DatabaseConnection) {
+    for table in ["neev_attachment_refs", "neev_attachments"] {
+        execute(db, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
 }

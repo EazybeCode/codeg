@@ -7,6 +7,7 @@ use super::{
 use crate::neev::{db, test_support as h};
 use futures::FutureExt;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, TransactionTrait};
+use sha2::Digest as _;
 
 fn assert_bounded_failure(
     failure: super::backup::VerifierFailure,
@@ -174,7 +175,7 @@ async fn sqlite_gateway8_rich_format_six_seven_eight() {
 async fn sqlite_schema_nine_through_eleven_decode_rich_bodies_and_catch_corruption() {
     // Regression: a v9/v10 snapshot must decode block documents (not read them as
     // markdown) and reject a corrupt rich body at the rich-decode stage.
-    for schema_version in [9, 10, 11, 12, 13, 14] {
+    for schema_version in [9, 10, 11, 12, 13, 14, 15] {
         rich_snapshot_contract(h::database().await, schema_version).await;
     }
 }
@@ -303,7 +304,25 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
+    if schema_version == 15 {
+        return;
+    }
+    // 15 adds two TABLES; a snapshot of an older version does not have them at
+    // all, and `validate_content_snapshot` compares the inventory exactly.
+    // References go before the attachments they point at.
+    for table in ["neev_attachment_refs", "neev_attachments"] {
+        db::execute(database, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     if schema_version == 14 {
+        db::execute(
+            database,
+            "UPDATE neev_schema_version SET version=14",
+            vec![],
+        )
+        .await
+        .unwrap();
         return;
     }
     // 14 is two additive COLUMNS on the sessions table; a snapshot of an older
@@ -655,7 +674,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 14);
+    assert_eq!(manifest.schema_version, 15);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -682,6 +701,14 @@ async fn snapshot_schema_is_exact_and_read_only() {
         );
     }
     db::execute(&db, "UPDATE neev_schema_version SET version=5", vec![])
+        .await
+        .unwrap();
+    // This fixture rewinds the current schema to a historical inventory.
+    // Remove attachment children before dropping their session parents.
+    db::execute(&db, "DROP TABLE neev_attachment_refs", vec![])
+        .await
+        .unwrap();
+    db::execute(&db, "DROP TABLE neev_attachments", vec![])
         .await
         .unwrap();
     db::execute(&db, "DROP TABLE neev_image_blobs", vec![])
@@ -1205,4 +1232,253 @@ fn controlled_connection_child() {
         ),
         ContentError::Invalid
     );
+}
+
+/// Where a tenant's attachment blob actually lives, so a test can lose or
+/// damage one the way a bad archive does.
+fn attachment_path(h: &Harness, org_id: i32, key: &str) -> std::path::PathBuf {
+    h.state
+        .config
+        .document_root
+        .join(org_id.to_string())
+        .join(format!("{key}.att"))
+}
+
+fn attachment_png() -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&[0u8; 56]);
+    bytes
+}
+
+fn reference_for<'a>(
+    manifest: &'a super::backup::Manifest,
+    key: &str,
+) -> Option<&'a super::backup::Reference> {
+    manifest.blobs.iter().find(|blob| blob.key == key)
+}
+
+/// A snapshot has to account for the FILES a conversation carries, not just the
+/// rows that name them.
+///
+/// Before this, `verify_snapshot` checked document bodies (schema >= 3) and
+/// document images (schema >= 10) but walked straight past `neev_attachments`.
+/// An archive whose `.att` blobs were never copied — or were copied short —
+/// verified as healthy, and the loss surfaced when someone opened the
+/// conversation and found an attachment that no longer had any bytes behind it.
+async fn attachment_snapshot_contract(database: DatabaseConnection) {
+    let h = Harness::new(database).await;
+    let chat = h.chat().await;
+    let baseline = verify_snapshot(&h.state.database, &h.state.blobs)
+        .await
+        .unwrap();
+    assert_eq!(baseline.schema_version, 15);
+
+    let png = attachment_png();
+    let notes = b"attachment acceptance notes\n".to_vec();
+    let image = super::attachment::store(
+        &h.state,
+        &h.creator,
+        super::attachment::Owner::Chat(&chat.id),
+        "one.png",
+        &png,
+    )
+    .await
+    .unwrap();
+    let text = super::attachment::store(
+        &h.state,
+        &h.creator,
+        super::attachment::Owner::Chat(&chat.id),
+        "two.txt",
+        &notes,
+    )
+    .await
+    .unwrap();
+
+    // The manifest is what an export and a restore are compared on, so both
+    // files have to be IN it, with the length and digest the row claims.
+    let manifest = verify_snapshot(&h.state.database, &h.state.blobs)
+        .await
+        .unwrap();
+    assert_eq!(manifest.blobs.len(), baseline.blobs.len() + 2);
+    let listed =
+        reference_for(&manifest, &image.key).expect("the image attachment is accounted for");
+    assert_eq!(
+        (listed.org_id, listed.byte_length),
+        (h.creator.org_id, png.len() as i64)
+    );
+    assert_eq!(
+        listed.sha256,
+        format!("{:x}", sha2::Sha256::digest(&png)),
+        "the manifest must carry the real digest, not a placeholder"
+    );
+    assert!(reference_for(&manifest, &text.key).is_some());
+
+    // A file the archive never copied. The row survives and still looks
+    // perfectly healthy on its own; only reading the bytes finds it.
+    let lost = attachment_path(&h, h.creator.org_id, &image.key);
+    std::fs::remove_file(&lost).unwrap();
+    assert_eq!(
+        verify_snapshot(&h.state.database, &h.state.blobs).await,
+        Err(ContentError::NotFound),
+        "a missing attachment blob must not verify as healthy"
+    );
+    assert_eq!(
+        assert_bounded_failure(
+            super::backup::verify_snapshot_staged(&h.state.database, &h.state.blobs)
+                .await
+                .unwrap_err(),
+            "NEEV_VERIFY_STAGE_BLOB_READ",
+            &["one.png", "two.txt", "attachment acceptance notes"],
+        ),
+        ContentError::NotFound
+    );
+    std::fs::write(&lost, &png).unwrap();
+    assert!(verify_snapshot(&h.state.database, &h.state.blobs)
+        .await
+        .is_ok());
+
+    // A file the archive copied SHORT. It reads back fine; only the length and
+    // the digest say what happened.
+    let truncated = attachment_path(&h, h.creator.org_id, &text.key);
+    std::fs::write(&truncated, &notes[..4]).unwrap();
+    assert_eq!(
+        verify_snapshot(&h.state.database, &h.state.blobs).await,
+        Err(ContentError::Storage),
+        "a truncated attachment blob must not verify as healthy"
+    );
+    assert_eq!(
+        assert_bounded_failure(
+            super::backup::verify_snapshot_staged(&h.state.database, &h.state.blobs)
+                .await
+                .unwrap_err(),
+            "NEEV_VERIFY_STAGE_BLOB_READ",
+            &["one.png", "two.txt", "attachment acceptance notes"],
+        ),
+        ContentError::Storage
+    );
+    std::fs::write(&truncated, &notes).unwrap();
+    assert!(verify_snapshot(&h.state.database, &h.state.blobs)
+        .await
+        .is_ok());
+
+    // Same bytes, same length, a digest that no longer describes them: the
+    // check is against what the row CLAIMS, which is the difference between
+    // verifying the files and counting them.
+    db::execute(
+        &h.state.database,
+        "UPDATE neev_attachments SET sha256=$1 WHERE org_id=$2 AND key=$3",
+        vec![
+            "0".repeat(64).into(),
+            h.creator.org_id.into(),
+            text.key.clone().into(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        verify_snapshot(&h.state.database, &h.state.blobs).await,
+        Err(ContentError::Storage),
+        "bytes that no longer match the recorded digest must not verify"
+    );
+    db::execute(
+        &h.state.database,
+        "UPDATE neev_attachments SET sha256=$1,byte_length=$2 WHERE org_id=$3 AND key=$4",
+        vec![
+            format!("{:x}", sha2::Sha256::digest(&notes)).into(),
+            (notes.len() as i64 - 3).into(),
+            h.creator.org_id.into(),
+            text.key.clone().into(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        verify_snapshot(&h.state.database, &h.state.blobs).await,
+        Err(ContentError::Storage),
+        "a length that no longer matches the bytes must not verify"
+    );
+}
+
+/// The paged read covers every tenant, and the keyset predicate excludes
+/// nothing at either end.
+///
+/// The references are read a page at a time, cursored on `(org_id, key)`. This
+/// fixture is smaller than one page on purpose — 500 fsynced uploads would buy
+/// a slow test rather than a better one — so what it pins down is the predicate
+/// itself: the lowest-ordered attachment is not skipped by the opening cursor,
+/// and an attachment belonging to a DIFFERENT organization is still reached and
+/// still verified. A predicate that only advanced the key, or only matched the
+/// cursor's own org, would drop one of these two rows and call the snapshot
+/// healthy.
+async fn attachment_paging_contract(database: DatabaseConnection) {
+    let h = Harness::new(database).await;
+    let mine = h.chat().await;
+    let theirs = resources::create(
+        &h.state,
+        &h.foreign,
+        ResourceInput {
+            node_id: h.foreign_node,
+            kind: ResourceKind::Chat,
+            title: "Another tenant".into(),
+            origin_chat_id: None,
+            request_id: request(),
+        },
+    )
+    .await
+    .unwrap();
+    let png = attachment_png();
+    let first = super::attachment::store(
+        &h.state,
+        &h.creator,
+        super::attachment::Owner::Chat(&mine.id),
+        "mine.png",
+        &png,
+    )
+    .await
+    .unwrap();
+    let second = super::attachment::store(
+        &h.state,
+        &h.foreign,
+        super::attachment::Owner::Chat(&theirs.id),
+        "theirs.png",
+        &png,
+    )
+    .await
+    .unwrap();
+    let manifest = verify_snapshot(&h.state.database, &h.state.blobs)
+        .await
+        .unwrap();
+    assert!(reference_for(&manifest, &first.key).is_some());
+    assert!(reference_for(&manifest, &second.key).is_some());
+    assert_ne!(h.creator.org_id, h.foreign.org_id);
+
+    // Losing the SECOND tenant's blob must still fail: it is only reachable
+    // once the cursor has crossed the organization boundary.
+    std::fs::remove_file(attachment_path(&h, h.foreign.org_id, &second.key)).unwrap();
+    assert_eq!(
+        verify_snapshot(&h.state.database, &h.state.blobs).await,
+        Err(ContentError::NotFound)
+    );
+}
+
+#[tokio::test]
+async fn sqlite_snapshot_verifies_attachment_bytes_not_just_rows() {
+    attachment_snapshot_contract(h::database().await).await;
+}
+
+#[tokio::test]
+async fn sqlite_snapshot_walks_every_tenants_attachments() {
+    attachment_paging_contract(h::database().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires guarded PostgreSQL"]
+async fn postgres_snapshot_verifies_attachment_bytes_not_just_rows() {
+    let (db, admin, schema) = h::postgres_database().await;
+    eprintln!("attachment snapshot owned schema: {schema}");
+    attachment_snapshot_contract(db.clone()).await;
+    h::cleanup_postgres(db, admin, schema).await;
+    let (db, admin, schema) = h::postgres_database().await;
+    attachment_paging_contract(db.clone()).await;
+    h::cleanup_postgres(db, admin, schema).await;
 }

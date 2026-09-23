@@ -1,5 +1,10 @@
 import { NativeClientError, nativeMutation, nativeRequest } from "./neev-client"
 import { parseRichDocument, type RichDocument } from "./neev-rich-document"
+import {
+  NEEV_MAX_ATTACHMENTS,
+  parseAttachments,
+  type NeevAttachment,
+} from "./neev-attachments"
 
 export type NativeResourceKind = "chat" | "document"
 export type NativeVisibility = "private" | "organization"
@@ -51,6 +56,15 @@ export interface NativeMessage {
   authorKind: NativeAuthorKind
   /** The provider that produced an agent message; `null` for a human one. */
   agentLabel: string | null
+  /**
+   * The files this message was sent with, as the server stored them.
+   *
+   * Persisted metadata, not the staged list the composer held: it is what makes
+   * a reopened conversation still show what was attached, and the only thing a
+   * reader other than the sender could ever see. Empty for a message with none,
+   * and for a server that predates attachments.
+   */
+  attachments: NeevAttachment[]
 }
 
 export interface NativeRevision {
@@ -95,6 +109,12 @@ export interface AppendNativeMessageInput {
   requestId: string
   expectedAuthRevision: string
   body: string
+  /**
+   * Keys of attachments already uploaded to THIS chat, in the order they should
+   * be shown. Omitted from the request when empty, so a server that has not
+   * learned about attachments sees exactly the payload it always did.
+   */
+  attachmentKeys?: readonly string[]
 }
 
 export type SaveNativeDocumentInput = {
@@ -316,10 +336,18 @@ export function parseMessage(value: unknown): NativeMessage {
     record(value).agentLabel !== undefined
   const object = exact(
     value,
-    labelled ? [...MESSAGE_KEYS, "authorKind", "agentLabel"] : MESSAGE_KEYS
+    labelled ? [...MESSAGE_KEYS, "authorKind", "agentLabel"] : MESSAGE_KEYS,
+    // Attachments arrived after authorship did, and a message without files
+    // carries no such field at all — so it is optional in both directions.
+    ["attachments"]
   )
   const body = text(object.body)
-  if (body.length === 0 || new TextEncoder().encode(body).length > 32768)
+  const attachments = parseAttachments(object.attachments)
+  // Files with no words is a real message; words with nothing in them is not.
+  if (
+    (body.length === 0 && attachments.length === 0) ||
+    new TextEncoder().encode(body).length > 32768
+  )
     return invalid()
   let authorKind: NativeAuthorKind = "human"
   let agentLabel: string | null = null
@@ -342,6 +370,7 @@ export function parseMessage(value: unknown): NativeMessage {
     createdAt: timestamp(object.createdAt),
     authorKind,
     agentLabel,
+    attachments,
   }
 }
 
@@ -626,14 +655,44 @@ export async function appendNativeMessage(
   assertUuid(input.requestId)
   assertPositiveRevision(input.expectedAuthRevision)
   if (typeof input.body !== "string") invalidRequest()
+  const keys = attachmentKeys(input.attachmentKeys)
+  // An empty body is only a message when files carry it; the server accepts it
+  // on exactly that condition, and refusing here keeps an empty send local.
+  if (input.body.length === 0 && keys.length === 0) invalidRequest()
   return parseMessage(
     await contentMutation(
       `/api/neev/chats/${chatId}/messages`,
-      input,
+      {
+        requestId: input.requestId,
+        expectedAuthRevision: input.expectedAuthRevision,
+        body: input.body,
+        ...(keys.length ? { attachmentKeys: keys } : {}),
+      },
       csrf,
       signal
     )
   )
+}
+
+/**
+ * The keys a send may carry: each a real key, no repeats, no more than the
+ * server takes. Checked here so a bug in a composer becomes a refused request
+ * rather than a message whose files quietly did not make it.
+ */
+export function attachmentKeys(value: readonly string[] | undefined): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > NEEV_MAX_ATTACHMENTS)
+    invalidRequest()
+  for (const key of value)
+    if (
+      typeof key !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+        key
+      )
+    )
+      invalidRequest()
+  if (new Set(value).size !== value.length) invalidRequest()
+  return [...value]
 }
 
 export async function listNativeDocumentRevisions(

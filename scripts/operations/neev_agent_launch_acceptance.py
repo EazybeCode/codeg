@@ -41,6 +41,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -75,10 +76,56 @@ def _fresh_run_dir(args):
     return run_dir
 
 
-def _via_helper(args, tenant, handle, provider_argv):
+# Mirrors `agents::execution::stage_attachments`: its own leaf under the run
+# workdir, 0755 so the DROPPED lane uid can traverse a directory the server uid
+# created, files 0644, leaf prefixed with the attachment key.
+_ATTACHMENT_DIR = "neev-attachments"
+_ATTACHMENT_KEY = "11111111-1111-4111-8111-111111111111"
+
+
+def _stage_attachment(run_dir, body, name="notes.txt"):
+    """Write an attachment the way the server does, and return its path.
+
+    Written BEFORE the helper runs and by this process (standing in for the
+    server uid), which is the whole point: the reader is a different uid that
+    does not exist yet.
+
+    The layout has a stable root and a per-CALL child, because a workspace can
+    be staged into more than once and two runs must not collide.
+    """
+    root = os.path.join(run_dir, _ATTACHMENT_DIR)
+    if not os.path.isdir(root):
+        os.mkdir(root)
+        os.chmod(root, 0o755)
+    directory = os.path.join(root, uuid.uuid4().hex)
+    os.mkdir(directory)
+    path = os.path.join(directory, "%s--%s" % (_ATTACHMENT_KEY, name))
+    # Under a hostile umask, because the server's own umask must not be able to
+    # mask these modes down and lock the lane out of its own attachment.
+    previous = os.umask(0o077)
+    try:
+        with open(path, "wb") as handle:
+            handle.write(body)
+    finally:
+        os.umask(previous)
+    os.chmod(directory, 0o755)
+    os.chmod(path, 0o644)
+    return path
+
+
+def _via_helper(args, tenant, handle, provider_argv, stage=None):
     """Create a fresh run workdir, invoke the REAL caphelper (dropped to the web uid),
-    and return (result, run_dir). The launcher removes run_dir on success."""
+    and return (result, run_dir). The launcher removes run_dir on success.
+
+    `stage` is bytes to place as an attachment before launching, so the lane's
+    view of a server-written file can be exercised through the real helper.
+    """
     run_dir = _fresh_run_dir(args)
+    staged_path = _stage_attachment(run_dir, stage) if stage is not None else None
+    if staged_path is not None:
+        provider_argv = [
+            part.replace("@@ATTACHMENT@@", staged_path) for part in provider_argv
+        ]
     launcher_args = [
         args.caphelper,
         "--tenant", tenant,
@@ -167,6 +214,43 @@ def run(args):
             "tenant B (same lane uid) sees no leftover CWD file from tenant A",
             b_run.returncode == 0 and b"leak.txt" not in b_run.stdout,
             "rc=%d stdout=%r" % (b_run.returncode, b_run.stdout[-200:]),
+        )
+
+        # 5. An attachment staged by the SERVER uid is readable by the DROPPED
+        #    lane uid, through the real helper.
+        #
+        #    The mirrored-layout test proves the uid and mode arithmetic in
+        #    isolation. This proves the launcher preserves it: the file is
+        #    written before the helper runs, by a different uid, and the lane
+        #    reads it after privileges are dropped and the sandbox is built.
+        body = b"ATTACHED-%d" % os.getpid()
+        att_run, _att_dir = _via_helper(
+            args, tenant_a, handles[scope_a],
+            ["sh", "-c", 'cat "@@ATTACHMENT@@"'],
+            stage=body,
+        )
+        check(
+            "the dropped lane uid reads an attachment staged by the server uid",
+            att_run.returncode == 0 and body in att_run.stdout,
+            "rc=%d stdout=%r stderr=%r"
+            % (att_run.returncode, att_run.stdout[-200:], att_run.stderr[-200:]),
+        )
+
+        # 6. And it is not a way into anything else: the staged directory holds
+        #    only what was staged, under its keyed leaf, with nothing at the
+        #    workdir root that an agent would read as configuration.
+        listing_run, _listing_dir = _via_helper(
+            args, tenant_a, handles[scope_a],
+            ["sh", "-c", 'ls -a "$PWD"; find "$PWD/%s" -type f' % _ATTACHMENT_DIR],
+            stage=body,
+        )
+        listed = listing_run.stdout
+        check(
+            "the staged attachment is keyed and nothing lands at the workdir root",
+            listing_run.returncode == 0
+            and _ATTACHMENT_KEY.encode() in listed
+            and b"AGENTS.md" not in listed,
+            "rc=%d stdout=%r" % (listing_run.returncode, listed[-300:]),
         )
     finally:
         for scope, handle in handles.items():

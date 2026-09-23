@@ -63,7 +63,219 @@ pub(crate) struct RunRequest {
     /// MODEL, because Claude's Fast is Opus-only and switching the model to
     /// satisfy a toggle would answer a question the reader did not ask.
     pub(crate) fast: bool,
+    /// Files the user attached to this turn, as bytes.
+    ///
+    /// The runtime stages them into its own working directory before launching,
+    /// because only it knows where that directory is. A run that cannot stage
+    /// what it was given fails rather than proceeding without the files.
+    pub(crate) attachments: Vec<RunAttachment>,
 }
+
+/// One file the user attached: its bytes, and enough to name and classify it.
+///
+/// Bytes rather than a path, because only the runtime knows where this run's
+/// working directory is — the HTTP layer must not guess it, and a path chosen
+/// before the workdir exists would be a path to nowhere.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunAttachment {
+    /// The attachment's storage key, used to make its staged leaf unique.
+    pub(crate) key: String,
+    pub(crate) file_name: String,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) is_image: bool,
+}
+
+/// One staged file: where it ended up, and what it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StagedAttachment {
+    pub(crate) path: String,
+    pub(crate) file_name: String,
+    pub(crate) is_image: bool,
+}
+
+/// The directory attachments are staged into, under the run's own workdir.
+///
+/// Its own leaf, never the workdir root: a file called `AGENTS.md` sitting at
+/// the root of a working directory is configuration that the agent will obey,
+/// and an upload must never become that. In here it is just a file the reader
+/// gave us, which the agent may open if the prompt points at it — and the leaf
+/// names are key-prefixed, so it is not even called `AGENTS.md` on disk.
+const ATTACHMENT_DIR: &str = "neev-attachments";
+
+/// Write this turn's attachments into `workdir` and return their paths.
+///
+/// The directory is **0755** and the files are 0644, both owned by the server
+/// uid that writes them. That looks permissive and is not: the run root above
+/// it is 0700 and owned by the dropped run uid, so the only uids that can reach
+/// this path at all are that run's uid and root.
+///
+/// It cannot be 0700. This directory is created by the SERVER uid, while the
+/// process that must read it runs as the dropped run uid — a 0700 directory
+/// owned by the server would block traversal entirely, and the 0644 files
+/// inside would be unreachable no matter how open their own mode was. The
+/// alternative is chowning the child in the privileged launcher; making the
+/// parent the boundary is the smaller mechanism.
+///
+/// Every write is `O_CREAT|O_EXCL|O_NOFOLLOW` on a path built from the workdir
+/// plus ONE already-validated name component. A name that is not a plain single
+/// segment was refused at upload; this refuses again rather than trusting that.
+///
+/// The leaf is `<key>--<name>`, truncated to fit. Two files called `notes.txt`
+/// in one turn would otherwise collide, and `O_EXCL` would fail the whole run;
+/// the prefix also means a file called `AGENTS.md` cannot land under a name
+/// anything reads as configuration. The original name is kept in the metadata
+/// for display, so truncation never reaches the reader.
+#[cfg(unix)]
+fn stage_attachments(
+    workdir: &Path,
+    attachments: &[RunAttachment],
+) -> Result<Vec<StagedAttachment>, ExecutionError> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The stable root. The sandboxed runtime gets a fresh workdir per run, so
+    // this is normally created once — but the dev runtime reuses one workspace
+    // for every run, and a plain `create_dir` failed on the second. Tolerating
+    // `AlreadyExists` alone would be worse: the existing entry could be a
+    // symlink pointing anywhere. So an existing entry is ACCEPTED only after
+    // `symlink_metadata` proves it is a real directory, which never follows it.
+    let root = workdir.join(ATTACHMENT_DIR);
+    match std::fs::create_dir(&root) {
+        Ok(()) => {
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+                .map_err(|_| ExecutionError::Unavailable)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::symlink_metadata(&root).map_err(|_| ExecutionError::Unavailable)?;
+            if !existing.is_dir() || existing.file_type().is_symlink() {
+                return Err(ExecutionError::Unauthorized);
+            }
+        }
+        Err(_) => return Err(ExecutionError::Unavailable),
+    }
+    // One child per call, so two runs sharing a workspace cannot collide and
+    // neither can see the other's files by guessing a name. `create_dir` on a
+    // fresh random name fails rather than reusing anything that is already
+    // there, symlink or not.
+    let directory = root.join(uuid::Uuid::new_v4().hyphenated().to_string());
+    std::fs::create_dir(&directory).map_err(|_| ExecutionError::Unavailable)?;
+    // Explicit, for the same reason as the files: `create_dir` is umask-masked.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+        .map_err(|_| ExecutionError::Unavailable)?;
+    let mut staged = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        // Re-prove the name is one ordinary path segment. Anything else — a
+        // separator, `..`, an absolute path — is refused rather than repaired.
+        let name = std::path::Path::new(&attachment.file_name);
+        let mut components = name.components();
+        let single = matches!(
+            (components.next(), components.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        );
+        if !single || attachment.file_name.starts_with('.') {
+            return Err(ExecutionError::Unauthorized);
+        }
+        let path = directory.join(staged_leaf(&attachment.key, &attachment.file_name));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            // A REQUEST, not a guarantee: the creating mode is masked by the
+            // process umask, so a server running at 077 would land this at 0600
+            // and the dropped run uid could not read its own attachment. The
+            // explicit set below is what actually decides the mode.
+            .mode(0o644)
+            .open(&path)
+            .map_err(|_| ExecutionError::Unavailable)?;
+        use std::io::Write;
+        file.write_all(&attachment.bytes)
+            .map_err(|_| ExecutionError::Unavailable)?;
+        file.sync_all().map_err(|_| ExecutionError::Unavailable)?;
+        // Set, not requested, and after creation so no umask applies. Safe to
+        // widen here: the file already exists at a path only this run's uid and
+        // root can reach, because the run root above is 0700 and theirs.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .map_err(|_| ExecutionError::Unavailable)?;
+        staged.push(StagedAttachment {
+            path: path.to_string_lossy().into_owned(),
+            file_name: attachment.file_name.clone(),
+            is_image: attachment.is_image,
+        });
+    }
+    Ok(staged)
+}
+
+#[cfg(not(unix))]
+fn stage_attachments(
+    _workdir: &Path,
+    attachments: &[RunAttachment],
+) -> Result<Vec<StagedAttachment>, ExecutionError> {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    Err(ExecutionError::Unavailable)
+}
+
+/// The longest leaf a filesystem will take, in BYTES.
+///
+/// `NAME_MAX` is 255 bytes on Linux, and an attachment name is bounded at 200
+/// CHARACTERS — which is up to 800 bytes of UTF-8, before a 36-byte key and a
+/// separator are added. Without this the staging of a long non-ASCII name fails
+/// with `ENAMETOOLONG` and takes the whole run with it.
+const MAX_LEAF_BYTES: usize = 255;
+
+/// `<key>--<name>`, with the name truncated on a character boundary so the leaf
+/// fits. The key is never truncated: uniqueness is what the prefix is for.
+fn staged_leaf(key: &str, file_name: &str) -> String {
+    let prefix = format!("{key}--");
+    let budget = MAX_LEAF_BYTES.saturating_sub(prefix.len());
+    let mut name = file_name;
+    if name.len() > budget {
+        // Back off to a character boundary: a leaf cut mid-codepoint would not
+        // be valid UTF-8, and the name is only for a human reading a path.
+        let mut end = budget;
+        while end > 0 && !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name = &name[..end];
+    }
+    format!("{prefix}{name}")
+}
+
+/// Name the staged files in the prompt, so the agent knows they are there.
+///
+/// Both providers get this. Codex additionally takes images as native inputs,
+/// but neither takes a PDF or a text file that way — those are real files the
+/// agent opens with its own read tool, and it cannot open what it was never
+/// told about. The paths are appended as a clearly delimited block rather than
+/// mixed into the reader's own words.
+/// What a turn says when the reader attached files and typed nothing.
+///
+/// Substituted HERE rather than in the UI, so both providers and both surfaces
+/// send the same sentence and an empty prompt can never reach a provider that
+/// would refuse it. Sending files with no words is an ordinary thing to do.
+pub(crate) const ATTACHMENT_ONLY_PROMPT: &str = "Please review the attached files.";
+
+fn prompt_with_attachments(prompt: &str, staged: &[StagedAttachment]) -> String {
+    if staged.is_empty() {
+        return prompt.to_owned();
+    }
+    let prompt = if prompt.trim().is_empty() {
+        ATTACHMENT_ONLY_PROMPT
+    } else {
+        prompt
+    };
+    let mut block = String::from("<attached-files>\n");
+    for item in staged {
+        block.push_str(&item.path);
+        block.push('\n');
+    }
+    block.push_str("</attached-files>\n\n");
+    format!("{block}{prompt}")
+}
+
+/// Forward one mapped stream item to the run's consumer.
 
 /// A credential handle is 32 hex characters (`neev_credential_store` handle
 /// length), matching the `storage_handle` column's constraint. Validated before
@@ -130,6 +342,10 @@ pub(crate) enum RunEvent {
 /// is a subcommand (`exec`) and its streaming switch is `--json`, verified
 /// against `codex exec --help` in the deployed agent image. An unknown provider
 /// gets Claude's form, which is what `resolve` already restricts the binary to.
+/// `images` are absolute paths ALREADY staged inside the run's sandbox working
+/// directory. They are passed as separate argv entries, never interpolated into
+/// the prompt or into a shell string, so a file name can carry any character the
+/// upload allowed without changing how the command parses.
 fn provider_argv(
     provider: &str,
     prompt: &str,
@@ -137,6 +353,7 @@ fn provider_argv(
     briefing: Option<&str>,
     effort: Option<&str>,
     fast: bool,
+    images: &[String],
 ) -> Vec<String> {
     let mut argv: Vec<String> = match provider {
         "codex" => vec![
@@ -211,7 +428,29 @@ fn provider_argv(
         argv.push(if provider == "codex" { "-m".into() } else { "--model".into() });
         argv.push(model.to_owned());
     }
+    // Images, where the provider takes them natively. Codex `exec` has
+    // `-i, --image <FILE>...`; the flag is repeated per file rather than
+    // comma-joined so a name containing a comma cannot split into two paths.
+    //
+    // Claude has no equivalent switch. Its images are staged files like every
+    // other attachment and it opens them with its own read tool, which is why
+    // the staged paths are named in the prompt for BOTH providers.
+    if provider == "codex" {
+        for path in images {
+            argv.push("--image".into());
+            argv.push(path.clone());
+        }
+    }
     argv
+}
+
+/// The staged paths a provider can take as native image inputs.
+fn image_paths(staged: &[StagedAttachment]) -> Vec<String> {
+    staged
+        .iter()
+        .filter(|item| item.is_image)
+        .map(|item| item.path.clone())
+        .collect()
 }
 
 /// Forward one mapped stream item to the run's consumer.
@@ -487,16 +726,19 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
         if request.model != "default" && !safe_model(&request.model) {
             return Err(ExecutionError::Unauthorized);
         }
+        let staged = stage_attachments(&self.workspace, &request.attachments)?;
+        let prompt = prompt_with_attachments(&request.prompt, &staged);
         let mut command = Command::new(&self.binary);
         // Shares `provider_argv` with the sandboxed runtime, so dev cannot drift
         // into invoking a provider differently from production.
         command.args(provider_argv(
             &request.provider,
-            &request.prompt,
+            &prompt,
             &request.model,
             request.briefing.as_deref(),
             request.effort.as_deref(),
             request.fast,
+            &image_paths(&staged),
         ));
         let mut child = command
             .current_dir(&self.workspace)
@@ -778,7 +1020,10 @@ impl SandboxedProviderCliRuntime {
         workdir: &Path,
         binary: &str,
         handle: &str,
-    ) -> Vec<String> {
+        staged: &[StagedAttachment],
+    ) -> Result<Vec<String>, ExecutionError> {
+        let prompt = prompt_with_attachments(&request.prompt, staged);
+        let _ = workdir;
         let mut argv = vec![
             "--tenant".into(),
             format!("org:{}/user:{}", request.org_id, request.user_id),
@@ -806,13 +1051,14 @@ impl SandboxedProviderCliRuntime {
         argv.push(binary.to_owned());
         argv.extend(provider_argv(
             &request.provider,
-            &request.prompt,
+            &prompt,
             &request.model,
             request.briefing.as_deref(),
             request.effort.as_deref(),
             request.fast,
+            &image_paths(staged),
         ));
-        argv
+        Ok(argv)
     }
 
     /// The full spawn argv: the privileged cap-helper (production, keeps the
@@ -825,7 +1071,10 @@ impl SandboxedProviderCliRuntime {
         workdir: &Path,
         binary: &str,
         handle: &str,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, ExecutionError> {
+        // Staged HERE: the workdir exists by now and belongs to this run, which
+        // is the only place a path for these files can honestly be chosen.
+        let staged = stage_attachments(workdir, &request.attachments)?;
         let mut argv = match &self.cap_helper {
             Some(helper) => vec![helper.clone()],
             None => vec![
@@ -833,8 +1082,8 @@ impl SandboxedProviderCliRuntime {
                 self.launcher.to_string_lossy().into_owned(),
             ],
         };
-        argv.extend(self.launcher_args(request, lane, workdir, binary, handle));
-        argv
+        argv.extend(self.launcher_args(request, lane, workdir, binary, handle, &staged)?);
+        Ok(argv)
     }
 
     /// The launcher argv up to and including `-- <binary>`, without the
@@ -850,7 +1099,7 @@ impl SandboxedProviderCliRuntime {
         workdir: &Path,
         binary: &str,
         handle: &str,
-    ) -> Vec<String> {
+    ) -> Result<Vec<String>, ExecutionError> {
         let mut argv = match &self.cap_helper {
             Some(helper) => vec![helper.clone()],
             None => vec![
@@ -858,14 +1107,16 @@ impl SandboxedProviderCliRuntime {
                 self.launcher.to_string_lossy().into_owned(),
             ],
         };
-        let full = self.launcher_args(request, lane, workdir, binary, handle);
+        // Discovery carries no attachments: it asks the provider for metadata,
+        // not for work on a file.
+        let full = self.launcher_args(request, lane, workdir, binary, handle, &[])?;
         let cut = full
             .iter()
             .position(|arg| arg == "--")
             .map(|index| index + 2)
             .unwrap_or(full.len());
         argv.extend(full.into_iter().take(cut));
-        argv
+        Ok(argv)
     }
 }
 
@@ -955,8 +1206,9 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
             briefing: None,
             effort: None,
             fast: false,
+            attachments: Vec::new(),
         };
-        let mut argv = self.launch_prefix(&probe, lane, &workdir, &binary, &handle);
+        let mut argv = self.launch_prefix(&probe, lane, &workdir, &binary, &handle)?;
         argv.push("app-server".into());
 
         // Run the probe on a TASK that owns the child, the lane guard and the
@@ -1013,7 +1265,7 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
         if std::fs::create_dir_all(&workdir).is_err() {
             return Err(ExecutionError::Isolation); // guard drops -> releases lane
         }
-        let argv = self.launch_argv(&request, lane, &workdir, &binary, &handle);
+        let argv = self.launch_argv(&request, lane, &workdir, &binary, &handle)?;
         let mut child = match Command::new(&argv[0])
             .args(&argv[1..])
             // Defence in depth for §5.4: the server's own HOME/config must not
@@ -1242,6 +1494,7 @@ mod tests {
             briefing: None,
             effort: None,
             fast: false,
+            attachments: Vec::new(),
         }
     }
 
@@ -1342,7 +1595,7 @@ mod tests {
             Some("/opt/neev/bin/neev-agent-caplaunch".into()),
         );
         let lane = Lane { slot: "a", uid: 61000 };
-        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/data/agents/run-x"), "/usr/local/bin/claude", HANDLE);
+        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/data/agents/run-x"), "/usr/local/bin/claude", HANDLE).unwrap();
         // The privileged fixed-command helper is argv[0] — NOT python and NOT the
         // provider; the server execs only the helper (keeps itself unprivileged).
         assert_eq!(argv[0], "/opt/neev/bin/neev-agent-caplaunch");
@@ -1358,7 +1611,7 @@ mod tests {
         let runtime = sandboxed();
         let lane = Lane { slot: "a", uid: 61000 };
         let workdir = Path::new("/var/lib/neev-native/agents/run-abc");
-        let argv = runtime.launch_argv(&request("draft"), lane, workdir, "/usr/local/bin/claude", HANDLE);
+        let argv = runtime.launch_argv(&request("draft"), lane, workdir, "/usr/local/bin/claude", HANDLE).unwrap();
         // First tokens are the launcher, never the provider binary.
         assert_eq!(argv[0], "python3");
         assert!(argv[1].ends_with("neev_agent_launch.py"));
@@ -1382,7 +1635,7 @@ mod tests {
     #[test]
     fn each_provider_is_invoked_in_its_own_dialect() {
         // Claude Code is headless via `-p` with a streaming output format.
-        let claude = provider_argv("claude", "draft", "default", None, None, false);
+        let claude = provider_argv("claude", "draft", "default", None, None, false, &[]);
         assert_eq!(&claude[..2], &["-p".to_string(), "draft".to_string()]);
         assert!(claude.contains(&"stream-json".to_string()));
         assert!(claude.contains(&"--include-partial-messages".to_string()));
@@ -1390,7 +1643,7 @@ mod tests {
         // Codex is a SUBCOMMAND with `--json`, verified against `codex exec
         // --help` in the deployed agent image. It rejects Claude's flags
         // outright, which is why sharing them produced no output at all.
-        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        let codex = provider_argv("codex", "draft", "default", None, None, false, &[]);
         // Speed is always stated, so the codex argv carries its two config
         // overrides even when nothing was switched on.
         assert_eq!(
@@ -1405,20 +1658,199 @@ mod tests {
         assert!(!codex.contains(&"--output-format".to_string()));
 
         // Model selection is spelled differently by each.
-        assert!(provider_argv("codex", "d", "gpt-5", None, None, false)
+        assert!(provider_argv("codex", "d", "gpt-5", None, None, false, &[])
             .windows(2)
             .any(|pair| pair == ["-m".to_string(), "gpt-5".to_string()]));
-        assert!(provider_argv("claude", "d", "opus", None, None, false)
+        assert!(provider_argv("claude", "d", "opus", None, None, false, &[])
             .windows(2)
             .any(|pair| pair == ["--model".to_string(), "opus".to_string()]));
         // "default" means the provider's own default: nothing is passed.
-        assert!(!provider_argv("codex", "d", "default", None, None, false).contains(&"-m".to_string()));
+        assert!(!provider_argv("codex", "d", "default", None, None, false, &[]).contains(&"-m".to_string()));
+    }
+
+    /// Pinned Codex (`rust-v0.155.1`) exposes `-i, --image <FILE>...` on `exec`,
+    /// verified against the live binary's own `--help`. This pins our side of
+    /// that contract: one flag per file, paths as separate argv entries, and
+    /// never folded into the prompt or a shell string — a name containing a
+    /// comma or a space must not split into two paths.
+    #[test]
+    fn codex_takes_staged_images_as_separate_arguments() {
+        let images = vec![
+            "/w/attachments/a b.png".to_string(),
+            "/w/attachments/c,d.png".to_string(),
+        ];
+        let argv = provider_argv("codex", "draft", "default", None, None, false, &images);
+        let positions: Vec<usize> = argv
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| *value == "--image")
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(positions.len(), 2);
+        assert_eq!(argv[positions[0] + 1], "/w/attachments/a b.png");
+        assert_eq!(argv[positions[1] + 1], "/w/attachments/c,d.png");
+        // The prompt is untouched: the files are arguments, not text.
+        assert!(argv.contains(&"draft".to_string()));
+        assert!(!argv.iter().any(|value| value.contains("attachments/a b.png")
+            && value.contains("draft")));
+    }
+
+    /// The dev runtime reuses ONE workspace for every run, so staging has to be
+    /// repeatable. It was not: the second run's `create_dir` hit the first
+    /// run's directory and failed, which would have surfaced as a run that
+    /// simply refused to start with attachments.
+    #[cfg(unix)]
+    #[test]
+    fn staging_twice_into_one_workspace_keeps_the_runs_apart() {
+        let root = std::env::temp_dir().join(format!(
+            "neev-stage-twice-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let one = vec![RunAttachment {
+            key: "11111111-1111-4111-8111-111111111111".into(),
+            file_name: "notes.txt".into(),
+            bytes: b"first run".to_vec(),
+            is_image: false,
+        }];
+        let two = vec![RunAttachment {
+            key: "11111111-1111-4111-8111-111111111111".into(),
+            file_name: "notes.txt".into(),
+            bytes: b"second run".to_vec(),
+            is_image: false,
+        }];
+        let first = stage_attachments(&root, &one).expect("first run stages");
+        let second = stage_attachments(&root, &two).expect("second run must also stage");
+        // Same key, same name, same workspace — and still two distinct files
+        // with their own bytes, so neither run can read the other's.
+        assert_ne!(first[0].path, second[0].path);
+        assert_eq!(std::fs::read(&first[0].path).unwrap(), b"first run");
+        assert_eq!(std::fs::read(&second[0].path).unwrap(), b"second run");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An existing staging root is reused only when it is a real directory.
+    /// Tolerating `AlreadyExists` without looking would let a symlink planted
+    /// at that path redirect every staged file out of the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn staging_refuses_a_symlink_where_its_directory_belongs() {
+        let root = std::env::temp_dir().join(format!(
+            "neev-stage-link-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let elsewhere = root.with_extension("target");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join(ATTACHMENT_DIR)).unwrap();
+        let attachments = vec![RunAttachment {
+            key: "11111111-1111-4111-8111-111111111111".into(),
+            file_name: "notes.txt".into(),
+            bytes: b"x".to_vec(),
+            is_image: false,
+        }];
+        assert!(
+            matches!(
+                stage_attachments(&root, &attachments),
+                Err(ExecutionError::Unauthorized)
+            ),
+            "a symlink must not be followed out of the workspace"
+        );
+        // And nothing was written through it.
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    /// Claude has no image switch. Its attachments are staged files it opens
+    /// with its own read tool, so inventing a flag here would fail the run.
+    /// Two files with the SAME name in one turn must both arrive, with their
+    /// own bytes. Keying the leaf is what makes that true; without it `O_EXCL`
+    /// would fail the run, and without `O_EXCL` one would silently win.
+    #[cfg(unix)]
+    #[test]
+    fn duplicate_names_are_staged_as_distinct_files() {
+        let root = std::env::temp_dir().join(format!(
+            "neev-stage-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let attachments = vec![
+            RunAttachment {
+                key: "11111111-1111-4111-8111-111111111111".into(),
+                file_name: "notes.txt".into(),
+                bytes: b"first".to_vec(),
+                is_image: false,
+            },
+            RunAttachment {
+                key: "22222222-2222-4222-8222-222222222222".into(),
+                file_name: "notes.txt".into(),
+                bytes: b"second".to_vec(),
+                is_image: false,
+            },
+        ];
+        // Under a hostile umask: 0o077 would mask the creating mode down to
+        // 0600 and silently lock the dropped run uid out of its own files.
+        let previous = unsafe { libc::umask(0o077) };
+        let staged = stage_attachments(&root, &attachments).unwrap();
+        unsafe { libc::umask(previous) };
+        assert_eq!(staged.len(), 2);
+        assert_ne!(staged[0].path, staged[1].path);
+        assert_eq!(std::fs::read(&staged[0].path).unwrap(), b"first");
+        assert_eq!(std::fs::read(&staged[1].path).unwrap(), b"second");
+        // Displayed by their own names, staged under keyed leaves.
+        assert_eq!(staged[0].file_name, "notes.txt");
+        assert!(staged[0].path.contains("11111111"));
+        // Nothing lands at the workdir root, where a name like AGENTS.md would
+        // be read as configuration.
+        assert!(!root.join("notes.txt").exists());
+        assert!(!root.join("AGENTS.md").exists());
+        assert!(!root.join(ATTACHMENT_DIR).join("AGENTS.md").exists());
+        // The staging directory must be traversable by the dropped run uid,
+        // which is NOT the uid that created it. Its protection is the 0700 run
+        // root above, not this mode.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(root.join(ATTACHMENT_DIR))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "a 0700 child would block the dropped run uid");
+        let file_mode = std::fs::metadata(&staged[0].path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o644);
+        // And the paths are named in the prompt, or the agent cannot open them.
+        let prompt = prompt_with_attachments("look", &staged);
+        assert!(prompt.contains(&staged[0].path));
+        assert!(prompt.contains(&staged[1].path));
+        assert!(prompt.ends_with("look"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn claude_is_given_no_image_flag() {
+        let images = vec!["/w/attachments/a.png".to_string()];
+        let argv = provider_argv("claude", "draft", "default", None, None, false, &images);
+        assert!(!argv.contains(&"--image".to_string()));
+        assert!(!argv.contains(&"-i".to_string()));
     }
 
     #[test]
     fn effort_and_speed_reach_each_cli_in_its_own_spelling() {
         // Claude: a native flag for effort, settings for speed.
-        let claude = provider_argv("claude", "draft", "opus", None, Some("xhigh"), true);
+        let claude = provider_argv("claude", "draft", "opus", None, Some("xhigh"), true, &[]);
         assert!(claude
             .windows(2)
             .any(|pair| pair == ["--effort".to_string(), "xhigh".to_string()]));
@@ -1429,7 +1861,7 @@ mod tests {
 
         // Codex: config overrides for both. `service_tier` and
         // `features.fast_mode` are the two the docs pair together.
-        let codex = provider_argv("codex", "draft", "default", None, Some("minimal"), true);
+        let codex = provider_argv("codex", "draft", "default", None, Some("minimal"), true, &[]);
         assert!(codex.windows(2).any(|pair| pair
             == [
                 "-c".to_string(),
@@ -1448,12 +1880,12 @@ mod tests {
         // A run that inherited fast mode from a config file the reader cannot
         // see would be spending their money on a setting they never chose, so
         // the OFF state is stated rather than omitted.
-        let claude = provider_argv("claude", "draft", "opus", None, None, false);
+        let claude = provider_argv("claude", "draft", "opus", None, None, false, &[]);
         assert!(claude
             .windows(2)
             .any(|pair| pair
                 == ["--settings".to_string(), "{\"fastMode\":false}".to_string()]));
-        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        let codex = provider_argv("codex", "draft", "default", None, None, false, &[]);
         assert!(codex
             .windows(2)
             .any(|pair| pair == ["-c".to_string(), "service_tier=\"default\"".to_string()]));
@@ -1466,9 +1898,9 @@ mod tests {
     fn an_unset_effort_passes_no_effort_argument_at_all() {
         // Unset means the provider's own default, which is not the same as any
         // level we could name for them.
-        let claude = provider_argv("claude", "draft", "default", None, None, false);
+        let claude = provider_argv("claude", "draft", "default", None, None, false, &[]);
         assert!(!claude.contains(&"--effort".to_string()));
-        let codex = provider_argv("codex", "draft", "default", None, None, false);
+        let codex = provider_argv("codex", "draft", "default", None, None, false, &[]);
         assert!(!codex
             .iter()
             .any(|arg| arg.starts_with("model_reasoning_effort")));
@@ -1480,7 +1912,7 @@ mod tests {
             "python3", "/l/launch.py", ProviderBinaries::claude("/usr/local/bin/claude"), "/w", vec![], None,
         );
         let lane = Lane { slot: "b", uid: 61001 };
-        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/w/run-x"), "/usr/local/bin/claude", HANDLE);
+        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/w/run-x"), "/usr/local/bin/claude", HANDLE).unwrap();
         assert!(!argv.contains(&"--provider-ipv4".to_string()));
     }
 
@@ -1521,7 +1953,7 @@ mod tests {
             Path::new("/w/run-x"),
             &binary,
             HANDLE,
-        );
+        ).unwrap();
         let sep = argv.iter().position(|a| a == "--").expect("separator");
         assert_eq!(argv[sep + 1], "/usr/local/bin/codex");
         // The launcher is told which provider scope to open credentials for.
@@ -1564,7 +1996,7 @@ mod tests {
             Path::new("/data/agents/run-x"),
             "/usr/local/bin/claude",
             HANDLE,
-        );
+        ).unwrap();
         let sep = argv.iter().position(|a| a == "--").expect("separator");
         // The handle is a LAUNCHER argument: the privileged side opens the
         // volume and mounts it as HOME. The provider argv never sees it.
@@ -1589,14 +2021,14 @@ mod tests {
             workdir,
             "/usr/local/bin/claude",
             HANDLE,
-        );
+        ).unwrap();
         assert!(!argv.contains(&"--model".to_string()));
 
         // A chosen model is actually passed through — the UI's selection is what
         // runs, so the session's stored model is not a decorative label.
         let mut chosen = request("hi");
         chosen.model = "claude-opus-4-1".into();
-        let argv = runtime.launch_argv(&chosen, lane, workdir, "/usr/local/bin/claude", HANDLE);
+        let argv = runtime.launch_argv(&chosen, lane, workdir, "/usr/local/bin/claude", HANDLE).unwrap();
         let position = argv
             .iter()
             .position(|arg| arg == "--model")
@@ -1731,6 +2163,7 @@ mod tests {
                 briefing: None,
                 effort: None,
                 fast: false,
+                attachments: Vec::new(),
             })
             .await
             .unwrap();

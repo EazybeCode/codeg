@@ -68,6 +68,19 @@ import {
   type UpdateNeevAgentSessionInput,
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls } from "./native-agent-controls"
+import {
+  AttachmentButton,
+  AttachmentTrayView,
+  handleAttachmentPaste,
+  SentAttachments,
+  useAttachmentTray,
+  useFileDrop,
+  type AttachmentUploader,
+} from "./native-attachments"
+import {
+  NEEV_MAX_ATTACHMENTS,
+  uploadSessionAttachment,
+} from "@/lib/neev-attachments"
 import { NativeContentNotFoundError } from "@/lib/neev-content-client"
 import type { ContentNavigationGuard } from "./native-content"
 import { useNativeAuth } from "./native-auth-provider"
@@ -516,7 +529,8 @@ function NewAgentChat({
   // An unsent draft is work; leaving must ask, exactly as a document does.
   useEffect(() => {
     onRequestNavigationGuard?.((action) => {
-      if (!draftRef.current.trim()) return action()
+      // Staged files are unsent work too, even with nothing typed.
+      if (!draftRef.current.trim() && !stagedRef.current) return action()
       if (window.confirm(t("discardDraftPrompt"))) action()
     })
     return () => onRequestNavigationGuard?.((action) => action())
@@ -529,10 +543,27 @@ function NewAgentChat({
   // and been told there is no runtime, and a provider the user must connect.
   const ready = connection?.state === "connected"
   const unknown = connectionsLoading || connections === null
+  // There is nothing to upload TO until the first message creates the session,
+  // so files wait here and go up inside `start` — after the session exists and
+  // before the turn that carries them.
+  const attachments = useAttachmentTray({ upload: null, disabled: !ready })
+  const drop = useFileDrop({
+    onFiles: (files) => void attachments.add(files),
+    disabled: !ready,
+  })
+  const stagedRef = useRef(false)
+  stagedRef.current = !attachments.empty
 
   async function start() {
     const prompt = draft.trim()
-    if (!prompt || busy || !auth.session || !ready) return
+    if (
+      (!prompt && attachments.empty) ||
+      busy ||
+      !auth.session ||
+      !ready ||
+      attachments.uploading
+    )
+      return
     setBusy(true)
     setError(null)
     // One id per draft: a retry after a lost response returns the SAME session
@@ -543,7 +574,11 @@ function NewAgentChat({
         created.current ??
         (await createAgentSession(
           {
-            title: deriveSessionTitle(prompt),
+            // A chat started from files alone takes its name from the first
+            // of them: a real thing the person chose, not a placeholder.
+            title: deriveSessionTitle(
+              prompt || attachments.items[0]?.name || ""
+            ),
             nodeId,
             provider,
             model: settings.model,
@@ -558,9 +593,26 @@ function NewAgentChat({
       // exists, and must never be created a second time for this draft.
       created.current = session
       setFrozen(true)
-      await startAgentTurn(session.id, prompt, auth.session.csrf, auth.signal)
+      // Now there is something to upload to. Each file goes up once: a retry
+      // after a failed turn reuses the keys rather than sending the bytes again.
+      const keys = await attachments.takeKeys((file, signal) =>
+        uploadSessionAttachment(
+          session.id,
+          file,
+          auth.session!.csrf,
+          signal ?? auth.signal
+        )
+      )
+      await startAgentTurn(
+        session.id,
+        prompt,
+        auth.session.csrf,
+        auth.signal,
+        keys
+      )
       setDraft("")
       draftRef.current = ""
+      attachments.clear()
       onCreated(session)
     } catch (cause) {
       auth.handleAuthorityError(cause)
@@ -582,6 +634,7 @@ function NewAgentChat({
           // The work was done. Hand over to the transcript that holds it.
           setDraft("")
           draftRef.current = ""
+          attachments.clear()
           onCreated(session)
           return
         }
@@ -610,7 +663,13 @@ function NewAgentChat({
         </div>
       </div>
       <div className="shrink-0 px-4 pb-3 pt-2 sm:px-8 sm:pb-5">
-        <div className="mx-auto w-full max-w-[832px] rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+        <div
+          {...drop.handlers}
+          className={cn(
+            "mx-auto w-full max-w-[832px] rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring",
+            drop.over && "border-primary ring-1 ring-primary"
+          )}
+        >
           <NativeError error={error} />
           {created.current && error !== null && (
             <p role="status" className="text-xs text-muted-foreground">
@@ -642,14 +701,41 @@ function NewAgentChat({
             maxLength={NEEV_MAX_PROMPT_CHARS}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (!sendsOnEnter(event, { busy })) return
+              if (!sendsOnEnter(event, { busy: busy || attachments.uploading }))
+                return
               event.preventDefault()
               void start()
+            }}
+            onPaste={(event) => {
+              if (!ready) return
+              handleAttachmentPaste(
+                event,
+                (files) => void attachments.add(files)
+              )
             }}
             placeholder={t("agentPromptPlaceholder")}
             className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none disabled:opacity-60 sm:text-sm"
           />
+          {drop.over && (
+            <p
+              role="status"
+              className="px-1 pb-1 text-xs text-muted-foreground"
+            >
+              {t("attachmentDrop")}
+            </p>
+          )}
+          <AttachmentTrayView tray={attachments} disabled={busy} />
+          {attachments.uploading && (
+            <p role="status" className="px-1 text-xs text-muted-foreground">
+              {t("attachmentsPending")}
+            </p>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-2">
+            <AttachmentButton
+              disabled={!ready || busy}
+              remaining={NEEV_MAX_ATTACHMENTS - attachments.items.length}
+              onFiles={(files) => void attachments.add(files)}
+            />
             {/* Picking a model under another provider's heading re-points this
                 whole draft — nothing has been created yet, so it is still a
                 choice about which chat to start rather than an edit to one. */}
@@ -671,7 +757,12 @@ function NewAgentChat({
               </Button>
               <Button
                 size="sm"
-                disabled={!draft.trim() || busy || !ready}
+                disabled={
+                  (!draft.trim() && attachments.empty) ||
+                  busy ||
+                  !ready ||
+                  attachments.uploading
+                }
                 onClick={() => void start()}
               >
                 {t("send")}
@@ -1016,7 +1107,31 @@ function AgentSessionView({
   // controls are showing the session's own row, which is the normal state.
   const [desired, setDesired] = useState<NeevAgentSettings | null>(null),
     [applying, setApplying] = useState(false)
+  // Files for the next turn, uploaded to THIS session as they arrive. A key is
+  // only ever staged into a run by a turn that carries it, so dropping a file
+  // sends nothing to any provider.
+  const uploader: AttachmentUploader | null = auth.session
+    ? (file, signal) =>
+        uploadSessionAttachment(
+          session.id,
+          file,
+          auth.session!.csrf,
+          signal ?? auth.signal
+        )
+    : null
+  const attachments = useAttachmentTray({
+    upload: uploader,
+    disabled: session.archived || !auth.session,
+  })
+  const drop = useFileDrop({
+    onFiles: (files) => void attachments.add(files),
+    disabled: session.archived,
+  })
   const draftRef = useRef("")
+  // Read by the navigation guard, which is installed once and must not close
+  // over an old tray.
+  const stagedRef = useRef(false)
+  stagedRef.current = !attachments.empty
   const history = useRef<HTMLOListElement>(null)
   // Opening a different chat must not carry this one's unsaved choice into it,
   // and an answer to a request made for the old one must not be applied to the
@@ -1027,6 +1142,11 @@ function AgentSessionView({
     openSession.current = session.id
     setDesired(null)
     setApplying(false)
+    // Files were uploaded to the chat they were dropped into. Carrying them
+    // across would attach them to a different conversation, so the tray is
+    // emptied and anything still uploading is abandoned.
+    attachments.clear()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.id])
   // What the current attachment has streamed so far, readable from the settle
   // handler without making it depend on the rendered value.
@@ -1040,7 +1160,8 @@ function AgentSessionView({
   useEffect(() => {
     if (!onRequestNavigationGuard) return
     const guard: ContentNavigationGuard = (action) => {
-      if (draftRef.current) setPending(() => action)
+      // Staged files are unsent work too: leaving would discard them.
+      if (draftRef.current || stagedRef.current) setPending(() => action)
       else action()
     }
     onRequestNavigationGuard(guard)
@@ -1234,7 +1355,17 @@ function AgentSessionView({
   }
 
   async function send() {
-    if (!draft.trim() || sending || running || !auth.session) return
+    // Files alone are a complete ask: the prompt goes up empty and the server
+    // is what says so, rather than this composer inventing a sentence.
+    const prompt = draft.trim()
+    if (
+      (!prompt && attachments.empty) ||
+      sending ||
+      running ||
+      attachments.uploading ||
+      !auth.session
+    )
+      return
     setSending(true)
     setError(null)
     // The run reads the SESSION, so an unstored choice would be silently
@@ -1246,15 +1377,21 @@ function AgentSessionView({
       return
     }
     try {
+      // Bytes first: a turn only carries files the server already has, and a
+      // failure here keeps both the prompt and the files for another try.
+      const keys = await attachments.takeKeys()
       const started = await startAgentTurn(
         session.id,
-        draft.trim(),
+        prompt,
         auth.session.csrf,
-        auth.signal
+        auth.signal,
+        keys
       )
       setTurns((old) => [...(old ?? []), started.turn])
       setDraft("")
       draftRef.current = ""
+      // Only now: the turn owns them from here.
+      attachments.clear()
       // A refused turn comes back already settled with its real reason; only a
       // genuinely running one gets an attachment.
       if (started.turn.status === "running") {
@@ -1375,6 +1512,8 @@ function AgentSessionView({
             <li key={turn.id} className="mx-auto w-full max-w-3xl space-y-3">
               <div className="rounded-lg bg-muted/60 px-4 py-3 text-sm">
                 {turn.prompt}
+                {/* What the run was actually given, from the stored turn. */}
+                <SentAttachments attachments={turn.attachments} />
               </div>
               <div className="space-y-2">
                 {turn.runId === activeRun ? (
@@ -1423,7 +1562,21 @@ function AgentSessionView({
         }}
         className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-4 pb-3 pt-2 sm:px-8 sm:pb-5 sm:pt-3"
       >
-        <div className="rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+        <div
+          {...drop.handlers}
+          className={cn(
+            "rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring",
+            drop.over && "border-primary ring-1 ring-primary"
+          )}
+        >
+          {drop.over && (
+            <p
+              role="status"
+              className="px-1 pb-1 text-xs text-muted-foreground"
+            >
+              {t("attachmentDrop")}
+            </p>
+          )}
           <label className="block">
             <span className="sr-only">{t("agentPrompt")}</span>
             <textarea
@@ -1436,13 +1589,33 @@ function AgentSessionView({
                 setDraft(event.target.value)
               }}
               onKeyDown={(event) => {
-                if (!sendsOnEnter(event, { busy: sending || running })) return
+                if (
+                  !sendsOnEnter(event, {
+                    busy: sending || running || attachments.uploading,
+                  })
+                )
+                  return
                 event.preventDefault()
                 void send()
+              }}
+              onPaste={(event) => {
+                if (session.archived) return
+                handleAttachmentPaste(
+                  event,
+                  (files) => void attachments.add(files)
+                )
               }}
               className="h-20 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-2 text-base outline-none sm:text-sm"
             />
           </label>
+          <AttachmentTrayView tray={attachments} disabled={session.archived} />
+          {/* Sending is held while bytes are still going up; say so rather than
+              leaving a Send button that does nothing when pressed. */}
+          {attachments.uploading && (
+            <p role="status" className="px-1 text-xs text-muted-foreground">
+              {t("attachmentsPending")}
+            </p>
+          )}
           <NativeError error={error} />
           {!ready && (
             <p role="status" className="px-1 text-xs text-muted-foreground">
@@ -1465,6 +1638,11 @@ function AgentSessionView({
             <Bot
               aria-hidden
               className="size-3.5 shrink-0 text-muted-foreground"
+            />
+            <AttachmentButton
+              disabled={sending || running || session.archived || !ready}
+              remaining={NEEV_MAX_ATTACHMENTS - attachments.items.length}
+              onFiles={(files) => void attachments.add(files)}
             />
             {/* The provider is immutable here — a turn may not contradict its
                 session's, and a team holder's id is derived from it — so only
@@ -1525,7 +1703,8 @@ function AgentSessionView({
                 running ||
                 session.archived ||
                 !ready ||
-                !draft.trim()
+                attachments.uploading ||
+                (!draft.trim() && attachments.empty)
               }
             >
               <ArrowUp aria-hidden />
@@ -1551,6 +1730,7 @@ function AgentSessionView({
                 setPending(null)
                 setDraft("")
                 draftRef.current = ""
+                attachments.clear()
                 action?.()
               }}
             >

@@ -950,6 +950,88 @@ pub(crate) async fn begin_turn(
     text: &str,
     request_id: Option<&str>,
 ) -> Result<(AgentTurn, bool), ContentError> {
+    begin_turn_with_attachments(state, actor, session_id, text, request_id, &[]).await
+}
+
+/// Prove every key was uploaded to THIS session before it is bound to the turn.
+///
+/// An Agent Chat is private to its owner, so an attachment that came from
+/// somewhere else would be a file crossing into a conversation it was never
+/// uploaded to. The check shares the turn's transaction, so a refusal takes the
+/// turn with it rather than leaving a run pointing at files it may not have.
+async fn owned_attachments(
+    tx: &sea_orm::DatabaseTransaction,
+    actor: &OrgContext,
+    session_id: &str,
+    keys: &[String],
+) -> Result<(), ContentError> {
+    if keys.len() > crate::neev::content::attachment::MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(ContentError::Invalid);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total: i64 = 0;
+    for key in keys {
+        if !seen.insert(key.as_str()) {
+            return Err(ContentError::Invalid);
+        }
+        let row = db::one(
+            tx,
+            "SELECT session_id,byte_length FROM neev_attachments WHERE org_id=$1 AND key=$2",
+            vec![actor.org_id.into(), key.clone().into()],
+        )
+        .await?
+        .ok_or(ContentError::Invalid)?;
+        let owner: Option<String> = row.try_get("", "session_id").map_err(database_error)?;
+        if owner.as_deref() != Some(session_id) {
+            return Err(ContentError::Invalid);
+        }
+        // The run's ceiling, applied where the turn becomes durable: a turn
+        // that could never be executed must not be storable either.
+        total += row
+            .try_get::<i64>("", "byte_length")
+            .map_err(database_error)?;
+        if total > crate::neev::content::attachment::MAX_RUN_ATTACHMENT_BYTES {
+            return Err(ContentError::Quota);
+        }
+    }
+    Ok(())
+}
+
+/// The attachment keys already recorded against a turn, in stored order.
+async fn recorded_attachments(
+    tx: &sea_orm::DatabaseTransaction,
+    actor: &OrgContext,
+    session_id: &str,
+    sequence: i64,
+) -> Result<Vec<String>, ContentError> {
+    let rows = tx
+        .query_all(db::statement(
+            tx,
+            "SELECT attachment_key FROM neev_attachment_refs WHERE org_id=$1 AND turn_session_id=$2 AND turn_sequence=$3 ORDER BY position",
+            vec![actor.org_id.into(), session_id.to_owned().into(), sequence.into()],
+        ))
+        .await
+        .map_err(database_error)?;
+    let mut keys = Vec::with_capacity(rows.len());
+    for row in &rows {
+        keys.push(row.try_get("", "attachment_key").map_err(database_error)?);
+    }
+    Ok(keys)
+}
+
+/// Begin a turn that carries uploaded files.
+///
+/// The references are written in the SAME transaction as the turn row, so the
+/// caller can read them back and know the run it is about to start is described
+/// by durable storage rather than by the request that asked for it.
+pub(crate) async fn begin_turn_with_attachments(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+    text: &str,
+    request_id: Option<&str>,
+    attachment_keys: &[String],
+) -> Result<(AgentTurn, bool), ContentError> {
     let text = prompt(text)?;
     let request_id = request_id
         .map(|value| org::normalize_request_id(value).map_err(|_| ContentError::Invalid))
@@ -961,6 +1043,15 @@ pub(crate) async fn begin_turn(
     // objection about the session's current state.
     if let Some(request) = request_id.as_deref() {
         if let Some(existing) = turn_by_request(&tx, actor.org_id, session_id, request).await? {
+            // A replay must mean the same ask, files included: a retry that
+            // swapped them is a conflict, not a replay. (The prompt itself is
+            // already pinned upstream — the only caller that passes a request
+            // id hashes it into the message receipt first.)
+            if recorded_attachments(&tx, actor, session_id, existing.sequence).await?
+                != attachment_keys
+            {
+                return Err(ContentError::Conflict);
+            }
             session::recheck(&tx, actor, state.clock.now_unix()).await?;
             tx.commit().await.map_err(database_error)?;
             // `false` = this caller did NOT create the turn, so it must not
@@ -1011,6 +1102,17 @@ pub(crate) async fn begin_turn(
             found.model.clone().into(),
             now.into(),
         ],
+    )
+    .await?;
+    // Atomic with the turn: the row and the files it carries commit together,
+    // or neither does.
+    owned_attachments(&tx, actor, session_id, attachment_keys).await?;
+    crate::neev::content::attachment::link_to_turn(
+        &tx,
+        actor,
+        session_id,
+        sequence,
+        attachment_keys,
     )
     .await?;
     // The session's own timestamp/revision move so the sidebar reorders and a

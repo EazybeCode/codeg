@@ -96,6 +96,7 @@ fn run_request() -> RunRequest {
         briefing: None,
         effort: None,
         fast: false,
+        attachments: Vec::new(),
     }
 }
 

@@ -847,3 +847,187 @@ async fn content_body_collection_reuses_the_thirty_second_deadline() {
         json!({"code":"request_timeout"})
     );
 }
+
+/// Eight magic bytes and some padding: a real PNG as far as the sniffer is
+/// concerned, which is the only opinion the server has about a file's type.
+fn png(fill: u8) -> Vec<u8> {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    bytes.extend_from_slice(&[fill; 24]);
+    bytes
+}
+
+impl Harness {
+    /// Upload one file to a conversation and return its stored metadata.
+    async fn upload(&self, path: &str, name: &str, bytes: Vec<u8>) -> axum_test::TestResponse {
+        self.server
+            .post(path)
+            .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+            .add_header(header::COOKIE, &self.cookies)
+            .add_header("x-neev-csrf", &self.csrf)
+            .add_header("x-neev-filename", name)
+            .bytes(Bytes::from(bytes))
+            .await
+    }
+}
+
+/// The whole chat-attachment round trip over HTTP: upload, send, reload, retry.
+///
+/// This is the path a person actually drives — drag a file in, send, come back
+/// tomorrow — so it is tested end to end rather than a layer at a time. What it
+/// pins down: the files survive the reload in the order they were sent, a send
+/// with files and no words is recorded as a real ask instead of an empty row,
+/// the bytes are downloadable by someone authorized for the chat, and a retry
+/// means the same thing it meant the first time or is refused.
+#[tokio::test]
+async fn chat_attachments_persist_reload_and_replay() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let upload_path = format!("/api/neev/chats/{chat_id}/attachments");
+
+    let first = h.upload(&upload_path, "notes.png", png(1)).await;
+    first.assert_status(StatusCode::CREATED);
+    let first: Value = first.json();
+    assert_eq!(first["fileName"], "notes.png");
+    assert_eq!(first["contentType"], "image/png");
+    assert_eq!(first["byteLength"], 32);
+    let second: Value = h
+        .upload(&upload_path, "second.png", png(2))
+        .await
+        .json();
+    let (key_a, key_b) = (
+        first["key"].as_str().unwrap().to_owned(),
+        second["key"].as_str().unwrap().to_owned(),
+    );
+
+    // Files with no words: the durable body is the server's own sentence, so
+    // the room sees an ask rather than a blank message with chips under it.
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let send = json!({
+        "requestId": request_id.clone(),
+        "expectedAuthRevision": "1",
+        "body": "",
+        "attachmentKeys": [key_a.clone(), key_b.clone()],
+    });
+    let sent = h
+        .mutation("POST", &format!("/api/neev/chats/{chat_id}/messages"), send.clone())
+        .await;
+    sent.assert_status(StatusCode::CREATED);
+    let message: Value = sent.json();
+    assert_eq!(message["body"], "Please review the attached files.");
+    let carried = message["attachments"].as_array().unwrap();
+    assert_eq!(carried.len(), 2);
+    assert_eq!(carried[0]["key"], json!(key_a.clone()));
+    assert_eq!(carried[0]["fileName"], "notes.png");
+    assert_eq!(carried[1]["key"], json!(key_b.clone()));
+
+    // A reload reads the same thing from storage, in the same order.
+    let listed = h
+        .server
+        .get(&format!("/api/neev/chats/{chat_id}/messages"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    listed.assert_status_ok();
+    let listed: Value = listed.json();
+    let items = listed["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["attachments"], message["attachments"]);
+
+    // The bytes themselves are served to someone authorized for the chat, and
+    // never as something the browser will render in our own origin.
+    let download = h
+        .server
+        .get(&format!("/api/neev/attachments/{key_a}"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    download.assert_status_ok();
+    assert_eq!(download.header(header::CONTENT_DISPOSITION), "attachment");
+    assert_eq!(download.as_bytes().as_ref(), png(1).as_slice());
+
+    // The same request id and the same files replays the same message.
+    let replay = h
+        .mutation("POST", &format!("/api/neev/chats/{chat_id}/messages"), send)
+        .await;
+    replay.assert_status(StatusCode::CREATED);
+    assert_eq!(replay.json::<Value>(), message);
+
+    // The same request id with DIFFERENT files is a different ask wearing one
+    // request id, and is refused rather than quietly replayed.
+    let swapped = h
+        .mutation(
+            "POST",
+            &format!("/api/neev/chats/{chat_id}/messages"),
+            json!({
+                "requestId": request_id,
+                "expectedAuthRevision": "1",
+                "body": "",
+                "attachmentKeys": [key_a.clone()],
+            }),
+        )
+        .await;
+    swapped.assert_status(StatusCode::CONFLICT);
+}
+
+/// A key is not a capability: it names a file in ONE conversation, and the
+/// conversation it belongs to is proved when the message is written, not taken
+/// from the sender's word.
+#[tokio::test]
+async fn a_message_cannot_carry_a_file_from_another_chat() {
+    let h = Harness::new().await;
+    let mine = h.create("chat", None).await;
+    let other = h.create("chat", None).await;
+    let mine_id = mine["id"].as_str().unwrap().to_owned();
+    let other_id = other["id"].as_str().unwrap().to_owned();
+    let elsewhere: Value = h
+        .upload(
+            &format!("/api/neev/chats/{other_id}/attachments"),
+            "other.png",
+            png(3),
+        )
+        .await
+        .json();
+    let key = elsewhere["key"].as_str().unwrap().to_owned();
+
+    let refused = h
+        .mutation(
+            "POST",
+            &format!("/api/neev/chats/{mine_id}/messages"),
+            json!({
+                "requestId": uuid::Uuid::new_v4().to_string(),
+                "expectedAuthRevision": "1",
+                "body": "look at this",
+                "attachmentKeys": [key.clone()],
+            }),
+        )
+        .await;
+    assert_safe_invalid(refused);
+
+    // And nothing was written: the refusal took the whole append with it.
+    let listed: Value = h
+        .server
+        .get(&format!("/api/neev/chats/{mine_id}/messages"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await
+        .json();
+    assert!(listed["items"].as_array().unwrap().is_empty());
+}
+
+/// A send with no words and no files is still nothing to say.
+#[tokio::test]
+async fn an_empty_message_without_files_is_still_refused() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap();
+    assert_safe_invalid(
+        h.mutation(
+            "POST",
+            &format!("/api/neev/chats/{chat_id}/messages"),
+            json!({
+                "requestId": uuid::Uuid::new_v4().to_string(),
+                "expectedAuthRevision": "1",
+                "body": "",
+            }),
+        )
+        .await,
+    );
+}

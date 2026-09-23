@@ -71,6 +71,7 @@ impl Harness {
                 briefing: None,
                 effort: None,
                 fast: false,
+                attachments: Vec::new(),
             })
             .await
             .unwrap();

@@ -128,6 +128,8 @@ pub(super) async fn run(
         briefing: None,
         effort: None,
         fast: false,
+        // The legacy one-shot route carries no attachments.
+        attachments: Vec::new(),
     };
     let mut handle = match state.agents.run(request).await {
         Ok(handle) => handle,

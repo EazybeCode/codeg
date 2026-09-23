@@ -57,6 +57,19 @@ import {
   type NeevAgentTurn,
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls, reconcileAgentSettings } from "./native-agent-controls"
+import {
+  AttachmentButton,
+  AttachmentTrayView,
+  handleAttachmentPaste,
+  SentAttachments,
+  useAttachmentTray,
+  useFileDrop,
+  type AttachmentUploader,
+} from "./native-attachments"
+import {
+  NEEV_MAX_ATTACHMENTS,
+  uploadChatAttachment,
+} from "@/lib/neev-attachments"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNeevMessageStream } from "@/hooks/use-neev-message-stream"
 import { useNativeAuth } from "./native-auth-provider"
@@ -88,6 +101,17 @@ type ChatMode = "agent" | "team"
  * message to their team instead of invoking, and only find out afterwards.
  */
 type ComposerPreference = { mode: ChatMode; provider: NeevAgentProvider }
+
+/** Whether two sends carry the same files, in the same order. */
+function sameKeys(
+  left: readonly string[] | undefined,
+  right: readonly string[]
+): boolean {
+  return (
+    (left ?? []).length === right.length &&
+    (left ?? []).every((key, index) => key === right[index])
+  )
+}
 
 function preferenceKey(owner: string, chatId: string): string {
   return `neev:chat-composer:${owner}:${chatId}`
@@ -233,6 +257,32 @@ function Chat({
     // level only Codex advertises can never ride along into Claude.
     [desired, setDesired] = useState<NeevAgentSettings | null>(null),
     [applying, setApplying] = useState(false)
+  /**
+   * Files staged for the next send, uploaded to THIS chat as they arrive.
+   *
+   * Uploading on arrival is what makes a preview honest — the bytes are already
+   * where the run will read them — and it is not a transmission to any
+   * provider: an attachment only reaches an agent when a turn that carries its
+   * key is actually started. The attachment inherits the chat's audience, so it
+   * is exactly as private as the conversation it was dropped into.
+   */
+  const uploader: AttachmentUploader | null = auth.session
+    ? (file, signal) =>
+        uploadChatAttachment(
+          resource.id,
+          file,
+          auth.session!.csrf,
+          signal ?? auth.signal
+        )
+    : null
+  const attachments = useAttachmentTray({
+    upload: uploader,
+    disabled: resource.archived || !auth.session,
+  })
+  const drop = useFileDrop({
+    onFiles: (files) => void attachments.add(files),
+    disabled: resource.archived || !auth.session,
+  })
   // A new conversation starts in agent mode; an existing one opens the way
   // this person last used it. Either is one click from the other.
   const [mode, setMode] = useState<ChatMode>(fresh ? "agent" : "team")
@@ -302,8 +352,15 @@ function Chat({
     cursors = useRef(new Map<string, string | null>()),
     turnsRef = useRef<NeevAgentTurn[]>([]),
     // A retry after a lost response reuses the id, so one ask cannot post two
-    // prompts — the same idempotency the plain composer uses.
-    invokeRequest = useRef<string | null>(null)
+    // prompts — the same idempotency the plain composer uses. What the id was
+    // minted FOR is kept with it: the server hashes the prompt and the keys
+    // into the receipt, so re-using an id after removing a file or editing the
+    // words is a permanent conflict rather than a retry.
+    invokeRequest = useRef<{
+      id: string
+      prompt: string
+      keys: readonly string[]
+    } | null>(null)
   // Push delivery replaces the interval while it is genuinely live; every other
   // state keeps polling, so a dropped or unavailable stream still delivers.
   const stream = useNeevMessageStream({
@@ -324,6 +381,12 @@ function Chat({
     if (!draftRef.current && !retry.current)
       pinned.current = resource.authRevision
   }, [resource])
+  // A staged file is unsent work in exactly the way typed text is, so leaving
+  // with one asks the same question.
+  useEffect(() => {
+    onDirtyChange?.(!!draftRef.current || !attachments.empty)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachments.empty])
   // Merge server rows into the thread by id, ordered by sequence. Callers never
   // invent a message: everything here came back from the server.
   function absorb(incoming: NativeMessage[]) {
@@ -689,7 +752,11 @@ function Chat({
   // settles — so what everyone sees is what was actually persisted. No private
   // Agent Chat history travels with the prompt; only this prompt does.
   async function askAgent() {
-    if (!draft.trim() || !scope.isCurrent()) return
+    // Files and no words is a complete ask. The prompt goes up empty and the
+    // server says what such a turn was asked to do — this composer does not
+    // invent a sentence and attribute it to the person who sent it.
+    const prompt = draft.trim()
+    if ((!prompt && attachments.empty) || !scope.isCurrent()) return
     // Pressing Enter with no runtime bound must SAY so. Failing silently here
     // is how a prompt disappears into nothing, and the draft stays put so
     // nothing typed is lost to it.
@@ -701,9 +768,15 @@ function Chat({
     // a run underneath it would race: the turn could launch against the
     // configuration being replaced, which is precisely the turn the reader was
     // configuring.
-    if (agentBusy || saving || applying || latest.archived || !auth.session)
+    if (
+      agentBusy ||
+      saving ||
+      applying ||
+      latest.archived ||
+      attachments.uploading ||
+      !auth.session
+    )
       return
-    const prompt = draft.trim()
     // The run reads the HOLDER, so an unstored choice would be ignored by the
     // very turn it was chosen for. Store it first, and if that fails do not
     // invoke: the prompt stays exactly where it was typed, with the reason
@@ -712,8 +785,22 @@ function Chat({
     setAgentBusy(true)
     setAgentText("")
     setError(null)
-    invokeRequest.current ??= crypto.randomUUID()
     try {
+      // Bytes first: a key only exists once the server has the file, so an ask
+      // can never mention a file that is not there. A failure here leaves the
+      // prompt and the files exactly where they are, so pressing Send again is
+      // a retry rather than a second ask.
+      const keys = await attachments.takeKeys()
+      if (!scope.isCurrent()) return
+      // The same ask keeps its id; a changed one gets a new id, because after a
+      // failure the natural next move is to remove a file or reword — and the
+      // old id would then be refused forever instead of retried.
+      const previous = invokeRequest.current
+      const request =
+        previous && previous.prompt === prompt && sameKeys(previous.keys, keys)
+          ? previous
+          : { id: crypto.randomUUID(), prompt, keys }
+      invokeRequest.current = request
       const invocation = await invokeTeamAgent(
         latest.id,
         {
@@ -726,7 +813,10 @@ function Chat({
           model: shown.model,
           effort: shown.effort,
           fast: shown.fast,
-          requestId: invokeRequest.current,
+          // Persisted onto the message the server posts for this ask, and
+          // staged for the run from that message — one list, not two.
+          attachmentKeys: keys,
+          requestId: request.id,
           expectedAuthRevision: pinned.current,
         },
         auth.session.csrf,
@@ -734,8 +824,11 @@ function Chat({
       )
       if (!scope.isCurrent()) return
       // The ask is durable now: clear the composer and show it immediately.
+      // The files go with it, and only now — the message the server returned is
+      // what carries them from here on.
       invokeRequest.current = null
       clearSent(prompt)
+      attachments.clear()
       retry.current = null
       followHistory.current = true
       absorb([invocation.message])
@@ -768,10 +861,14 @@ function Chat({
     }
   }
   async function send() {
+    // Empty body + files is a message the server accepts and labels; empty
+    // body with nothing attached is not a message at all.
+    const body = draft.trim() ? draft : ""
     if (
-      !draft.trim() ||
+      (!body && attachments.empty) ||
       sending.current ||
       latest.archived ||
+      attachments.uploading ||
       !auth.session ||
       !scope.isCurrent()
     )
@@ -784,12 +881,37 @@ function Chat({
     sending.current = true
     setSaving(true)
     setError(null)
-    const candidate = { body: draft, expectedAuthRevision: pinned.current }
+    let keys: string[]
+    try {
+      // Nothing is posted until every staged file has a key. A failure here
+      // keeps the draft AND the files, so the next Send is the same message
+      // again rather than one with its attachments quietly missing.
+      keys = await attachments.takeKeys()
+    } catch (cause) {
+      if (scope.isCurrent()) {
+        setError(cause)
+        sending.current = false
+        setSaving(false)
+      }
+      return
+    }
+    if (!scope.isCurrent()) {
+      sending.current = false
+      return
+    }
+    const candidate = {
+      body,
+      expectedAuthRevision: pinned.current,
+      attachmentKeys: keys,
+    }
     const previous = retry.current
     const input =
       previous &&
       previous.body === candidate.body &&
-      previous.expectedAuthRevision === candidate.expectedAuthRevision
+      previous.expectedAuthRevision === candidate.expectedAuthRevision &&
+      // Same words but a different set of files is a different message, and
+      // reusing the request id would make the server return the first one.
+      sameKeys(previous.attachmentKeys, keys)
         ? previous
         : { ...candidate, requestId: crypto.randomUUID() }
     retry.current = input
@@ -805,6 +927,7 @@ function Chat({
       absorb([message])
       // Leave the incremental cursor unchanged: another author's intervening messages may exist.
       clearSent(input.body)
+      attachments.clear()
       retry.current = null
       pinned.current = latest.authRevision
       void nameFromFirstMessage(input.body)
@@ -920,8 +1043,12 @@ function Chat({
   // that looks ready and does nothing. The textarea stays writable, as it does
   // for every other busy state; only sending waits, and `gate` below is what
   // actually holds the POST.
-  const composerBusy = saving || agentBusy || applying || loading
-  const sendable = !!draft.trim() && !composerBusy && !latest.archived
+  const composerBusy =
+    saving || agentBusy || applying || loading || attachments.uploading
+  // Files with no words are a complete message; words with a file still
+  // uploading are not, because sending now would drop the file.
+  const sendable =
+    (!!draft.trim() || !attachments.empty) && !composerBusy && !latest.archived
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
       {/* ONE row, title and standing included. It was a title stacked over a
@@ -1115,6 +1242,9 @@ function Chat({
                 />
               )}
               <NativeMarkdown markdown={message.body} />
+              {/* The server's own record of what was sent with this message,
+                  so a reload shows the files rather than a mention of them. */}
+              <SentAttachments attachments={message.attachments} />
             </div>
           </li>
         ))}
@@ -1148,7 +1278,21 @@ function Chat({
         }}
         className="mx-auto w-full max-w-[832px] shrink-0 px-4 pb-3 pt-1 sm:px-8 sm:pb-5"
       >
-        <div className="rounded-xl border bg-background p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring">
+        <div
+          {...drop.handlers}
+          className={cn(
+            "rounded-xl border bg-background p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring",
+            drop.over && "border-primary ring-1 ring-primary"
+          )}
+        >
+          {drop.over && (
+            <p
+              role="status"
+              className="px-1 pb-1 text-xs text-muted-foreground"
+            >
+              {t("attachmentDrop")}
+            </p>
+          )}
           <label className="block">
             <span className="sr-only">{t("message")}</span>
             <textarea
@@ -1172,16 +1316,32 @@ function Chat({
                 draftRef.current = event.target.value
                 setDraft(event.target.value)
                 retry.current = null
-                onDirtyChange?.(!!event.target.value)
+                onDirtyChange?.(!!event.target.value || !attachments.empty)
               }}
               onKeyDown={(event) => {
                 if (!sendsOnEnter(event, { busy: composerBusy })) return
                 event.preventDefault()
                 submit()
               }}
+              onPaste={(event) => {
+                if (latest.archived) return
+                handleAttachmentPaste(
+                  event,
+                  (files) => void attachments.add(files)
+                )
+              }}
               className="h-16 max-h-40 min-h-12 w-full resize-y border-0 bg-transparent px-1 py-1.5 text-base outline-none sm:text-sm"
             />
           </label>
+          <AttachmentTrayView tray={attachments} disabled={latest.archived} />
+          {/* Send is held while bytes are still going up. Holding it without
+              saying so is the "button that looks ready and does nothing" this
+              composer refuses everywhere else. */}
+          {attachments.uploading && (
+            <p role="status" className="px-1 text-xs text-muted-foreground">
+              {t("attachmentsPending")}
+            </p>
+          )}
           <NativeError error={error} />
           {(latest.authRevision !== pinned.current ||
             (error instanceof NativeClientError &&
@@ -1203,6 +1363,11 @@ function Chat({
             <p id={postsNote} className="sr-only">
               {t("agentPostsToTeam")}
             </p>
+            <AttachmentButton
+              disabled={latest.archived || !auth.session}
+              remaining={NEEV_MAX_ATTACHMENTS - attachments.items.length}
+              onFiles={(files) => void attachments.add(files)}
+            />
             {(["agent", "team"] as const).map((value) => (
               <Button
                 key={value}

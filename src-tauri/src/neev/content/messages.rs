@@ -1,4 +1,4 @@
-use super::{access, resources, types::*};
+use super::{access, attachment, resources, types::*};
 use crate::neev::{
     auth::session, db, error::database_error, org, startup::ServerState, types::OrgContext,
 };
@@ -40,6 +40,57 @@ async fn load(
     message(&row)
 }
 
+/// Prove every key was uploaded to THIS chat, then bind it to the message —
+/// inside the transaction that creates the message.
+///
+/// Atomic on purpose: a message sent WITH files must never become durable
+/// without them, and a reference must never outlive a rolled-back message. The
+/// ownership re-check is what stops a sender carrying a file across from
+/// another conversation they happen to be able to read — the attachment would
+/// otherwise inherit THIS chat's audience.
+async fn link_attachments(
+    tx: &DatabaseTransaction,
+    actor: &OrgContext,
+    chat_id: &str,
+    message_id: &str,
+    keys: &[String],
+) -> Result<(), ContentError> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    if keys.len() > attachment::MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(ContentError::Invalid);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total: i64 = 0;
+    for key in keys {
+        if !seen.insert(key.as_str()) {
+            return Err(ContentError::Invalid);
+        }
+        let row = db::one(
+            tx,
+            "SELECT chat_id,byte_length FROM neev_attachments WHERE org_id=$1 AND key=$2",
+            vec![actor.org_id.into(), key.clone().into()],
+        )
+        .await?
+        .ok_or(ContentError::Invalid)?;
+        let owner: Option<String> = row.try_get("", "chat_id").map_err(database_error)?;
+        if owner.as_deref() != Some(chat_id) {
+            return Err(ContentError::Invalid);
+        }
+        // The same ceiling the run enforces, applied where the files become
+        // durable: a message that could never be sent to an agent must not be
+        // storable either, or the thread accumulates sends nothing can act on.
+        total += row
+            .try_get::<i64>("", "byte_length")
+            .map_err(database_error)?;
+        if total > attachment::MAX_RUN_ATTACHMENT_BYTES {
+            return Err(ContentError::Quota);
+        }
+    }
+    attachment::link_to_message(tx, actor, message_id, keys).await
+}
+
 pub(crate) async fn append(
     state: &ServerState,
     actor: &OrgContext,
@@ -48,17 +99,58 @@ pub(crate) async fn append(
     expected_auth_revision: i64,
     body: &str,
 ) -> Result<Message, ContentError> {
+    append_with_attachments(
+        state,
+        actor,
+        chat_id,
+        request_id,
+        expected_auth_revision,
+        body,
+        &[],
+    )
+    .await
+}
+
+/// Append a message that carries uploaded files.
+///
+/// The keys are part of the idempotency hash, so a retry of the same request id
+/// replays the same message, and a retry that changed the files is a conflict
+/// rather than a second, quietly different meaning for one request id.
+pub(crate) async fn append_with_attachments(
+    state: &ServerState,
+    actor: &OrgContext,
+    chat_id: &str,
+    request_id: &str,
+    expected_auth_revision: i64,
+    body: &str,
+    attachment_keys: &[String],
+) -> Result<Message, ContentError> {
     if body.is_empty() || body.len() > 32768 || expected_auth_revision < 1 {
         return Err(ContentError::Invalid);
     }
+    if attachment_keys.len() > attachment::MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(ContentError::Invalid);
+    }
     let request = org::normalize_request_id(request_id).map_err(|_| ContentError::Invalid)?;
-    let hash = org::digest_parts(&[
+    let tenant = actor.org_id.to_string();
+    let revision = expected_auth_revision.to_string();
+    // The files are part of what the request MEANT, so a retry that changed
+    // them is a conflict rather than a replay of a different send. Appended
+    // only when there are any: a send without files has to hash exactly as it
+    // did before attachments existed, or every receipt already in storage would
+    // start reading as a conflict.
+    let attached = attachment_keys.join(",");
+    let mut parts = vec![
         "content.message.append",
-        &actor.org_id.to_string(),
+        tenant.as_str(),
         chat_id,
-        &expected_auth_revision.to_string(),
+        revision.as_str(),
         body,
-    ]);
+    ];
+    if !attachment_keys.is_empty() {
+        parts.push(attached.as_str());
+    }
+    let hash = org::digest_parts(&parts);
     let tx = resources::begin(state, actor).await?;
     access::lock_resources(&tx, actor, chat_id, false).await?;
     let chat = access::authorized(&tx, actor, chat_id, false).await?;
@@ -106,6 +198,9 @@ pub(crate) async fn append(
         ],
     )
     .await?;
+    // Before the receipt: if a key does not belong here the whole append rolls
+    // back, so no request id is ever spent on a message that was refused.
+    link_attachments(&tx, actor, chat_id, &id, attachment_keys).await?;
     resources::record_receipt(&tx, actor, "content.message.append", &request, &hash, &id).await?;
     let result = load(&tx, actor.org_id, chat_id, &id).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;

@@ -19,6 +19,15 @@ pub(crate) struct Reference {
 
 const FAILURE_GUIDANCE: &str = "Native content verification failed. Require --database NAME --schema NAME --confirm-isolated and dedicated verifier environment; inspect the isolated restore privately.";
 
+/// Attachment rows read per query.
+///
+/// A tenant may hold twenty thousand uploads, and a snapshot holds every
+/// tenant's. The references all end up in the manifest either way — that is
+/// what the manifest is — but the DATABASE is asked for them a page at a time,
+/// so one archive cannot make the verifier build an unbounded result set inside
+/// its read-only transaction.
+const ATTACHMENT_PAGE: usize = 500;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VerificationStage {
     Arguments,
@@ -93,6 +102,52 @@ fn at_stage<T>(
     result.map_err(|error| VerifierFailure::new(stage, error))
 }
 
+/// Prove a side-car blob is byte-for-byte what its row claims.
+///
+/// `read_image` and `read_attachment` hand back whatever is on disk — unlike
+/// `read`, which is told the length and digest to expect and checks them
+/// itself. So the comparison happens here. A blob the snapshot LOST fails
+/// earlier, at the read; a blob that was truncated or rewritten between export
+/// and restore reads back fine and fails only this, which is the whole reason
+/// the digest is stored alongside the row.
+fn verify_side_car(bytes: &[u8], reference: &Reference) -> Result<(), VerifierFailure> {
+    use sha2::{Digest, Sha256};
+    if bytes.len() as i64 != reference.byte_length
+        || format!("{:x}", Sha256::digest(bytes)) != reference.sha256
+    {
+        return Err(VerifierFailure::new(
+            VerificationStage::BlobRead,
+            ContentError::Storage,
+        ));
+    }
+    Ok(())
+}
+
+/// One `(org_id, key, sha256, byte_length)` row as a manifest reference.
+fn side_car_reference(row: &sea_orm::QueryResult) -> Result<Reference, VerifierFailure> {
+    let text = |column: &str| {
+        at_stage(
+            row.try_get::<String>("", column)
+                .map_err(|_| ContentError::Storage),
+            VerificationStage::ReferenceExtraction,
+        )
+    };
+    Ok(Reference {
+        org_id: at_stage(
+            row.try_get::<i32>("", "org_id")
+                .map_err(|_| ContentError::Storage),
+            VerificationStage::ReferenceExtraction,
+        )?,
+        key: text("key")?,
+        sha256: text("sha256")?,
+        byte_length: at_stage(
+            row.try_get::<i64>("", "byte_length")
+                .map_err(|_| ContentError::Storage),
+            VerificationStage::ReferenceExtraction,
+        )?,
+    })
+}
+
 pub(crate) async fn verify_snapshot(
     database: &DatabaseConnection,
     store: &BlobStore,
@@ -106,7 +161,6 @@ pub(super) async fn verify_snapshot_staged(
     database: &DatabaseConnection,
     store: &BlobStore,
 ) -> Result<Manifest, VerifierFailure> {
-    use sha2::{Digest, Sha256};
     // Never use db::begin (SQLite write intent), initialize, or application startup.
     let tx = if database.get_database_backend() == DbBackend::Postgres {
         database
@@ -195,26 +249,41 @@ pub(super) async fn verify_snapshot_staged(
             VerificationStage::ReferenceQuery,
         )?;
         for row in image_rows {
-            let extract = |column: &str| {
-                row.try_get::<i64>("", column)
-                    .map_err(|_| ContentError::Storage)
-            };
-            let text = |column: &str| {
-                row.try_get::<String>("", column)
-                    .map_err(|_| ContentError::Storage)
-            };
-            image_refs.push(Reference {
-                org_id: at_stage(
-                    row.try_get("", "org_id").map_err(|_| ContentError::Storage),
-                    VerificationStage::ReferenceExtraction,
-                )?,
-                key: at_stage(text("key"), VerificationStage::ReferenceExtraction)?,
-                sha256: at_stage(text("sha256"), VerificationStage::ReferenceExtraction)?,
-                byte_length: at_stage(
-                    extract("byte_length"),
-                    VerificationStage::ReferenceExtraction,
-                )?,
-            });
+            image_refs.push(side_car_reference(&row)?);
+        }
+    }
+    // schema15+ binds uploaded files to a chat or an Agent Chat session in
+    // neev_attachments, stored as separate `.att` blobs. Without this pass a
+    // snapshot whose attachment bytes never made it — or arrived truncated —
+    // verified as healthy on the strength of its rows alone, and the loss was
+    // discovered only when someone opened the conversation.
+    let mut attachment_refs = Vec::new();
+    if schema_version >= 15 {
+        // Keyset paging over the primary key. `LIMIT/OFFSET` would re-scan the
+        // prefix for every page, and a plain unbounded SELECT is the thing this
+        // is avoiding.
+        let (mut cursor_org, mut cursor_key) = (0i32, String::new());
+        loop {
+            let page = at_stage(
+                tx.query_all(db::statement(
+                    &tx,
+                    &format!("SELECT org_id,key,sha256,byte_length FROM neev_attachments WHERE org_id>$1 OR (org_id=$2 AND key>$3) ORDER BY org_id,key LIMIT {ATTACHMENT_PAGE}"),
+                    vec![cursor_org.into(), cursor_org.into(), cursor_key.clone().into()],
+                ))
+                .await
+                .map_err(|_| ContentError::Storage),
+                VerificationStage::ReferenceQuery,
+            )?;
+            let exhausted = page.len() < ATTACHMENT_PAGE;
+            for row in page {
+                let reference = side_car_reference(&row)?;
+                cursor_org = reference.org_id;
+                cursor_key.clone_from(&reference.key);
+                attachment_refs.push(reference);
+            }
+            if exhausted {
+                break;
+            }
         }
     }
     at_stage(
@@ -243,17 +312,25 @@ pub(super) async fn verify_snapshot_staged(
             store.read_image(blob.org_id, &blob.key).await,
             VerificationStage::BlobRead,
         )?;
-        if bytes.len() as i64 != blob.byte_length
-            || format!("{:x}", Sha256::digest(&bytes)) != blob.sha256
-        {
-            return Err(VerifierFailure::new(
-                VerificationStage::BlobRead,
-                ContentError::Storage,
-            ));
-        }
+        verify_side_car(&bytes, blob)?;
     }
-    // Account for image blobs in the manifest so restore verification is complete.
+    // Paging returned them in key order already; sorted again so the manifest
+    // does not depend on a restored database's collation, exactly as the other
+    // two passes do.
+    attachment_refs.sort_by(|a, b| (a.org_id, &a.key).cmp(&(b.org_id, &b.key)));
+    for blob in &attachment_refs {
+        let bytes = at_stage(
+            store.read_attachment(blob.org_id, &blob.key).await,
+            VerificationStage::BlobRead,
+        )?;
+        verify_side_car(&bytes, blob)?;
+    }
+    // Account for image and attachment blobs in the manifest so restore
+    // verification is complete: the manifest is what an export and a restore
+    // are compared on, so a file present in one and missing in the other has to
+    // change it.
     blobs.extend(image_refs);
+    blobs.extend(attachment_refs);
     Ok(Manifest {
         schema_version,
         blobs,

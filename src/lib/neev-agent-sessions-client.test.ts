@@ -113,8 +113,9 @@ describe("agent session wire validation", () => {
       expect(() => parseAgentSession({ ...session, nodeId: bad })).toThrow(
         NativeClientError
       )
-    expect(parseAgentTurn(turn)).toEqual(turn)
-    expect(parseAgentTurn(settled)).toEqual(settled)
+    // A server that sends no `attachments` means a turn that carried none.
+    expect(parseAgentTurn(turn)).toEqual({ ...turn, attachments: [] })
+    expect(parseAgentTurn(settled)).toEqual({ ...settled, attachments: [] })
   })
 
   it("refuses sessions and turns that could not have come from the server", () => {
@@ -141,7 +142,7 @@ describe("agent session wire validation", () => {
 
   it("refuses a started-turn envelope whose run id is not the turn's", () => {
     expect(parseStartedTurn({ turn, runId: RUN_ID })).toEqual({
-      turn,
+      turn: { ...turn, attachments: [] },
       runId: RUN_ID,
     })
     expect(() =>

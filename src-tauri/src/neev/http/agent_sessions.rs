@@ -26,12 +26,16 @@ use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use super::content::{canonical_uuid, safe_path, safe_query};
+use super::content::{
+    attachment_dtos, canonical_uuid, requested_keys, safe_path, safe_query, sent_text,
+    AttachmentDto,
+};
 use super::{catalog, private_json, ApiError};
-use crate::neev::agents::execution::RunRequest;
+use crate::neev::agents::execution::{RunAttachment, RunRequest};
 use crate::neev::agents::runs::{self, RunSignal};
 use crate::neev::agents::sessions::{self, AgentSession, AgentTurn, SessionInput, TurnStatus};
 use crate::neev::agents::{intents, supervisor, types::Provider};
+use crate::neev::content::attachment::{self, Owner, StoredAttachment};
 use crate::neev::content::types::Page;
 use crate::neev::startup::ServerState;
 use crate::neev::types::OrgContext;
@@ -86,6 +90,9 @@ struct TurnDto {
     /// no tools — a client seeding from this must not have to tell "no trace"
     /// apart from "field missing".
     activity: Vec<crate::neev::agents::activity::ActivityItem>,
+    /// The files this turn was started with, in send order. Always present,
+    /// `[]` when none — same reason as `activity`.
+    attachments: Vec<AttachmentDto>,
     status: &'static str,
     error_code: Option<String>,
     provider: String,
@@ -218,6 +225,10 @@ struct MoveSessionInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StartTurnInput {
     prompt: String,
+    /// Keys of files already uploaded to THIS session, in send order. Defaulted
+    /// so a client that predates attachments posts the body it always did.
+    #[serde(default)]
+    attachment_keys: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -259,7 +270,7 @@ fn session_dto(session: AgentSession) -> SessionDto {
     }
 }
 
-fn turn_dto(turn: AgentTurn) -> TurnDto {
+fn turn_dto(turn: AgentTurn, attachments: Vec<AttachmentDto>) -> TurnDto {
     TurnDto {
         id: turn.id,
         session_id: turn.session_id,
@@ -268,6 +279,7 @@ fn turn_dto(turn: AgentTurn) -> TurnDto {
         prompt: turn.prompt,
         response: turn.response,
         activity: turn.activity,
+        attachments,
         status: turn.status.name(),
         error_code: turn.error_code,
         provider: turn.provider,
@@ -278,11 +290,58 @@ fn turn_dto(turn: AgentTurn) -> TurnDto {
     }
 }
 
-fn turn_page_dto(page: Page<AgentTurn>) -> TurnPageDto {
-    TurnPageDto {
-        items: page.items.into_iter().map(turn_dto).collect(),
-        next_after: page.next_after,
+/// A page of turns with the files each was started with. One lookup for the
+/// page, so a long history is not a round trip per turn.
+async fn turn_page_dto(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+    page: Page<AgentTurn>,
+) -> Result<TurnPageDto, ApiError> {
+    let sequences: Vec<i64> = page.items.iter().map(|turn| turn.sequence).collect();
+    let mut carried = attachment::for_turns(state, actor, session_id, &sequences).await?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for turn in page.items {
+        let attachments = attachment_dtos(carried.remove(&turn.sequence).unwrap_or_default());
+        items.push(turn_dto(turn, attachments));
     }
+    Ok(TurnPageDto {
+        items,
+        next_after: page.next_after,
+    })
+}
+
+/// The files one persisted turn carries, read back from its references.
+async fn turn_attachments(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+    sequence: i64,
+) -> Result<Vec<StoredAttachment>, ApiError> {
+    let mut carried = attachment::for_turns(state, actor, session_id, &[sequence]).await?;
+    Ok(carried.remove(&sequence).unwrap_or_default())
+}
+
+/// Hand the runtime the bytes, not a path: only it knows where this run's
+/// working directory is, and a path chosen here would point at nothing.
+fn run_attachments(resolved: Vec<attachment::RunAttachment>) -> Vec<RunAttachment> {
+    resolved
+        .into_iter()
+        .map(|item| {
+            let is_image = item.is_image();
+            RunAttachment {
+                key: item.key,
+                file_name: item.file_name,
+                bytes: item.bytes,
+                is_image,
+            }
+        })
+        .collect()
+}
+
+/// The keys a set of persisted references actually names, in stored order.
+fn stored_keys(stored: &[StoredAttachment]) -> Vec<String> {
+    stored.iter().map(|item| item.key.clone()).collect()
 }
 
 /// The connection-store provider for a stored session provider name.
@@ -432,9 +491,10 @@ pub(super) async fn list_turns(
         .map(catalog::canonical_revision)
         .transpose()
         .map_err(|_| ApiError::NotFound)?;
-    Ok(private_json(turn_page_dto(
-        sessions::turns(&state, &actor, &id, after).await?,
-    )))
+    let page = sessions::turns(&state, &actor, &id, after).await?;
+    Ok(private_json(
+        turn_page_dto(&state, &actor, &id, page).await?,
+    ))
 }
 
 /// Start a turn. The prompt is persisted FIRST, so a refusal by the runtime is
@@ -449,7 +509,19 @@ pub(super) async fn start_turn(
     canonical_uuid(&session_id)?;
     let (input, actor) =
         catalog::organization_mutation::<StartTurnInput>(&state, request, TURN_BODY_LIMIT).await?;
+    let keys = requested_keys(&input.attachment_keys)?;
+    let prompt = sent_text(input.prompt, keys.len());
     let session = sessions::get(&state, &actor, &session_id).await?;
+    // Resolved BEFORE the turn exists: an unreadable key, one uploaded to
+    // another conversation, or a set over the per-turn budget is a plain
+    // refusal here rather than a turn that has to be settled as failed.
+    let resolved = attachment::resolve_for_run(
+        &state,
+        &actor,
+        Owner::Session(&session_id),
+        &keys,
+    )
+    .await?;
     // Context is gathered BEFORE the new turn exists so it cannot include
     // itself, and only completed turns contribute (§ `conversation_prompt`).
     let history = sessions::recent_turns(&state, &actor, &session_id).await?;
@@ -463,8 +535,24 @@ pub(super) async fn start_turn(
         None => None,
     };
     // A saved-session turn carries no request id, so this caller is always
-    // its creator.
-    let (turn, _created) = sessions::begin_turn(&state, &actor, &session_id, &input.prompt, None).await?;
+    // its creator. The references commit with the turn row.
+    let (turn, _created) =
+        sessions::begin_turn_with_attachments(&state, &actor, &session_id, &prompt, None, &keys)
+            .await?;
+    // The run is described by STORAGE, not by the request: the references just
+    // committed are read back and required to be the set that was resolved. A
+    // mismatch settles the turn instead of launching against the wrong files.
+    let carried = turn_attachments(&state, &actor, &session_id, turn.sequence).await?;
+    if stored_keys(&carried) != keys {
+        runs::settle_refusal(&state, &turn.run_id, "unavailable").await?;
+        let settled = sessions::turn_by_run(&state, &actor, &turn.run_id).await?;
+        let mut response = private_json(StartedTurnDto {
+            run_id: settled.run_id.clone(),
+            turn: turn_dto(settled, attachment_dtos(carried)),
+        });
+        *response.status_mut() = StatusCode::CREATED;
+        return Ok(response);
+    }
     let composed = sessions::conversation_prompt(&history, &turn.prompt);
     // Best effort: a run must not fail because its orientation could not be
     // read. Without it the agent answers about the sandbox it woke up in.
@@ -491,6 +579,11 @@ pub(super) async fn start_turn(
         // makes it a setting rather than something to re-pick each time.
         effort: session.effort.clone(),
         fast: session.fast,
+        // The bytes behind the references this turn committed. The runtime
+        // stages them inside its own working directory; nothing here guesses a
+        // path, and a run that cannot stage them fails rather than mentioning
+        // files it does not have.
+        attachments: run_attachments(resolved),
     };
     match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -507,7 +600,7 @@ pub(super) async fn start_turn(
             );
             let mut response = private_json(StartedTurnDto {
                 run_id: turn.run_id.clone(),
-                turn: turn_dto(turn),
+                turn: turn_dto(turn, attachment_dtos(carried)),
             });
             *response.status_mut() = StatusCode::CREATED;
             Ok(response)
@@ -521,7 +614,7 @@ pub(super) async fn start_turn(
             let settled = sessions::turn_by_run(&state, &actor, &turn.run_id).await?;
             let mut response = private_json(StartedTurnDto {
                 run_id: settled.run_id.clone(),
-                turn: turn_dto(settled),
+                turn: turn_dto(settled, attachment_dtos(carried)),
             });
             *response.status_mut() = StatusCode::CREATED;
             Ok(response)
@@ -1144,6 +1237,11 @@ struct TeamInvokeInput {
     fast: bool,
     request_id: String,
     expected_auth_revision: String,
+    /// Keys of files already uploaded to THIS chat, in send order. They hang on
+    /// the invoker's team-visible MESSAGE — the ask and its files are one thing
+    /// the room can see — and the run is fed from those persisted references.
+    #[serde(default)]
+    attachment_keys: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1317,19 +1415,36 @@ pub(super) async fn team_invoke(
     canonical_uuid(&input.request_id)?;
     let expected = catalog::canonical_revision(&input.expected_auth_revision)?;
     let provider = provider_of(&input.provider).ok_or(ApiError::Invalid)?;
+    let keys = requested_keys(&input.attachment_keys)?;
+    let prompt = sent_text(input.prompt, keys.len());
+    // Resolved before anything is written: a key from another chat, one the
+    // caller may not read, or a set over the per-turn budget refuses here
+    // rather than after the ask is already team-visible.
+    let resolved =
+        attachment::resolve_for_run(&state, &actor, Owner::Chat(&chat_id), &keys).await?;
 
-    // 1. The ask becomes team-visible first. This also proves write access to
-    //    the chat and applies the org's message quota, so an unauthorized or
-    //    over-quota invocation never reaches the runtime.
-    let prompt_message = crate::neev::content::messages::append(
+    // 1. The ask becomes team-visible first, with its files bound to it in the
+    //    same transaction. This also proves write access to the chat and
+    //    applies the org's message quota, so an unauthorized or over-quota
+    //    invocation never reaches the runtime.
+    let prompt_message = crate::neev::content::messages::append_with_attachments(
         &state,
         &actor,
         &chat_id,
         &input.request_id,
         expected,
-        &input.prompt,
+        &prompt,
+        &keys,
     )
     .await?;
+    // What the run is fed comes from the PERSISTED message, never from the
+    // request: a retry that resolved to an earlier message carries that
+    // message's files, and a key the append did not record cannot be smuggled
+    // into this turn.
+    let carried = super::content::message_attachments(&state, &actor, &prompt_message.id).await?;
+    if stored_keys(&carried) != keys {
+        return Err(ApiError::Conflict);
+    }
 
     // 2. The invoker's own durable holder for this chat + provider.
     // Applied to the holder before anything launches, so the FIRST ask runs at
@@ -1355,11 +1470,15 @@ pub(super) async fn team_invoke(
     // `requestId` makes the whole invocation idempotent — a retry (racing or
     // long after the fact) resolves to the SAME turn and run, so the provider
     // never executes one ask twice and no duplicate reply can be published.
+    // No attachment references on the TURN: these files belong to the chat and
+    // are already recorded on the message the room can see. Referencing them a
+    // second time from a private holder would give one attachment two
+    // audiences.
     let (turn, created) = sessions::begin_turn(
         &state,
         &actor,
         &session.id,
-        &input.prompt,
+        &prompt,
         Some(&input.request_id),
     )
     .await?;
@@ -1373,9 +1492,9 @@ pub(super) async fn team_invoke(
     // (or settle the shared turn as `busy` while the winner is still running).
     if !created {
         let mut response = private_json(TeamInvokeDto {
-            message: super::content::message_dto(prompt_message)?,
+            message: super::content::message_dto(prompt_message, attachment_dtos(carried))?,
             run_id: turn.run_id.clone(),
-            turn: turn_dto(turn),
+            turn: turn_dto(turn, Vec::new()),
         });
         *response.status_mut() = StatusCode::CREATED;
         return Ok(response);
@@ -1411,6 +1530,9 @@ pub(super) async fn team_invoke(
         briefing,
         effort: session.effort.clone(),
         fast: session.fast,
+        // The bytes behind the message's persisted references; the runtime
+        // stages them into its own workdir.
+        attachments: run_attachments(resolved),
     };
     let turn = match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -1435,9 +1557,9 @@ pub(super) async fn team_invoke(
         }
     };
     let mut response = private_json(TeamInvokeDto {
-        message: super::content::message_dto(prompt_message)?,
+        message: super::content::message_dto(prompt_message, attachment_dtos(carried))?,
         run_id: turn.run_id.clone(),
-        turn: turn_dto(turn),
+        turn: turn_dto(turn, Vec::new()),
     });
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
