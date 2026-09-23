@@ -10,7 +10,10 @@ import {
   type AttachmentTray,
   type AttachmentUploader,
 } from "./native-attachments"
-import { NEEV_MAX_ATTACHMENT_BYTES } from "@/lib/neev-attachments"
+import {
+  NEEV_MAX_ATTACHMENT_BYTES,
+  NEEV_MAX_PREVIEW_BYTES,
+} from "@/lib/neev-attachments"
 import { NativeClientError } from "@/lib/neev-client"
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1])
@@ -275,11 +278,82 @@ it("renders what was actually stored, by its key", () => {
       />
     </NextIntlClientProvider>
   )
-  expect(screen.getByRole("img", { name: "diagram.png" })).toHaveAttribute(
-    "src",
-    `/api/neev/attachments/${key(1)}`
-  )
+  // Every attachment is the same compact reference now, image or not: named,
+  // downloadable, and addressed by the key the server gave it.
+  const image = screen.getByRole("link", { name: /diagram\.png/ })
+  expect(image).toHaveAttribute("href", `/api/neev/attachments/${key(1)}`)
+  expect(image).toHaveAttribute("download", "diagram.png")
+  // The thumbnail rides inside that reference and is decorative — the name is
+  // already on the row, so announcing the file twice would only make it longer
+  // to hear.
+  expect(
+    within(image).getByRole("presentation", { hidden: true })
+  ).toHaveAttribute("src", `/api/neev/attachments/${key(1)}`)
   const download = screen.getByRole("link", { name: /notes\.txt/ })
   expect(download).toHaveAttribute("href", `/api/neev/attachments/${key(2)}`)
   expect(download).toHaveAttribute("download", "notes.txt")
+})
+
+it("previews a staged image as data:, never as a blob: the CSP blocks", async () => {
+  // The regression this exists for: previews were object URLs, and the app is
+  // served under `img-src 'self' data:` (neev/http/static_files.rs), so every
+  // one of them was blocked. The element still "loaded" — complete, and
+  // naturalWidth 0 — so it failed as a broken image with nothing on screen
+  // saying why. A data: URL is inside the policy.
+  const created = vi.spyOn(URL, "createObjectURL")
+  const { tray } = mount(async (file) => stored(file.name, 1))
+  await act(async () => {
+    await tray().add([png("shot.png")])
+  })
+  const thumb = await waitFor(() => {
+    const found = document.querySelector("img")
+    expect(found?.getAttribute("src")).toMatch(/^data:image\/png;base64,/)
+    return found!
+  })
+  expect(thumb.getAttribute("src")).not.toMatch(/^blob:/)
+  expect(created).not.toHaveBeenCalled()
+  created.mockRestore()
+})
+
+it("stages a large image without a preview, and still sends it", async () => {
+  // Over the preview bound, so no data: URL is built — encoding megabytes on
+  // the main thread would cost more than the thumbnail is worth. The file is
+  // unaffected: staged, uploaded, and sent exactly as a small one is.
+  // The sniffed type has to stay honest: the first bytes decide, not the name.
+  const bytes = new Uint8Array(NEEV_MAX_PREVIEW_BYTES + 1024)
+  bytes.set(PNG, 0)
+  const file = new File([bytes.buffer], "huge.png", { type: "image/png" })
+  const upload = vi.fn(async (f: File) => stored(f.name, 1))
+  const { tray } = mount(upload)
+  await act(async () => {
+    await tray().add([file])
+  })
+  await waitFor(() => expect(tray().uploading).toBe(false))
+  expect(tray().items[0].previewUrl).toBeNull()
+  expect(document.querySelector("img")).toBeNull()
+  expect(screen.getByText("huge.png")).toBeInTheDocument()
+  expect(await tray().takeKeys()).toEqual([key(1)])
+})
+
+it("says a preview failed instead of quietly drawing a file icon", async () => {
+  // A stored image whose bytes will not decode. Falling back to the plain file
+  // icon here would make a real failure look like an ordinary attachment with
+  // no thumbnail — which is exactly how the CSP breakage stayed invisible.
+  render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <SentAttachments attachments={[stored("broken.png", 1)]} />
+    </NextIntlClientProvider>
+  )
+  const thumb = document.querySelector("img")!
+  await act(async () => {
+    thumb.dispatchEvent(new Event("error"))
+  })
+  expect(
+    await screen.findByText("broken.png could not be previewed.")
+  ).toBeInTheDocument()
+  // Still named, still a working link: the file WAS sent and the agent read it.
+  expect(screen.getByRole("link", { name: /broken\.png/ })).toHaveAttribute(
+    "href",
+    `/api/neev/attachments/${key(1)}`
+  )
 })

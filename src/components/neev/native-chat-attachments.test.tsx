@@ -127,10 +127,11 @@ it("uploads a dropped file and sends the message with its key", async () => {
   await waitFor(() =>
     expect(screen.queryByRole("button", { name: "Remove shot.png" })).toBeNull()
   )
-  expect(await screen.findByRole("img", { name: "shot.png" })).toHaveAttribute(
-    "src",
-    `/api/neev/attachments/${KEY}`
-  )
+  // A compact file reference now, image or not: named, downloadable, and
+  // addressed by the key the server gave it — with the thumbnail inside it.
+  const reference = await screen.findByRole("link", { name: /shot\.png/ })
+  expect(reference).toHaveAttribute("href", `/api/neev/attachments/${KEY}`)
+  expect(reference).toHaveAttribute("download", "shot.png")
 })
 
 it("sends files with no words as empty content plus keys", async () => {

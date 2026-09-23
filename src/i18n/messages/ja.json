@@ -239,7 +239,11 @@
     "attachmentDrop": "ファイルをここにドロップすると添付されます。",
     "attachmentDismiss": "閉じる",
     "attachmentQuota": "{name} を保存できませんでした。組織の添付ファイル容量がいっぱいです。",
-    "attachmentMoreRejected": "他 {number} 件。"
+    "attachmentMoreRejected": "他 {number} 件。",
+    "moreModels": "その他のモデル",
+    "editShortlist": "よく使うモデルを編集",
+    "shortlistHint": "このメニューの上部に最大 {number} 件のモデルを固定できます。",
+    "attachmentPreviewFailed": "{name} はプレビューできませんでした。"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

@@ -239,7 +239,11 @@
     "attachmentDrop": "Dateien hier ablegen, um sie anzuhängen.",
     "attachmentDismiss": "Ausblenden",
     "attachmentQuota": "{name} konnte nicht gespeichert werden: Der Anhangspeicher Ihrer Organisation ist voll.",
-    "attachmentMoreRejected": "Und {number} weitere."
+    "attachmentMoreRejected": "Und {number} weitere.",
+    "moreModels": "Weitere Modelle",
+    "editShortlist": "Kurzliste bearbeiten",
+    "shortlistHint": "Heften Sie bis zu {number} Modelle oben an dieses Menü.",
+    "attachmentPreviewFailed": "{name} konnte nicht als Vorschau angezeigt werden."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

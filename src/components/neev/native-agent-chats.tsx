@@ -13,7 +13,7 @@
 //    a dropped connection can never repeat a prompt's side effects. A run that
 //    cannot be followed is reported as such and needs an explicit new turn.
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useRef, useState } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
 import {
@@ -22,6 +22,7 @@ import {
   ChevronRight,
   Lock,
   MoreHorizontal,
+  PlugZap,
   Plus,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -501,6 +502,9 @@ function NewAgentChat({
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
+  // Per instance: several composers stay mounted at once, so a fixed id would
+  // point every Connect control at the first one's description.
+  const connectNote = useId()
   const [provider, setProvider] = useState<NeevAgentProvider>(initialProvider)
   // Once the session exists it has a provider, and it is the one it was created
   // with. Changing it here would send the next attempt into that session under a
@@ -676,19 +680,6 @@ function NewAgentChat({
               {t("agentChatKept")}
             </p>
           )}
-          {!ready && !unknown && (
-            <div
-              role="status"
-              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm"
-            >
-              <span className="text-muted-foreground">
-                {t("providerNotConnected", { name: provider })}
-              </span>
-              <Button size="sm" variant="outline" onClick={onRequestSettings}>
-                {t("connectProvider")}
-              </Button>
-            </div>
-          )}
           <label className="sr-only" htmlFor="neev-new-agent-chat">
             {t("message")}
           </label>
@@ -752,6 +743,30 @@ function NewAgentChat({
               className="min-w-0 flex-1"
             />
             <div className="flex items-center gap-2">
+              {/* The same compact Connect as every other composer. It was a
+                  full-width banner above the textarea, which put a standing
+                  block of explanation between the heading and the box someone
+                  came here to type in. The state is unchanged — Send is still
+                  held while `ready` is false — only the way it asks. */}
+              {!ready && !unknown && (
+                <>
+                  <p id={connectNote} className="sr-only">
+                    {t("providerNotConnected", { name: provider })}
+                  </p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    aria-describedby={connectNote}
+                    title={t("providerNotConnected", { name: provider })}
+                    className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs font-normal"
+                    onClick={onRequestSettings}
+                  >
+                    <PlugZap aria-hidden className="size-3.5" />
+                    {t("connectProvider")}
+                  </Button>
+                </>
+              )}
               <Button variant="ghost" size="sm" onClick={onCancel}>
                 {n("cancel")}
               </Button>
@@ -1086,6 +1101,9 @@ function AgentSessionView({
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
     n = useTranslations("Native")
+  // Per instance: several composers stay mounted at once, so a fixed id would
+  // point every Connect control at the first one's description.
+  const connectNote = useId()
   const [turns, setTurns] = useState<NeevAgentTurn[] | null>(null),
     [draft, setDraft] = useState(""),
     [error, setError] = useState<unknown>(null),
@@ -1617,21 +1635,12 @@ function AgentSessionView({
             </p>
           )}
           <NativeError error={error} />
-          {!ready && (
+          {/* Agents off for the whole server is not something this person can
+              connect their way out of, so it stays a sentence. Everything that
+              IS actionable is the Connect control in the row below. */}
+          {!runtimeEnabled && (
             <p role="status" className="px-1 text-xs text-muted-foreground">
-              {connectionBlocker()}{" "}
-              <Link
-                href="/settings?section=agents"
-                onClick={(event) => {
-                  if (onRequestSettings) {
-                    event.preventDefault()
-                    onRequestSettings()
-                  }
-                }}
-                className="rounded underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {n("personalAgents")}
-              </Link>
+              {t("agentsOff")}
             </p>
           )}
           <div className="flex min-w-0 items-center gap-2">
@@ -1674,6 +1683,46 @@ function AgentSessionView({
                   ? t("settingsUnsaved")
                   : ""}
             </span>
+            {/* Honest, compact, and the only thing here that fixes it. The
+                sentence and trailing link this replaces sat under the composer
+                whenever the provider was not connected — a full line, every
+                time, saying the state rather than offering the remedy. Send
+                stays disabled either way: nothing here pretends a
+                disconnected provider will run. */}
+            {runtimeEnabled &&
+              connection &&
+              connection.state !== "connected" && (
+                <>
+                  <p id={connectNote} className="sr-only">
+                    {t("providerNotConnected", { name: session.provider })}
+                  </p>
+                  <Button
+                    asChild
+                    size="sm"
+                    variant="outline"
+                    className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs font-normal"
+                  >
+                    <Link
+                      href="/settings?section=agents"
+                      aria-describedby={connectNote}
+                      title={t("providerNotConnected", {
+                        name: session.provider,
+                      })}
+                      onClick={(event) => {
+                        if (onRequestSettings) {
+                          event.preventDefault()
+                          onRequestSettings()
+                        }
+                      }}
+                    >
+                      <PlugZap aria-hidden className="size-3.5" />
+                      {connection.state === "reconnect_required"
+                        ? t("reconnectProvider")
+                        : t("connectProvider")}
+                    </Link>
+                  </Button>
+                </>
+              )}
             {running && (
               <Button
                 type="button"
@@ -1752,11 +1801,6 @@ function AgentSessionView({
       )}
     </section>
   )
-
-  function connectionBlocker() {
-    if (!runtimeEnabled) return t("agentsOff")
-    return t(`connectionState_${connection?.state ?? "unavailable"}`)
-  }
 
   function runStatusLabel() {
     if (running)

@@ -1,4 +1,11 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeAgentChats } from "./native-agent-chats"
@@ -183,16 +190,27 @@ it("creates a saved session with a supported provider and opens it", async () =>
   // The model menu IS the provider choice: one compact menu grouped by
   // provider, every entry read from the catalogue rather than written here.
   await user.click(screen.getByRole("button", { name: "Model" }))
+  // The menu leads with a shortlist — the catalogue's own first few until
+  // someone pins otherwise — and everything else is one submenu away.
   expect(
     within(await screen.findByRole("group", { name: "Claude Code" }))
       .getAllByRole("menuitemradio")
       .map((item) => item.textContent)
+  ).toEqual(["Default", "Haiku", "Sonnet"])
+  await user.click(screen.getByRole("menuitem", { name: "More models" }))
+  const all = await screen.findByRole("menu", { name: "More models" })
+  expect(
+    within(within(all).getByRole("group", { name: "Claude Code" }))
+      .getAllByRole("menuitemradio")
+      .map((item) => item.textContent)
   ).toEqual(["Default", "Haiku", "Sonnet", "Opus"])
   expect(
-    within(screen.getByRole("group", { name: "Codex" }))
+    within(within(all).getByRole("group", { name: "Codex" }))
       .getAllByRole("menuitemradio")
       .map((item) => item.textContent)
   ).toEqual(["Default"])
+  // One Escape: Radix closes the whole menu tree, not just the submenu — the
+  // dialog behind it must survive, because the chat has not been created yet.
   await user.keyboard("{Escape}")
   await user.click(screen.getByRole("button", { name: "Create" }))
   await waitFor(() => expect(bodies).toHaveLength(1))
@@ -640,8 +658,12 @@ it("will not let a disconnected provider be typed into", async () => {
   // Nothing has been created yet, so picking a model under another provider's
   // heading re-points the whole draft rather than editing a session.
   await user.click(screen.getByRole("button", { name: "Model" }))
-  await user.click(
-    within(await screen.findByRole("group", { name: "Codex" })).getByRole(
+  await user.click(screen.getByRole("menuitem", { name: "More models" }))
+  const models = await screen.findByRole("menu", { name: "More models" })
+  // `fireEvent` for a submenu row: Radix holds a submenu open against the
+  // trigger's geometry, and every rect is zero in jsdom.
+  fireEvent.click(
+    within(within(models).getByRole("group", { name: "Codex" })).getByRole(
       "menuitemradio",
       { name: "Default" }
     )

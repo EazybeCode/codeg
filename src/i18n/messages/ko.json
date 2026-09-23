@@ -239,7 +239,11 @@
     "attachmentDrop": "여기에 파일을 놓으면 첨부됩니다.",
     "attachmentDismiss": "닫기",
     "attachmentQuota": "{name}을(를) 저장하지 못했습니다. 조직의 첨부 파일 저장 공간이 가득 찼습니다.",
-    "attachmentMoreRejected": "외 {number}개."
+    "attachmentMoreRejected": "외 {number}개.",
+    "moreModels": "모델 더 보기",
+    "editShortlist": "즐겨찾는 모델 편집",
+    "shortlistHint": "이 메뉴 상단에 최대 {number}개의 모델을 고정할 수 있습니다.",
+    "attachmentPreviewFailed": "{name}을(를) 미리 볼 수 없습니다."
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

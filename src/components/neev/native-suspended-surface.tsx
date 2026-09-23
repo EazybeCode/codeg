@@ -11,7 +11,10 @@ import {
   type ReactNode,
 } from "react"
 import { DialogContent } from "@/components/ui/dialog"
-import { DropdownMenuContent } from "@/components/ui/dropdown-menu"
+import {
+  DropdownMenuContent,
+  DropdownMenuSubContent,
+} from "@/components/ui/dropdown-menu"
 
 const PortalContainer = createContext<HTMLElement | null>(null)
 
@@ -116,5 +119,22 @@ export function NativeDropdownMenuContent(
   const container = useContext(PortalContainer)
   return container ? (
     <DropdownMenuContent {...props} portalContainer={container} />
+  ) : null
+}
+
+/**
+ * A submenu that stays inside its tab, like the menu that opened it.
+ *
+ * Radix portals a submenu independently of its parent content, so a submenu
+ * left to the default container escapes the tab panel: switching tabs would
+ * leave it on screen and clickable over the tab in front, which is the exact
+ * failure `NativeDropdownMenuContent` exists to prevent one level up.
+ */
+export function NativeDropdownMenuSubContent(
+  props: ComponentProps<typeof DropdownMenuSubContent>
+) {
+  const container = useContext(PortalContainer)
+  return container ? (
+    <DropdownMenuSubContent {...props} portalContainer={container} />
   ) : null
 }

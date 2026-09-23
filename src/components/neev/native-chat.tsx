@@ -5,6 +5,7 @@ import {
   ArrowUp,
   Lock,
   MoreHorizontal,
+  PlugZap,
   Sparkles,
   Users,
 } from "lucide-react"
@@ -209,6 +210,9 @@ function Chat({
   // Per instance: every open chat tab stays mounted, so a fixed id here would
   // point every Ask agent toggle at the first chat's description.
   const postsNote = useId()
+  // Same reasoning, for the Connect control's honest description of WHICH
+  // provider is not connected.
+  const connectNote = useId()
   /**
    * Opens when this mount's first metadata read has settled.
    *
@@ -1368,34 +1372,52 @@ function Chat({
               remaining={NEEV_MAX_ATTACHMENTS - attachments.items.length}
               onFiles={(files) => void attachments.add(files)}
             />
-            {(["agent", "team"] as const).map((value) => (
-              <Button
-                key={value}
-                type="button"
-                size="sm"
-                variant={mode === value ? "secondary" : "ghost"}
-                aria-pressed={mode === value}
-                // Both the ask and the reply become team-visible messages, so
-                // the control that does that carries the promise (spec §5.3) —
-                // on hover for a mouse, and as its description for everyone.
-                aria-describedby={value === "agent" ? postsNote : undefined}
-                title={
-                  value === "agent" ? t("agentPostsToTeam") : t("teamChat")
-                }
-                className={cn(
-                  "h-7 shrink-0 rounded-full px-2.5 text-xs",
-                  mode !== value && "opacity-70"
-                )}
-                onClick={() => choose(value)}
-              >
-                {value === "agent" ? (
-                  <Sparkles aria-hidden className="size-3.5" />
-                ) : (
-                  <Users aria-hidden className="size-3.5" />
-                )}
-                {t(value === "agent" ? "askAgent" : "teamChat")}
-              </Button>
-            ))}
+            {/* A segmented pair, not two standing pills. Only the CHOSEN side
+                spells itself out; the other is its icon, with the same
+                accessible name and the same tooltip. Both words were on the
+                row at all times before, and between them they cost more width
+                than the model, the level and the speed control together —
+                while saying something that only changes when it is clicked.
+                Team chat is one keyboard stop away, exactly as it was. */}
+            <div
+              role="group"
+              aria-label={t("agentPanel")}
+              className="flex shrink-0 items-center rounded-full border p-0.5"
+            >
+              {(["agent", "team"] as const).map((value) => (
+                <Button
+                  key={value}
+                  type="button"
+                  size="sm"
+                  variant={mode === value ? "secondary" : "ghost"}
+                  aria-pressed={mode === value}
+                  // The accessible name never collapses with the label: a
+                  // screen reader gets "Team chat" whether or not the word is
+                  // painted.
+                  aria-label={t(value === "agent" ? "askAgent" : "teamChat")}
+                  // Both the ask and the reply become team-visible messages, so
+                  // the control that does that carries the promise (spec §5.3) —
+                  // on hover for a mouse, and as its description for everyone.
+                  aria-describedby={value === "agent" ? postsNote : undefined}
+                  title={
+                    value === "agent" ? t("agentPostsToTeam") : t("teamChat")
+                  }
+                  className="h-6 shrink-0 gap-1.5 rounded-full px-2 text-xs font-normal"
+                  onClick={() => choose(value)}
+                >
+                  {value === "agent" ? (
+                    <Sparkles aria-hidden className="size-3.5" />
+                  ) : (
+                    <Users aria-hidden className="size-3.5" />
+                  )}
+                  {mode === value && (
+                    <span className="truncate">
+                      {t(value === "agent" ? "askAgent" : "teamChat")}
+                    </span>
+                  )}
+                </Button>
+              ))}
+            </div>
             {mode === "agent" && (
               <>
                 {/* One grouped menu, not a provider select beside a model
@@ -1440,6 +1462,50 @@ function Chat({
                     {t("settingsPending")}
                   </span>
                 )}
+                {/* The one thing that is actually broken, as the one thing
+                    that fixes it. This was a sentence and a link under the
+                    composer — permanent, a full line wide, and describing a
+                    state rather than offering a way out of it. It is now a
+                    button that says Connect and goes where connecting
+                    happens. Nothing here claims the provider IS connected:
+                    the chip appears precisely because it is not, and the run
+                    still fails honestly if one is started anyway. */}
+                {runtimeEnabled &&
+                  connection &&
+                  connection.state !== "connected" && (
+                    <>
+                      <p id={connectNote} className="sr-only">
+                        {t("providerNotConnected", { name: agentProvider })}
+                      </p>
+                      <Button
+                        asChild
+                        size="sm"
+                        variant="outline"
+                        className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs font-normal"
+                      >
+                        {/* Still a link, so it opens in a new tab the way a link
+                          does and works with the panel closed. */}
+                        <Link
+                          href="/settings?section=agents"
+                          aria-describedby={connectNote}
+                          title={t("providerNotConnected", {
+                            name: agentProvider,
+                          })}
+                          onClick={(event) => {
+                            if (onRequestSettings) {
+                              event.preventDefault()
+                              onRequestSettings()
+                            }
+                          }}
+                        >
+                          <PlugZap aria-hidden className="size-3.5" />
+                          {connection.state === "reconnect_required"
+                            ? t("reconnectProvider")
+                            : t("connectProvider")}
+                        </Link>
+                      </Button>
+                    </>
+                  )}
               </>
             )}
             {agentBusy && (
@@ -1474,39 +1540,19 @@ function Chat({
             that makes it true, which is where someone deciding between Agent
             and Team is actually looking.
           */}
-          {mode === "agent" &&
-            (!runtimeEnabled ? (
-              <p
-                role="status"
-                className="px-1 pt-1.5 text-xs text-muted-foreground"
-              >
-                {t("agentsOff")}
-              </p>
-            ) : (
-              connection &&
-              connection.state !== "connected" && (
-                // Honest, and actionable: the one place this can be fixed is
-                // one link away.
-                <p
-                  role="status"
-                  className="px-1 pt-1.5 text-xs text-muted-foreground"
-                >
-                  {t("providerNotConnected", { name: agentProvider })}{" "}
-                  <Link
-                    href="/settings"
-                    onClick={(event) => {
-                      if (onRequestSettings) {
-                        event.preventDefault()
-                        onRequestSettings()
-                      }
-                    }}
-                    className="rounded underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    {n("personalAgents")}
-                  </Link>
-                </p>
-              )
-            ))}
+          {/* Agents switched off for the whole server is NOT a thing this
+              person can connect their way out of, so it stays a sentence and
+              does not become a button that leads somewhere useless. Everything
+              that IS actionable moved up into the row as the Connect
+              control. */}
+          {mode === "agent" && !runtimeEnabled && (
+            <p
+              role="status"
+              className="px-1 pt-1.5 text-xs text-muted-foreground"
+            >
+              {t("agentsOff")}
+            </p>
+          )}
         </div>
       </form>
       <Dialog open={review} onOpenChange={setReview}>

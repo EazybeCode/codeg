@@ -239,7 +239,11 @@
     "attachmentDrop": "Déposez des fichiers ici pour les joindre.",
     "attachmentDismiss": "Masquer",
     "attachmentQuota": "{name} n'a pas pu être stocké : votre organisation n'a plus d'espace pour les pièces jointes.",
-    "attachmentMoreRejected": "Et {number} de plus."
+    "attachmentMoreRejected": "Et {number} de plus.",
+    "moreModels": "Plus de modèles",
+    "editShortlist": "Modifier la liste courte",
+    "shortlistHint": "Épinglez jusqu’à {number} modèles en haut de ce menu.",
+    "attachmentPreviewFailed": "Impossible d’afficher un aperçu de {name}."
   },
   "Native": {
     "callbackConflict": "Cette méthode de connexion entre en conflit avec un compte existant. Utilisez votre méthode de connexion initiale, puis ouvrez les paramètres pour en associer une autre. Les comptes ne sont jamais fusionnés automatiquement.",

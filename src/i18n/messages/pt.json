@@ -239,7 +239,11 @@
     "attachmentDrop": "Solte os arquivos aqui para anexá-los.",
     "attachmentDismiss": "Dispensar",
     "attachmentQuota": "Não foi possível armazenar {name}: sua organização está sem espaço para anexos.",
-    "attachmentMoreRejected": "E mais {number}."
+    "attachmentMoreRejected": "E mais {number}.",
+    "moreModels": "Mais modelos",
+    "editShortlist": "Editar lista rápida",
+    "shortlistHint": "Fixe até {number} modelos no topo deste menu.",
+    "attachmentPreviewFailed": "Não foi possível pré-visualizar {name}."
   },
   "Native": {
     "callbackConflict": "Este método de acesso entra em conflito com uma conta existente. Use seu método de acesso original e abra Configurações para vincular outro método. As contas nunca são mescladas automaticamente.",

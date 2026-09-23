@@ -239,7 +239,11 @@
     "attachmentDrop": "Drop files to attach them.",
     "attachmentDismiss": "Dismiss",
     "attachmentQuota": "{name} could not be stored: your organization is out of attachment storage.",
-    "attachmentMoreRejected": "And {number} more."
+    "attachmentMoreRejected": "And {number} more.",
+    "moreModels": "More models",
+    "editShortlist": "Edit shortlist",
+    "shortlistHint": "Pin up to {number} models to the top of this menu.",
+    "attachmentPreviewFailed": "{name} could not be previewed."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

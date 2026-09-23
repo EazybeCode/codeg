@@ -1,4 +1,10 @@
-import { render, screen, waitFor, within } from "@testing-library/react"
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeAgentChats } from "./native-agent-chats"
@@ -199,6 +205,44 @@ function openSaved(routes: Record<string, () => Response>) {
   )
 }
 
+/** Open the one composer menu behind the model trigger. */
+async function openMenu(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "Model" }))
+}
+
+/**
+ * Choose a model, wherever it lives.
+ *
+ * The menu leads with a shortlist; everything else is one submenu away. A test
+ * about what gets STORED should not have to know which of the two a model is
+ * in today, so this looks in both.
+ */
+async function pickModel(
+  user: ReturnType<typeof userEvent.setup>,
+  label: string
+) {
+  await openMenu(user)
+  const short = await screen.findByRole("group", { name: "Claude Code" })
+  const pinned = within(short).queryByRole("menuitemradio", { name: label })
+  if (pinned) {
+    await user.click(pinned)
+    return
+  }
+  await user.click(screen.getByRole("menuitem", { name: "More models" }))
+  const all = await screen.findByRole("menu", { name: "More models" })
+  // `fireEvent`, not `userEvent`, and only here: Radix keeps a submenu open
+  // using the pointer's position against the trigger's geometry, and in jsdom
+  // every rect is zero — so userEvent's move-then-click closes the submenu
+  // before the click lands. The keyboard path is covered separately.
+  fireEvent.click(within(all).getByRole("menuitemradio", { name: label }))
+}
+
+/** The Fast row, which now lives inside the menu rather than beside it. */
+async function fastRow(user: ReturnType<typeof userEvent.setup>) {
+  await openMenu(user)
+  return screen.getByRole("menuitemcheckbox", { name: "Fast" })
+}
+
 describe("more than one of these on a page", () => {
   it("gives each row its own description, so a chip never points at another chat's", () => {
     // Several composers are mounted at once — one per open tab. A hardcoded id
@@ -220,9 +264,17 @@ describe("more than one of these on a page", () => {
         />
       </NativeTestRoot>
     )
+    // The description lives beside the trigger, not inside the menu, so it
+    // resolves whether or not the menu is open — and there is one per mounted
+    // row.
     const described = screen
-      .getAllByRole("button", { name: "Fast" })
-      .map((chip) => chip.getAttribute("aria-describedby"))
+      .getAllByRole("button", { name: "Model" })
+      .map((trigger) =>
+        trigger
+          .closest("div")!
+          .querySelector<HTMLElement>("span.sr-only[id]")
+          ?.getAttribute("id")
+      )
     expect(described[0]).toBeTruthy()
     expect(described[0]).not.toBe(described[1])
     // Every id resolves, and to exactly one element.
@@ -262,16 +314,16 @@ describe("the controls on a saved agent chat", () => {
     )
     // The model's server-given label, the level's translated name, and the
     // speed state — all three, with nothing invented.
+    // All three on the one trigger: the model's server-given label, the level's
+    // translated name, and a mark that Fast is on — with nothing invented.
+    const trigger = await screen.findByRole("button", { name: "Model" })
+    expect(trigger).toHaveTextContent("Opus")
+    expect(trigger).toHaveTextContent("Very high")
+    const user = userEvent.setup()
+    await user.click(trigger)
     expect(
-      await screen.findByRole("button", { name: "Model" })
-    ).toHaveTextContent("Opus")
-    expect(screen.getByRole("button", { name: "Reasoning" })).toHaveTextContent(
-      "Very high"
-    )
-    expect(screen.getByRole("button", { name: "Fast" })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    )
+      screen.getByRole("menuitemcheckbox", { name: "Fast" })
+    ).toHaveAttribute("aria-checked", "true")
   })
 
   it("stores model, level and speed together in one revision", async () => {
@@ -289,12 +341,7 @@ describe("the controls on a saved agent chat", () => {
       return original(path, init)
     })
 
-    await user.click(await screen.findByRole("button", { name: "Model" }))
-    await user.click(
-      within(
-        await screen.findByRole("group", { name: "Claude Code" })
-      ).getByRole("menuitemradio", { name: "Opus" })
-    )
+    await pickModel(user, "Opus")
     await waitFor(() => expect(patches).toHaveLength(1))
     // The whole desired state, against the revision it was read at — never a
     // partial patch the server would have to guess the rest of.
@@ -366,15 +413,17 @@ describe("the controls on a saved agent chat", () => {
   it("will not offer a different provider, because that is a different chat", async () => {
     const user = userEvent.setup()
     openSaved({})
-    await user.click(await screen.findByRole("button", { name: "Model" }))
+    await openMenu(user)
+    await user.click(screen.getByRole("menuitem", { name: "More models" }))
     // The session's own provider is there; the other is not, and the menu says
     // why rather than showing a disabled row with no explanation.
+    const all = await screen.findByRole("menu", { name: "More models" })
     expect(
-      await screen.findByRole("group", { name: "Claude Code" })
+      within(all).getByRole("group", { name: "Claude Code" })
     ).toBeVisible()
-    expect(screen.queryByRole("group", { name: "Codex" })).toBeNull()
+    expect(within(all).queryByRole("group", { name: "Codex" })).toBeNull()
     expect(
-      screen.getByText(/Another provider is a new agent chat/)
+      within(all).getByText(/Another provider is a new agent chat/)
     ).toBeVisible()
   })
 
@@ -382,59 +431,153 @@ describe("the controls on a saved agent chat", () => {
     const user = userEvent.setup()
     openSaved({})
     await screen.findByRole("button", { name: "Model" })
-    // Claude has the control, Haiku does not: the chip stays visible and
-    // disabled with the reason, rather than vanishing.
-    const fast = screen.getByRole("button", { name: "Fast" })
-    expect(fast).toBeDisabled()
-    // The reason rides on the chip — as its description and its tooltip — not
-    // as a standing paragraph under every composer that has one of these rows.
-    const reason = (chip: HTMLElement) =>
-      document.getElementById(chip.getAttribute("aria-describedby") ?? "")
+    // Claude has the control, the default model does not: the row stays
+    // visible and disabled with the reason, rather than vanishing.
+    const fast = await fastRow(user)
+    expect(fast).toHaveAttribute("aria-disabled", "true")
+    // The reason rides on the row — as its description and its tooltip — not
+    // as a standing paragraph under every composer that has one of these.
+    const reason = (row: HTMLElement) =>
+      document.getElementById(row.getAttribute("aria-describedby") ?? "")
         ?.textContent ?? ""
     expect(reason(fast)).toMatch(/Fast mode is not available for Default/)
     expect(fast).toHaveAttribute(
       "title",
       expect.stringMatching(/not available for Default/) as unknown as string
     )
+    await user.keyboard("{Escape}")
     // Choosing Opus makes it possible — but does not switch it on.
-    await user.click(screen.getByRole("button", { name: "Model" }))
-    await user.click(
-      within(
-        await screen.findByRole("group", { name: "Claude Code" })
-      ).getByRole("menuitemradio", { name: "Opus" })
-    )
+    await pickModel(user, "Opus")
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Fast" })).toBeEnabled()
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+        "Opus"
+      )
     )
-    expect(screen.getByRole("button", { name: "Fast" })).toHaveAttribute(
-      "aria-pressed",
-      "false"
-    )
+    const enabled = await fastRow(user)
+    expect(enabled).not.toHaveAttribute("aria-disabled", "true")
+    // Standard is where it stays until someone chooses otherwise.
+    expect(enabled).toHaveAttribute("aria-checked", "false")
     // And the cost of using it is stated before it is used — reachable, and
     // reachable without a permanent line of copy under the composer.
-    const enabled = screen.getByRole("button", { name: "Fast" })
     expect(
       document.getElementById(enabled.getAttribute("aria-describedby") ?? "")
     ).toHaveTextContent("Fast mode costs more per run.")
     expect(enabled).toHaveAttribute("title", "Fast mode costs more per run.")
-    // Standard is where it stays until someone chooses otherwise.
-    expect(screen.getByRole("button", { name: "Standard" })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    )
   })
 
-  it("keeps the whole row on one line, with nothing standing under it", async () => {
+  it("puts model, reasoning and speed behind one trigger, with nothing under it", async () => {
+    const user = userEvent.setup()
     openSaved({})
-    const row = (await screen.findByRole("button", { name: "Model" }))
-      .parentElement!
-    // Model, reasoning and speed, and that is the row. Every explanatory
-    // paragraph that used to sit beneath it is now on the control it explains.
+    const trigger = await screen.findByRole("button", { name: "Model" })
+    const row = trigger.parentElement!
+    // One control on the row, and no explanatory paragraph beneath it: every
+    // one of those now sits on the thing it explains.
     expect(
       [...row.children].filter((child) => child.tagName === "P")
     ).toHaveLength(0)
-    for (const name of ["Model", "Reasoning", "Standard", "Fast"])
-      expect(screen.getByRole("button", { name })).toBeInTheDocument()
+    expect(row.querySelectorAll("button")).toHaveLength(1)
+    // And all three decisions are one click away, together.
+    await user.click(trigger)
+    expect(
+      screen.getByRole("group", { name: "Claude Code" })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("menuitem", { name: /Reasoning/ })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "Fast" })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("menuitem", { name: "Edit shortlist" })
+    ).toBeInTheDocument()
+  })
+
+  it("opens from the keyboard, and reaches both submenus without a pointer", async () => {
+    // One menu now holds three decisions, so each has to be reachable without
+    // a pointer. Typeahead picks the row; ArrowRight opens what is behind it.
+    const user = userEvent.setup()
+    openSaved({})
+    const trigger = await screen.findByRole("button", { name: "Model" })
+    trigger.focus()
+    await user.keyboard("{Enter}")
+    await screen.findByRole("group", { name: "Claude Code" })
+
+    await user.keyboard("Reason")
+    await user.keyboard("{ArrowRight}")
+    const levels = await screen.findByRole("menu", { name: "Reasoning" })
+    expect(within(levels).getAllByRole("menuitemradio").length).toBeGreaterThan(
+      1
+    )
+
+    await user.keyboard("{ArrowLeft}")
+    await user.keyboard("Edit")
+    await user.keyboard("{ArrowRight}")
+    expect(
+      await screen.findByRole("menu", { name: "Edit shortlist" })
+    ).toBeInTheDocument()
+  })
+
+  it("toggles fast from the keyboard and leaves the menu open", async () => {
+    // Speed is read against the model right above it, so a toggle must not
+    // close the menu and send someone back to reopen it to compare.
+    const user = userEvent.setup()
+    openSaved({
+      [SETTINGS]: () => json({ ...session, model: "opus", revision: "2" }),
+    })
+    await screen.findByRole("button", { name: "Model" })
+    await pickModel(user, "Opus")
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+        "Opus"
+      )
+    )
+    const fast = await fastRow(user)
+    expect(fast).toHaveAttribute("aria-checked", "false")
+    fireEvent.click(fast)
+    expect(
+      await screen.findByRole("menuitemcheckbox", { name: "Fast" })
+    ).toBeInTheDocument()
+  })
+
+  it("pins a model on the first click, rather than removing it", async () => {
+    // With nothing saved, the editor's ticks and the list a toggle starts from
+    // were computed separately: three unticked rows, and ticking one wrote a
+    // list that REMOVED it. They are one value now.
+    const user = userEvent.setup()
+    openSaved({})
+    await user.click(await screen.findByRole("button", { name: "Model" }))
+    await user.click(screen.getByRole("menuitem", { name: "Edit shortlist" }))
+    const editor = await screen.findByRole("menu", { name: "Edit shortlist" })
+    const boxes = within(editor).getAllByRole("menuitemcheckbox")
+    // What the menu is showing is what the editor ticks.
+    expect(
+      boxes.map((box) => [box.textContent, box.getAttribute("aria-checked")])
+    ).toEqual([
+      ["Default", "true"],
+      ["Haiku", "true"],
+      ["Sonnet", "true"],
+      ["Opus", "false"],
+    ])
+    fireEvent.click(
+      within(editor).getByRole("menuitemcheckbox", { name: "Opus" })
+    )
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("menu", { name: "Edit shortlist" })).getByRole(
+          "menuitemcheckbox",
+          { name: "Opus" }
+        )
+      ).toHaveAttribute("aria-checked", "true")
+    )
+    // And a fourth pin really shows up in the menu it was pinned to — the
+    // shortlist size caps the DEFAULT, never a list someone chose.
+    await user.keyboard("{Escape}")
+    await user.click(screen.getByRole("button", { name: "Model" }))
+    expect(
+      within(await screen.findByRole("group", { name: "Claude Code" }))
+        .getAllByRole("menuitemradio")
+        .map((item) => item.textContent)
+    ).toEqual(["Default", "Haiku", "Sonnet", "Opus"])
   })
 
   it("re-reads and retries once when someone else changed the session first", async () => {
@@ -471,12 +614,7 @@ describe("the controls on a saved agent chat", () => {
         </NativeBoundary>
       </NativeTestRoot>
     )
-    await user.click(await screen.findByRole("button", { name: "Model" }))
-    await user.click(
-      within(
-        await screen.findByRole("group", { name: "Claude Code" })
-      ).getByRole("menuitemradio", { name: "Opus" })
-    )
+    await pickModel(user, "Opus")
     // First against the revision it held, then against what is really there —
     // and exactly once more, never a loop against a moving target.
     await waitFor(() => expect(revisions).toEqual(["1", "7"]))
@@ -509,12 +647,7 @@ describe("the controls on a saved agent chat", () => {
         </NativeBoundary>
       </NativeTestRoot>
     )
-    await user.click(await screen.findByRole("button", { name: "Model" }))
-    await user.click(
-      within(
-        await screen.findByRole("group", { name: "Claude Code" })
-      ).getByRole("menuitemradio", { name: "Opus" })
-    )
+    await pickModel(user, "Opus")
     const box = await screen.findByRole("textbox", { name: "Ask the agent" })
     await user.type(box, "Summarise the parser")
     await user.click(screen.getByRole("button", { name: "Send" }))

@@ -26,6 +26,23 @@ export const NEEV_MAX_TURN_ATTACHMENT_BYTES = 25 * 1024 * 1024
 /** `MAX_NAME_CHARS` in `content/attachment.rs`. */
 const MAX_NAME_CHARS = 200
 
+/**
+ * The largest image a composer will build an inline preview for.
+ *
+ * Two reasons for a bound, and neither is the upload limit — a 10 MB image
+ * still uploads and still sends:
+ *
+ *  - A preview is a `data:` URL, which is base64 and therefore about 1.37× the
+ *    bytes, held as a string in React state. Five 10 MB images would be ~68 MB
+ *    of string kept alive for as long as the composer is open.
+ *  - It has to be produced before the chip can show it, and encoding megabytes
+ *    on the main thread is time the person spends looking at nothing.
+ *
+ * Over this, the chip shows the same file reference with its type icon. The
+ * file is staged, uploaded and sent identically; only the thumbnail is absent.
+ */
+export const NEEV_MAX_PREVIEW_BYTES = 2 * 1024 * 1024
+
 /** The complete set of types the server stores, in its own spelling. */
 export const NEEV_ATTACHMENT_TYPES = [
   "image/png",
@@ -410,6 +427,44 @@ export function uploadRejection(
   if (error.status === 409) return "quota"
   if (error.status === 400) return "unsupportedType"
   return null
+}
+
+/**
+ * A staged image as something an `<img>` in this app may actually load.
+ *
+ * It returns a `data:` URL and NOT an object URL, and that is a hard
+ * requirement rather than a preference. The app is served under a Content
+ * Security Policy of `img-src 'self' data:`
+ * (`neev/http/static_files.rs`), so a `blob:` source is blocked by the
+ * browser: the element loads to `naturalWidth === 0` and draws as a broken
+ * image, with the failure visible only in the console. That is exactly what
+ * was happening to every staged image here. `data:` is inside the policy, so
+ * the preview is a preview again without widening what this origin may load.
+ *
+ * `null` means "no preview", never "no file": too large to be worth encoding,
+ * not an image, or unreadable. The caller shows a file reference instead.
+ */
+export async function imagePreviewDataUrl(
+  file: File,
+  contentType: NeevAttachmentType
+): Promise<string | null> {
+  if (!contentType.startsWith("image/")) return null
+  if (file.size === 0 || file.size > NEEV_MAX_PREVIEW_BYTES) return null
+  try {
+    const bytes = await readBytes(file)
+    // Chunked: `String.fromCharCode(...bytes)` spreads one argument per byte,
+    // and a couple of hundred thousand of them overflows the call stack.
+    let binary = ""
+    const CHUNK = 0x8000
+    for (let at = 0; at < bytes.length; at += CHUNK)
+      binary += String.fromCharCode(...bytes.subarray(at, at + CHUNK))
+    return `data:${contentType};base64,${btoa(binary)}`
+  } catch {
+    // A file that cannot be read locally may still upload — the browser
+    // re-reads it for the request — so this is a missing thumbnail and
+    // nothing more.
+    return null
+  }
 }
 
 /** A size a person can read, in the units a file manager would use. */

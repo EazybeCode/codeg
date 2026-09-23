@@ -239,7 +239,11 @@
     "attachmentDrop": "將檔案拖放到這裡即可新增。",
     "attachmentDismiss": "略過",
     "attachmentQuota": "無法儲存 {name}：你所屬組織的附件儲存空間已用完。",
-    "attachmentMoreRejected": "還有 {number} 個。"
+    "attachmentMoreRejected": "還有 {number} 個。",
+    "moreModels": "更多模型",
+    "editShortlist": "編輯快捷清單",
+    "shortlistHint": "最多可將 {number} 個模型釘選至此選單頂端。",
+    "attachmentPreviewFailed": "無法預覽 {name}。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

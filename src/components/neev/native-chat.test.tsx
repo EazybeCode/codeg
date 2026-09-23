@@ -560,13 +560,7 @@ it("remembers the chosen mode and provider across a reload", async () => {
   await user.click(await screen.findByRole("button", { name: "Ask agent" }))
   // Provider is chosen by picking a model under its heading: one grouped menu
   // rather than a provider select beside a model select.
-  await user.click(screen.getByRole("button", { name: "Model" }))
-  await user.click(
-    within(await screen.findByRole("group", { name: "Codex" })).getByRole(
-      "menuitemradio",
-      { name: "Default" }
-    )
-  )
+  await pickFromMoreModels(user, "Codex", "Default")
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
       "Codex · Default"
@@ -947,11 +941,39 @@ it("points an unconnected provider at the one place it can be fixed", async () =
   })
   mount(true)
   await ready()
-  expect(await screen.findByText("claude is not connected yet.")).toBeVisible()
+  // A compact control that GOES where connecting happens, not a sentence
+  // describing the state. The sentence is still there as the control's
+  // accessible description — honest, without a standing line under every
+  // composer — and a provider that needs re-authorising says Reconnect.
+  const connect = await screen.findByRole("link", { name: "Reconnect" })
+  expect(connect).toHaveAttribute("href", "/settings?section=agents")
   expect(
-    screen.getByRole("link", { name: "Personal AI connections" })
-  ).toHaveAttribute("href", "/settings")
+    document.getElementById(connect.getAttribute("aria-describedby") ?? "")
+  ).toHaveTextContent("claude is not connected yet.")
 })
+
+/**
+ * Pick a model that is not on the shortlist, through "More models".
+ *
+ * `fireEvent` for the submenu row: Radix keeps a submenu open using the
+ * pointer's position against the trigger's geometry, and every rect is zero in
+ * jsdom, so userEvent's move-then-click closes it before the click lands.
+ */
+async function pickFromMoreModels(
+  user: ReturnType<typeof userEvent.setup>,
+  group: string,
+  label: string
+) {
+  await user.click(screen.getByRole("button", { name: "Model" }))
+  await user.click(screen.getByRole("menuitem", { name: "More models" }))
+  const all = await screen.findByRole("menu", { name: "More models" })
+  fireEvent.click(
+    within(within(all).getByRole("group", { name: group })).getByRole(
+      "menuitemradio",
+      { name: label }
+    )
+  )
+}
 
 const completedTurn = {
   ...runningTurn,
@@ -1333,25 +1355,26 @@ it("lets the FIRST ask be configured, and sends that configuration with it", asy
   // live before a single turn has run.
   const model = await screen.findByRole("button", { name: "Model" })
   expect(model).toBeEnabled()
-  expect(screen.getByRole("button", { name: "Reasoning" })).toBeEnabled()
 
+  await pickFromMoreModels(user, "Claude Code", "Opus")
+  await waitFor(() => expect(model).toHaveTextContent("Opus"))
+
+  // Opus is the Claude model that can do fast mode, so the row opens up —
+  // but it is still off until it is pressed. Model, reasoning and speed are
+  // all in the one menu now, so this is a single open.
   await user.click(model)
-  await user.click(
-    within(await screen.findByRole("group", { name: "Claude Code" })).getByRole(
-      "menuitemradio",
-      { name: "Opus" }
-    )
-  )
-  // Opus is the Claude model that can do fast mode, so the chip opens up —
-  // but it is still off until it is pressed.
-  const fast = await screen.findByRole("button", { name: "Fast" })
-  await waitFor(() => expect(fast).toBeEnabled())
-  expect(fast).toHaveAttribute("aria-pressed", "false")
+  const fast = screen.getByRole("menuitemcheckbox", { name: "Fast" })
+  expect(fast).not.toHaveAttribute("aria-disabled", "true")
+  expect(fast).toHaveAttribute("aria-checked", "false")
   await user.click(fast)
-  await user.click(screen.getByRole("button", { name: "Reasoning" }))
-  await user.click(
-    await screen.findByRole("menuitemradio", { name: "Very high" })
+  // The menu deliberately stays open across a speed toggle, so reasoning is
+  // the next click rather than the next reopen.
+  await user.click(screen.getByRole("menuitem", { name: /Reasoning/ }))
+  const levels = await screen.findByRole("menu", { name: "Reasoning" })
+  fireEvent.click(
+    within(levels).getByRole("menuitemradio", { name: "Very high" })
   )
+  await user.keyboard("{Escape}")
 
   await typeAsk(user)
   await user.click(screen.getByRole("button", { name: "Send" }))
@@ -1441,27 +1464,23 @@ it("switches provider through the model menu and keeps each holder's own configu
   mount(true)
   await ready()
 
-  // Claude's holder: Opus, Max, fast.
+  // Claude's holder: Opus, Max, fast. "Opus" names its provider by naming
+  // itself, so the trigger does not spend width on "Claude Code ·" as well —
+  // it only does that for a model called "Default", which both providers have.
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
-      "Claude Code · Opus"
+      "Opus"
     )
   )
-  expect(screen.getByRole("button", { name: "Reasoning" })).toHaveTextContent(
-    "Max"
-  )
-  expect(screen.getByRole("button", { name: "Fast" })).toHaveAttribute(
-    "aria-pressed",
-    "true"
-  )
-
+  // Level and speed ride on the same trigger now.
+  expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent("Max")
   await user.click(screen.getByRole("button", { name: "Model" }))
-  await user.click(
-    within(await screen.findByRole("group", { name: "Codex" })).getByRole(
-      "menuitemradio",
-      { name: "Default" }
-    )
-  )
+  expect(
+    screen.getByRole("menuitemcheckbox", { name: "Fast" })
+  ).toHaveAttribute("aria-checked", "true")
+  await user.keyboard("{Escape}")
+
+  await pickFromMoreModels(user, "Codex", "Default")
 
   // Codex's own holder takes over: its level, and its speed. Claude's `max`
   // could not survive anyway — Codex does not advertise it.
@@ -1470,13 +1489,14 @@ it("switches provider through the model menu and keeps each holder's own configu
       "Codex · Default"
     )
   )
-  expect(screen.getByRole("button", { name: "Reasoning" })).toHaveTextContent(
+  expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
     "Minimal"
   )
-  expect(screen.getByRole("button", { name: "Fast" })).toHaveAttribute(
-    "aria-pressed",
-    "false"
-  )
+  await user.click(screen.getByRole("button", { name: "Model" }))
+  expect(
+    screen.getByRole("menuitemcheckbox", { name: "Fast" })
+  ).toHaveAttribute("aria-checked", "false")
+  await user.keyboard("{Escape}")
 
   await typeAsk(user)
   await user.click(screen.getByRole("button", { name: "Send" }))

@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
-import { FileText, Paperclip, X } from "lucide-react"
+import { FileText, ImageIcon, ImageOff, Paperclip, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { NativeClientError } from "@/lib/neev-client"
@@ -26,6 +26,7 @@ import {
   filesFromDrop,
   filesFromPaste,
   formatBytes,
+  imagePreviewDataUrl,
   NEEV_MAX_ATTACHMENTS,
   pasteIsFileOnly,
   uploadRejection,
@@ -54,7 +55,14 @@ export interface DraftAttachment {
   name: string
   size: number
   contentType: NeevAttachmentType
-  /** An object URL for images, so a preview needs no round trip. */
+  /**
+   * A bounded `data:` URL for a small image, so a preview needs no round trip.
+   *
+   * Never an object URL: this app's CSP is `img-src 'self' data:`, so a `blob:`
+   * source is blocked and renders as a broken image. `null` is the normal case
+   * for anything that is not a small image, and the chip then shows its type
+   * icon — the file itself is unaffected either way.
+   */
   previewUrl: string | null
   status: DraftAttachmentStatus
   attachment: NeevAttachment | null
@@ -116,7 +124,6 @@ export function useAttachmentTray(options: {
   itemsRef.current = items
   const uploadRef = useRef<AttachmentUploader | null>(upload)
   uploadRef.current = upload
-  const previews = useRef(new Set<string>())
   // One controller per staged file: removing it, or leaving the conversation,
   // aborts its upload rather than letting the answer arrive for a composer that
   // no longer exists.
@@ -139,16 +146,16 @@ export function useAttachmentTray(options: {
   const era = useRef(0)
   useEffect(() => {
     alive.current = true
-    // The maps themselves outlive every render; capturing them is what the
-    // cleanup needs, and they are never replaced.
+    // The map itself outlives every render; capturing it is what the cleanup
+    // needs, and it is never replaced.
     const inFlight = flights.current
-    const urls = previews.current
     return () => {
       alive.current = false
       for (const controller of inFlight.values()) controller.abort()
       inFlight.clear()
-      for (const url of urls) URL.revokeObjectURL(url)
-      urls.clear()
+      // Previews are `data:` URLs held in state and are collected with it.
+      // There is nothing to revoke, which is the other reason they are not
+      // object URLs: the old lifetime bookkeeping is simply gone.
     }
   }, [])
 
@@ -208,33 +215,40 @@ export function useAttachmentTray(options: {
       if (!alive.current || dropped !== era.current) return
       if (refused.length) setRejected((old) => [...old, ...refused])
       if (!accepted.length) return
-      const staged = accepted.map(({ file, contentType }) => {
-        const previewUrl = contentType.startsWith("image/")
-          ? URL.createObjectURL(file)
-          : null
-        if (previewUrl) previews.current.add(previewUrl)
-        return {
-          id: localId(),
-          file,
-          name: file.name.trim(),
-          size: file.size,
-          contentType,
-          previewUrl,
-          status: "queued" as const,
-          attachment: null,
-          reason: null,
-          error: null,
-        }
-      })
+      const staged = accepted.map(({ file, contentType }) => ({
+        id: localId(),
+        file,
+        name: file.name.trim(),
+        size: file.size,
+        contentType,
+        // Filled in below, if there is one to fill in. The chip appears now,
+        // with its file reference, rather than waiting on an encode.
+        previewUrl: null as string | null,
+        status: "queued" as const,
+        attachment: null,
+        reason: null,
+        error: null,
+      }))
       // Both refs and state: the next queued drop measures against these
       // before React has re-rendered.
       itemsRef.current = [...itemsRef.current, ...staged]
       setItems(itemsRef.current)
+      // Deliberately not awaited before the upload starts: bytes going up is
+      // the part that matters, and a thumbnail arriving a moment later costs
+      // nothing. `patch` drops it if the file has since been removed, and an
+      // era change means the chat it belonged to is gone.
+      void Promise.all(
+        staged.map(async (item) => {
+          const url = await imagePreviewDataUrl(item.file, item.contentType)
+          if (url && alive.current && dropped === era.current)
+            patch(item.id, { previewUrl: url })
+        })
+      )
       const uploader = uploadRef.current
       if (!uploader) return
       await Promise.allSettled(staged.map((item) => send(item, uploader)))
     },
-    [disabled, send]
+    [disabled, patch, send]
   )
 
   const add = useCallback(
@@ -251,11 +265,6 @@ export function useAttachmentTray(options: {
   const drop = useCallback((id: string) => {
     flights.current.get(id)?.abort()
     flights.current.delete(id)
-    const going = itemsRef.current.find((item) => item.id === id)
-    if (going?.previewUrl) {
-      URL.revokeObjectURL(going.previewUrl)
-      previews.current.delete(going.previewUrl)
-    }
     itemsRef.current = itemsRef.current.filter((item) => item.id !== id)
     setItems(itemsRef.current)
   }, [])
@@ -266,8 +275,6 @@ export function useAttachmentTray(options: {
     era.current += 1
     for (const controller of flights.current.values()) controller.abort()
     flights.current.clear()
-    for (const url of previews.current) URL.revokeObjectURL(url)
-    previews.current.clear()
     itemsRef.current = []
     setItems([])
     setRejected([])
@@ -499,6 +506,79 @@ function rejectionMessage(
  */
 const SHOWN_REJECTIONS = 5
 
+/**
+ * The small square at the head of a file reference.
+ *
+ * Three outcomes, and they are deliberately three rather than two:
+ *
+ *  - a thumbnail, when there is one and it loads;
+ *  - a type icon, when there was never a preview to show (not an image, or an
+ *    image too large to encode inline) — an ordinary state, said quietly;
+ *  - a BROKEN-preview icon with a reason, when a preview was offered and the
+ *    browser refused it. That is the case worth keeping visible. Falling back
+ *    to the plain file icon here would have made the CSP-blocked previews this
+ *    change fixes look like a design choice instead of a bug.
+ *
+ * The file is attached and will be sent in all three.
+ */
+function AttachmentThumb({
+  src,
+  contentType,
+  name,
+  className,
+}: {
+  src: string | null
+  contentType: string
+  name: string
+  className?: string
+}) {
+  const t = useTranslations("NativeContent")
+  const [failed, setFailed] = useState(false)
+  // A new source is a new attempt: the previous failure said nothing about it.
+  const [attempted, setAttempted] = useState(src)
+  if (attempted !== src) {
+    setAttempted(src)
+    setFailed(false)
+  }
+  const box = cn(
+    "flex size-6 shrink-0 items-center justify-center rounded",
+    className
+  )
+  if (src && !failed)
+    return (
+      // Decorative: the name is right beside it, so announcing the file twice
+      // would only make the row longer to hear.
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={src}
+        alt=""
+        onError={() => setFailed(true)}
+        className={cn(box, "border object-cover")}
+      />
+    )
+  if (failed)
+    return (
+      <span
+        className={cn(box, "bg-destructive/10 text-destructive")}
+        title={t("attachmentPreviewFailed", { name })}
+      >
+        <ImageOff aria-hidden className="size-3.5" />
+        <span className="sr-only">
+          {t("attachmentPreviewFailed", { name })}
+        </span>
+      </span>
+    )
+  return (
+    <span className={cn(box, "bg-muted text-muted-foreground")}>
+      {contentType.startsWith("image/") ? (
+        <ImageIcon aria-hidden className="size-3.5" />
+      ) : (
+        <FileText aria-hidden className="size-3.5" />
+      )}
+    </span>
+  )
+}
+
 /** What is staged, what it is doing, and how to take it back out. */
 export function AttachmentTrayView({
   tray,
@@ -522,42 +602,38 @@ export function AttachmentTrayView({
           {tray.items.map((item) => (
             <li
               key={item.id}
+              // One line, not a card: a reference to a file, the way the file
+              // is referred to in the sentence being typed above it. Name and
+              // state sit on the SAME line, so five attachments cost one row
+              // of the composer rather than five.
               className={cn(
-                "flex max-w-56 items-center gap-2 rounded-lg border bg-muted/40 py-1 pe-1 ps-2",
+                "flex h-8 max-w-64 items-center gap-1.5 rounded-md border bg-muted/40 pe-0.5 ps-1",
                 item.status === "failed" && "border-destructive/60"
               )}
             >
-              {item.previewUrl ? (
-                // Decorative: the name is right beside it, so announcing the
-                // file twice would only make the row longer to hear.
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={item.previewUrl}
-                  alt=""
-                  className="size-8 shrink-0 rounded object-cover"
-                />
-              ) : (
-                <span className="flex size-8 shrink-0 items-center justify-center rounded bg-muted">
-                  <FileText aria-hidden className="size-4" />
-                </span>
-              )}
-              <span className="min-w-0 flex-1 py-0.5">
-                <span className="block truncate text-xs" title={item.name}>
-                  {item.name}
-                </span>
-                <span className="block text-[11px] text-muted-foreground">
-                  {item.status === "uploading" ? (
-                    <span role="status">{t("attachmentUploading")}</span>
-                  ) : item.status === "failed" ? (
-                    <span className="text-destructive">
-                      {item.reason
-                        ? rejectionMessage(t, item.reason, item.name)
-                        : t("attachmentFailed")}
-                    </span>
-                  ) : (
-                    formatBytes(item.size)
-                  )}
-                </span>
+              <AttachmentThumb
+                src={item.previewUrl}
+                contentType={item.contentType}
+                name={item.name}
+              />
+              <span
+                className="min-w-0 truncate text-xs"
+                title={`${item.name} · ${formatBytes(item.size)}`}
+              >
+                {item.name}
+              </span>
+              <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
+                {item.status === "uploading" ? (
+                  <span role="status">{t("attachmentUploading")}</span>
+                ) : item.status === "failed" ? (
+                  <span className="text-destructive">
+                    {item.reason
+                      ? rejectionMessage(t, item.reason, item.name)
+                      : t("attachmentFailed")}
+                  </span>
+                ) : (
+                  formatBytes(item.size)
+                )}
               </span>
               {item.status === "failed" && (
                 <Button
@@ -625,10 +701,15 @@ export function AttachmentTrayView({
  * The attachments a message or a turn was actually sent with.
  *
  * Read from the server's stored metadata, so they survive a reload — that is
- * the whole point of rendering these rather than the staged list. An image is
- * shown; anything else is a link that downloads, because the server serves
- * these as attachments with `nosniff` and framing a PDF from the same origin
- * would be a different promise than the one it makes.
+ * the whole point of rendering these rather than the staged list.
+ *
+ * Every one of them is the SAME compact reference, image or not. A message
+ * used to inline its images at up to 160px tall, which meant three screenshots
+ * pushed the reply that discussed them off the screen. What a reader needs in
+ * the transcript is that the file was sent and which file it was; opening it
+ * is one click on the reference. The thumbnail is served same-origin and ACL
+ * checked on every read, and it degrades to a named broken-preview marker
+ * rather than to silence.
  */
 export function SentAttachments({
   attachments,
@@ -636,47 +717,61 @@ export function SentAttachments({
   attachments: readonly NeevAttachment[]
 }) {
   const t = useTranslations("NativeContent")
-  const images = useMemo(
-    () => attachments.filter((item) => item.contentType.startsWith("image/")),
-    [attachments]
-  )
-  const files = useMemo(
-    () => attachments.filter((item) => !item.contentType.startsWith("image/")),
+  // Built once per list: `attachmentUrl` validates the key and throws on one
+  // that is not shaped like a key, which must not happen mid-render for a
+  // transcript that is otherwise fine.
+  const items = useMemo(
+    () =>
+      attachments.map((item) => {
+        try {
+          return { item, href: attachmentUrl(item.key) }
+        } catch {
+          return { item, href: null }
+        }
+      }),
     [attachments]
   )
   if (attachments.length === 0) return null
   return (
-    <ul aria-label={t("attachments")} className="flex flex-wrap gap-2 py-1">
-      {images.map((item) => (
-        <li key={item.key}>
-          {/* Same-origin and ACL-served: the endpoint re-checks the bound
-              chat's audience on every read. */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={attachmentUrl(item.key)}
-            alt={item.fileName}
-            title={item.fileName}
-            className="max-h-40 rounded-lg border object-contain"
-          />
-        </li>
-      ))}
-      {files.map((item) => (
-        <li key={item.key}>
-          <a
-            href={attachmentUrl(item.key)}
-            download={item.fileName}
-            className="flex max-w-56 items-center gap-2 rounded-lg border px-2 py-1.5 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <FileText aria-hidden className="size-4 shrink-0" />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-xs">{item.fileName}</span>
-              <span className="block text-[11px] text-muted-foreground">
-                {formatBytes(item.byteLength)}
-              </span>
+    <ul aria-label={t("attachments")} className="flex flex-wrap gap-1.5 py-1">
+      {items.map(({ item, href }) => {
+        const inside = (
+          <>
+            <AttachmentThumb
+              src={href && item.contentType.startsWith("image/") ? href : null}
+              contentType={item.contentType}
+              name={item.fileName}
+            />
+            <span className="min-w-0 truncate text-xs">{item.fileName}</span>
+            <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
+              {formatBytes(item.byteLength)}
             </span>
-          </a>
-        </li>
-      ))}
+          </>
+        )
+        return (
+          <li key={item.key}>
+            {href ? (
+              // `download`, not a viewer: these are served as attachments with
+              // `nosniff`, so framing one from this origin would be a
+              // different promise than the endpoint makes.
+              <a
+                href={href}
+                download={item.fileName}
+                title={`${item.fileName} · ${formatBytes(item.byteLength)}`}
+                className="flex h-8 max-w-64 items-center gap-1.5 rounded-md border px-1 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {inside}
+              </a>
+            ) : (
+              // Stored metadata this build cannot address. It is still named,
+              // because the file WAS sent and the agent did read it.
+              <span className="flex h-8 max-w-64 items-center gap-1.5 rounded-md border border-dashed px-1 opacity-70">
+                {inside}
+              </span>
+            )}
+          </li>
+        )
+      })}
     </ul>
   )
 }

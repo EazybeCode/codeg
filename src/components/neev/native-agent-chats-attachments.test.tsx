@@ -255,10 +255,11 @@ it("uploads into the open session and shows what a stored turn carried", async (
   const box = await screen.findByRole("textbox", { name: "Ask the agent" })
   await waitFor(() => expect(box).toBeEnabled())
   // The stored turn's own attachments, read back from the server.
-  expect(await screen.findByRole("img", { name: "shot.png" })).toHaveAttribute(
-    "src",
-    `/api/neev/attachments/${KEY}`
-  )
+  // A compact file reference now, image or not: named, downloadable, and
+  // addressed by the key the server gave it — with the thumbnail inside it.
+  const reference = await screen.findByRole("link", { name: /shot\.png/ })
+  expect(reference).toHaveAttribute("href", `/api/neev/attachments/${KEY}`)
+  expect(reference).toHaveAttribute("download", "shot.png")
 
   fireEvent.drop(box, { dataTransfer: fileDrag([png("diagram.png")]) })
   await waitFor(() => expect(uploads).toEqual(["diagram.png"]))

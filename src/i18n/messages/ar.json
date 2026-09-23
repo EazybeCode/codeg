@@ -239,7 +239,11 @@
     "attachmentDrop": "أفلِت الملفات هنا لإرفاقها.",
     "attachmentDismiss": "تجاهل",
     "attachmentQuota": "تعذّر تخزين {name}: لم تعد لدى مؤسستك مساحة للمرفقات.",
-    "attachmentMoreRejected": "و{number} أخرى."
+    "attachmentMoreRejected": "و{number} أخرى.",
+    "moreModels": "مزيد من النماذج",
+    "editShortlist": "تحرير القائمة المختصرة",
+    "shortlistHint": "يمكنك تثبيت ما يصل إلى {number} من النماذج أعلى هذه القائمة.",
+    "attachmentPreviewFailed": "تعذّرت معاينة {name}."
   },
   "Native": {
     "callbackConflict": "تتعارض طريقة تسجيل الدخول هذه مع حساب موجود. استخدم طريقة تسجيل الدخول الأصلية، ثم افتح الإعدادات لربط طريقة أخرى. لا تُدمج الحسابات تلقائيًا أبدًا.",
