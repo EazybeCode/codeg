@@ -8,10 +8,18 @@ chat flow, because they hit different hosts.
 
 Provenance (why each host is on the list):
 
-  * ("codex", "login")  auth.openai.com:443
+  * ("codex", "login")  auth.openai.com:443, chatgpt.com:443
         The Codex app-server device-login verification URL is
         https://auth.openai.com/codex/device (see neev_codex_login_protocol) and the
         existing login proxy already pins this host. CONFIRMED.
+        chatgpt.com is the ChatGPT-subscription backend the pinned CLI calls during
+        the SAME device-login flow. CONFIRMED by a live capture on the hosted
+        deployment (2026-09-23T18:21Z): with auth.openai.com alone, the login proxy
+        logged `category=denied ... authority=chatgpt.com:443` at login start and
+        again 37s later, the driver never saw account/login/completed, and the
+        attempt aged out `pending` — the user had entered the device code and the
+        UI still showed disconnected. Same shape as the api.anthropic.com entry
+        below: a post-verification account call the CLI needs to FINISH login.
   * ("claude", "login") claude.com:443, console.anthropic.com:443
         Root probed pinned claude 2.1.267 (query stripped, no secrets logged): the
         default --claudeai flow opens https://claude.com/cai/oauth/authorize.
@@ -82,7 +90,10 @@ class Endpoint:
 # alone cannot refresh). claude.ai authentication is also officially required
 # (claude.com redirects to it). These are doc-confirmed.
 _ENDPOINTS = {
-    ("codex", "login"): (Endpoint("auth.openai.com", 443, True),),
+    ("codex", "login"): (
+        Endpoint("auth.openai.com", 443, True),  # device-code issue + token poll
+        Endpoint("chatgpt.com", 443, True),      # ChatGPT-account call that completes login
+    ),
     ("claude", "login"): (
         Endpoint("claude.com", 443, True),            # observed authorize origin
         Endpoint("claude.ai", 443, True),             # official auth (redirect target)

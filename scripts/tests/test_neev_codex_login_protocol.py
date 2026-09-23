@@ -157,7 +157,7 @@ class CodexLoginProtocolTests(unittest.TestCase):
 
     def test_supported_chatgpt_plans_project_without_exposing_email_in_repr(self):
         self.initialize()
-        for plan in ("plus", "pro", "team", "business", "enterprise", "edu"):
+        for plan in ("plus", "pro", "prolite", "team", "business", "enterprise", "edu"):
             with self.subTest(plan=plan):
                 request = json.loads(self.protocol.read_account())
                 result = dict(ACCOUNT)
@@ -454,6 +454,65 @@ class CodexLoginProtocolTests(unittest.TestCase):
         self.assertEqual(account_request["params"], {"refreshToken": True})
         account_event = self.reply(account_request, ACCOUNT)[0]
         self.assertEqual(account_event.account.status, "supported")
+
+    def test_prolite_subscriber_completes_the_whole_device_login(self):
+        """End-to-end regression for the reported symptom: a real paid ChatGPT
+        account whose CLI reports "Plan: Prolite" used to finish the device flow and
+        then project `unsupported`, which the driver turns into `unsupported_account`
+        — a connected subscriber shown as disconnected."""
+        self.initialize()
+        self.start_login()
+        completion = {
+            "method": "account/login/completed",
+            "params": {"loginId": LOGIN_ID, "success": True, "error": None},
+        }
+        self.assertEqual(
+            self.protocol.receive(frame(completion))[0].kind, "account_check_required"
+        )
+        request = json.loads(self.protocol.read_account(refresh=True))
+        self.assertEqual(request["params"], {"refreshToken": True})
+        result = dict(ACCOUNT, account=dict(ACCOUNT["account"], planType="prolite"))
+        event = self.reply(request, result)[0]
+        self.assertEqual(event.account.status, "supported")
+        self.assertEqual(event.account.plan, "prolite")
+        self.assertEqual(event.account.email, "person@example.invalid")
+        # The plan label is not a secret, but the email still must not reach a repr.
+        self.assertNotIn("person@example.invalid", repr(event.account))
+
+    def test_unpaid_and_unknown_plans_still_fail_closed_after_a_real_completion(self):
+        """Widening to `prolite` must not open the gate generally: the same fully
+        successful completion path still projects unsupported for everything else."""
+        for plan in (
+            "free",
+            "go",
+            "unknown",
+            "self_serve_business_prolite",   # pinned enum, deliberately unsupported
+            "self_serve_business_usage_based",
+            "edu_plus",
+            "Prolite",                        # case-sensitive — not the paid tier
+            "prolite_future",                 # prefix of an allowed value
+            "future_plan_we_have_not_seen",
+        ):
+            with self.subTest(plan=plan):
+                protocol = self.module.CodexLoginProtocol()
+                request = json.loads(protocol.initialize())
+                protocol.receive(
+                    frame({"id": request["id"], "result": {"userAgent": "invented"}})
+                )
+                request = json.loads(protocol.start_login())
+                protocol.receive(frame({"id": request["id"], "result": DEVICE}))
+                protocol.receive(frame({
+                    "method": "account/login/completed",
+                    "params": {"loginId": LOGIN_ID, "success": True, "error": None},
+                }))
+                request = json.loads(protocol.read_account(refresh=True))
+                result = dict(ACCOUNT, account=dict(ACCOUNT["account"], planType=plan))
+                event = protocol.receive(
+                    frame({"id": request["id"], "result": result})
+                )[0]
+                self.assertEqual(event.account.status, "unsupported")
+                self.assertIsNone(event.account.plan)
+                self.assertIsNone(event.account.email)
 
     def test_foreign_completion_is_harmless_and_cannot_settle_current_login(self):
         self.initialize()

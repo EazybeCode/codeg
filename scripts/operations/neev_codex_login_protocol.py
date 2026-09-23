@@ -42,7 +42,15 @@ _PLAN_TYPES = frozenset(
         "unknown",
     )
 )
-_SUPPORTED_PLANS = frozenset(("plus", "pro", "team", "business", "enterprise", "edu"))
+# Paid ChatGPT subscriptions whose Codex access we recognize. `prolite` is a real
+# paid tier (observed on a live ChatGPT-login account whose CLI reports
+# "Plan: Prolite, Auth: ChatGPT login"); excluding it rejected a genuine subscriber
+# as `unsupported_account` after a fully successful device login. Everything not
+# named here — including `free`, `go`, `unknown`, and any future plan string —
+# still fails closed as unsupported.
+_SUPPORTED_PLANS = frozenset(
+    ("plus", "pro", "prolite", "team", "business", "enterprise", "edu")
+)
 _LOGIN_ID = re.compile(r"[A-Za-z0-9_-]+\Z")
 _USER_CODE = re.compile(r"[A-Z0-9-]+\Z")
 _VERIFICATION_URL = "https://auth.openai.com/codex/device"

@@ -73,15 +73,21 @@ A supported projection requires all of the following:
 - the account is the strict `chatgpt` variant;
 - the email is null or a printable private display label of at most 254 Unicode
   codepoints; and
-- `planType` is one of `plus`, `pro`, `team`, `business`, `enterprise`, or `edu`.
+- `planType` is one of `plus`, `pro`, `prolite`, `team`, `business`, `enterprise`,
+  or `edu`.
+
+`prolite` was admitted on 2026-09-24 after a live account whose CLI reports
+"Plan: Prolite, Auth: ChatGPT login" finished a device login and was still projected
+`unsupported` — a paying subscriber shown as disconnected. It is a paid tier; the
+profile is otherwise unchanged and every other value still fails closed.
 
 Absent/null accounts project as disconnected. Exact API-key and Amazon Bedrock
-accounts, `requiresOpenaiAuth=false`, and well-formed ChatGPT plans outside the six
+accounts, `requiresOpenaiAuth=false`, and well-formed ChatGPT plans outside the seven
 recognized values project as unsupported, never connected. Account-read
 `planType` requires only a JSON string and is not restricted to the notification
 enum; the global frame cap bounds its encoded size. Unsupported projections do
 not retain the raw plan string. Unsupported values explicitly include future plan
-strings and the pinned schema's `free`, `go`, `prolite`,
+strings and the pinned schema's `free`, `go`,
 `self_serve_business_prolite`, `self_serve_business_usage_based`, `ent26`,
 `enterprise_cbp_automation`, `enterprise_cbp_usage_based`, `edu_plus`, `edu_pro`,
 and `unknown` values. A profile extension requires review; enum membership alone

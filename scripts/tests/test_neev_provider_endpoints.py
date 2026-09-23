@@ -20,7 +20,11 @@ class EndpointTableTests(unittest.TestCase):
                     self.assertEqual(endpoint.port, 443)
 
     def test_observed_login_hosts(self):
-        self.assertEqual(endpoints.hosts("codex", "login"), {"auth.openai.com"})
+        # chatgpt.com joined the LOGIN list after a live capture showed the pinned CLI
+        # calling it mid-device-flow and the proxy denying it (login never completed).
+        self.assertEqual(
+            endpoints.hosts("codex", "login"), {"auth.openai.com", "chatgpt.com"}
+        )
         claude_login = endpoints.hosts("claude", "login")
         # Observed authorize origin + officially-required auth/token hosts, plus
         # api.anthropic.com which the pinned CLI fetches its role/profile from to COMPLETE
@@ -36,9 +40,33 @@ class EndpointTableTests(unittest.TestCase):
 
     def test_authorities_are_exact_host_port_bytes(self):
         self.assertEqual(
-            endpoints.authorities("codex", "login"), {b"auth.openai.com:443"}
+            endpoints.authorities("codex", "login"),
+            {b"auth.openai.com:443", b"chatgpt.com:443"},
         )
         self.assertIn(b"claude.com:443", endpoints.authorities("claude", "login"))
+
+    def test_codex_login_widening_admits_chatgpt_only_and_stays_exact(self):
+        """Adding chatgpt.com must not become a soft/suffix match or a general opening."""
+        hosts = endpoints.hosts("codex", "login")
+        for host in (
+            "api.openai.com",          # a RUN host — not needed to log in
+            "api.github.com",          # the CLI's update check, correctly denied live
+            "chatgpt.com.evil.invalid",  # suffix-prefix confusion
+            "evil.invalid.chatgpt.com",  # subdomain of the allowed host
+            "sub.chatgpt.com",
+            "www.chatgpt.com",
+            "openai.com",
+            "example.invalid",
+        ):
+            with self.subTest(host=host):
+                self.assertNotIn(host, hosts)
+                with self.assertRaises(endpoints.EndpointError):
+                    endpoints.port_for("codex", "login", host)
+        # No wildcard/empty authority ever leaks into the byte set, and the login
+        # scope stays strictly narrower than the runtime scope.
+        for authority in endpoints.authorities("codex", "login"):
+            self.assertRegex(authority, rb"^[a-z0-9.-]+:443\Z")
+        self.assertLess(hosts, endpoints.hosts("codex", "run"))
 
     def test_port_lookup_and_unknown_host(self):
         self.assertEqual(endpoints.port_for("claude", "run", "api.anthropic.com"), 443)

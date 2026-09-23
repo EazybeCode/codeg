@@ -92,6 +92,29 @@ class PolicyAndParseTests(unittest.TestCase):
                     egress.parse_connect(connect(authority), self.policy)
                 self.assertEqual(caught.exception.code, "denied")
 
+    def test_codex_login_proxy_tunnels_chatgpt_but_nothing_arbitrary(self):
+        """Regression for the hosted device-login stall: the LOGIN proxy denied
+        `CONNECT chatgpt.com:443` (live capture 2026-09-23T18:21Z), so the CLI never
+        finished the flow. It must now pass — and only it, at 443, exactly."""
+        policy = egress.policy_for("codex", "login")
+        for authority in (b"chatgpt.com:443", b"auth.openai.com:443"):
+            with self.subTest(allowed=authority):
+                host = authority.rsplit(b":", 1)[0].decode("ascii")
+                self.assertEqual(egress.parse_connect(connect(authority), policy), host)
+        for authority in (
+            b"api.openai.com:443",         # runtime-only host, not a login host
+            b"api.github.com:443",         # the CLI's update check
+            b"sub.chatgpt.com:443",        # subdomain of the newly-allowed host
+            b"chatgpt.com.evil.invalid:443",
+            b"chatgpt.com:80",             # right host, wrong port
+            b"chatgpt.com:8443",
+            b"evil.invalid:443",
+        ):
+            with self.subTest(denied=authority):
+                with self.assertRaises(egress.EgressError) as caught:
+                    egress.parse_connect(connect(authority), policy)
+                self.assertEqual(caught.exception.code, "denied")
+
     def test_parse_connect_rejects_mismatched_host_header(self):
         request = (
             b"CONNECT chatgpt.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n"
