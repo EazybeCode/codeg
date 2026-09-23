@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslations } from "next-intl"
 import { Lock, MoreHorizontal, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -84,6 +84,26 @@ const LOAD_TIMEOUT_MS = 15_000
 const ERROR_MARKER = 'meta[name="neev-document-engine-error"]'
 
 /**
+ * Asks the embedded editor to re-read this document's metadata.
+ *
+ * The counterpart of `neev-doc-metadata-updated`, which the editor posts out
+ * when someone renames from inside it. This is the same nudge travelling the
+ * other way, for a rename that happened in Neev's own chrome.
+ */
+export const FRAME_REFRESH_EVENT = "neev-doc-refresh-metadata"
+
+/**
+ * The editor saying it is listening.
+ *
+ * `load` fires before the editor has hydrated, so a refresh sent then arrives
+ * at a window with no listener on it. A fixed delay was the first answer and
+ * it is a guess: a slow machine hydrates after whatever number is chosen, and
+ * the race stays open. So the frame says when it is ready instead, and
+ * anything held is flushed on hearing it.
+ */
+export const FRAME_READY_EVENT = "neev-doc-frame-ready"
+
+/**
  * Whether the frame is showing a failure rather than the editor.
  *
  * Detects only failures that carry the marker above. The proxy does emit it —
@@ -152,6 +172,12 @@ function Frame({
    * it cannot become a poll.
    */
   const pending = useRef(false)
+  /** The metadata revision last seen on the prop, to notice when it moves. */
+  const lastRevision = useRef(resource.authRevision)
+  /** A refresh held because the frame had not said it was listening yet. */
+  const refreshPending = useRef(false)
+  /** Whether the frame has announced its listener. Reset by a remount. */
+  const frameReady = useRef(false)
 
   /**
    * Re-read the document's metadata when it may have changed.
@@ -270,9 +296,72 @@ function Frame({
 
   function retry() {
     settled.current = false
+    frameReady.current = false
     setState("loading")
     setAttempt((value) => value + 1)
   }
+
+  /**
+   * Tell the frame this document's metadata moved under it.
+   *
+   * The editor reads the title when it boots, so a rename done in Neev's own
+   * chrome leaves it showing the old name. Invalidating one query fixes that
+   * without reloading — a reload during an unsaved edit can cost a paragraph,
+   * which is too much to spend on a name. The message carries an id and no
+   * title: the frame re-reads its own API rather than believing a string.
+   */
+  const refreshFrame = useCallback(() => {
+    frame.current?.contentWindow?.postMessage(
+      { type: FRAME_REFRESH_EVENT, resourceId: resourceId },
+      window.location.origin
+    )
+  }, [resourceId])
+
+  /**
+   * Any metadata write is worth a refresh, including the frame's own.
+   *
+   * Keyed on `authRevision` rather than the title, because the title is not
+   * the only thing in here the editor renders: archiving makes the body
+   * read-only upstream, and restoring makes it writable again. Every metadata
+   * PATCH bumps this, so one dependency covers all of them.
+   *
+   * An earlier version tried to tell the two apart and suppress the frame's
+   * own renames. It could not: the focus-driven re-read above picks up an
+   * EXTERNAL rename just as readily, so "the frame told us this" was inferred
+   * from evidence that did not support it, and a real rename went unsent. One
+   * redundant GET after someone renames in place is the cheaper mistake.
+   *
+   * A change arriving before the frame says it is listening is held rather
+   * than dropped, and flushed by the handshake below.
+   */
+  useEffect(() => {
+    if (resource.authRevision === lastRevision.current) return
+    lastRevision.current = resource.authRevision
+    if (frameReady.current) refreshFrame()
+    else refreshPending.current = true
+  }, [resource.authRevision, refreshFrame])
+
+  /**
+   * The frame announcing its listener, and the flush that goes with it.
+   *
+   * Same three checks as every other message crossing this boundary: this
+   * frame's own window, our own origin, this document's id.
+   */
+  useEffect(() => {
+    const onReady = (event: MessageEvent) => {
+      if (event.source !== frame.current?.contentWindow) return
+      if (event.origin !== window.location.origin) return
+      const data = event.data as { type?: unknown; resourceId?: unknown } | null
+      if (!data || data.type !== FRAME_READY_EVENT) return
+      if (data.resourceId !== resourceId) return
+      frameReady.current = true
+      if (!refreshPending.current) return
+      refreshPending.current = false
+      refreshFrame()
+    }
+    window.addEventListener("message", onReady)
+    return () => window.removeEventListener("message", onReady)
+  }, [resourceId, refreshFrame])
 
   /**
    * The resource id IS the upstream document id — there is no second id and no
@@ -353,21 +442,42 @@ function Frame({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               {/*
-                No Rename. Upstream owns the title and writes it through its own
-                save path; a Neev rename beside it would be a second writer for
-                one name. Same reasoning as the absent title above.
+                Rename is here now, and the old reasoning for leaving it out no
+                longer holds. It was omitted because upstream owns the title and
+                a second writer for one name is a conflict — but Neev's PATCH is
+                not a second writer, it is the same one: the backend projects a
+                native title change into Docs and reconciles on open. The title
+                inside the frame is still directly editable, and that remains
+                the quickest way to do it; this exists because the reader
+                looking for "rename" looks in a menu, and finding nothing there
+                reads as "you cannot".
               */}
               <DropdownMenuItem
                 disabled={actions.disabled}
-                onSelect={actions.onArchiveToggle}
+                onSelect={actions.onRename}
               >
-                {t(actions.archived ? "reopen" : "archive")}
+                {t("rename")}
               </DropdownMenuItem>
               <DropdownMenuItem
                 disabled={actions.disabled}
                 onSelect={actions.onMove}
               >
                 {t("move")}
+              </DropdownMenuItem>
+              {/*
+                The delete affordance, named for what it actually does. There is
+                no hard delete behind it — the API archives, and archiving is
+                reversible — so calling it "Delete" would promise a finality the
+                system does not implement, and calling it "Archive" left readers
+                hunting for a delete that was never coming. "Move to trash" is
+                both true and the thing they were looking for, and it is paired
+                with a restore in the same menu and a trash view in the sidebar.
+              */}
+              <DropdownMenuItem
+                disabled={actions.disabled}
+                onSelect={actions.onArchiveToggle}
+              >
+                {t(actions.archived ? "restoreFromTrash" : "moveToTrash")}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -386,11 +496,37 @@ function Frame({
       )}
 
       <div className="relative min-h-0 flex-1">
+        {/*
+          The shape of the thing that is coming, rather than a word about it.
+          This window is the editor's own boot — a large bundle and its first
+          reads — and for that whole time the frame is blank. One line of
+          centred grey text over a white rectangle read as a page that had
+          failed; a title bar and a few lines of body read as a page that is
+          arriving, which is what is happening. The wording still exists for
+          anyone not looking at it.
+        */}
         {state === "loading" && (
-          <p
-            role="status"
-            className="absolute inset-x-0 top-4 text-center text-sm text-muted-foreground"
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 overflow-hidden bg-background px-6 pt-6 sm:px-10"
           >
+            <div className="mx-auto w-full max-w-[760px] animate-pulse space-y-6">
+              <div className="h-8 w-2/5 rounded-md bg-muted" />
+              <div className="space-y-3">
+                {["w-full", "w-11/12", "w-4/5", "w-full", "w-3/5"].map(
+                  (width) => (
+                    <div
+                      key={width}
+                      className={`h-3.5 rounded bg-muted/70 ${width}`}
+                    />
+                  )
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+        {state === "loading" && (
+          <p role="status" className="sr-only">
             {n("working")}
           </p>
         )}

@@ -206,7 +206,12 @@
     "settingsConflict": "この設定は別の場所で変更されました。チャットを開き直して選び直してください。",
     "settingsPending": "適用中…",
     "settingsUnsaved": "まだ適用されていません。",
-    "modelsIncomplete": "{name} のモデル一覧を取得できませんでした。これがすべてとは限りません。"
+    "modelsIncomplete": "{name} のモデル一覧を取得できませんでした。これがすべてとは限りません。",
+    "loadingConversation": "この会話を読み込んでいます…",
+    "moveToTrash": "ゴミ箱に移動",
+    "restoreFromTrash": "元に戻す",
+    "inTrash": "ゴミ箱内",
+    "itemActions": "{title} の操作"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",
@@ -338,7 +343,10 @@
     "invalidJoinCode": "そのコードは無効、無効化済み、または利用できません。",
     "newTab": "新しいタブ",
     "emptyTab": "新しいタブ",
-    "emptyTabHint": "ここで開くドキュメントまたはチャットを選んでください。"
+    "emptyTabHint": "ここで開くドキュメントまたはチャットを選んでください。",
+    "opening": "開いています…",
+    "showTrash": "ゴミ箱を表示",
+    "hideTrash": "ゴミ箱を非表示"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "ワークスペースのチャット情報を利用できません。",

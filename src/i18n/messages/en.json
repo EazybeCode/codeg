@@ -206,7 +206,12 @@
     "settingsConflict": "These settings changed somewhere else. Reopen the chat and choose again.",
     "settingsPending": "Applying…",
     "settingsUnsaved": "Not applied yet.",
-    "modelsIncomplete": "{name} could not list its models, so this may not be all of them."
+    "modelsIncomplete": "{name} could not list its models, so this may not be all of them.",
+    "loadingConversation": "Loading this conversation…",
+    "moveToTrash": "Move to trash",
+    "restoreFromTrash": "Restore",
+    "inTrash": "In trash",
+    "itemActions": "Actions for {title}"
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",
@@ -338,7 +343,10 @@
     "invalidJoinCode": "That code is invalid, disabled, or unavailable.",
     "newTab": "New tab",
     "emptyTab": "New tab",
-    "emptyTabHint": "Choose a document or a chat to open here."
+    "emptyTabHint": "Choose a document or a chat to open here.",
+    "opening": "Opening…",
+    "showTrash": "Show trash",
+    "hideTrash": "Hide trash"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Workspace chat context is unavailable.",

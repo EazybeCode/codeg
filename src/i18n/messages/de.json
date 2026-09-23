@@ -206,7 +206,12 @@
     "settingsConflict": "Diese Einstellungen wurden anderswo geändert. Öffne den Chat erneut und wähle noch einmal.",
     "settingsPending": "Wird angewendet …",
     "settingsUnsaved": "Noch nicht angewendet.",
-    "modelsIncomplete": "{name} konnte seine Modelle nicht auflisten – das sind möglicherweise nicht alle."
+    "modelsIncomplete": "{name} konnte seine Modelle nicht auflisten – das sind möglicherweise nicht alle.",
+    "loadingConversation": "Diese Unterhaltung wird geladen…",
+    "moveToTrash": "In den Papierkorb verschieben",
+    "restoreFromTrash": "Wiederherstellen",
+    "inTrash": "Im Papierkorb",
+    "itemActions": "Aktionen für {title}"
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",
@@ -338,7 +343,10 @@
     "invalidJoinCode": "Dieser Code ist ungültig, deaktiviert oder nicht verfügbar.",
     "newTab": "Neuer Tab",
     "emptyTab": "Neuer Tab",
-    "emptyTabHint": "Wählen Sie ein Dokument oder einen Chat, um es hier zu öffnen."
+    "emptyTabHint": "Wählen Sie ein Dokument oder einen Chat, um es hier zu öffnen.",
+    "opening": "Wird geöffnet…",
+    "showTrash": "Papierkorb anzeigen",
+    "hideTrash": "Papierkorb ausblenden"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Der Chat-Kontext des Arbeitsbereichs ist nicht verfügbar.",

@@ -206,7 +206,12 @@
     "settingsConflict": "Ces réglages ont changé ailleurs. Rouvrez la discussion et choisissez à nouveau.",
     "settingsPending": "Application…",
     "settingsUnsaved": "Pas encore appliqué.",
-    "modelsIncomplete": "{name} n'a pas pu lister ses modèles ; ce ne sont peut-être pas tous."
+    "modelsIncomplete": "{name} n'a pas pu lister ses modèles ; ce ne sont peut-être pas tous.",
+    "loadingConversation": "Chargement de cette conversation…",
+    "moveToTrash": "Mettre à la corbeille",
+    "restoreFromTrash": "Restaurer",
+    "inTrash": "Dans la corbeille",
+    "itemActions": "Actions pour {title}"
   },
   "Native": {
     "callbackConflict": "Cette méthode de connexion entre en conflit avec un compte existant. Utilisez votre méthode de connexion initiale, puis ouvrez les paramètres pour en associer une autre. Les comptes ne sont jamais fusionnés automatiquement.",
@@ -338,7 +343,10 @@
     "invalidJoinCode": "Ce code est invalide, désactivé ou indisponible.",
     "newTab": "Nouvel onglet",
     "emptyTab": "Nouvel onglet",
-    "emptyTabHint": "Choisissez un document ou une conversation à ouvrir ici."
+    "emptyTabHint": "Choisissez un document ou une conversation à ouvrir ici.",
+    "opening": "Ouverture…",
+    "showTrash": "Afficher la corbeille",
+    "hideTrash": "Masquer la corbeille"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "Le contexte du chat de l’espace de travail est indisponible.",

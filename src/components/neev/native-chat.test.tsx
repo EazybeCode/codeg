@@ -56,6 +56,19 @@ afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
+/**
+ * Wait for a mounted chat to finish its first read.
+ *
+ * The shell is now drawn before the metadata and history come back, so the
+ * composer appearing no longer means the chat is loaded — which is what most
+ * of these tests were using it for. This is the real signal.
+ */
+async function ready() {
+  await screen.findByRole("textbox", { name: "Message" })
+  await waitFor(() =>
+    expect(screen.queryByText("Loading this conversation…")).toBeNull()
+  )
+}
 function mount(fresh = false) {
   return render(
     <NativeTestRoot>
@@ -80,6 +93,7 @@ it("renders message Markdown without activating unsafe links", async () => {
       }),
   })
   mount()
+  await ready()
   expect((await screen.findByText("Decision")).tagName).toBe("STRONG")
   expect(screen.queryByRole("link", { name: "bad" })).toBeNull()
 })
@@ -90,6 +104,7 @@ it("brings a successfully sent message into view from older history", async () =
     [`POST ${path}`]: () => json(message, 201),
   })
   mount()
+  await ready()
   const history = await screen.findByRole("list", { name: "Messages" })
   Object.defineProperties(history, {
     scrollHeight: { value: 900 },
@@ -120,6 +135,7 @@ it("retries a committed message with the same request ID and displays its human 
   })
   const user = userEvent.setup()
   mount()
+  await ready()
   await user.type(
     await screen.findByRole("textbox", { name: "Message" }),
     message.body
@@ -161,6 +177,7 @@ it("pins a dirty message audience across polling and explicitly accepts the late
   })
   const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
   mount()
+  await ready()
   await user.type(
     await screen.findByRole("textbox", { name: "Message" }),
     message.body
@@ -210,6 +227,7 @@ it("polls metadata before incremental messages only while visible and stops on u
     },
   })
   const view = mount()
+  await ready()
   await screen.findByText(message.body)
   expect(order).toEqual(["metadata", "first"])
   const visibility = vi
@@ -276,6 +294,7 @@ it.each([403, 404, 401])(
     })
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
     mount()
+    await ready()
     await screen.findByText(message.body)
     await user.type(
       screen.getByRole("textbox", { name: "Message" }),
@@ -364,6 +383,7 @@ it.each(["1", "9007199254740992"])(
     })
     const user = userEvent.setup()
     mount()
+    await ready()
     await user.type(
       await screen.findByRole("textbox", { name: "Message" }),
       "Third"
@@ -471,6 +491,7 @@ it("carries the audience promise on the control that makes it true", async () =>
     ...noSessions,
   })
   mount(true)
+  await ready()
   const agent = await screen.findByRole("button", { name: "Ask agent" })
   const promise =
     "Your question and the agent's reply are both posted to this conversation."
@@ -500,6 +521,7 @@ it("opens a new chat in agent mode and an existing one in team mode", async () =
   })
   const user = userEvent.setup()
   const view = mount(true)
+  await ready()
   const agent = await screen.findByRole("button", { name: "Ask agent" })
   expect(agent).toHaveAttribute("aria-pressed", "true")
   // Both modes are one click away, inside the same conversation: there is no
@@ -518,6 +540,7 @@ it("opens a new chat in agent mode and an existing one in team mode", async () =
   // Nothing chosen for this chat yet, and no agent history in it: team.
   localStorage.clear()
   mount()
+  await ready()
   expect(
     await screen.findByRole("button", { name: "Team chat" })
   ).toHaveAttribute("aria-pressed", "true")
@@ -532,6 +555,7 @@ it("remembers the chosen mode and provider across a reload", async () => {
   })
   const user = userEvent.setup()
   const view = mount()
+  await ready()
   // A human-only thread opens in team mode; choosing Agent is a decision.
   await user.click(await screen.findByRole("button", { name: "Ask agent" }))
   // Provider is chosen by picking a model under its heading: one grouped menu
@@ -550,6 +574,7 @@ it("remembers the chosen mode and provider across a reload", async () => {
   )
   view.unmount()
   mount()
+  await ready()
   // Forgetting this is not a cosmetic slip: Enter would post to the team
   // instead of invoking, and the sender would only find out afterwards.
   expect(
@@ -573,6 +598,7 @@ it("opens a thread that already has agent replies in agent mode", async () => {
     ...noSessions,
   })
   mount()
+  await ready()
   expect(
     await screen.findByRole("button", { name: "Ask agent" })
   ).toHaveAttribute("aria-pressed", "true")
@@ -585,6 +611,7 @@ it("falls back to team mode and says so when no runtime is bound", async () => {
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   expect(
     await screen.findByRole("button", { name: "Team chat" })
   ).toHaveAttribute("aria-pressed", "true")
@@ -622,6 +649,7 @@ it("stays writable through a long run and keeps what was typed during it", async
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   await typeAsk(user)
   await user.click(screen.getByRole("button", { name: "Send" }))
   const box = await screen.findByRole("textbox", { name: "Message" })
@@ -681,6 +709,7 @@ it("posts the ask and the persisted agent reply to the one conversation", async 
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   await typeAsk(user)
   await user.click(screen.getByRole("button", { name: "Send" }))
   // The ask carries the audience the composer was pinned to and an idempotent
@@ -727,6 +756,7 @@ it("sends on Enter, keeps Shift+Enter a newline, and never sends mid-composition
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   const box = await screen.findByRole("textbox", { name: "Message" })
   await user.type(box, "help")
   fireEvent.keyDown(box, { key: "Enter", shiftKey: true })
@@ -763,6 +793,7 @@ it("names the tool in flight, counts the seconds, and opens the call", async () 
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   await typeAsk(user)
   await user.click(screen.getByRole("button", { name: "Send" }))
   // Working status is immediate, before any activity has arrived, and it
@@ -833,6 +864,7 @@ it("shows Cancel while the invoked run streams and cancels it by run id", async 
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   await typeAsk(user)
   await user.click(screen.getByRole("button", { name: "Send" }))
   await screen.findByText("partial")
@@ -866,6 +898,7 @@ it("keeps a refused invocation's ask visible and names the reason", async () => 
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   await typeAsk(user)
   await user.click(screen.getByRole("button", { name: "Send" }))
   // The question stays team-visible even though no reply came …
@@ -886,6 +919,7 @@ it("surfaces an error when the invocation is refused outright (503)", async () =
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   await typeAsk(user)
   await user.click(screen.getByRole("button", { name: "Send" }))
   expect(await screen.findByRole("alert")).toBeVisible()
@@ -912,6 +946,7 @@ it("points an unconnected provider at the one place it can be fixed", async () =
       }),
   })
   mount(true)
+  await ready()
   expect(await screen.findByText("claude is not connected yet.")).toBeVisible()
   expect(
     screen.getByRole("link", { name: "Personal AI connections" })
@@ -959,6 +994,7 @@ it("replays this reader's own stored trace when the conversation is reopened", a
   })
   const user = userEvent.setup()
   mount()
+  await ready()
   // The reply is there from the message list; the trace comes from the turn.
   expect(await screen.findByText("do X")).toBeVisible()
   const summary = await screen.findByRole("button", {
@@ -1004,6 +1040,7 @@ it("re-reads only what is new after a run completes", async () => {
   })
   const user = userEvent.setup()
   mount()
+  await ready()
   await screen.findByRole("button", { name: /1 tool calls/ })
   expect(reads).toEqual(["all"])
   await user.type(screen.getByRole("textbox", { name: "Message" }), "and then?")
@@ -1034,6 +1071,7 @@ it("never attaches another person's private trace to their reply", async () => {
     [TURNS]: () => json({ items: [completedTurn], nextAfter: null }),
   })
   mount()
+  await ready()
   expect(await screen.findByText("do X")).toBeVisible()
   await waitFor(() => expect(screen.queryByText(/tool calls/)).toBeNull())
   expect(screen.queryByText("Read")).toBeNull()
@@ -1078,6 +1116,7 @@ it("rejoins a run that was still going, without re-sending anything", async () =
     },
   })
   mount()
+  await ready()
   // Reopening attaches to the run already in flight and streams it …
   expect(await screen.findByText("do X")).toBeVisible()
   // … exactly once, and it never re-posts the prompt.
@@ -1123,6 +1162,7 @@ it("renders a teammate's message from a push notice and says updates are live", 
       ),
   })
   mount()
+  await ready()
   await screen.findByRole("textbox", { name: "Message" })
   act(() =>
     controller.enqueue(
@@ -1159,6 +1199,7 @@ it("keeps polling and says so when the server does not push", async () => {
     [streamPath]: () => json({ code: "not_found" }, 404),
   })
   mount()
+  await ready()
   await screen.findByRole("textbox", { name: "Message" })
   // No "Live updates" claim when nothing is actually streaming.
   expect(await screen.findByText("Updates every few seconds")).toBeVisible()
@@ -1240,6 +1281,7 @@ it("keeps what was typed while a send was in flight", async () => {
       }),
   })
   mount()
+  await ready()
   const composer = await screen.findByRole("textbox", { name: "Message" })
   await user.type(composer, "first message")
   await user.click(screen.getByRole("button", { name: "Send" }))
@@ -1285,6 +1327,7 @@ it("lets the FIRST ask be configured, and sends that configuration with it", asy
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
 
   // Nothing is disabled and nothing says "ask first": all three controls are
   // live before a single turn has run.
@@ -1335,6 +1378,7 @@ it("keeps the draft and the chosen configuration when the first ask fails", asyn
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
   await user.click(await screen.findByRole("button", { name: "Model" }))
   await user.click(
     within(await screen.findByRole("group", { name: "Claude Code" })).getByRole(
@@ -1395,6 +1439,7 @@ it("switches provider through the model menu and keeps each holder's own configu
   })
   const user = userEvent.setup()
   mount(true)
+  await ready()
 
   // Claude's holder: Opus, Max, fast.
   await waitFor(() =>
@@ -1444,4 +1489,56 @@ it("switches provider through the model menu and keeps each holder's own configu
     effort: "minimal",
   })
   expect(invocations[0]).not.toHaveProperty("fast")
+})
+
+/**
+ * The panel used to be one line of text — "Loading your workspace…" — until the
+ * metadata read AND the whole paged history had come back. Opening a brand new
+ * chat therefore spent two round trips showing nothing, and saying the wrong
+ * thing about what was missing.
+ *
+ * The shell is drawable from the resource the caller already fetched, so it is
+ * drawn. What must NOT happen is a message leaving before the read that proves
+ * this chat is still readable, and the wait for it is shown rather than hidden
+ * behind a button that looks ready.
+ */
+it("draws the conversation before its history arrives, and posts nothing until the metadata read lands", async () => {
+  let release: (() => void) | undefined
+  const mock = mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () =>
+      new Promise((resolve) => {
+        release = () => resolve(json(resource))
+      }),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}`]: () => json(message, 201),
+  })
+  mount()
+
+  // The shell is here: its name, and somewhere to type.
+  const composer = await screen.findByRole("textbox", { name: "Message" })
+  expect(screen.getByTitle("Design chat")).toBeInTheDocument()
+  expect(screen.getByText("Loading this conversation…")).toBeInTheDocument()
+  // The old behaviour, which must not come back.
+  expect(screen.queryByText("Loading your workspace…")).toBeNull()
+
+  const posts = () =>
+    mock.fetcher.mock.calls.filter(
+      ([target, init]) =>
+        target === path && (init as RequestInit)?.method === "POST"
+    )
+
+  // Writable immediately, and visibly not sendable yet.
+  const user = userEvent.setup()
+  await user.type(composer, message.body)
+  expect(composer).toHaveValue(message.body)
+  expect(screen.getByRole("button", { name: "Working…" })).toBeDisabled()
+  expect(posts()).toEqual([])
+
+  await act(async () => {
+    release?.()
+    await Promise.resolve()
+  })
+  await ready()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(posts()).toHaveLength(1))
 })

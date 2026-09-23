@@ -206,7 +206,12 @@
     "settingsConflict": "這些設定已在別處變更。請重新開啟對話並再次選擇。",
     "settingsPending": "套用中…",
     "settingsUnsaved": "尚未套用。",
-    "modelsIncomplete": "無法取得 {name} 的模型清單，這可能不是全部。"
+    "modelsIncomplete": "無法取得 {name} 的模型清單，這可能不是全部。",
+    "loadingConversation": "正在載入此對話…",
+    "moveToTrash": "移至回收筒",
+    "restoreFromTrash": "還原",
+    "inTrash": "在回收筒中",
+    "itemActions": "{title} 的操作"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",
@@ -338,7 +343,10 @@
     "invalidJoinCode": "該代碼無效、已停用或無法使用。",
     "newTab": "新增分頁",
     "emptyTab": "新增分頁",
-    "emptyTabHint": "選擇要在這裡開啟的文件或聊天。"
+    "emptyTabHint": "選擇要在這裡開啟的文件或聊天。",
+    "opening": "正在開啟…",
+    "showTrash": "顯示回收筒",
+    "hideTrash": "隱藏回收筒"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作區聊天內容無法使用。",

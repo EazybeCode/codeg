@@ -206,7 +206,12 @@
     "settingsConflict": "这些设置已在别处更改。请重新打开对话并再次选择。",
     "settingsPending": "正在应用…",
     "settingsUnsaved": "尚未应用。",
-    "modelsIncomplete": "无法获取 {name} 的模型列表，这可能不是全部。"
+    "modelsIncomplete": "无法获取 {name} 的模型列表，这可能不是全部。",
+    "loadingConversation": "正在加载此对话…",
+    "moveToTrash": "移到回收站",
+    "restoreFromTrash": "恢复",
+    "inTrash": "在回收站中",
+    "itemActions": "{title} 的操作"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",
@@ -338,7 +343,10 @@
     "invalidJoinCode": "该代码无效、已停用或不可用。",
     "newTab": "新建标签",
     "emptyTab": "新建标签",
-    "emptyTabHint": "选择要在这里打开的文档或聊天。"
+    "emptyTabHint": "选择要在这里打开的文档或聊天。",
+    "opening": "正在打开…",
+    "showTrash": "显示回收站",
+    "hideTrash": "隐藏回收站"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "工作区聊天上下文不可用。",

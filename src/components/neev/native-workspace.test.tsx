@@ -539,6 +539,36 @@ const resource = {
   createdAt: 0,
   updatedAt: 0,
 }
+/** A one-project tree holding a single document, for the sidebar tests. */
+function treeRoutes(doc: Omit<typeof resource, "kind"> & { kind: "document" }) {
+  return {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () =>
+      json({ runtimeEnabled: true, connections: [] }),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 7,
+            orgId: 3,
+            kind: "project",
+            parentId: null,
+            name: "Space",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+    "GET /api/neev/nodes/7/documents": () =>
+      json({ items: [doc], nextAfter: null }),
+    "GET /api/neev/nodes/7/chats": () => json({ items: [], nextAfter: null }),
+    [`GET /api/neev/resources/${doc.id}`]: () => json(doc),
+    [`GET /api/neev/documents/${doc.id}/content`]: () =>
+      json({ revision: null, markdown: "", document: null }),
+    [`GET /api/neev/documents/${doc.id}/revisions`]: () =>
+      json({ items: [], nextAfter: null }),
+  }
+}
 it("opens conversations from the sidebar, guards switching items, and reveals a created one", async () => {
   const chatA = resource
   const chatB = {
@@ -879,7 +909,7 @@ it("asks before browsing away from an unsent agent prompt", async () => {
   const tree = await screen.findByRole("navigation", { name: "Projects" })
   await user.click(await within(tree).findByRole("button", { name: "Space" }))
   await user.click(
-    await within(tree).findByRole("button", { name: /Parser chat/ })
+    await within(tree).findByRole("button", { name: /^Parser chat/ })
   )
   await user.type(
     await screen.findByRole("textbox", { name: "Ask the agent" }),
@@ -891,7 +921,7 @@ it("asks before browsing away from an unsent agent prompt", async () => {
     "Discard unsaved changes?"
   )
   await user.click(screen.getByRole("button", { name: "Keep editing" }))
-  expect(screen.getByRole("tab", { name: /Parser chat/ })).toHaveAttribute(
+  expect(screen.getByRole("tab", { name: /^Parser chat/ })).toHaveAttribute(
     "aria-selected",
     "true"
   )
@@ -909,7 +939,7 @@ it("asks before browsing away from an unsent agent prompt", async () => {
       "true"
     )
   )
-  expect(screen.queryByRole("tab", { name: /Parser chat/ })).toBeNull()
+  expect(screen.queryByRole("tab", { name: /^Parser chat/ })).toBeNull()
   expect(mock.unknown).toEqual([])
 })
 
@@ -1556,12 +1586,12 @@ it("marks only the active tab's item as current in the tree", async () => {
   // Browsing replaces what is in front, so a SECOND tab is asked for.
   await user.click(screen.getByRole("button", { name: "New tab" }))
   await user.click(
-    await within(tree).findByRole("button", { name: /Parser chat/ })
+    await within(tree).findByRole("button", { name: /^Parser chat/ })
   )
 
   // The chat is in front, so the chat is the only thing marked current.
   expect(
-    within(tree).getByRole("button", { name: /Parser chat/ })
+    within(tree).getByRole("button", { name: /^Parser chat/ })
   ).toHaveAttribute("aria-current", "page")
   expect(
     within(tree).getByRole("button", { name: "Brief" })
@@ -1576,6 +1606,136 @@ it("marks only the active tab's item as current in the tree", async () => {
     )
   )
   expect(
-    within(tree).getByRole("button", { name: /Parser chat/ })
+    within(tree).getByRole("button", { name: /^Parser chat/ })
   ).not.toHaveAttribute("aria-current")
+})
+
+/**
+ * Renaming from the sidebar, which is where renaming was missing.
+ *
+ * It was reachable only by opening a thing first and finding the menu in its
+ * header, which is why readers reported that Neev had no rename at all.
+ *
+ * The assertion that matters is the LAST one. A tab that is already open holds
+ * its own copy of the resource, and the panel used to prefer whichever copy it
+ * happened to have fetched first — so a rename made afterwards, in the sidebar,
+ * left the tab showing the old name. `authRevision` decides now, so the newer
+ * write wins wherever it came from.
+ */
+it("renames from the sidebar, and the open tab takes the newer name", async () => {
+  const doc = { ...resource, kind: "document" as const, title: "Brief" }
+  const renamed = { ...doc, title: "Brief, renamed", authRevision: "2" }
+  let patched: Record<string, unknown> | undefined
+  mockNativeSession(undefined, {
+    ...treeRoutes(doc),
+    [`PATCH /api/neev/resources/${doc.id}`]: (init: RequestInit) => {
+      patched = JSON.parse(init.body as string)
+      return json(renamed)
+    },
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  const tree = await screen.findByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Space" }))
+  await user.click(await within(tree).findByRole("button", { name: "Brief" }))
+  await screen.findByRole("tab", { name: /Brief/ })
+
+  // The menu is on the row itself, not behind opening the document.
+  await act(async () => {
+    fireEvent.keyDown(
+      within(tree).getByRole("button", { name: "Actions for Brief" }),
+      { key: "Enter" }
+    )
+  })
+  await user.click(await screen.findByRole("menuitem", { name: "Rename" }))
+  // Scoped to the dialog: the open document has its own title field.
+  const dialog = await screen.findByRole("dialog")
+  const field = within(dialog).getByLabelText("Title")
+  await user.clear(field)
+  await user.type(field, "Brief, renamed")
+  await user.click(within(dialog).getByRole("button", { name: "Save" }))
+
+  // The rest of the row is carried back unchanged; only the name moves.
+  await waitFor(() => expect(patched).toBeDefined())
+  expect(patched).toMatchObject({
+    title: "Brief, renamed",
+    nodeId: doc.nodeId,
+    visibility: doc.visibility,
+    archived: false,
+    expectedAuthRevision: "1",
+  })
+
+  await waitFor(() =>
+    expect(
+      within(tree).getByRole("button", { name: "Brief, renamed" })
+    ).toBeInTheDocument()
+  )
+  // The tab is the point: it holds its own copy and must take the newer one.
+  expect(
+    screen.getByRole("tab", { name: /Brief, renamed/ })
+  ).toBeInTheDocument()
+})
+
+/**
+ * "Move to trash" is only an honest name if what it moves can be found again.
+ *
+ * There is no hard delete in the API — this archives — so the row must be
+ * reachable and restorable rather than simply gone, which is what archiving
+ * looked like when nothing listed it.
+ */
+it("moves a document to the trash and offers it back from the trash view", async () => {
+  const doc = { ...resource, kind: "document" as const, title: "Brief" }
+  const trashed = { ...doc, archived: true, authRevision: "2" }
+  const bodies: Record<string, unknown>[] = []
+  mockNativeSession(undefined, {
+    ...treeRoutes(doc),
+    // The server stops listing it live once it is trashed, and starts listing
+    // it archived — one row, one place, exactly as the backend behaves.
+    "GET /api/neev/nodes/7/documents": () =>
+      json({ items: bodies.length ? [] : [doc], nextAfter: null }),
+    "GET /api/neev/nodes/7/documents?archived=true": () =>
+      json({ items: bodies.length ? [trashed] : [], nextAfter: null }),
+    "GET /api/neev/nodes/7/chats?archived=true": () =>
+      json({ items: [], nextAfter: null }),
+    [`PATCH /api/neev/resources/${doc.id}`]: (init: RequestInit) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json(bodies.length === 1 ? trashed : doc)
+    },
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+
+  const tree = await screen.findByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Space" }))
+  await within(tree).findByRole("button", { name: "Brief" })
+
+  await act(async () => {
+    fireEvent.keyDown(
+      within(tree).getByRole("button", { name: "Actions for Brief" }),
+      { key: "Enter" }
+    )
+  })
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Move to trash" })
+  )
+  await waitFor(() => expect(bodies[0]).toMatchObject({ archived: true }))
+
+  // Gone from the tree, as a deletion should look.
+  await waitFor(() =>
+    expect(within(tree).queryByRole("button", { name: "Brief" })).toBeNull()
+  )
+
+  // And findable again, which is what makes the name truthful.
+  await user.click(screen.getByRole("button", { name: "Show trash" }))
+  const row = await within(tree).findByRole("button", { name: /^Brief/ })
+  expect(row).toHaveTextContent("In trash")
+  await act(async () => {
+    fireEvent.keyDown(
+      within(tree).getByRole("button", { name: "Actions for Brief" }),
+      { key: "Enter" }
+    )
+  })
+  await user.click(await screen.findByRole("menuitem", { name: "Restore" }))
+  await waitFor(() => expect(bodies[1]).toMatchObject({ archived: false }))
 })

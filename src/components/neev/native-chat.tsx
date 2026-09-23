@@ -182,6 +182,23 @@ function Chat({
   // Per instance: every open chat tab stays mounted, so a fixed id here would
   // point every Ask agent toggle at the first chat's description.
   const postsNote = useId()
+  /**
+   * Opens when this mount's first metadata read has settled.
+   *
+   * Drawing the shell early means the composer exists before the read that
+   * proves this chat is still readable. Disabling Send for that window was the
+   * first answer and it was the wrong lever: it makes a button that does
+   * nothing when pressed, for a race the reader cannot see. Sending waits on
+   * this instead — the post is issued after the read either way, and nothing
+   * about the composer lies in the meantime.
+   */
+  const [gate] = useState(() => {
+    let open!: () => void
+    const promise = new Promise<void>((resolve) => {
+      open = resolve
+    })
+    return { promise, open }
+  })
   const [latest, setLatest] = useState(resource),
     [messages, setMessages] = useState<NativeMessage[]>([]),
     [draft, setDraft] = useState(""),
@@ -369,9 +386,11 @@ function Chat({
         after = page.nextAfter
       } while (after)
       setLoading(false)
+      gate.open()
     } catch (e) {
       fail(e)
       if (scope.isCurrent()) setLoading(false)
+      gate.open()
     }
   }
   useEffect(() => {
@@ -754,6 +773,11 @@ function Chat({
       !scope.isCurrent()
     )
       return
+    // Nothing is posted before this mount's metadata read has settled. The
+    // guards are re-checked afterwards, because the read is exactly what may
+    // have revoked this chat.
+    await gate.promise
+    if (revoked || !auth.session || !scope.isCurrent()) return
     sending.current = true
     setSaving(true)
     setError(null)
@@ -867,11 +891,33 @@ function Chat({
         </Button>
       </div>
     )
-  if (loading) return <p role="status">{n("loading")}</p>
+  /*
+   * Nothing waits on the history read to draw the conversation.
+   *
+   * This used to return a single line — "Loading your workspace…" — in place of
+   * the whole panel until `refresh()` had finished. `refresh()` reads the
+   * resource and THEN pages the history, nose to tail, so opening a brand new
+   * chat with no messages in it still spent two round trips showing a blank
+   * region and a sentence about the workspace, which was not what was loading.
+   *
+   * The shell is drawable before either read returns: `latest` starts as the
+   * `resource` the parent passed in, which the parent had already fetched and
+   * been authorized for. So the title, the audience and the composer are
+   * honest from the first frame.
+   *
+   * What is NOT drawn early is any message. The history list stays empty until
+   * `refresh()` has re-read the metadata and been satisfied by it, which is the
+   * check that ordering was there to enforce — it is kept exactly as it was.
+   * Only the paint is unblocked, not the read.
+   */
   const traces = attachTurns(messages, turns, auth.session?.user.id ?? -1)
   // `applying` is in here too, so Enter and the Send button are both held
   // while the configuration is being stored. The textarea stays writable.
-  const composerBusy = saving || agentBusy || applying
+  // `loading` is in here, so the held state is VISIBLE rather than a button
+  // that looks ready and does nothing. The textarea stays writable, as it does
+  // for every other busy state; only sending waits, and `gate` below is what
+  // actually holds the POST.
+  const composerBusy = saving || agentBusy || applying || loading
   const sendable = !!draft.trim() && !composerBusy && !latest.archived
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
@@ -1011,6 +1057,16 @@ function Chat({
         aria-label={t("messages")}
         className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-4 py-3 sm:px-8"
       >
+        {/* Says what is actually being waited for. The conversation's own
+            history, not "your workspace" — the workspace is already here. */}
+        {loading && (
+          <li
+            role="status"
+            className="mx-auto w-full max-w-3xl text-sm text-muted-foreground"
+          >
+            {t("loadingConversation")}
+          </li>
+        )}
         {messages.map((message) => (
           <li key={message.id} className="mx-auto flex w-full max-w-3xl gap-3">
             <span
@@ -1100,7 +1156,12 @@ function Chat({
               // lock the box for minutes, and what is typed during one is kept:
               // the ask was cleared the moment it became durable, so nothing
               // the run finishes doing touches this draft.
-              disabled={loading || latest.archived}
+              //
+              // Writable during the first read too, now that the composer is
+              // drawn before it finishes. Only sending waits: a box that
+              // refuses the first thing typed into a chat that looks open is
+              // worse than a Send button that says it is not ready yet.
+              disabled={latest.archived}
               onChange={(event) => {
                 if (!draftRef.current) pinned.current = latest.authRevision
                 draftRef.current = event.target.value

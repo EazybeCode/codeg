@@ -943,7 +943,7 @@ it(
       await screen.findByRole("button", { name: "Expand Research" })
     )
     await user.click(
-      await screen.findByRole("button", { name: /Draft document/ })
+      await screen.findByRole("button", { name: /^Draft document/ })
     )
     await user.type(
       // Loading the real code-split editor is not subject to a one-second SLA.
@@ -966,7 +966,7 @@ it(
     )
     await user.click(screen.getByRole("menuitem", { name: "New agent chat" }))
     expect(screen.queryByRole("dialog")).toBeNull()
-    await user.click(screen.getByRole("tab", { name: /Draft document/ }))
+    await user.click(screen.getByRole("tab", { name: /^Draft document/ }))
     expect(
       screen.getAllByRole("textbox", { name: "Document content" })[0]
     ).toHaveTextContent("secret draft")
@@ -1050,7 +1050,7 @@ it(
       await screen.findByRole("button", { name: "Expand Research" })
     )
     await user.click(
-      await screen.findByRole("button", { name: /Draft document/ })
+      await screen.findByRole("button", { name: /^Draft document/ })
     )
     const body = await screen.findByRole(
       "textbox",
@@ -1082,7 +1082,7 @@ it(
     // the reader is looking at the draft they were asked about.
     await user.click(screen.getByRole("button", { name: "Keep editing" }))
     expect(
-      await screen.findByRole("tab", { name: /Draft document/ })
+      await screen.findByRole("tab", { name: /^Draft document/ })
     ).toHaveAttribute("aria-selected", "true")
     expect(
       screen.getByRole("textbox", { name: "Document content" })

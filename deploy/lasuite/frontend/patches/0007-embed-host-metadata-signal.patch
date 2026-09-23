@@ -1,9 +1,9 @@
 diff --git a/apps/impress/src/core/embed-host.ts b/apps/impress/src/core/embed-host.ts
 new file mode 100644
-index 0000000..3560b54
+index 0000000..d77baae
 --- /dev/null
 +++ b/apps/impress/src/core/embed-host.ts
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,81 @@
 +import { isEmbedded } from './embed';
 +
 +/**
@@ -45,6 +45,44 @@ index 0000000..3560b54
 +  } catch {
 +    // A host that cannot receive it is not this document's problem, and the
 +    // rename itself has already succeeded.
++  }
++}
++
++/**
++ * Asks this page to re-read a document's metadata, sent by the host.
++ *
++ * The counterpart of `HOST_METADATA_EVENT` above, travelling the other way: a
++ * rename done in the host's own chrome cannot be seen from in here, and this
++ * is how the host says so. Defined beside its opposite so the two names of the
++ * one conversation stay together.
++ */
++export const HOST_REFRESH_EVENT = 'neev-doc-refresh-metadata';
++
++/**
++ * Tells the host this page is listening for the message above.
++ *
++ * The host's `load` handler fires before this page has hydrated, so a refresh
++ * sent then reaches a window with no listener on it. Rather than have the host
++ * guess at a delay — which a slow machine will beat — it holds the refresh and
++ * sends it when this arrives.
++ */
++export const FRAME_READY_EVENT = 'neev-doc-frame-ready';
++
++export function notifyHostFrameReady(resourceId: string): void {
++  if (!isEmbedded() || typeof window === 'undefined') {
++    return;
++  }
++  if (window.parent === window) {
++    return;
++  }
++
++  try {
++    window.parent.postMessage(
++      { type: FRAME_READY_EVENT, resourceId },
++      window.location.origin,
++    );
++  } catch {
++    // A host that cannot receive it will fall back to its own re-reads.
 +  }
 +}
 diff --git a/apps/impress/src/features/docs/doc-management/hooks/useDocTitleUpdate.tsx b/apps/impress/src/features/docs/doc-management/hooks/useDocTitleUpdate.tsx

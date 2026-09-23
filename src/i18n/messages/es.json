@@ -206,7 +206,12 @@
     "settingsConflict": "Estos ajustes cambiaron en otro sitio. Vuelve a abrir el chat y elige de nuevo.",
     "settingsPending": "Aplicando…",
     "settingsUnsaved": "Aún no aplicado.",
-    "modelsIncomplete": "{name} no pudo listar sus modelos, así que puede que no estén todos."
+    "modelsIncomplete": "{name} no pudo listar sus modelos, así que puede que no estén todos.",
+    "loadingConversation": "Cargando esta conversación…",
+    "moveToTrash": "Mover a la papelera",
+    "restoreFromTrash": "Restaurar",
+    "inTrash": "En la papelera",
+    "itemActions": "Acciones para {title}"
   },
   "Native": {
     "callbackConflict": "Este método de acceso entra en conflicto con una cuenta existente. Usa tu método de acceso original y luego abre Configuración para vincular otro método. Las cuentas nunca se fusionan automáticamente.",
@@ -338,7 +343,10 @@
     "invalidJoinCode": "Ese código no es válido, está desactivado o no está disponible.",
     "newTab": "Nueva pestaña",
     "emptyTab": "Nueva pestaña",
-    "emptyTabHint": "Elige un documento o un chat para abrirlo aquí."
+    "emptyTabHint": "Elige un documento o un chat para abrirlo aquí.",
+    "opening": "Abriendo…",
+    "showTrash": "Mostrar papelera",
+    "hideTrash": "Ocultar papelera"
   },
   "WorkspaceCatalog": {
     "contextUnavailable": "El contexto del chat del espacio de trabajo no está disponible.",

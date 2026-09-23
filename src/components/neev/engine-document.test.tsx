@@ -484,21 +484,26 @@ it("keeps the sharing, archive and move actions Neev owns", async () => {
   ).toBeInTheDocument()
   await openContentMenu()
   expect(
-    await screen.findByRole("menuitem", { name: "Archive" })
+    await screen.findByRole("menuitem", { name: "Move to trash" })
   ).toBeInTheDocument()
   expect(screen.getByRole("menuitem", { name: "Move" })).toBeInTheDocument()
 })
 
-it("offers no rename, because renaming belongs to the editor", async () => {
+/**
+ * Rename used to be absent here, on the grounds that upstream owns the title
+ * and a second writer for one name is a conflict. That is no longer what this
+ * is: the backend projects a native title change into Docs and reconciles on
+ * open, so the PATCH is the same writer. What changed the decision was that a
+ * reader looking for "rename" looks in a menu, and an empty one reads as "you
+ * cannot".
+ */
+it("offers rename, now that Neev's PATCH is the same writer and not a second one", async () => {
   const user = userEvent.setup()
   await openEngineDocument(user)
   await openContentMenu()
-  await screen.findByRole("menuitem", { name: "Move" })
-  // Two ways to rename one document, backed by two different stores, is two
-  // names that can disagree.
   expect(
-    screen.queryByRole("menuitem", { name: "Rename" })
-  ).not.toBeInTheDocument()
+    await screen.findByRole("menuitem", { name: "Rename" })
+  ).toBeInTheDocument()
 })
 
 /**
@@ -682,4 +687,140 @@ it("still refuses a response missing a required field", () => {
   delete missing.title
   expect(() => parseResource(missing)).toThrow()
   expect(() => parseResource({ ...missing, engine: "lasuite" })).toThrow()
+})
+
+/** Renders the frame and hands back the frame plus a rerender for the prop. */
+function framed(value: NativeResource = resource) {
+  mockNativeSession()
+  const view = render(
+    <NativeTestRoot>
+      <EngineDocument resource={value} onBack={vi.fn()} onChanged={vi.fn()} />
+    </NativeTestRoot>
+  )
+  const rerenderWith = (next: NativeResource) =>
+    view.rerender(
+      <NativeTestRoot>
+        <EngineDocument resource={next} onBack={vi.fn()} onChanged={vi.fn()} />
+      </NativeTestRoot>
+    )
+  return { rerenderWith }
+}
+
+/** Stand in for the editor announcing that its listener is attached. */
+async function announceReady(
+  frame: HTMLIFrameElement,
+  resourceId = resource.id,
+  origin = window.location.origin,
+  source: unknown = frame.contentWindow
+) {
+  await act(async () => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "neev-doc-frame-ready", resourceId },
+        origin,
+        source: source as MessageEventSource,
+      })
+    )
+  })
+}
+
+/**
+ * A rename from Neev's own chrome must reach the editor, which read the title
+ * once when it booted and has no other way to hear about it.
+ *
+ * Asserted on the message rather than on a reload, because reloading is the
+ * thing this must not do: the frame is where the writing is, and a reload
+ * during an unsaved edit costs a paragraph to fix a name.
+ */
+it("asks the frame to re-read after an external rename, without reloading it", async () => {
+  const { rerenderWith } = framed()
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  const post = vi.fn()
+  Object.defineProperty(frame, "contentWindow", {
+    configurable: true,
+    value: { postMessage: post },
+  })
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+  await announceReady(frame)
+
+  await act(async () => {
+    rerenderWith({ ...resource, title: "Renamed elsewhere", authRevision: "2" })
+  })
+
+  expect(post).toHaveBeenCalledWith(
+    { type: "neev-doc-refresh-metadata", resourceId: resource.id },
+    window.location.origin
+  )
+  // The frame was not torn down and re-requested.
+  expect(screen.getByTitle("Renamed elsewhere")).toBe(frame)
+})
+
+/**
+ * The rename can land while the editor is still booting, and `load` fires
+ * before it has hydrated — so there is a window with no listener on the other
+ * side. A fixed delay would be a guess that a slow machine beats; the frame
+ * says when it is ready and the held refresh goes then.
+ */
+it("holds a rename that arrives before the frame is listening, and flushes it on the ready signal", async () => {
+  const { rerenderWith } = framed()
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  const post = vi.fn()
+  Object.defineProperty(frame, "contentWindow", {
+    configurable: true,
+    value: { postMessage: post },
+  })
+
+  // Renamed during boot: loaded, but the editor has not announced itself.
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+  await act(async () => {
+    rerenderWith({ ...resource, title: "Renamed in flight", authRevision: "2" })
+  })
+  expect(post).not.toHaveBeenCalled()
+
+  await announceReady(frame)
+  expect(post).toHaveBeenCalledTimes(1)
+  expect(post).toHaveBeenCalledWith(
+    { type: "neev-doc-refresh-metadata", resourceId: resource.id },
+    window.location.origin
+  )
+})
+
+/**
+ * The handshake is a message like any other, so it gets the same three checks.
+ * Anything else on the page can post, and being believed here would let it
+ * drive this frame.
+ */
+it("ignores a ready signal from the wrong origin, window or document", async () => {
+  const { rerenderWith } = framed()
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  const post = vi.fn()
+  Object.defineProperty(frame, "contentWindow", {
+    configurable: true,
+    value: { postMessage: post },
+  })
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+  await act(async () => {
+    rerenderWith({ ...resource, title: "Renamed", authRevision: "2" })
+  })
+
+  await announceReady(frame, resource.id, "https://evil.example")
+  await announceReady(frame, resource.id, window.location.origin, {})
+  await announceReady(frame, "99999999-9999-4999-8999-999999999999")
+  expect(post).not.toHaveBeenCalled()
+
+  // And the real one still works, so the test cannot pass by never flushing.
+  await announceReady(frame)
+  expect(post).toHaveBeenCalledTimes(1)
 })

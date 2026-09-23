@@ -32,6 +32,7 @@ import {
   Plus,
   Search,
   Settings2,
+  Trash2,
   X,
   Sun,
 } from "lucide-react"
@@ -83,6 +84,7 @@ import { NativeAgentChats } from "./native-agent-chats"
 import { NativeTabPanel } from "./native-suspended-surface"
 import {
   listAgentSessions,
+  updateAgentSession,
   type NeevAgentProvider,
   type NeevAgentSession,
 } from "@/lib/neev-agent-sessions-client"
@@ -90,6 +92,7 @@ import {
   createNativeResource,
   listNativeResources,
   loadNativeResource,
+  updateNativeResource,
   type NativeResource,
   type NativeResourceKind,
 } from "@/lib/neev-content-client"
@@ -193,6 +196,44 @@ function TabIcon({
  * asks for the resource itself, and only a refusal from that authorized read
  * closes the tab.
  */
+/**
+ * The most recently written of several copies of one resource.
+ *
+ * A panel can hold up to three: what it fetched itself, what the sidebar's list
+ * currently says, and what it last had. Taking the first non-empty one meant a
+ * restored tab's own fetch outranked a rename that happened in the sidebar
+ * afterwards, and the tab kept the old name. `authRevision` is bumped by every
+ * metadata write, so it — not the order these happen to be listed in — decides.
+ */
+function newest(
+  ...candidates: (NativeResource | null | undefined)[]
+): NativeResource | null {
+  let best: NativeResource | null = null
+  let bestRevision: bigint | null = null
+  for (const candidate of candidates) {
+    if (!candidate) continue
+    let revision: bigint | null = null
+    try {
+      revision = BigInt(candidate.authRevision)
+    } catch {
+      // Unparsable revisions cannot be ordered. Such a copy is still better
+      // than nothing, but never displaces one that can be ordered.
+      revision = null
+    }
+    if (!best) {
+      best = candidate
+      bestRevision = revision
+      continue
+    }
+    if (revision === null) continue
+    if (bestRevision === null || revision > bestRevision) {
+      best = candidate
+      bestRevision = revision
+    }
+  }
+  return best
+}
+
 function ResourcePanel({
   orgId,
   resourceId,
@@ -231,12 +272,50 @@ function ResourcePanel({
   const [loaded, setLoaded] = useState<NativeResource | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [request, setRequest] = useState(0)
-  const resource = loaded ?? cached ?? null
+  /**
+   * The last resource this panel had, for the renders where it has no other.
+   *
+   * `cached` is a lookup into a list the sidebar owns and refetches, and a
+   * resource can leave that list without going anywhere — moving one to the
+   * trash takes it out of a list that excludes trashed things. Falling back to
+   * the placeholder at that moment would unmount the panel's contents, and for
+   * a document that means tearing down the editor frame and booting it again,
+   * seconds of it, because something was renamed in the sidebar.
+   *
+   * A newer `cached` or `loaded` still wins; this only catches the fall to
+   * nothing. State rather than a ref, because it is read while rendering.
+   */
+  const [retained, setRetained] = useState<NativeResource | null>(null)
+  const resource = newest(loaded, cached, retained)
   useEffect(() => {
-    if (resource) onResolved(resource)
-  }, [resource, onResolved])
+    if (!resource) return
+    // Compared by identity of the VERSION, not of the object: two reads of the
+    // same unchanged row are different objects, and storing each one would
+    // schedule a render that produces another one just like it.
+    if (
+      retained?.id !== resource.id ||
+      retained.authRevision !== resource.authRevision
+    )
+      // Deliberate: this remembers what was rendered so a LATER render that
+      // loses it has something to fall back on. There is no earlier point to
+      // record it from — the value is derived — and the comparison above is
+      // what stops it scheduling itself again.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setRetained(resource)
+    onResolved(resource)
+  }, [resource, retained, onResolved])
+  /*
+   * Started without waiting for the project tree.
+   *
+   * This used to also require `node`, which put the whole tree load in front of
+   * this one read for any tab whose folder had not been paged in yet — a
+   * restored tab, most often. The wait bought nothing: this GET is authorized
+   * server-side by organization and resource id, and it 404s for a resource the
+   * reader may not see whether or not a tree is loaded. So the two run
+   * together, and the render below still waits for both.
+   */
   useEffect(() => {
-    if (resource || !node) return
+    if (resource) return
     const controller = new AbortController()
     const load = async () => {
       try {
@@ -263,13 +342,17 @@ function ResourcePanel({
     }
     void load()
     return () => controller.abort()
-  }, [resource, node, orgId, resourceId, auth, onGone])
+  }, [resource, orgId, resourceId, auth, onGone])
 
   if (error) return <NativeError error={error} />
   if (!node || !resource)
     return (
       <p role="status" className="px-6 py-10 text-sm text-muted-foreground">
-        {t("loading")}
+        {/* What is opening is this one thing, and saying so is both shorter
+            and true. "Loading your workspace…" described a whole-application
+            boot that had already happened, in a panel beside a sidebar that
+            was plainly already loaded. */}
+        {t("opening")}
       </p>
     )
   return (
@@ -491,6 +574,12 @@ function NativeWorkspaceTree({
   selectedNodeId,
   openAgentSessionId,
   openAgentSession,
+  showTrash,
+  renameResource,
+  trashResource,
+  renameSession,
+  trashSession,
+  actionsBusy,
 }: {
   nodes: NativeNode[]
   parentId?: number | null
@@ -515,6 +604,15 @@ function NativeWorkspaceTree({
   selectedNodeId: number | null
   openAgentSessionId: string | null
   openAgentSession: (node: NativeNode, session: NeevAgentSession) => void
+  /** Whether trashed rows are listed alongside the rest. */
+  showTrash: boolean
+  renameResource: (node: NativeNode, resource: NativeResource) => void
+  /** Moves to the trash, or brings back out of it. Reversible either way. */
+  trashResource: (resource: NativeResource) => void
+  renameSession: (session: NeevAgentSession) => void
+  trashSession: (session: NeevAgentSession) => void
+  /** A sidebar mutation is in flight; a second one must not be started. */
+  actionsBusy: boolean
 }) {
   const t = useTranslations("Native")
   const c = useTranslations("NativeContent")
@@ -645,39 +743,119 @@ function NativeWorkspaceTree({
                     selectedNodeId={selectedNodeId}
                     openAgentSessionId={openAgentSessionId}
                     openAgentSession={openAgentSession}
+                    showTrash={showTrash}
+                    renameResource={renameResource}
+                    trashResource={trashResource}
+                    renameSession={renameSession}
+                    trashSession={trashSession}
+                    actionsBusy={actionsBusy}
                   />
                   <ul className="ms-3 space-y-0.5 border-s border-sidebar-border/60 ps-1.5">
-                    {(list?.items ?? []).map((resource) => (
-                      <li key={resource.id}>
-                        <button
-                          onClick={() => selectResource(node, resource)}
-                          aria-current={
-                            openResourceId === resource.id ? "page" : undefined
-                          }
-                          className={cn(
-                            "flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring",
-                            openResourceId === resource.id
-                              ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
-                              : "text-muted-foreground hover:bg-sidebar-accent/60"
-                          )}
-                        >
-                          {resource.kind === "document" ? (
-                            <FileText
-                              aria-hidden
-                              className="size-3.5 shrink-0"
-                            />
-                          ) : (
-                            <MessagesSquare
-                              aria-hidden
-                              className="size-3.5 shrink-0"
-                            />
-                          )}
-                          <span className="truncate" title={resource.title}>
-                            {resource.title}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
+                    {/*
+                      Trashed rows are held back unless the trash is being
+                      shown. Filtered here rather than dropped from the list,
+                      because a tab open on the thing that was just trashed
+                      still reads its row — taking it out of state would make
+                      that tab look like it was loading all over again.
+                    */}
+                    {(list?.items ?? [])
+                      .filter((resource) => showTrash || !resource.archived)
+                      .map((resource) => (
+                        <li key={resource.id}>
+                          {/* A row and its menu, in one hoverable group. The
+                              menu button is always in the tree for keyboard and
+                              screen-reader users; it only *appears* on hover or
+                              focus, so a quiet sidebar stays quiet. */}
+                          <div
+                            className={cn(
+                              "group/item flex min-h-8 min-w-0 items-center rounded-lg pe-1",
+                              openResourceId === resource.id
+                                ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+                                : "text-muted-foreground hover:bg-sidebar-accent/60"
+                            )}
+                          >
+                            <button
+                              onClick={() => selectResource(node, resource)}
+                              aria-current={
+                                openResourceId === resource.id
+                                  ? "page"
+                                  : undefined
+                              }
+                              className="flex min-h-8 w-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              {resource.kind === "document" ? (
+                                <FileText
+                                  aria-hidden
+                                  className="size-3.5 shrink-0"
+                                />
+                              ) : (
+                                <MessagesSquare
+                                  aria-hidden
+                                  className="size-3.5 shrink-0"
+                                />
+                              )}
+                              <span
+                                className={cn(
+                                  "truncate",
+                                  resource.archived && "line-through opacity-70"
+                                )}
+                                title={resource.title}
+                              >
+                                {resource.title}
+                              </span>
+                              {/* Says where it is, so a struck-through row is
+                                  not left to be guessed at. */}
+                              {resource.archived && (
+                                <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                                  {c("inTrash")}
+                                </span>
+                              )}
+                            </button>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <button
+                                  aria-label={c("itemActions", {
+                                    title: resource.title,
+                                  })}
+                                  className={cn(
+                                    "flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring",
+                                    // Hidden until hover ONLY where hovering
+                                    // exists. On a touch screen there is no
+                                    // hover, so an opacity-0 control is simply
+                                    // a control nobody can find.
+                                    "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/item:opacity-100",
+                                    "group-focus-within/item:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                                  )}
+                                >
+                                  <MoreHorizontal
+                                    aria-hidden
+                                    className="size-3.5"
+                                  />
+                                </button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem
+                                  onSelect={() =>
+                                    renameResource(node, resource)
+                                  }
+                                >
+                                  {c("rename")}
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  disabled={actionsBusy}
+                                  onSelect={() => trashResource(resource)}
+                                >
+                                  {c(
+                                    resource.archived
+                                      ? "restoreFromTrash"
+                                      : "moveToTrash"
+                                  )}
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                        </li>
+                      ))}
                     {list?.loading && (
                       <li
                         role="status"
@@ -690,30 +868,82 @@ function NativeWorkspaceTree({
                         team chats: the same kind of thing, not a destination. */}
                     {agentSessions
                       .filter((item) => item.nodeId === node.id)
+                      .filter((item) => showTrash || !item.archived)
                       .map((item) => (
                         <li key={item.id}>
-                          <button
-                            onClick={() => openAgentSession(node, item)}
-                            aria-current={
-                              openAgentSessionId === item.id
-                                ? "page"
-                                : undefined
-                            }
+                          {/* An agent chat gets the same two actions as
+                              everything else in the tree. Its API takes one
+                              field per request, so rename and trash are
+                              separate calls — but to the reader they are the
+                              same menu on the same kind of row. */}
+                          <div
                             className={cn(
-                              "flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring",
+                              "group/item flex min-h-8 min-w-0 items-center rounded-lg pe-1",
                               openAgentSessionId === item.id
                                 ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
                                 : "text-muted-foreground hover:bg-sidebar-accent/60"
                             )}
                           >
-                            <Bot aria-hidden className="size-3.5 shrink-0" />
-                            <span className="truncate" title={item.title}>
-                              {item.title}
-                            </span>
-                            <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-                              {item.provider}
-                            </span>
-                          </button>
+                            <button
+                              onClick={() => openAgentSession(node, item)}
+                              aria-current={
+                                openAgentSessionId === item.id
+                                  ? "page"
+                                  : undefined
+                              }
+                              className="flex min-h-8 w-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              <Bot aria-hidden className="size-3.5 shrink-0" />
+                              <span
+                                className={cn(
+                                  "truncate",
+                                  item.archived && "line-through opacity-70"
+                                )}
+                                title={item.title}
+                              >
+                                {item.title}
+                              </span>
+                              <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                                {item.archived ? c("inTrash") : item.provider}
+                              </span>
+                            </button>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <button
+                                  aria-label={c("itemActions", {
+                                    title: item.title,
+                                  })}
+                                  className={cn(
+                                    "flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring",
+                                    "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/item:opacity-100",
+                                    "group-focus-within/item:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                                  )}
+                                >
+                                  <MoreHorizontal
+                                    aria-hidden
+                                    className="size-3.5"
+                                  />
+                                </button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem
+                                  onSelect={() => renameSession(item)}
+                                >
+                                  {c("rename")}
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  disabled={actionsBusy}
+                                  onSelect={() => trashSession(item)}
+                                >
+                                  {c(
+                                    item.archived
+                                      ? "restoreFromTrash"
+                                      : "moveToTrash"
+                                  )}
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
                         </li>
                       ))}
                   </ul>
@@ -730,6 +960,10 @@ type Editor = {
   parentId: number | null
   node?: NativeNode
 }
+/** What a rename is being asked about. Both kinds have their own PATCH. */
+type RenameTarget =
+  | { kind: "resource"; resource: NativeResource }
+  | { kind: "agent"; session: NeevAgentSession }
 function WorkspaceContent() {
   const t = useTranslations("Native"),
     c = useTranslations("NativeContent"),
@@ -1064,12 +1298,28 @@ function WorkspaceContent() {
   // expanded container in the sidebar (Notion/Slack-style direct navigation).
   type ItemList = { loading: boolean; items: NativeResource[]; error: unknown }
   const [itemsByNode, setItemsByNode] = useState<Record<number, ItemList>>({})
+  /**
+   * Whether trashed things are shown alongside the rest.
+   *
+   * This is what makes "Move to trash" an honest name. The API has no hard
+   * delete — it archives, and archiving is reversible — but a reversal nobody
+   * can find is indistinguishable from a deletion, and until now archived items
+   * were simply absent from the sidebar with no way to list them. So the trash
+   * is a view over the lists that are already here, and the thing that was
+   * moved into it can be seen and restored from the same tree it left.
+   *
+   * Off by default, and off costs nothing: the archived half is only fetched
+   * once someone asks to see it.
+   */
+  const [showTrash, setShowTrash] = useState(false)
   const [open, setOpen] = useState<{
     resource: NativeResource
     request: number
   } | null>(null)
   const openNumber = useRef(0)
   const itemsRequest = useRef(0)
+  /** Per-node load counter, so two loads of one node cannot land out of order. */
+  const itemGeneration = useRef(new Map<number, number>())
   // Restoration is attempted once per mount. Until it has run, the persist
   // effect below stays quiet — the section effect nulls `open` on mount, and
   // writing that through would erase the very pointer we are about to read.
@@ -1083,6 +1333,17 @@ function WorkspaceContent() {
     async (nodeId: number) => {
       if (!org) return
       const stamp = itemsRequest.current
+      /*
+       * Per node, because `itemsRequest` is shared by all of them and does not
+       * move between two loads of the SAME node. Toggling the trash on and off
+       * quickly issues exactly that, and without this the slower first answer
+       * — the one without the trashed rows — could land last and win.
+       */
+      const generation = (itemGeneration.current.get(nodeId) ?? 0) + 1
+      itemGeneration.current.set(nodeId, generation)
+      const current = () =>
+        stamp === itemsRequest.current &&
+        generation === itemGeneration.current.get(nodeId)
       setItemsByNode((old) => ({
         ...old,
         [nodeId]: {
@@ -1094,12 +1355,26 @@ function WorkspaceContent() {
       try {
         // Both kinds, together: a project holds its documents and its team
         // chats, and the sidebar no longer has a mode that hides one of them.
+        //
+        // And both states, but only while the trash is being shown. The
+        // archived half is a second request per kind and almost nobody is
+        // looking at it, so it is asked for when asked for and not before.
+        const states = showTrash ? [false, true] : [false]
         const pages = await Promise.all(
-          CONTENT_KINDS.map((kind) =>
-            listNativeResources(org.id, nodeId, kind, false, null, auth.signal)
+          states.flatMap((archived) =>
+            CONTENT_KINDS.map((kind) =>
+              listNativeResources(
+                org.id,
+                nodeId,
+                kind,
+                archived,
+                null,
+                auth.signal
+              )
+            )
           )
         )
-        if (stamp !== itemsRequest.current) return
+        if (!current()) return
         const items = pages
           .flatMap((page) => page.items)
           .sort((left, right) => left.title.localeCompare(right.title))
@@ -1108,7 +1383,7 @@ function WorkspaceContent() {
           [nodeId]: { loading: false, items, error: null },
         }))
       } catch (e) {
-        if (stamp !== itemsRequest.current) return
+        if (!current()) return
         setItemsByNode((old) => ({
           ...old,
           [nodeId]: {
@@ -1122,8 +1397,23 @@ function WorkspaceContent() {
         auth.handleAuthorityError(e)
       }
     },
-    [org, auth]
+    [org, auth, showTrash]
   )
+  /**
+   * Showing or hiding the trash re-reads the folders already on screen.
+   *
+   * In place, deliberately: emptying the lists first would take the open tabs'
+   * cached rows with them and make every one of them look like it was opening
+   * again. The guard is a ref rather than the state, because `loadItems`
+   * writes `itemsByNode` and this effect reads it — without it, the write
+   * would trigger the read that caused it.
+   */
+  const trashShown = useRef(showTrash)
+  useEffect(() => {
+    if (trashShown.current === showTrash) return
+    trashShown.current = showTrash
+    for (const id of Object.keys(itemsByNode)) void loadItems(Number(id))
+  }, [showTrash, itemsByNode, loadItems])
   // Restored resource tabs need their names even when their folder is closed.
   // Load each required folder once; keep its visible expansion state unchanged.
   useEffect(() => {
@@ -1143,7 +1433,7 @@ function WorkspaceContent() {
     const controller = new AbortController()
     const load = async () => {
       try {
-        const list = await listAgentSessions(false, controller.signal)
+        const list = await listAgentSessions(showTrash, controller.signal)
         if (controller.signal.aborted) return
         setAgentSessions(list)
         // Restore what the reader had open, once and only into a session the
@@ -1167,7 +1457,7 @@ function WorkspaceContent() {
     }
     void load()
     return () => controller.abort()
-  }, [org, agentsToken, auth, user, orgId])
+  }, [org, agentsToken, auth, user, orgId, showTrash])
 
   // Saved references only, and only once the first restore has run — writing
   // an empty list before reading would erase what we are about to read.
@@ -1241,12 +1531,15 @@ function WorkspaceContent() {
             (item) => item.id === tab.resourceId
           )?.title ??
           openedTitles[tab.resourceId] ??
-          t("loading")
+          // A tab is a few characters wide. "Loading your workspace…" was
+          // truncated to "Loading your wo…" in it, which read as the name of
+          // the thing rather than as its absence.
+          t("opening")
         )
       if (tab.kind === "agent")
         return (
           agentSessions.find((item) => item.id === tab.sessionId)?.title ??
-          t("loading")
+          t("opening")
         )
       // Asked for and not yet filled. It says what it is, rather than falling
       // through to the draft's name and claiming to be a chat nobody started.
@@ -1361,6 +1654,197 @@ function WorkspaceContent() {
       }),
     [showTab]
   )
+
+  /**
+   * Renaming and trashing, from the sidebar rather than from inside the thing.
+   *
+   * Both were reachable only by opening a document or a chat first and finding
+   * the menu in its header — which is why they read as missing. The sidebar is
+   * where you point at something you are not currently looking at.
+   *
+   * Neither is new capability. Rename is the title field of the PATCH that
+   * already exists, and trash is its `archived` flag: there is no hard delete
+   * in the API and nothing here adds one, so everything this does is
+   * reversible from the trash view.
+   */
+  const applyResource = useCallback(
+    (next: NativeResource) => {
+      noteResource(next)
+      setItemsByNode((old) => {
+        const list = old[next.nodeId]
+        if (!list) return old
+        return {
+          ...old,
+          [next.nodeId]: {
+            ...list,
+            items: list.items.map((item) =>
+              item.id === next.id ? next : item
+            ),
+          },
+        }
+      })
+    },
+    [noteResource]
+  )
+  const applySession = useCallback((next: NeevAgentSession) => {
+    setAgentSessions((old) =>
+      old.map((item) => (item.id === next.id ? next : item))
+    )
+  }, [])
+
+  /**
+   * The last sidebar mutation that failed, and whether one is in flight.
+   *
+   * These used to route the failure through `auth.handleError` alone, which
+   * re-proves the session and says nothing: a 403, a revision conflict or a
+   * dropped connection left the row exactly as it was with no account of why.
+   * A destructive-looking action that silently does nothing is worse than one
+   * that fails out loud.
+   */
+  const [mutationError, setMutationError] = useState<unknown>(null)
+  const [mutationBusy, setMutationBusy] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
+  const [renameValue, setRenameValue] = useState("")
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [renameError, setRenameError] = useState<unknown>(null)
+  const openRename = useCallback((target: RenameTarget) => {
+    // Menu items unmount when the dialog opens; keep a durable return target.
+    const active = document.activeElement as HTMLElement | null
+    const menu = active?.closest('[role="menu"]')
+    opener.current =
+      document.getElementById(menu?.getAttribute("aria-labelledby") ?? "") ??
+      active
+    setRenameValue(
+      target.kind === "resource" ? target.resource.title : target.session.title
+    )
+    setRenameError(null)
+    setRenameTarget(target)
+  }, [])
+  const renameResource = useCallback(
+    (_node: NativeNode, resource: NativeResource) =>
+      openRename({ kind: "resource", resource }),
+    [openRename]
+  )
+  const renameSession = useCallback(
+    (session: NeevAgentSession) => openRename({ kind: "agent", session }),
+    [openRename]
+  )
+  /**
+   * Trashing goes through the same unsaved-work guard as navigating away.
+   *
+   * Archiving what someone is part-way through writing makes the body
+   * read-only under them, and anything not yet saved has nowhere to go. The
+   * panel's own menu already asks first; reaching the same action from the
+   * sidebar must not be the way around that question.
+   */
+  const trashResource = useCallback(
+    (resource: NativeResource) => {
+      if (!auth.session || mutationBusy) return
+      guardAll(() => {
+        void (async () => {
+          setMutationBusy(true)
+          setMutationError(null)
+          try {
+            applyResource(
+              await updateNativeResource(
+                resource.orgId,
+                resource.id,
+                {
+                  nodeId: resource.nodeId,
+                  title: resource.title,
+                  visibility: resource.visibility,
+                  archived: !resource.archived,
+                  expectedAuthRevision: resource.authRevision,
+                },
+                auth.session!.csrf,
+                auth.signal
+              )
+            )
+          } catch (cause) {
+            setMutationError(cause)
+            auth.handleError(cause)
+          } finally {
+            setMutationBusy(false)
+          }
+        })()
+      })
+    },
+    [auth, applyResource, guardAll, mutationBusy]
+  )
+  const trashSession = useCallback(
+    (session: NeevAgentSession) => {
+      if (!auth.session || mutationBusy) return
+      guardAll(() => {
+        void (async () => {
+          setMutationBusy(true)
+          setMutationError(null)
+          try {
+            applySession(
+              await updateAgentSession(
+                session.id,
+                {
+                  archived: !session.archived,
+                  expectedRevision: session.revision,
+                },
+                auth.session!.csrf,
+                auth.signal
+              )
+            )
+          } catch (cause) {
+            setMutationError(cause)
+            auth.handleError(cause)
+          } finally {
+            setMutationBusy(false)
+          }
+        })()
+      })
+    },
+    [auth, applySession, guardAll, mutationBusy]
+  )
+  const saveRename = useCallback(async () => {
+    if (!renameTarget || !auth.session || renameBusy) return
+    const title = renameValue.trim()
+    if (!title) return
+    setRenameBusy(true)
+    setRenameError(null)
+    try {
+      if (renameTarget.kind === "resource") {
+        const resource = renameTarget.resource
+        applyResource(
+          await updateNativeResource(
+            resource.orgId,
+            resource.id,
+            {
+              nodeId: resource.nodeId,
+              title,
+              visibility: resource.visibility,
+              archived: resource.archived,
+              expectedAuthRevision: resource.authRevision,
+            },
+            auth.session.csrf,
+            auth.signal
+          )
+        )
+      } else {
+        const session = renameTarget.session
+        applySession(
+          await updateAgentSession(
+            session.id,
+            { title, expectedRevision: session.revision },
+            auth.session.csrf,
+            auth.signal
+          )
+        )
+      }
+      setRenameTarget(null)
+    } catch (cause) {
+      setRenameError(cause)
+      auth.handleError(cause)
+    } finally {
+      setRenameBusy(false)
+    }
+  }, [renameTarget, renameValue, renameBusy, auth, applyResource, applySession])
+
   // Remember only WHICH resource is open, scoped to this user and org. The
   // pointer confers nothing: it is re-fetched and re-authorized on restore.
   useEffect(() => {
@@ -1664,7 +2148,31 @@ function WorkspaceContent() {
             selectedNodeId={frontNodeId}
             openAgentSessionId={frontSessionId}
             openAgentSession={openAgentSession}
+            showTrash={showTrash}
+            renameResource={renameResource}
+            trashResource={trashResource}
+            renameSession={renameSession}
+            trashSession={trashSession}
+            actionsBusy={mutationBusy}
           />
+          {/* Said here, beside the rows it is about. */}
+          <NativeError error={mutationError} />
+          {/*
+            The way back out of the trash, and the only reason "Move to trash"
+            is an honest name for what archiving does. It sits under the tree
+            rather than in a menu because it is a view over the tree, and
+            because a reader looking for something they deleted looks here.
+          */}
+          <button
+            onClick={() => setShowTrash((value) => !value)}
+            aria-pressed={showTrash}
+            className="mt-1 flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-sm text-muted-foreground hover:bg-sidebar-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <Trash2 aria-hidden className="size-3.5 shrink-0" />
+            <span className="truncate">
+              {t(showTrash ? "hideTrash" : "showTrash")}
+            </span>
+          </button>
           {!loading && nodes.length === 0 && !query.trim() && (
             <p className="px-2 text-sm text-muted-foreground">
               {t("emptyProjects")}
@@ -2170,6 +2678,64 @@ function WorkspaceContent() {
                 {t("cancel")}
               </Button>
               <Button type="submit" disabled={saving || !name.trim()}>
+                {t("save")}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+      {/* Renaming, for the sidebar. One field, because a name is the only
+          thing being changed and the PATCH behind it carries the rest of the
+          row back unaltered. */}
+      <Dialog
+        open={renameTarget !== null}
+        onOpenChange={(value) => {
+          if (!value) setRenameTarget(null)
+        }}
+      >
+        <DialogContent
+          onCloseAutoFocus={(event) => {
+            if (!opener.current) return
+            event.preventDefault()
+            opener.current.focus()
+          }}
+        >
+          <DialogTitle>{c("rename")}</DialogTitle>
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void saveRename()
+            }}
+          >
+            <label className="block space-y-1">
+              <span className="text-sm">{c("title")}</span>
+              <input
+                autoFocus
+                value={renameValue}
+                onChange={(event) => setRenameValue(event.target.value)}
+                disabled={renameBusy}
+                maxLength={100}
+                className="h-10 w-full min-w-0 rounded-lg border bg-background px-3"
+              />
+            </label>
+            <NativeError error={renameError} />
+            <p role="status" className="text-sm">
+              {renameBusy ? t("working") : ""}
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                type="button"
+                disabled={renameBusy}
+                onClick={() => setRenameTarget(null)}
+              >
+                {t("cancel")}
+              </Button>
+              <Button
+                type="submit"
+                disabled={renameBusy || !renameValue.trim()}
+              >
                 {t("save")}
               </Button>
             </div>

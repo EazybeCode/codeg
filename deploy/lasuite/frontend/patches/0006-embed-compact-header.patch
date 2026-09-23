@@ -1,8 +1,8 @@
 diff --git a/apps/impress/src/components/FloatingBar.tsx b/apps/impress/src/components/FloatingBar.tsx
-index 4ac75e0..dccc511 100644
+index 4ac75e0..0cf1b9d 100644
 --- a/apps/impress/src/components/FloatingBar.tsx
 +++ b/apps/impress/src/components/FloatingBar.tsx
-@@ -1,9 +1,20 @@
+@@ -1,9 +1,56 @@
  import { PropsWithChildren } from 'react';
  import { css } from 'styled-components';
  
@@ -12,28 +12,88 @@ index 4ac75e0..dccc511 100644
  import { Card } from './Card';
  
 +/**
-+ * Embedded, this bar sits below the host application's own chrome, so its
-+ * height is added to a header the reader has already paid for. Standalone it is
-+ * the only thing above the document and 68px is right; inside a frame the same
-+ * 68px is the difference between the title being on screen and being pushed
-+ * under the fold.
++ * Embedded, this bar is taken out of the vertical flow entirely.
++ *
++ * Lowering `min-height` did almost nothing, because the height was never the
++ * minimum: the row measures 66px from its own contents — a 42px button inside
++ * `sm` padding — and that 66px is blank space above the title of every
++ * document, on top of the host's own chrome. Standalone the bar is the only
++ * thing up there and its height is the right price; in a frame it is a second
++ * header charged for a handful of buttons.
++ *
++ * So in a frame it becomes a zero-height overlay pinned to the top right. The
++ * buttons are unmoved and still clickable; what goes is the empty row they
++ * were sitting in. `pointer-events` is off on the strip and back on for its
++ * contents, so the invisible band cannot swallow a click meant for the title
++ * underneath it, and `DocHeader` reserves the width it covers so the two never
++ * overlap at narrow sizes.
 + */
-+const BAR_MIN_HEIGHT = isEmbedded() ? '44px' : '68px';
++const EMBED_FLOATING_STYLES = css`
++  position: sticky;
++  top: 0;
++  left: 0;
++  right: 0;
++  width: 100%;
++  height: 0;
++  min-height: 0;
++  overflow: visible;
++  justify-content: flex-end;
++  align-items: flex-start;
++  z-index: 10;
++  isolation: isolate;
++  pointer-events: none;
++
++  /* The scrim belongs to a full-height bar; there is no longer one to scrim. */
++  &::before {
++    content: none;
++  }
++
++  > * {
++    position: relative;
++    z-index: 1;
++    pointer-events: auto;
++    margin: 4px 8px 0 0;
++  }
++`;
 +
  const FLOATING_STYLES = css`
    position: sticky;
    top: 0;
-@@ -12,7 +23,7 @@ const FLOATING_STYLES = css`
-   width: 100%;
-   z-index: 10; // Under editor select box but above other elements (e.g., doc title, suggestion menu)
-   isolation: isolate;
--  min-height: 68px;
-+  min-height: ${BAR_MIN_HEIGHT};
+@@ -45,9 +92,9 @@ export const FloatingBar = ({
+       $direction="row"
+       $justify="space-between"
+       $align="flex-start"
+-      $padding="sm"
++      $padding={isEmbedded() ? 'none' : 'sm'}
+       $css={css`
+-        ${FLOATING_STYLES}
++        ${isEmbedded() ? EMBED_FLOATING_STYLES : FLOATING_STYLES}
+         ${$css}
+       `}
+       {...props}
+diff --git a/apps/impress/src/features/docs/doc-editor/components/DocEditor.tsx b/apps/impress/src/features/docs/doc-editor/components/DocEditor.tsx
+index 96626f5..9cd6b8f 100644
+--- a/apps/impress/src/features/docs/doc-editor/components/DocEditor.tsx
++++ b/apps/impress/src/features/docs/doc-editor/components/DocEditor.tsx
+@@ -3,6 +3,7 @@ import { PropsWithChildren, useEffect, useState } from 'react';
+ import { css } from 'styled-components';
  
-   &::before {
-     content: '';
+ import { Box } from '@/components';
++import { isEmbedded } from '@/core/embed';
+ import { DocHeader } from '@/docs/doc-header/';
+ import {
+   Doc,
+@@ -62,7 +63,7 @@ export const DocEditorContainer = ({
+         >
+           <Box $css="flex:1;" $position="relative" $width="100%">
+             <Box
+-              $padding={{ top: 'md', bottom: '2rem' }}
++              $padding={{ top: isEmbedded() ? 'none' : 'md', bottom: '2rem' }}
+               $background="var(--c--contextuals--background--surface--primary)"
+               className={clsx('--docs--editor-container', {
+                 '--docs--doc-readonly': readOnly,
 diff --git a/apps/impress/src/features/docs/doc-header/components/DocHeader.tsx b/apps/impress/src/features/docs/doc-header/components/DocHeader.tsx
-index eaaa307..70db986 100644
+index eaaa307..09c5924 100644
 --- a/apps/impress/src/features/docs/doc-header/components/DocHeader.tsx
 +++ b/apps/impress/src/features/docs/doc-header/components/DocHeader.tsx
 @@ -6,6 +6,7 @@ import { css } from 'styled-components';
@@ -44,7 +104,7 @@ index eaaa307..70db986 100644
  import {
    Doc,
    getEmojiAndTitle,
-@@ -44,7 +45,14 @@ export const DocHeader = ({ doc }: DocHeaderProps) => {
+@@ -44,7 +45,20 @@ export const DocHeader = ({ doc }: DocHeaderProps) => {
          $width="100%"
          aria-label={t('It is the card information about the document.')}
          className="--docs--doc-header"
@@ -56,11 +116,59 @@ index eaaa307..70db986 100644
 +         * that is usually absent and a metadata row that is hidden below, so
 +         * standalone it is reasonable and in a frame it is mostly empty.
 +         */
-+        $minHeight={isEmbedded() ? '56px' : '125px'}
++        $minHeight={isEmbedded() ? 'auto' : '125px'}
++        /*
++         * Room for the options overlay that now sits above this, so the title
++         * never runs underneath it on a narrow frame. Desktop has the width to
++         * spare already; this is what makes it safe at every size.
++         */
++        $padding={{ right: isEmbedded() ? '56px' : undefined }}
          $css={css`
            .--docs--doc-header-emoji-button {
              opacity: 0;
-@@ -109,9 +117,16 @@ export const DocHeader = ({ doc }: DocHeaderProps) => {
+@@ -60,18 +74,20 @@ export const DocHeader = ({ doc }: DocHeaderProps) => {
+           }
+         `}
+       >
+-        <Box
+-          $gap="base"
+-          $padding={{
+-            bottom: isDeletedDoc || !isEditable ? 'base' : undefined,
+-          }}
+-        >
+-          {isDeletedDoc && <AlertRestore doc={doc} />}
+-          {!isEditable && <AlertNetwork />}
+-        </Box>
++        {/*
++          Rendered only when there is an alert to put in it. Embedded, an empty
++          Box here is not free: its parent lays out with a gap, so a wrapper
++          holding nothing still pushes the title down the screen.
++        */}
++        {(isDeletedDoc || !isEditable) && (
++          <Box $gap="base" $padding={{ bottom: 'base' }}>
++            {isDeletedDoc && <AlertRestore doc={doc} />}
++            {!isEditable && <AlertNetwork />}
++          </Box>
++        )}
+         <Box $gap="sm">
+-          <Box>
+-            {displayEmojiButton && (
++          {displayEmojiButton && (
++            <Box>
+               <Button
+                 className="--docs--doc-header-emoji-button"
+                 size="nano"
+@@ -101,17 +117,28 @@ export const DocHeader = ({ doc }: DocHeaderProps) => {
+               >
+                 {emoji ? t('Remove emoji') : t('Add emoji')}
+               </Button>
+-            )}
+-          </Box>
++            </Box>
++          )}
+           <DocTitle
+             doc={doc}
+             onTitleUpdate={(title) => {
                latestTitleRef.current = title;
              }}
            />
@@ -73,9 +181,13 @@ index eaaa307..70db986 100644
 +          {!isEmbedded() && <DocHeaderInfo doc={doc} />}
          </Box>
 -        <HorizontalSeparator $margin={{ top: '24px' }} />
-+        <HorizontalSeparator
-+          $margin={{ top: isEmbedded() ? '12px' : '24px' }}
-+        />
++        {/*
++          Standalone this rule separates the header from the body. Embedded,
++          the host already draws a band directly above this frame, so the rule
++          is a second divider a few pixels below the first — and it costs its
++          own margin on a screen where the reader asked for the space back.
++        */}
++        {!isEmbedded() && <HorizontalSeparator $margin={{ top: '24px' }} />}
        </Box>
      </>
    );
