@@ -17,7 +17,6 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
 import {
-  ArrowLeft,
   ArrowUp,
   Bot,
   ChevronRight,
@@ -978,7 +977,7 @@ function AgentSessionView({
   session,
   connections,
   capabilities,
-  onBack,
+  // Kept on the props; no longer reached from a header control.
   onChanged,
   onGone,
   onRequestSettings,
@@ -1313,15 +1312,6 @@ function AgentSessionView({
       aria-label={session.title}
     >
       <div className="flex h-9 shrink-0 items-center gap-2 px-4 sm:gap-3 sm:px-8">
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={t("back")}
-          title={t("back")}
-          onClick={onBack}
-        >
-          <ArrowLeft aria-hidden />
-        </Button>
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2
             className="shrink truncate text-sm font-medium"

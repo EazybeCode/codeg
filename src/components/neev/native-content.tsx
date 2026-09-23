@@ -790,6 +790,7 @@ function Content({
                 resource={selected}
                 fresh={openTarget?.fresh === true}
                 onBack={back}
+                showBack={!chromeless}
                 onChanged={changed}
                 onDirtyChange={onDirtyChange}
                 onRequestSettings={() => guard(() => router.push("/settings"))}
@@ -820,6 +821,7 @@ function Content({
                 key={selected.id}
                 resource={selected}
                 onBack={back}
+                showBack={!chromeless}
                 onChanged={changed}
                 actions={{
                   isCreator: selected.creatorId === auth.session?.user.id,

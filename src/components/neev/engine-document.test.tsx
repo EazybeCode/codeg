@@ -178,13 +178,33 @@ it("renders nothing for a resource from another organization", async () => {
   expect(container.querySelector("iframe")).toBeNull()
 })
 
-it("goes back without touching the document", async () => {
+/**
+ * The workspace shell keeps the sidebar and the tab strip on screen the whole
+ * time, so a Back control there only restated them and cost a row of height.
+ * The standalone folder view hides its listing while a resource is open, so
+ * there it is still the only way out — which is why this is a prop and not a
+ * deletion.
+ */
+it("offers no way back in the shell, where the sidebar and tabs are the way back", async () => {
+  mockNativeSession()
+  render(
+    <NativeTestRoot>
+      <EngineDocument resource={resource} onBack={vi.fn()} />
+    </NativeTestRoot>
+  )
+  await screen.findByTitle("Design document")
+  expect(
+    screen.queryByRole("button", { name: "Back to folder" })
+  ).not.toBeInTheDocument()
+})
+
+it("goes back without touching the document, where a way back is asked for", async () => {
   const user = userEvent.setup()
   const onBack = vi.fn()
   mockNativeSession()
   render(
     <NativeTestRoot>
-      <EngineDocument resource={resource} onBack={onBack} />
+      <EngineDocument resource={resource} onBack={onBack} showBack />
     </NativeTestRoot>
   )
   await user.click(

@@ -157,6 +157,8 @@ type Props = {
   actions?: ResourceActions
   /** Just created and still called "New chat": the first message may name it. */
   fresh?: boolean
+  /** Draw a way back to the listing. Only the standalone folder view needs one. */
+  showBack?: boolean
 }
 export function NativeChat(props: Props) {
   const auth = useNativeAuth()
@@ -175,6 +177,7 @@ function Chat({
   onRequestSettings,
   actions,
   fresh = false,
+  showBack = false,
 }: Props) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
@@ -925,15 +928,17 @@ function Chat({
           metadata line, which cost two rows of height at the top of every
           conversation to say two short things. The conversation is the page. */}
       <div className="flex h-9 shrink-0 items-center gap-2 px-4 sm:gap-3 sm:px-8">
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label={t("back")}
-          title={t("back")}
-          onClick={onBack}
-        >
-          <ArrowLeft aria-hidden />
-        </Button>
+        {showBack && (
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={t("back")}
+            title={t("back")}
+            onClick={onBack}
+          >
+            <ArrowLeft aria-hidden />
+          </Button>
+        )}
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2
             className="shrink truncate text-sm font-medium"

@@ -62,6 +62,15 @@ type Props = {
    * one outcome worth ruling out. Shortened by tests; never set in the app.
    */
   loadTimeoutMs?: number
+  /**
+   * Whether to draw a way back to the folder listing.
+   *
+   * False in the workspace shell, where the sidebar and the tab strip are on
+   * screen the whole time and a Back control only spent height restating
+   * them. True in the standalone folder view, where the listing hides itself
+   * while a resource is open and this is the only way out of it.
+   */
+  showBack?: boolean
 }
 
 const LOAD_TIMEOUT_MS = 15_000
@@ -146,6 +155,7 @@ function Frame({
   actions,
   onChanged,
   loadTimeoutMs = LOAD_TIMEOUT_MS,
+  showBack = false,
 }: Props) {
   const auth = useNativeAuth()
   const t = useTranslations("NativeContent")
@@ -375,15 +385,20 @@ function Frame({
       className="flex min-h-0 min-w-0 flex-1 flex-col"
       aria-label={resource.title}
     >
-      {/*
-        A thin band, and nothing in it that the frame already draws. No title:
-        upstream renders and edits it inside. What is left is what Neev owns —
-        getting out, who can read this, and the actions that move or retire it.
-      */}
-      <header className="flex shrink-0 items-center gap-2 px-6 py-2 sm:px-10">
-        <Button variant="ghost" size="sm" onClick={onBack}>
-          {t("back")}
-        </Button>
+      {/* Who can read this, and the actions that move or retire it — nothing
+          the frame already draws, and no Back: the sidebar and tab strip are
+          on screen the whole time, so it only cost height. */}
+      <header className="flex h-8 shrink-0 items-center gap-2 px-6 sm:px-10">
+        {showBack && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2"
+            onClick={onBack}
+          >
+            {t("back")}
+          </Button>
+        )}
         <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
           <span
             role="img"
@@ -405,6 +420,7 @@ function Frame({
           <Button
             variant="ghost"
             size="sm"
+            className="h-7 px-2"
             disabled={actions.disabled}
             aria-label={t(
               actions.visibility === "private" ? "share" : "makePrivate"
@@ -434,6 +450,7 @@ function Frame({
               <Button
                 variant="ghost"
                 size="sm"
+                className="h-7 px-2"
                 aria-label={t("resourceActions")}
                 disabled={actions.disabled}
               >
