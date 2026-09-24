@@ -936,6 +936,7 @@ export function ActivityTimeline({
   items,
   running,
   startedAt,
+  completed = false,
 }: {
   /** The turn's activity, already merged with anything arriving live. */
   items: NeevActivityItem[]
@@ -943,6 +944,19 @@ export function ActivityTimeline({
   running: boolean
   /** When the turn began, in epoch milliseconds; null if unknown. */
   startedAt: number | null
+  /**
+   * Whether the turn itself finished and answered.
+   *
+   * A tool that failed is not a turn that failed. An agent that reached for
+   * `python`, did not find it, and got the same answer for `node` before
+   * finishing the job with `rg` ran two commands that failed and then did the
+   * work — but the row said "2 failed" in red and nothing else, so a completed
+   * review read as a broken one.
+   *
+   * The count is NOT softened: those two commands did fail, and each keeps its
+   * own error in the rows below. What was missing is the outcome beside them.
+   */
+  completed?: boolean
 }) {
   const t = useTranslations("NativeContent")
   const n = useTranslations("Native")
@@ -1000,6 +1014,15 @@ export function ActivityTimeline({
         {summary.errors > 0 && (
           <span className="shrink-0 text-destructive">
             {t("activityErrors", { number: summary.errors })}
+          </span>
+        )}
+        {/*
+          Last, and only once the turn is actually over. It is the answer to
+          "did this work?", which the failed-step count was being read as.
+        */}
+        {!running && completed && (
+          <span className="shrink-0 text-muted-foreground">
+            {t("activityCompleted")}
           </span>
         )}
       </button>
@@ -1567,6 +1590,7 @@ function AgentSessionView({
                         turn.runId === activeRun && turn.status === "running"
                       }
                       startedAt={turn.createdAt * 1000}
+                      completed={turn.status === "completed"}
                     />
                     {turn.response && (
                       <NativeMarkdown markdown={turn.response} />

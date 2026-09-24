@@ -1094,6 +1094,63 @@ it("replays this reader's own stored trace when the conversation is reopened", a
   expect(mock.unknown).toEqual([])
 })
 
+it("says a turn completed even when tools failed on the way, and still counts them", async () => {
+  // The real shape of the complaint: the agent reached for `python`, did not
+  // find it, tried `node`, did not find that either, finished the job with `rg`
+  // and wrote a useful review — and the row said "2 failed" in red with no
+  // outcome beside it, so a completed review read as a broken one.
+  const recovered = {
+    ...completedTurn,
+    activity: [
+      ...completedTurn.activity,
+      {
+        seq: 3,
+        offset: 0,
+        id: "call-2",
+        kind: "tool_call",
+        name: "Bash",
+        input: '{"command":"python parse.py"}',
+        inputTruncated: false,
+      },
+      {
+        seq: 4,
+        offset: 0,
+        id: "result-2",
+        kind: "tool_result",
+        callId: "call-2",
+        output: "python: command not found",
+        outputTruncated: false,
+        isError: true,
+      },
+    ],
+  }
+  const mock = mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({ items: [askMessage, replyMessage], nextAfter: null }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    [TEAM_SESSION("claude")]: () => json(teamSession),
+    [TEAM_SESSION("codex")]: () => json({ code: "not_found" }, 404),
+    [TURNS]: () => json({ items: [recovered], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await ready()
+  const summary = await screen.findByRole("button", { name: /tool calls/ })
+  // The outcome is stated. This is the whole point: the turn answered.
+  expect(summary).toHaveTextContent("Completed")
+  // And the failure is NOT softened away — it really did fail, it is still
+  // counted, and it still says so. One failure reads as one, not "1 steps".
+  expect(summary).toHaveTextContent("1 step failed")
+  // The error itself stays readable in the rows underneath, verbatim — the
+  // failing step is still marked failed, and opening it shows what it said.
+  await user.click(summary)
+  await user.click(screen.getByRole("button", { name: "Failed" }))
+  expect(screen.getByText("python: command not found")).toBeVisible()
+  expect(mock.unknown).toEqual([])
+})
+
 it("re-reads only what is new after a run completes", async () => {
   const reads: string[] = []
   const mock = mockNativeSession(undefined, {

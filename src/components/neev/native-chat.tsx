@@ -1313,6 +1313,11 @@ function Chat({
                   items={traces.get(message.id)!.activity}
                   running={false}
                   startedAt={null}
+                  // `attachTurns` pairs a reply only with a COMPLETED turn, so
+                  // a trace reaching this row is by construction a turn that
+                  // answered. Read off the turn anyway rather than passed as a
+                  // literal, so it stays true if that ever loosens.
+                  completed={traces.get(message.id)!.status === "completed"}
                 />
               )}
               {/* A message written here keeps its files where they were put;
