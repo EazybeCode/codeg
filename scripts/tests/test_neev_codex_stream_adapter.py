@@ -162,6 +162,30 @@ class ArgvTests(unittest.TestCase):
         self.assertEqual(params["model"], "m")
         self.assertEqual(params["serviceTier"], "fast")
 
+    def test_the_response_style_is_a_thread_developer_instruction(self):
+        """The protocol's own developer channel — not the user's prompt.
+
+        `developerInstructions` is a thread property in the pinned schema,
+        separate from `baseInstructions`. We never send the latter: Codex's own
+        instructions stay, ours are added alongside them.
+        """
+        style = 'Lead with the answer.\n\nUse `code` and "quotes" and a \\ one.'
+        args = self.parse(["--developer-instructions", style, "--", "hi"])
+        params = adapter.thread_params(args, "/w/run-x")
+        self.assertEqual(params["developerInstructions"], style)
+        self.assertNotIn("baseInstructions", params)
+        # The prompt is untouched by it, and carries nothing of it.
+        self.assertEqual(args.prompt, "hi")
+        self.assertEqual(adapter.turn_input(args.prompt, args.image),
+                         [{"type": "text", "text": "hi"}])
+        self.assertNotIn("developerInstructions",
+                         adapter.start_params(args, "t1", "/w/run-x"))
+        # Unset is absent, never an empty string.
+        self.assertNotIn(
+            "developerInstructions",
+            adapter.thread_params(self.parse(["--", "hi"]), "/w/run-x"),
+        )
+
     def test_effort_and_model_reach_the_turn(self):
         args = self.parse(["--model", "m", "--effort", "high", "--", "hi"])
         params = adapter.start_params(args, "t1", "/w/run-x")

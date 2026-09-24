@@ -21,6 +21,7 @@ one or more it is a provider allowlist wired through the slot proxy.
 """
 
 import argparse
+import json
 import os
 import re
 import signal
@@ -170,6 +171,13 @@ ADAPTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neev_codex_s
 _EFFORT_OVERRIDE = re.compile(r'\Amodel_reasoning_effort="([A-Za-z-]{1,32})"\Z')
 _TIER_OVERRIDE = re.compile(r'\Aservice_tier="([A-Za-z-]{1,32})"\Z')
 _FAST_MODE_OVERRIDE = re.compile(r"\Afeatures\.fast_mode=(?:true|false)\Z")
+# The response-style policy on the `exec` transport: Codex's documented
+# developer-instruction config key, carried as a JSON string so newlines, quotes
+# and backslashes survive the override verbatim. DOTALL because the value is
+# multi-line by construction.
+_DEVELOPER_INSTRUCTIONS_OVERRIDE = re.compile(
+    r'\Adeveloper_instructions=(".*")\Z', re.DOTALL
+)
 
 
 def _config_argument(value):
@@ -182,6 +190,19 @@ def _config_argument(value):
         return ["--service-tier", tier.group(1)]
     if _FAST_MODE_OVERRIDE.match(value):
         return ["--config", value]
+    instructions = _DEVELOPER_INSTRUCTIONS_OVERRIDE.match(value)
+    if instructions:
+        # The app-server has a parameter for this (`thread/start`
+        # `developerInstructions`), so the override becomes one rather than
+        # being passed through as config. Decoded here and re-checked: an
+        # override that is not a JSON string is refused, never guessed at.
+        try:
+            text = json.loads(instructions.group(1))
+        except ValueError as error:
+            raise sandbox.SandboxError("invalid") from error
+        if not isinstance(text, str) or not text:
+            raise sandbox.SandboxError("invalid")
+        return ["--developer-instructions", text]
     raise sandbox.SandboxError("invalid")
 
 
@@ -235,13 +256,180 @@ def app_server_argv(provider, provider_argv, adapter=ADAPTER, python=sandbox.PYT
     return [python, "-I", adapter] + mapped + ["--", prompt]
 
 
-def build_spec(args):
-    """Pure: turn parsed args into a validated SandboxSpec (raises SandboxError)."""
+# The shared response-style policy, beside this launcher in the same root-owned
+# 0555 directory and nowhere else — never from the run workdir, which the model
+# itself can write. It is our text, not the reader's and not the workspace's.
+RESPONSE_STYLE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "neev_response_style.md"
+)
+# Generous for a ~300-word policy and far too small to be a channel for anything
+# else. A file above this is refused rather than truncated: half a policy is a
+# instruction set nobody wrote.
+_MAX_RESPONSE_STYLE_BYTES = 8 * 1024
+
+
+def load_response_style(path=RESPONSE_STYLE, limit=_MAX_RESPONSE_STYLE_BYTES):
+    """The packaged policy text, or "" when there is none to apply.
+
+    Bounded, UTF-8, read from the fixed package path. Missing, oversized or
+    undecodable all mean the same thing and are handled the same way: the turn
+    runs exactly as it did before this existed. A style that cannot be read is
+    a formatting default the reply loses, not a reason to refuse work somebody
+    is paying for.
+    """
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(limit + 1)
+    except OSError:
+        return ""
+    if len(raw) > limit:
+        return ""
+    try:
+        return raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
+
+
+# Claude's paid-turn options as `provider_argv` spells them, split by whether
+# they take a value. The table exists so the argv is WALKED rather than
+# searched: a prompt is the user's words and may be exactly
+# `--append-system-prompt`, so `in argv` would find the prompt and append our
+# policy to it.
+_CLAUDE_SYSTEM_PROMPT = "--append-system-prompt"
+_CLAUDE_VALUE_OPTIONS = frozenset(
+    {_CLAUDE_SYSTEM_PROMPT, "--effort", "--model", "--output-format", "--settings"}
+)
+_CLAUDE_FLAG_OPTIONS = frozenset({"--include-partial-messages", "--verbose"})
+# Codex `exec` options, same split, same reason (its prompt is index 3).
+_CODEX_VALUE_OPTIONS = frozenset({"-c", "-m", "--image"})
+_CODEX_FLAG_OPTIONS = frozenset({"--skip-git-repo-check", _EXTERNALLY_SANDBOXED})
+
+
+def _walk_options(options, value_options, flag_options):
+    """Pure: the index of each option's VALUE, or None if the shape is unknown.
+
+    Returns a list of `(option, value_index_or_None)` in order. An option this
+    table does not know ends the walk: we then leave the argv alone instead of
+    guessing which of its arguments is a value.
+    """
+    walked = []
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option in flag_options:
+            walked.append((option, None))
+            index += 1
+            continue
+        if option in value_options:
+            if index + 1 >= len(options):
+                return None
+            walked.append((option, index + 1))
+            index += 2
+            continue
+        return None
+    return walked
+
+
+def _already_carries(instructions, style):
+    """Pure: is `style` there as OUR suffix — not merely somewhere in the text?
+
+    `style in instructions` would be a hole: the briefing is workspace data a
+    user can write, so a copy of the policy pasted into a workspace description
+    would read as "already applied" and the turn would run with no trusted
+    instruction at all. Only text we appended ourselves (or an argv we already
+    rewrote) counts.
+    """
+    return instructions == style or instructions.endswith("\n\n" + style)
+
+
+def response_style_argv(provider, provider_argv, style):
+    """Pure: carry the shared response-style policy into ONE canonical paid turn.
+
+    Claude takes real system instructions, so the policy is APPENDED to the
+    `--append-system-prompt` value the runtime already built — the workspace
+    briefing stays first and intact — or the flag is added when there is none.
+    Codex `exec` has no such switch; it gets the documented
+    `developer_instructions` config key as a JSON string, which
+    `app_server_argv` then maps to the app-server's `thread/start`
+    `developerInstructions` parameter. `baseInstructions` is never set: the
+    provider's own instructions stay, ours are added to them.
+
+    Only the canonical shapes are touched — `claude -p <prompt> …` and
+    `codex exec --json <prompt> …` — and the prompt (index 2 / index 3) is
+    never read, parsed or matched against anything. Metadata probes and login
+    flows are neither of those shapes and pass through unchanged. Anything
+    else, including an option this launcher does not know, is handed back as it
+    arrived: a missing style costs formatting, a mangled argv costs the turn.
+    """
+    argv = list(provider_argv)
+    if not style:
+        return argv
+    if provider == "codex":
+        if len(argv) < 4 or argv[1] != "exec" or argv[2] != "--json":
+            return argv
+        options = argv[4:]
+        walked = _walk_options(options, _CODEX_VALUE_OPTIONS, _CODEX_FLAG_OPTIONS)
+        if walked is None:
+            return argv
+        for option, at in walked:
+            if option != "-c":
+                continue
+            existing = _DEVELOPER_INSTRUCTIONS_OVERRIDE.match(options[at])
+            if existing is None:
+                continue
+            # An override that is already there is somebody's instruction and
+            # is KEPT; the policy is appended to it once. Dropping ours would
+            # silently exempt the turn, replacing theirs would silently lose
+            # it.
+            try:
+                text = json.loads(existing.group(1))
+            except ValueError:
+                return argv
+            if not isinstance(text, str):
+                return argv
+            if _already_carries(text, style):
+                return argv
+            merged = list(argv)
+            merged[4 + at] = "developer_instructions=" + json.dumps(
+                f"{text}\n\n{style}" if text else style
+            )
+            return merged
+        return argv + ["-c", f"developer_instructions={json.dumps(style)}"]
+    if len(argv) < 3 or argv[1] != "-p":
+        return argv
+    options = argv[3:]
+    walked = _walk_options(options, _CLAUDE_VALUE_OPTIONS, _CLAUDE_FLAG_OPTIONS)
+    if walked is None:
+        return argv
+    at = next(
+        (value for option, value in walked if option == _CLAUDE_SYSTEM_PROMPT), None
+    )
+    if at is None:
+        return argv + [_CLAUDE_SYSTEM_PROMPT, style]
+    briefing = options[at]
+    if _already_carries(briefing, style):
+        return argv
+    merged = list(options)
+    merged[at] = f"{briefing}\n\n{style}" if briefing else style
+    return argv[:3] + merged
+
+
+def build_spec(args, style=None):
+    """Pure: turn parsed args into a validated SandboxSpec (raises SandboxError).
+
+    `style` defaults to the packaged response-style policy; pass `""` for a run
+    with none.
+    """
     provider_argv = list(args.provider_argv)
     if provider_argv and provider_argv[0] == "--":
         provider_argv = provider_argv[1:]
     if not provider_argv:
         raise sandbox.SandboxError("invalid")
+    provider_argv = response_style_argv(
+        args.provider,
+        provider_argv,
+        load_response_style() if style is None else style,
+    )
     if args.codex_stream == "app-server":
         provider_argv = app_server_argv(args.provider, provider_argv)
     else:

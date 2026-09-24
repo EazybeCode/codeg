@@ -129,6 +129,12 @@ COPY --chown=0:0 scripts/operations/neev_agent_launch.py \
      scripts/operations/neev_slot_proxy.py \
      /opt/neev/scripts/operations/
 RUN chmod 0555 /opt/neev/scripts/operations/*.py
+# The shared response-style policy the launcher carries into each paid turn.
+# Data, not code: root-owned and world-READABLE only, beside the launcher that
+# is the only thing allowed to load it.
+COPY --chown=0:0 scripts/operations/neev_response_style.md \
+     /opt/neev/scripts/operations/
+RUN chmod 0444 /opt/neev/scripts/operations/neev_response_style.md
 
 ENV NEEV_AGENT_LAUNCHER=/opt/neev/scripts/operations/neev_agent_launch.py \
     NEEV_AGENT_CAP_HELPER=/usr/local/bin/neev-agent-caplaunch \

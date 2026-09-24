@@ -59,6 +59,12 @@ def _parse(argv):
     parser.add_argument("--effort", default=None)
     parser.add_argument("--service-tier", default=None, dest="service_tier")
     parser.add_argument("--config", action="append", default=[], dest="config")
+    # The shared response-style policy, as the protocol's own developer
+    # channel. Never the user's prompt, and never `baseInstructions`: that
+    # would REPLACE Codex's own instructions instead of adding to them.
+    parser.add_argument(
+        "--developer-instructions", default=None, dest="developer_instructions"
+    )
     parser.add_argument("--image", action="append", default=[], dest="image")
     parser.add_argument("prompt", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -108,6 +114,11 @@ def thread_params(args, cwd):
         params["model"] = args.model
     if args.service_tier:
         params["serviceTier"] = args.service_tier
+    # `developerInstructions` is a thread property in the pinned schema
+    # (string | null), separate from `baseInstructions`, which we never send:
+    # the provider's own base prompt stays, this is added alongside it.
+    if args.developer_instructions:
+        params["developerInstructions"] = args.developer_instructions
     return params
 
 
