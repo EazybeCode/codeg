@@ -59,3 +59,19 @@ health 200, creation enabled, UI hash verified:
 `e8f0bad26c6abe933f0a5181050457677201900c49cc5ce63eb0af945741f4b4`.
 The earlier live run verified indicator lifecycle; this final visual replacement
 was build-verified, without claiming a further live provider run.
+
+
+## Final ring design
+
+After the initial looked awkward to the user, `e7a755cb` replaces it with a
+14px muted circular indicator: thin track, rounded arc, smooth rotation,
+6px spacing to the clock. Reduced-motion preference keeps a static ring.
+A local browser preview verified size and alignment before release. ESLint,
+diff check, and production build passed; this SVG/CSS-only change retained the
+previously tested running/completion logic.
+
+Live image: `neev-native-agent:ux-docs-speed-ring-loader-20260924`.
+UI SHA-256: `9e8693fe0dff517e99f327099d53a0047fa97474bfbd61d8e2263eb0d8255b9a`.
+An initial release attempt used the wrong date suffix and failed before image
+replacement; the correct existing image was then deployed. Final health 200,
+UI hash verified, document creation remained enabled.
