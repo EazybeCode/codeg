@@ -10,6 +10,7 @@ import {
   Users,
 } from "lucide-react"
 import { NativeMarkdown } from "./native-markdown"
+import { usePublishRunningChat } from "@/lib/neev-running-chats"
 
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
 import Link from "next/link"
@@ -272,6 +273,10 @@ function Chat({
     // level only Codex advertises can never ride along into Claude.
     [desired, setDesired] = useState<NeevAgentSettings | null>(null),
     [applying, setApplying] = useState(false)
+  // What the sidebar reads to mark this conversation as running. Published
+  // from the state the run already sets here rather than polled for, so it
+  // clears the moment the run finishes or is cancelled.
+  usePublishRunningChat(auth.session, "chat", resource.id, agentBusy)
   /**
    * Files staged for the next send, uploaded to THIS chat as they arrive.
    *
@@ -1488,21 +1493,25 @@ function Chat({
                   </time>
                 )}
               </div>
-              {/* Outside the live region below: the clock on this line changes
-                  ten times a second, and inside one it would be announced
-                  that often. The reply itself is what is worth hearing. */}
-              <ActivityTimeline
-                items={liveActivity}
-                running={agentBusy}
-                startedAt={runStartedAt}
-                finishedAt={runFinishedAt}
-                completed={runCompleted}
-              />
               {/* Only the reply. "Still working" is said once, by the activity
-                  line above — a second sr-only "Working…" here was the same
+                  line below — a second sr-only "Working…" here was the same
                   fact announced twice for one run. */}
               <div aria-live="polite">
                 {agentText && <NativeMarkdown markdown={agentText} streaming />}
+              </div>
+              {/* Progress sits AFTER the newest output, near the composer,
+                  rather than above a reply that grows and scrolls it off the
+                  screen. One spinner for the run, and it stays outside the live
+                  region: the clock on this line changes ten times a second, and
+                  inside one it would be announced that often. */}
+              <div className="pt-3">
+                <ActivityTimeline
+                  items={liveActivity}
+                  running={agentBusy}
+                  startedAt={runStartedAt}
+                  finishedAt={runFinishedAt}
+                  completed={runCompleted}
+                />
               </div>
             </div>
           </li>
