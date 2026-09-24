@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Neev Browser",
+  "version": "0.1.0",
+  "description": "Drive one tab you pick with your locally installed Claude Code or Codex CLI.",
+  "permissions": ["sidePanel", "scripting", "nativeMessaging", "activeTab"],
+  "optional_permissions": ["tabs"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Neev Browser"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'"
+  }
+}

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Neev Browser</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="brand-name">Neev Browser</span>
+      </div>
+      <span id="status-pill" class="pill">Idle</span>
+    </header>
+
+    <p class="local-note">
+      Runs stay on this machine. Nothing is saved to a Neev server and no Neev
+      chat is created. Use <strong>Export transcript</strong> to keep a copy.
+    </p>
+
+    <p id="error" class="banner error" hidden></p>
+
+    <section id="setup" class="card">
+      <h2>Agent</h2>
+      <div class="segmented" id="provider">
+        <label
+          ><input type="radio" name="provider" value="claude" checked /><span
+            >Claude Code</span
+          ></label
+        >
+        <label
+          ><input type="radio" name="provider" value="codex" /><span
+            >Codex CLI</span
+          ></label
+        >
+      </div>
+      <label class="field">
+        <span>Model <em>optional</em></span>
+        <input
+          id="model"
+          type="text"
+          maxlength="100"
+          placeholder="leave empty for the CLI default"
+          autocomplete="off"
+        />
+      </label>
+
+      <h2>Tab</h2>
+      <p id="tabs-empty" class="hint">
+        Neev can read and act on exactly one tab, and only after you pick it.
+      </p>
+      <ul id="tabs" class="tabs"></ul>
+      <button id="load-tabs" class="ghost" type="button">List open tabs</button>
+
+      <h2>Task</h2>
+      <textarea
+        id="task"
+        rows="4"
+        maxlength="8000"
+        placeholder="Open the orders table and tell me which orders are unpaid."
+      ></textarea>
+      <button id="attach" class="primary" type="button" disabled>
+        Grant access &amp; run
+      </button>
+      <p class="hint">
+        Attaching asks Chrome for access to that one site, and injects the page
+        agent into that one tab. Every click and keystroke is confirmed by you.
+      </p>
+    </section>
+
+    <section id="run-card" class="card" hidden>
+      <div class="target">
+        <span class="target-title" id="run-title"></span>
+        <span class="target-origin" id="run-origin"></span>
+      </div>
+      <dl class="meta">
+        <dt>Agent</dt>
+        <dd id="run-provider"></dd>
+        <dt>CLI</dt>
+        <dd id="run-cli"></dd>
+        <dt>Run directory</dt>
+        <dd><code id="run-dir" class="selectable"></code></dd>
+      </dl>
+      <button id="stop" class="danger" type="button">Stop</button>
+    </section>
+
+    <section id="approval-card" class="card accent" hidden>
+      <h2 class="accent-title">Approve this action?</h2>
+      <p class="approval-line">
+        <span id="approval-tool" class="chip"></span>
+        <span id="approval-role" class="chip subtle"></span>
+      </p>
+      <p class="quoted" id="approval-name"></p>
+      <p class="quoted mono" id="approval-text" hidden></p>
+      <p class="hint" id="approval-reason"></p>
+      <div class="row">
+        <button id="approve" class="primary" type="button">Approve</button>
+        <button id="deny" class="ghost" type="button">Deny</button>
+      </div>
+    </section>
+
+    <section id="handoff-card" class="card accent" hidden>
+      <h2 class="accent-title">Over to you</h2>
+      <p class="quoted" id="handoff-instruction"></p>
+      <p class="hint" id="handoff-reason"></p>
+      <div class="row">
+        <button id="handoff-done" class="primary" type="button">
+          I did it
+        </button>
+        <button id="handoff-skip" class="ghost" type="button">Skip</button>
+      </div>
+    </section>
+
+    <section class="stream-wrap">
+      <h2 class="stream-title">Activity</h2>
+      <ul id="stream" class="stream"></ul>
+    </section>
+
+    <footer class="bottom">
+      <button id="export-transcript" class="ghost" type="button">
+        Export transcript
+      </button>
+      <button id="export-results" class="ghost" type="button">
+        Export results
+      </button>
+      <a
+        class="neev-link"
+        href="https://app.neev.so"
+        target="_blank"
+        rel="noreferrer noopener"
+        >Open Neev</a
+      >
+    </footer>
+
+    <script src="sidepanel.js" type="module"></script>
+  </body>
+</html>

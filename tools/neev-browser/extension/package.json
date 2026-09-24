@@ -1,0 +1,6 @@
+{
+  "name": "neev-browser-extension",
+  "private": true,
+  "type": "module",
+  "description": "Marks lib/*.js as ES modules so Node can import the same files Chrome loads. Chrome reads manifest.json only and ignores this file."
+}
