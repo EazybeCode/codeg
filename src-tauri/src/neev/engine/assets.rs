@@ -19,7 +19,7 @@ use axum::{
     http::{header, HeaderValue, Response, StatusCode},
 };
 
-use crate::neev::http::ApiError;
+use crate::neev::http::{ApiError, IMMUTABLE_ASSET};
 
 /// Largest single asset served. The export's biggest chunks are well under this;
 /// the bound exists so a mistaken artifact root cannot stream something huge.
@@ -100,12 +100,34 @@ pub(crate) fn serve(root: &Path, relative: &str) -> Result<Response<Body>, ApiEr
         HeaderValue::from_static(content_type(&path)),
     );
     // The export's asset names are content-addressed by build id, but the HTML
-    // shells are not, so nothing here is declared immutable.
+    // shells are not — so the shells keep revalidating and only the addressed
+    // ones are declared immutable. Serving BOTH as `no-cache`, with no validator
+    // to make a revalidation cheap, meant every chunk of the editor bundle came
+    // down in full on every document open; the frame is remounted per document,
+    // so that was every open, not just the first.
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache"),
+        if content_addressed(root, &path) {
+            HeaderValue::from_static(IMMUTABLE_ASSET)
+        } else {
+            HeaderValue::from_static("no-cache")
+        },
     );
     Ok(response)
+}
+
+/// Whether a resolved file sits in the export's content-addressed tree.
+///
+/// Decided from the RESOLVED path, not from the request text. Asking whether the
+/// request started with `_next/static/` would hand a long cache to
+/// `_next/static/../docs/[id]/index.html` — a shell, under a name that reads
+/// like a chunk — and pin every reader to a stale editor. `resolve` has already
+/// canonicalized and confined this path, so where it actually landed is the only
+/// honest answer to the question.
+fn content_addressed(root: &Path, path: &Path) -> bool {
+    root.canonicalize()
+        .map(|root| path.starts_with(root.join("_next").join("static")))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -160,6 +182,48 @@ mod tests {
                 "a symlink escaped the artifact root"
             );
         }
+    }
+
+    #[test]
+    fn a_content_addressed_chunk_is_cacheable_and_a_shell_is_not() {
+        // The regression this guards: both were `no-cache` with no validator, so
+        // every document open re-downloaded the whole editor bundle in full.
+        let root = artifact();
+        let chunk = serve(root.path(), "_next/static/chunk.js").unwrap();
+        assert_eq!(
+            chunk.headers().get(header::CACHE_CONTROL).unwrap(),
+            IMMUTABLE_ASSET
+        );
+        // The shell's name is stable across builds, so a long cache on it would
+        // pin readers to the old editor after a deploy.
+        for path in ["", "docs/b3b1f0d2-8c4a-4f5e-9a1b-2c3d4e5f6a7b/"] {
+            let shell = serve(root.path(), path).unwrap();
+            assert_eq!(
+                shell.headers().get(header::CACHE_CONTROL).unwrap(),
+                "no-cache",
+                "an HTML shell was served cacheable at {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shell_reached_through_a_chunk_shaped_name_is_not_cacheable() {
+        // Deciding from the request text rather than from where it resolved would
+        // hand a year-long lifetime to a shell, under a name that reads like a
+        // chunk. `resolve` confines the path; this asserts the header agrees with
+        // the file it actually landed on.
+        let root = artifact();
+        let resolved = resolve(root.path(), "_next/static/../../index.html");
+        if let Some(resolved) = resolved {
+            assert!(
+                !content_addressed(root.path(), &resolved),
+                "a shell was treated as content-addressed"
+            );
+        }
+        assert!(!content_addressed(
+            root.path(),
+            &root.path().canonicalize().unwrap().join("index.html")
+        ));
     }
 
     #[test]

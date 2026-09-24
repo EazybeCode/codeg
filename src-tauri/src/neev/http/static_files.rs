@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::neev::startup::ServerState;
 
-use super::{add_private_headers, ApiError};
+use super::{add_private_headers, ApiError, IMMUTABLE_ASSET};
 
 const CONFIRM_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'";
 
@@ -145,6 +145,26 @@ pub(super) async fn asset(
         HeaderValue::from_static(CONFIRM_CSP),
     );
     add_private_headers(&mut response);
+    // `add_private_headers` has just said `no-store`, which is right for every
+    // response whose body depends on who asked. A build-id-named chunk is not
+    // one of those: the name IS the version, so the bytes behind it can never
+    // change, and re-downloading the whole bundle on every load was the cost of
+    // treating it as though they could. Overridden here rather than by skipping
+    // `add_private_headers`, so the `no-referrer` it also sets is kept.
+    //
+    // `private`, not `public`: these paths sit behind the same authorization as
+    // everything else, and nothing is gained by inviting a shared cache to hold
+    // them. The reader's own browser is the only cache this needs.
+    //
+    // Only the content-addressed prefix qualifies. The navigation payload `.txt`
+    // files and the icons keep their real names across builds, so a long cache
+    // on those would pin a stale app; `neev-auth/*` is unhashed too.
+    if file.starts_with("_next/static/") {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(IMMUTABLE_ASSET),
+        );
+    }
     response.headers_mut().insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

@@ -685,7 +685,21 @@ async fn native_static_export_assets_navigation_and_exact_inline_hashes() {
         asset.assert_status_ok();
         assert_eq!(asset.header(header::CONTENT_TYPE), content_type);
         assert_eq!(asset.header("x-content-type-options"), "nosniff");
-        assert_eq!(asset.header(header::CACHE_CONTROL), "no-store");
+        // A build-id-named chunk may be kept; anything whose name is stable
+        // across builds may not, or a deploy would leave readers on the old app.
+        // These were all `no-store`, which is why the whole bundle came down
+        // again on every load.
+        let expected = if path.starts_with("/_next/static/") {
+            crate::neev::http::IMMUTABLE_ASSET
+        } else {
+            "no-store"
+        };
+        assert_eq!(
+            asset.header(header::CACHE_CONTROL),
+            expected,
+            "wrong cache policy for {path}"
+        );
+        assert_eq!(asset.header("referrer-policy"), "no-referrer");
     }
     for path in [
         "/settings/agents",

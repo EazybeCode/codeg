@@ -385,6 +385,19 @@ pub(super) fn private_json(value: impl Serialize) -> Response {
     response
 }
 
+/// `Cache-Control` for a file whose NAME already identifies its bytes.
+///
+/// Both static trees Neev serves — its own export and the document engine's —
+/// name their chunks after a build id or a content hash, so a given URL can
+/// never answer with different bytes than it did last time. A new build means
+/// new names, which is what makes a year-long lifetime safe rather than
+/// reckless: there is nothing to invalidate.
+///
+/// Only ever applied to those content-addressed prefixes. HTML shells,
+/// navigation payloads and icons keep stable names across builds and must keep
+/// revalidating, or a deploy would leave readers pinned to the old app.
+pub(crate) const IMMUTABLE_ASSET: &str = "private, max-age=31536000, immutable";
+
 pub(super) fn add_private_headers(response: &mut Response) {
     response
         .headers_mut()
