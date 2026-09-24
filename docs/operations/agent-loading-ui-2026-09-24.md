@@ -44,3 +44,18 @@ with one running row and a stable Send control.
 Image: `neev-native-agent:ux-docs-speed-dot-loader-20260924`.
 UI SHA-256: `45d9be5b379801e665912b3b88502ff3fce17cd8d36b8ca9b05033ad6585ff5f`.
 Health 200, document creation enabled, deployed hash matched; image-only release.
+
+
+## Compact initial correction
+
+The user preferred a smaller Neev initial after reviewing the dots. Commit
+`47781dac` replaces them with a lowercase n in a fixed 12px box, 14px type,
+and a 6px gap to the elapsed clock. Subtle opacity pulse only while running;
+reduced motion disables it. No second loading state.
+
+68 focused chat tests, ESLint, static export and diff check passed.
+Image `neev-native-agent:ux-docs-speed-n-loader-20260924` deployed successfully;
+health 200, creation enabled, UI hash verified:
+`e8f0bad26c6abe933f0a5181050457677201900c49cc5ce63eb0af945741f4b4`.
+The earlier live run verified indicator lifecycle; this final visual replacement
+was build-verified, without claiming a further live provider run.
