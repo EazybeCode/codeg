@@ -1429,8 +1429,23 @@ function Chat({
                   {new Date(message.createdAt * 1000).toLocaleString()}
                 </time>
               </div>
+              {/* A message written here keeps its files where they were put;
+                  anything else — an agent's reply, a message from before this
+                  existed — is the markdown it always was. */}
+              {message.attachments.length > 0 ? (
+                <SentPrompt
+                  body={message.body}
+                  attachments={message.attachments}
+                />
+              ) : (
+                <NativeMarkdown markdown={message.body} />
+              )}
               {/* The stored trace, replayed: only ever from this reader's own
-                  sessions, and only on a reply they invoked. */}
+                  sessions, and only on a reply they invoked.
+
+                  Below the reply, where the live one is: a run that put its
+                  progress above the answer moved every word of that answer up
+                  the screen the moment it finished. */}
               {traces.has(message.id) && (
                 <ActivityTimeline
                   items={traces.get(message.id)!.activity}
@@ -1450,17 +1465,6 @@ function Chat({
                   // literal, so it stays true if that ever loosens.
                   completed={traces.get(message.id)!.status === "completed"}
                 />
-              )}
-              {/* A message written here keeps its files where they were put;
-                  anything else — an agent's reply, a message from before this
-                  existed — is the markdown it always was. */}
-              {message.attachments.length > 0 ? (
-                <SentPrompt
-                  body={message.body}
-                  attachments={message.attachments}
-                />
-              ) : (
-                <NativeMarkdown markdown={message.body} />
               )}
             </div>
           </li>
