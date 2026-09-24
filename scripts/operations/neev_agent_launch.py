@@ -45,6 +45,15 @@ def _parse(argv):
     parser.add_argument("--provider", required=True, choices=sorted(credentials.PROVIDERS))
     parser.add_argument("--credential-handle", required=True, dest="credential_handle")
     parser.add_argument("--provider-ipv4", action="append", default=[], dest="provider_ipv4")
+    # Which Codex transport to run. `exec` is the deployment's existing
+    # behaviour and stays the default, so an older runtime that passes nothing
+    # gets exactly what it got before.
+    parser.add_argument(
+        "--codex-stream",
+        choices=("exec", "app-server"),
+        default="exec",
+        dest="codex_stream",
+    )
     parser.add_argument("--cpu-seconds", type=int, default=120)
     # `None` means "unset", so an operator's explicit value is never silently
     # replaced by the per-provider default below.
@@ -146,6 +155,86 @@ def externally_sandboxed_argv(provider, provider_argv):
     return head + ["--json"] + options + ["--", prompt]
 
 
+# The in-sandbox streaming adapter, beside this launcher in the same root-owned
+# 0555 directory. `-I` matches the ns prelude: no user site-packages, no
+# inherited PYTHONPATH.
+ADAPTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neev_codex_stream_adapter.py")
+
+
+# The `-c key=value` overrides `provider_argv` builds for `codex exec`, and what
+# each becomes for the app-server. Effort and tier have parameters of their own
+# in the pinned protocol, so they are sent as parameters and the thread reports
+# back what it took; fast mode has none and stays a config override. An override
+# outside this table is refused rather than dropped — it is a choice somebody
+# made, and a turn that ignores it looks like a turn that honoured it.
+_EFFORT_OVERRIDE = re.compile(r'\Amodel_reasoning_effort="([A-Za-z-]{1,32})"\Z')
+_TIER_OVERRIDE = re.compile(r'\Aservice_tier="([A-Za-z-]{1,32})"\Z')
+_FAST_MODE_OVERRIDE = re.compile(r"\Afeatures\.fast_mode=(?:true|false)\Z")
+
+
+def _config_argument(value):
+    """Pure: one `-c` override -> the adapter's arguments for it."""
+    effort = _EFFORT_OVERRIDE.match(value)
+    if effort:
+        return ["--effort", effort.group(1)]
+    tier = _TIER_OVERRIDE.match(value)
+    if tier:
+        return ["--service-tier", tier.group(1)]
+    if _FAST_MODE_OVERRIDE.match(value):
+        return ["--config", value]
+    raise sandbox.SandboxError("invalid")
+
+
+def app_server_argv(provider, provider_argv, adapter=ADAPTER, python=sandbox.PYTHON):
+    """Pure: rewrite a `codex exec --json` launch into the streaming adapter's.
+
+    `exec` emits nothing until an item is finished, so a reply appears only once
+    the turn is over. The adapter drives `codex app-server`, which streams the
+    message as it is written, and it runs HERE — as the sandboxed provider
+    process — so it owns the app-server's stdin inside the isolation boundary
+    instead of asking for a pipe through it. The launcher's own stdin stays
+    DEVNULL for every paid turn, exactly as before.
+
+    Only the canonical shape `provider_argv` builds is accepted. Anything else
+    raises rather than being rewritten on a guess or quietly run as `exec`: an
+    argument this function does not know is a selection the reader made and
+    would otherwise lose. Codex's sandbox bypass is NOT added — the adapter
+    expresses the same thing as thread parameters.
+    """
+    argv = list(provider_argv)
+    if provider != "codex":
+        return argv
+    if tuple(argv[1:]) == _METADATA_ARGV:  # noqa: F821 - defined below, read at call time
+        # The catalogue probe already IS an app-server launch, driven by the
+        # runtime over the bounded stdin relay. It is not a turn and has no
+        # prompt to stream.
+        return argv
+    if len(argv) < 4 or argv[1] != "exec" or argv[2] != "--json":
+        raise sandbox.SandboxError("invalid")
+    binary, prompt, options = argv[0], argv[3], argv[4:]
+    mapped = ["--codex", binary]
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option in ("-c", "-m", "--image"):
+            if index + 1 >= len(options):
+                raise sandbox.SandboxError("invalid")
+            value = options[index + 1]
+            if option == "-c":
+                mapped += _config_argument(value)
+            else:
+                mapped += [{"-m": "--model", "--image": "--image"}[option], value]
+            index += 2
+            continue
+        if option == "--skip-git-repo-check":
+            # An `exec` precondition with no app-server equivalent: a thread is
+            # started on a cwd, not on a checkout.
+            index += 1
+            continue
+        raise sandbox.SandboxError("invalid")
+    return [python, "-I", adapter] + mapped + ["--", prompt]
+
+
 def build_spec(args):
     """Pure: turn parsed args into a validated SandboxSpec (raises SandboxError)."""
     provider_argv = list(args.provider_argv)
@@ -153,7 +242,10 @@ def build_spec(args):
         provider_argv = provider_argv[1:]
     if not provider_argv:
         raise sandbox.SandboxError("invalid")
-    provider_argv = externally_sandboxed_argv(args.provider, provider_argv)
+    if args.codex_stream == "app-server":
+        provider_argv = app_server_argv(args.provider, provider_argv)
+    else:
+        provider_argv = externally_sandboxed_argv(args.provider, provider_argv)
     egress = (
         sandbox.EgressPolicy.provider_allowlist(args.provider_ipv4)
         if args.provider_ipv4

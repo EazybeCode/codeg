@@ -544,6 +544,18 @@ async fn serve() -> Result<(), ()> {
             }
             binaries.codex = Some(codex);
         }
+        // Which Codex transport the sandbox runs. Absent means `exec` — the
+        // behaviour this deployment already has — and an unrecognised value
+        // aborts the boot rather than being read as either choice.
+        let codex_stream = match std::env::var("NEEV_CODEX_STREAM") {
+            Ok(value) => {
+                match super::agents::execution::CodexStream::parse(value.trim()) {
+                    Some(stream) => stream,
+                    None => return Err(()),
+                }
+            }
+            Err(_) => super::agents::execution::CodexStream::default(),
+        };
         state.agents = super::agents::execution::sandboxed_runtime(
             python,
             launcher,
@@ -551,6 +563,7 @@ async fn serve() -> Result<(), ()> {
             workspace_root,
             provider_ipv4,
             Some(cap_helper),
+            codex_stream,
         );
     }
     // Bind the local supervisor when one is deployed. Every part is REQUIRED

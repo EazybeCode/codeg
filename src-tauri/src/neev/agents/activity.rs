@@ -15,7 +15,7 @@
 //! - **Never invent.** A provider stream we cannot map produces one
 //!   `unsupported` marker, not a plausible-looking empty trace.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -145,6 +145,11 @@ struct PendingTool {
     input: String,
 }
 
+/// Items tracked as open at once, per kind. A message completes and is forgotten
+/// straight away, so one or two entries is the real steady state; this is the
+/// bound that stops a malformed stream growing the process, not a working limit.
+const MAX_OPEN_ITEMS: usize = 64;
+
 /// Maps one provider's `stream-json` lines to [`StreamItem`]s.
 ///
 /// Stateful because a Claude tool input arrives as `input_json_delta` fragments
@@ -156,6 +161,13 @@ pub(crate) struct StreamParser {
     /// would otherwise produce one marker per line.
     unsupported_reported: bool,
     redact: Vec<String>,
+    /// Codex message ids that have delivered at least one delta. Their
+    /// `item.completed` carries the SAME text again, so it is dropped — without
+    /// this every streamed reply would be shown twice.
+    streamed: HashSet<String>,
+    /// Codex command ids already announced at `item.started` with a command to
+    /// show. Their `item.completed` contributes only the result.
+    announced: HashSet<String>,
 }
 
 impl StreamParser {
@@ -165,6 +177,8 @@ impl StreamParser {
             open: HashMap::new(),
             unsupported_reported: false,
             redact: redact.into_iter().filter(|value| !value.is_empty()).collect(),
+            streamed: HashSet::new(),
+            announced: HashSet::new(),
         }
     }
 
@@ -394,12 +408,17 @@ impl StreamParser {
         }
     }
 
-    /// Codex CLI — BEST EFFORT, and deliberately conservative.
+    /// Codex CLI, in both of the shapes this deployment runs.
     ///
-    /// The runner currently launches the codex binary with Claude's flags, so
-    /// this shape is unverified against a real stream. Only items whose meaning
-    /// is unambiguous are mapped; anything else falls through to `unsupported`
-    /// rather than being guessed into a trace that reads as authoritative.
+    /// `codex exec --json` emits an envelope per finished item, so a reply
+    /// appears all at once when the turn is already over. The app-server
+    /// adapter (`neev_codex_stream_adapter.py`, inside the sandbox) speaks the
+    /// SAME envelopes plus `item.delta`, so the two paths share one mapping
+    /// here and the flag that chooses between them changes nothing else.
+    ///
+    /// Still conservative: only items whose meaning is unambiguous are mapped,
+    /// and anything unknown falls through to `unsupported` rather than being
+    /// guessed into a trace that reads as authoritative.
     fn codex(&mut self, value: &serde_json::Value) -> Option<Vec<StreamItem>> {
         // Codex may also be run with the Claude-compatible stream; if it looks
         // like one, read it as one.
@@ -411,27 +430,86 @@ impl StreamParser {
         }
         let outer = value.get("type")?.as_str()?;
         match outer {
+            // A fragment of a message still being written. Only the adapter
+            // produces these; `exec` has no token-level output at all.
+            "item.delta" => {
+                let item = value.get("item")?;
+                if item.get("type")?.as_str()? != "agent_message" {
+                    // A delta for something we do not render as prose (a plan,
+                    // a reasoning summary). Recognised and dropped.
+                    return Some(Vec::new());
+                }
+                let delta = item.get("delta")?.as_str()?;
+                if delta.is_empty() {
+                    // Nothing to show, and marking the message as started on an
+                    // empty fragment would cost the next one its paragraph break.
+                    return Some(Vec::new());
+                }
+                let id = item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                if self.streamed.contains(&id) {
+                    // Mid-message: appended exactly as it arrives, because these
+                    // are fragments of one sentence.
+                    return Some(vec![StreamItem::Text(delta.to_owned())]);
+                }
+                if self.streamed.len() < MAX_OPEN_ITEMS {
+                    self.streamed.insert(id);
+                }
+                // The FIRST fragment of a message begins where the last one
+                // ended rather than running on from it — the same break a whole
+                // message gets, taken at the moment the message starts.
+                Some(vec![StreamItem::Message(delta.to_owned())])
+            }
             "item.started" | "item.completed" | "item.updated" => {
                 let item = value.get("item")?;
                 let item_type = item.get("type")?.as_str()?;
-                // Only completed items carry an outcome worth recording; a
-                // started one would duplicate into a second entry.
-                if outer != "item.completed" {
+                if outer == "item.updated" {
+                    // Nothing here is an outcome: an updated item is re-sent
+                    // whole at completion.
                     return Some(Vec::new());
+                }
+                let id = item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                if outer == "item.started" {
+                    // A command that runs for thirty seconds is announced NOW,
+                    // with no output yet; the same id is re-sent at completion
+                    // and the log revises that row in place rather than adding
+                    // a second one. Everything else waits for its outcome.
+                    if item_type != "command_execution" {
+                        return Some(Vec::new());
+                    }
+                    let command = item
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    if !command.is_empty() && self.announced.len() < MAX_OPEN_ITEMS {
+                        self.announced.insert(id.clone());
+                    }
+                    let announced = if id.is_empty() { "command".to_owned() } else { id };
+                    return Some(vec![self.call(announced, "command".to_owned(), command)]);
                 }
                 match item_type {
                     "agent_message" => {
+                        // Already delivered fragment by fragment: the completed
+                        // item repeats it in full, and sending it again would
+                        // show the reader their reply twice.
+                        if self.streamed.remove(&id) {
+                            return Some(Vec::new());
+                        }
                         let text = item.get("text").and_then(|v| v.as_str())?;
                         // `item.completed` means this message is finished, so
                         // it is a whole one and the next is a new one.
                         Some(vec![StreamItem::Message(text.to_owned())])
                     }
                     "command_execution" => {
-                        let id = item
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("command")
-                            .to_owned();
+                        let announced = self.announced.remove(&id);
+                        let id = if id.is_empty() { "command".to_owned() } else { id };
                         let command = item
                             .get("command")
                             .and_then(|v| v.as_str())
@@ -441,10 +519,12 @@ impl StreamParser {
                             .get("aggregated_output")
                             .and_then(|v| v.as_str())
                             .unwrap_or_default();
-                        Some(vec![
-                            self.call(id.clone(), "command".to_owned(), command),
-                            self.result(id, output, exit.unwrap_or(0) != 0),
-                        ])
+                        let mut items = Vec::new();
+                        if !announced {
+                            items.push(self.call(id.clone(), "command".to_owned(), command));
+                        }
+                        items.push(self.result(id, output, exit.unwrap_or(0) != 0));
+                        Some(items)
                     }
                     // Reasoning items are recognised and dropped.
                     "reasoning" => Some(Vec::new()),

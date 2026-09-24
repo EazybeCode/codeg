@@ -811,3 +811,114 @@ class AddressSpaceTests(unittest.TestCase):
             .limits.address_space_bytes,
             12345,
         )
+
+
+class AppServerTransportTests(unittest.TestCase):
+    """The `--codex-stream app-server` rewrite.
+
+    `codex exec --json` emits nothing until an item is finished, so a reply
+    lands whole after the turn is over. The rewrite runs the adapter as the
+    sandboxed provider instead; the adapter drives `codex app-server` over its
+    OWN child pipes, inside the boundary. Nothing about the launcher's stdin
+    changes — that is the invariant these tests exist to hold.
+    """
+
+    def spec_for(self, provider, tail, stream="app-server"):
+        parsed = launch._parse([
+            "--tenant", "org:3/user:7",
+            "--slot", "a",
+            "--workdir", "/var/lib/neev-native/agents/run-x",
+            "--uid", "61000", "--gid", "61000",
+            "--provider", provider,
+            "--credential-handle", "handle-1",
+            "--codex-stream", stream,
+            "--", f"/usr/local/bin/{provider}", *tail,
+        ])
+        return parsed, launch.build_spec(parsed)
+
+    def test_exec_is_the_default_and_leaves_the_launch_as_it_was(self):
+        parsed = launch._parse([
+            "--tenant", "org:3/user:7", "--slot", "a",
+            "--workdir", "/var/lib/neev-native/agents/run-x",
+            "--uid", "61000", "--gid", "61000",
+            "--provider", "codex", "--credential-handle", "handle-1",
+            "--", "/usr/local/bin/codex", "exec", "--json", "hi",
+        ])
+        self.assertEqual(parsed.codex_stream, "exec")
+        spec = launch.build_spec(parsed)
+        self.assertEqual(spec.provider_argv[0], "/usr/local/bin/codex")
+        self.assertIn(launch._EXTERNALLY_SANDBOXED, spec.provider_argv)
+
+    def test_a_turn_runs_the_adapter_with_every_selection_carried(self):
+        _, spec = self.spec_for("codex", [
+            "exec", "--json", "hi",
+            "--skip-git-repo-check",
+            "-c", 'service_tier="fast"',
+            "-c", "features.fast_mode=true",
+            "-m", "gpt-5.1-codex",
+            "--image", "/w/run-x/a b.png",
+        ])
+        self.assertEqual(spec.provider_argv, (
+            sandbox.PYTHON, "-I", launch.ADAPTER,
+            "--codex", "/usr/local/bin/codex",
+            # Effort and tier have parameters of their own in the pinned
+            # protocol; fast mode has none and stays a config override.
+            "--service-tier", "fast",
+            "--config", "features.fast_mode=true",
+            "--model", "gpt-5.1-codex",
+            "--image", "/w/run-x/a b.png",
+            "--", "hi",
+        ))
+        # Codex's own sandbox bypass belongs to `exec`; the adapter says the
+        # same thing as thread parameters.
+        self.assertNotIn(launch._EXTERNALLY_SANDBOXED, spec.provider_argv)
+
+    def test_the_prompt_is_passed_through_literally(self):
+        for prompt in ("--help", "-c notify=[]", "--", "  spaced  "):
+            with self.subTest(prompt=prompt):
+                _, spec = self.spec_for("codex", ["exec", "--json", prompt])
+                self.assertEqual(spec.provider_argv[-2:], ("--", prompt))
+
+    def test_the_reasoning_effort_becomes_a_protocol_parameter(self):
+        _, spec = self.spec_for("codex", [
+            "exec", "--json", "hi", "-c", 'model_reasoning_effort="high"',
+        ])
+        self.assertIn("--effort", spec.provider_argv)
+        self.assertEqual(
+            spec.provider_argv[spec.provider_argv.index("--effort") + 1], "high"
+        )
+
+    def test_an_unmapped_option_is_refused_not_silently_dropped(self):
+        # An argument this rewrite does not know is a selection the reader made.
+        # Running the turn without it would look like it worked.
+        for tail in (
+            ["exec", "--json", "hi", "--unknown-flag"],
+            ["exec", "--json", "hi", "-m"],          # a flag with no value
+            ["exec", "hi"],                          # not the canonical shape
+            ["login"],
+            # An override with no protocol parameter and no place in the table.
+            ["exec", "--json", "hi", "-c", 'model_provider="someone_else"'],
+            ["exec", "--json", "hi", "-c", "features.fast_mode=maybe"],
+        ):
+            with self.subTest(tail=tail):
+                with self.assertRaises(sandbox.SandboxError):
+                    self.spec_for("codex", tail)
+
+    def test_the_metadata_probe_and_claude_are_untouched(self):
+        parsed, spec = self.spec_for("codex", ["app-server"])
+        self.assertEqual(spec.provider_argv, ("/usr/local/bin/codex", "app-server"))
+        self.assertTrue(launch.is_metadata_probe(parsed.provider, spec))
+        _, claude = self.spec_for("claude", ["-p", "hi", "--output-format", "stream-json"])
+        self.assertEqual(claude.provider_argv[0], "/usr/local/bin/claude")
+
+    def test_a_streaming_turn_is_never_a_metadata_probe(self):
+        # The probe is the ONE shape with a writable stdin. A turn that now runs
+        # an app-server BEHIND the adapter must not become one: the prompt still
+        # arrives as argv and nothing is fed in from outside the sandbox.
+        parsed, spec = self.spec_for("codex", ["exec", "--json", "hi"])
+        self.assertFalse(launch.is_metadata_probe(parsed.provider, spec))
+        self.assertNotIn("app-server", spec.provider_argv)
+
+
+if __name__ == "__main__":
+    unittest.main()

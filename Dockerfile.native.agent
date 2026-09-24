@@ -103,6 +103,7 @@ RUN setcap 'cap_chown,cap_dac_override,cap_kill,cap_setgid,cap_setuid,cap_setpca
 # The launcher composes the sandbox + provider-egress; ship the whole operations
 # set it imports (sandbox, egress, login profile, codex login egress).
 COPY --chown=0:0 scripts/operations/neev_agent_launch.py \
+     scripts/operations/neev_codex_stream_adapter.py \
      scripts/operations/neev_agent_sandbox.py \
      scripts/operations/neev_agent_ns_prelude.py \
      scripts/operations/neev_agent_credentials.py \
@@ -134,6 +135,13 @@ ENV NEEV_AGENT_LAUNCHER=/opt/neev/scripts/operations/neev_agent_launch.py \
     NEEV_AGENT_WORKSPACE_ROOT=/data/agents \
     NEEV_AGENT_BINARY=/usr/local/bin/claude \
     NEEV_AGENT_CODEX_BINARY=/usr/local/bin/codex
+
+# Codex turns run through the in-sandbox app-server adapter, which streams the
+# reply as it is written; `codex exec --json` has no token-level output and
+# delivers it whole after the turn is over. Rollback is this value set to `exec`
+# (or removed) plus a restart: the launcher's own default is still `exec`, so
+# this line is the only thing selecting the new transport.
+ENV NEEV_CODEX_STREAM=app-server
 
 # Fail-closed defaults preserved: runtime OFF, non-root. Enabling is a deploy-time
 # decision (see NEEV-PRODUCTION-RELEASE-RUNBOOK.md STEP 3/4): set

@@ -297,6 +297,40 @@ pub(crate) fn safe_model(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
 }
 
+/// Which Codex transport the sandbox runs.
+///
+/// `codex exec --json` has no token-level output, so a reply arrives whole when
+/// the turn is already over. `AppServer` runs the same binary as an app-server
+/// behind an adapter INSIDE the sandbox, which streams the message as it is
+/// written. The choice is a deployment flag defaulting to [`CodexStream::Exec`],
+/// so production behaviour is unchanged until an operator sets it and reverting
+/// is a restart rather than a rebuild.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CodexStream {
+    #[default]
+    Exec,
+    AppServer,
+}
+
+impl CodexStream {
+    /// Strict: an unrecognised value is `None` so a typo aborts startup rather
+    /// than silently selecting a transport. Mirrors `NEEV_RUNTIME_ENABLED`.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "exec" => Some(Self::Exec),
+            "app-server" => Some(Self::AppServer),
+            _ => None,
+        }
+    }
+
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::Exec => "exec",
+            Self::AppServer => "app-server",
+        }
+    }
+}
+
 /// The provider binaries this deployment actually has. A provider with no
 /// binary is [`ExecutionError::Unsupported`] — never silently served by another.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -956,6 +990,10 @@ pub(crate) struct SandboxedProviderCliRuntime {
     /// privileged context).
     cap_helper: Option<String>,
     slots: SlotPool,
+    /// Which Codex transport the launcher should run. Passed on every launch so
+    /// the argv says what it is doing rather than depending on the launcher's
+    /// own default.
+    codex_stream: CodexStream,
     /// Concurrency budget for metadata probes, separate from the run budget.
     ///
     /// Discovery needs an egress lane like a turn does, and there are only two.
@@ -979,6 +1017,7 @@ impl SandboxedProviderCliRuntime {
         workspace_root: impl Into<PathBuf>,
         provider_ipv4: Vec<String>,
         cap_helper: Option<String>,
+        codex_stream: CodexStream,
     ) -> Self {
         Self {
             python: python.into(),
@@ -987,6 +1026,7 @@ impl SandboxedProviderCliRuntime {
             workspace_root: workspace_root.into(),
             provider_ipv4,
             cap_helper,
+            codex_stream,
             probes: Arc::new(tokio::sync::Semaphore::new(1)),
             slots: SlotPool::new(),
         }
@@ -1054,6 +1094,11 @@ impl SandboxedProviderCliRuntime {
             request.provider.clone(),
             "--credential-handle".into(),
             handle.to_owned(),
+            // Which Codex transport to run. Said explicitly on every launch,
+            // including Claude's (where the launcher ignores it), so the argv a
+            // reviewer reads is the whole instruction.
+            "--codex-stream".into(),
+            self.codex_stream.as_arg().to_owned(),
         ];
         for ip in &self.provider_ipv4 {
             argv.push("--provider-ipv4".into());
@@ -1476,6 +1521,7 @@ pub(crate) fn sandboxed_runtime(
     workspace_root: impl Into<PathBuf>,
     provider_ipv4: Vec<String>,
     cap_helper: Option<String>,
+    codex_stream: CodexStream,
 ) -> std::sync::Arc<AgentRuntime> {
     std::sync::Arc::new(AgentRuntime::Sandboxed(SandboxedProviderCliRuntime::new(
         python,
@@ -1484,6 +1530,7 @@ pub(crate) fn sandboxed_runtime(
         workspace_root,
         provider_ipv4,
         cap_helper,
+        codex_stream,
     )))
 }
 
@@ -1598,6 +1645,7 @@ mod tests {
             "/data/agents",
             vec!["140.82.112.3".into()],
             None, // direct exec (dev/test)
+            CodexStream::Exec,
         )
     }
 
@@ -1610,6 +1658,7 @@ mod tests {
             "/data/agents",
             vec!["140.82.112.3".into()],
             Some("/opt/neev/bin/neev-agent-caplaunch".into()),
+            CodexStream::Exec,
         );
         let lane = Lane { slot: "a", uid: 61000 };
         let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/data/agents/run-x"), "/usr/local/bin/claude", HANDLE).unwrap();
@@ -1926,9 +1975,65 @@ mod tests {
     }
 
     #[test]
+    fn the_codex_transport_is_a_launcher_argument_and_defaults_to_exec() {
+        let lane = Lane { slot: "a", uid: 61000 };
+        let workdir = Path::new("/w/run-x");
+        let mut codex = request("hi");
+        codex.provider = "codex".into();
+
+        // Default: the argv says `exec` rather than leaving the launcher to
+        // assume it, and the provider's own arguments are the exec ones.
+        let argv = sandboxed()
+            .launch_argv(&codex, lane, workdir, "/usr/local/bin/codex", HANDLE)
+            .unwrap();
+        let sep = argv.iter().position(|a| a == "--").expect("separator");
+        let position = argv[..sep]
+            .iter()
+            .position(|a| a == "--codex-stream")
+            .expect("transport is a launcher argument");
+        assert_eq!(argv[position + 1], "exec");
+        assert_eq!(argv[sep + 2], "exec");
+
+        // Enabled: ONLY the launcher argument changes. Which binary runs, which
+        // credential volume it opens and what the provider is asked are all the
+        // same — the rewrite into an app-server launch happens inside the
+        // sandbox, where the isolation already is.
+        let streaming = SandboxedProviderCliRuntime::new(
+            "python3",
+            "/opt/neev/scripts/operations/neev_agent_launch.py",
+            ProviderBinaries::claude("/usr/local/bin/claude"),
+            "/data/agents",
+            vec!["140.82.112.3".into()],
+            None,
+            CodexStream::AppServer,
+        );
+        let enabled = streaming
+            .launch_argv(&codex, lane, workdir, "/usr/local/bin/codex", HANDLE)
+            .unwrap();
+        let position = enabled
+            .iter()
+            .position(|a| a == "--codex-stream")
+            .expect("transport is a launcher argument");
+        assert_eq!(enabled[position + 1], "app-server");
+        assert_eq!(enabled[sep + 1..], argv[sep + 1..]);
+    }
+
+    #[test]
+    fn an_unknown_codex_transport_is_refused_rather_than_read_as_a_default() {
+        assert_eq!(CodexStream::parse("exec"), Some(CodexStream::Exec));
+        assert_eq!(CodexStream::parse("app-server"), Some(CodexStream::AppServer));
+        assert_eq!(CodexStream::default(), CodexStream::Exec);
+        // A typo must not be read as either choice: startup aborts on `None`.
+        for value in ["appserver", "app_server", "APP-SERVER", "true", ""] {
+            assert_eq!(CodexStream::parse(value), None, "{value} must be refused");
+        }
+    }
+
+    #[test]
     fn sandboxed_deny_all_when_no_provider_ip() {
         let runtime = SandboxedProviderCliRuntime::new(
             "python3", "/l/launch.py", ProviderBinaries::claude("/usr/local/bin/claude"), "/w", vec![], None,
+            CodexStream::Exec,
         );
         let lane = Lane { slot: "b", uid: 61001 };
         let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/w/run-x"), "/usr/local/bin/claude", HANDLE).unwrap();
@@ -1961,6 +2066,7 @@ mod tests {
             "/w",
             vec![],
             None,
+            CodexStream::Exec,
         );
         let mut codex = request("hi");
         codex.provider = "codex".into();
@@ -2256,6 +2362,7 @@ mod tests {
             &workspace,
             Vec::new(),
             Some(helper.to_string_lossy().into_owned()),
+            CodexStream::Exec,
         );
 
         let answer = runtime
@@ -2293,7 +2400,12 @@ mod tests {
         );
         assert!(name.starts_with("run-probe-"), "and it is still identifiable as a probe: {name}");
         // It drives `app-server`, never a turn the reader would be charged for.
-        assert_eq!(argv.last().map(String::as_str), Some("app-server"));
-        assert!(!argv.iter().any(|arg| arg == "exec"));
+        // Read from the PROVIDER's own arguments — after the sandbox separator
+        // — because `exec` is also the name of a transport the launcher is told
+        // about, and a launcher argument saying so is not a subcommand.
+        let separator = argv.iter().position(|arg| arg == "--").expect("separator");
+        let provider_argv = &argv[separator + 1..];
+        assert_eq!(provider_argv.last().map(String::as_str), Some("app-server"));
+        assert!(!provider_argv.iter().any(|arg| arg == "exec"));
     }
 }

@@ -2,10 +2,12 @@
 //! actually emit.
 //!
 //! The Claude fixtures are taken from `--output-format stream-json
-//! --include-partial-messages --verbose`. The Codex fixtures are the documented
-//! `item.*` envelope shape and are explicitly UNVERIFIED against a live signed-in
-//! Codex — see the note on [`StreamParser::codex`]; they pin our mapping, not
-//! the provider's contract.
+//! --include-partial-messages --verbose`. The Codex fixtures are the `item.*`
+//! envelope shape: as `codex exec --json` emits it, and as the in-sandbox
+//! app-server adapter normalises it (same envelopes, plus `item.delta`). They
+//! pin OUR mapping. The adapter's own translation from the app-server's
+//! camelCase notifications is pinned separately, against the version-matched
+//! schema, in `scripts/tests/test_neev_codex_stream_adapter.py`.
 
 use super::*;
 
@@ -397,6 +399,182 @@ fn a_codex_command_item_becomes_a_call_and_its_result() {
         },
         "a non-zero exit is an error result"
     );
+}
+
+#[test]
+fn a_streamed_codex_message_arrives_in_fragments_and_is_not_repeated_whole() {
+    // The app-server adapter's shape: deltas as the message is written, then
+    // the completed item carrying the SAME text in full. Sending both is how a
+    // reader ends up looking at their reply twice.
+    let mut parser = StreamParser::new("codex", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[
+            r#"{"type":"item.delta","item":{"type":"agent_message","id":"m1","delta":"Look"}}"#,
+            r#"{"type":"item.delta","item":{"type":"agent_message","id":"m1","delta":"ing at"}}"#,
+            r#"{"type":"item.delta","item":{"type":"agent_message","id":"m1","delta":" it."}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","id":"m1","text":"Looking at it."}}"#,
+        ],
+    );
+    assert_eq!(text_of(&items), "Looking at it.", "the reply, exactly once");
+    // The first fragment opens the message (so it starts after whatever came
+    // before rather than running on from it); the rest continue it and must be
+    // appended with nothing inserted between them.
+    assert!(
+        matches!(items.first(), Some(StreamItem::Message(text)) if text == "Look"),
+        "the first fragment must open a message"
+    );
+    assert!(
+        items[1..]
+            .iter()
+            .all(|item| matches!(item, StreamItem::Text(_))),
+        "later fragments must be continuations, not new messages"
+    );
+}
+
+#[test]
+fn a_second_streamed_message_begins_rather_than_running_on() {
+    let mut parser = StreamParser::new("codex", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[
+            r#"{"type":"item.delta","item":{"type":"agent_message","id":"m1","delta":"Let me look."}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","id":"m1","text":"Let me look."}}"#,
+            r#"{"type":"item.delta","item":{"type":"agent_message","id":"m2","delta":"Yes"}}"#,
+            r#"{"type":"item.delta","item":{"type":"agent_message","id":"m2","delta":" — here."}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","id":"m2","text":"Yes — here."}}"#,
+        ],
+    );
+    let opened: Vec<&str> = items
+        .iter()
+        .filter_map(|item| match item {
+            StreamItem::Message(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opened,
+        vec!["Let me look.", "Yes"],
+        "each message opens once, at its first fragment"
+    );
+    assert_eq!(text_of(&items), "Let me look.Yes — here.");
+}
+
+#[test]
+fn an_unstreamed_codex_message_is_still_delivered_whole() {
+    // `codex exec --json` emits no deltas at all. That path must keep working
+    // exactly as it did — the flag chooses a transport, not a behaviour.
+    let mut parser = StreamParser::new("codex", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[r#"{"type":"item.completed","item":{"type":"agent_message","id":"m1","text":"Whole."}}"#],
+    );
+    assert!(
+        matches!(items.as_slice(), [StreamItem::Message(text)] if text == "Whole."),
+        "a message that never streamed must still arrive"
+    );
+}
+
+#[test]
+fn an_empty_delta_costs_the_message_neither_a_break_nor_a_write() {
+    let mut parser = StreamParser::new("codex", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[
+            r#"{"type":"item.delta","item":{"type":"agent_message","id":"m1","delta":""}}"#,
+            r#"{"type":"item.delta","item":{"type":"agent_message","id":"m1","delta":"Real."}}"#,
+        ],
+    );
+    assert!(
+        matches!(items.as_slice(), [StreamItem::Message(text)] if text == "Real."),
+        "the first fragment with something in it is what opens the message"
+    );
+}
+
+#[test]
+fn a_streamed_delta_is_scrubbed_like_everything_else() {
+    let mut parser = StreamParser::new("codex", vec!["handle-0123456789abcdef".to_owned()]);
+    let items = drain(
+        &mut parser,
+        &[r#"{"type":"item.delta","item":{"type":"agent_message","id":"m1","delta":"path handle-0123456789abcdef here"}}"#],
+    );
+    // Deltas are reply TEXT, which the turn's own redaction covers on the way
+    // out; what matters here is that the fragment is delivered intact rather
+    // than dropped, and that the parser treats it as prose, not activity.
+    assert!(matches!(items.as_slice(), [StreamItem::Message(_)]));
+    assert!(activity(&items).is_empty());
+}
+
+#[test]
+fn a_reasoning_delta_is_dropped_without_reporting_the_stream_unreadable() {
+    let mut parser = StreamParser::new("codex", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[r#"{"type":"item.delta","item":{"type":"reasoning","id":"r1","delta":"thinking"}}"#],
+    );
+    assert!(items.is_empty(), "hidden reasoning is never surfaced");
+}
+
+#[test]
+fn a_command_is_announced_when_it_starts_and_not_listed_twice_when_it_ends() {
+    // A command that runs for thirty seconds was invisible until it finished,
+    // which is the whole of "nothing is happening" from the reader's side.
+    let mut parser = StreamParser::new("codex", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[
+            r#"{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"ls -la","status":"inProgress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"ls -la","aggregated_output":"a\nb","exit_code":0,"status":"completed"}}"#,
+        ],
+    );
+    let drafts = activity(&items);
+    assert_eq!(drafts.len(), 2, "one call and one result, not two calls");
+    assert_eq!(
+        drafts[0].kind,
+        ActivityKind::ToolCall {
+            name: "command".into(),
+            input: "ls -la".into(),
+            input_truncated: false,
+        },
+        "the command is shown when it starts"
+    );
+    assert_eq!(
+        drafts[1].kind,
+        ActivityKind::ToolResult {
+            call_id: "c1".into(),
+            output: "a\nb".into(),
+            output_truncated: false,
+            is_error: false,
+        },
+        "the outcome is still recorded"
+    );
+}
+
+#[test]
+fn a_command_that_was_never_announced_is_still_shown_with_its_result() {
+    // `item.started` may be absent (the exec path emits none) or carry no
+    // command yet. Either way the completed item must supply the call.
+    let mut parser = StreamParser::new("codex", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[
+            r#"{"type":"item.started","item":{"id":"c1","type":"command_execution","status":"inProgress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"ls","aggregated_output":"","exit_code":0}}"#,
+        ],
+    );
+    let drafts = activity(&items);
+    assert_eq!(drafts.len(), 3, "an empty announcement, then the call and result");
+    assert_eq!(
+        drafts[1].kind,
+        ActivityKind::ToolCall {
+            name: "command".into(),
+            input: "ls".into(),
+            input_truncated: false,
+        },
+        "the completed item fills in the command that the announcement lacked"
+    );
+    // Same id throughout, so the log revises one row rather than growing two.
+    assert!(drafts.iter().take(2).all(|draft| draft.id == "c1"));
 }
 
 #[test]
