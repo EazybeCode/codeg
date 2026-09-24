@@ -126,6 +126,40 @@ export const FRAME_READY_EVENT = "neev-doc-frame-ready"
  * a browser; the acceptance harness covers the marker, the tests cover the
  * component's response to it.
  */
+const TYPOGRAPHY_STYLE_ID = "neev-frame-typography"
+
+/**
+ * Start the framed editor's body from the same family its title uses.
+ *
+ * The title renders in Inter Variable and the body asks for plain `Inter`, so
+ * one document is drawn in two faces. This is not a change to the engine: no
+ * patch, no rebuild, no new font request — only which family the body starts
+ * from. No `!important` and no descendant selectors, so anything upstream or a
+ * writer states about their own content still wins. Same-origin, so a frame
+ * that ever stops being readable throws, is ignored, and renders as it does
+ * today. Re-runs move the one rule to the end of the head rather than stacking
+ * copies, which is why the ready handshake calls it again after the editor has
+ * injected its own styles.
+ */
+function alignFrameTypography(element: HTMLIFrameElement | null): void {
+  try {
+    const doc = element?.contentDocument
+    if (!doc) return
+    const style =
+      doc.getElementById(TYPOGRAPHY_STYLE_ID) ?? doc.createElement("style")
+    style.id = TYPOGRAPHY_STYLE_ID
+    // The variable is set on the containers themselves, not only on :root: the
+    // editor sets its own there, and a :root value would sit underneath it.
+    const stack = `"Inter Variable","Inter",system-ui,sans-serif`
+    style.textContent =
+      `:root,.bn-container,.bn-editor{--bn-font-family:${stack}}` +
+      `.bn-container,.bn-editor{font-family:${stack}}`
+    doc.head?.appendChild(style)
+  } catch {
+    // A frame that cannot be read is one whose typography is not ours to set.
+  }
+}
+
 function failed(element: HTMLIFrameElement | null): boolean {
   if (!element) return false
   try {
@@ -365,6 +399,9 @@ function Frame({
       if (!data || data.type !== FRAME_READY_EVENT) return
       if (data.resourceId !== resourceId) return
       frameReady.current = true
+      // The editor has hydrated, so its own styles are in: put the default
+      // family back at the end of the head, where it is still the default.
+      alignFrameTypography(frame.current)
       if (!refreshPending.current) return
       refreshPending.current = false
       refreshFrame()
@@ -562,7 +599,9 @@ function Frame({
           className="h-full w-full border-0"
           onLoad={() => {
             settled.current = true
-            setState(failed(frame.current) ? "stalled" : "ready")
+            const broken = failed(frame.current)
+            if (!broken) alignFrameTypography(frame.current)
+            setState(broken ? "stalled" : "ready")
           }}
           onError={() => {
             settled.current = true

@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from "react"
 import Link from "next/link"
-import { useTranslations } from "next-intl"
+import { useFormatter, useTranslations } from "next-intl"
 import {
   ArrowUp,
   Bot,
@@ -34,7 +34,9 @@ import {
 } from "@/components/ui/dropdown-menu"
 import {
   describeToolInput,
-  elapsedSeconds,
+  ELAPSED_TICK_MS,
+  elapsedDisplay,
+  elapsedMs,
   mergeActivity,
   runningTool,
   summariseActivity,
@@ -912,6 +914,51 @@ function CreateSessionDialog({
 }
 
 /**
+ * The clock on a running turn, and nothing else.
+ *
+ * Its own component because it is the only thing on screen that changes ten
+ * times a second. The same state one level up, in `ActivityTimeline`, would
+ * re-render every activity row on every tick; in the transcript above it, every
+ * turn. Here a tick repaints one `<span>`.
+ *
+ * The wall clock is read ONCE, to learn how long this turn has already been
+ * going. After that the count advances on `performance.now()`, which cannot be
+ * set backwards — an NTP correction or a laptop waking up mid-run would
+ * otherwise make the seconds jump, or run backwards, in front of the reader.
+ */
+function ElapsedClock({ startedAt }: { startedAt: number }) {
+  const t = useTranslations("NativeContent")
+  const format = useFormatter()
+  const [ms, setMs] = useState(() => elapsedMs(startedAt, Date.now()))
+  useEffect(() => {
+    const base = elapsedMs(startedAt, Date.now())
+    const origin = performance.now()
+    const timer = window.setInterval(
+      () => setMs(base + (performance.now() - origin)),
+      ELAPSED_TICK_MS
+    )
+    return () => window.clearInterval(timer)
+  }, [startedAt])
+
+  // Always one decimal, including a trailing `.0` — plain number formatting
+  // drops it, and a digit that comes and goes makes the whole line twitch
+  // sideways ten times a second. `tabular-nums` fixes the width of the rest.
+  // `aria-hidden`: the team chat reads its agent reply from inside an
+  // `aria-live` region, and a number that changes ten times a second would be
+  // announced ten times a second. The turn's status is said in words beside it.
+  return (
+    <span aria-hidden className="shrink-0 tabular-nums opacity-70">
+      {t("activityElapsed", {
+        number: format.number(elapsedDisplay(ms, true), {
+          minimumFractionDigits: 1,
+          maximumFractionDigits: 1,
+        }),
+      })}
+    </span>
+  )
+}
+
+/**
  * What the agent did, between what it said.
  *
  * Collapsed to one line by default — a run can make dozens of tool calls, and
@@ -936,6 +983,7 @@ export function ActivityTimeline({
   items,
   running,
   startedAt,
+  finishedAt = null,
   completed = false,
 }: {
   /** The turn's activity, already merged with anything arriving live. */
@@ -944,6 +992,13 @@ export function ActivityTimeline({
   running: boolean
   /** When the turn began, in epoch milliseconds; null if unknown. */
   startedAt: number | null
+  /**
+   * When the turn ended, in epoch milliseconds; null while it runs or if the
+   * server never recorded one. With `startedAt` it is how long the turn took,
+   * which is worth keeping on screen after the live clock stops — but both are
+   * stored to the second, so what it can honestly say is whole seconds.
+   */
+  finishedAt?: number | null
   /**
    * Whether the turn itself finished and answered.
    *
@@ -962,24 +1017,24 @@ export function ActivityTimeline({
   const n = useTranslations("Native")
   const [open, setOpen] = useState(false)
   const [shown, setShown] = useState<number | null>(null)
-  // The clock only advances from the interval — reading the time during render,
-  // or writing it as the effect runs, would be a side effect in the wrong place.
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!running || startedAt === null) return
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [running, startedAt])
 
   const visible = visibleActivity(items)
-  if (!running && visible.length === 0) return null
+  // What the turn ended up costing, once it is over. Whole seconds: the two
+  // timestamps it is read from are stored that way.
+  const took =
+    !running && startedAt !== null && finishedAt !== null
+      ? elapsedDisplay(elapsedMs(startedAt, finishedAt), false)
+      : null
+  // A turn that ran no tools still took time and still finished, and that is
+  // worth one quiet line. Only a turn with NOTHING to say — no trace, no
+  // duration, no outcome — renders nothing at all.
+  if (!running && visible.length === 0 && took === null && !completed)
+    return null
   const summary = summariseActivity(visible)
   const current = running ? runningTool(visible) : null
-  const seconds =
-    running && startedAt !== null ? elapsedSeconds(startedAt, now) : null
 
   return (
-    <div className="my-1.5 text-[13px]">
+    <div className="my-1.5 text-[13px] leading-5">
       <button
         type="button"
         aria-expanded={open}
@@ -1001,14 +1056,24 @@ export function ActivityTimeline({
             ? current
               ? t("activityRunningTool", { name: current.name })
               : t("activityWorking")
-            : t("activitySummary", {
-                number: summary.calls,
-                name: String(summary.results),
-              })}
+            : visible.length > 0
+              ? t("activitySummary", {
+                  number: summary.calls,
+                  name: String(summary.results),
+                })
+              : // Nothing was called, so there is no count to give. Saying
+                // "0 tool calls, 0 results" would describe an empty trace as
+                // if it were a finding; the outcome is the whole story here.
+                completed && t("activityCompleted")}
         </span>
-        {seconds !== null && (
+        {/* Mounted only while the turn runs, so the tick stops with it —
+            on completion, on cancellation, and on unmount alike. */}
+        {running && startedAt !== null && (
+          <ElapsedClock startedAt={startedAt} />
+        )}
+        {took !== null && (
           <span className="shrink-0 tabular-nums opacity-70">
-            {t("activityElapsed", { number: seconds })}
+            {t("activityElapsed", { number: took })}
           </span>
         )}
         {summary.errors > 0 && (
@@ -1019,8 +1084,9 @@ export function ActivityTimeline({
         {/*
           Last, and only once the turn is actually over. It is the answer to
           "did this work?", which the failed-step count was being read as.
+          Skipped when there is no trace, because the label above already is it.
         */}
-        {!running && completed && (
+        {!running && completed && visible.length > 0 && (
           <span className="shrink-0 text-muted-foreground">
             {t("activityCompleted")}
           </span>
@@ -1569,27 +1635,38 @@ function AgentSessionView({
               </div>
               <div className="space-y-2">
                 {turn.runId === activeRun ? (
-                  <div aria-live="polite" className="text-sm">
-                    {liveText ? (
-                      <NativeMarkdown markdown={liveText} />
-                    ) : (
-                      <span className="text-muted-foreground">
-                        {n("working")}
-                      </span>
-                    )}
-                  </div>
+                  <>
+                    {/* The running turn gets the same line the finished ones
+                        get, which is where the clock lives. Without it a run
+                        said "Working…" and nothing else — no tool, no count,
+                        and no sign it was still moving.
+
+                        Outside the live region below on purpose: a clock
+                        inside one would be read out ten times a second. */}
+                    <ActivityTimeline
+                      items={mergeActivity(turn.activity, liveActivity)}
+                      running
+                      startedAt={turn.createdAt * 1000}
+                    />
+                    <div aria-live="polite" className="text-sm">
+                      {liveText ? (
+                        <NativeMarkdown markdown={liveText} />
+                      ) : (
+                        <span className="sr-only">{n("working")}</span>
+                      )}
+                    </div>
+                  </>
                 ) : (
                   <>
                     <ActivityTimeline
-                      items={
-                        turn.runId === activeRun
-                          ? mergeActivity(turn.activity, liveActivity)
-                          : turn.activity
-                      }
-                      running={
-                        turn.runId === activeRun && turn.status === "running"
-                      }
+                      items={turn.activity}
+                      running={false}
                       startedAt={turn.createdAt * 1000}
+                      finishedAt={
+                        turn.completedAt === null
+                          ? null
+                          : turn.completedAt * 1000
+                      }
                       completed={turn.status === "completed"}
                     />
                     {turn.response && (

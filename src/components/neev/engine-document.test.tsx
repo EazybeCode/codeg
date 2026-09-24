@@ -844,3 +844,47 @@ it("ignores a ready signal from the wrong origin, window or document", async () 
   await announceReady(frame)
   expect(post).toHaveBeenCalledTimes(1)
 })
+
+it("starts the framed editor's body from the family its title uses", async () => {
+  alone()
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  const inner = document.implementation.createHTMLDocument("engine")
+  Object.defineProperty(frame, "contentDocument", {
+    configurable: true,
+    value: inner,
+  })
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+
+  const style = inner.getElementById("neev-frame-typography")
+  expect(style?.textContent).toContain('"Inter Variable"')
+  // A default, not an override: anything the editor or the writer states about
+  // a particular block still wins.
+  expect(style?.textContent).not.toContain("!important")
+  // A reload or a retry re-applies it without stacking copies.
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+  expect(inner.querySelectorAll("style#neev-frame-typography")).toHaveLength(1)
+})
+
+it("renders the frame unchanged when its document cannot be read", async () => {
+  alone()
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  // What a cross-origin frame does on access. The editor must still be ready.
+  Object.defineProperty(frame, "contentDocument", {
+    configurable: true,
+    get() {
+      throw new DOMException("cross-origin", "SecurityError")
+    },
+  })
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+})

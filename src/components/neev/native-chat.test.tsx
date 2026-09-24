@@ -860,7 +860,8 @@ it("names the tool in flight, counts the seconds, and opens the call", async () 
   // too, so this asks the thread rather than the page.)
   const thread = within(await screen.findByRole("list", { name: "Messages" }))
   expect(await thread.findByRole("button", { name: /Working…/ })).toBeVisible()
-  expect(screen.getByText("0s")).toBeVisible()
+  // Tenths, from the first frame: the digit that moves is the whole point.
+  expect(screen.getByText("0.0s")).toBeVisible()
   await waitFor(() => expect(controller).toBeDefined())
   act(() =>
     controller.enqueue(

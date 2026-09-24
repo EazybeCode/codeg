@@ -1,7 +1,8 @@
 import { expect, it } from "vitest"
 import {
   describeToolInput,
-  elapsedSeconds,
+  elapsedDisplay,
+  elapsedMs,
   isNoise,
   mergeActivity,
   runningTool,
@@ -153,9 +154,25 @@ it("names the tool still in flight, and nothing once it answers", () => {
   expect(runningTool([status(1, "truncated")])).toBeNull()
 })
 
-it("counts whole seconds and never counts backwards", () => {
-  expect(elapsedSeconds(1_000, 4_500)).toBe(3)
-  expect(elapsedSeconds(1_000, 1_000)).toBe(0)
+it("measures elapsed time and never measures backwards", () => {
+  expect(elapsedMs(1_000, 4_500)).toBe(3_500)
+  expect(elapsedMs(1_000, 1_000)).toBe(0)
   // A clock that disagrees with itself must not show a negative age.
-  expect(elapsedSeconds(5_000, 1_000)).toBe(0)
+  expect(elapsedMs(5_000, 1_000)).toBe(0)
+})
+
+it("shows tenths only where a tenth was actually measured", () => {
+  // A live clock, under a minute: the tenth is the whole point.
+  expect(elapsedDisplay(37_240, true)).toBe(37.2)
+  expect(elapsedDisplay(999, true)).toBe(0.9)
+  expect(elapsedDisplay(0, true)).toBe(0)
+  // Truncated, not rounded: the turn has not reached 37.3s yet.
+  expect(elapsedDisplay(37_290, true)).toBe(37.2)
+  // A long run is where a still number reads as a hung one: the tenth stays.
+  expect(elapsedDisplay(61_400, true)).toBe(61.4)
+  expect(elapsedDisplay(754_000, true)).toBe(754)
+  // Read off stored whole-second timestamps: no invented precision.
+  expect(elapsedDisplay(37_000, false)).toBe(37)
+  expect(elapsedDisplay(37_240, false)).toBe(37)
+  expect(elapsedDisplay(-5, true)).toBe(0)
 })

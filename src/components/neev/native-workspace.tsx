@@ -545,7 +545,7 @@ function ProjectContents({
                   className="size-4 shrink-0 text-muted-foreground"
                 />
                 <span className="truncate">{session.title}</span>
-                <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
                   {session.provider}
                 </span>
               </button>
@@ -806,7 +806,7 @@ function NativeWorkspaceTree({
                               {/* Says where it is, so a struck-through row is
                                   not left to be guessed at. */}
                               {resource.archived && (
-                                <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                                <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
                                   {c("inTrash")}
                                 </span>
                               )}
@@ -908,7 +908,7 @@ function NativeWorkspaceTree({
                               >
                                 {item.title}
                               </span>
-                              <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                              <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
                                 {item.archived ? c("inTrash") : item.provider}
                               </span>
                             </button>
@@ -2078,7 +2078,7 @@ function WorkspaceContent() {
         ) : (
           <span
             aria-hidden
-            className="flex size-5 shrink-0 items-center justify-center rounded bg-sidebar-accent text-[11px] font-semibold"
+            className="flex size-5 shrink-0 items-center justify-center rounded bg-sidebar-accent text-[11px] font-semibold leading-none"
           >
             {org.name.slice(0, 1)}
           </span>
@@ -2101,13 +2101,16 @@ function WorkspaceContent() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t("search")}
-            className="h-7 w-full rounded-md bg-sidebar-accent/60 ps-7 pe-2 text-[13px] outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            className="h-7 w-full rounded-md bg-sidebar-accent/60 ps-7 pe-2 text-[13px] leading-5 outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
           />
         </div>
       </div>
       <nav aria-label={t("projects")} className="flex min-h-0 flex-1 flex-col">
         <div className="flex items-center justify-between gap-2 px-2.5 pb-1">
-          <h2 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          {/* Every compact label in this shell states its own line height. The
+              root's 1.5em is 24px, and inheriting that under an 11px label
+              spends a row and a half of sidebar on one word. */}
+          <h2 className="text-[11px] font-medium uppercase leading-4 tracking-wide text-muted-foreground">
             {t("projects")}
           </h2>
           <button
@@ -2212,7 +2215,7 @@ function WorkspaceContent() {
             <button className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-start text-sm hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring">
               <span
                 aria-hidden
-                className="flex size-5 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-[11px] font-semibold"
+                className="flex size-5 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-[11px] font-semibold leading-none"
               >
                 {auth.session.user.displayName.slice(0, 1)}
               </span>
@@ -2314,7 +2317,7 @@ function WorkspaceContent() {
             )}
             <nav
               aria-label={t("breadcrumb")}
-              className="flex min-w-0 flex-1 items-center gap-1 text-[13px] text-muted-foreground"
+              className="flex min-w-0 flex-1 items-center gap-1 text-[13px] leading-5 text-muted-foreground"
             >
               {breadcrumb.map((crumb, index) => (
                 <span
@@ -2366,7 +2369,7 @@ function WorkspaceContent() {
                     <div
                       key={tabKey(tab)}
                       className={cn(
-                        "group/tab flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[13px]",
+                        "group/tab flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[13px] leading-5",
                         current
                           ? "bg-accent text-foreground"
                           : "text-muted-foreground hover:bg-accent/50"

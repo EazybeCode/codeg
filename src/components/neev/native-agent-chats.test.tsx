@@ -7,8 +7,10 @@ import {
   within,
 } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { NextIntlClientProvider } from "next-intl"
+import messages from "@/i18n/messages/en.json"
 import { afterEach, expect, it, vi } from "vitest"
-import { NativeAgentChats } from "./native-agent-chats"
+import { ActivityTimeline, NativeAgentChats } from "./native-agent-chats"
 import { NativeBoundary } from "./native-boundary"
 import {
   json,
@@ -768,4 +770,101 @@ it("says a missing chat is missing instead of loading forever", async () => {
     await screen.findByText("That chat is no longer in this project.")
   ).toBeVisible()
   expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled()
+})
+
+/**
+ * The clock and the duration, tested on the timeline itself.
+ *
+ * Driven through a stubbed `performance.now` rather than the fake timer's own
+ * clock: the count is deliberately NOT read off the wall clock once it starts,
+ * so advancing timers alone would leave it frozen — which is the property being
+ * asserted, not a limitation of the test.
+ */
+function renderTimeline(props: Parameters<typeof ActivityTimeline>[0]) {
+  // Translations and nothing else: the timeline reads no session, and mounting
+  // the auth provider around it would only add a fetch to every assertion.
+  return render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <ActivityTimeline {...props} />
+    </NextIntlClientProvider>
+  )
+}
+
+it("counts a running turn in tenths, and stops counting when it ends", async () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1_700_000_000_000)
+  let elapsed = 0
+  vi.spyOn(performance, "now").mockImplementation(() => elapsed)
+
+  // The turn began 1.2s before this was rendered — a reattach mid-run — so the
+  // clock starts where the turn is, not at zero.
+  const { rerender } = renderTimeline({
+    items: [],
+    running: true,
+    startedAt: 1_700_000_000_000 - 1_200,
+  })
+  expect(screen.getByText("1.2s")).toBeVisible()
+
+  act(() => {
+    elapsed = 900
+    vi.advanceTimersByTime(900)
+  })
+  expect(screen.getByText("2.1s")).toBeVisible()
+
+  // A clock set backwards mid-run must not drag the count back with it: the
+  // count advances on `performance.now`, which cannot be set.
+  act(() => {
+    vi.setSystemTime(1_700_000_000_000 - 60_000)
+    elapsed = 1_400
+    vi.advanceTimersByTime(500)
+  })
+  expect(screen.getByText("2.6s")).toBeVisible()
+
+  // Finished: the live clock is gone, and what is left is the recorded
+  // duration — whole seconds, because that is all the timestamps hold.
+  rerender(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <ActivityTimeline
+        items={[]}
+        running={false}
+        completed
+        startedAt={1_700_000_000_000}
+        finishedAt={1_700_000_003_000}
+      />
+    </NextIntlClientProvider>
+  )
+  expect(screen.queryByText("2.6s")).toBeNull()
+  expect(screen.getByText("3s")).toBeVisible()
+
+  // And nothing is still ticking behind it.
+  act(() => {
+    elapsed = 30_000
+    vi.advanceTimersByTime(30_000)
+  })
+  expect(screen.getByText("3s")).toBeVisible()
+})
+
+it("keeps the duration of a turn that finished without running a tool", () => {
+  renderTimeline({
+    items: [],
+    running: false,
+    completed: true,
+    startedAt: 1_700_000_000_000,
+    finishedAt: 1_700_000_012_000,
+  })
+  // The answer came straight back. It still took twelve seconds, and it still
+  // finished — but there is no trace, so there is no count to report, and
+  // "0 tool calls, 0 results" would be describing an absence as a finding.
+  expect(screen.getByText("Completed")).toBeVisible()
+  expect(screen.getByText("12s")).toBeVisible()
+  expect(screen.queryByText(/tool call/)).toBeNull()
+})
+
+it("says nothing at all about a turn with no trace, no outcome and no time", () => {
+  const { container } = renderTimeline({
+    items: [],
+    running: false,
+    startedAt: null,
+  })
+  expect(container.querySelector("button")).toBeNull()
 })

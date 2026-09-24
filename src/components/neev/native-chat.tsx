@@ -1312,7 +1312,15 @@ function Chat({
                 <ActivityTimeline
                   items={traces.get(message.id)!.activity}
                   running={false}
-                  startedAt={null}
+                  // How long it took, from the two stored timestamps. They are
+                  // whole seconds, so this says whole seconds — the live clock
+                  // is the only thing that measured a tenth.
+                  startedAt={traces.get(message.id)!.createdAt * 1000}
+                  finishedAt={
+                    traces.get(message.id)!.completedAt === null
+                      ? null
+                      : traces.get(message.id)!.completedAt! * 1000
+                  }
                   // `attachTurns` pairs a reply only with a COMPLETED turn, so
                   // a trace reaching this row is by construction a turn that
                   // answered. Read off the turn anyway rather than passed as a
@@ -1342,15 +1350,20 @@ function Chat({
             >
               <Sparkles className="size-3.5" />
             </span>
-            <div className="min-w-0 flex-1 space-y-1.5" aria-live="polite">
+            <div className="min-w-0 flex-1 space-y-1.5">
               <p className="text-xs font-medium">{agentProvider}</p>
+              {/* Outside the live region below: the clock on this line changes
+                  ten times a second, and inside one it would be announced
+                  that often. The reply itself is what is worth hearing. */}
               <ActivityTimeline
                 items={liveActivity}
                 running={agentBusy}
                 startedAt={runStartedAt}
               />
-              {agentText && <NativeMarkdown markdown={agentText} />}
-              {agentBusy && <span className="sr-only">{n("working")}</span>}
+              <div aria-live="polite">
+                {agentText && <NativeMarkdown markdown={agentText} />}
+                {agentBusy && <span className="sr-only">{n("working")}</span>}
+              </div>
             </div>
           </li>
         )}

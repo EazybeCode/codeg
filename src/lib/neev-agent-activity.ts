@@ -177,7 +177,27 @@ export function runningTool(
   return null
 }
 
-/** Whole seconds since `startedAt`, for a running turn. */
-export function elapsedSeconds(startedAt: number, now: number): number {
-  return Math.max(0, Math.floor((now - startedAt) / 1000))
+/** Milliseconds since `startedAt`, never negative. */
+export function elapsedMs(startedAt: number, now: number): number {
+  return Math.max(0, now - startedAt)
+}
+
+/** One tick per tenth: the resolution the running clock is shown at. */
+export const ELAPSED_TICK_MS = 100
+
+/**
+ * The seconds an elapsed reading is shown as.
+ *
+ * `precise` says whether the input was actually measured to better than a
+ * second. It is true for a live clock, which reads one, and FALSE for a
+ * duration computed from stored timestamps: those are whole seconds, so a
+ * tenth on one would be a digit nobody recorded.
+ *
+ * The tenth stays for the whole run, however long it gets. A long run is
+ * exactly when a still number reads as a hung one.
+ */
+export function elapsedDisplay(ms: number, precise: boolean): number {
+  const value = Math.max(0, ms)
+  if (!precise) return Math.floor(value / 1000)
+  return Math.floor(value / 100) / 10
 }
