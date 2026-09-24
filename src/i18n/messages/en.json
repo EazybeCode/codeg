@@ -245,7 +245,14 @@
     "moreModels": "More models",
     "editShortlist": "Edit shortlist",
     "shortlistHint": "Pin up to {number} models to the top of this menu.",
-    "attachmentPreviewFailed": "{name} could not be previewed."
+    "attachmentPreviewFailed": "{name} could not be previewed.",
+    "mentionList": "Coworkers",
+    "mentionLimit": "Up to {number} mentions per message",
+    "mentions": "Mentions",
+    "mentionsEmpty": "No mentions yet",
+    "mentionedYou": "{name} mentioned you",
+    "mentionsUnread": "{number} unread",
+    "mentionsOpen": "Open mentions"
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

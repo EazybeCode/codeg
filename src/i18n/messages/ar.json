@@ -245,7 +245,14 @@
     "moreModels": "مزيد من النماذج",
     "editShortlist": "تحرير القائمة المختصرة",
     "shortlistHint": "يمكنك تثبيت ما يصل إلى {number} من النماذج أعلى هذه القائمة.",
-    "attachmentPreviewFailed": "تعذّرت معاينة {name}."
+    "attachmentPreviewFailed": "تعذّرت معاينة {name}.",
+    "mentionList": "الزملاء",
+    "mentionLimit": "حتى {number} إشارة لكل رسالة",
+    "mentions": "الإشارات",
+    "mentionsEmpty": "لا توجد إشارات بعد",
+    "mentionedYou": "{name} أشار إليك",
+    "mentionsUnread": "{number} غير مقروءة",
+    "mentionsOpen": "فتح الإشارات"
   },
   "Native": {
     "callbackConflict": "تتعارض طريقة تسجيل الدخول هذه مع حساب موجود. استخدم طريقة تسجيل الدخول الأصلية، ثم افتح الإعدادات لربط طريقة أخرى. لا تُدمج الحسابات تلقائيًا أبدًا.",

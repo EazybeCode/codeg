@@ -19,6 +19,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useImperativeHandle,
   useMemo,
   useRef,
@@ -47,10 +48,15 @@ import {
   pasteIsFileOnly,
 } from "@/lib/neev-attachments"
 import {
+  mentionText,
   promptIsEmpty,
   sameSegments,
   type PromptSegment,
 } from "@/lib/neev-inline-prompt"
+import {
+  MAX_MENTIONS_PER_MESSAGE,
+  type MentionCandidate,
+} from "@/lib/neev-mentions"
 import {
   AttachmentFailures,
   AttachmentRejections,
@@ -60,6 +66,19 @@ import {
 } from "./native-attachments"
 
 const ATTACHMENT_NODE = "neevAttachment"
+const MENTION_NODE = "neevMention"
+
+/**
+ * What may sit between the start of a word and the `@` that opens the picker.
+ *
+ * An `@` mid-word is an email address, a handle somebody is quoting, a path —
+ * none of them an attempt to name a coworker. The picker opens at a word
+ * boundary and nowhere else.
+ *
+ * `￼` is how a paragraph reports an atom node (a file, or another
+ * mention), so the query can never run backwards through one.
+ */
+const MENTION_TRIGGER = /(?:^|[\s([{"'«¿¡-])@([^\s@￼]{0,40})$/u
 
 /**
  * How many released files an undo can reach back through.
@@ -192,6 +211,57 @@ const AttachmentExtension = Node.create({
   addNodeView: () => ReactNodeViewRenderer(AttachmentChip, { as: "span" }),
 })
 
+/** A coworker, inside the sentence, while it is being written. */
+function MentionChip({ node, selected }: NodeViewProps) {
+  const name = String(node.attrs.name ?? "")
+  return (
+    <NodeViewWrapper
+      as="span"
+      contentEditable={false}
+      data-mention-user={String(node.attrs.userId ?? "")}
+      className={cn(
+        "rounded bg-primary/10 px-0.5 font-medium text-primary",
+        selected && "ring-2 ring-ring"
+      )}
+    >
+      {mentionText(name)}
+    </NodeViewWrapper>
+  )
+}
+
+/**
+ * A mention: one atom, carrying the id of the person it means.
+ *
+ * Atomic so the caret steps over it and Backspace takes the whole name rather
+ * than leaving "@An" behind pointing at nobody — and so undo brings back a
+ * person, not a fragment.
+ *
+ * **It has no `parseHTML` rule, deliberately.** Everything else in this schema
+ * can be built from markup; a mention cannot, because a mention is an identity.
+ * Pasted or dropped HTML claiming to be one parses as the plain text inside it,
+ * which is what `@Ana` written by anything other than the picker actually is.
+ */
+const MentionExtension = Node.create({
+  name: MENTION_NODE,
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  draggable: false,
+  addAttributes: () => ({
+    userId: { default: null },
+    name: { default: "" },
+  }),
+  renderHTML: ({ node, HTMLAttributes }) => [
+    "span",
+    mergeAttributes(HTMLAttributes, {
+      "data-mention-user": String(node.attrs.userId ?? ""),
+    }),
+    mentionText(String(node.attrs.name ?? "")),
+  ],
+  addNodeView: () => ReactNodeViewRenderer(MentionChip, { as: "span" }),
+})
+
 const DocumentExtension = Node.create({
   name: "doc",
   topNode: true,
@@ -239,6 +309,7 @@ const extensions = [
   TextExtension,
   HardBreakExtension,
   AttachmentExtension,
+  MentionExtension,
   HistoryExtension,
 ]
 
@@ -260,6 +331,15 @@ export function segmentsFromDoc(doc: ProseMirrorNode): PromptSegment[] {
       else if (child.type.name === "hardBreak") write("\n")
       else if (child.type.name === ATTACHMENT_NODE)
         out.push({ kind: "attachment", id: String(child.attrs.localId ?? "") })
+      else if (child.type.name === MENTION_NODE) {
+        const userId = Number(child.attrs.userId)
+        const name = String(child.attrs.name ?? "")
+        // A node that cannot name a person is not one. Written out as the text
+        // it shows rather than dropped, so nothing anybody can read disappears.
+        if (Number.isSafeInteger(userId) && userId > 0 && name)
+          out.push({ kind: "mention", userId, name })
+        else write(mentionText(name))
+      }
     })
   })
   return out
@@ -276,6 +356,13 @@ export function docFromSegments(
       current().push({ type: ATTACHMENT_NODE, attrs: { localId: segment.id } })
       continue
     }
+    if (segment.kind === "mention") {
+      current().push({
+        type: MENTION_NODE,
+        attrs: { userId: segment.userId, name: segment.name },
+      })
+      continue
+    }
     segment.text.split("\n").forEach((line, index) => {
       if (index > 0) paragraphs.push([])
       if (line) current().push({ type: "text", text: line })
@@ -288,6 +375,34 @@ export function docFromSegments(
       ...(content.length ? { content } : {}),
     })),
   }
+}
+
+/**
+ * Where the picker is, and what it has been asked for.
+ *
+ * `from`/`to` are the positions the chosen mention replaces — the `@` and
+ * everything typed after it — captured when the query was read rather than
+ * recomputed on selection, so the answer lands where the question was asked.
+ */
+interface PickerState {
+  from: number
+  to: number
+  query: string
+  active: number
+}
+
+/** The directory this composer may offer, if it may offer one at all. */
+export interface MentionSource {
+  /**
+   * The people this query names, already narrowed to those permitted HERE.
+   *
+   * The composer never decides who may be mentioned. A surface with no
+   * audience — a private chat, an agent session — passes no source at all, and
+   * `@` is then an ordinary character.
+   */
+  candidates: (query: string) => readonly MentionCandidate[]
+  /** Called when the picker opens, so a caller can load its directory lazily. */
+  onOpen?: () => void
 }
 
 export interface InlineComposerHandle {
@@ -309,6 +424,7 @@ export function NativeInlineComposer({
   attachDisabled = false,
   autoFocus = false,
   maxChars,
+  mentions,
   className,
 }: {
   ref?: React.Ref<InlineComposerHandle>
@@ -327,8 +443,11 @@ export function NativeInlineComposer({
   attachDisabled?: boolean
   autoFocus?: boolean
   maxChars?: number
+  /** Absent: this conversation has nobody to name, so `@` is just `@`. */
+  mentions?: MentionSource
   className?: string
 }) {
+  const c = useTranslations("NativeContent")
   // Read by editor callbacks, which are registered once and must not close over
   // the first render's props. Written after the render rather than during it:
   // nothing here is read while rendering, and a ref written in render is a
@@ -336,6 +455,21 @@ export function NativeInlineComposer({
   const latest = useRef({ onSubmit, onChange, busy, maxChars, attachDisabled })
   useEffect(() => {
     latest.current = { onSubmit, onChange, busy, maxChars, attachDisabled }
+  })
+  // The picker, and the keys it answers. The handlers live in a ref because
+  // `handleKeyDown` is registered with the editor and must not close over the
+  // render that registered it — the same reason `latest` exists.
+  const [picker, setPicker] = useState<PickerState | null>(null)
+  const keys = useRef<{
+    open: boolean
+    move: (delta: number) => void
+    choose: () => boolean
+    close: () => void
+  }>({
+    open: false,
+    move: () => {},
+    choose: () => false,
+    close: () => {},
   })
   const emitted = useRef<readonly PromptSegment[]>(value)
   // Ids this editor has put in the document and the tray has not confirmed
@@ -352,6 +486,10 @@ export function NativeInlineComposer({
   const trayRef = useRef(tray)
   useEffect(() => {
     trayRef.current = tray
+  })
+  const sourceRef = useRef(mentions)
+  useEffect(() => {
+    sourceRef.current = mentions
   })
 
   /**
@@ -435,6 +573,31 @@ export function NativeInlineComposer({
           ),
         },
         handleKeyDown: (_view, event) => {
+          // While the picker is up it owns the arrows, Enter, Tab and Escape —
+          // Enter CHOOSES and never sends, which is the difference between
+          // naming a coworker and posting the half-typed name of one.
+          //
+          // Never during composition: an IME's own candidate window is driven
+          // by exactly these keys, and taking them would make the composer
+          // fight the input method for the same keystroke.
+          const composing = event.isComposing || event.keyCode === 229
+          if (keys.current.open && !composing) {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault()
+              keys.current.move(event.key === "ArrowDown" ? 1 : -1)
+              return true
+            }
+            if (event.key === "Enter" || event.key === "Tab") {
+              if (!keys.current.choose()) return false
+              event.preventDefault()
+              return true
+            }
+            if (event.key === "Escape") {
+              event.preventDefault()
+              keys.current.close()
+              return true
+            }
+          }
           if (
             !sendsOnEnter(
               {
@@ -524,6 +687,52 @@ export function NativeInlineComposer({
       editor.off("update", report)
     }
   }, [editor])
+  /**
+   * The picker follows the caret.
+   *
+   * Read from the paragraph the caret is in, up to the caret, with every atom
+   * node reported as one placeholder character — so a query can neither run
+   * backwards past a file nor past another mention, and a position in the
+   * string is a position in the document.
+   *
+   * Nothing is parsed out of the document by this: it decides only whether a
+   * LIST is on screen. What ends up in the message is the node the person then
+   * chose, never the characters they typed.
+   */
+  useEffect(() => {
+    if (!editor) return
+    const close = () => setPicker(null)
+    const detect = () => {
+      if (editor.isDestroyed || !sourceRef.current || !editor.isEditable)
+        return close()
+      const { selection } = editor.state
+      if (!selection.empty) return close()
+      const { $from } = selection
+      const before = $from.parent.textBetween(0, $from.parentOffset, "\n", "￼")
+      const match = MENTION_TRIGGER.exec(before)
+      if (!match) return close()
+      const query = match[1]
+      const to = $from.pos
+      const from = to - query.length - 1
+      setPicker((previous) =>
+        previous &&
+        previous.from === from &&
+        previous.to === to &&
+        previous.query === query
+          ? previous
+          : { from, to, query, active: 0 }
+      )
+    }
+    editor.on("update", detect)
+    editor.on("selectionUpdate", detect)
+    editor.on("blur", close)
+    return () => {
+      editor.off("update", detect)
+      editor.off("selectionUpdate", detect)
+      editor.off("blur", close)
+    }
+  }, [editor])
+
   // The single live observer, and the one-shot latch that says this editor has
   // already been released. Mirrors the rich editor, for the same reason:
   // Activity and Strict Mode detach refs without removing anything.
@@ -652,6 +861,92 @@ export function NativeInlineComposer({
   )
   const empty = promptIsEmpty(value)
 
+  // How many people this message already names. The ceiling is the server's,
+  // enforced here so the tenth mention is the last one offered rather than the
+  // reason a finished message is refused.
+  const named = value.reduce(
+    (total, segment) => total + (segment.kind === "mention" ? 1 : 0),
+    0
+  )
+  const atLimit = named >= MAX_MENTIONS_PER_MESSAGE
+  const options =
+    picker && mentions && !atLimit ? mentions.candidates(picker.query) : []
+  const activeIndex = picker
+    ? Math.min(picker.active, Math.max(options.length - 1, 0))
+    : 0
+  // Open means a list is actually on screen. Nobody to offer is not an open
+  // picker, so Enter goes back to meaning Send.
+  const pickerOpen = options.length > 0
+  const listId = useId()
+  const optionId = (userId: number) => `${listId}-${userId}`
+  const insertMention = (candidate: MentionCandidate) => {
+    if (!editor || editor.isDestroyed || !picker) return
+    const size = editor.state.doc.content.size
+    const from = Math.max(Math.min(picker.from, size), 0)
+    const to = Math.min(Math.max(picker.to, from), size)
+    setPicker(null)
+    editor
+      .chain()
+      .focus()
+      .insertContentAt({ from, to }, [
+        {
+          type: MENTION_NODE,
+          attrs: { userId: candidate.userId, name: candidate.name },
+        },
+        // A name is a word among words: the next one must not be glued to it.
+        { type: "text", text: " " },
+      ])
+      .run()
+  }
+  // Re-read every render, since the editor's key handler holds this object and
+  // not the render that filled it in.
+  useEffect(() => {
+    keys.current = {
+      open: pickerOpen,
+      move: (delta) =>
+        setPicker((previous) =>
+          previous && options.length > 0
+            ? {
+                ...previous,
+                active:
+                  (((activeIndex + delta) % options.length) + options.length) %
+                  options.length,
+              }
+            : previous
+        ),
+      choose: () => {
+        const option = options[activeIndex]
+        if (!option) return false
+        insertMention(option)
+        return true
+      },
+      close: () => setPicker(null),
+    }
+    // The box IS the combobox, so the state belongs on it. Applied here rather
+    // than in the editor's own attributes because those are set once, and this
+    // changes on every arrow key. Removed entirely where there is no
+    // directory: a textbox that claims a list it does not have is worse for a
+    // screen reader than a plain one.
+    const dom = editor?.view.dom
+    if (!dom) return
+    if (!mentions) {
+      for (const name of [
+        "aria-autocomplete",
+        "aria-expanded",
+        "aria-controls",
+        "aria-activedescendant",
+      ])
+        dom.removeAttribute(name)
+      return
+    }
+    dom.setAttribute("aria-autocomplete", "list")
+    dom.setAttribute("aria-expanded", pickerOpen ? "true" : "false")
+    dom.setAttribute("aria-controls", listId)
+    const active = pickerOpen ? options[activeIndex] : undefined
+    if (active) dom.setAttribute("aria-activedescendant", optionId(active.userId))
+    else dom.removeAttribute("aria-activedescendant")
+  })
+
   return (
     <TrayContext.Provider value={context}>
       <div className="relative">
@@ -666,6 +961,50 @@ export function NativeInlineComposer({
         <div ref={ownHost}>
           <EditorContent editor={editor} className="max-h-40 overflow-y-auto" />
         </div>
+        {/* Above the box, never over it: what is being typed has to stay
+            readable while the list narrows. */}
+        {pickerOpen && (
+          <ul
+            id={listId}
+            role="listbox"
+            aria-label={c("mentionList")}
+            className="absolute bottom-full z-20 mb-1 max-h-48 w-64 overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
+          >
+            {options.map((option, index) => (
+              <li
+                key={option.userId}
+                id={optionId(option.userId)}
+                role="option"
+                aria-selected={index === activeIndex}
+                className={cn(
+                  "cursor-pointer truncate rounded px-2 py-1 text-sm",
+                  index === activeIndex && "bg-accent text-accent-foreground"
+                )}
+                // The caret stays where it is: a click that took focus out of
+                // the box would insert the name into nothing.
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() =>
+                  setPicker((previous) =>
+                    previous ? { ...previous, active: index } : previous
+                  )
+                }
+                onClick={() => insertMention(option)}
+              >
+                {option.name}
+              </li>
+            ))}
+          </ul>
+        )}
+        {/* Said rather than silently ignored: a picker that stops opening with
+            no explanation reads as a broken one. */}
+        {picker !== null && atLimit && (
+          <p
+            role="status"
+            className="absolute bottom-full z-20 mb-1 rounded-md border bg-popover px-2 py-1 text-xs text-muted-foreground shadow-md"
+          >
+            {c("mentionLimit", { count: MAX_MENTIONS_PER_MESSAGE })}
+          </p>
+        )}
       </div>
       <AttachmentFailures items={tray.items} />
       <AttachmentRejections

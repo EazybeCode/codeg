@@ -17,9 +17,22 @@
  * composer can turn into a path an agent might try to open.
  */
 
+import { countCodePoints, type MentionSpan } from "@/lib/neev-mentions"
+
+/** What a send carries for each person it names: who, and where they are said. */
+export type WireMention = MentionSpan
+
 export type PromptSegment =
   | { kind: "text"; text: string }
   | { kind: "attachment"; id: string }
+  /**
+   * A coworker, picked from the directory rather than typed.
+   *
+   * `userId` is the whole point: the message carries WHO was meant, so nothing
+   * downstream has to match a name back to a person. The text is what the
+   * provider and every older reader see — a plain, readable `@Name`.
+   */
+  | { kind: "mention"; userId: number; name: string }
 
 /** Long enough to recognise a file by, short enough not to be a payload. */
 export const MARKER_NAME_LIMIT = 80
@@ -50,10 +63,23 @@ export function attachmentMarker(index: number, name: string): string {
   return `[attachment ${index}: ${markerName(name)}]`
 }
 
-/** Everything the person actually typed, with no markers in it. */
+/** The text a mention stands for, in the sentence and in the prompt. */
+export function mentionText(name: string): string {
+  return `@${name}`
+}
+
+/**
+ * Everything the person actually typed, with no markers in it.
+ *
+ * A mention counts as typed: it is a word in the sentence, and a draft holding
+ * nothing but "@Ana" is not an empty draft.
+ */
 export function promptText(segments: readonly PromptSegment[]): string {
   return segments
-    .map((segment) => (segment.kind === "text" ? segment.text : ""))
+    .map((segment) => {
+      if (segment.kind === "text") return segment.text
+      return segment.kind === "mention" ? mentionText(segment.name) : ""
+    })
     .join("")
 }
 
@@ -82,9 +108,13 @@ export function sameSegments(
   return a.every((segment, index) => {
     const other = b[index]
     if (segment.kind !== other.kind) return false
-    return segment.kind === "text"
-      ? segment.text === (other as { text: string }).text
-      : segment.id === (other as { id: string }).id
+    if (segment.kind === "text")
+      return segment.text === (other as { text: string }).text
+    if (segment.kind === "mention") {
+      const mention = other as { userId: number; name: string }
+      return segment.userId === mention.userId && segment.name === mention.name
+    }
+    return segment.id === (other as { id: string }).id
   })
 }
 
@@ -101,22 +131,49 @@ export const EMPTY_PROMPT: readonly PromptSegment[] = []
 export function composeWirePrompt(
   segments: readonly PromptSegment[],
   names: ReadonlyMap<string, string>
-): { prompt: string; ids: string[] } {
+): { prompt: string; ids: string[]; mentions: WireMention[] } {
   const ids: string[] = []
+  const spans: WireMention[] = []
   let prompt = ""
+  // Code points written so far. The span is what tells the server, and later
+  // the reader, WHICH run of characters is a person — so it is measured in the
+  // one unit Rust and JavaScript agree on without conversion.
+  let offset = 0
   for (const segment of segments) {
     if (segment.kind === "text") {
       prompt += segment.text
+      offset += countCodePoints(segment.text)
+      continue
+    }
+    if (segment.kind === "mention") {
+      const text = mentionText(segment.name)
+      const length = countCodePoints(text)
+      spans.push({ userId: segment.userId, start: offset, length })
+      prompt += text
+      offset += length
       continue
     }
     const name = names.get(segment.id)
     if (name === undefined) continue
     ids.push(segment.id)
-    prompt += attachmentMarker(ids.length, name)
+    const marker = attachmentMarker(ids.length, name)
+    prompt += marker
+    offset += countCodePoints(marker)
   }
   // Trimmed at the ends only: the space a chip leaves behind it, or a stray
   // newline, is not part of what anyone wrote.
-  return { prompt: prompt.trim(), ids }
+  const trimmed = prompt.trim()
+  const lead = countCodePoints(
+    prompt.slice(0, prompt.length - prompt.trimStart().length)
+  )
+  const total = countCodePoints(trimmed)
+  // Trimming moves every span left by whatever the front lost. A span that no
+  // longer fits the body it describes is dropped rather than sent: a mention
+  // the server would refuse must not take the whole message down with it.
+  const mentions = spans
+    .map((span) => ({ ...span, start: span.start - lead }))
+    .filter((span) => span.start >= 0 && span.start + span.length <= total)
+  return { prompt: trimmed, ids, mentions }
 }
 
 export type SentPromptPart =

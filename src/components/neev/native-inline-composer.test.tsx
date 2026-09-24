@@ -253,5 +253,9 @@ it("pastes markup as the text it reads as, never as a file it does not have", as
     })
   })
   expect(draft.some((segment) => segment.kind === "attachment")).toBe(false)
-  expect(composeWirePrompt(draft, names)).toEqual({ prompt: "see", ids: [] })
+  expect(composeWirePrompt(draft, names)).toEqual({
+    prompt: "see",
+    ids: [],
+    mentions: [],
+  })
 })

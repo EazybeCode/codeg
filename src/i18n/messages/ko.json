@@ -245,7 +245,14 @@
     "moreModels": "모델 더 보기",
     "editShortlist": "즐겨찾는 모델 편집",
     "shortlistHint": "이 메뉴 상단에 최대 {number}개의 모델을 고정할 수 있습니다.",
-    "attachmentPreviewFailed": "{name}을(를) 미리 볼 수 없습니다."
+    "attachmentPreviewFailed": "{name}을(를) 미리 볼 수 없습니다.",
+    "mentionList": "동료",
+    "mentionLimit": "메시지당 최대 {number}개의 멘션",
+    "mentions": "멘션",
+    "mentionsEmpty": "아직 멘션이 없습니다",
+    "mentionedYou": "{name}님이 회원님을 멘션했습니다",
+    "mentionsUnread": "읽지 않음 {number}개",
+    "mentionsOpen": "멘션 열기"
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

@@ -245,7 +245,14 @@
     "moreModels": "Weitere Modelle",
     "editShortlist": "Kurzliste bearbeiten",
     "shortlistHint": "Heften Sie bis zu {number} Modelle oben an dieses Menü.",
-    "attachmentPreviewFailed": "{name} konnte nicht als Vorschau angezeigt werden."
+    "attachmentPreviewFailed": "{name} konnte nicht als Vorschau angezeigt werden.",
+    "mentionList": "Kolleginnen und Kollegen",
+    "mentionLimit": "Bis zu {number} Erwähnungen pro Nachricht",
+    "mentions": "Erwähnungen",
+    "mentionsEmpty": "Noch keine Erwähnungen",
+    "mentionedYou": "{name} hat dich erwähnt",
+    "mentionsUnread": "{number} ungelesen",
+    "mentionsOpen": "Erwähnungen öffnen"
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

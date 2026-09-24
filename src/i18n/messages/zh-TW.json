@@ -245,7 +245,14 @@
     "moreModels": "更多模型",
     "editShortlist": "編輯快捷清單",
     "shortlistHint": "最多可將 {number} 個模型釘選至此選單頂端。",
-    "attachmentPreviewFailed": "無法預覽 {name}。"
+    "attachmentPreviewFailed": "無法預覽 {name}。",
+    "mentionList": "同事",
+    "mentionLimit": "每則訊息最多 {number} 個提及",
+    "mentions": "提及",
+    "mentionsEmpty": "尚無提及",
+    "mentionedYou": "{name} 提到了你",
+    "mentionsUnread": "{number} 則未讀",
+    "mentionsOpen": "開啟提及"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

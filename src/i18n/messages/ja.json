@@ -245,7 +245,14 @@
     "moreModels": "その他のモデル",
     "editShortlist": "よく使うモデルを編集",
     "shortlistHint": "このメニューの上部に最大 {number} 件のモデルを固定できます。",
-    "attachmentPreviewFailed": "{name} はプレビューできませんでした。"
+    "attachmentPreviewFailed": "{name} はプレビューできませんでした。",
+    "mentionList": "同僚",
+    "mentionLimit": "1 件のメッセージにつき最大 {number} 件のメンション",
+    "mentions": "メンション",
+    "mentionsEmpty": "メンションはまだありません",
+    "mentionedYou": "{name} さんがあなたをメンションしました",
+    "mentionsUnread": "未読 {number} 件",
+    "mentionsOpen": "メンションを開く"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",
