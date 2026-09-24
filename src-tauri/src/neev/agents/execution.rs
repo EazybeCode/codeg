@@ -327,6 +327,9 @@ impl ProviderBinaries {
 pub(crate) enum RunEvent {
     Started(String),
     Chunk(String),
+    /// A whole message, which starts where the last one ended rather than
+    /// running on from it. See [`super::activity::StreamItem::Message`].
+    Message(String),
     /// One recorded step of the provider's work — a tool call, its result, or a
     /// status marker. Carried beside the text rather than inside it so the
     /// reply stays the reply.
@@ -470,6 +473,12 @@ async fn send_item(
                 return Ok(());
             }
             RunEvent::Chunk(text)
+        }
+        super::activity::StreamItem::Message(text) => {
+            if text.is_empty() {
+                return Ok(());
+            }
+            RunEvent::Message(text)
         }
         super::activity::StreamItem::Activity(draft) => RunEvent::Activity(draft),
     };
@@ -2184,7 +2193,9 @@ mod tests {
             match event {
                 RunEvent::Started(_) => started = true,
                 RunEvent::Activity(_) => {},
-                RunEvent::Chunk(chunk) => text.push_str(&chunk),
+                // Raw stream: this harness accumulates what arrived, without
+                // the seam handling that `LiveRun::append_message` adds.
+                RunEvent::Chunk(chunk) | RunEvent::Message(chunk) => text.push_str(&chunk),
                 RunEvent::Completed => completed = true,
                 RunEvent::Failed(reason) => panic!("real run failed: {reason}"),
             }

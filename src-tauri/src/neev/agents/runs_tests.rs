@@ -525,3 +525,101 @@ async fn settle_refusal_refuses_a_run_id_that_is_not_the_caller_s() {
     .unwrap()
     .is_none());
 }
+
+/// A `LiveRun` with nothing behind it, for exercising the buffer alone.
+fn buffer_only() -> LiveRun {
+    let (events, _) = tokio::sync::broadcast::channel(4);
+    LiveRun {
+        org_id: 1,
+        owner_id: 1,
+        session_id: "session".to_owned(),
+        turn_id: "turn".to_owned(),
+        buffer: std::sync::Mutex::new((String::new(), 0)),
+        activity: std::sync::Mutex::new(crate::neev::agents::activity::ActivityLog::new()),
+        events,
+        cancel: std::sync::Mutex::new(None),
+    }
+}
+
+#[test]
+fn whole_messages_are_separated_by_a_blank_line_and_fragments_are_not() {
+    let live = buffer_only();
+    // A turn: preamble, then the answer. These arrived joined, which is how
+    // "…improvements." and "Yes…" became "…improvements.Yes…".
+    live.append_message("Let me look for obvious improvements.");
+    live.append_message("Yes — here is the review.");
+    let (text, _) = live.snapshot();
+    assert_eq!(
+        text,
+        "Let me look for obvious improvements.\n\nYes — here is the review."
+    );
+
+    // Fragments of ONE message keep joining exactly as they arrive; a break
+    // inserted between these would land mid-word.
+    let live = buffer_only();
+    live.append_capped("improve");
+    live.append_capped("ments");
+    assert_eq!(live.snapshot().0, "improvements");
+}
+
+#[test]
+fn a_break_is_topped_up_never_stacked() {
+    // Idempotent at the seam: newlines already present on either side count, so
+    // a provider that formats its own paragraphs does not get three blank lines.
+    for (first, second, expected) in [
+        ("One.", "Two.", "One.\n\nTwo."),
+        ("One.\n", "Two.", "One.\n\nTwo."),
+        ("One.\n\n", "Two.", "One.\n\nTwo."),
+        ("One.", "\nTwo.", "One.\n\nTwo."),
+        ("One.", "\n\nTwo.", "One.\n\nTwo."),
+        ("One.\n", "\nTwo.", "One.\n\nTwo."),
+        // Already more than a blank line: left alone rather than trimmed. The
+        // reply is the provider's, and this only ever ADDS a missing break.
+        ("One.\n\n\n", "Two.", "One.\n\n\nTwo."),
+    ] {
+        let live = buffer_only();
+        live.append_message(first);
+        live.append_message(second);
+        assert_eq!(live.snapshot().0, expected, "joining {first:?} to {second:?}");
+    }
+}
+
+#[test]
+fn what_readers_are_sent_is_exactly_what_is_stored() {
+    // The invariant the driver depends on: it broadcasts `accepted` and stores
+    // the buffer. A separator written to one but not returned in the other
+    // would make the live reply and the reloaded reply differ by the break —
+    // silently, and only for readers who watched it arrive.
+    let live = buffer_only();
+    let mut broadcast = String::new();
+    // Astral characters on both sides of a seam: `offset` counts scalars, so a
+    // break inserted near one must not drift the count.
+    for message in ["First 🙂.", "Second 👍.", "Third."] {
+        let appended = live.append_message(message);
+        assert_eq!(
+            appended.offset,
+            broadcast.chars().count(),
+            "a delta must start where the last one ended"
+        );
+        broadcast.push_str(&appended.accepted);
+    }
+    let (stored, count) = live.snapshot();
+    assert_eq!(broadcast, stored, "live stream and stored reply diverged");
+    assert_eq!(count, stored.chars().count(), "offset counts scalars");
+    assert_eq!(stored, "First 🙂.\n\nSecond 👍.\n\nThird.");
+}
+
+#[test]
+fn a_break_cannot_push_a_reply_past_the_cap_unnoticed() {
+    let live = buffer_only();
+    let first = "a".repeat(MAX_RESPONSE_CHARS - 2);
+    live.append_message(&first);
+    // Only the two break characters fit; the message itself does not. The
+    // append that overflows is the one that reports it, so the run still stops
+    // rather than silently dropping the tail.
+    let appended = live.append_message("b");
+    assert!(appended.overflowed, "an overrun at the seam must be reported");
+    let (stored, count) = live.snapshot();
+    assert_eq!(count, MAX_RESPONSE_CHARS, "never stores past the cap");
+    assert_eq!(count, stored.chars().count());
+}

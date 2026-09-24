@@ -25,7 +25,10 @@ fn text_of(items: &[StreamItem]) -> String {
     items
         .iter()
         .filter_map(|item| match item {
-            StreamItem::Text(text) => Some(text.as_str()),
+            // Both carry reply text; they differ in whether more of the same
+            // message may follow, which is what `joined_with_a_blank_line`
+            // below is about rather than this.
+            StreamItem::Text(text) | StreamItem::Message(text) => Some(text.as_str()),
             _ => None,
         })
         .collect()
@@ -609,4 +612,40 @@ fn a_turn_without_tools_stores_nothing_at_all() {
     let log = ActivityLog::new();
     assert!(log.is_empty());
     assert_eq!(log.stored(), None, "NULL, not an empty array");
+}
+
+#[test]
+fn two_codex_messages_in_one_turn_are_whole_messages_not_fragments() {
+    // The real shape from the failing turn: the model says what it is about to
+    // do, runs its tools, then answers. Both arrive as COMPLETED items, so
+    // neither is a fragment of the other and the reply must not run them
+    // together — "…improvements." followed by "Yes…" read as
+    // "…improvements.Yes…" in the stored reply, which is why a reload did not
+    // fix it.
+    let mut parser = StreamParser::new("codex", vec!["handle-0123456789abcdef".to_owned()]);
+    let items = drain(
+        &mut parser,
+        &[
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"Let me look for obvious improvements."}}"#,
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"Yes — here is the review."}}"#,
+        ],
+    );
+    let messages: Vec<&str> = items
+        .iter()
+        .filter_map(|item| match item {
+            StreamItem::Message(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        messages,
+        vec!["Let me look for obvious improvements.", "Yes — here is the review."],
+        "a completed agent_message must be a whole message, not a fragment"
+    );
+    // Nothing classified as a fragment: a fragment would be appended with no
+    // break, which is the bug.
+    assert!(
+        !items.iter().any(|item| matches!(item, StreamItem::Text(_))),
+        "a completed message was classified as a fragment"
+    );
 }

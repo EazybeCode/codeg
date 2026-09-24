@@ -82,6 +82,60 @@ impl LiveRun {
     /// Append up to the stored cap. Trimming here — rather than after the fact —
     /// is what keeps the live stream and the persisted replay identical: a
     /// character that cannot be stored is never sent to anyone.
+    /// Append a WHOLE message, started where the last one ended.
+    ///
+    /// A turn is usually several messages: the provider says what it is about
+    /// to do, runs its tools, then answers. They arrived joined the way
+    /// fragments of one sentence are joined, so the last word of the preamble
+    /// ran into the first word of the answer — "…improvements.Yes…" — in the
+    /// STORED reply, which is why it survived a reload and read as a rendering
+    /// fault.
+    ///
+    /// The break goes through `append_capped` like any other text, so it is
+    /// counted once, spends the cap like any other characters, and lands in the
+    /// live stream and the replay identically. Activity offsets are taken from
+    /// the same counter and therefore stay pointing at the same characters.
+    ///
+    /// Nothing is inserted before the first message, or when the text already
+    /// has a blank line at the seam — a provider that formats its own paragraph
+    /// breaks must not have a second set added to them.
+    fn append_message(&self, text: &str) -> Appended {
+        let needed = {
+            let guard = match self.buffer.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if guard.0.is_empty() {
+                // Nothing to be separated from.
+                0
+            } else {
+                // A blank line means TWO newlines at the seam, and they may
+                // already be there — on either side. Counting both ends and
+                // topping up is what makes this idempotent: a provider that
+                // ends its message with a newline, or starts the next one with
+                // one, gets a paragraph break rather than three blank lines.
+                let have = guard.0.chars().rev().take_while(|c| *c == '\n').count()
+                    + text.chars().take_while(|c| *c == '\n').count();
+                2usize.saturating_sub(have)
+            }
+        };
+        if needed == 0 {
+            return self.append_capped(text);
+        }
+        // ONE append, not two. The separator and the message have to travel as
+        // a single `Appended`: the driver broadcasts `accepted` and stores the
+        // buffer, so a separator appended separately and not returned would be
+        // written down but never sent, and the live reply and the reloaded one
+        // would differ by exactly the break this adds. It also keeps the cap
+        // honest — the break is counted once, in the same bounded append.
+        let mut combined = String::with_capacity(needed + text.len());
+        for _ in 0..needed {
+            combined.push('\n');
+        }
+        combined.push_str(text);
+        self.append_capped(&combined)
+    }
+
     fn append_capped(&self, text: &str) -> Appended {
         let mut guard = match self.buffer.lock() {
             Ok(guard) => guard,
@@ -290,6 +344,8 @@ async fn drive(
     // without one is an interruption, not a success.
     let mut settled: Option<(TurnStatus, Option<&'static str>)> = None;
     while let Some(event) = handle.next().await {
+        // Read before the match, which moves the text out of the event.
+        let whole = matches!(event, RunEvent::Message(_));
         match event {
             // The runtime's own id is internal; the durable identity is ours.
             RunEvent::Started(_) => {}
@@ -300,11 +356,17 @@ async fn drive(
                     let _ = live.events.send(RunSignal::Activity(item));
                 }
             }
-            RunEvent::Chunk(text) => {
+            RunEvent::Chunk(text) | RunEvent::Message(text) => {
                 if text.is_empty() {
                     continue;
                 }
-                let appended = live.append_capped(&text);
+                // A fragment continues whatever it is part of; a whole message
+                // begins after the last one rather than running on from it.
+                let appended = if whole {
+                    live.append_message(&text)
+                } else {
+                    live.append_capped(&text)
+                };
                 let total = appended.total;
                 if !appended.accepted.is_empty() {
                     let _ = live.events.send(RunSignal::Delta(RunDelta {

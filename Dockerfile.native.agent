@@ -2,6 +2,15 @@
 # sandboxed personal-agent runtime. Built ON TOP of the reviewed base image
 # (Dockerfile.native), adding only what the sandbox launcher needs:
 #   * python3            — runs scripts/operations/neev_agent_launch.py + sandbox
+#   * python-is-python3  — `python` is what an agent actually types
+#   * python3-bs4        — HTML parsing, the common reason it reaches for python
+#
+# Deliberately NOT here: node. It appeared in the same trace only as a FALLBACK
+# after `python` was missing, and it was wanted for cheerio — so shipping node
+# without npm packages would move the failure rather than remove it, and
+# shipping npm packages is a far larger surface than the one failure justifies.
+# With python and bs4 present the first choice works and the fallback is not
+# reached. Revisit if a trace shows node wanted on its own merits.
 #   * util-linux         — unshare / setpriv / prlimit (namespaces, uid drop, rlimits)
 #   * iproute2, nftables — ip / nft (per-tenant egress netns + default-deny firewall)
 #   * the launcher + sandbox + egress scripts at NEEV_AGENT_LAUNCHER
@@ -40,6 +49,17 @@ RUN install -d -o 0 -g 0 -m 0755 /opt/neev/codex \
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
       python3 \
+      # `python3` alone is not what anything actually types. An agent asked to
+      # pull apart an HTML attachment reaches for `python` and gets
+      # "command not found" — observed in a real turn, which then cost a second
+      # failed attempt looking for node before it fell back to `rg`. This is the
+      # distro's own symlink package, nothing more.
+      python-is-python3 \
+      # BeautifulSoup, because parsing the HTML was the actual task and the
+      # interpreter alone would only move the failure from "no python" to "no
+      # module". Distro-packaged rather than pip-installed so the image stays
+      # reproducible and no build toolchain is pulled in.
+      python3-bs4 \
       util-linux \
       cryptsetup-bin \
       e2fsprogs \

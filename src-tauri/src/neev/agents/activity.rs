@@ -94,7 +94,19 @@ pub(crate) struct ActivityDraft {
 /// One mapped piece of a provider's stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StreamItem {
+    /// Part of a message still being written. Joined to whatever came before it
+    /// exactly as it arrives — these are fragments of one sentence and anything
+    /// inserted between them would land mid-word.
     Text(String),
+    /// A WHOLE message, complete when it arrived.
+    ///
+    /// A turn usually contains more than one: the provider says what it is
+    /// about to do, runs its tools, then answers. Appending those the way
+    /// fragments are appended ran the last word of one into the first word of
+    /// the next — "…improvements.Yes…" — which reads as a rendering fault and
+    /// was in the stored reply itself. Kept apart from `Text` because only a
+    /// whole message is a place where a break belongs.
+    Message(String),
     Activity(ActivityDraft),
 }
 
@@ -410,7 +422,9 @@ impl StreamParser {
                 match item_type {
                     "agent_message" => {
                         let text = item.get("text").and_then(|v| v.as_str())?;
-                        Some(vec![StreamItem::Text(text.to_owned())])
+                        // `item.completed` means this message is finished, so
+                        // it is a whole one and the next is a new one.
+                        Some(vec![StreamItem::Message(text.to_owned())])
                     }
                     "command_execution" => {
                         let id = item

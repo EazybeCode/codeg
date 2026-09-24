@@ -68,7 +68,13 @@ fn event_json(event: &RunEvent) -> Option<String> {
     let quote = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
     Some(match event {
         RunEvent::Started(id) => format!("{{\"type\":\"started\",\"run_id\":{}}}", quote(id)),
-        RunEvent::Chunk(text) => format!("{{\"type\":\"chunk\",\"text\":{}}}", quote(text)),
+        // Both go out as `chunk`. This stream has no accumulator to hold a
+        // seam against — it is one-shot text with nothing stored — so the
+        // distinction has nowhere to be applied here, and collapsing it keeps
+        // this endpoint's wire format exactly as it was.
+        RunEvent::Chunk(text) | RunEvent::Message(text) => {
+            format!("{{\"type\":\"chunk\",\"text\":{}}}", quote(text))
+        }
         RunEvent::Activity(_) => return None,
         RunEvent::Completed => "{\"type\":\"completed\"}".into(),
         RunEvent::Failed(reason) => format!("{{\"type\":\"failed\",\"reason\":{}}}", quote(reason)),
