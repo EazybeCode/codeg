@@ -11,9 +11,7 @@ guidance, not a record of incidents.
 
 Conductor documents how an agent's behaviour is shaped in a repository —
 `AGENTS.md` / `CLAUDE.md`, repository preferences, skills. We did not find an
-exact universal response prompt in the public docs we reviewed; the bare domain
-does not serve, `https://www.conductor.build/docs/reference/agent-behavior`
-does. Claude's output-styles documentation describes session-level style
+exact universal response prompt in the public docs we reviewed; see the official sources below. Claude's output-styles documentation describes session-level style
 instructions, which guide a reply rather than guarantee its shape. So what
 ships here is our own policy rather than a copy of an upstream one.
 
@@ -84,3 +82,29 @@ we reviewed, which is not the same as establishing that none exists.
 Verified by the focused suites — `test_neev_agent_launch.py`,
 `test_neev_codex_stream_adapter.py`, `test_neev_agent_sandbox.py`: 107 passed.
 Not deployed or validated against a live provider turn as part of this change.
+
+
+## Live release verification
+
+Released image `neev-native-agent:ux-docs-speed-response-style-20260924`.
+The image-only compose change preserved all other deployment settings. Health
+returned HTTP 200 and document creation remained enabled. The server and UI
+were unchanged; the packaged policy matched source SHA-256
+`7978276cd972250767dd770c85f06e587754f3b78483fe72042f6a5aba544089`
+and was root-owned with mode 0444.
+
+Independent focused verification: **107 passed** with ResourceWarning treated
+as an error; `git diff --check` passed.
+
+Two synthetic live turns in a private verification chat used GPT-5.6-Luna:
+
+- A short comparison rendered readable paragraphs, a list, and a JavaScript
+  code block; it completed in 7 seconds.
+- An explicit JSON-only request returned exactly `{"format":"json","ok":true}`,
+  without a heading or Markdown fence; it completed in 4 seconds.
+
+Both provider instruction paths are covered by tests. A live Claude turn was
+not verified because the account was not connected; no credentials were changed.
+These checks establish the observed cases, not a guarantee of every future answer.
+
+Repository and release context: [org-memory: wiki/engineering/workos.md].
