@@ -1162,7 +1162,22 @@ it("shows Cancel while the invoked run streams and cancels it by run id", async 
   await screen.findByText("partial")
   await user.click(screen.getByRole("button", { name: "Cancel" }))
   await waitFor(() => expect(canceled).toEqual({ runId: RUN_ID }))
-  act(() => controller.close())
+  act(() => {
+    controller.enqueue(
+      new TextEncoder().encode(
+        'data: {"type":"finished","status":"canceled","errorCode":null}\n\n'
+      )
+    )
+    controller.close()
+  })
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull()
+  )
+  expect(
+    screen.queryByText(
+      "This service is temporarily unavailable. Please try again."
+    )
+  ).toBeNull()
 }, 10000)
 
 it("keeps a refused invocation's ask visible and names the reason", async () => {

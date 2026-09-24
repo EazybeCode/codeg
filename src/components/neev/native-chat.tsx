@@ -866,7 +866,8 @@ function Chat({
             // under the reader by a line.
             answered = event.status === "completed"
             setRunCompleted(answered)
-            if (!answered) setError(new NativeClientError("unavailable"))
+            if (!answered && event.status !== "canceled")
+              setError(new NativeClientError("unavailable"))
           }
         },
       })
