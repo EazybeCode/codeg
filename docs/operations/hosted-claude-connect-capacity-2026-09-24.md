@@ -177,9 +177,7 @@ alongside the existing entries:
 
 Strictly scoped: named device nodes only. No `privileged`, no `/dev` bind mount, and
 no change to `device_cgroup_rules` — the existing `b 252:* rmw` covers device-mapper,
-and loop devices are granted per node by `devices:`. Recreating the container drops
-the live mappings; both connected rows re-open on next use, which is the supported
-restart path. **This was verified live on 2026-09-24: Connect then reached "Waiting
+and loop devices are granted per node by `devices:`. Existing host-kernel mappings can survive container recreation. The next use restores the mapping node, revalidates the volume and releases it after use. **This was verified live on 2026-09-24: Connect then reached "Waiting
 for sign-in" with a working Claude sign-in link and code prompt.**
 
 **Image change.** The fix is Python and static assets only:
@@ -232,3 +230,5 @@ not about quota, entitlement, or a runtime turn.
 - Browser after reload: Codex Test succeeded, Checked 09:11:14 IST. Claude Connect reached Waiting for sign-in with provider link and code field, expiry 09:21:38 IST. No temporary-unavailable error. Completing provider authorization requires the user's approval/code; not claimed complete.
 
 [org-memory: wiki/engineering/workos.md]
+
+- Post-deployment metadata check confirmed the successfully tested Codex volume has no remaining loop attachment or device-mapper mapping, and no release-failure diagnostic. One pre-existing other-organization Claude mapping survives the old container; its next use reconciles and releases it. Left untouched to preserve that user's state.
