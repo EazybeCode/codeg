@@ -75,3 +75,30 @@ UI SHA-256: `9e8693fe0dff517e99f327099d53a0047fa97474bfbd61d8e2263eb0d8255b9a`.
 An initial release attempt used the wrong date suffix and failed before image
 replacement; the correct existing image was then deployed. Final health 200,
 UI hash verified, document creation remained enabled.
+
+## Progress footer and sidebar — 2026-09-25
+
+`610a0abd` + `a4a30573` place live activity after streaming output in both chat
+surfaces, reserve clock width, and publish scoped live run state to sidebar rows.
+The ring is shared; there remains one conversation activity indicator. Sidebar
+state is client-local and clears on finish, cancel, or unmount; it does not
+claim to monitor server runs from an unmounted chat.
+
+Validation: 82 focused tests (26 private-chat/store, 56 team-chat/attachments/
+activity), lint, diff check and production static export passed. Earlier mixed
+workspace tests had jsdom BlockNote elementsFromPoint errors; standalone focused
+suites passed. Live disposable chat ran two Codex commands: observed 12.5s +
+Running command below output and sidebar running mark, then completion cleared
+both. Test chat moved to recoverable trash and test browser tab closed.
+
+Image: `neev-native-agent:ux-docs-speed-progress-footer-20260925`
+UI SHA256: `3c9e577e3645e4be384760f70f7a0a321080543b671a8ca6aff20f89433abef7`.
+Idle check 0 sign-ins/0 turns before restart; live health and UI hash passed.
+
+The same release adds official checksummed Node v22.23.3 with npm 10.9.9.
+Non-root image smoke test and actual agent sandbox command confirmed versions.
+Playwright package/browser is NOT installed by this change.
+
+Storage: removed 340 MB of unmounted provider build downloads and pruned the
+stopped neev-native-20260912 BuildKit cache (9.337 GB reported). Free host disk
+rose to ~9 GB. No application data, credentials, or application volumes removed.
