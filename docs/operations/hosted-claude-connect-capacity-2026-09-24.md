@@ -197,8 +197,7 @@ concurrency ceiling; the lifecycle fix is what keeps the requirement proportiona
 
 ## Verification
 
-* `scripts/tests` — `python3 -m unittest discover -p 'test_neev*.py'`: **534 pass**,
-  3 skipped (was 501 before this change).
+* `scripts/tests` — `python3 -m unittest discover -p 'test_neev*.py'`: **531 passed, 3 skipped** (534 total) (was 501 before this change).
 * Load-bearing check, credential lifecycle: with `_release_volume` neutralised to the
   pre-fix behaviour, **8** tests fail —
   `test_recover_lend_and_restore_ownership_around_the_child`,
@@ -223,3 +222,13 @@ does not claim a completed Claude login on the current account: the only complet
 Claude login on this deployment belongs to a different account and predates the
 outage. A connected row remains a statement about a stored, verified credential —
 not about quota, entitlement, or a runtime turn.
+
+## Final deployed verification
+
+- Commit `10aa9db3`, image `neev-native-agent:ux-docs-speed-claude-5e00323a`.
+- UI `workspace.html` SHA-256 `5e00323af6f4a1f3816cf2c8cbcf086fe091dc78f07016e40167ce40cc59e7c0`.
+- Native server SHA-256 remains `ca8928567353882884deef861a706dc719a90ccf595ee227e8ac8741cc63bb27`; helper capabilities unchanged.
+- Live health 200; document creation remains enabled. Deployment retains explicit loop0..7 device nodes and prior image/config backups.
+- Browser after reload: Codex Test succeeded, Checked 09:11:14 IST. Claude Connect reached Waiting for sign-in with provider link and code field, expiry 09:21:38 IST. No temporary-unavailable error. Completing provider authorization requires the user's approval/code; not claimed complete.
+
+[org-memory: wiki/engineering/workos.md]
