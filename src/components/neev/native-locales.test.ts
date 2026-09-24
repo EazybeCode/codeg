@@ -58,4 +58,12 @@ it.each([
     }
   }
   expect(errors).toEqual([])
+  // The share button shows `shareShort` and is NAMED `share`. A reader using
+  // voice control says the words they can see, so the visible label has to be
+  // contained in the accessible name (WCAG 2.5.3 Label in Name) — in every
+  // locale, not just the one this was written in. A translation that renders
+  // the short form as something absent from the long one breaks that silently,
+  // which is exactly the kind of thing no screenshot would catch.
+  const { share, shareShort } = messages.NativeContent
+  expect(share.toLowerCase()).toContain(shareShort.toLowerCase())
 })

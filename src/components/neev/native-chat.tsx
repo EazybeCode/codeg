@@ -440,7 +440,38 @@ function Chat({
     setError(e)
     auth.handleAuthorityError(e)
   }
-  async function refresh() {
+  /**
+   * Re-read the metadata, then the history that follows this reader's cursor.
+   *
+   * `opening` is the first read after mounting, and the ONLY one that starts
+   * the two together. The first page of history reads nothing off the metadata
+   * — it is keyed on the chat id and on this reader's own cursor — so awaiting
+   * one before asking for the other put a whole round trip in front of every
+   * chat open, with someone watching a spinner for it.
+   *
+   * Every LATER refresh keeps the strict order. Those are polls, and a poll's
+   * metadata read is the authority check: it is how a revocation is noticed. A
+   * chat this reader has just lost access to must not have its history asked
+   * for again, and on a poll there is no one waiting on the round trip to
+   * justify asking early. So the concurrency is spent exactly where it is felt
+   * and nowhere else.
+   */
+  async function refresh(opening = false) {
+    let after = sequence.current
+    // Started before the metadata is awaited. The authority check is still the
+    // FIRST thing that happens to either answer: nothing reaches the transcript
+    // until the metadata has come back and been accepted, so a reader whose
+    // access was refused still sees nothing. Issuing the read early grants
+    // nothing either — the server authorizes this endpoint on its own, and the
+    // response is dropped unread when the metadata refuses.
+    const firstPage = opening
+      ? listNativeMessages(resource.id, after, scope.signal)
+      : null
+    // Observed the moment it exists. When the metadata read fails, the code
+    // below throws before it ever awaits this promise, and a rejection nobody
+    // looked at surfaces as an unhandled one. The sink does not swallow it: the
+    // `await` further down still sees the same rejection and still reports it.
+    firstPage?.catch(() => {})
     try {
       const metadata = await loadNativeResource(
         resource.orgId,
@@ -455,9 +486,13 @@ function Chat({
       if (!draftRef.current && !retry.current)
         pinned.current = metadata.authRevision
       // Metadata authority is checked before every incremental history read.
-      let after = sequence.current
+      // The first iteration consumes the read already in flight; the rest are
+      // genuinely sequential, since each one needs the cursor the last returned.
+      let inflight = firstPage
       do {
-        const page = await listNativeMessages(resource.id, after, scope.signal)
+        const page = await (inflight ??
+          listNativeMessages(resource.id, after, scope.signal))
+        inflight = null
         if (!scope.isCurrent()) return
         absorb(page.items)
         if (page.items.length)
@@ -476,7 +511,7 @@ function Chat({
     sending.current = false
     busy.current = false
     setSaving(false)
-    void refresh()
+    void refresh(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope])
   /**
@@ -1141,8 +1176,15 @@ function Chat({
                 size="sm"
                 disabled={actions.disabled}
                 // The label collapses to its icon on narrow viewports; the
-                // accessible name stays the full sentence either way.
+                // accessible name stays the full sentence either way — and now
+                // also when the label is showing, where it reads just "Share".
+                // Who that shares with is the whole consequence of pressing it,
+                // so it stays in the accessible name and in the tooltip rather
+                // than being dropped along with the width.
                 aria-label={t(
+                  actions.visibility === "private" ? "share" : "makePrivate"
+                )}
+                title={t(
                   actions.visibility === "private" ? "share" : "makePrivate"
                 )}
                 aria-describedby={
@@ -1163,7 +1205,9 @@ function Chat({
                 )}
                 <span className="hidden sm:inline">
                   {t(
-                    actions.visibility === "private" ? "share" : "makePrivate"
+                    actions.visibility === "private"
+                      ? "shareShort"
+                      : "makePrivate"
                   )}
                 </span>
               </Button>

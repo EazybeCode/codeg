@@ -422,7 +422,12 @@ function Frame({
             size="sm"
             className="h-7 px-2"
             disabled={actions.disabled}
+            // Icon-only here, so the accessible name is the only reading of it
+            // there is; the tooltip gives the same sentence to a pointer.
             aria-label={t(
+              actions.visibility === "private" ? "share" : "makePrivate"
+            )}
+            title={t(
               actions.visibility === "private" ? "share" : "makePrivate"
             )}
             onClick={

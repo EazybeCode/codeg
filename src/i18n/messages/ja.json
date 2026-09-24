@@ -75,6 +75,7 @@
     "discard": "変更を破棄",
     "keepEditing": "編集を続ける",
     "share": "組織と共有",
+    "shareShort": "共有",
     "makePrivate": "非公開にする",
     "makePrivateWarning": "非公開にすると今後のアクセスはブロックされますが、すでにダウンロードされたコピーを回収することはできません。",
     "shareTitle": "全履歴を共有しますか？",

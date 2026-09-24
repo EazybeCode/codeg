@@ -75,6 +75,7 @@
     "discard": "변경 사항 버리기",
     "keepEditing": "계속 편집",
     "share": "조직과 공유",
+    "shareShort": "공유",
     "makePrivate": "비공개로 설정",
     "makePrivateWarning": "비공개로 전환하면 이후 접근은 차단되지만, 다른 사람이 이미 다운로드한 사본은 회수할 수 없습니다.",
     "shareTitle": "전체 기록을 공유할까요?",

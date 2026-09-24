@@ -75,6 +75,7 @@
     "discard": "Descartar cambios",
     "keepEditing": "Seguir editando",
     "share": "Compartir con la organización",
+    "shareShort": "Compartir",
     "makePrivate": "Hacer privado",
     "makePrivateWarning": "Hacer que esto sea privado bloquea el acceso futuro, pero las copias que otras personas ya hayan descargado no se pueden retirar.",
     "shareTitle": "¿Compartir todo el historial?",

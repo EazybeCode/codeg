@@ -75,6 +75,7 @@
     "discard": "Abandonner les modifications",
     "keepEditing": "Continuer la modification",
     "share": "Partager avec l’organisation",
+    "shareShort": "Partager",
     "makePrivate": "Rendre privé",
     "makePrivateWarning": "Rendre ce contenu privé bloque les accès futurs, mais les copies déjà téléchargées ne peuvent pas être rappelées.",
     "shareTitle": "Partager tout l’historique ?",

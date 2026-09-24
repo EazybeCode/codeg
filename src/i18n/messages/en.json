@@ -75,6 +75,7 @@
     "discard": "Discard changes",
     "keepEditing": "Keep editing",
     "share": "Share with organization",
+    "shareShort": "Share",
     "makePrivate": "Make private",
     "makePrivateWarning": "Making this private blocks future access, but copies that people already downloaded cannot be recalled.",
     "shareTitle": "Share full history?",

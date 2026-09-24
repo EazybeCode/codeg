@@ -1146,8 +1146,14 @@ function Document({
                 size="sm"
                 disabled={actions.disabled}
                 // Icon-only on narrow viewports so the title keeps its room; the
-                // accessible name is the full sentence at every width.
+                // accessible name is the full sentence at every width, including
+                // the wide one where the label itself reads just "Share". Who
+                // that shares with is the consequence of pressing it, so it
+                // stays in the accessible name and in the tooltip.
                 aria-label={t(
+                  actions.visibility === "private" ? "share" : "makePrivate"
+                )}
+                title={t(
                   actions.visibility === "private" ? "share" : "makePrivate"
                 )}
                 aria-describedby={
@@ -1168,7 +1174,9 @@ function Document({
                 )}
                 <span className="hidden sm:inline">
                   {t(
-                    actions.visibility === "private" ? "share" : "makePrivate"
+                    actions.visibility === "private"
+                      ? "shareShort"
+                      : "makePrivate"
                   )}
                 </span>
               </Button>

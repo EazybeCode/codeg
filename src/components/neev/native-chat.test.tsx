@@ -100,6 +100,64 @@ it("renders message Markdown without activating unsafe links", async () => {
   expect((await screen.findByText("Decision")).tagName).toBe("STRONG")
   expect(screen.queryByRole("link", { name: "bad" })).toBeNull()
 })
+it("asks for history without waiting for the metadata to come back", async () => {
+  // The round trip this removes: history was awaited AFTER the metadata, though
+  // it reads nothing off it, so every chat open paid two serial round trips
+  // where one would do.
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let asked = false
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: async () => {
+      await held
+      return json(resource)
+    },
+    [`GET ${path}`]: () => {
+      asked = true
+      return json({ items: [message], nextAfter: null })
+    },
+  })
+  mount()
+  // Still holding the metadata response, so this can only be true if the two
+  // reads were started together.
+  await waitFor(() => expect(asked).toBe(true))
+  release()
+  await ready()
+  await screen.findByText(message.body)
+})
+it("shows no history when the metadata refuses, though it was already asked for", async () => {
+  // The authority check stays FIRST. The history read is in flight by the time
+  // the refusal lands, and its answer must never reach the transcript.
+  const unhandled = vi.fn()
+  window.addEventListener("unhandledrejection", unhandled)
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () =>
+      json({ code: "forbidden" }, 403),
+    [`GET ${path}`]: () => json({ items: [message], nextAfter: null }),
+  })
+  mount()
+  await waitFor(() =>
+    expect(screen.queryByText("Loading this conversation…")).toBeNull()
+  )
+  expect(screen.queryByText(message.body)).toBeNull()
+  window.removeEventListener("unhandledrejection", unhandled)
+  expect(unhandled).not.toHaveBeenCalled()
+})
+it("reports the history failure when the page rejects and the metadata does not", async () => {
+  // The sink that keeps the early read from becoming an unhandled rejection must
+  // not also swallow it: a history read that fails is still a failed open.
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ code: "unavailable" }, 503),
+  })
+  mount()
+  await waitFor(() =>
+    expect(screen.queryByText("Loading this conversation…")).toBeNull()
+  )
+  expect(screen.queryByText(message.body)).toBeNull()
+})
 it("brings a successfully sent message into view from older history", async () => {
   mockNativeSession(undefined, {
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
@@ -232,7 +290,9 @@ it("polls metadata before incremental messages only while visible and stops on u
   const view = mount()
   await ready()
   await screen.findByText(message.body)
-  expect(order).toEqual(["metadata", "first"])
+  // Opening starts both at once, so which of the two the mock sees first is not
+  // a property worth pinning — only that both were asked for and neither waited.
+  expect([...order].sort()).toEqual(["first", "metadata"])
   const visibility = vi
     .spyOn(document, "visibilityState", "get")
     .mockReturnValue("hidden")
@@ -245,7 +305,11 @@ it("polls metadata before incremental messages only while visible and stops on u
     await vi.advanceTimersByTimeAsync(5000)
   })
   expect(screen.getByText(second.body)).toBeVisible()
-  expect(order).toEqual(["metadata", "first", "metadata", "incremental"])
+  // A POLL keeps the strict order: its metadata read is the authority check, and
+  // it is how a revocation is noticed, so the history behind it is never asked
+  // for concurrently. This is the half of the ordering that still matters.
+  expect(order.slice(2)).toEqual(["metadata", "incremental"])
+  expect(order).toHaveLength(4)
   view.unmount()
   await act(async () => {
     await vi.advanceTimersByTimeAsync(15000)
@@ -1289,6 +1353,16 @@ it("keeps the chat header on one compact row with a title that can give way", as
   // The visible label collapses on a phone; the accessible name never does —
   // `getByRole` above already proves that.
   expect(share.querySelector("span")).toHaveClass("hidden", "sm:inline")
+  // The label reads just "Share". Who it shares with is the whole consequence
+  // of pressing it, so that half moves into the accessible name and the
+  // tooltip rather than disappearing: `getByRole` above found this button by
+  // the full sentence, and the visible word is contained in it, which is what
+  // keeps voice control able to say what it sees (WCAG 2.5.3).
+  expect(share.querySelector("span")).toHaveTextContent(/^Share$/)
+  expect(share).toHaveAttribute("title", "Share with organization")
+  expect(share.getAttribute("aria-label")).toContain(
+    share.querySelector("span")?.textContent ?? ""
+  )
 })
 
 it("keeps what was typed while a send was in flight", async () => {

@@ -75,6 +75,7 @@
     "discard": "丢弃更改",
     "keepEditing": "继续编辑",
     "share": "与组织共享",
+    "shareShort": "共享",
     "makePrivate": "设为私密",
     "makePrivateWarning": "设为私有会阻止今后的访问，但无法收回其他人此前已下载的副本。",
     "shareTitle": "共享完整历史记录？",
