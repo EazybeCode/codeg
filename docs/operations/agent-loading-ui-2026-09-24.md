@@ -29,3 +29,18 @@ reduced motion; no claim of live OS reduced-motion testing.
 
 Repository context: [org-memory: wiki/engineering/workos.md]; current source
 verified directly because the wiki describes the older fork.
+
+
+## Dotted indicator correction
+
+User reference showed chasing dots next to elapsed seconds, not an icon pulse.
+Commit `49f860d6` replaces the pulse with eight staggered dots and places the
+elapsed clock immediately beside it. Generic Working text is screen-reader-only;
+actual tool names still appear. Reduced motion leaves static dots.
+
+Validation: 80 focused tests, ESLint, production export and diff check passed.
+Live screenshot confirmed the dotted indicator beside `14.4s` during a command,
+with one running row and a stable Send control.
+Image: `neev-native-agent:ux-docs-speed-dot-loader-20260924`.
+UI SHA-256: `45d9be5b379801e665912b3b88502ff3fce17cd8d36b8ca9b05033ad6585ff5f`.
+Health 200, document creation enabled, deployed hash matched; image-only release.
