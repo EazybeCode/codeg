@@ -796,6 +796,238 @@ it("posts the ask and the persisted agent reply to the one conversation", async 
   expect(mock.unknown).toEqual([])
 })
 
+it("hands the streamed reply to the stored one with no gap and no double", async () => {
+  // The handover used to clear the preview and THEN go to the network for the
+  // stored reply. The answer someone was reading disappeared for two round
+  // trips and came back in a row of a different height — which is what "the
+  // streaming view isn't good" was describing.
+  let releaseHistory: () => void = () => {},
+    releaseTraces: () => void = () => {}
+  const history = new Promise<void>((resolve) => {
+      releaseHistory = resolve
+    }),
+    traces = new Promise<void>((resolve) => {
+      releaseTraces = resolve
+    })
+  let replied = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: async () => {
+      if (replied) await history
+      return json({
+        items: replied ? [askMessage, replyMessage] : [],
+        nextAfter: null,
+      })
+    },
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    [TEAM_SESSION("claude")]: async () => {
+      if (!replied) return json({ code: "not_found" }, 404)
+      await traces
+      return json(teamSession)
+    },
+    [TEAM_SESSION("codex")]: () => json({ code: "not_found" }, 404),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () => {
+      replied = true
+      return sseBody(
+        `{"type":"started","runId":"${RUN_ID}","turnId":"${runningTurn.id}"}`,
+        '{"type":"chunk","text":"do "}',
+        '{"type":"chunk","text":"X"}',
+        '{"type":"finished","status":"completed","errorCode":null}'
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // The run is over — the trace has stopped saying it is working — and the
+  // reply it streamed is still on screen, with the stored row held back at the
+  // network.
+  const list = await screen.findByRole("list", { name: "Messages" })
+  const thread = within(list)
+  // The live row is the one inside the live region; the stored row is not.
+  const preview = () => list.querySelector('[aria-live="polite"]')
+  await waitFor(() =>
+    expect(thread.queryByRole("button", { name: /Working…/ })).toBeNull()
+  )
+  expect(preview()).toHaveTextContent("do X")
+  expect(thread.getAllByText("do X")).toHaveLength(1)
+  // The stored row lands while the preview is still mounted: one answer, not
+  // the same answer printed twice, and never none.
+  releaseHistory()
+  await waitFor(() => expect(preview()).toBeNull())
+  expect(thread.getAllByText("do X")).toHaveLength(1)
+  releaseTraces()
+  await waitFor(() => expect(thread.getAllByRole("listitem")).toHaveLength(2))
+  expect(thread.getAllByText("do X")).toHaveLength(1)
+})
+
+it("keeps the preview up against an identical answer already in the thread", async () => {
+  // Two asks, one answer. Retiring the preview on the body alone would take
+  // the older row as this run's reply and blank the answer being read.
+  const older = {
+    ...replyMessage,
+    id: "77777777-7777-4777-8777-777777777777",
+    sequence: "2",
+  }
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let replied = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({ items: [askMessage, older], nextAfter: null }),
+    [`GET ${path}?after=2`]: async () => {
+      if (replied) await held
+      return json({
+        items: replied
+          ? [
+              {
+                ...askMessage,
+                id: "88888888-8888-4888-8888-888888888888",
+                sequence: "3",
+              },
+              { ...replyMessage, sequence: "4" },
+            ]
+          : [],
+        nextAfter: null,
+      })
+    },
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json(
+        {
+          message: {
+            ...askMessage,
+            id: "88888888-8888-4888-8888-888888888888",
+            sequence: "3",
+          },
+          turn: runningTurn,
+          runId: RUN_ID,
+        },
+        201
+      ),
+    [RUN_EVENTS]: () => {
+      replied = true
+      return sseBody(
+        '{"type":"chunk","text":"do X"}',
+        '{"type":"finished","status":"completed","errorCode":null}'
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  const thread = within(await screen.findByRole("list", { name: "Messages" }))
+  await waitFor(() =>
+    expect(thread.queryByRole("button", { name: /Working…/ })).toBeNull()
+  )
+  // The old reply and the live one: two, because there genuinely are two.
+  expect(thread.getAllByText("do X")).toHaveLength(2)
+  release()
+  // Still two once the new row lands — the preview it replaced is gone.
+  await waitFor(() => expect(thread.getAllByRole("listitem")).toHaveLength(4))
+  expect(thread.getAllByText("do X")).toHaveLength(2)
+})
+
+it("keeps the answer on screen when the re-read that follows the run fails", async () => {
+  let broken = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () =>
+      broken ? json({ code: "server_error" }, 500) : json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () => {
+      broken = true
+      return sseBody(
+        '{"type":"chunk","text":"do X"}',
+        '{"type":"finished","status":"completed","errorCode":null}'
+      )
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  const thread = within(await screen.findByRole("list", { name: "Messages" }))
+  // The re-read failed and said so. The answer it failed to fetch a copy of is
+  // still the one on screen: clearing it here would lose it outright.
+  expect(await screen.findByRole("alert")).toBeVisible()
+  await waitFor(() =>
+    expect(thread.queryByRole("button", { name: /Working…/ })).toBeNull()
+  )
+  expect(thread.getByText("do X")).toBeVisible()
+})
+
+it("does not let a finished run's handover clear the next run's reply", async () => {
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let run = 0
+  const second = "99999999-9999-4999-8999-999999999999"
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: async () => {
+      if (run === 1) await held
+      return json({ items: [], nextAfter: null })
+    },
+    ...noSessions,
+    [AGENT_PATH]: () => {
+      run += 1
+      return json(
+        {
+          message: { ...askMessage, id: run === 1 ? askMessage.id : second },
+          turn: runningTurn,
+          runId: RUN_ID,
+        },
+        201
+      )
+    },
+    [RUN_EVENTS]: () =>
+      sseBody(
+        `{"type":"chunk","text":"${run === 1 ? "first" : "second"}"}`,
+        '{"type":"finished","status":"completed","errorCode":null}'
+      ),
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  const thread = within(await screen.findByRole("list", { name: "Messages" }))
+  expect(await thread.findByText("first")).toBeVisible()
+  // The first run's re-read is still out at the network. Ask again anyway.
+  await waitFor(() =>
+    expect(thread.queryByRole("button", { name: /Working…/ })).toBeNull()
+  )
+  await typeAsk()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  expect(await thread.findByText("second")).toBeVisible()
+  // The first run's handover lands last, and belongs to nothing on screen.
+  release()
+  await waitFor(() =>
+    expect(thread.queryByRole("button", { name: /Working…/ })).toBeNull()
+  )
+  expect(thread.getByText("second")).toBeVisible()
+})
+
 it("sends on Enter, keeps Shift+Enter a newline, and never sends mid-composition", async () => {
   const invocations: Record<string, unknown>[] = []
   mockNativeSession(undefined, {

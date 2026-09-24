@@ -252,6 +252,11 @@ function Chat({
     // say what is happening now rather than only that something is.
     [liveActivity, setLiveActivity] = useState<NeevActivityItem[]>([]),
     [runStartedAt, setRunStartedAt] = useState<number | null>(null),
+    // When it ended, and whether it answered. Both are null/false while it
+    // runs; they are set for the moment between the run settling and its
+    // stored row arriving, so the preview reads like that row already.
+    [runFinishedAt, setRunFinishedAt] = useState<number | null>(null),
+    [runCompleted, setRunCompleted] = useState(false),
     // The caller's own stored turns for this chat: what makes a reopened
     // conversation show the trace it showed before.
     [turns, setTurns] = useState<NeevAgentTurn[]>([]),
@@ -352,6 +357,17 @@ function Chat({
       history.scrollTop = history.scrollHeight
   }, [messages, loading, liveActivity, agentText])
   const pinned = useRef(resource.authRevision),
+    messagesRef = useRef<NativeMessage[]>([]),
+    // Which run the live preview belongs to. A handover still in flight when
+    // the next run starts must not clear the next run's text.
+    generation = useRef(0),
+    // How far the thread had got when the current run began, and the provider
+    // it runs as. A sequence rather than a set of ids: a reply from an EARLIER
+    // run can still be unread when this one starts, and it sorts below this
+    // run's own ask, so a high-water mark excludes it where "not seen yet"
+    // would not.
+    previewFloor = useRef(0n),
+    previewProvider = useRef<string>("claude"),
     draftRef = useRef(""),
     sequence = useRef<string | null>(null),
     retry = useRef<AppendNativeMessageInput | null>(null),
@@ -374,6 +390,35 @@ function Chat({
       prompt: string
       keys: readonly string[]
     } | null>(null)
+  /*
+   * Whether the reply the live preview stands in for is in the thread already.
+   *
+   * The preview outlives its run now, so the stored row lands underneath it —
+   * from the re-read at the end of `follow` or from a push that got there
+   * first — and the preview is the copy to drop: it has no author line, no
+   * timestamp and no attachments.
+   *
+   * Identity, not text. A run's reply is the agent row that sorts after
+   * everything the thread held when the run began, is this reader's own, and
+   * carries the provider this run ran as. Comparing bodies instead would
+   * retire the preview against an identical answer already above it — and
+   * would FAIL to retire it whenever the stored reply differs from the stream
+   * by so much as a trailing newline, leaving two copies on screen for good.
+   */
+  const previewStored =
+    agentText !== "" &&
+    messages.some(
+      (item) =>
+        BigInt(item.sequence) > previewFloor.current &&
+        item.authorKind === "agent" &&
+        item.authorId === auth.session?.user.id &&
+        item.agentLabel === previewProvider.current
+    )
+  // Retired by its own stored row arriving and by nothing else — not by a
+  // completed read, which can return before the driver has published.
+  useEffect(() => {
+    if (previewStored) clearPreview()
+  }, [previewStored])
   // Push delivery replaces the interval while it is genuinely live; every other
   // state keeps polling, so a dropped or unavailable stream still delivers.
   const stream = useNeevMessageStream({
@@ -402,20 +447,24 @@ function Chat({
   }, [attachments.empty])
   // Merge server rows into the thread by id, ordered by sequence. Callers never
   // invent a message: everything here came back from the server.
+  //
+  // The ref is the one this merges from, so a run starting in the same tick as
+  // an absorb reads the thread as it actually is — `messages` is a render
+  // behind at that point, and the run's baseline is taken from it.
   function absorb(incoming: NativeMessage[]) {
-    setMessages((old) =>
-      [
-        ...new Map(
-          [...old, ...incoming].map((item) => [item.id, item])
-        ).values(),
-      ].sort((a, b) =>
-        BigInt(a.sequence) < BigInt(b.sequence)
-          ? -1
-          : BigInt(a.sequence) > BigInt(b.sequence)
-            ? 1
-            : 0
-      )
+    const merged = [
+      ...new Map(
+        [...messagesRef.current, ...incoming].map((item) => [item.id, item])
+      ).values(),
+    ].sort((a, b) =>
+      BigInt(a.sequence) < BigInt(b.sequence)
+        ? -1
+        : BigInt(a.sequence) > BigInt(b.sequence)
+          ? 1
+          : 0
     )
+    messagesRef.current = merged
+    setMessages(merged)
   }
   function fail(e: unknown) {
     if (!scope.isCurrent()) return
@@ -425,6 +474,7 @@ function Chat({
         (e.kind === "forbidden" || e.kind === "unauthorized"))
     ) {
       setMessages([])
+      messagesRef.current = []
       turnsRef.current = []
       cursors.current.clear()
       setTurns([])
@@ -575,7 +625,14 @@ function Chat({
         // composer happened to be pointed at.
         if (NEEV_AGENT_PROVIDERS.includes(live.provider as NeevAgentProvider))
           setAgentProvider(live.provider as NeevAgentProvider)
-        await follow(live.runId, live.createdAt * 1000, live.activity)
+        // The provider is passed rather than read back off `agentProvider`:
+        // the set above has not rendered yet.
+        await follow(
+          live.runId,
+          live.createdAt * 1000,
+          live.activity,
+          live.provider
+        )
       }
     } catch (cause) {
       if (!scope.isCurrent()) return
@@ -745,18 +802,39 @@ function Chat({
    * The same path serves a run just started and a run rejoined on reopen, so
    * the two can never diverge. The text streamed here is a preview; what the
    * team keeps is the persisted reply, which is re-read once the run settles.
+   *
+   * The handover is the whole reason this is written the way it is. Clearing
+   * the preview and THEN going to the network for the stored reply meant the
+   * answer someone was mid-sentence in vanished for two round trips. So a
+   * preview that ANSWERED is retired by `previewStored` below — the arrival of
+   * its own stored row — and never by a timer or a completed read. Only a run
+   * that published nothing is cleared here.
    */
   async function follow(
     runIdValue: string,
     startedAt: number,
-    seed: readonly NeevActivityItem[]
+    seed: readonly NeevActivityItem[],
+    provider: string
   ) {
+    // Everything after an await is guarded by this: a handover outlived by the
+    // next run must not touch the next run's state.
+    const mine = ++generation.current
     busy.current = true
+    previewFloor.current = messagesRef.current.reduce(
+      (high, item) =>
+        BigInt(item.sequence) > high ? BigInt(item.sequence) : high,
+      0n
+    )
+    previewProvider.current = provider
     setAgentBusy(true)
     setAgentRunId(runIdValue)
+    setAgentText("")
     setRunStartedAt(startedAt)
+    setRunFinishedAt(null)
+    setRunCompleted(false)
     setLiveActivity(mergeActivity([], seed))
     followHistory.current = true
+    let answered = false
     try {
       await followAgentRun({
         runId: runIdValue,
@@ -776,23 +854,41 @@ function Chat({
           if (event.type === "started") setAgentText("")
           else if (event.type === "chunk")
             setAgentText((current) => current + event.text)
-          else if (event.status !== "completed")
-            setError(new NativeClientError("unavailable"))
+          else {
+            // How it ended, so the preview's trace line reads like the stored
+            // one it is about to be swapped for rather than moving the text
+            // under the reader by a line.
+            answered = event.status === "completed"
+            setRunCompleted(answered)
+            if (!answered) setError(new NativeClientError("unavailable"))
+          }
         },
       })
     } finally {
+      // The clock stops and the composer reopens: the run IS over. The text
+      // stays — it is still the only copy of the answer on screen.
       busy.current = false
-      if (scope.isCurrent()) {
+      if (scope.isCurrent() && generation.current === mine) {
         setAgentBusy(false)
         setAgentRunId(null)
-        setAgentText("")
-        setLiveActivity([])
-        setRunStartedAt(null)
+        setRunFinishedAt(Date.now())
       }
     }
-    if (!scope.isCurrent()) return
+    if (!scope.isCurrent() || generation.current !== mine) return
     await refresh()
     await loadTraces()
+    // A run that published nothing has no stored row coming, so nothing will
+    // ever retire its partial text: clear it here, beside the error saying
+    // why. One that ANSWERED is left to `previewStored`.
+    if (!answered && scope.isCurrent() && generation.current === mine)
+      clearPreview()
+  }
+  function clearPreview() {
+    setAgentText("")
+    setLiveActivity([])
+    setRunStartedAt(null)
+    setRunFinishedAt(null)
+    setRunCompleted(false)
   }
   // Explicit team invocation (spec §5.3). The prompt is posted as an ordinary
   // human message by the server, the reply is written by the run driver as an
@@ -898,7 +994,12 @@ function Chat({
         return
       }
       resumed.current.add(invocation.runId)
-      await follow(invocation.runId, Date.now(), invocation.turn.activity)
+      await follow(
+        invocation.runId,
+        Date.now(),
+        invocation.turn.activity,
+        agentProvider
+      )
     } catch (cause) {
       if (scope.isCurrent()) {
         setAgentBusy(false)
@@ -1342,7 +1443,7 @@ function Chat({
             </div>
           </li>
         ))}
-        {(agentBusy || agentText) && (
+        {(agentBusy || agentText) && !previewStored && (
           <li className="mx-auto flex w-full max-w-3xl gap-3">
             <span
               aria-hidden
@@ -1351,7 +1452,25 @@ function Chat({
               <Sparkles className="size-3.5" />
             </span>
             <div className="min-w-0 flex-1 space-y-1.5">
-              <p className="text-xs font-medium">{agentProvider}</p>
+              {/* The same header the stored row draws, with the same three
+                  things in it. It was a bare provider name, which is one line
+                  where the stored row can be two — so the swap at the end of a
+                  run moved the answer down the screen on a narrow viewport. */}
+              <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  {agentProvider}
+                </span>
+                <span className="rounded bg-muted px-1.5 py-0.5">
+                  {t("agentAuthored", {
+                    name: auth.session?.user.displayName ?? "",
+                  })}
+                </span>
+                {runStartedAt !== null && (
+                  <time dateTime={new Date(runStartedAt).toISOString()}>
+                    {new Date(runStartedAt).toLocaleString()}
+                  </time>
+                )}
+              </div>
               {/* Outside the live region below: the clock on this line changes
                   ten times a second, and inside one it would be announced
                   that often. The reply itself is what is worth hearing. */}
@@ -1359,6 +1478,8 @@ function Chat({
                 items={liveActivity}
                 running={agentBusy}
                 startedAt={runStartedAt}
+                finishedAt={runFinishedAt}
+                completed={runCompleted}
               />
               <div aria-live="polite">
                 {agentText && <NativeMarkdown markdown={agentText} />}
