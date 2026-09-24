@@ -70,6 +70,8 @@ import {
   type NativeNode,
 } from "@/lib/neev-client"
 import { useNativeAuth } from "./native-auth-provider"
+import { AgentRunIndicator } from "./agent-run-indicator"
+import { runningChatKey, useRunningChats } from "@/lib/neev-running-chats"
 import {
   NativeDialogContent as DialogContent,
   NativeDropdownMenuContent as DropdownMenuContent,
@@ -617,6 +619,12 @@ function NativeWorkspaceTree({
   const t = useTranslations("Native")
   const c = useTranslations("NativeContent")
   const contentOpener = useRef<number | null>(null)
+  const auth = useNativeAuth()
+  const runningChats = useRunningChats()
+  const isRunning = (kind: "chat" | "agent", id: string) => {
+    const key = runningChatKey(auth.session, kind, id)
+    return key !== null && runningChats.has(key)
+  }
   return (
     <ul
       className={cn(
@@ -803,6 +811,17 @@ function NativeWorkspaceTree({
                               >
                                 {resource.title}
                               </span>
+                              {resource.kind === "chat" &&
+                                isRunning("chat", resource.id) && (
+                                  <span
+                                    className="ms-auto shrink-0"
+                                    role="img"
+                                    aria-label={c("activityWorking")}
+                                    title={c("activityWorking")}
+                                  >
+                                    <AgentRunIndicator className="size-3 text-muted-foreground" />
+                                  </span>
+                                )}
                               {/* Says where it is, so a struck-through row is
                                   not left to be guessed at. */}
                               {resource.archived && (
@@ -908,6 +927,16 @@ function NativeWorkspaceTree({
                               >
                                 {item.title}
                               </span>
+                              {isRunning("agent", item.id) && (
+                                <span
+                                  className="ms-auto shrink-0"
+                                  role="img"
+                                  aria-label={c("activityWorking")}
+                                  title={c("activityWorking")}
+                                >
+                                  <AgentRunIndicator className="size-3 text-muted-foreground" />
+                                </span>
+                              )}
                               <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
                                 {item.archived ? c("inTrash") : item.provider}
                               </span>

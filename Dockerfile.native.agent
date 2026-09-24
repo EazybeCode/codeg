@@ -5,12 +5,7 @@
 #   * python-is-python3  — `python` is what an agent actually types
 #   * python3-bs4        — HTML parsing, the common reason it reaches for python
 #
-# Deliberately NOT here: node. It appeared in the same trace only as a FALLBACK
-# after `python` was missing, and it was wanted for cheerio — so shipping node
-# without npm packages would move the failure rather than remove it, and
-# shipping npm packages is a far larger surface than the one failure justifies.
-# With python and bs4 present the first choice works and the fallback is not
-# reached. Revisit if a trace shows node wanted on its own merits.
+#   * Node.js + npm     — JavaScript/HTML tooling inside agent runs
 #   * util-linux         — unshare / setpriv / prlimit (namespaces, uid drop, rlimits)
 #   * iproute2, nftables — ip / nft (per-tenant egress netns + default-deny firewall)
 #   * the launcher + sandbox + egress scripts at NEEV_AGENT_LAUNCHER
@@ -71,6 +66,20 @@ RUN apt-get update \
     # Lanes need search access to their own absolute HOME below this directory.
     # They cannot list it; each run directory remains private at mode 0700.
     && install -d -o 65532 -g 65532 -m 0711 /data/agents
+
+# Official Node LTS distribution, pinned to its published SHA-256. Keep npm
+# with Node so agents can inspect package availability without a missing binary.
+ADD --checksum=sha256:1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af \
+    https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.gz \
+    /tmp/neev-node.tar.gz
+RUN install -d -o 0 -g 0 -m 0755 /opt/neev/node \
+    && tar -xzf /tmp/neev-node.tar.gz --strip-components=1 -C /opt/neev/node \
+       node-v22.23.3-linux-x64/bin node-v22.23.3-linux-x64/lib node-v22.23.3-linux-x64/LICENSE \
+    && rm /tmp/neev-node.tar.gz \
+    && ln -s /opt/neev/node/bin/node /usr/local/bin/node \
+    && ln -s /opt/neev/node/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /opt/neev/node/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && node --version && npm --version
 
 # Grant the FIXED-command launch helper exactly the caps the sandbox setup needs
 # (and no more): chown the per-run workdir, drop to the tenant uid/gid, drop the

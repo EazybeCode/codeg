@@ -26,6 +26,8 @@ import {
   Plus,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { AgentRunIndicator } from "./agent-run-indicator"
+import { usePublishRunningChat } from "@/lib/neev-running-chats"
 import { Dialog, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import {
   DropdownMenu,
@@ -947,7 +949,7 @@ function ElapsedClock({ startedAt }: { startedAt: number }) {
   // `aria-live` region, and a number that changes ten times a second would be
   // announced ten times a second. The turn's status is said in words beside it.
   return (
-    <span aria-hidden className="shrink-0 tabular-nums opacity-70">
+    <span aria-hidden className="min-w-[5ch] shrink-0 tabular-nums opacity-70">
       {t("activityElapsed", {
         number: format.number(elapsedDisplay(ms, true), {
           minimumFractionDigits: 1,
@@ -1041,30 +1043,7 @@ export function ActivityTimeline({
         onClick={() => setOpen((value) => !value)}
         className="flex min-w-0 max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-start text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:hover:text-muted-foreground"
       >
-        {running && (
-          <svg
-            aria-hidden
-            viewBox="0 0 16 16"
-            className="neev-run-spinner size-3.5 shrink-0"
-          >
-            <circle
-              cx="8"
-              cy="8"
-              r="5.5"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              opacity="0.18"
-            />
-            <path
-              d="M8 2.5a5.5 5.5 0 0 1 5.5 5.5"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            />
-          </svg>
-        )}
+        {running && <AgentRunIndicator />}
         {running && startedAt !== null && (
           <ElapsedClock startedAt={startedAt} />
         )}
@@ -1430,6 +1409,7 @@ function AgentSessionView({
   )
   const ready = runtimeEnabled && connection?.state === "connected"
   const running = activeRun !== null
+  usePublishRunningChat(auth.session, "agent", session.id, running)
   /**
    * What this session runs as, from the SESSION — not from local state.
    *
@@ -1666,25 +1646,19 @@ function AgentSessionView({
               <div className="space-y-2">
                 {turn.runId === activeRun ? (
                   <>
-                    {/* The running turn gets the same line the finished ones
-                        get, which is where the clock lives. Without it a run
-                        said "Working…" and nothing else — no tool, no count,
-                        and no sign it was still moving.
-
-                        Outside the live region below on purpose: a clock
-                        inside one would be read out ten times a second. */}
-                    <ActivityTimeline
-                      items={mergeActivity(turn.activity, liveActivity)}
-                      running
-                      startedAt={turn.createdAt * 1000}
-                    />
-                    {/* Only the reply. "Still working" is said once, by the
-                        line above; a second sr-only "Working…" here meant a
-                        screen reader heard it twice for one run. */}
                     <div aria-live="polite" className="text-sm">
                       {liveText && (
                         <NativeMarkdown markdown={liveText} streaming />
                       )}
+                    </div>
+                    {/* Keep progress after the newest output, near the composer.
+                        The clock stays outside the response live region. */}
+                    <div className="pt-3">
+                      <ActivityTimeline
+                        items={mergeActivity(turn.activity, liveActivity)}
+                        running
+                        startedAt={turn.createdAt * 1000}
+                      />
                     </div>
                   </>
                 ) : (
