@@ -90,8 +90,8 @@ chrome.runtime.onConnect.addListener((port) => {
   })
 })
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  controller.onTabUpdated(tabId, changeInfo)
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  controller.onTabUpdated(tabId, changeInfo, tab)
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {

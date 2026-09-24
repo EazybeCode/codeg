@@ -520,3 +520,104 @@ test("scrolling to an element from a dead reading is refused too", async () => {
   assert.equal(results(env)[1].error, "stale_ref")
   assert.equal(env.contentCalls("scroll").length, 0)
 })
+
+test("an approval answered after the host gave up never reaches the page", async () => {
+  const { env, controller } = setup()
+  await startRun(controller, env)
+  await emitCall(env, controller, { tool: "browser_snapshot" })
+  await emitCall(env, controller, {
+    tool: "browser_click",
+    callId: "c2",
+    args: { ref: "e1:0" },
+  })
+  const pending = env.lastState().approval
+  assert.ok(pending)
+
+  // The host abandons the call at 120 s; our prompt expires just inside that.
+  const expiry = env.timers.find((timer) => timer.ms === 110000)
+  assert.ok(expiry, "the prompt is on a timer")
+  expiry.fn()
+  await settle()
+
+  assert.equal(env.lastState().approval, null, "the prompt is taken down")
+  assert.equal(results(env)[1].error, "detached")
+
+  // Approving afterwards is a no-op: the prompt is gone and so is the call.
+  await controller.onPanelMessage({
+    kind: "panel.approval",
+    id: pending.id,
+    decision: "approve",
+  })
+  await settle()
+  assert.equal(env.contentCalls("click").length, 0)
+  assert.equal(env.contentCalls("snapshot").length, 1)
+})
+
+test("a handoff prompt expires inside the host's longer window", async () => {
+  const { env, controller } = setup()
+  await startRun(controller, env)
+  await emitCall(env, controller, {
+    tool: "browser_request_user_action",
+    args: { reason: "login", instruction: "Sign in." },
+  })
+
+  const expiry = env.timers.find((timer) => timer.ms === 870000)
+  assert.ok(expiry, "870 s, inside the host's 900 s")
+  expiry.fn()
+  await settle()
+  assert.equal(env.lastState().handoff, null)
+  assert.equal(results(env)[0].error, "detached")
+})
+
+test("a reload at the same URL invalidates refs even with no url in the change", async () => {
+  const { env, controller } = setup()
+  await startRun(controller, env)
+  await emitCall(env, controller, { tool: "browser_snapshot" })
+  assert.equal(controller.guard.refsValid, true)
+
+  // Chrome reports `url` only when it changes; a reload is a bare status.
+  controller.onTabUpdated(7, { status: "loading" }, env.tabs.get(7))
+  await settle()
+
+  assert.equal(controller.guard.refsValid, false)
+  assert.equal(controller.guard.active, true)
+  assert.equal(env.port.sentOfType("target.navigated").length, 1)
+  assert.equal(env.contentCalls("reset").length, 1)
+
+  await emitCall(env, controller, {
+    tool: "browser_click",
+    callId: "c2",
+    args: { ref: "e1:0" },
+  })
+  assert.equal(results(env)[1].error, "stale_ref")
+})
+
+test("one navigation is not reported twice", async () => {
+  const { env, controller } = setup()
+  await startRun(controller, env)
+  await emitCall(env, controller, { tool: "browser_snapshot" })
+
+  const tab = env.tabs.get(7)
+  controller.onTabUpdated(7, { status: "loading" }, tab)
+  controller.onTabUpdated(7, { status: "complete" }, tab)
+  controller.onTabUpdated(7, { status: "loading" }, tab)
+  await settle()
+
+  assert.equal(env.port.sentOfType("target.navigated").length, 1)
+})
+
+test("a navigation whose URL Chrome will not show us is treated as leaving", async () => {
+  const { env, controller } = setup()
+  await startRun(controller, env)
+  // Host permission covers one origin, so a URL we cannot see is a URL that
+  // is no longer ours.
+  controller.onTabUpdated(7, { status: "loading" }, { id: 7 })
+  await settle()
+
+  assert.equal(
+    env.port.sentOfType("target.revoked")[0].reason,
+    "cross_origin_navigation"
+  )
+  assert.equal(env.port.sentOfType("target.navigated").length, 0)
+  assert.equal(controller.guard.active, false)
+})

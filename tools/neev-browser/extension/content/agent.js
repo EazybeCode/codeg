@@ -781,16 +781,23 @@
       var el = found.el
       var tag = upper(el.tagName)
       var labels = collectLabels(doc.body || doc.documentElement, new Map())
-      var sensitive = isSensitive(el)
+      // The page's redaction hint has to hold here too. The snapshot already
+      // strips these, but the approval card and the exported transcript are
+      // fed from this call, and they are written to the person's disk.
+      var redacted = !!ancestorWithAttribute(el, "data-neev-redact")
+      var sensitive = redacted || isSensitive(el)
       // Same classifier the snapshot uses, so the approval card names the
       // element exactly as the model saw it.
-      var classified = classify(el, tag, labels, false, { text: 0 }) || {}
+      var classified = classify(el, tag, labels, redacted, { text: 0 }) || {}
+      var role = classified.role || lower(tag)
+      if (redacted) role = classified.role || "hidden"
+      else if (sensitive) role = "password"
       return {
         ok: true,
         node: {
           ref: ref,
           tag: lower(tag),
-          role: sensitive ? "password" : classified.role || lower(tag),
+          role: role,
           name: sensitive ? "" : classified.name || accessibleName(el, labels),
           consequential:
             !!classified.consequential ||
@@ -872,6 +879,9 @@
       window.__neevBrowserAgent = createAgent(window)
       chromeApi.runtime.onMessage.addListener(
         function (message, sender, sendResponse) {
+          // Only this extension can reach here — `externally_connectable` is
+          // not declared — but the sender check costs nothing and says so.
+          if (!sender || sender.id !== chromeApi.runtime.id) return false
           if (!message || message.neev !== 1) return false
           window.__neevBrowserAgent
             .handle(message)

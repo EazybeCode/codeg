@@ -17,6 +17,13 @@ export const MAX_TYPE_CHARS = 2000
 export const MAX_LOG_ENTRIES = 400
 /** How long to wait for the host's `run.ended` before tearing down anyway. */
 export const END_GRACE_MS = 5000
+/**
+ * Approval and handoff prompts expire just inside the host's own call
+ * timeouts — 120 s and 900 s — so an answer can never arrive after the model
+ * has been told the call failed.
+ */
+export const APPROVAL_EXPIRY_MS = 110000
+export const HANDOFF_EXPIRY_MS = 870000
 
 class ToolError extends Error {
   constructor(slug) {
@@ -46,6 +53,7 @@ export class Controller {
     this.approvals = new Map()
     this.handoffs = new Map()
     this.seq = 0
+    this.lastNavigatedUrl = null
   }
 
   // ----------------------------------------------------------------- panel
@@ -131,6 +139,7 @@ export class Controller {
 
     this.guard = guard
     this.port = port
+    this.lastNavigatedUrl = null
     this.log = []
     this.state = emptyState()
     this.state.status = "starting"
@@ -305,7 +314,11 @@ export class Controller {
     }
 
     const decision = await this.#askApproval(tool, node, text)
-    if (decision === "cleared") throw new ToolError("detached")
+    // Cleared by Stop, or expired: the call is gone, so the page is not
+    // touched and no snapshot is taken for a result nobody is waiting for.
+    if (decision !== "approved" && decision !== "denied") {
+      throw new ToolError("detached")
+    }
     if (decision !== "approved") {
       this.#log({
         type: "action",
@@ -347,6 +360,10 @@ export class Controller {
   }
 
   async #screenshot(tab) {
+    // `captureVisibleTab` photographs whatever is active at capture time, so
+    // a tab switch between this check and the call could aim it elsewhere.
+    // Chrome's own permission check is what closes that: we hold host
+    // permission for one origin, and it throws for anything else.
     if (!tab.active) throw new ToolError("screenshot_unavailable")
     for (const quality of SCREENSHOT_QUALITIES) {
       let dataUrl
@@ -377,10 +394,13 @@ export class Controller {
     this.#pushState()
     const outcome = await new Promise((resolve) => {
       this.handoffs.set(id, resolve)
+      this.#expire(this.handoffs, id, resolve, HANDOFF_EXPIRY_MS, "handoff")
     })
     this.state.handoff = null
     this.#pushState()
-    if (outcome === "cleared") throw new ToolError("detached")
+    if (outcome !== "done" && outcome !== "skipped") {
+      throw new ToolError("detached")
+    }
     return { outcome, snapshot: await this.#snapshot() }
   }
 
@@ -410,10 +430,35 @@ export class Controller {
     this.#pushState()
     const decision = await new Promise((resolve) => {
       this.approvals.set(id, resolve)
+      this.#expire(this.approvals, id, resolve, APPROVAL_EXPIRY_MS, "approval")
     })
     this.state.approval = null
     this.#pushState()
     return decision
+  }
+
+  /**
+   * Take the prompt down before the host gives up on the call.
+   *
+   * Without this, approving at 200 s would dispatch a click the model was
+   * told had timed out at 120 s — the page acted on with nobody watching for
+   * the result. The timer is never cleared; it just finds the entry already
+   * settled and does nothing.
+   */
+  #expire(pending, id, resolve, after, label) {
+    const timer = this.env.setTimeout || globalThis.setTimeout
+    timer(() => {
+      if (pending.get(id) !== resolve) return
+      pending.delete(id)
+      this.#log({
+        type: "notice",
+        text:
+          "The " +
+          label +
+          " prompt expired before anyone answered — nothing was done to the page.",
+      })
+      resolve("expired")
+    }, after)
   }
 
   #settleApproval(id, decision) {
@@ -441,16 +486,33 @@ export class Controller {
 
   // ------------------------------------------------------------ tab events
 
-  onTabUpdated(tabId, changeInfo) {
+  onTabUpdated(tabId, changeInfo, tab) {
     const guard = this.guard
     if (!guard || !guard.active || tabId !== guard.tabId) return
-    const url = changeInfo && changeInfo.url
-    if (!url) return
-    const origin = P.originOf(url)
-    // Same-origin counts: a new document means every outstanding ref points at
-    // whatever now happens to sit in that position.
+    const change = changeInfo || {}
+    // Chrome reports `url` only when the URL *changes*, so a reload — or any
+    // document replacement at the same address — arrives as a bare
+    // `status: "loading"`. Both are navigations and both kill every ref.
+    const navigating =
+      typeof change.url === "string" || change.status === "loading"
+    if (!navigating) return
+    const url = change.url || (tab && tab.url) || null
+    // One navigation can fire several of these; once the refs are already
+    // dead for this URL there is nothing left to do. A URL we cannot see is
+    // never deduplicated — it has to be acted on every time.
+    if (url !== null && !guard.refsValid && url === this.lastNavigatedUrl) {
+      return
+    }
+    this.lastNavigatedUrl = url
+
     guard.invalidateRefs("navigation")
     this.#toContent({ kind: "reset" }).catch(noop)
+
+    // A missing URL is itself the answer. We hold host permission for the
+    // run's origin, so Chrome shows us the URL for as long as the tab is
+    // there and withholds it the moment it is not — with or without the
+    // optional `tabs` permission.
+    const origin = url ? P.originOf(url) : null
     if (origin) this.#send(P.targetNavigated(guard.runId, url))
     if (origin !== guard.origin) {
       this.#log({ type: "notice", text: "The tab left " + guard.origin + "." })

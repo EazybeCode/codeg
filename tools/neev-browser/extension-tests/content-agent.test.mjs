@@ -538,3 +538,31 @@ test("an unknown instruction is refused rather than guessed at", async () => {
     error: "not_actionable",
   })
 })
+
+test("a redacted region stays redacted in the approval card and the export", async () => {
+  const { agent } = await attached({
+    body: [
+      el("div", { "data-neev-redact": "" }, [
+        el("button", { id: "wire", text: "Wire £40,000 to Acme Ltd" }),
+        el("a", { href: "/case/8812", text: "Case 8812 — Jane Roe" }),
+      ]),
+      el("button", { id: "ok", text: "Cancel" }),
+    ],
+  })
+  const snap = await snapshot(agent, 1)
+
+  // The model already sees nothing; this is about what `describe` feeds into
+  // the approval card and the exported transcript on disk.
+  for (const ref of snap.nodes.map((node) => node.ref)) {
+    const described = await agent.handle({
+      neev: 1,
+      token: "tok",
+      kind: "describe",
+      ref,
+    })
+    if (described.node.name === "Cancel") continue
+    assert.equal(described.node.name, "", "no name escapes a redacted region")
+    assert.equal(described.node.role, "hidden")
+    assert.equal(described.node.sensitive, true)
+  }
+})

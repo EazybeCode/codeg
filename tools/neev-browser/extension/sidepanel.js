@@ -195,18 +195,7 @@ function showError(text) {
 
 // -------------------------------------------------------------- tab picker
 
-async function loadTabs() {
-  const hasTabs = await chrome.permissions.contains({ permissions: ["tabs"] })
-  if (!hasTabs) {
-    const granted = await chrome.permissions.request({ permissions: ["tabs"] })
-    if (!granted) {
-      showError(
-        "Chrome needs the tabs permission to show you a list to pick from. " +
-          "Without it Neev cannot tell you which tab is which."
-      )
-      return
-    }
-  }
+async function listTabs() {
   const all = await chrome.tabs.query({})
   candidates = all.filter(
     (tab) =>
@@ -264,7 +253,24 @@ function safeOrigin(url) {
 // ------------------------------------------------------------------ actions
 
 els.loadTabs.addEventListener("click", () => {
-  loadTabs().catch((error) => showError(String(error && error.message)))
+  // First statement in the handler, deliberately: Chrome only grants an
+  // optional permission during a user gesture, and an `await` before this
+  // point spends the gesture. `request` resolves true straight away when the
+  // permission is already held, so there is no `contains` pre-check.
+  chrome.permissions
+    .request({ permissions: ["tabs"] })
+    .then((granted) => {
+      if (!granted) {
+        showError(
+          "Chrome needs the tabs permission to show you a list to pick from. " +
+            "Without it Neev cannot tell you which tab is which."
+        )
+        return undefined
+      }
+      els.error.hidden = true
+      return listTabs()
+    })
+    .catch((error) => showError(String(error && error.message)))
 })
 
 els.attach.addEventListener("click", () => {
@@ -412,9 +418,10 @@ els.exportResults.addEventListener("click", () => {
   )
 })
 
-// If the tabs permission is already granted, fill the picker straight away.
+// If the tabs permission is already held, fill the picker straight away. This
+// only reads — it never asks — so there is no gesture to lose.
 chrome.permissions.contains({ permissions: ["tabs"] }).then((has) => {
-  if (has) loadTabs().catch(() => {})
+  if (has) listTabs().catch(() => {})
 })
 
 renderState()
