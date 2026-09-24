@@ -6,6 +6,8 @@ credential volumes, so every op's effect + the login state machine are verified
 without sockets or subprocesses. Every response is round-tripped through the DTO
 codec (and correlated where the DTO requires) so the wire stays valid."""
 
+import contextlib
+import io
 import sys
 import unittest
 from dataclasses import replace
@@ -16,6 +18,7 @@ sys.path.insert(0, str(OPERATIONS))
 
 import neev_supervisor_dto as dto  # noqa: E402
 import neev_agent_supervisor as sup  # noqa: E402
+from neev_credential_store import StoreError  # noqa: E402
 
 BOOT = dto.Id("3" * 32)
 COORD = dto.Coordinator(dto.Counter("1"), dto.Id("1" * 32))
@@ -573,10 +576,97 @@ class RecoveryAndFaultTests(unittest.TestCase):
             BOOT, volumes, exploding_driver_for, now=lambda: 1000, mint_id=_mint_factory()
         )
         supervisor.recover()
-        response = supervisor.handle(request(dto.StartLoginRequest(ticket(dto.Provider.CODEX))))
+        # The failure now also writes a sanitized diagnostic; capture it so the suite's
+        # output stays clean (its content is asserted below).
+        with contextlib.redirect_stderr(io.StringIO()):
+            response = supervisor.handle(
+                request(dto.StartLoginRequest(ticket(dto.Provider.CODEX)))
+            )
         self.assertIs(response.error.code, dto.ErrorCode.UNAVAILABLE)
         self.assertEqual(len(volumes.created), 1)
         self.assertEqual(len(volumes.revoked), 1)  # the half-provisioned volume was revoked
+
+    # -- a sign-in that dies before the provider must not die silently ----------- #
+    #
+    # Live 2026-09-24: `_start_login` mapped every exception to a bare UNAVAILABLE, the
+    # browser reported "This service is temporarily unavailable", and the server then
+    # cancelled the attempt it had just recorded — a signature indistinguishable from
+    # the user pressing Cancel. The real cause (the credential store out of loop
+    # devices at `cryptsetup open`) left no trace in any log.
+
+    def _start_and_capture(self, volumes, driver_for):
+        supervisor = sup.Supervisor(
+            BOOT, volumes, driver_for, now=lambda: 1000, mint_id=_mint_factory()
+        )
+        supervisor.recover()
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            response = supervisor.handle(
+                request(dto.StartLoginRequest(ticket(dto.Provider.CLAUDE)))
+            )
+        return response, log.getvalue()
+
+    def test_volume_provisioning_failure_names_the_stage_and_a_safe_code(self):
+        class RefusingVolumes(FakeVolumes):
+            def create(self, store_scope):
+                raise StoreError("quota")
+
+        response, log = self._start_and_capture(RefusingVolumes(), _drivers_sink()[1])
+        self.assertIs(response.error.code, dto.ErrorCode.UNAVAILABLE)
+        self.assertEqual(
+            log, "NEEV-LOGIN-DIAG provider=claude stage=volume_create code=quota\n"
+        )
+
+    def test_driver_start_failure_names_its_own_stage(self):
+        def exploding_driver_for(provider, store_scope, handle):
+            raise RuntimeError("driver init failed")
+
+        response, log = self._start_and_capture(FakeVolumes(), exploding_driver_for)
+        self.assertIs(response.error.code, dto.ErrorCode.UNAVAILABLE)
+        self.assertEqual(
+            log, "NEEV-LOGIN-DIAG provider=claude stage=driver_start code=unknown\n"
+        )
+
+    def test_diagnostic_never_echoes_an_unrecognised_code_or_a_message(self):
+        # The only codes that may appear are the fixed literals our own storage and
+        # channel layers raise. An exception carrying an attacker- or path-shaped
+        # `code` degrades to "unknown", and no message text is ever written.
+        class LeakyVolumes(FakeVolumes):
+            def create(self, store_scope):
+                error = RuntimeError("/var/lib/neev-supervisor/credentials/deadbeef")
+                error.code = "/var/lib/neev-supervisor/credentials/deadbeef"
+                raise error
+
+        response, log = self._start_and_capture(LeakyVolumes(), _drivers_sink()[1])
+        self.assertIs(response.error.code, dto.ErrorCode.UNAVAILABLE)
+        self.assertEqual(
+            log, "NEEV-LOGIN-DIAG provider=claude stage=volume_create code=unknown\n"
+        )
+        self.assertNotIn("deadbeef", log)
+
+    def test_a_broken_diagnostic_never_breaks_the_sign_in(self):
+        # Diagnostics are observability, not control flow: if writing one fails, the
+        # effect's own outcome must be unchanged.
+        class RefusingVolumes(FakeVolumes):
+            def create(self, store_scope):
+                raise StoreError("busy")
+
+        class BrokenStderr:
+            def write(self, _text):
+                raise OSError("log pipe gone")
+
+            def flush(self):
+                pass
+
+        supervisor = sup.Supervisor(
+            BOOT, RefusingVolumes(), _drivers_sink()[1],
+            now=lambda: 1000, mint_id=_mint_factory(),
+        )
+        supervisor.recover()
+        with contextlib.redirect_stderr(BrokenStderr()):
+            response = supervisor.handle(
+                request(dto.StartLoginRequest(ticket(dto.Provider.CLAUDE)))
+            )
+        self.assertIs(response.error.code, dto.ErrorCode.UNAVAILABLE)
 
     def test_cleanup_revoke_failure_reports_failed_and_quarantines(self):
         volumes = FakeVolumes(revoke_ok=False)

@@ -39,6 +39,7 @@ import errno
 import fcntl
 import os
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, Tuple
@@ -132,6 +133,53 @@ def _ensure_provider_home(home: str, provider: str) -> None:
         pass
     except OSError as error:
         raise CredentialError("credentials") from error
+
+
+# The ONLY codes a release diagnostic may name — every one is a fixed literal from
+# `neev_credential_store._SAFE_ERROR_CODES`. Anything else degrades to "unknown", so
+# no path, handle, scope or provider message can reach the daemon log through here.
+_RELEASE_DIAG_CODES = frozenset(("invalid", "unavailable", "conflict", "busy", "quota"))
+
+
+def _release_volume(volumes, scope: Scope, handle: str) -> None:
+    """Close the volume this lend opened, so it is unmapped once the run is over.
+
+    `open`/`close` are a PAIR. `open` attaches the image through an autoclear loop
+    device; closing the mapping is what detaches it. Skipping the close leaves one
+    loop device pinned per volume for the life of the container, and a container has
+    only the loop device nodes it was given. Once they are all pinned, the very next
+    `CredentialVolumes.create` fails at `cryptsetup open` ("Attaching loopback device
+    failed"), `Supervisor._start_login` turns that into a bare UNAVAILABLE, and the
+    server cancels the attempt it just recorded — every sign-in, for every provider,
+    dying one second in as "This service is temporarily unavailable". Capacity must
+    depend on how many runs are in flight, not on how many users have ever signed in.
+
+    Closing is NOT the destructive half of teardown: `close` only unmounts and
+    unmaps a mapping it has proven belongs to this exact image, while `revoke` is
+    what deletes credentials — and a lend must still never revoke.
+
+    A close that cannot be completed is deliberately not fatal. A busy unmount is
+    documented to leave the volume mounted for an administrator to inspect, the
+    store's metadata lock is non-blocking so a concurrent create/open can make this
+    transiently unavailable, and `open` revalidates and reuses a surviving mapping,
+    so the next lend converges. Failing a finished sign-in over a teardown blip would
+    be strictly worse than the leak. It is reported, never silent.
+
+    `volumes` may be a caller-supplied double that only implements `open` (the
+    documented minimum), so the close is looked up rather than assumed.
+    """
+    close = getattr(volumes, "close", None)
+    if close is None:
+        return
+    try:
+        close(scope, handle)
+    except Exception as error:  # noqa: BLE001 - deliberately non-fatal, see above
+        code = getattr(error, "code", None)
+        if type(code) is not str or code not in _RELEASE_DIAG_CODES:
+            code = "unknown"
+        with contextlib.suppress(Exception):
+            sys.stderr.write("NEEV-CRED-DIAG stage=release code=%s\n" % code)
+            sys.stderr.flush()
 
 
 @dataclass(frozen=True)
@@ -245,37 +293,51 @@ def deliver(
         except StoreError as error:
             raise CredentialError("credentials") from error
         home = os.fspath(mountpoint)
-        # The mount root must be a real directory (not a symlink) at 0700 before we
-        # touch it — refuse to chown through a swapped-in link.
+        # Everything past a SUCCESSFUL open belongs to this outer try: validation, the
+        # ownership handoff and the provider-home creation can all fail, and each one
+        # of those exits used to abandon a mapped volume. The mapping is the scarce
+        # resource (one autoclear loop device each), so the release is owed from the
+        # moment `open` returns, not merely from the moment the run starts. Both this
+        # and the run's own release happen under the per-scope run lock taken above,
+        # so no other lend for this volume can be reading it as it is unmapped.
         try:
-            info = stat_fn(home, follow_symlinks=False)
-        except OSError as error:
-            raise CredentialError("credentials") from error
-        if not stat.S_ISDIR(info.st_mode):
-            raise CredentialError("shape")
-        if stat.S_IMODE(info.st_mode) != 0o700:
-            raise CredentialError("mode")
-        # Recover first, under the lock: if a prior run crashed mid-lend the tree may
-        # still be owned by a lane uid. Restoring the canonical owner here is safe —
-        # the lock guarantees no other run for this volume — and idempotent when it
-        # is already canonical. Then lend to THIS run's lane uid; the lock means no
-        # other lane can ever hold or read the volume concurrently, so there is no
-        # chown race and refresh writes cannot interleave.
-        chown_tree(home, CANONICAL_OWNER_UID, CANONICAL_OWNER_GID)
-        # The provider's config dir must exist before it launches (Codex refuses to
-        # start otherwise). Create it under the lock, before the lend, so the following
-        # chown makes it owned by (writable to) this run's lane uid.
-        ensure_provider_home(home, provider)
-        chown_tree(home, run_uid, run_gid)
-        seen_home = home if home_as is None else home_as
-        try:
-            yield Delivery(
-                home=seen_home, env=provider_env(seen_home, provider), mount=home
-            )
+            # The mount root must be a real directory (not a symlink) at 0700 before we
+            # touch it — refuse to chown through a swapped-in link.
+            try:
+                info = stat_fn(home, follow_symlinks=False)
+            except OSError as error:
+                raise CredentialError("credentials") from error
+            if not stat.S_ISDIR(info.st_mode):
+                raise CredentialError("shape")
+            if stat.S_IMODE(info.st_mode) != 0o700:
+                raise CredentialError("mode")
+            # Recover first, under the lock: if a prior run crashed mid-lend the tree may
+            # still be owned by a lane uid. Restoring the canonical owner here is safe —
+            # the lock guarantees no other run for this volume — and idempotent when it
+            # is already canonical. Then lend to THIS run's lane uid; the lock means no
+            # other lane can ever hold or read the volume concurrently, so there is no
+            # chown race and refresh writes cannot interleave.
+            chown_tree(home, CANONICAL_OWNER_UID, CANONICAL_OWNER_GID)
+            # The provider's config dir must exist before it launches (Codex refuses to
+            # start otherwise). Create it under the lock, before the lend, so the
+            # following chown makes it owned by (writable to) this run's lane uid.
+            ensure_provider_home(home, provider)
+            chown_tree(home, run_uid, run_gid)
+            seen_home = home if home_as is None else home_as
+            try:
+                yield Delivery(
+                    home=seen_home, env=provider_env(seen_home, provider), mount=home
+                )
+            finally:
+                # Restore the canonical owner so refresh tokens written during the run
+                # (now this lane uid's) become owner-readable again and the store
+                # invariant holds at rest. Best-effort: a failure does not mask the
+                # run's result; the next lend (or the supervisor's reconcile)
+                # re-recovers it. A refusal BEFORE the lend never chowned, and must not
+                # start now — a tree of the wrong shape or mode is not ours to touch.
+                with contextlib.suppress(Exception):
+                    chown_tree(home, CANONICAL_OWNER_UID, CANONICAL_OWNER_GID)
         finally:
-            # Restore the canonical owner so refresh tokens written during the run
-            # (now this lane uid's) become owner-readable again and the store
-            # invariant holds at rest. Best-effort: a failure does not mask the run's
-            # result; the next lend (or the supervisor's reconcile) re-recovers it.
-            with contextlib.suppress(Exception):
-                chown_tree(home, CANONICAL_OWNER_UID, CANONICAL_OWNER_GID)
+            # Ownership first, then give the mapping back: at rest a volume is
+            # canonically owned AND unmapped.
+            _release_volume(volumes, scope, handle)

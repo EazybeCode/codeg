@@ -8,7 +8,9 @@ missing credentials, shape/mode enforcement, the recover→lend→restore owners
 sequence held across the child's lifetime, honest busy on a held lock, and per-scope
 lock isolation (different users never block or expose each other)."""
 
+import contextlib
 import fcntl
+import io
 import os
 import stat
 import sys
@@ -24,10 +26,13 @@ from neev_credential_store import Scope, StoreError  # noqa: E402
 
 
 class FakeVolumes:
-    def __init__(self, seeded):
+    def __init__(self, seeded, close_error=None, on_close=None):
         self._seeded = seeded  # {(org, user, provider, handle): path}
+        self._close_error = close_error
+        self._on_close = on_close
         self.opened = []
         self.closed = []
+        self.revoked = []
 
     def open(self, scope, handle):
         assert isinstance(scope, Scope)
@@ -37,8 +42,28 @@ class FakeVolumes:
         except KeyError:
             raise StoreError("unavailable") from None
 
-    def close(self, scope, handle):  # the launcher must NEVER unmount/delete
+    def close(self, scope, handle):
+        # `close` unmaps; it is NOT the destructive half. A lend gives the mapping
+        # (and its autoclear loop device) back so a volume is unmapped at rest.
+        assert isinstance(scope, Scope)
         self.closed.append((scope.org_id, scope.user_id, scope.provider, handle))
+        if self._on_close is not None:
+            self._on_close()
+        if self._close_error is not None:
+            raise self._close_error
+
+    def revoke(self, scope, handle):  # the launcher must NEVER delete credentials
+        self.revoked.append((scope.org_id, scope.user_id, scope.provider, handle))
+
+
+class OpenOnlyVolumes:
+    """The documented minimum a caller may supply: `open(scope, handle) -> path`."""
+
+    def __init__(self, seeded):
+        self._seeded = seeded
+
+    def open(self, scope, handle):
+        return self._seeded[(scope.org_id, scope.user_id, scope.provider, handle)]
 
 
 def fake_stat(perm=0o700, isdir=True):
@@ -140,9 +165,11 @@ class DeliverTests(unittest.TestCase):
                 chown.calls,
                 [("/mnt/vol-h1", C, C), ("/mnt/vol-h1", 61000, 61000)],
             )
-        # On exit the canonical owner is restored, and nothing was unmounted/deleted.
+        # On exit the canonical owner is restored, the mapping is given back, and
+        # nothing was DELETED — close unmaps, revoke destroys, and a lend never revokes.
         self.assertEqual(chown.calls[-1], ("/mnt/vol-h1", C, C))
-        self.assertEqual(volumes.closed, [])
+        self.assertEqual(volumes.closed, [(3, 7, "claude", "h1")])
+        self.assertEqual(volumes.revoked, [])
 
     def test_home_as_sets_seen_home_while_chown_targets_the_physical_mount(self):
         # With a bind delivery, the provider's HOME is the lane-traversable path,
@@ -244,6 +271,177 @@ class DeliverTests(unittest.TestCase):
             credentials.RUN_LOCK_TIMEOUT_SECONDS = saved
         self.assertEqual(caught.exception.category, "busy")
         self.assertEqual(chown.calls, [])  # never touched the volume
+
+    # -- releasing the mapping (the loop-device leak that broke every sign-in) ---- #
+    #
+    # Live 2026-09-24: `deliver` opened volumes and never closed them, so every volume
+    # ever lent kept its dm mapping — and with it one autoclear loop device — for the
+    # life of the container. The deployment had two loop nodes; once two connections
+    # held them, `CredentialVolumes.create` failed at `cryptsetup open` for EVERY new
+    # sign-in, the supervisor reported a bare UNAVAILABLE, and the server cancelled the
+    # attempt it had just recorded. Users saw "This service is temporarily unavailable"
+    # one second after pressing Connect, with nothing in any log.
+
+    def test_release_runs_under_the_scope_run_lock(self):
+        # The safety property behind unmapping at all: the close happens while this
+        # scope's run lock is still held, so no other lend for the SAME volume can be
+        # reading the mapping as it goes away. Proven, not asserted: a fresh fd on the
+        # same lockfile must fail to take it while close is running (flock conflicts
+        # across open file descriptions, including within one process).
+        observed = {}
+
+        def probe():
+            fd = os.open(
+                os.path.join(self.lock_dir, "3-7-claude.lock"),
+                os.O_RDWR | os.O_CREAT, 0o600,
+            )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                observed["held"] = False  # we got it -> deliver had already let go
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                observed["held"] = True
+            finally:
+                os.close(fd)
+
+        volumes = FakeVolumes({(3, 7, "claude", "h1"): "/mnt/vol-h1"}, on_close=probe)
+        with deliver(
+            volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+            self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+        ):
+            pass
+        self.assertEqual(volumes.closed, [(3, 7, "claude", "h1")])
+        self.assertTrue(observed["held"])
+
+    def test_release_runs_when_the_run_fails(self):
+        volumes = self._volumes()
+        with self.assertRaises(RuntimeError):
+            with deliver(
+                volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+                self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+            ):
+                raise RuntimeError("child failed / cancelled")
+        self.assertEqual(volumes.closed, [(3, 7, "claude", "h1")])
+
+    def test_release_runs_when_the_lend_is_refused_after_open(self):
+        # Everything between a successful `open` and the lend can refuse: a mount root
+        # of the wrong shape or mode, a failing stat, a provider-home creation that
+        # raises. Each of those exits owes the mapping back too — leaking one per
+        # refusal is how the pool is exhausted by attempts that never ran at all.
+        cases = [
+            (dict(stat_fn=fake_stat(perm=0o755)), "mode"),
+            (dict(stat_fn=fake_stat(isdir=False)), "shape"),
+        ]
+        for kwargs, category in cases:
+            volumes = self._volumes()
+            with self.assertRaises(credentials.CredentialError) as caught:
+                with deliver(
+                    volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+                    self.lock_dir, chown_tree=RecordingChown(), **kwargs,
+                ):
+                    pass
+            self.assertEqual(caught.exception.category, category)
+            self.assertEqual(volumes.closed, [(3, 7, "claude", "h1")], category)
+
+    def test_release_runs_when_preparing_the_provider_home_raises(self):
+        volumes, chown = self._volumes(), RecordingChown()
+
+        def boom(_home, _provider):
+            raise OSError("cannot create config dir")
+
+        # An OSError raised inside the lend surfaces through the run lock's own OSError
+        # handling as CredentialError("lock") — a pre-existing mislabel, asserted here
+        # as observed rather than quietly changed; what this test is about is that the
+        # mapping is still given back on the way out.
+        with self.assertRaises(credentials.CredentialError):
+            with deliver(
+                volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+                self.lock_dir, chown_tree=chown, stat_fn=fake_stat(),
+                ensure_provider_home=boom,
+            ):
+                pass
+        self.assertEqual(volumes.closed, [(3, 7, "claude", "h1")])
+        # It had already chowned to canonical by then, so that is restored too.
+        C = credentials.CANONICAL_OWNER_UID
+        self.assertEqual(chown.calls[-1], ("/mnt/vol-h1", C, C))
+
+    def test_a_refusal_before_open_never_closes_anything(self):
+        # `open` itself failing means there is no mapping of ours to give back, and
+        # closing on a handle we were refused would be a cross-scope action.
+        volumes = self._volumes()
+        with self.assertRaises(credentials.CredentialError):
+            with deliver(
+                volumes, "org:3/user:8", "claude", "h1", 61000, 61000,
+                self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+            ):
+                pass
+        self.assertEqual(volumes.closed, [])
+
+    def test_a_close_that_fails_is_reported_and_does_not_fail_the_run(self):
+        # A busy unmount is documented to leave the volume for an administrator, the
+        # store's metadata lock is non-blocking so a concurrent create can make this
+        # transiently unavailable, and `open` revalidates and reuses a surviving
+        # mapping. Failing a finished sign-in over that would be worse than the leak —
+        # but it must never be silent.
+        volumes = FakeVolumes(
+            {(3, 7, "claude", "h1"): "/mnt/vol-h1"}, close_error=StoreError("busy")
+        )
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            with deliver(
+                volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+                self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+            ) as delivery:
+                self.assertEqual(delivery.home, "/mnt/vol-h1")
+        self.assertEqual(log.getvalue(), "NEEV-CRED-DIAG stage=release code=busy\n")
+
+    def test_a_close_failure_reports_only_an_allowlisted_code(self):
+        # An exception from outside the store's fixed vocabulary must not put its
+        # message — which could carry a path or a handle — into the daemon log.
+        volumes = FakeVolumes(
+            {(3, 7, "claude", "h1"): "/mnt/vol-h1"},
+            close_error=RuntimeError("/var/lib/neev-supervisor/credentials/deadbeef"),
+        )
+        with contextlib.redirect_stderr(io.StringIO()) as log:
+            with deliver(
+                volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+                self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+            ):
+                pass
+        self.assertEqual(log.getvalue(), "NEEV-CRED-DIAG stage=release code=unknown\n")
+        self.assertNotIn("deadbeef", log.getvalue())
+
+    def test_volumes_without_close_are_still_supported(self):
+        # `open(scope, handle) -> path` is the documented minimum for a caller-supplied
+        # double; a missing close is not an error.
+        volumes = OpenOnlyVolumes({(3, 7, "claude", "h1"): "/mnt/vol-h1"})
+        with deliver(
+            volumes, "org:3/user:7", "claude", "h1", 61000, 61000,
+            self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+        ) as delivery:
+            self.assertEqual(delivery.home, "/mnt/vol-h1")
+
+    def test_repeated_connections_never_accumulate_open_volumes(self):
+        # The invariant that keeps the pool bounded: after N sign-ins/runs across
+        # several users and both providers, nothing is left mapped. Capacity depends on
+        # how many lends are IN FLIGHT, never on how many users have ever signed in.
+        seeded = {
+            (3, user, provider, f"h{user}{provider}"): f"/mnt/vol-{user}-{provider}"
+            for user in (7, 8, 9)
+            for provider in ("claude", "codex")
+        }
+        volumes = FakeVolumes(seeded)
+        for _round in range(3):
+            for (org, user, provider, handle) in sorted(seeded):
+                with deliver(
+                    volumes, f"org:{org}/user:{user}", provider, handle, 61000, 61000,
+                    self.lock_dir, chown_tree=RecordingChown(), stat_fn=fake_stat(),
+                ):
+                    pass
+        self.assertEqual(len(volumes.opened), 18)
+        # Every open was paired with a close of the SAME scope and handle: a lend can
+        # never unmap another user's or another provider's volume.
+        self.assertEqual(volumes.closed, volumes.opened)
+        self.assertEqual(volumes.revoked, [])
 
     def test_different_scopes_do_not_block_each_other(self):
         # Holding user 7's lock must not stop user 9's delivery (different volume,

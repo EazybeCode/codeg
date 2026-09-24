@@ -212,6 +212,102 @@ it("replays one request key so a retried connect cannot start two sign-ins", asy
   expect(keys[0]).toBe(keys[1])
 })
 
+/**
+ * Live 2026-09-24: the supervisor could not provision a credential volume, so the
+ * server cancelled the attempt it had just recorded and answered 503. The key was
+ * kept, every later click replayed it, and the server — matching the key to that
+ * cancelled attempt — answered 409 forever. The panel reported "This information
+ * changed, or the sign-in method is linked to another account" for what was not an
+ * account problem, and Connect never worked again without clearing site storage.
+ */
+it("retires a connect key the server has told us is spent", async () => {
+  const keys: string[] = []
+  let answer = 503
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+    [CONNECT]: (init) => {
+      keys.push(
+        (JSON.parse(init.body as string) as { requestKey: string }).requestKey
+      )
+      if (answer !== 200) {
+        const status = answer
+        // The 503 leaves the key spent but does not PROVE it; the 409 does.
+        answer = answer === 503 ? 409 : 200
+        return json({ error: "refused" }, status)
+      }
+      return json(
+        {
+          outcome: "pending",
+          attemptId: ATTEMPT_ID,
+          expiresAt: FAR_FUTURE,
+          connection: null,
+        },
+        202
+      )
+    },
+    [ATTEMPT]: () => json({ state: "pending", expiresAt: FAR_FUTURE }),
+  })
+  const user = userEvent.setup()
+  mount()
+  const connect = async () =>
+    user.click(await screen.findByRole("button", { name: "Connect claude" }))
+  await connect()
+  expect(await screen.findByRole("alert")).toBeVisible()
+  // The 503 may have come from a gateway AFTER the backend admitted the request, so
+  // the attempt may be live: the key is kept and this click replays it.
+  await connect()
+  await waitFor(() => expect(keys).toHaveLength(2))
+  expect(keys[1]).toBe(keys[0])
+  // The 409 is the application's own answer and proves the key is spent, so the next
+  // click starts a fresh sign-in instead of replaying a dead one forever.
+  await connect()
+  await waitFor(() => expect(keys).toHaveLength(3))
+  expect(keys[2]).not.toBe(keys[0])
+  expect(await screen.findByText("Waiting for sign-in…")).toBeVisible()
+})
+
+it("keeps the connect key when a gateway answers for the backend", async () => {
+  // 502/504 are the reverse proxy's, not the application's: they are no evidence the
+  // attempt died, so replaying the same key resumes it rather than stranding it.
+  for (const status of [502, 504]) {
+    const keys: string[] = []
+    let first = true
+    mockNativeSession(undefined, {
+      "GET /api/neev/agent/connections": () => json(wiring("not_signed_in")),
+      [CONNECT]: (init) => {
+        keys.push(
+          (JSON.parse(init.body as string) as { requestKey: string }).requestKey
+        )
+        if (first) {
+          first = false
+          return json({ error: "gateway" }, status)
+        }
+        return json(
+          {
+            outcome: "pending",
+            attemptId: ATTEMPT_ID,
+            expiresAt: FAR_FUTURE,
+            connection: null,
+          },
+          202
+        )
+      },
+      [ATTEMPT]: () => json({ state: "pending", expiresAt: FAR_FUTURE }),
+    })
+    const user = userEvent.setup()
+    mount()
+    await user.click(
+      await screen.findByRole("button", { name: "Connect claude" })
+    )
+    expect(await screen.findByRole("alert")).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Connect claude" }))
+    await waitFor(() => expect(keys).toHaveLength(2))
+    expect(keys[1]).toBe(keys[0])
+    cleanup()
+    localStorage.clear()
+  }
+})
+
 it("offers reconnect and disconnect for a connection that needs attention", async () => {
   let body: Record<string, unknown> | null = null
   let state = "reconnect_required"

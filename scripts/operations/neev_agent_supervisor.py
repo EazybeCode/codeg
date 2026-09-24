@@ -36,6 +36,7 @@ import asyncio
 import contextlib
 import json
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
@@ -180,6 +181,50 @@ class _Entry:
     storage_handle: Optional[str] = None
     receipt_id: Optional[str] = None
     cleanup_operation_id: Optional[str] = None
+
+
+# The ONLY stages and codes a sign-in start diagnostic may name. The codes are the
+# fixed literals raised by our own storage and channel layers
+# (`neev_credential_store._SAFE_ERROR_CODES`, `neev_slot_proxy.SlotProxyError`,
+# `neev_agent_supervisor_main.ChannelError`, `neev_agent_credentials.CredentialError`);
+# anything else degrades to "unknown". Nothing derived from a provider, a path, a
+# handle or an exception message is ever written.
+_START_DIAG_STAGES = frozenset(("volume_create", "driver_start"))
+_START_DIAG_CODES = frozenset((
+    "invalid", "unavailable", "conflict", "busy", "quota",
+    "quarantined", "occupied", "slot_quarantined", "teardown_failed",
+    "credentials", "handle", "uid", "home", "shape", "mode",
+))
+
+
+def _report_start_failure(provider, stage: str, error: BaseException) -> None:
+    """Emit ONE sanitized line when a sign-in dies before it ever reaches the provider.
+
+    `_start_login` maps every exception to a bare UNAVAILABLE, which the browser shows
+    as "This service is temporarily unavailable" — and the server, having already
+    recorded the attempt, then cancels it. That signature (attempt pending, connect
+    abandoned, cancel completed, one second apart) was indistinguishable from a user
+    pressing Cancel, and nothing anywhere recorded which step failed. Live on
+    2026-09-24 that cost hours: the real cause was the credential store running out of
+    loop devices at `cryptsetup open`, and it left no trace at all.
+
+    Diagnostics must never break the effect, so every failure here is swallowed.
+    """
+    try:
+        code = getattr(error, "code", None)
+        if type(code) is not str or code not in _START_DIAG_CODES:
+            code = "unknown"
+        name = getattr(provider, "value", None)
+        if type(name) is not str or name not in ("claude", "codex"):
+            name = "unknown"
+        if stage not in _START_DIAG_STAGES:
+            stage = "unknown"
+        sys.stderr.write(
+            "NEEV-LOGIN-DIAG provider=%s stage=%s code=%s\n" % (name, stage, code)
+        )
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 class Supervisor:
@@ -460,14 +505,16 @@ class Supervisor:
         store_scope = self._store_scope(binding.scope)
         try:
             handle = self._volumes.create(store_scope)
-        except Exception:
+        except Exception as error:
+            _report_start_failure(binding.scope.provider, "volume_create", error)
             raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
         # From here the volume EXISTS; any failure building/starting the driver must
         # tear it down durably (revoke), never leak a half-provisioned volume.
         try:
             driver = self._driver_for(binding.scope.provider, store_scope, handle)
             driver.start()
-        except Exception:
+        except Exception as error:
+            _report_start_failure(binding.scope.provider, "driver_start", error)
             self._revoke_volume(binding.scope, handle)
             raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
         attempt = _Attempt(

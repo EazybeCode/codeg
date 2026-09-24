@@ -47,6 +47,7 @@ import {
   type NeevAgentProvider,
   type NeevAttemptState,
 } from "@/lib/neev-agent-sessions-client"
+import { NativeClientError } from "@/lib/neev-client"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeError } from "./native-boundary"
 
@@ -339,11 +340,39 @@ export function NativeAgentConnectionsPanel({
     try {
       await beginSignIn(provider)
     } catch (cause) {
+      forgetSpentKey(provider, cause)
       setError(cause)
       auth.handleAuthorityError(cause)
     } finally {
       setBusy(null)
     }
+  }
+
+  /**
+   * Drop this provider's connect key on the ONE answer that proves it is spent.
+   *
+   * The key is an idempotency key, so it may only be retired when the previous
+   * attempt's fate is known. `409` is that proof and nothing else is: it is the
+   * application's own reply, and it means the server matched this key to a recorded
+   * connect operation whose attempt is no longer replayable — which is exactly what a
+   * sign-in the server started and then cancelled itself leaves behind. Without this,
+   * one such failure poisons the key permanently: every later click replays it,
+   * earns 409 again, and the panel reports "This information changed, or the sign-in
+   * method is linked to another account" for what is not an account problem at all.
+   *
+   * Everything else keeps the key, deliberately. A 502/503/504 may come from the
+   * reverse proxy AFTER the backend admitted the request, so it is no evidence the
+   * attempt died; a timeout, abort or transport failure carries no answer at all.
+   * In each of those the attempt may be live, and replaying the same key resumes it
+   * instead of stranding it with nothing left to cancel it by.
+   */
+  function forgetSpentKey(provider: NeevAgentProvider, cause: unknown): void {
+    if (
+      cause instanceof NativeClientError &&
+      cause.status === 409 &&
+      cause.kind === "conflict"
+    )
+      pendingKeys.current.delete(provider)
   }
 
   /** Start a sign-in. The caller owns `busy` and the error reporting. */
