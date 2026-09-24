@@ -34,7 +34,10 @@ dependency in either half.
 - **Redaction.** No form field value ever reaches the model — text fields
   report only filled or empty. Password and hidden inputs are reduced to a
   marker with no name. No cookies, storage, or raw HTML. Snapshots are capped
-  at 200 nodes, 120 chars per string, 48 KB, with truncation reported.
+  at 200 nodes, 120 chars per string, 48 KB, with truncation reported. The
+  extension clips first and sets `truncated` itself; the host honours that flag
+  rather than recomputing it from a node count that has already been clipped,
+  so a page of 5000 elements is never reported as fully read.
 - **Tool surface.** Six tools, allowlisted by name. No JavaScript evaluation,
   no navigation, no tab creation, no storage access. Arguments are validated in
   the MCP server before the socket is touched — the schema is treated as
@@ -63,7 +66,21 @@ dependency in either half.
 
 ## Verification
 
-`tools/neev-browser/companion/run_tests.sh` — **151 tests pass** on Python
+Two suites, both offline, neither needing a browser, a network, an installed
+extension, or a provider:
+
+```bash
+tools/neev-browser/companion/run_tests.sh        # 156 tests, Python stdlib
+tools/neev-browser/extension-tests/run_tests.sh  #  82 tests, node --test
+```
+
+Both green — 156 and 82 — on Python 3.9.6 and Node v18.15.0. The extension
+suite syntax-checks every shipped `.js` file and then exercises the protocol
+builders, the scope guard, the run controller and the page agent against a
+hand-built DOM; `background.js` is the only file that touches `chrome`, which
+is what makes the rest reachable from Node.
+
+`tools/neev-browser/companion/run_tests.sh` — **156 tests pass** on Python
 3.9.6, offline, with no provider invoked. Coverage: frame codec including
 truncation and oversize; protocol validation; origin normalisation rejecting
 non-http schemes, userinfo, and inconsistent IPv6 forms; the scope guard and
@@ -87,10 +104,54 @@ CLI interfaces were validated live with `--version` / `--help` only —
 `claude` 2.1.247 and `codex-cli` 0.154.0-alpha.6.2. No credential file was
 read and no paid run was made.
 
-**Not verified, and not claimed:** no run against a real Chrome, a real page,
-or a real provider has been performed. The extension has not been loaded. The
-native host has not been registered. Installation is the user's explicit final
-step and no part of it was carried out here.
+## What the cross-review found
+
+Both halves were reviewed against each other before packaging. Six findings
+came out of it; all six are closed.
+
+1. **`truncated` was lost at the boundary.** The extension clips to 200 nodes
+   before sending, and the host recomputed the flag from the node count it
+   received — so it always said nothing was dropped, and the model was told it
+   had read a whole page when it had read 200 of 5000 elements. Fixed in
+   `bound_snapshot` (`19ef7899`): the host now honours an incoming `true`.
+2. **`chrome.permissions.request` sat behind an `await`**, which spends the
+   user gesture Chrome requires — most likely making the first-run tab picker
+   unusable. The request is now the first statement in the click.
+3. **A late approval still clicked the page.** Approving at 200 s dispatched a
+   click the model had been told timed out at 120 s. Prompts now expire at
+   110 s and 870 s, just inside the host's own call timeouts, and an expired
+   prompt touches nothing and takes no snapshot.
+4. **A same-URL reload did not invalidate element references** at the guard or
+   host layer, because Chrome reports `url` only when it changes. `loading` now
+   counts as a navigation, and a navigation whose URL Chrome will not show us is
+   treated as leaving the origin.
+5. **`browser_scroll` with a `ref` skipped the `refsValid` check.** Now checked
+   in the extension. `REF_TOOLS` stays `[click, type]` on both sides
+   deliberately: a scroll to the wrong element is a wasted call, not a wrong
+   action, and two mirrored lists that agree beat three checks on a scroll.
+6. **`data-neev-redact` did not hold in `describe`.** A button or link inside a
+   redacted region was stripped from snapshots but kept its accessible name in
+   the approval card and in the exported transcript on disk. It is redacted
+   there now.
+
+## Not verified, and not claimed
+
+This is the honest boundary of the package:
+
+- **Nothing has run in a real Chrome.** Not the extension, not the native host,
+  not one page. Everything either half asserts about user-gesture context,
+  withheld `changeInfo.url`, `captureVisibleTab` behaviour, or synthetic-event
+  fidelity is reasoning from Chrome's documented API contracts, not
+  observation. That should be the first thing anyone checks.
+- **No provider has been run.** `claude` and `codex` were validated with
+  `--version` / `--help` only. No credential file was read and no paid run was
+  made.
+- **Nothing is installed.** The extension has not been loaded and the native
+  host has not been registered. Installation is the user's explicit final step
+  and no part of it was carried out here.
+- A 380px side-panel layout was inspected visually by root through a static
+  preview. No extension API was exercised by it, so it says the layout renders
+  and nothing more.
 
 ## Environment notes
 
@@ -109,7 +170,8 @@ Documented in `tools/neev-browser/README.md` and worth repeating here:
 
 - Actions are dispatched from a content script, so `event.isTrusted` is false.
   Sites that gate on trusted input will not respond. `chrome.debugger` would
-  fix this and is deliberately not used in this version.
+  fix this; it is **not declared in the manifest at all**, not merely left
+  unrequested, so the install carries no debugger warning.
 - Native browser UI — file pickers, the address bar, extension dialogs — is out
   of reach. The agent must ask the user via `browser_request_user_action`.
 - Chrome/Chromium/Brave only.
@@ -119,3 +181,13 @@ Documented in `tools/neev-browser/README.md` and worth repeating here:
 - One tab, one run. The provider layer is shaped so a third CLI could be
   added; only Claude and Codex are implemented and no broader support is
   claimed.
+- **Every click and keystroke needs a human Approve**, so a run is never
+  unattended. This is the deliberate strict-first choice for a first version,
+  not an oversight. Relaxing it to consequential actions only is one condition
+  in the extension's `#clickOrType` — a change to make on evidence.
+- The optional `tabs` permission is requested on a click, not at install, so
+  Chrome shows no tab-reading warning up front. Declining it leaves the picker
+  with blank titles and URLs, since Chrome withholds them.
+- Element references die on any navigation, including a reload. The agent must
+  call `browser_snapshot` again before it can act; a reference from the old
+  document is refused at three independent layers.

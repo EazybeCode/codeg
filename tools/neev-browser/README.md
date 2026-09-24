@@ -52,6 +52,13 @@ nothing else — in particular it never edits your Claude or Codex config.
 
 **4. Fully quit and reopen Chrome.**
 
+The first time you open the panel it asks for permission to list your tabs —
+that is an optional permission requested on a click, not something the install
+grants, so Chrome shows no tab-reading warning up front. Without it Chrome
+blanks the titles and URLs in the picker and you cannot tell the tabs apart.
+Access to the page itself is a separate, per-origin grant asked for when you
+press Run.
+
 To undo: `tools/neev-browser/install/uninstall.sh`. Your runs are kept.
 
 If the CLI is not where the companion expects, point it at the right binary:
@@ -151,8 +158,9 @@ Read these; they are real.
 
 - **Synthetic events.** Actions are dispatched from a content script, so
   `event.isTrusted` is false. Sites that specifically gate on trusted input
-  will not respond. `chrome.debugger` would fix this and is deliberately not
-  used in this version.
+  will not respond. `chrome.debugger` would fix this; it is **not declared in
+  the manifest at all**, so the install carries no debugger warning and no code
+  path can reach for it.
 - **No native browser UI.** File pickers, the address bar, extension dialogs
   and OS prompts are out of reach. The agent has to ask you.
 - **Chrome only.** MV3, Chrome/Chromium/Brave. No Firefox or Safari.
@@ -165,11 +173,21 @@ Read these; they are real.
 
 ## Tests
 
+Two suites, both offline, neither needing an installed extension, a browser, a
+network, or a provider. Nothing to install for either.
+
 ```bash
-tools/neev-browser/companion/run_tests.sh
+tools/neev-browser/companion/run_tests.sh      # 156 tests, Python stdlib
+tools/neev-browser/extension-tests/run_tests.sh # 82 tests, node --test
 ```
 
-Offline, standard library only, and no provider is ever invoked —
+The extension suite syntax-checks every shipped `.js` file, then runs the
+protocol builders, the scope guard, the run controller and the page agent
+against a hand-built DOM — `background.js` is the only file that touches
+`chrome`, so everything else is reachable from Node. Needs Node 18 or newer;
+verified on v18.15.0.
+
+The companion suite is standard library only, and no provider is ever invoked —
 `tests/fake_agent.py` stands in for the CLI and speaks real MCP through the
 real launcher, socket and host. The suite covers frame decoding, protocol
 validation, the tab/origin scope guard, stale-reference refusal across
