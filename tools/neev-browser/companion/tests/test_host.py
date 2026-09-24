@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 
 from neev_browser.host import Host, ProtocolError, validate
@@ -92,6 +93,20 @@ class HostTestCase(unittest.TestCase):
         thread.start()
         return thread
 
+    def await_result(self, sink, timeout=5.0):
+        """Wait for the calling thread to actually store its result.
+
+        `wait_for_pending(0)` is not the same thing: the host removes the
+        pending entry before `tool_call` returns, so a test that waits on it
+        can read `sink[0]` a beat too early.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if sink:
+                return sink[0]
+            time.sleep(0.01)
+        self.fail("no tool result arrived within %ss" % timeout)
+
 
 class StartTest(HostTestCase):
     def test_starting_a_run_reports_the_run_directory(self):
@@ -179,7 +194,7 @@ class ToolCallTest(HostTestCase):
         self.assertEqual(call["tool"], "browser_snapshot")
         self.assertEqual(call["tabId"], 5)
         self.snapshot(1, call["callId"])
-        self.assertTrue(self.host.wait_for_pending(0, timeout=2))
+        self.await_result(results)
 
     def test_a_tool_outside_the_allowlist_never_reaches_the_extension(self):
         self.start()
@@ -198,8 +213,7 @@ class ToolCallTest(HostTestCase):
         self.assertTrue(self.host.wait_for_pending(1))
         call_id = messages_of(self.out, "tool.call")[0]["callId"]
         self.snapshot(1, call_id, url="https://evil.test/page")
-        self.assertTrue(self.host.wait_for_pending(0, timeout=2))
-        self.assertEqual(results[0]["error"], "wrong_origin")
+        self.assertEqual(self.await_result(results)["error"], "wrong_origin")
         self.assertEqual(self.host.run_state("r1"), "revoked")
 
     def test_a_replayed_epoch_is_refused(self):
@@ -210,8 +224,7 @@ class ToolCallTest(HostTestCase):
             self.assertTrue(self.host.wait_for_pending(1))
             call_id = messages_of(self.out, "tool.call")[-1]["callId"]
             self.snapshot(epoch, call_id)
-            self.assertTrue(self.host.wait_for_pending(0, timeout=2))
-            self.assertEqual(results[0].get("error"), expected)
+            self.assertEqual(self.await_result(results).get("error"), expected)
 
     def test_an_unanswered_call_times_out_rather_than_hanging(self):
         self.start()
@@ -231,7 +244,7 @@ class StaleRefTest(HostTestCase):
         self.call_async("browser_snapshot", {}, results)
         self.assertTrue(self.host.wait_for_pending(1))
         self.snapshot(epoch, messages_of(self.out, "tool.call")[-1]["callId"])
-        self.assertTrue(self.host.wait_for_pending(0, timeout=2))
+        self.await_result(results)
 
     def test_clicking_needs_a_ref_from_the_current_snapshot(self):
         self.start()

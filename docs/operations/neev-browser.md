@@ -41,8 +41,13 @@ dependency in either half.
   advisory, since nothing guarantees the CLI enforced it. A browser reply that
   does not carry what the tool promised is reported as a failure rather than
   reading as success.
-- **Consequential actions** need a human Approve in the side panel. Approval
-  lives entirely in the extension; the host never sees it and cannot grant it.
+- **Every click and keystroke** needs a human Approve in the side panel — not
+  only the consequential ones. The shipped extension confirms all of them; the
+  snapshot still marks submit controls, forms and off-site links as
+  consequential so the model knows what it is choosing, and the prompt says so,
+  but the confirmation is unconditional. A run is therefore never unattended,
+  which is the deliberate first-version choice. Approval lives entirely in the
+  extension; the host never sees it and cannot grant it.
 - **IPC.** AF_UNIX inside the run directory, mode 0600, per-run token in the
   first frame. No TCP listener. The token lives in a 0600 file that is deleted
   when the run ends, and is never placed on a command line, so it appears

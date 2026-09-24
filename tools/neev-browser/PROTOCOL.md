@@ -248,6 +248,10 @@ Allowed roles: `button`, `link`, `textbox`, `checkbox`, `radio`, `select`,
 - The host caps the result at 200 nodes, 120 chars per string, 48 KB total, and
   sets `truncated: true` when it clips. Sending more is not an error; it is
   just discarded, so prefer sending the most useful 200.
+- **If you clip first, set `truncated: true` yourself.** The host honours an
+  incoming `true` and ORs it with its own clipping. Without it the model is
+  told it read the whole page when it read 200 of 5000 elements — the host
+  cannot infer this, because by then it only ever sees 200.
 
 ### `epoch` and refs
 
@@ -278,15 +282,17 @@ grant one, so a compromised agent has no path to it.
 
 `approval` is one of:
 
-- `"not_required"` — the element is not consequential.
 - `"approved"` — the user pressed Approve in the side panel; the action ran.
 - `"denied"` — the user pressed Deny. Return `ok: false` and a fresh snapshot.
   This is a **normal result, not an error**, so the model can adapt.
+- `"not_required"` — still accepted by the host, but the shipped extension
+  confirms **every** click and type, so it is not currently emitted.
 
 An element is **consequential** when it is `[type=submit]`, a bare `<button>`
 inside a `<form>`, a `<form>` itself, or an `<a>` whose resolved origin differs
-from the page's. Mark those `consequential: true` in the snapshot too, so the
-model can see what will need a human.
+from the page's. Mark those `consequential: true` in the snapshot, so the model
+knows what it is choosing, and word the prompt accordingly — but the flag does
+not decide whether the prompt appears. It always appears.
 
 When approval is pending, the panel shows the element's accessible name — as
 `textContent`, it is page-controlled — plus the tool and the reason.

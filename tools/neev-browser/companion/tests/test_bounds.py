@@ -77,6 +77,32 @@ class BoundsTest(unittest.TestCase):
         self.assertEqual(bound_snapshot("<html>")["nodes"], [])
 
 
+class TruncationSignalTest(unittest.TestCase):
+    """The extension clips to MAX_NODES itself, so counting nodes here would
+    always report a full read. The flag has to cross the boundary intact."""
+
+    def test_a_flag_set_by_the_extension_survives(self):
+        sent = snapshot([node(i) for i in range(MAX_NODES)], truncated=True)
+        self.assertTrue(bound_snapshot(sent)["truncated"])
+
+    def test_a_full_page_within_the_caps_still_reports_no_truncation(self):
+        sent = snapshot([node(i) for i in range(MAX_NODES)], truncated=False)
+        self.assertFalse(bound_snapshot(sent)["truncated"])
+
+    def test_the_host_still_reports_truncation_the_extension_did_not(self):
+        sent = snapshot([node(i) for i in range(MAX_NODES + 1)])
+        self.assertTrue(bound_snapshot(sent)["truncated"])
+
+    def test_a_non_boolean_flag_is_not_treated_as_truncated(self):
+        for value in ("false", "true", 1, 0, [], None, {}):
+            sent = snapshot([node(0)], truncated=value)
+            self.assertFalse(bound_snapshot(sent)["truncated"], repr(value))
+
+    def test_the_flag_is_never_carried_as_a_node_or_a_string(self):
+        out = bound_snapshot(snapshot([node(0)], truncated=True))
+        self.assertIs(out["truncated"], True)
+
+
 class RunsTest(unittest.TestCase):
     def setUp(self):
         self.base = tempfile.mkdtemp()

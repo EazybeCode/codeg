@@ -92,9 +92,23 @@ result of what it just did.
 
 ### What needs your say-so
 
-Clicking a submit control, anything inside a form, or a link leaving the site
-pauses and asks you to Approve or Deny in the side panel. Declining is a normal
-answer the agent can work with, not an error.
+**Every click and every keystroke.** This first version confirms all of them:
+the run pauses, the side panel names the element, and nothing touches the page
+until you press Approve. Declining is a normal answer the agent can work with,
+not an error.
+
+Actions that submit a form or leave the site are labelled as such in the
+prompt, and the agent is told which elements are consequential before it picks
+one — but the confirmation itself is unconditional.
+
+That means **a run is never unattended**. It is the deliberate choice for a
+first version: the approval step is the thing standing between a page that can
+say anything and an agent acting on your behalf. If it proves too slow in
+practice, narrowing it to consequential actions only is a small change — but it
+is a change to make on evidence, not up front.
+
+Approval lives entirely in the extension. The companion never sees the prompt
+and cannot grant one, so nothing on the agent side has a path to it.
 
 Navigation, sign-ins, payments and browser UI are outside the tool set
 entirely. The agent has to ask you, through

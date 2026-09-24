@@ -40,7 +40,11 @@ def bound_snapshot(raw):
         return {"truncated": False, "nodes": []}
     nodes = raw.get("nodes")
     nodes = list(nodes) if isinstance(nodes, list) else []
-    out = {"truncated": len(nodes) > MAX_NODES,
+    # The extension clips to MAX_NODES before sending, so counting here would
+    # always say "nothing was dropped" — the flag has to survive the boundary
+    # or the model is told it read the whole page when it read 200 of 5000.
+    # `is True` rather than truthiness: this arrives as JSON from elsewhere.
+    out = {"truncated": raw.get("truncated") is True or len(nodes) > MAX_NODES,
            "nodes": [_bound_node(node) for node in nodes[:MAX_NODES]]}
     for key in _SNAPSHOT_KEYS:
         if key in raw:
