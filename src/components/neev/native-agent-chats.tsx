@@ -1663,6 +1663,9 @@ function AgentSessionView({
                   </>
                 ) : (
                   <>
+                    {turn.response && (
+                      <NativeMarkdown markdown={turn.response} />
+                    )}
                     <ActivityTimeline
                       items={turn.activity}
                       running={false}
@@ -1674,9 +1677,6 @@ function AgentSessionView({
                       }
                       completed={turn.status === "completed"}
                     />
-                    {turn.response && (
-                      <NativeMarkdown markdown={turn.response} />
-                    )}
                   </>
                 )}
                 {turn.status !== "completed" && turn.runId !== activeRun && (
