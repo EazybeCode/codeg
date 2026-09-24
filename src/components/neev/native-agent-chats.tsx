@@ -1042,31 +1042,12 @@ export function ActivityTimeline({
         className="flex min-w-0 max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-start text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:hover:text-muted-foreground"
       >
         {running && (
-          <svg
+          <span
             aria-hidden
-            viewBox="0 0 20 20"
-            className="neev-dot-loader size-5 shrink-0"
+            className="neev-run-mark inline-flex size-3 shrink-0 items-center justify-center text-[14px] font-semibold leading-none"
           >
-            {[
-              [4, 4],
-              [10, 4],
-              [16, 4],
-              [16, 10],
-              [16, 16],
-              [10, 16],
-              [4, 16],
-              [4, 10],
-            ].map(([cx, cy], index) => (
-              <circle
-                key={index}
-                cx={cx}
-                cy={cy}
-                r="1.4"
-                fill="currentColor"
-                style={{ animationDelay: `${index * -0.15}s` }}
-              />
-            ))}
-          </svg>
+            n
+          </span>
         )}
         {running && startedAt !== null && (
           <ElapsedClock startedAt={startedAt} />

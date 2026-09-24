@@ -2790,18 +2790,15 @@ div.monaco-diff-editor.side-by-side .editor.modified {
 
 /* ─── Agent run indicator ─── */
 
-/* Staggered dots keep the running state visible without shifting the row. */
-.neev-dot-loader circle {
-  opacity: 0.3;
-}
+/* Compact Neev initial; fixed dimensions keep the adjacent clock steady. */
 @media (prefers-reduced-motion: no-preference) {
-  .neev-dot-loader circle {
-    animation: neev-dot-chase 1.2s linear infinite;
+  .neev-run-mark {
+    animation: neev-mark-pulse 1.6s ease-in-out infinite;
   }
 }
-@keyframes neev-dot-chase {
-  0%, 15% { opacity: 1; }
-  70%, 100% { opacity: 0.2; }
+@keyframes neev-mark-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
 }
 
 /* ─── Conversation canvas (ReactFlow) ─── */
