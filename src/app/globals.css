@@ -2790,15 +2790,14 @@ div.monaco-diff-editor.side-by-side .editor.modified {
 
 /* ─── Agent run indicator ─── */
 
-/* Compact Neev initial; fixed dimensions keep the adjacent clock steady. */
+/* One small, fixed-size activity indicator beside the elapsed clock. */
 @media (prefers-reduced-motion: no-preference) {
-  .neev-run-mark {
-    animation: neev-mark-pulse 1.6s ease-in-out infinite;
+  .neev-run-spinner {
+    animation: neev-spinner-turn 1s linear infinite;
   }
 }
-@keyframes neev-mark-pulse {
-  0%, 100% { opacity: 0.45; }
-  50% { opacity: 1; }
+@keyframes neev-spinner-turn {
+  to { transform: rotate(360deg); }
 }
 
 /* ─── Conversation canvas (ReactFlow) ─── */
