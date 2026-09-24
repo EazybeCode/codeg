@@ -2790,17 +2790,18 @@ div.monaco-diff-editor.side-by-side .editor.modified {
 
 /* ─── Agent run indicator ─── */
 
-/* The agent mark on a running activity line breathes. Opacity only, so the
-   status line never shifts. Guarded by motion-safe at the usage site:
-   reduced-motion keeps the mark and drops the animation. */
-@keyframes neev-breathe {
-  0%,
-  100% {
-    opacity: 0.45;
+/* Staggered dots keep the running state visible without shifting the row. */
+.neev-dot-loader circle {
+  opacity: 0.3;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .neev-dot-loader circle {
+    animation: neev-dot-chase 1.2s linear infinite;
   }
-  50% {
-    opacity: 1;
-  }
+}
+@keyframes neev-dot-chase {
+  0%, 15% { opacity: 1; }
+  70%, 100% { opacity: 0.2; }
 }
 
 /* ─── Conversation canvas (ReactFlow) ─── */

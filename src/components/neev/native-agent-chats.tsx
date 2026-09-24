@@ -24,7 +24,6 @@ import {
   MoreHorizontal,
   PlugZap,
   Plus,
-  Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogDescription, DialogTitle } from "@/components/ui/dialog"
@@ -1042,14 +1041,35 @@ export function ActivityTimeline({
         onClick={() => setOpen((value) => !value)}
         className="flex min-w-0 max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-start text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:hover:text-muted-foreground"
       >
-        {/* The one busy indicator: while a turn runs, the agent mark breathes
-            here beside the tool in flight and the clock. One place says "still
-            working", and it is the place that says what the work IS. */}
         {running && (
-          <Sparkles
+          <svg
             aria-hidden
-            className="size-3.5 shrink-0 text-primary motion-safe:[animation:neev-breathe_2.4s_ease-in-out_infinite]"
-          />
+            viewBox="0 0 20 20"
+            className="neev-dot-loader size-5 shrink-0"
+          >
+            {[
+              [4, 4],
+              [10, 4],
+              [16, 4],
+              [16, 10],
+              [16, 16],
+              [10, 16],
+              [4, 16],
+              [4, 10],
+            ].map(([cx, cy], index) => (
+              <circle
+                key={index}
+                cx={cx}
+                cy={cy}
+                r="1.4"
+                fill="currentColor"
+                style={{ animationDelay: `${index * -0.15}s` }}
+              />
+            ))}
+          </svg>
+        )}
+        {running && startedAt !== null && (
+          <ElapsedClock startedAt={startedAt} />
         )}
         {visible.length > 0 && (
           <ChevronRight
@@ -1064,7 +1084,10 @@ export function ActivityTimeline({
             busy sentence — "Working…", then the tool in flight. The clock is
             deliberately outside it, because a live region containing a number
             that changes ten times a second is read out ten times a second. */}
-        <span className="truncate" role={running ? "status" : undefined}>
+        <span
+          className={running && !current ? "sr-only" : "truncate"}
+          role={running ? "status" : undefined}
+        >
           {running
             ? current
               ? t("activityRunningTool", { name: current.name })
@@ -1079,11 +1102,6 @@ export function ActivityTimeline({
                 // if it were a finding; the outcome is the whole story here.
                 completed && t("activityCompleted")}
         </span>
-        {/* Mounted only while the turn runs, so the tick stops with it —
-            on completion, on cancellation, and on unmount alike. */}
-        {running && startedAt !== null && (
-          <ElapsedClock startedAt={startedAt} />
-        )}
         {took !== null && (
           <span className="shrink-0 tabular-nums opacity-70">
             {t("activityElapsed", { number: took })}
