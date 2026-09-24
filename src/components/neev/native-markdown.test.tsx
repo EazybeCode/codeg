@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import { NextIntlClientProvider } from "next-intl"
 import { expect, it, vi } from "vitest"
 import messages from "@/i18n/messages/en.json"
@@ -97,4 +97,83 @@ it("holds GitHub-flavoured Markdown to the same link and HTML refusals", () => {
   expect(screen.getByRole("table")).toBeVisible()
   expect(screen.queryByRole("link", { name: "bad" })).toBeNull()
   expect(container.querySelector("img,iframe,script,style")).toBeNull()
+})
+
+/** Render a reply the way the chat does, with a `streaming` flag. */
+function show(markdown: string, streaming = false) {
+  return render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <NativeMarkdown markdown={markdown} streaming={streaming} />
+    </NextIntlClientProvider>
+  )
+}
+
+it("reads a half-arrived table, emphasis and code fence as what they are becoming", async () => {
+  // Mid-stream the closing syntax has not been typed yet. Read literally, each
+  // of these renders as its own punctuation and then snaps into place a chunk
+  // later — which is the flicker the reply was showing. Each is tested at the
+  // END of the text, because that is the only place a stream can be cut off.
+  const bold = show("A **strong sta", true)
+  expect(screen.getByText(/strong sta/).tagName).toBe("STRONG")
+  expect(bold.container).not.toHaveTextContent("**")
+  bold.unmount()
+
+  const table = show("| Section | Proposed |\n|---|---|\n| Hero | One li", true)
+  await waitFor(() => expect(screen.queryByRole("table")).not.toBeNull())
+  const grid = screen.getByRole("table")
+  expect(
+    within(grid).getByRole("columnheader", { name: "Proposed" })
+  ).toBeVisible()
+  expect(within(grid).getByRole("cell", { name: "Hero" })).toBeVisible()
+  expect(table.container).not.toHaveTextContent("|---|")
+  table.unmount()
+
+  const code = show("```ts\nconst a = 1", true)
+  await waitFor(() =>
+    expect(code.container.querySelector("pre")).toHaveTextContent("const a = 1")
+  )
+  expect(code.container).not.toHaveTextContent("```ts")
+})
+
+it("adds nothing to a finished reply that a half-arrived one would have closed", async () => {
+  // The repair appends closers. On text that is already complete it can close
+  // a span that was never open — a glob inside code, an identifier with an
+  // underscore — and write a character the author did not. Stored replies are
+  // rendered static precisely so that cannot happen.
+  const finished = "Ignore `foo/*` and _meta and `_blank`.\n\n```sh\nls\n```"
+  const { container } = show(finished)
+  await waitFor(() =>
+    expect(container.querySelector("pre")).toHaveTextContent("ls")
+  )
+  expect(screen.getByText(/Ignore/)).toHaveTextContent(
+    "Ignore foo/* and _meta and _blank."
+  )
+  // The fence closed, so its content is code and not three loose backticks.
+  expect(container).not.toHaveTextContent("```")
+  expect(container.querySelectorAll("em")).toHaveLength(0)
+})
+
+it("leaves the blocks it has already drawn alone while the last one grows", async () => {
+  // What makes a long reply readable while it streams: a finished paragraph is
+  // not re-rendered — and so not re-laid-out under the reader — every time a
+  // token lands at the end of the one below it.
+  const { container, rerender } = show("First settled.\n\nSecond gro", true)
+  await waitFor(() =>
+    expect(container.querySelectorAll("p").length).toBeGreaterThan(1)
+  )
+  const first = container.querySelectorAll("p")[0]
+  expect(first).toHaveTextContent("First settled.")
+  rerender(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <NativeMarkdown
+        markdown={"First settled.\n\nSecond growing longer."}
+        streaming
+      />
+    </NextIntlClientProvider>
+  )
+  await waitFor(() =>
+    expect(container).toHaveTextContent("Second growing longer.")
+  )
+  // The same node, not an equal one: it was never torn down and rebuilt.
+  expect(container.querySelectorAll("p")[0]).toBe(first)
 })

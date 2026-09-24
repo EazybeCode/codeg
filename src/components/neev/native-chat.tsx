@@ -814,16 +814,22 @@ function Chat({
     runIdValue: string,
     startedAt: number,
     seed: readonly NeevActivityItem[],
-    provider: string
+    provider: string,
+    // This run's own ask, when the caller has it. The thread high-water is the
+    // same thing whenever the ask has been absorbed — but an unread reply from
+    // an EARLIER run sorts below it, so reading the ask's sequence off the
+    // invocation is what makes the floor right without depending on that.
+    askSequence?: string
   ) {
-    // Everything after an await is guarded by this: a handover outlived by the
-    // next run must not touch the next run's state.
+    // Everything after an await, and every callback below, is guarded by this:
+    // a handover outlived by the next run must not touch the next run's state.
     const mine = ++generation.current
+    const current = () => scope.isCurrent() && generation.current === mine
     busy.current = true
     previewFloor.current = messagesRef.current.reduce(
       (high, item) =>
         BigInt(item.sequence) > high ? BigInt(item.sequence) : high,
-      0n
+      askSequence ? BigInt(askSequence) : 0n
     )
     previewProvider.current = provider
     setAgentBusy(true)
@@ -840,17 +846,17 @@ function Chat({
         runId: runIdValue,
         signal: scope.signal,
         onPhase: (phase) => {
-          if (scope.isCurrent() && phase === "lost")
+          if (current() && phase === "lost")
             setError(new NativeClientError("unavailable"))
         },
         onActivity: (item) => {
-          if (!scope.isCurrent()) return
+          if (!current()) return
           // `seq` is the identity: a rejoin replays the stored prefix, so this
           // upserts rather than appends and the trace cannot double.
           setLiveActivity((old) => mergeActivity(old, [item]))
         },
         onEvent: (event) => {
-          if (!scope.isCurrent()) return
+          if (!current()) return
           if (event.type === "started") setAgentText("")
           else if (event.type === "chunk")
             setAgentText((current) => current + event.text)
@@ -866,22 +872,24 @@ function Chat({
       })
     } finally {
       // The clock stops and the composer reopens: the run IS over. The text
-      // stays — it is still the only copy of the answer on screen.
-      busy.current = false
-      if (scope.isCurrent() && generation.current === mine) {
+      // stays — it is still the only copy of the answer on screen. Guarded
+      // too: `busy.current` is what tells `loadTraces` a run is in flight, and
+      // clearing it on behalf of a run that has been superseded would let the
+      // next poll rejoin the one that IS running a second time.
+      if (current()) {
+        busy.current = false
         setAgentBusy(false)
         setAgentRunId(null)
         setRunFinishedAt(Date.now())
       }
     }
-    if (!scope.isCurrent() || generation.current !== mine) return
+    if (!current()) return
     await refresh()
     await loadTraces()
     // A run that published nothing has no stored row coming, so nothing will
     // ever retire its partial text: clear it here, beside the error saying
     // why. One that ANSWERED is left to `previewStored`.
-    if (!answered && scope.isCurrent() && generation.current === mine)
-      clearPreview()
+    if (!answered && current()) clearPreview()
   }
   function clearPreview() {
     setAgentText("")
@@ -998,12 +1006,17 @@ function Chat({
         invocation.runId,
         Date.now(),
         invocation.turn.activity,
-        agentProvider
+        agentProvider,
+        invocation.message.sequence
       )
     } catch (cause) {
+      // `busy.current` rather than `scope`: a throw from this ask's own
+      // handover must not stand a later run down. The reason is still reported.
       if (scope.isCurrent()) {
-        setAgentBusy(false)
-        setAgentRunId(null)
+        if (!busy.current) {
+          setAgentBusy(false)
+          setAgentRunId(null)
+        }
         fail(cause)
       }
     }
@@ -1482,7 +1495,7 @@ function Chat({
                 completed={runCompleted}
               />
               <div aria-live="polite">
-                {agentText && <NativeMarkdown markdown={agentText} />}
+                {agentText && <NativeMarkdown markdown={agentText} streaming />}
                 {agentBusy && <span className="sr-only">{n("working")}</span>}
               </div>
             </div>

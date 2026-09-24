@@ -1650,7 +1650,7 @@ function AgentSessionView({
                     />
                     <div aria-live="polite" className="text-sm">
                       {liveText ? (
-                        <NativeMarkdown markdown={liveText} />
+                        <NativeMarkdown markdown={liveText} streaming />
                       ) : (
                         <span className="sr-only">{n("working")}</span>
                       )}
