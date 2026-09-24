@@ -288,7 +288,10 @@ it("streams a new turn and can cancel it", async () => {
   await user.click(screen.getByRole("button", { name: "Send" }))
   act(() => stream.push({ type: "chunk", text: "Working on it" }))
   expect(await screen.findByText("Working on it")).toBeVisible()
-  expect(screen.getByText("Running")).toBeVisible()
+  // One busy indicator, on the activity line — not a second copy in the
+  // header, which used to say "Running" for the same fact.
+  expect(screen.getByText("Working…")).toBeVisible()
+  expect(screen.queryByText("Running")).toBeNull()
   await user.click(screen.getByRole("button", { name: "Cancel" }))
   await waitFor(() => expect(canceled).toEqual({ runId: RUN_ID }))
   act(() =>
@@ -329,7 +332,7 @@ it("shows a refused turn's real reason instead of a pending state", async () => 
   expect(
     await screen.findByText("Agents are turned off on this server.")
   ).toBeVisible()
-  expect(screen.queryByText("Running")).toBeNull()
+  expect(screen.queryByText("Working…")).toBeNull()
 })
 
 it("refuses to accept a prompt while the provider is not signed in", async () => {

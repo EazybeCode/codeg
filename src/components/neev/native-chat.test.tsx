@@ -1088,8 +1088,8 @@ it("names the tool in flight, counts the seconds, and opens the call", async () 
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   // Working status is immediate, before any activity has arrived, and it
-  // counts from the moment the run started. (The Send button says "Working…"
-  // too, so this asks the thread rather than the page.)
+  // counts from the moment the run started. It lives on the activity line in
+  // the thread — the Send button stays "Send" and only goes disabled.
   const thread = within(await screen.findByRole("list", { name: "Messages" }))
   expect(await thread.findByRole("button", { name: /Working…/ })).toBeVisible()
   // Tenths, from the first frame: the digit that moves is the whole point.
@@ -1936,7 +1936,7 @@ it("draws the conversation before its history arrives, and posts nothing until t
   const user = userEvent.setup()
   await typeInComposer(composer, message.body)
   expect(composerText(composer)).toBe(message.body)
-  expect(screen.getByRole("button", { name: "Working…" })).toBeDisabled()
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
   expect(posts()).toEqual([])
 
   await act(async () => {

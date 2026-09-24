@@ -214,7 +214,7 @@ it("will not send while a file is still going up", async () => {
   await userEvent.setup().type(box, "Look at this")
   fireEvent.drop(box, { dataTransfer: fileDrag([png()]) })
   await screen.findByText("Uploading…")
-  expect(screen.getByRole("button", { name: "Working…" })).toBeDisabled()
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
   // Held, and it says why rather than looking ready and doing nothing.
   expect(
     screen.getByText("Waiting for the attached files to finish uploading.")

@@ -1376,7 +1376,10 @@ function Chat({
             history.scrollHeight - history.scrollTop - history.clientHeight < 48
         }}
         aria-label={t("messages")}
-        className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-4 py-3 sm:px-8"
+        // Asymmetric on purpose: the top stays tight against the header, and
+        // the last message gets room to breathe before the composer rather
+        // than ending against its top edge.
+        className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-4 pb-14 pt-3 sm:px-8"
       >
         {/* Says what is actually being waited for. The conversation's own
             history, not "your workspace" — the workspace is already here. */}
@@ -1495,9 +1498,11 @@ function Chat({
                 finishedAt={runFinishedAt}
                 completed={runCompleted}
               />
+              {/* Only the reply. "Still working" is said once, by the activity
+                  line above — a second sr-only "Working…" here was the same
+                  fact announced twice for one run. */}
               <div aria-live="polite">
                 {agentText && <NativeMarkdown markdown={agentText} streaming />}
-                {agentBusy && <span className="sr-only">{n("working")}</span>}
               </div>
             </div>
           </li>
@@ -1746,8 +1751,10 @@ function Chat({
               type="submit"
               size="icon"
               className="ms-auto rounded-md"
-              aria-label={composerBusy ? n("working") : t("send")}
-              title={composerBusy ? n("working") : t("send")}
+              // Always "Send": it is what the button does. Busy is said once,
+              // on the activity line; this control only goes disabled.
+              aria-label={t("send")}
+              title={t("send")}
               disabled={
                 loading || !sendable || (mode === "agent" && !runtimeEnabled)
               }

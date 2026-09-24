@@ -2788,6 +2788,21 @@ div.monaco-diff-editor.side-by-side .editor.modified {
   --tu-seq-7: var(--tu-accent);
 }
 
+/* ─── Agent run indicator ─── */
+
+/* The agent mark on a running activity line breathes. Opacity only, so the
+   status line never shifts. Guarded by motion-safe at the usage site:
+   reduced-motion keeps the mark and drops the animation. */
+@keyframes neev-breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 /* ─── Conversation canvas (ReactFlow) ─── */
 
 /* Running-conversation breathing ring: opacity only, on the card's ring —

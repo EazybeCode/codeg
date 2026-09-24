@@ -24,6 +24,7 @@ import {
   MoreHorizontal,
   PlugZap,
   Plus,
+  Sparkles,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogDescription, DialogTitle } from "@/components/ui/dialog"
@@ -1014,7 +1015,6 @@ export function ActivityTimeline({
   completed?: boolean
 }) {
   const t = useTranslations("NativeContent")
-  const n = useTranslations("Native")
   const [open, setOpen] = useState(false)
   const [shown, setShown] = useState<number | null>(null)
 
@@ -1042,6 +1042,15 @@ export function ActivityTimeline({
         onClick={() => setOpen((value) => !value)}
         className="flex min-w-0 max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-start text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:hover:text-muted-foreground"
       >
+        {/* The one busy indicator: while a turn runs, the agent mark breathes
+            here beside the tool in flight and the clock. One place says "still
+            working", and it is the place that says what the work IS. */}
+        {running && (
+          <Sparkles
+            aria-hidden
+            className="size-3.5 shrink-0 text-primary motion-safe:[animation:neev-breathe_2.4s_ease-in-out_infinite]"
+          />
+        )}
         {visible.length > 0 && (
           <ChevronRight
             aria-hidden
@@ -1051,7 +1060,11 @@ export function ActivityTimeline({
             )}
           />
         )}
-        <span className="truncate">
+        {/* Announced from here, and only from here: this span holds the whole
+            busy sentence — "Working…", then the tool in flight. The clock is
+            deliberately outside it, because a live region containing a number
+            that changes ten times a second is read out ten times a second. */}
+        <span className="truncate" role={running ? "status" : undefined}>
           {running
             ? current
               ? t("activityRunningTool", { name: current.name })
@@ -1159,7 +1172,6 @@ export function ActivityTimeline({
           ))}
         </ul>
       )}
-      <span className="sr-only">{running ? n("working") : ""}</span>
     </div>
   )
 }
@@ -1624,7 +1636,10 @@ function AgentSessionView({
         <ol
           ref={history}
           aria-label={t("agentTurns")}
-          className="mx-auto min-h-0 w-full max-w-[832px] flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 py-6 text-[15px] sm:px-8"
+          // Asymmetric on purpose: the first ask starts where it always did,
+          // and the last paragraph of a reply gets room to breathe before the
+          // composer instead of ending against its top edge.
+          className="mx-auto min-h-0 w-full max-w-[832px] flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 pb-14 pt-6 text-[15px] sm:px-8"
         >
           {turns.map((turn) => (
             <li key={turn.id} className="mx-auto w-full max-w-3xl space-y-3">
@@ -1648,11 +1663,12 @@ function AgentSessionView({
                       running
                       startedAt={turn.createdAt * 1000}
                     />
+                    {/* Only the reply. "Still working" is said once, by the
+                        line above; a second sr-only "Working…" here meant a
+                        screen reader heard it twice for one run. */}
                     <div aria-live="polite" className="text-sm">
-                      {liveText ? (
+                      {liveText && (
                         <NativeMarkdown markdown={liveText} streaming />
-                      ) : (
-                        <span className="sr-only">{n("working")}</span>
                       )}
                     </div>
                   </>
@@ -1844,8 +1860,10 @@ function AgentSessionView({
               type="submit"
               size="icon"
               className="ms-auto rounded-md"
-              aria-label={sending ? n("working") : t("send")}
-              title={sending ? n("working") : t("send")}
+              // Always "Send": it is what the button does. Busy is said once,
+              // on the activity line; this control only goes disabled.
+              aria-label={t("send")}
+              title={t("send")}
               disabled={
                 sending ||
                 running ||
@@ -1902,12 +1920,14 @@ function AgentSessionView({
   )
 
   function runStatusLabel() {
-    if (running)
-      return phase === "streaming"
-        ? t("agentRunning")
-        : phase === "reconnecting"
-          ? t("agentReattaching")
-          : t("agentRunLost")
+    // A healthy run is NOT reported here. The activity line beside the turn
+    // already says it, counts it, and names the tool — so this header repeated
+    // it in a second place, one that could not say anything more. What is kept
+    // is what the activity line cannot know: a run whose stream dropped.
+    if (running && phase !== "streaming")
+      return phase === "reconnecting"
+        ? t("agentReattaching")
+        : t("agentRunLost")
     if (!runtimeEnabled) return t("agentsOff")
     return t(`connectionState_${connection?.state ?? "unavailable"}`)
   }
