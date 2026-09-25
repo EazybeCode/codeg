@@ -1045,7 +1045,7 @@ export function ActivityTimeline({
   return (
     <div className="my-1.5 flex min-w-0 max-w-full items-center gap-1.5 px-1.5 py-0.5 text-[13px] leading-5 text-muted-foreground">
       {/* The accent, on the one thing that is actually happening. */}
-      {running && <AgentRunIndicator className="text-chat-accent" />}
+      {running && <AgentRunIndicator className="text-muted-foreground" />}
       {running && startedAt !== null && <ElapsedClock startedAt={startedAt} />}
       {/*
         Announced, not painted. The tool in flight already has a row of its own

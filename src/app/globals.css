@@ -981,20 +981,11 @@
   }
 }
 
-/* The one hue spent inside a chat transcript: the agent's mark, the composer's
-   focus halo, the live spinner. Its own token rather than --primary, which is
-   achromatic under the neutral presets — so the accent is explicit here and the
-   theme's own controls stay exactly as neutral as the preset makes them.
-   --chat-tool is the same idea held right back: a slate for tool rows, cool
-   enough to read as machinery beside the grey of prose.
-   The `.dark` rules come last, so they win on equal specificity. */
+/* Shared focus accent and warm user-message surfaces. */
 :root {
   --chat-accent: oklch(0.52 0.19 285);
   --chat-tool: oklch(0.52 0.035 265);
-  /* The human turn's own paper: a warm brown-tinted card that separates a
-     person's words from the agent's prose without a second accent hue.
-     Base tokens rather than brand-scoped ones, so the bubble utilities always
-     resolve — the Neev theme below only re-tunes them. */
+  /* Keep the warm brown user-message paper; navigation remains neutral. */
   --chat-user-surface: oklch(0.948 0.02 62);
   --chat-user-foreground: oklch(0.33 0.045 52);
 }
@@ -1015,41 +1006,26 @@
   }
 }
 
-/* ─── Neev brand theme: warm plum + coral ───
-   Scoped to the Neev workspace by the `data-neev-theme="brand"` marker on its
-   root element, matched with `:has()` from `:root` so that portalled surfaces
-   (dropdowns, dialogs, tooltips — all rendered under <body>) inherit the same
-   palette as the tree they were opened from. Nothing outside a mounted Neev
-   workspace is touched: on every other page the selector simply does not match
-   and the user's chosen preset stays exactly as it was.
-
-   The palette is declared as a ramp (--neev-*), and the semantic tokens below
-   point at that ramp. Only the ramp is restated for dark mode — because both
-   rules land on the same element (:root), the semantic `var()` references
-   resolve against whichever ramp won.
-
-   Expressive at the edges, neutral where you read: plum carries primary
-   buttons, the selected row and the focus ring; coral is spent only on small
-   marks; the page itself is warm ivory (light) / warm-neutral charcoal (dark)
-   and body text stays near-black / near-white. */
+/* Neev uses neutral surfaces; purple is reserved for primary controls and focus.
+   Match the workspace from :root so portalled menus share its palette. */
 :root:has([data-neev-theme="brand"]) {
   /* Brand ramp — light */
   --neev-plum: oklch(0.44 0.13 330);
   --neev-plum-hover: oklch(0.38 0.12 330);
-  --neev-plum-tint: oklch(0.945 0.024 330);
-  --neev-plum-ink: oklch(0.34 0.09 330);
+  --neev-plum-tint: oklch(0.955 0 0);
+  --neev-plum-ink: oklch(0.25 0 0);
   --neev-plum-text: oklch(0.46 0.14 330);
-  --neev-on-plum: oklch(0.99 0.006 85);
+  --neev-on-plum: oklch(0.99 0 0);
   --neev-coral: oklch(0.64 0.16 32);
   --neev-coral-tint: oklch(0.95 0.03 40);
-  --neev-surface: oklch(0.985 0.008 85);
-  --neev-surface-raised: oklch(0.998 0.003 85);
-  --neev-surface-sunken: oklch(0.968 0.012 82);
-  --neev-ink: oklch(0.23 0.02 325);
-  --neev-ink-muted: oklch(0.52 0.022 325);
-  --neev-muted: oklch(0.955 0.012 80);
-  --neev-line: oklch(0.9 0.014 75);
-  --neev-tool: oklch(0.53 0.035 200);
+  --neev-surface: oklch(1 0 0);
+  --neev-surface-raised: oklch(1 0 0);
+  --neev-surface-sunken: oklch(0.985 0 0);
+  --neev-ink: oklch(0.23 0 0);
+  --neev-ink-muted: oklch(0.52 0 0);
+  --neev-muted: oklch(0.96 0 0);
+  --neev-line: oklch(0.91 0 0);
+  --neev-tool: oklch(0.53 0 0);
 
   /* Semantic mapping — mode-independent; the ramp above is what flips. */
   --background: var(--neev-surface);
@@ -1077,9 +1053,7 @@
   --sidebar-accent-foreground: var(--neev-plum-ink);
   --sidebar-border: var(--neev-line);
   --sidebar-ring: var(--neev-plum);
-  /* Transcript hues follow the brand: plum for the agent's mark and the
-     composer halo, a subdued slate-teal for tool rows so machinery reads as
-     machinery beside plum. */
+  /* Purple focus, neutral tool activity. */
   --chat-accent: var(--neev-plum-text);
   --chat-tool: var(--neev-tool);
 }
@@ -1090,40 +1064,40 @@
   /* Brand ramp — dark */
   --neev-plum: oklch(0.72 0.13 330);
   --neev-plum-hover: oklch(0.78 0.12 330);
-  --neev-plum-tint: oklch(0.315 0.045 330);
-  --neev-plum-ink: oklch(0.93 0.04 330);
+  --neev-plum-tint: oklch(0.29 0 0);
+  --neev-plum-ink: oklch(0.94 0 0);
   --neev-plum-text: oklch(0.82 0.1 330);
-  --neev-on-plum: oklch(0.2 0.03 330);
+  --neev-on-plum: oklch(0.2 0 0);
   --neev-coral: oklch(0.75 0.13 34);
   --neev-coral-tint: oklch(0.33 0.05 34);
-  --neev-surface: oklch(0.175 0.008 325);
-  --neev-surface-raised: oklch(0.215 0.01 325);
-  --neev-surface-sunken: oklch(0.2 0.01 325);
-  --neev-ink: oklch(0.97 0.006 85);
-  --neev-ink-muted: oklch(0.72 0.015 325);
-  --neev-muted: oklch(0.265 0.012 325);
+  --neev-surface: oklch(0.175 0 0);
+  --neev-surface-raised: oklch(0.215 0 0);
+  --neev-surface-sunken: oklch(0.2 0 0);
+  --neev-ink: oklch(0.97 0 0);
+  --neev-ink-muted: oklch(0.72 0 0);
+  --neev-muted: oklch(0.265 0 0);
   --neev-line: oklch(1 0 0 / 11%);
-  --neev-tool: oklch(0.73 0.03 200);
+  --neev-tool: oklch(0.73 0 0);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]):not(.light):has([data-neev-theme="brand"]) {
     --neev-plum: oklch(0.72 0.13 330);
     --neev-plum-hover: oklch(0.78 0.12 330);
-    --neev-plum-tint: oklch(0.315 0.045 330);
-    --neev-plum-ink: oklch(0.93 0.04 330);
+    --neev-plum-tint: oklch(0.29 0 0);
+    --neev-plum-ink: oklch(0.94 0 0);
     --neev-plum-text: oklch(0.82 0.1 330);
-    --neev-on-plum: oklch(0.2 0.03 330);
+    --neev-on-plum: oklch(0.2 0 0);
     --neev-coral: oklch(0.75 0.13 34);
     --neev-coral-tint: oklch(0.33 0.05 34);
-    --neev-surface: oklch(0.175 0.008 325);
-    --neev-surface-raised: oklch(0.215 0.01 325);
-    --neev-surface-sunken: oklch(0.2 0.01 325);
-    --neev-ink: oklch(0.97 0.006 85);
-    --neev-ink-muted: oklch(0.72 0.015 325);
-    --neev-muted: oklch(0.265 0.012 325);
+    --neev-surface: oklch(0.175 0 0);
+    --neev-surface-raised: oklch(0.215 0 0);
+    --neev-surface-sunken: oklch(0.2 0 0);
+    --neev-ink: oklch(0.97 0 0);
+    --neev-ink-muted: oklch(0.72 0 0);
+    --neev-muted: oklch(0.265 0 0);
     --neev-line: oklch(1 0 0 / 11%);
-    --neev-tool: oklch(0.73 0.03 200);
+    --neev-tool: oklch(0.73 0 0);
   }
 }
 

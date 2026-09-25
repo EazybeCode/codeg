@@ -232,12 +232,7 @@ function writePreference(key: string, value: ComposerPreference): void {
   }
 }
 
-/**
- * The square beside a message, and the one place colour is spent: the agent mark
- * carries `--chat-accent` so replies are findable while scrolling, a person
- * keeps the neutral square with their initial. Decoration only — the author is
- * named in words beside it, so this is `aria-hidden`.
- */
+/** Neutral author marks; the icon and label distinguish people from agents. */
 function AuthorMark({ agent, initial }: { agent: boolean; initial: string }) {
   return (
     <span
@@ -245,7 +240,7 @@ function AuthorMark({ agent, initial }: { agent: boolean; initial: string }) {
       className={cn(
         "flex size-7 shrink-0 items-center justify-center rounded-md text-xs font-medium",
         agent
-          ? "bg-chat-accent/15 text-chat-accent ring-1 ring-inset ring-chat-accent/25"
+          ? "bg-muted text-muted-foreground ring-1 ring-inset ring-border"
           : "bg-muted text-muted-foreground"
       )}
     >

@@ -667,11 +667,9 @@ function NativeWorkspaceTree({
                   )}
                 >
                   {node.kind === "project" ? (
-                    // The single coral mark in the tree: a project is the one
-                    // row worth picking out of a column of folders.
                     <Layers3
                       aria-hidden
-                      className="size-4 shrink-0 text-neev-accent"
+                      className="size-4 shrink-0 text-muted-foreground"
                     />
                   ) : (
                     <Folder
@@ -2450,9 +2448,9 @@ function WorkspaceContent() {
                     <div
                       key={tabKey(tab)}
                       className={cn(
-                        "group/tab flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[13px] leading-5",
+                        "group/tab relative flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[13px] leading-5",
                         current
-                          ? "bg-accent text-foreground"
+                          ? "bg-accent text-foreground after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:bg-primary"
                           : "text-muted-foreground hover:bg-accent/50"
                       )}
                     >
