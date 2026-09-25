@@ -71,10 +71,10 @@ extension, or a provider:
 
 ```bash
 tools/neev-browser/companion/run_tests.sh        # 156 tests, Python stdlib
-tools/neev-browser/extension-tests/run_tests.sh  #  92 tests, node --test
+tools/neev-browser/extension-tests/run_tests.sh  # 106 tests, node --test
 ```
 
-Both green — 156 and 82 — on Python 3.9.6 and Node v18.15.0. The extension
+Both green — 156 and 106 — on Python 3.9.6 and Node v18.15.0. The extension
 suite syntax-checks every shipped `.js` file and then exercises the protocol
 builders, the scope guard, the run controller and the page agent against a
 hand-built DOM; `background.js` is the only file that touches `chrome`, which

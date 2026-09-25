@@ -7,8 +7,9 @@
  */
 
 import { Controller } from "./lib/controller.js"
+import { makePanelSlot } from "./lib/connection.js"
 
-let panelPort = null
+const panel = makePanelSlot()
 
 const env = {
   random: globalThis.crypto,
@@ -61,11 +62,12 @@ const env = {
   },
 
   toPanel(message) {
-    if (!panelPort) return
+    const port = panel.port
+    if (!port) return
     try {
-      panelPort.postMessage(message)
+      port.postMessage(message)
     } catch {
-      panelPort = null
+      panel.release(port)
     }
   },
 }
@@ -74,7 +76,10 @@ const controller = new Controller(env)
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "neev-panel") return
-  panelPort = port
+  panel.adopt(port)
+  // Posted before any listener is registered, on purpose: this snapshot is
+  // also the panel's proof that this worker really started, which is what
+  // tells it a reconnect succeeded.
   try {
     port.postMessage(controller.snapshotForPanel())
   } catch {
@@ -84,7 +89,10 @@ chrome.runtime.onConnect.addListener((port) => {
     Promise.resolve(controller.onPanelMessage(message)).catch(() => {})
   })
   port.onDisconnect.addListener(() => {
-    if (panelPort === port) panelPort = null
+    // A panel that outlived a previous worker reconnects, so a superseded
+    // port can disconnect after the live one is already adopted. Ending the
+    // run on that would kill the run the reconnect just recovered.
+    if (!panel.release(port)) return
     // Closing the panel takes the approvals with it, so the run ends too.
     controller.onPanelDisconnect()
   })

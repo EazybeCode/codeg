@@ -8,7 +8,8 @@
  * be putting markup in the panel that approves actions against it.
  */
 
-import { describe, report } from "./lib/boot.js"
+import { report } from "./lib/boot.js"
+import { PanelConnection } from "./lib/connection.js"
 
 const $ = (id) => document.getElementById(id)
 
@@ -53,62 +54,97 @@ let entries = []
 let candidates = []
 let selectedTabId = null
 
+/** True while the worker holds a run that has not ended yet. */
+let liveRun = false
+
+const LOST_RUN_TEXT =
+  "Chrome shut down the extension's background service worker, and the run " +
+  "was running inside it, so the run is over. Nothing was replayed: no " +
+  "further action was taken on the page, and the agent process ended when " +
+  "its connection to the Neev companion closed. The run badge stays on that " +
+  "tab until you reload it."
+
+const WORKER_GONE_TEXT =
+  "Chrome had already shut down the extension's background service worker, " +
+  "so this run is no longer attached. Nothing was sent and nothing further " +
+  "was done to the page."
+
+const connection = new PanelConnection({
+  connect: () => chrome.runtime.connect({ name: "neev-panel" }),
+  handlers: {
+    onMessage: onWorkerMessage,
+    onDrop: onWorkerDrop,
+    onGaveUp: onWorkerGaveUp,
+  },
+})
+
 // Connecting is the first thing in this file that can fail, and a throw here
-// would abort the module before a single listener below is registered. Caught
-// so the panel stays rendered and says what went wrong instead.
-let port = null
-try {
-  port = chrome.runtime.connect({ name: "neev-panel" })
-} catch (error) {
+// would abort the module before a single listener below is registered. The
+// failure comes back as a value instead, so the panel stays rendered and says
+// what went wrong.
+const openFailure = connection.open()
+if (openFailure) {
   report(
     "The panel could not reach the extension's background service worker (" +
-      describe(error) +
+      openFailure +
       "). Reload the extension."
   )
 }
 
-/** Post to the service worker, or say plainly that there is nobody to post to. */
-function send(message) {
-  if (!port) {
-    showError(
-      "Not connected to the extension's background service worker. Reload " +
-        "the extension, then reopen the panel."
-    )
+/**
+ * Post to the service worker, or say plainly why it did not go.
+ *
+ * `reconnect` is for messages that start something new: Chrome shutting an
+ * idle worker down costs nothing, and waking it is the normal way back. It is
+ * deliberately *not* set for stop, approval or handoff — those name state
+ * that lived in the worker that went away, so sending them to a fresh one
+ * would be answering a question nobody is asking any more.
+ */
+function send(message, { reconnect = false } = {}) {
+  if (!connection.connected && reconnect) {
+    const failure = connection.ensure()
+    if (failure) {
+      showError(
+        "Could not reach the extension's background service worker (" +
+          failure +
+          "). Reload the extension."
+      )
+      return false
+    }
+  }
+  if (!connection.connected) {
+    showError(WORKER_GONE_TEXT)
     return false
   }
-  try {
-    port.postMessage(message)
-    return true
-  } catch (error) {
-    showError("The background service worker went away: " + describe(error))
-    port = null
+  const failure = connection.post(message)
+  if (failure) {
+    showError("The background service worker went away: " + failure)
     return false
   }
+  return true
 }
 
-port?.onDisconnect.addListener(() => {
-  // A service worker that fails to register still hands back a port, then
-  // drops it immediately. Without this the panel would just sit there.
-  const why = chrome.runtime.lastError && chrome.runtime.lastError.message
-  port = null
-  report(
-    "The extension's background service worker disconnected" +
-      (why ? " (" + why + ")" : "") +
-      ". Reload the extension, then reopen the panel."
-  )
-})
-
-port?.onMessage.addListener((message) => {
+function onWorkerMessage(message) {
   if (!message) return
   if (message.kind === "sync") {
+    // A snapshot with no run, when this panel had one, is the worker telling
+    // us it restarted empty. Keep what the panel already has so the run that
+    // died is still readable and exportable, and mark it ended for the reason
+    // it actually ended for.
+    if (liveRun && !(message.state && message.state.run)) {
+      announceLostRun()
+      return
+    }
     state = message.state
     entries = message.log || []
+    liveRun = isLive(state)
     renderStream()
     renderState()
     return
   }
   if (message.kind === "state") {
     state = message.state
+    liveRun = isLive(state)
     renderState()
     return
   }
@@ -116,7 +152,55 @@ port?.onMessage.addListener((message) => {
     entries.push(message.entry)
     appendEntry(message.entry)
   }
-})
+}
+
+function isLive(next) {
+  return !!(next && next.run && next.status && next.status !== "idle")
+}
+
+function announceLostRun() {
+  liveRun = false
+  state = {
+    ...state,
+    status: "idle",
+    approval: null,
+    handoff: null,
+    ended: {
+      state: "revoked",
+      reason: "service_worker_terminated",
+      at: Date.now(),
+    },
+    error: LOST_RUN_TEXT,
+  }
+  const entry = { at: Date.now(), type: "error", text: LOST_RUN_TEXT }
+  entries.push(entry)
+  appendEntry(entry)
+  renderState()
+}
+
+function onWorkerDrop() {
+  if (liveRun) {
+    // Something was riding on that port. Reconnect — bounded — so the panel
+    // can say what became of the run instead of guessing.
+    connection.recover()
+    return
+  }
+  // Idle. Chrome terminates an idle service worker on purpose; nothing is
+  // wrong and nothing is lost, so the panel says nothing and the next thing
+  // the person does opens a fresh port.
+}
+
+// Hand the port back when the panel goes away, so the worker ends the run on
+// the panel's own teardown rather than on Chrome noticing later, and so a
+// scheduled retry cannot fire into a dying document.
+window.addEventListener("pagehide", () => connection.close())
+
+function onWorkerGaveUp() {
+  report(
+    "The extension's background service worker disconnected and would not " +
+      "start again. Reload the extension, then reopen the panel."
+  )
+}
 
 // ------------------------------------------------------------------ render
 
@@ -341,13 +425,18 @@ els.attach.addEventListener("click", () => {
         showError("Chrome did not grant access to " + origin + ".")
         return
       }
-      send({
-        kind: "panel.start",
-        provider: selectedProvider(),
-        model: els.model.value.trim() || null,
-        task,
-        tabId: tab.id,
-      })
+      // The one message that may wake a shut-down worker: it starts something
+      // new rather than answering for something the old worker held.
+      send(
+        {
+          kind: "panel.start",
+          provider: selectedProvider(),
+          model: els.model.value.trim() || null,
+          task,
+          tabId: tab.id,
+        },
+        { reconnect: true }
+      )
     })
     .catch((error) => showError(String(error && error.message)))
 })

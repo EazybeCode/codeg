@@ -166,16 +166,45 @@ involved and a slow load is never mistaken for a dead one.
   after the colon is the real error. The panel is dead; reload the extension.
 - **"Panel error: …"** — an uncaught error or rejection after load. The panel
   may be partly working.
-- **"The background service worker disconnected."** The panel loaded but
-  `background.js` did not register, or it crashed. Check the service worker's
-  own errors.
 - **A panel that is genuinely blank** — no header, no banner, no buttons — is
   none of the above, because all of those still leave the static HTML painted.
   Reading the source, everything but `#boot`, `#error` and the three
   conditional cards is unconditionally visible and no CSS rule hides a
   container at load, so a fully blank panel points at the document never
-  loading rather than at the panel script. That is an inference from the
-  source; it has not been confirmed against a real Chrome.
+  loading rather than at the panel script. Observed once, on 2026-09-25, in
+  Chrome Profile 5: the whole panel body painted in the browser's theme colour
+  rather than either of `sidepanel.css`'s palettes, which is Chrome's own side
+  panel background showing through because no extension document was rendered.
+  Reloading the extension cleared it and it has not recurred. **No cause was
+  established** — nothing in this tool's source was shown to produce it, and
+  nothing here should be read as a fix for it.
+
+### The service worker going away is not a fault
+
+Chrome terminates an idle MV3 service worker on purpose, and the panel's port
+dies with it. The panel used to call that "disconnected — reload the extension"
+and stop, which asked the person to hand-repair Chrome's normal lifecycle. It
+now reconnects instead, under three rules in `lib/connection.js`:
+
+- **Nothing is replayed.** A message that was not delivered stays undelivered.
+  Only **Grant access & run** may wake a shut-down worker, because it starts
+  something new. Stop, Approve, Deny and the handoff buttons answer for state
+  that lived in the worker that went away, so they are never re-sent to a fresh
+  one — the panel says so instead.
+- **Recovery is bounded, and never periodic.** An idle panel does not reconnect
+  at all; it waits for the next thing you do. Waking the worker on a timer
+  would only restart the same idle clock forever. A panel that had a live run
+  reconnects with backoff — 0.25 s, 0.75 s, 2 s, 5 s — then gives up and says
+  so.
+- **A reconnect counts only once the worker speaks.** `chrome.runtime.connect`
+  hands back a port even when the worker will not start, so the backoff resets
+  on the snapshot the worker posts on connect, not on the connect itself.
+
+If the worker is terminated while a run is attached, the run is genuinely over:
+it lived in that worker, and the agent process ends when the native host's
+stdin closes. The panel reconnects only to confirm that and then says so,
+keeping the activity log so the transcript is still exportable. The run badge
+stays on the page until you reload that tab.
 
 ## Limitations
 
@@ -203,7 +232,7 @@ network, or a provider. Nothing to install for either.
 
 ```bash
 tools/neev-browser/companion/run_tests.sh      # 156 tests, Python stdlib
-tools/neev-browser/extension-tests/run_tests.sh # 92 tests, node --test
+tools/neev-browser/extension-tests/run_tests.sh # 106 tests, node --test
 ```
 
 The extension suite syntax-checks every shipped `.js` file, then runs the
