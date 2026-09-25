@@ -108,7 +108,11 @@ import {
   useTabVisible,
 } from "./native-suspended-surface"
 import { NativeError } from "./native-boundary"
-import { ActivityTimeline, attachTurns } from "./native-chat-activity"
+import {
+  ActivityTimeline,
+  TranscriptBody,
+  attachTurns,
+} from "./native-chat-activity"
 
 /**
  * One conversation, two ways of speaking into it.
@@ -1605,15 +1609,27 @@ function Chat({
                 <p className="whitespace-pre-wrap break-words">
                   <MentionedText text={message.body} spans={message.mentions} />
                 </p>
+              ) : traces.has(message.id) ? (
+                /* The stored trace, replayed in place: the reply cut at the
+                   offsets the server recorded, with a row where each tool
+                   actually ran. Only ever from this reader's own sessions, and
+                   only on a reply they invoked.
+
+                   Reached only on the plain-markdown branch, which is where
+                   every agent reply lands — attachments and mention chips
+                   belong to what a PERSON wrote, and `attachTurns` pairs a
+                   trace with an agent message or with nothing. */
+                <TranscriptBody
+                  text={message.body}
+                  items={traces.get(message.id)!.activity}
+                />
               ) : (
                 <NativeMarkdown markdown={message.body} />
               )}
-              {/* The stored trace, replayed: only ever from this reader's own
-                  sessions, and only on a reply they invoked.
-
-                  Below the reply, where the live one is: a run that put its
+              {/* Below the reply, where the live footer is: a run that put its
                   progress above the answer moved every word of that answer up
-                  the screen the moment it finished. */}
+                  the screen the moment it finished. The trace itself is NOT
+                  repeated here — it is above, interleaved with the prose. */}
               {traces.has(message.id) && (
                 <ActivityTimeline
                   items={traces.get(message.id)!.activity}
@@ -1665,17 +1681,30 @@ function Chat({
                   </time>
                 )}
               </div>
-              {/* Only the reply. "Still working" is said once, by the activity
-                  line below — a second sr-only "Working…" here was the same
-                  fact announced twice for one run. */}
+              {/* The reply and the work that produced it, interleaved by the
+                  offsets the server recorded. "Still working" is said once, by
+                  the footer below — a second sr-only "Working…" here was the
+                  same fact announced twice for one run.
+
+                  Rendered as soon as there is EITHER text or activity: a run
+                  that reaches for a tool before writing a word has something
+                  real to show, and used to show nothing until the first
+                  token. */}
               <div aria-live="polite">
-                {agentText && <NativeMarkdown markdown={agentText} streaming />}
+                {(agentText || liveActivity.length > 0) && (
+                  <TranscriptBody
+                    text={agentText}
+                    items={liveActivity}
+                    streaming
+                  />
+                )}
               </div>
               {/* Progress sits AFTER the newest output, near the composer,
                   rather than above a reply that grows and scrolls it off the
                   screen. One spinner for the run, and it stays outside the live
                   region: the clock on this line changes ten times a second, and
-                  inside one it would be announced that often. */}
+                  inside one it would be announced that often. The trace is not
+                  repeated here — it is above, in place. */}
               <div className="pt-3">
                 <ActivityTimeline
                   items={liveActivity}

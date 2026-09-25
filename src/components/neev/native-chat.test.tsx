@@ -1088,10 +1088,12 @@ it("names the tool in flight, counts the seconds, and opens the call", async () 
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   // Working status is immediate, before any activity has arrived, and it
-  // counts from the moment the run started. It lives on the activity line in
-  // the thread — the Send button stays "Send" and only goes disabled.
+  // counts from the moment the run started. It is announced from the progress
+  // footer rather than printed — the tool in flight gets a row of its own in
+  // the transcript, so painting its name twice would say it twice. The Send
+  // button stays "Send" and only goes disabled.
   const thread = within(await screen.findByRole("list", { name: "Messages" }))
-  expect(await thread.findByRole("button", { name: /Working…/ })).toBeVisible()
+  expect(await thread.findByText("Working…")).toBeVisible()
   // Tenths, from the first frame: the digit that moves is the whole point.
   expect(screen.getByText("0.0s")).toBeVisible()
   await waitFor(() => expect(controller).toBeDefined())
@@ -1116,8 +1118,10 @@ it("names the tool in flight, counts the seconds, and opens the call", async () 
       )
     )
   )
-  await user.click(screen.getByRole("button", { name: /Running Bash/ }))
+  // One row, not two: `seq` is the identity, not the position.
   expect(screen.getAllByText("Bash")).toHaveLength(1)
+  // The command is on the row itself, clipped, without opening anything.
+  expect(screen.getByText("ls -a")).toBeVisible()
   // The call opens into its real arguments — a public summary of what ran.
   await user.click(screen.getByRole("button", { name: /^Bash/ }))
   expect(screen.getByText('{"command":"ls -a"}')).toBeVisible()
@@ -1330,14 +1334,15 @@ it("replays this reader's own stored trace when the conversation is reopened", a
   const user = userEvent.setup()
   mount()
   await ready()
-  // The reply is there from the message list; the trace comes from the turn.
+  // The reply is there from the message list; the trace comes from the turn,
+  // and is drawn in place rather than folded into a drawer.
   expect(await screen.findByText("do X")).toBeVisible()
-  const summary = await screen.findByRole("button", {
-    name: /1 tool calls, 1 results/,
-  })
-  await user.click(summary)
-  expect(screen.getByText("Read")).toBeVisible()
-  expect(screen.getByText("/tmp/notes.md")).toBeVisible()
+  const row = await screen.findByRole("button", { name: /^Read/ })
+  // Name and path are on the row already. The output is what a click is for.
+  expect(within(row).getByText("Read")).toBeVisible()
+  expect(within(row).getByText("/tmp/notes.md")).toBeVisible()
+  expect(screen.queryByText("two lines")).toBeNull()
+  await user.click(row)
   expect(screen.getByText("two lines")).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
@@ -1385,16 +1390,18 @@ it("says a turn completed even when tools failed on the way, and still counts th
   const user = userEvent.setup()
   mount()
   await ready()
-  const summary = await screen.findByRole("button", { name: /tool calls/ })
-  // The outcome is stated. This is the whole point: the turn answered.
-  expect(summary).toHaveTextContent("Completed")
+  // The outcome is stated on the footer. This is the whole point: the turn
+  // answered.
+  expect(await screen.findByText("Completed")).toBeVisible()
   // And the failure is NOT softened away — it really did fail, it is still
   // counted, and it still says so. One failure reads as one, not "1 steps".
-  expect(summary).toHaveTextContent("1 step failed")
-  // The error itself stays readable in the rows underneath, verbatim — the
-  // failing step is still marked failed, and opening it shows what it said.
-  await user.click(summary)
-  await user.click(screen.getByRole("button", { name: "Failed" }))
+  expect(screen.getByText("1 step failed")).toBeVisible()
+  // The failing step is marked failed on its own row, beside the command that
+  // failed, and opening it shows verbatim what the tool said.
+  const failed = screen.getByRole("button", { name: /^Bash/ })
+  expect(within(failed).getByText("python parse.py")).toBeVisible()
+  expect(within(failed).getByText("Failed")).toBeVisible()
+  await user.click(failed)
   expect(screen.getByText("python: command not found")).toBeVisible()
   expect(mock.unknown).toEqual([])
 })
@@ -1433,7 +1440,7 @@ it("re-reads only what is new after a run completes", async () => {
   const user = userEvent.setup()
   mount()
   await ready()
-  await screen.findByRole("button", { name: /1 tool calls/ })
+  await screen.findByRole("button", { name: /^Read/ })
   expect(reads).toEqual(["all"])
   await typeInComposer(
     screen.getByRole("textbox", { name: "Message" }),
@@ -1517,11 +1524,12 @@ it("rejoins a run that was still going, without re-sending anything", async () =
   // … exactly once, and it never re-posts the prompt.
   expect(posts).toEqual([])
   expect(attachments).toEqual([RUN_ID])
-  expect(
-    within(screen.getByRole("list", { name: "Messages" })).getAllByRole(
-      "listitem"
-    )
-  ).toHaveLength(2)
+  // Two MESSAGES. Counted as direct children rather than by role: a reply now
+  // draws its tool rows as a nested list inside its own item, so every
+  // `listitem` under the thread is no longer one message.
+  expect(screen.getByRole("list", { name: "Messages" }).children).toHaveLength(
+    2
+  )
 })
 
 const pushing = () => json({ ...nativeCapabilities, realtime: true })

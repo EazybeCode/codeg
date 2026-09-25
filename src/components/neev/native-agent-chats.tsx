@@ -13,17 +13,29 @@
 //    a dropped connection can never repeat a prompt's side effects. A run that
 //    cannot be followed is reported as such and needs an explicit new turn.
 
-import { useCallback, useEffect, useId, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react"
 import Link from "next/link"
 import { useFormatter, useTranslations } from "next-intl"
 import {
   ArrowUp,
   Bot,
-  ChevronRight,
+  FileText,
+  Globe,
   Lock,
   MoreHorizontal,
+  PenLine,
   PlugZap,
   Plus,
+  Search,
+  Terminal,
+  Wrench,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { AgentRunIndicator } from "./agent-run-indicator"
@@ -40,9 +52,12 @@ import {
   elapsedDisplay,
   elapsedMs,
   mergeActivity,
+  pairResults,
   runningTool,
+  splitByActivity,
   summariseActivity,
   visibleActivity,
+  type NeevToolResult,
 } from "@/lib/neev-agent-activity"
 import { type NeevActivityItem } from "@/lib/neev-agent-sessions-client"
 import { cn } from "@/lib/utils"
@@ -961,25 +976,17 @@ function ElapsedClock({ startedAt }: { startedAt: number }) {
 }
 
 /**
- * What the agent did, between what it said.
+ * The progress footer for a turn: what it is doing, and what it cost.
  *
- * Collapsed to one line by default — a run can make dozens of tool calls, and
- * unrolled they bury the answer. Opening shows one concise row per call: the
- * tool and an abbreviated command or path, with the full input and output a
- * further click away.
+ * ONE small line, and deliberately not a trace. The trace itself is drawn by
+ * `TranscriptBody`, inline and in order, where each tool actually ran — so
+ * repeating those rows down here would be the same run described twice, once
+ * in place and once in a drawer.
  *
- * Everything rendered here is model-authored text. It is displayed and nothing
- * else: never parsed into a request, never put in a URL, never executed.
- */
-/**
- * What the agent did, and what it is doing.
- *
- * A subdued line rather than a bordered panel: while a turn runs it says so
- * immediately, counts the seconds, and names the tool currently in flight; when
- * it is done it collapses to a count that opens into concise rows. The
- * provider's own bookkeeping — `end_turn`, `success`, the model line — is left
- * out, because a row that repeats what the transcript already shows is noise
- * between the reader and the answer.
+ * What is left is only what the rows cannot say: that something is still
+ * happening, how long it has been happening, how long it took, and whether the
+ * turn as a whole answered. The provider's own bookkeeping — `end_turn`,
+ * `success`, the model line — is filtered out upstream by `isNoise`.
  */
 export function ActivityTimeline({
   items,
@@ -1011,13 +1018,11 @@ export function ActivityTimeline({
    * review read as a broken one.
    *
    * The count is NOT softened: those two commands did fail, and each keeps its
-   * own error in the rows below. What was missing is the outcome beside them.
+   * own error on its own row above. What was missing is the outcome beside them.
    */
   completed?: boolean
 }) {
   const t = useTranslations("NativeContent")
-  const [open, setOpen] = useState(false)
-  const [shown, setShown] = useState<number | null>(null)
 
   const visible = visibleActivity(items)
   // What the turn ended up costing, once it is over. Whole seconds: the two
@@ -1027,148 +1032,309 @@ export function ActivityTimeline({
       ? elapsedDisplay(elapsedMs(startedAt, finishedAt), false)
       : null
   // A turn that ran no tools still took time and still finished, and that is
-  // worth one quiet line. Only a turn with NOTHING to say — no trace, no
-  // duration, no outcome — renders nothing at all.
-  if (!running && visible.length === 0 && took === null && !completed)
-    return null
+  // worth one quiet line. Only a turn with NOTHING to say — no duration, no
+  // outcome, not running — renders nothing at all.
+  if (!running && took === null && !completed) return null
   const summary = summariseActivity(visible)
   const current = running ? runningTool(visible) : null
 
   return (
-    <div className="my-1.5 text-[13px] leading-5">
+    <div className="my-1.5 flex min-w-0 max-w-full items-center gap-1.5 px-1 py-0.5 text-[13px] leading-5 text-muted-foreground">
+      {running && <AgentRunIndicator />}
+      {running && startedAt !== null && <ElapsedClock startedAt={startedAt} />}
+      {/*
+        Announced, not painted. The tool in flight already has a row of its own
+        in the transcript above, so printing its name again here would put the
+        same fact on screen twice — but a reader who cannot see that row still
+        needs to be told the run is going, and what it is doing.
+      */}
+      {running && (
+        <span className="sr-only" role="status">
+          {current
+            ? t("activityRunningTool", { name: current.name })
+            : t("activityWorking")}
+        </span>
+      )}
+      {took !== null && (
+        <span className="shrink-0 tabular-nums opacity-70">
+          {t("activityElapsed", { number: took })}
+        </span>
+      )}
+      {summary.errors > 0 && (
+        <span className="shrink-0 text-destructive">
+          {t("activityErrors", { number: summary.errors })}
+        </span>
+      )}
+      {/*
+        Last, and only once the turn is actually over. It is the answer to
+        "did this work?", which the failed-step count was being read as.
+      */}
+      {!running && completed && (
+        <span className="shrink-0">{t("activityCompleted")}</span>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The icon for a tool, by what it does.
+ *
+ * Matched on the lowercased name, so one mapping covers providers that spell
+ * the same job differently — `Bash`, `shell`, `run_command`. Anything not
+ * recognised gets the neutral wrench rather than a near-miss: an icon claiming
+ * a tool read a file when it wrote one is a statement about what ran, and this
+ * is only allowed to decorate.
+ *
+ * Order matters. `write_file` and `edit_file` both contain "file", so the
+ * writing tests come before the reading ones.
+ */
+function ToolIcon({ name }: { name: string }) {
+  const key = name.toLowerCase()
+  const shared = {
+    "aria-hidden": true,
+    className: "size-3.5 shrink-0 text-muted-foreground",
+  } as const
+  if (/bash|shell|command|terminal|exec|run/.test(key))
+    return <Terminal {...shared} />
+  if (/search|grep|glob|find|list/.test(key)) return <Search {...shared} />
+  if (/fetch|http|web|url|browse|curl/.test(key)) return <Globe {...shared} />
+  if (/write|edit|patch|apply|create|update/.test(key))
+    return <PenLine {...shared} />
+  if (/read|file|cat|view|open/.test(key)) return <FileText {...shared} />
+  return <Wrench {...shared} />
+}
+
+/**
+ * One tool invocation, as one compact row.
+ *
+ * Collapsed by default and to a single line: the tool's name, then the command
+ * or path it was given, clipped, on a quiet pill. A run can make dozens of
+ * calls and their raw output can be thousands of lines — dumped inline they
+ * bury the answer they were gathered for, so the full input and output are one
+ * click away and the click is a real, labelled, keyboard-reachable expander.
+ *
+ * `result` is the tool's own answer, folded in by `pairResults` so that one
+ * invocation is one row. It is what makes a row able to say "this failed"
+ * without a second nameless row underneath saying it.
+ *
+ * Everything rendered here is model-authored or tool-authored text. It is
+ * displayed and nothing else: never parsed into a request, never put in a URL,
+ * never executed.
+ */
+function ActivityRow({
+  item,
+  result,
+}: {
+  item: NeevActivityItem
+  /** The result folded into this call, when it has one and this is a call. */
+  result: NeevToolResult | null
+}) {
+  const t = useTranslations("NativeContent")
+  const [open, setOpen] = useState(false)
+
+  if (item.kind === "status")
+    return (
+      <li>
+        <p role="status" className="px-1 py-0.5 text-xs text-muted-foreground">
+          {item.state === "truncated"
+            ? t("activityTruncated")
+            : t("activityUnsupported", { name: item.detail ?? "" })}
+        </p>
+      </li>
+    )
+
+  // A result standing on its own: one whose call is not in this trace, or a
+  // second result for a call that already had one. Kept rather than hidden —
+  // dropping recorded output to shorten a list is the one thing a trace may
+  // not do — but it has no name of its own, so it stays a plain line.
+  if (item.kind === "tool_result") {
+    const empty = !item.output.trim()
+    return (
+      <li>
+        <button
+          type="button"
+          aria-expanded={open}
+          disabled={empty}
+          onClick={() => setOpen((value) => !value)}
+          className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-start hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
+        >
+          <span
+            className={cn(
+              "truncate text-xs",
+              item.isError ? "text-destructive" : "text-muted-foreground"
+            )}
+          >
+            {item.isError
+              ? t("activityFailed")
+              : oneLineOf(item.output) || t("activityCompleted")}
+          </span>
+        </button>
+        {open && !empty && (
+          <OutputBlock text={item.output} truncated={item.outputTruncated} />
+        )}
+      </li>
+    )
+  }
+
+  const output = result?.output.trim() ? result.output : ""
+  // Nothing to open is not a control. The input is almost always there, so this
+  // is the rare tool called with no arguments and no output recorded.
+  const empty = !item.input.trim() && !output
+  return (
+    <li>
       <button
         type="button"
         aria-expanded={open}
-        disabled={visible.length === 0}
+        disabled={empty}
         onClick={() => setOpen((value) => !value)}
-        className="flex min-w-0 max-w-full items-center gap-1.5 rounded px-1 py-0.5 text-start text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:hover:text-muted-foreground"
+        className="flex w-full min-w-0 items-center gap-2 rounded px-1 py-0.5 text-start hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
       >
-        {running && <AgentRunIndicator />}
-        {running && startedAt !== null && (
-          <ElapsedClock startedAt={startedAt} />
-        )}
-        {visible.length > 0 && (
-          <ChevronRight
-            aria-hidden
-            className={cn(
-              "size-3.5 shrink-0 transition-transform",
-              open && "rotate-90"
-            )}
-          />
-        )}
-        {/* Announced from here, and only from here: this span holds the whole
-            busy sentence — "Working…", then the tool in flight. The clock is
-            deliberately outside it, because a live region containing a number
-            that changes ten times a second is read out ten times a second. */}
-        <span
-          className={running && !current ? "sr-only" : "truncate"}
-          role={running ? "status" : undefined}
-        >
-          {running
-            ? current
-              ? t("activityRunningTool", { name: current.name })
-              : t("activityWorking")
-            : visible.length > 0
-              ? t("activitySummary", {
-                  number: summary.calls,
-                  name: String(summary.results),
-                })
-              : // Nothing was called, so there is no count to give. Saying
-                // "0 tool calls, 0 results" would describe an empty trace as
-                // if it were a finding; the outcome is the whole story here.
-                completed && t("activityCompleted")}
+        <ToolIcon name={item.name} />
+        <span className="shrink-0 text-[13px] font-medium leading-5">
+          {item.name}
         </span>
-        {took !== null && (
-          <span className="shrink-0 tabular-nums opacity-70">
-            {t("activityElapsed", { number: took })}
+        {/* The command as it was given, clipped to one line on a quiet pill.
+            `min-w-0` so the pill is what shrinks when the column is narrow —
+            without it the flex child refuses to go below its content width and
+            the row overflows instead of the text ellipsing. */}
+        {describeToolInput(item.input) && (
+          <span className="min-w-0 truncate rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+            {describeToolInput(item.input)}
           </span>
         )}
-        {summary.errors > 0 && (
-          <span className="shrink-0 text-destructive">
-            {t("activityErrors", { number: summary.errors })}
-          </span>
-        )}
-        {/*
-          Last, and only once the turn is actually over. It is the answer to
-          "did this work?", which the failed-step count was being read as.
-          Skipped when there is no trace, because the label above already is it.
-        */}
-        {!running && completed && visible.length > 0 && (
-          <span className="shrink-0 text-muted-foreground">
-            {t("activityCompleted")}
+        {result?.isError && (
+          <span className="shrink-0 text-xs text-destructive">
+            {t("activityFailed")}
           </span>
         )}
       </button>
-      {open && visible.length > 0 && (
-        <ul className="mt-0.5 space-y-0.5 border-s ps-2">
-          {visible.map((item) => (
-            <li key={item.seq}>
-              {item.kind === "status" ? (
-                <p
-                  role="status"
-                  className="px-1 py-0.5 text-xs text-muted-foreground"
-                >
-                  {item.state === "truncated"
-                    ? t("activityTruncated")
-                    : t("activityUnsupported", { name: item.detail ?? "" })}
-                </p>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    aria-expanded={shown === item.seq}
-                    disabled={
-                      item.kind === "tool_result" && !item.output.trim()
-                    }
-                    onClick={() =>
-                      setShown((value) =>
-                        value === item.seq ? null : item.seq
-                      )
-                    }
-                    className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-start hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    {item.kind === "tool_call" ? (
-                      <>
-                        <span className="shrink-0 font-medium">
-                          {item.name}
-                        </span>
-                        <span className="truncate font-mono text-xs text-muted-foreground">
-                          {describeToolInput(item.input)}
-                        </span>
-                      </>
-                    ) : (
-                      <span
-                        className={cn(
-                          "truncate text-xs",
-                          item.isError
-                            ? "text-destructive"
-                            : "text-muted-foreground"
-                        )}
-                      >
-                        {item.isError
-                          ? t("activityFailed")
-                          : oneLineOf(item.output) || t("activityCompleted")}
-                      </span>
-                    )}
-                  </button>
-                  {shown === item.seq && (
-                    <pre className="mx-1 mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 p-2 font-mono text-xs">
-                      {item.kind === "tool_call" ? item.input : item.output}
-                      {(item.kind === "tool_call"
-                        ? item.inputTruncated
-                        : item.outputTruncated) && (
-                        <span className="block pt-1 text-muted-foreground">
-                          {t("activityTruncated")}
-                        </span>
-                      )}
-                    </pre>
-                  )}
-                </>
-              )}
-            </li>
-          ))}
-        </ul>
+      {open && !empty && (
+        <div className="space-y-1">
+          {item.input.trim() && (
+            <OutputBlock text={item.input} truncated={item.inputTruncated} />
+          )}
+          {output && (
+            <OutputBlock
+              text={result!.output}
+              truncated={result!.outputTruncated}
+            />
+          )}
+        </div>
       )}
+    </li>
+  )
+}
+
+/** The verbatim text behind a row, capped in height rather than in content. */
+function OutputBlock({
+  text,
+  truncated,
+}: {
+  text: string
+  truncated: boolean
+}) {
+  const t = useTranslations("NativeContent")
+  return (
+    <pre className="mx-1 mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 p-2 font-mono text-xs">
+      {text}
+      {truncated && (
+        <span className="block pt-1 text-muted-foreground">
+          {t("activityTruncated")}
+        </span>
+      )}
+    </pre>
+  )
+}
+
+/**
+ * A reply and the work that produced it, in the order both happened.
+ *
+ * The server records, for every activity item, the `offset` in the reply text
+ * at which it happened — so the chronology here is READ, never reconstructed.
+ * `splitByActivity` cuts the text at those offsets and hands back segments
+ * whose `items` sit at the segment's leading boundary, which is why the rows
+ * are drawn before the prose in each one.
+ *
+ * Nothing is synthesised. A run that recorded no tools renders exactly the
+ * markdown it always did; a segment exists only because an offset put it there.
+ *
+ * `streaming` applies to the LAST segment alone. Incomplete-markdown repair
+ * appends closers to text that may end mid-token, which is right for the text
+ * still arriving and wrong for text already settled behind a tool call — there
+ * it could close a span the author left open on purpose.
+ */
+export function TranscriptBody({
+  text,
+  items,
+  streaming = false,
+}: {
+  /** The reply so far, or the whole stored reply. */
+  text: string
+  /** The turn's activity, already merged with anything arriving live. */
+  items: readonly NeevActivityItem[]
+  /** Whether `text` is still arriving. */
+  streaming?: boolean
+}) {
+  const visible = visibleActivity(items)
+  const { resultOf, absorbed } = pairResults(visible)
+  const segments = splitByActivity(text, visible)
+  /*
+   * Only the segments that will actually draw something.
+   *
+   * A result folded into its call leaves its own segment with no rows, and a
+   * result recorded at the end of the text so far leaves it with no text
+   * either — which is the ordinary shape of a live run, not an edge case. Left
+   * in, each one is an empty `<div>` inside a `space-y-2` stack, so the reply
+   * grows a blank gap every time a tool answers.
+   *
+   * `index` is kept from BEFORE the filter, for two reasons. It is what says
+   * which segment holds the text still arriving (the last one, and only if it
+   * has text: everything behind a recorded offset is settled, and repairing
+   * settled text can close a span its author left open). And it is not the
+   * React key — that is the seq of the segment's leading item, which does not
+   * shift when an earlier segment appears or disappears, so an expanded row
+   * stays expanded when its result lands.
+   */
+  const drawn = segments
+    .map((segment, index) => ({
+      index,
+      text: segment.text,
+      // The item that opens this segment, drawn or not. Only the FIRST segment
+      // can have none — every later one is created by crossing an item's
+      // offset — so this is a unique, stable key even as segments come and go.
+      key: segment.items[0]?.seq ?? "head",
+      rows: segment.items.filter(
+        (item) => !(item.kind === "tool_result" && absorbed.has(item.seq))
+      ),
+    }))
+    .filter((segment) => segment.rows.length > 0 || segment.text.trim())
+  return (
+    <div className="space-y-2">
+      {drawn.map((segment) => (
+        <div key={segment.key} className="space-y-2">
+          {segment.rows.length > 0 && (
+            <ul className="space-y-0.5">
+              {segment.rows.map((item) => (
+                <ActivityRow
+                  key={item.seq}
+                  item={item}
+                  result={
+                    item.kind === "tool_call"
+                      ? (resultOf.get(item.seq) ?? null)
+                      : null
+                  }
+                />
+              ))}
+            </ul>
+          )}
+          {segment.text.trim() && (
+            <NativeMarkdown
+              markdown={segment.text}
+              streaming={streaming && segment.index === segments.length - 1}
+            />
+          )}
+        </div>
+      ))}
     </div>
   )
 }
@@ -1257,6 +1423,17 @@ function AgentSessionView({
   const stagedRef = useRef(false)
   stagedRef.current = !attachments.empty
   const history = useRef<HTMLOListElement>(null)
+  /**
+   * Whether the reader is still following the newest output.
+   *
+   * Scrolling up during a run is a decision, and the transcript used to
+   * overrule it on the very next token: every change of `turns` or `liveText`
+   * pinned the view back to the bottom, so reading anything earlier while an
+   * agent worked was impossible. This is the same follow flag the team thread
+   * has, with the same 48px tolerance, so "near enough to the bottom" still
+   * counts as following and a run that ends where you left it does not jump.
+   */
+  const followHistory = useRef(true)
   // Opening a different chat must not carry this one's unsaved choice into it,
   // and an answer to a request made for the old one must not be applied to the
   // new one. The id at the time of asking is checked against the id now.
@@ -1401,10 +1578,14 @@ function AgentSessionView({
     // reattaches to the same run and never starts a new one.
   }, [activeRun, attachNonce])
 
-  useEffect(() => {
+  // Before paint, and only while the reader is still following: a tool row
+  // appearing mid-reply changes the height of the transcript, and correcting
+  // for that after the browser has painted is what a visible jolt looks like.
+  useLayoutEffect(() => {
     const element = history.current
-    if (element) element.scrollTop = element.scrollHeight
-  }, [turns, liveText])
+    if (element && followHistory.current)
+      element.scrollTop = element.scrollHeight
+  }, [turns, liveText, liveActivity])
 
   const runtimeEnabled = connections?.runtimeEnabled ?? false
   const connection = connections?.connections.find(
@@ -1633,63 +1814,90 @@ function AgentSessionView({
       ) : (
         <ol
           ref={history}
+          onScroll={(event) => {
+            const element = event.currentTarget
+            followHistory.current =
+              element.scrollHeight - element.scrollTop - element.clientHeight <
+              48
+          }}
           aria-label={t("agentTurns")}
           // Asymmetric on purpose: the first ask starts where it always did,
           // and the last paragraph of a reply gets room to breathe before the
           // composer instead of ending against its top edge.
           className="mx-auto min-h-0 w-full max-w-[832px] flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 pb-14 pt-6 text-[15px] sm:px-8"
         >
-          {turns.map((turn) => (
-            <li key={turn.id} className="mx-auto w-full max-w-3xl space-y-3">
-              <div className="rounded-lg bg-muted/60 px-4 py-3 text-sm">
-                {/* The ask as it was written: files where they were put, not
-                    in a row underneath. */}
-                <SentPrompt body={turn.prompt} attachments={turn.attachments} />
-              </div>
-              <div className="space-y-2">
-                {turn.runId === activeRun ? (
-                  <>
-                    <div aria-live="polite" className="text-sm">
-                      {liveText && (
-                        <NativeMarkdown markdown={liveText} streaming />
-                      )}
-                    </div>
-                    {/* Keep progress after the newest output, near the composer.
-                        The clock stays outside the response live region. */}
-                    <div className="pt-3">
-                      <ActivityTimeline
-                        items={mergeActivity(turn.activity, liveActivity)}
-                        running
-                        startedAt={turn.createdAt * 1000}
-                      />
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    {turn.response && (
-                      <NativeMarkdown markdown={turn.response} />
-                    )}
+          {turns.map((turn) => {
+            const live = turn.runId === activeRun
+            /*
+             * ONE tree for a turn, whether it is running or finished.
+             *
+             * Running and finished used to be two different branches, and React
+             * reconciles by position and type: the live branch wrapped the body
+             * in a live region and the finished one did not, so the moment a run
+             * ended the body was a different element in that slot. React
+             * unmounted it and mounted a new one — which threw away every open
+             * tool row under the reader, and changed the height of the turn as
+             * the wrapper's own text size went with it.
+             *
+             * So the shape is fixed and only the PROPS change. `aria-live` is an
+             * attribute on the same element rather than a reason to draw a
+             * different one, and the footer keeps its slot and its spacing and
+             * merely stops running.
+             */
+            const items = live
+              ? mergeActivity(turn.activity, liveActivity)
+              : turn.activity
+            return (
+              <li key={turn.id} className="mx-auto w-full max-w-3xl space-y-3">
+                <div className="rounded-lg bg-muted/60 px-4 py-3 text-sm">
+                  {/* The ask as it was written: files where they were put, not
+                      in a row underneath. */}
+                  <SentPrompt
+                    body={turn.prompt}
+                    attachments={turn.attachments}
+                  />
+                </div>
+                <div className="space-y-2">
+                  {/* Prose and tool rows in one body, in the order the server's
+                      offsets record them. Live text while the run is in flight,
+                      the stored reply once it is not — the same component in the
+                      same place, so an expanded row stays expanded across the
+                      handover. */}
+                  <div
+                    aria-live={live ? "polite" : undefined}
+                    className="text-sm"
+                  >
+                    <TranscriptBody
+                      text={live ? liveText : turn.response}
+                      items={items}
+                      streaming={live}
+                    />
+                  </div>
+                  {/* Progress after the newest output, near the composer. The
+                      clock stays outside the response live region, and the trace
+                      is NOT repeated here — it is above, in place. */}
+                  <div className="pt-3">
                     <ActivityTimeline
-                      items={turn.activity}
-                      running={false}
+                      items={items}
+                      running={live}
                       startedAt={turn.createdAt * 1000}
                       finishedAt={
-                        turn.completedAt === null
+                        live || turn.completedAt === null
                           ? null
                           : turn.completedAt * 1000
                       }
-                      completed={turn.status === "completed"}
+                      completed={!live && turn.status === "completed"}
                     />
-                  </>
-                )}
-                {turn.status !== "completed" && turn.runId !== activeRun && (
-                  <p className="text-xs text-muted-foreground">
-                    {outcomeLabel(turn)}
-                  </p>
-                )}
-              </div>
-            </li>
-          ))}
+                  </div>
+                  {turn.status !== "completed" && !live && (
+                    <p className="text-xs text-muted-foreground">
+                      {outcomeLabel(turn)}
+                    </p>
+                  )}
+                </div>
+              </li>
+            )
+          })}
         </ol>
       )}
 

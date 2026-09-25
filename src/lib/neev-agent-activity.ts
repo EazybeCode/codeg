@@ -67,6 +67,55 @@ export function splitByActivity(
   return segments
 }
 
+/** A tool result, narrowed out of the item union. */
+export type NeevToolResult = Extract<NeevActivityItem, { kind: "tool_result" }>
+
+/**
+ * Fold each tool result into the call it answers.
+ *
+ * One invocation is one row. The server records a call and its result as two
+ * separate items — it must, because the result can be minutes later — but a
+ * reader looking at a trace sees one thing happen: `Bash` ran, and it either
+ * worked or it did not. Drawn as two rows that is the same fact twice, and the
+ * second row has no name on it.
+ *
+ * Pairing is by `callId`, which is the server's own link, never by position.
+ * Two things are deliberately NOT hidden:
+ *  - a result whose `callId` matches no call in this trace (the type says it
+ *    may match none), and
+ *  - a SECOND result for a call that already has one.
+ * Both keep their own row. Absorbing them would drop recorded output on the
+ * floor to make the list shorter, which is the one thing a trace may not do.
+ *
+ * The result is attached at the CALL's position. That is where the invocation
+ * happened, and it is why a running row can become a finished one in place
+ * rather than a new row appearing further down.
+ */
+export function pairResults(items: readonly NeevActivityItem[]): {
+  /** The result for a call, keyed by the CALL's `seq`. */
+  resultOf: Map<number, NeevToolResult>
+  /** `seq` of every result now drawn inside a call, and so not on its own. */
+  absorbed: Set<number>
+} {
+  const resultOf = new Map<number, NeevToolResult>()
+  const absorbed = new Set<number>()
+  const callSeqById = new Map<string, number>()
+  for (const item of [...items].sort((left, right) => left.seq - right.seq)) {
+    if (item.kind === "tool_call") {
+      // First call wins the id. Ids are the server's and are not reused within
+      // a turn; if one ever were, the later call keeps its own row.
+      if (!callSeqById.has(item.id)) callSeqById.set(item.id, item.seq)
+      continue
+    }
+    if (item.kind !== "tool_result") continue
+    const seq = callSeqById.get(item.callId)
+    if (seq === undefined || resultOf.has(seq)) continue
+    resultOf.set(seq, item)
+    absorbed.add(item.seq)
+  }
+  return { resultOf, absorbed }
+}
+
 /** What a collapsed group says about itself, without opening it. */
 export function summariseActivity(items: readonly NeevActivityItem[]): {
   calls: number

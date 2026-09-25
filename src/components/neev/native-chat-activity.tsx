@@ -3,16 +3,18 @@
 /**
  * Pairing a shared thread's agent replies with the reader's own stored turns.
  *
- * The rendering of a trace is NOT here: that is `ActivityTimeline`, which the
- * agent-chat surface owns and this module re-exports so both surfaces show a
- * trace the same way. What is here is the one question the team thread has and
- * the private one does not — which turn, if any, produced this message.
+ * The rendering of a trace is NOT here: that is `TranscriptBody` (prose and
+ * tool rows in recorded order) and `ActivityTimeline` (the progress footer),
+ * which the agent-chat surface owns and this module re-exports so both
+ * surfaces show a trace the same way. What is here is the one question the
+ * team thread has and the private one does not — which turn, if any, produced
+ * this message.
  */
 
 import type { NeevAgentTurn } from "@/lib/neev-agent-sessions-client"
 import type { NativeMessage } from "@/lib/neev-content-client"
 
-export { ActivityTimeline } from "./native-agent-chats"
+export { ActivityTimeline, TranscriptBody } from "./native-agent-chats"
 
 /**
  * Pair the reader's own stored turns with the agent replies in a shared thread.

@@ -5,6 +5,7 @@ import {
   elapsedMs,
   isNoise,
   mergeActivity,
+  pairResults,
   runningTool,
   splitByActivity,
   summariseActivity,
@@ -79,6 +80,32 @@ it("never loses or reorders the prose it wraps", () => {
   const text = "one two three"
   const segments = splitByActivity(text, [call(2, 8), call(1, 4)])
   expect(segments.map((segment) => segment.text).join("")).toBe(text)
+})
+
+it("folds a result into the call it answers, at the call's position", () => {
+  // One invocation is one row. The result is attached to the CALL's seq, which
+  // is why a running row becomes a finished one in place rather than a second
+  // nameless row appearing further down the reply.
+  const { resultOf, absorbed } = pairResults([call(1, 4), result(2, 30)])
+  expect(resultOf.get(1)?.seq).toBe(2)
+  expect(absorbed.has(2)).toBe(true)
+})
+
+it("leaves a result no call in this trace claims on its own row", () => {
+  // The contract says a result's `callId` may match none. Hiding it would drop
+  // recorded output to make the list shorter.
+  const orphan = { ...result(9), callId: "toolu_missing" } as NeevActivityItem
+  const { resultOf, absorbed } = pairResults([call(1), orphan])
+  expect(resultOf.size).toBe(0)
+  expect(absorbed.size).toBe(0)
+})
+
+it("keeps a second result for the same call rather than swallowing it", () => {
+  const first = result(2)
+  const second = { ...result(3), callId: "toolu_1" } as NeevActivityItem
+  const { resultOf, absorbed } = pairResults([call(1), first, second])
+  expect(resultOf.get(1)?.seq).toBe(2)
+  expect(absorbed.has(3)).toBe(false)
 })
 
 it("summarises a group without opening it", () => {

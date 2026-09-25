@@ -10,7 +10,11 @@ import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
 import messages from "@/i18n/messages/en.json"
 import { afterEach, expect, it, vi } from "vitest"
-import { ActivityTimeline, NativeAgentChats } from "./native-agent-chats"
+import {
+  ActivityTimeline,
+  NativeAgentChats,
+  TranscriptBody,
+} from "./native-agent-chats"
 import { NativeBoundary } from "./native-boundary"
 import {
   json,
@@ -870,4 +874,286 @@ it("says nothing at all about a turn with no trace, no outcome and no time", () 
     startedAt: null,
   })
   expect(container.querySelector("button")).toBeNull()
+})
+
+/**
+ * The transcript body, tested on its own.
+ *
+ * Only translations around it: the body reads no session and no auth, and
+ * mounting the provider would add a fetch to every assertion.
+ */
+function renderBody(props: Parameters<typeof TranscriptBody>[0]) {
+  return render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <TranscriptBody {...props} />
+    </NextIntlClientProvider>
+  )
+}
+
+const bashCall = (seq: number, offset: number, command: string) =>
+  ({
+    seq,
+    offset,
+    kind: "tool_call",
+    id: `toolu_${seq}`,
+    name: "Bash",
+    input: JSON.stringify({ command }),
+    inputTruncated: false,
+  }) as const
+
+const bashResult = (
+  seq: number,
+  offset: number,
+  callSeq: number,
+  output: string,
+  isError = false
+) =>
+  ({
+    seq,
+    offset,
+    kind: "tool_result",
+    id: `res_${seq}`,
+    callId: `toolu_${callSeq}`,
+    output,
+    outputTruncated: false,
+    isError,
+  }) as const
+
+it("draws prose and tool rows in the order the offsets record", () => {
+  // The chronology is READ from the server's offsets, never reconstructed: the
+  // second command was recorded after "Then this." and renders after it, even
+  // though both calls were delivered before any of the text was complete.
+  const { container } = renderBody({
+    text: "First this. Then this. Done.",
+    items: [
+      bashCall(1, 12, "ls -a"),
+      bashResult(2, 12, 1, "a b"),
+      bashCall(3, 23, "rg todo"),
+      bashResult(4, 23, 3, "none"),
+    ],
+  })
+  // Reading the rendered tree top to bottom is the assertion: prose, row,
+  // prose, row, prose — not all the prose and then all the tools.
+  const order = [...container.querySelectorAll("p, li")].map((node) =>
+    node.textContent?.trim()
+  )
+  expect(order).toEqual([
+    "First this.",
+    "Bashls -a",
+    "Then this.",
+    "Bashrg todo",
+    "Done.",
+  ])
+})
+
+it("folds each result into its call, so one invocation is one row", () => {
+  renderBody({
+    text: "done",
+    items: [bashCall(1, 0, "ls -a"), bashResult(2, 0, 1, "a b")],
+  })
+  // One row, named, with the command on it. The result is behind the expander,
+  // not a second nameless row underneath.
+  expect(screen.getAllByRole("listitem")).toHaveLength(1)
+  expect(screen.getByText("ls -a")).toBeVisible()
+  expect(screen.queryByText("a b")).toBeNull()
+})
+
+it("adds no empty wrapper when a result lands at the end of the text so far", () => {
+  // The ordinary shape of a live run: the call is announced, some text
+  // arrives, then the result is recorded at the end of that text. Its segment
+  // has no rows (the result is folded into the call) and no text, and left in
+  // it is a blank gap that grows every time a tool answers.
+  const { container } = renderBody({
+    text: "ab",
+    items: [bashCall(1, 0, "ls -a"), bashResult(2, 2, 1, "a b")],
+  })
+  const body = container.firstElementChild!
+  expect(body.children).toHaveLength(1)
+  expect([...body.children].every((child) => child.textContent?.trim())).toBe(
+    true
+  )
+})
+
+it("keeps a row open when its result arrives", () => {
+  // The result changes which segments exist. Keyed by position that would
+  // remount the row and close it under the reader mid-run.
+  const open = { text: "ab", items: [bashCall(1, 0, "ls -a")] }
+  const { rerender } = renderBody(open)
+  fireEvent.click(screen.getByRole("button", { name: /^Bash/ }))
+  expect(screen.getByText('{"command":"ls -a"}')).toBeVisible()
+  rerender(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <TranscriptBody
+        text="ab"
+        items={[bashCall(1, 0, "ls -a"), bashResult(2, 2, 1, "a b")]}
+      />
+    </NextIntlClientProvider>
+  )
+  expect(screen.getByRole("button", { name: /^Bash/ })).toHaveAttribute(
+    "aria-expanded",
+    "true"
+  )
+  // And the result it just gained is in the same open block.
+  expect(screen.getByText("a b")).toBeVisible()
+})
+
+it("says a command failed without inventing a reason it did not record", () => {
+  // A provider that reports failure with no output at all. The row must still
+  // say it failed — that flag is recorded — and must not fill the silence with
+  // a cause, an exit code, or a guess at what went wrong.
+  renderBody({
+    text: "",
+    items: [bashCall(1, 0, "python parse.py"), bashResult(2, 0, 1, "", true)],
+  })
+  const row = screen.getByRole("button", { name: /^Bash/ })
+  expect(within(row).getByText("Failed")).toBeVisible()
+  fireEvent.click(row)
+  // What opens is the command that was run, verbatim, and nothing else: there
+  // is no second block, because there was no output to put in one.
+  expect(screen.getByText('{"command":"python parse.py"}')).toBeVisible()
+  expect(screen.queryAllByRole("listitem")).toHaveLength(1)
+})
+
+it("renders no segment at all for a reply that recorded no activity", () => {
+  const { container } = renderBody({ text: "just an answer", items: [] })
+  expect(container.querySelectorAll("li")).toHaveLength(0)
+  expect(screen.getByText("just an answer")).toBeVisible()
+})
+
+it("stops following the newest output once the reader scrolls up, and follows again at the bottom", async () => {
+  // Scrolling up during a run is a decision. The transcript used to overrule
+  // it on the very next token, which made reading anything earlier while an
+  // agent worked impossible.
+  const stream = liveStream()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  await typeInComposer(
+    await screen.findByRole("textbox", { name: "Ask the agent" }),
+    "Summarise the parser"
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  const history = await screen.findByRole("list", { name: "Session history" })
+  // jsdom lays nothing out, so the scrollable geometry is stated outright.
+  Object.defineProperties(history, {
+    scrollHeight: { value: 900, configurable: true },
+    clientHeight: { value: 200, configurable: true },
+  })
+
+  // Read something further up, well clear of the 48px tolerance …
+  history.scrollTop = 100
+  fireEvent.scroll(history)
+  act(() => stream.push({ type: "chunk", text: "one" }))
+  expect(await screen.findByText("one")).toBeVisible()
+  // … and the new token does not drag the view away from it.
+  expect(history.scrollTop).toBe(100)
+
+  // Back to the bottom is back to following.
+  history.scrollTop = 700
+  fireEvent.scroll(history)
+  act(() => stream.push({ type: "chunk", text: " two" }))
+  expect(await screen.findByText("one two")).toBeVisible()
+  expect(history.scrollTop).toBe(900)
+  act(() => stream.close())
+})
+
+it("hands a streamed trace to the stored turn without doubling a row or a word", async () => {
+  // Reattaching replays the stored prefix before streaming on, so the same
+  // frames arrive twice; and when the run ends the live preview is replaced by
+  // what the server saved. Either step, done wrong, shows the work twice.
+  const stream = liveStream()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  await typeInComposer(
+    await screen.findByRole("textbox", { name: "Ask the agent" }),
+    "Summarise the parser"
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+
+  const frames = [
+    { type: "activity", ...bashCall(1, 0, "ls -a") },
+    { type: "chunk", text: "Looked." },
+    { type: "activity", ...bashResult(2, 8, 1, "a b") },
+  ]
+  act(() => frames.forEach((frame) => stream.push(frame)))
+  expect(await screen.findByText("Looked.")).toBeVisible()
+  // The replay: `started` resets the buffer and every frame comes again.
+  act(() => {
+    stream.push({ type: "started", runId: RUN_ID, turnId: TURN_ID })
+    frames.forEach((frame) => stream.push(frame))
+  })
+  expect(await screen.findByText("Looked.")).toBeVisible()
+  expect(screen.getAllByText("Bash")).toHaveLength(1)
+
+  act(() =>
+    stream.push({ type: "finished", status: "completed", errorCode: null })
+  )
+  // The stored turn takes over. One row, one sentence, one outcome.
+  expect(await screen.findByText("Completed")).toBeVisible()
+  expect(screen.getAllByText("Bash")).toHaveLength(1)
+  expect(screen.getAllByText("Looked.")).toHaveLength(1)
+  expect(screen.getAllByText("ls -a")).toHaveLength(1)
+  act(() => stream.close())
+})
+
+it("keeps a tool row the reader opened open when the run finishes under them", async () => {
+  // Running and finished are the same tree with different props, for exactly
+  // this: reading a command's output while the agent works must not be undone
+  // by the agent finishing. Two branches meant React replaced the body at the
+  // handover, closing every row and changing the height of the turn with it.
+  const stream = liveStream()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  await typeInComposer(
+    await screen.findByRole("textbox", { name: "Ask the agent" }),
+    "Summarise the parser"
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  act(() => {
+    stream.push({ type: "activity", ...bashCall(1, 0, "ls -a") })
+    stream.push({ type: "chunk", text: "Looked." })
+    stream.push({ type: "activity", ...bashResult(2, 7, 1, "a b") })
+  })
+  // Opened mid-run, while the agent is still working.
+  await user.click(await screen.findByRole("button", { name: /^Bash/ }))
+  expect(screen.getByText("a b")).toBeVisible()
+
+  act(() =>
+    stream.push({ type: "finished", status: "completed", errorCode: null })
+  )
+  expect(await screen.findByText("Completed")).toBeVisible()
+  // Still open, still showing the same output, still one row.
+  expect(screen.getByRole("button", { name: /^Bash/ })).toHaveAttribute(
+    "aria-expanded",
+    "true"
+  )
+  expect(screen.getByText("a b")).toBeVisible()
+  expect(screen.getAllByText("Bash")).toHaveLength(1)
+  act(() => stream.close())
 })
