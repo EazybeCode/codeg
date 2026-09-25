@@ -981,7 +981,33 @@
   }
 }
 
+/* The one hue spent inside a chat transcript: the agent's mark, the composer's
+   focus halo, the live spinner. Its own token rather than --primary, which is
+   achromatic under the neutral presets — so the accent is explicit here and the
+   theme's own controls stay exactly as neutral as the preset makes them.
+   --chat-tool is the same idea held right back: a slate for tool rows, cool
+   enough to read as machinery beside the grey of prose.
+   The `.dark` rules come last, so they win on equal specificity. */
+:root {
+  --chat-accent: oklch(0.52 0.19 285);
+  --chat-tool: oklch(0.52 0.035 265);
+}
+
+.dark {
+  --chat-accent: oklch(0.78 0.13 288);
+  --chat-tool: oklch(0.72 0.03 265);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]):not(.light) {
+    --chat-accent: oklch(0.78 0.13 288);
+    --chat-tool: oklch(0.72 0.03 265);
+  }
+}
+
 @theme inline {
+  --color-chat-accent: var(--chat-accent);
+  --color-chat-tool: var(--chat-tool);
   --font-sans: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);

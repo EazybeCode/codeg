@@ -1336,7 +1336,7 @@ it("replays this reader's own stored trace when the conversation is reopened", a
   await ready()
   // The reply is there from the message list; the trace comes from the turn,
   // and is drawn in place rather than folded into a drawer.
-  expect(await screen.findByText("do X")).toBeVisible()
+  await waitFor(() => expect(screen.getByText("do X")).toBeVisible())
   const row = await screen.findByRole("button", { name: /^Read/ })
   // Name and path are on the row already. The output is what a click is for.
   expect(within(row).getByText("Read")).toBeVisible()

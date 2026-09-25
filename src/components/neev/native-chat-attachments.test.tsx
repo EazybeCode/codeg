@@ -156,7 +156,7 @@ it("sends files with no words as the reference alone plus keys", async () => {
   fireEvent.drop(box, { dataTransfer: fileDrag([png()]) })
   await screen.findByRole("button", { name: "Remove shot.png" })
   const send = screen.getByRole("button", { name: "Send" })
-  expect(send).toBeEnabled()
+  await waitFor(() => expect(send).toBeEnabled())
   await userEvent.setup().click(send)
   await waitFor(() => expect(posted).toHaveLength(1))
   // Not empty any more: a message that is only a file still SAYS which file,

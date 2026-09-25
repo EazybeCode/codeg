@@ -705,8 +705,11 @@ function NewAgentChat({
         <div
           {...drop.handlers}
           className={cn(
-            "mx-auto w-full max-w-[832px] rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring",
-            drop.over && "border-primary ring-1 ring-primary"
+            // The in-chat composer's chrome, so the first prompt is typed into
+            // the same control it will be edited in. Only the height differs:
+            // an empty chat has room, and a taller box invites the first ask.
+            "mx-auto w-full max-w-[832px] rounded-xl border border-border/70 bg-background p-2 shadow-sm focus-within:border-chat-accent/50 focus-within:ring-2 focus-within:ring-chat-accent/20",
+            drop.over && "border-chat-accent ring-2 ring-chat-accent/25"
           )}
         >
           <NativeError error={error} />
@@ -1039,8 +1042,9 @@ export function ActivityTimeline({
   const current = running ? runningTool(visible) : null
 
   return (
-    <div className="my-1.5 flex min-w-0 max-w-full items-center gap-1.5 px-1 py-0.5 text-[13px] leading-5 text-muted-foreground">
-      {running && <AgentRunIndicator />}
+    <div className="my-1.5 flex min-w-0 max-w-full items-center gap-1.5 px-1.5 py-0.5 text-[13px] leading-5 text-muted-foreground">
+      {/* The accent, on the one thing that is actually happening. */}
+      {running && <AgentRunIndicator className="text-chat-accent" />}
       {running && startedAt !== null && <ElapsedClock startedAt={startedAt} />}
       {/*
         Announced, not painted. The tool in flight already has a row of its own
@@ -1090,9 +1094,11 @@ export function ActivityTimeline({
  */
 function ToolIcon({ name }: { name: string }) {
   const key = name.toLowerCase()
+  // Slate rather than the prose grey: a tool row is machinery, and the icon is
+  // what says so before the name is read.
   const shared = {
     "aria-hidden": true,
-    className: "size-3.5 shrink-0 text-muted-foreground",
+    className: "size-3.5 shrink-0 text-chat-tool",
   } as const
   if (/bash|shell|command|terminal|exec|run/.test(key))
     return <Terminal {...shared} />
@@ -1135,7 +1141,7 @@ function ActivityRow({
   if (item.kind === "status")
     return (
       <li>
-        <p role="status" className="px-1 py-0.5 text-xs text-muted-foreground">
+        <p role="status" className="px-1.5 py-1 text-xs text-muted-foreground">
           {item.state === "truncated"
             ? t("activityTruncated")
             : t("activityUnsupported", { name: item.detail ?? "" })}
@@ -1156,7 +1162,7 @@ function ActivityRow({
           aria-expanded={open}
           disabled={empty}
           onClick={() => setOpen((value) => !value)}
-          className="flex w-full min-w-0 items-baseline gap-2 rounded px-1 py-0.5 text-start hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
+          className="flex w-full min-w-0 items-baseline gap-2 rounded-md px-1.5 py-1 text-start hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
         >
           <span
             className={cn(
@@ -1187,7 +1193,7 @@ function ActivityRow({
         aria-expanded={open}
         disabled={empty}
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full min-w-0 items-center gap-2 rounded px-1 py-0.5 text-start hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
+        className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-start hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
       >
         <ToolIcon name={item.name} />
         <span className="shrink-0 text-[13px] font-medium leading-5">
@@ -1198,7 +1204,7 @@ function ActivityRow({
             without it the flex child refuses to go below its content width and
             the row overflows instead of the text ellipsing. */}
         {describeToolInput(item.input) && (
-          <span className="min-w-0 truncate rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+          <span className="min-w-0 truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-chat-tool">
             {describeToolInput(item.input)}
           </span>
         )}
@@ -1235,7 +1241,7 @@ function OutputBlock({
 }) {
   const t = useTranslations("NativeContent")
   return (
-    <pre className="mx-1 mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/50 p-2 font-mono text-xs">
+    <pre className="mx-1.5 mb-1 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/60 bg-muted/40 p-2.5 font-mono text-xs leading-5">
       {text}
       {truncated && (
         <span className="block pt-1 text-muted-foreground">
@@ -1757,7 +1763,10 @@ function AgentSessionView({
       className="flex min-h-0 flex-1 flex-col"
       aria-label={session.title}
     >
-      <div className="flex h-9 shrink-0 items-center gap-2 px-4 sm:gap-3 sm:px-8">
+      {/* A hairline under the header, matching the team chat: the transcript
+          below scrolls and this does not, so without an edge a turn scrolling
+          up disappeared into the title. */}
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-4 sm:gap-3 sm:px-8">
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2
             className="shrink truncate text-sm font-medium"
@@ -1824,7 +1833,7 @@ function AgentSessionView({
           // Asymmetric on purpose: the first ask starts where it always did,
           // and the last paragraph of a reply gets room to breathe before the
           // composer instead of ending against its top edge.
-          className="mx-auto min-h-0 w-full max-w-[832px] flex-1 space-y-8 overflow-y-auto overscroll-contain px-4 pb-14 pt-6 text-[15px] sm:px-8"
+          className="mx-auto min-h-0 w-full max-w-[832px] flex-1 space-y-6 overflow-y-auto overscroll-contain px-4 pb-14 pt-5 text-sm sm:px-8"
         >
           {turns.map((turn) => {
             const live = turn.runId === activeRun
@@ -1848,14 +1857,22 @@ function AgentSessionView({
               ? mergeActivity(turn.activity, liveActivity)
               : turn.activity
             return (
-              <li key={turn.id} className="mx-auto w-full max-w-3xl space-y-3">
-                <div className="rounded-lg bg-muted/60 px-4 py-3 text-sm">
-                  {/* The ask as it was written: files where they were put, not
-                      in a row underneath. */}
-                  <SentPrompt
-                    body={turn.prompt}
-                    attachments={turn.attachments}
-                  />
+              <li
+                key={turn.id}
+                className="mx-auto w-full max-w-3xl space-y-2.5"
+              >
+                {/* The ask, right-aligned and only as wide as it needs to be:
+                    this chat has exactly two participants and one of them is the
+                    reader, so the side of the column says who is speaking. Safe
+                    here and NOT in team chat, where several people share the
+                    thread. Files stay where they were put in the sentence. */}
+                <div className="flex justify-end">
+                  <div className="max-w-[85%] rounded-2xl border border-border/60 bg-muted/50 px-3.5 py-2">
+                    <SentPrompt
+                      body={turn.prompt}
+                      attachments={turn.attachments}
+                    />
+                  </div>
                 </div>
                 <div className="space-y-2">
                   {/* Prose and tool rows in one body, in the order the server's
@@ -1911,8 +1928,10 @@ function AgentSessionView({
         <div
           {...drop.handlers}
           className={cn(
-            "rounded-lg border bg-background p-3 shadow-sm focus-within:ring-1 focus-within:ring-ring",
-            drop.over && "border-primary ring-1 ring-primary"
+            // Same geometry and same focus accent as the team-chat composer:
+            // one control should not change shape between two chat surfaces.
+            "rounded-xl border border-border/70 bg-background p-2 shadow-sm focus-within:border-chat-accent/50 focus-within:ring-2 focus-within:ring-chat-accent/20",
+            drop.over && "border-chat-accent ring-2 ring-chat-accent/25"
           )}
         >
           {drop.over && (
@@ -1940,7 +1959,7 @@ function AgentSessionView({
             readOnly={sending || running || session.archived || !ready}
             attachDisabled={session.archived || !ready}
             maxChars={NEEV_MAX_PROMPT_CHARS}
-            className="min-h-16"
+            className="min-h-14"
           />
           {/* Sending is held while bytes are still going up; say so rather than
               leaving a Send button that does nothing when pressed. */}

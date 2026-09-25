@@ -231,6 +231,98 @@ function writePreference(key: string, value: ComposerPreference): void {
   }
 }
 
+/**
+ * The square beside a message, and the one place colour is spent: the agent mark
+ * carries `--chat-accent` so replies are findable while scrolling, a person
+ * keeps the neutral square with their initial. Decoration only — the author is
+ * named in words beside it, so this is `aria-hidden`.
+ */
+function AuthorMark({ agent, initial }: { agent: boolean; initial: string }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "flex size-7 shrink-0 items-center justify-center rounded-md text-xs font-medium",
+        agent
+          ? "bg-chat-accent/15 text-chat-accent ring-1 ring-inset ring-chat-accent/25"
+          : "bg-muted text-muted-foreground"
+      )}
+    >
+      {agent ? <Sparkles className="size-3.5" /> : initial}
+    </span>
+  )
+}
+
+/**
+ * Who wrote a message and when, on one quiet line. ONE component for the stored
+ * row and the live preview, so the two cannot drift and move the reply down the
+ * screen when a run ends. Nothing is dropped to shorten it: the invoker keeps
+ * the chip, and the timestamp keeps its exact value in `dateTime` and the
+ * tooltip while the painted form is short.
+ */
+function MessageMeta({
+  author,
+  invoker,
+  at,
+}: {
+  /**
+   * Whoever wrote it: a person, or the provider. Nullable because a stored
+   * agent reply may carry no label, and inventing a provider name for it would
+   * be claiming which agent answered.
+   */
+  author: string | null
+  /** The human who invoked an agent reply; null on a person's own message. */
+  invoker: string | null
+  /** When it was written, in epoch milliseconds; null if not known yet. */
+  at: number | null
+}) {
+  const t = useTranslations("NativeContent")
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs leading-5 text-muted-foreground">
+      {author !== null && (
+        <span className="font-medium text-foreground">{author}</span>
+      )}
+      {invoker !== null && (
+        <span className="rounded-full bg-muted px-1.5 text-[11px]">
+          {t("agentAuthored", { name: invoker })}
+        </span>
+      )}
+      {at !== null && (
+        <time
+          dateTime={new Date(at).toISOString()}
+          title={new Date(at).toLocaleString()}
+          className="tabular-nums text-muted-foreground/70"
+        >
+          {messageTime(at)}
+        </time>
+      )}
+    </div>
+  )
+}
+
+/**
+ * A timestamp as short as it can be without losing which day it means: today is
+ * the clock alone, an earlier day adds the date, an earlier year adds the year —
+ * a bare "Mar 3" would read as this March.
+ */
+function messageTime(at: number): string {
+  const date = new Date(at)
+  const now = new Date()
+  const time = { hour: "numeric", minute: "2-digit" } as const
+  if (date.getFullYear() !== now.getFullYear())
+    return date.toLocaleString([], {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      ...time,
+    })
+  const sameDay =
+    date.getMonth() === now.getMonth() && date.getDate() === now.getDate()
+  return sameDay
+    ? date.toLocaleTimeString([], time)
+    : date.toLocaleString([], { month: "short", day: "numeric", ...time })
+}
+
 type Props = {
   resource: NativeResource
   onBack: () => void
@@ -1388,7 +1480,9 @@ function Chat({
       {/* ONE row, title and standing included. It was a title stacked over a
           metadata line, which cost two rows of height at the top of every
           conversation to say two short things. The conversation is the page. */}
-      <div className="flex h-9 shrink-0 items-center gap-2 px-4 sm:gap-3 sm:px-8">
+      {/* A hairline under the header: the transcript scrolls and this does not,
+          so without an edge a message scrolling up vanished into the title. */}
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-4 sm:gap-3 sm:px-8">
         {showBack && (
           <Button
             variant="ghost"
@@ -1533,7 +1627,7 @@ function Chat({
         // Asymmetric on purpose: the top stays tight against the header, and
         // the last message gets room to breathe before the composer rather
         // than ending against its top edge.
-        className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-4 pb-14 pt-3 sm:px-8"
+        className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain px-4 pb-14 pt-5 text-sm sm:px-8"
       >
         {/* Says what is actually being waited for. The conversation's own
             history, not "your workspace" — the workspace is already here. */}
@@ -1546,50 +1640,40 @@ function Chat({
           </li>
         )}
         {messages.map((message) => (
-          <li key={message.id} className="mx-auto flex w-full max-w-3xl gap-3">
-            <span
-              aria-hidden
-              className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-xs font-medium"
-            >
-              {message.authorKind === "agent" ? (
-                <Sparkles className="size-3.5" />
-              ) : (
-                message.authorName.slice(0, 1)
-              )}
-            </span>
-            {/* What a person said is given its own surface — a quiet fill and
-                a border — and what an agent answered is left on the page.
-                A thread is mostly agent prose, so boxing THAT would put a
-                frame around nearly every line and none of it would read as
-                separated. The contrast of the words is untouched either way:
-                this marks who is speaking, it does not mute anyone. */}
+          <li
+            key={message.id}
+            className="mx-auto flex w-full max-w-3xl gap-2.5"
+          >
+            <AuthorMark
+              agent={message.authorKind === "agent"}
+              initial={message.authorName.slice(0, 1)}
+            />
+            {/* A person's words get a quiet tinted surface; an agent's are left
+                on the page, since boxing the prose that fills a thread would
+                separate nothing. Left-aligned for everyone including the reader:
+                right-alignment would mean "me", and a shared transcript may not
+                be mirrored per reader. */}
             <div
               className={cn(
-                "min-w-0 flex-1 space-y-1.5",
+                "min-w-0 flex-1 space-y-1",
                 message.authorKind === "human" &&
-                  "rounded-lg border bg-muted/30 px-3 py-2"
+                  "rounded-xl border border-border/60 bg-muted/40 px-3 py-2"
               )}
             >
-              <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
-                {/* An agent reply names the provider that wrote it and the
-                    human who invoked it. `authorId` is still the invoker,
-                    so the agent never impersonates a teammate. */}
-                <span className="font-medium text-foreground">
-                  {message.authorKind === "agent"
+              {/* An agent reply names the provider that wrote it and the
+                  human who invoked it. `authorId` is still the invoker, so the
+                  agent never impersonates a teammate. */}
+              <MessageMeta
+                author={
+                  message.authorKind === "agent"
                     ? message.agentLabel
-                    : message.authorName}
-                </span>
-                {message.authorKind === "agent" && (
-                  <span className="rounded bg-muted px-1.5 py-0.5">
-                    {t("agentAuthored", { name: message.authorName })}
-                  </span>
-                )}
-                <time
-                  dateTime={new Date(message.createdAt * 1000).toISOString()}
-                >
-                  {new Date(message.createdAt * 1000).toLocaleString()}
-                </time>
-              </div>
+                    : message.authorName
+                }
+                invoker={
+                  message.authorKind === "agent" ? message.authorName : null
+                }
+                at={message.createdAt * 1000}
+              />
               {/* A message written here keeps its files where they were put
                   and its chips where the people were named; anything else — an
                   agent's reply, a message from before either existed — is the
@@ -1654,33 +1738,16 @@ function Chat({
           </li>
         ))}
         {(agentBusy || agentText) && !previewStored && (
-          <li className="mx-auto flex w-full max-w-3xl gap-3">
-            <span
-              aria-hidden
-              className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted"
-            >
-              <Sparkles className="size-3.5" />
-            </span>
-            <div className="min-w-0 flex-1 space-y-1.5">
-              {/* The same header the stored row draws, with the same three
-                  things in it. It was a bare provider name, which is one line
-                  where the stored row can be two — so the swap at the end of a
-                  run moved the answer down the screen on a narrow viewport. */}
-              <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">
-                  {agentProvider}
-                </span>
-                <span className="rounded bg-muted px-1.5 py-0.5">
-                  {t("agentAuthored", {
-                    name: auth.session?.user.displayName ?? "",
-                  })}
-                </span>
-                {runStartedAt !== null && (
-                  <time dateTime={new Date(runStartedAt).toISOString()}>
-                    {new Date(runStartedAt).toLocaleString()}
-                  </time>
-                )}
-              </div>
+          <li className="mx-auto flex w-full max-w-3xl gap-2.5">
+            <AuthorMark agent initial="" />
+            <div className="min-w-0 flex-1 space-y-1">
+              {/* The same component the stored row draws: a header that differs
+                  by a line moves the answer down the screen when a run ends. */}
+              <MessageMeta
+                author={agentProvider}
+                invoker={auth.session?.user.displayName ?? ""}
+                at={runStartedAt}
+              />
               {/* The reply and the work that produced it, interleaved by the
                   offsets the server recorded. "Still working" is said once, by
                   the footer below — a second sr-only "Working…" here was the
@@ -1730,8 +1797,11 @@ function Chat({
         <div
           {...drop.handlers}
           className={cn(
-            "rounded-xl border bg-background p-2 shadow-sm focus-within:ring-1 focus-within:ring-ring",
-            drop.over && "border-primary ring-1 ring-primary"
+            // One geometry for both chat surfaces, and a focus accent in the
+            // same hue as the agent mark: a soft halo, not an outline, because
+            // this box is on screen at all times.
+            "rounded-xl border border-border/70 bg-background p-2 shadow-sm focus-within:border-chat-accent/50 focus-within:ring-2 focus-within:ring-chat-accent/20",
+            drop.over && "border-chat-accent ring-2 ring-chat-accent/25"
           )}
         >
           {drop.over && (
