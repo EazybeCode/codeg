@@ -551,8 +551,15 @@ function Chat({
     if (directoryRead.current || !canMention || !auth.session) return
     directoryRead.current = true
     try {
-      const members = await loadMembers(0, scope.signal)
-      if (scope.isCurrent()) setDirectory(members)
+      const members = new Map<number, NativeMember>()
+      for (let offset = 0; ; offset += 100) {
+        const page = await loadMembers(offset, scope.signal)
+        if (!scope.isCurrent() || scope.signal.aborted) return
+        for (const member of page) members.set(member.id, member)
+        // Offer the first page immediately while later coworkers load.
+        setDirectory([...members.values()])
+        if (page.length < 100) break
+      }
     } catch {
       // The picker then offers nobody, which is what it already shows while the
       // read is in flight. A directory that could not be listed is not worth

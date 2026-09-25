@@ -217,3 +217,32 @@ it("draws a chip only where a stored span says one belongs", async () => {
   expect(chips[0].getAttribute("data-mention-user")).toBe("2")
   expect(chips[0].textContent).toBe("@Ana Duarte")
 })
+
+it("offers coworkers beyond the first directory page", async () => {
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${shared.id}`]: () => json(shared),
+    [`GET ${messagesPath}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${membersPath}`]: () =>
+      json({
+        members: Array.from({ length: 100 }, (_, i) => ({
+          id: i + 10,
+          role: "member",
+          user: { id: i + 10, displayName: `Member ${i}`, avatarUrl: null },
+        })),
+      }),
+    "GET /api/neev/organization/members?limit=100&offset=100": () =>
+      json({
+        members: [
+          {
+            id: 200,
+            role: "member",
+            user: { id: 200, displayName: "Zelda", avatarUrl: null },
+          },
+        ],
+      }),
+  })
+  mount(shared)
+  const box = await ready()
+  await typeInComposer(box, "@Zelda")
+  expect(await screen.findByRole("option", { name: "Zelda" })).toBeVisible()
+})
