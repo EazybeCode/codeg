@@ -25,6 +25,7 @@ import Link from "next/link"
 import { useFormatter, useTranslations } from "next-intl"
 import {
   ArrowUp,
+  Square,
   Bot,
   FileText,
   Globe,
@@ -1867,7 +1868,7 @@ function AgentSessionView({
                     here and NOT in team chat, where several people share the
                     thread. Files stay where they were put in the sentence. */}
                 <div className="flex justify-end">
-                  <div className="max-w-[85%] rounded-2xl border border-border/60 bg-muted/50 px-3.5 py-2">
+                  <div className="max-w-[85%] rounded-2xl border border-chat-user-foreground/10 bg-chat-user-surface px-3.5 py-2 text-chat-user-foreground">
                     <SentPrompt
                       body={turn.prompt}
                       attachments={turn.attachments}
@@ -2060,10 +2061,14 @@ function AgentSessionView({
             {running && (
               <Button
                 type="button"
-                variant="ghost"
+                size="icon"
+                variant="default"
+                className="ms-auto rounded-md"
+                aria-label={t("stopGeneration")}
+                title={t("stopGeneration")}
                 onClick={() => void cancel()}
               >
-                {n("cancel")}
+                <Square aria-hidden className="size-3.5 fill-current" />
               </Button>
             )}
             {phase === "lost" && running && (
@@ -2078,7 +2083,7 @@ function AgentSessionView({
             <Button
               type="submit"
               size="icon"
-              className="ms-auto rounded-md"
+              className={cn("rounded-md", !running && "ms-auto")}
               // Always "Send": it is what the button does. Busy is said once,
               // on the activity line; this control only goes disabled.
               aria-label={t("send")}

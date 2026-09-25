@@ -296,7 +296,7 @@ it("streams a new turn and can cancel it", async () => {
   // header, which used to say "Running" for the same fact.
   expect(screen.getByText("Working…")).toBeVisible()
   expect(screen.queryByText("Running")).toBeNull()
-  await user.click(screen.getByRole("button", { name: "Cancel" }))
+  await user.click(screen.getByRole("button", { name: "Stop generation" }))
   await waitFor(() => expect(canceled).toEqual({ runId: RUN_ID }))
   act(() =>
     stream.push({

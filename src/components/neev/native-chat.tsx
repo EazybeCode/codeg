@@ -3,6 +3,7 @@
 import {
   ArrowLeft,
   ArrowUp,
+  Square,
   Lock,
   MoreHorizontal,
   PlugZap,
@@ -355,8 +356,7 @@ function Chat({
   showBack = false,
 }: Props) {
   const auth = useNativeAuth(),
-    t = useTranslations("NativeContent"),
-    n = useTranslations("Native")
+    t = useTranslations("NativeContent")
   // Per instance: every open chat tab stays mounted, so a fixed id here would
   // point every Ask agent toggle at the first chat's description.
   const postsNote = useId()
@@ -1657,7 +1657,7 @@ function Chat({
               className={cn(
                 "min-w-0 flex-1 space-y-1",
                 message.authorKind === "human" &&
-                  "rounded-xl border border-border/60 bg-muted/40 px-3 py-2"
+                  "rounded-xl border border-chat-user-foreground/10 bg-chat-user-surface px-3 py-2 text-chat-user-foreground"
               )}
             >
               {/* An agent reply names the provider that wrote it and the
@@ -2036,17 +2036,20 @@ function Chat({
             {agentBusy && (
               <Button
                 type="button"
-                size="sm"
-                variant="ghost"
+                size="icon"
+                variant="default"
+                className="ms-auto rounded-md"
+                aria-label={t("stopGeneration")}
+                title={t("stopGeneration")}
                 onClick={() => void cancelAgent()}
               >
-                {n("cancel")}
+                <Square aria-hidden className="size-3.5 fill-current" />
               </Button>
             )}
             <Button
               type="submit"
               size="icon"
-              className="ms-auto rounded-md"
+              className={cn("rounded-md", !agentBusy && "ms-auto")}
               // Always "Send": it is what the button does. Busy is said once,
               // on the activity line; this control only goes disabled.
               aria-label={t("send")}

@@ -1,5 +1,6 @@
 {
   "NativeContent": {
+    "stopGeneration": "生成を停止",
     "copyRichDraft": "構造化JSONをコピー",
     "convertRich": "リッチ文書に変換",
     "conversionPreview": "変換を確認",

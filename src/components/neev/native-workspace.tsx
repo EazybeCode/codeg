@@ -667,9 +667,11 @@ function NativeWorkspaceTree({
                   )}
                 >
                   {node.kind === "project" ? (
+                    // The single coral mark in the tree: a project is the one
+                    // row worth picking out of a column of folders.
                     <Layers3
                       aria-hidden
-                      className="size-4 shrink-0 text-muted-foreground"
+                      className="size-4 shrink-0 text-neev-accent"
                     />
                   ) : (
                     <Folder
@@ -2340,7 +2342,14 @@ function WorkspaceContent() {
     </div>
   )
   return (
-    <div className="flex h-dvh min-w-0 flex-col overflow-hidden">
+    // The one marker the Neev brand theme keys off. globals.css matches it
+    // with `:root:has([data-neev-theme="brand"])`, so portalled menus and
+    // dialogs get the same palette as the tree they were opened from, and no
+    // other page in the app is recoloured.
+    <div
+      data-neev-theme="brand"
+      className="flex h-dvh min-w-0 flex-col overflow-hidden"
+    >
       <div className="flex min-h-0 min-w-0 flex-1">
         {!mobile && sidebarOpen && (
           <aside className="w-[248px] shrink-0 border-e bg-sidebar text-sidebar-foreground">

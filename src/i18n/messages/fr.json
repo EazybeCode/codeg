@@ -1,5 +1,6 @@
 {
   "NativeContent": {
+    "stopGeneration": "Arrêter la génération",
     "copyRichDraft": "Copier le JSON structuré",
     "convertRich": "Convertir en document enrichi",
     "conversionPreview": "Vérifier la conversion",

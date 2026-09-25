@@ -1,5 +1,6 @@
 {
   "NativeContent": {
+    "stopGeneration": "Stop generation",
     "copyRichDraft": "Copy structured JSON",
     "convertRich": "Convert to rich document",
     "conversionPreview": "Review conversion",

@@ -1128,7 +1128,7 @@ it("names the tool in flight, counts the seconds, and opens the call", async () 
   act(() => controller.close())
 })
 
-it("shows Cancel while the invoked run streams and cancels it by run id", async () => {
+it("shows Stop generation while the invoked run streams and cancels it by run id", async () => {
   let controller!: ReadableStreamDefaultController<Uint8Array>
   let canceled: unknown = null
   mockNativeSession(undefined, {
@@ -1164,7 +1164,7 @@ it("shows Cancel while the invoked run streams and cancels it by run id", async 
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await screen.findByText("partial")
-  await user.click(screen.getByRole("button", { name: "Cancel" }))
+  await user.click(screen.getByRole("button", { name: "Stop generation" }))
   await waitFor(() => expect(canceled).toEqual({ runId: RUN_ID }))
   act(() => {
     controller.enqueue(
@@ -1175,7 +1175,7 @@ it("shows Cancel while the invoked run streams and cancels it by run id", async 
     controller.close()
   })
   await waitFor(() =>
-    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull()
   )
   expect(
     screen.queryByText(
