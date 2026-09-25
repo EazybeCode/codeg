@@ -14,7 +14,12 @@ use sea_orm::ConnectionTrait;
 use uuid::Uuid;
 
 /// Per-tenant storage bounds, enforced race-safe under the admission guard.
-const MAX_ATTACHMENTS_PER_ORG: i64 = 20_000;
+///
+/// `pub(crate)` because it is the bound a run's carried-context set is measured
+/// against too (§ `agents::transcript`): what a conversation may hand forward is
+/// what the tenant was allowed to store, not a second smaller number that would
+/// silently hide a file the reader is looking at.
+pub(crate) const MAX_ATTACHMENTS_PER_ORG: i64 = 20_000;
 /// Deliberately modest while the host is storage-constrained. This is the one
 /// bound a reader can actually hit, so it is reported as a quota error they can
 /// act on (remove something, or ask for more) rather than a generic failure.

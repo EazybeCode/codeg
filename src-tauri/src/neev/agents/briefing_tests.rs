@@ -7,6 +7,7 @@
 
 use super::{build, Scope};
 use crate::neev::agents::test_support::Harness;
+use crate::neev::agents::transcript;
 use crate::neev::{db, test_support as h, types::OrgContext};
 use sea_orm::DatabaseConnection;
 
@@ -72,9 +73,34 @@ async fn message(db: &DatabaseConnection, org: i32, author: i32, seq: i64, id: &
 }
 
 async fn brief(h: &Harness, actor: &OrgContext, scope: Scope<'_>, prompt: &str) -> String {
-    build(&h.state, actor, scope, prompt)
+    build(&h.state, actor, scope, prompt, None)
         .await
         .expect("a readable workspace always briefs")
+}
+
+/// A briefing built with the context a real run carries.
+async fn brief_with(
+    h: &Harness,
+    actor: &OrgContext,
+    scope: Scope<'_>,
+    prompt: &str,
+    manifest: &transcript::Manifest,
+) -> String {
+    build(&h.state, actor, scope, prompt, Some(manifest))
+        .await
+        .expect("a readable workspace always briefs")
+}
+
+/// The manifest of a run whose whole conversation fit, carrying no files.
+fn complete_manifest(entries: usize) -> transcript::Manifest {
+    transcript::Manifest {
+        entries,
+        omitted: 0,
+        carried: Vec::new(),
+        carried_total: 0,
+        carried_omitted: 0,
+        carried_unavailable: false,
+    }
 }
 
 #[tokio::test]
@@ -543,4 +569,218 @@ async fn an_older_message_repeating_the_prompt_is_kept() {
          is part of the conversation and stays"
     );
     assert!(text.contains("ship on Friday"));
+}
+
+/// The reported bug, at the briefing layer. A message longer than the
+/// per-message budget still gets cut here — that is what a briefing is — but the
+/// cut must ANNOUNCE itself and say where the rest is. Unannounced, the model
+/// read point 5 as the end of the message and told the reader the rest was
+/// unavailable.
+#[tokio::test]
+async fn a_shortened_message_says_it_is_an_excerpt_and_names_the_transcript() {
+    let database = h::database().await;
+    let harness = Harness::new(database.clone()).await;
+    let project = node(&database, harness.org_a, harness.alice_id, "Planning").await;
+    resource(
+        &database,
+        harness.org_a,
+        CHAT,
+        "chat",
+        project,
+        harness.alice_id,
+        "Planning",
+        "organization",
+    )
+    .await;
+    // The real shape from the report: ten numbered points, well over a thousand
+    // characters, with point 10 far past the 600-character per-message budget.
+    let mut body = String::new();
+    for point in 1..=10 {
+        body.push_str(&format!(
+            "point {point}: {}\n",
+            "a considered sentence about the matter at hand. ".repeat(3)
+        ));
+    }
+    let length = body.chars().count();
+    assert!(
+        length > 600,
+        "the fixture must exceed the per-message budget to test anything"
+    );
+    message(
+        &database,
+        harness.org_a,
+        harness.alice_id,
+        1,
+        "1b1b1b1b-1b1b-4b1b-8b1b-1b1b1b1b1b1b",
+        &body,
+    )
+    .await;
+    let text = brief_with(
+        &harness,
+        &harness.alice_a,
+        Scope::Chat { chat_id: CHAT },
+        "what was point 10",
+        &complete_manifest(1),
+    )
+    .await;
+    // The briefing still only excerpts — but it says so, with the real length.
+    assert!(
+        text.contains("[excerpt"),
+        "a cut message is marked as an excerpt"
+    );
+    assert!(
+        text.contains("conversation.md"),
+        "and the mark names the file holding the full text"
+    );
+    assert!(
+        text.contains(&format!("{length} characters")),
+        "and states how long the message actually is, so the model can tell how \
+         much it is missing"
+    );
+    assert!(
+        text.contains("Do NOT tell the reader"),
+        "the instructions forbid reporting earlier material as unavailable \
+         before looking in that file"
+    );
+    assert!(
+        text.ends_with("END >>>\n"),
+        "and the fence still closes, whatever the marks add"
+    );
+}
+
+/// The whole-body cut is announced too. A briefing that stops mid-thread in
+/// silence is how the conversation came to look truncated to the model.
+#[tokio::test]
+async fn a_briefing_cut_to_fit_says_where_the_conversation_continues() {
+    let database = h::database().await;
+    let harness = Harness::new(database.clone()).await;
+    let project = node(&database, harness.org_a, harness.alice_id, "Busy").await;
+    resource(
+        &database,
+        harness.org_a,
+        CHAT,
+        "chat",
+        project,
+        harness.alice_id,
+        "Planning",
+        "organization",
+    )
+    .await;
+    for index in 0..12 {
+        message(
+            &database,
+            harness.org_a,
+            harness.alice_id,
+            index + 1,
+            &format!("2c2c2c2c-2c2c-4c2c-8c2c-{index:012}"),
+            &"x".repeat(900),
+        )
+        .await;
+    }
+    let text = brief_with(
+        &harness,
+        &harness.alice_a,
+        Scope::Chat { chat_id: CHAT },
+        "go",
+        &complete_manifest(12),
+    )
+    .await;
+    assert!(text.chars().count() <= 8_000, "still bounded");
+    assert!(
+        text.contains("this orientation is cut off here"),
+        "the body cut announces itself"
+    );
+    assert!(
+        text.ends_with("END >>>\n"),
+        "and the fence survives saying so"
+    );
+}
+
+/// Files carried from earlier in the conversation are named, so the model knows
+/// it can read them and the reader is not asked to send them again.
+#[tokio::test]
+async fn carried_files_are_named_and_the_rest_are_counted() {
+    let database = h::database().await;
+    let harness = Harness::new(database.clone()).await;
+    let manifest = transcript::Manifest {
+        entries: 4,
+        omitted: 0,
+        carried: vec!["report.html".into(), "notes.txt".into()],
+        carried_total: 7,
+        carried_omitted: 2,
+        carried_unavailable: false,
+    };
+    let text = brief_with(
+        &harness,
+        &harness.alice_a,
+        Scope::Session { node_id: None },
+        "what did that report say",
+        &manifest,
+    )
+    .await;
+    assert!(text.contains("report.html"), "the earlier upload is named");
+    assert!(
+        text.contains("7 file(s) sent EARLIER"),
+        "and the total is stated even though only some are named"
+    );
+    assert!(
+        text.contains("list that directory"),
+        "with an honest route to the ones that are not named"
+    );
+    assert!(
+        text.contains("2 further file(s)"),
+        "files the reader can no longer reach are reported, not hidden"
+    );
+}
+
+/// The one case where saying nothing would be a lie: the file set could not be
+/// read. "There are none" and "I could not look" are different answers.
+#[tokio::test]
+async fn an_unreadable_file_set_is_reported_rather_than_implied_absent() {
+    let database = h::database().await;
+    let harness = Harness::new(database.clone()).await;
+    let manifest = transcript::Manifest {
+        entries: 2,
+        omitted: 0,
+        carried: Vec::new(),
+        carried_total: 0,
+        carried_omitted: 0,
+        carried_unavailable: true,
+    };
+    let text = brief_with(
+        &harness,
+        &harness.alice_a,
+        Scope::Session { node_id: None },
+        "open the file I sent",
+        &manifest,
+    )
+    .await;
+    assert!(
+        text.contains("could NOT be listed"),
+        "the failure is stated"
+    );
+    assert!(
+        text.contains("do not conclude that no such file exists"),
+        "and the model is told what not to infer from it"
+    );
+}
+
+/// A briefing built without context says nothing about a transcript. The
+/// pointer exists only when the file does — an instruction to open a file that
+/// was never staged is the same class of lie this work removes.
+#[tokio::test]
+async fn a_run_without_context_is_not_told_to_open_a_transcript() {
+    let database = h::database().await;
+    let harness = Harness::new(database.clone()).await;
+    let text = brief(
+        &harness,
+        &harness.alice_a,
+        Scope::Session { node_id: None },
+        "hello",
+    )
+    .await;
+    assert!(
+        !text.contains("conversation.md"),
+        "no pointer without a file to point at"
+    );
 }

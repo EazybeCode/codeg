@@ -136,6 +136,9 @@ pub(super) async fn run(
         fast: false,
         // The legacy one-shot route carries no attachments.
         attachments: Vec::new(),
+        // Nor any conversation: it has no session and no thread to be the
+        // continuation of, so there is no transcript to stage.
+        context_files: Vec::new(),
     };
     let mut handle = match state.agents.run(request).await {
         Ok(handle) => handle,

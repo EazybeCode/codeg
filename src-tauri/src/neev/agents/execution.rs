@@ -69,6 +69,15 @@ pub(crate) struct RunRequest {
     /// because only it knows where that directory is. A run that cannot stage
     /// what it was given fails rather than proceeding without the files.
     pub(crate) attachments: Vec<RunAttachment>,
+    /// Files the SERVER composed for this run: the complete transcript of the
+    /// conversation, and the files sent earlier in it (§ `agents::transcript`).
+    ///
+    /// Staged in their OWN directory, never mixed with `attachments`, and never
+    /// offered as native provider inputs. Keeping the two sets apart is what
+    /// lets the prompt say "the reader just sent you these" about one of them
+    /// and mean it — and what keeps a name shared between a new upload and an
+    /// old one from resolving to the wrong bytes.
+    pub(crate) context_files: Vec<RunAttachment>,
 }
 
 /// One file the user attached: its bytes, and enough to name and classify it.
@@ -102,6 +111,17 @@ pub(crate) struct StagedAttachment {
 /// names are key-prefixed, so it is not even called `AGENTS.md` on disk.
 const ATTACHMENT_DIR: &str = "neev-attachments";
 
+/// Where server-composed context is staged: the conversation transcript and the
+/// files earlier turns of the same conversation carried.
+///
+/// A DIFFERENT leaf from `ATTACHMENT_DIR` on purpose. These are not uploads the
+/// reader just made, and the two sets must be distinguishable by path alone —
+/// both for the prompt, which describes them differently, and for a reviewer
+/// reading a workdir. It is equally not the workdir root, for the same reason
+/// attachments are not: a file at the root of a working directory is
+/// configuration an agent will obey.
+const CONTEXT_DIR: &str = "neev-context";
+
 /// Write this turn's attachments into `workdir` and return their paths.
 ///
 /// The directory is **0755** and the files are 0644, both owned by the server
@@ -126,8 +146,9 @@ const ATTACHMENT_DIR: &str = "neev-attachments";
 /// anything reads as configuration. The original name is kept in the metadata
 /// for display, so truncation never reaches the reader.
 #[cfg(unix)]
-fn stage_attachments(
+fn stage_files(
     workdir: &Path,
+    root_name: &str,
     attachments: &[RunAttachment],
 ) -> Result<Vec<StagedAttachment>, ExecutionError> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -140,7 +161,7 @@ fn stage_attachments(
     // `AlreadyExists` alone would be worse: the existing entry could be a
     // symlink pointing anywhere. So an existing entry is ACCEPTED only after
     // `symlink_metadata` proves it is a real directory, which never follows it.
-    let root = workdir.join(ATTACHMENT_DIR);
+    let root = workdir.join(root_name);
     match std::fs::create_dir(&root) {
         Ok(()) => {
             std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
@@ -207,14 +228,39 @@ fn stage_attachments(
 }
 
 #[cfg(not(unix))]
-fn stage_attachments(
+fn stage_files(
     _workdir: &Path,
+    _root_name: &str,
     attachments: &[RunAttachment],
 ) -> Result<Vec<StagedAttachment>, ExecutionError> {
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
     Err(ExecutionError::Unavailable)
+}
+
+/// This turn's own uploads.
+fn stage_attachments(
+    workdir: &Path,
+    attachments: &[RunAttachment],
+) -> Result<Vec<StagedAttachment>, ExecutionError> {
+    stage_files(workdir, ATTACHMENT_DIR, attachments)
+}
+
+/// The transcript and the conversation's earlier files.
+///
+/// Failures PROPAGATE, exactly as they do for this turn's uploads. Swallowing
+/// them was the tempting shape — context is a nicety, a reply is not — and it is
+/// wrong: the briefing has already told the model that a transcript is staged
+/// and pointed at it by name. A run that then quietly has no such file is a run
+/// whose instructions are false, and the model would report the reader's own
+/// conversation as missing. Better to refuse the turn honestly, which the caller
+/// records as a visible failure the reader can retry.
+fn stage_context(
+    workdir: &Path,
+    files: &[RunAttachment],
+) -> Result<Vec<StagedAttachment>, ExecutionError> {
+    stage_files(workdir, CONTEXT_DIR, files)
 }
 
 /// The longest leaf a filesystem will take, in BYTES.
@@ -482,6 +528,50 @@ fn provider_argv(
         }
     }
     argv
+}
+
+/// How many context paths the briefing spells out.
+///
+/// Every argument in an argv is bounded (`MAX_ARG_STRLEN`, 128 KiB on Linux) and
+/// the briefing is ONE argument. A conversation may hold thousands of files, all
+/// of them genuinely staged; naming each one would build an argument no kernel
+/// will accept, and the exec would fail for the whole run. So the transcript and
+/// the first few files are named, the directory is named, and the count is
+/// stated — the model can list the directory for the rest, which is true rather
+/// than a polite way of hiding them. Matches `transcript::MANIFEST_NAMES`, which
+/// bounds the same list on the briefing side.
+const CONTEXT_PATHS: usize = super::transcript::MANIFEST_NAMES + 1;
+
+/// Append the staged context paths to the briefing.
+///
+/// Done HERE and nowhere earlier: the briefing is composed while the run's
+/// working directory does not yet exist, so it can name a FILE but never a path.
+/// This is the one point where both are known.
+fn briefing_with_context(briefing: Option<&str>, staged: &[StagedAttachment]) -> Option<String> {
+    if staged.is_empty() {
+        return briefing.map(str::to_owned);
+    }
+    let mut text = briefing.unwrap_or_default().to_owned();
+    text.push_str("\n<context-files>\n");
+    if let Some(directory) = std::path::Path::new(&staged[0].path)
+        .parent()
+        .map(|parent| parent.to_string_lossy().into_owned())
+    {
+        text.push_str(&format!("directory: {directory}\n"));
+    }
+    for item in staged.iter().take(CONTEXT_PATHS) {
+        text.push_str(&item.path);
+        text.push('\n');
+    }
+    if staged.len() > CONTEXT_PATHS {
+        text.push_str(&format!(
+            "({} more file(s) in that directory, not listed here to keep this short — \
+list the directory to see them all.)\n",
+            staged.len() - CONTEXT_PATHS
+        ));
+    }
+    text.push_str("</context-files>\n");
+    Some(text)
 }
 
 /// The staged paths a provider can take as native image inputs.
@@ -773,6 +863,8 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
             return Err(ExecutionError::Unauthorized);
         }
         let staged = stage_attachments(&self.workspace, &request.attachments)?;
+        let context = stage_context(&self.workspace, &request.context_files)?;
+        let briefing = briefing_with_context(request.briefing.as_deref(), &context);
         let prompt = prompt_with_attachments(&request.prompt, &staged);
         let mut command = Command::new(&self.binary);
         // Shares `provider_argv` with the sandboxed runtime, so dev cannot drift
@@ -781,7 +873,7 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
             &request.provider,
             &prompt,
             &request.model,
-            request.briefing.as_deref(),
+            briefing.as_deref(),
             request.effort.as_deref(),
             request.fast,
             &image_paths(&staged),
@@ -1065,6 +1157,13 @@ impl SandboxedProviderCliRuntime {
 
     /// The launcher's own arguments (everything the launcher parses); the provider
     /// binary only ever appears AFTER the `--` sandbox separator.
+    ///
+    /// The two staged sets arrive as separate parameters rather than one
+    /// combined list, because they are not interchangeable: uploads are named in
+    /// the PROMPT as files that just arrived, context is named in the BRIEFING as
+    /// files from earlier. Merging them to save an argument would erase exactly
+    /// the distinction the caller needs to keep.
+    #[allow(clippy::too_many_arguments)]
     fn launcher_args(
         &self,
         request: &RunRequest,
@@ -1073,9 +1172,10 @@ impl SandboxedProviderCliRuntime {
         binary: &str,
         handle: &str,
         staged: &[StagedAttachment],
+        context: &[StagedAttachment],
     ) -> Result<Vec<String>, ExecutionError> {
         let prompt = prompt_with_attachments(&request.prompt, staged);
-        let _ = workdir;
+        let briefing = briefing_with_context(request.briefing.as_deref(), context);
         let mut argv = vec![
             "--tenant".into(),
             format!("org:{}/user:{}", request.org_id, request.user_id),
@@ -1110,7 +1210,7 @@ impl SandboxedProviderCliRuntime {
             &request.provider,
             &prompt,
             &request.model,
-            request.briefing.as_deref(),
+            briefing.as_deref(),
             request.effort.as_deref(),
             request.fast,
             &image_paths(staged),
@@ -1132,6 +1232,7 @@ impl SandboxedProviderCliRuntime {
         // Staged HERE: the workdir exists by now and belongs to this run, which
         // is the only place a path for these files can honestly be chosen.
         let staged = stage_attachments(workdir, &request.attachments)?;
+        let context = stage_context(workdir, &request.context_files)?;
         let mut argv = match &self.cap_helper {
             Some(helper) => vec![helper.clone()],
             None => vec![
@@ -1139,7 +1240,7 @@ impl SandboxedProviderCliRuntime {
                 self.launcher.to_string_lossy().into_owned(),
             ],
         };
-        argv.extend(self.launcher_args(request, lane, workdir, binary, handle, &staged)?);
+        argv.extend(self.launcher_args(request, lane, workdir, binary, handle, &staged, &context)?);
         Ok(argv)
     }
 
@@ -1164,9 +1265,9 @@ impl SandboxedProviderCliRuntime {
                 self.launcher.to_string_lossy().into_owned(),
             ],
         };
-        // Discovery carries no attachments: it asks the provider for metadata,
-        // not for work on a file.
-        let full = self.launcher_args(request, lane, workdir, binary, handle, &[])?;
+        // Discovery carries no attachments and no context: it asks the provider
+        // for metadata, not for work on a file or on a conversation.
+        let full = self.launcher_args(request, lane, workdir, binary, handle, &[], &[])?;
         let cut = full
             .iter()
             .position(|arg| arg == "--")
@@ -1269,6 +1370,9 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
             effort: None,
             fast: false,
             attachments: Vec::new(),
+            // Discovery asks the provider for its catalogue. There is no
+            // conversation to carry and nothing to be continuous with.
+            context_files: Vec::new(),
         };
         let mut argv = self.launch_prefix(&probe, lane, &workdir, &binary, &handle)?;
         argv.push("app-server".into());
@@ -1559,6 +1663,7 @@ mod tests {
             effort: None,
             fast: false,
             attachments: Vec::new(),
+            context_files: Vec::new(),
         }
     }
 
@@ -1798,6 +1903,110 @@ mod tests {
         assert_eq!(std::fs::read(&first[0].path).unwrap(), b"first run");
         assert_eq!(std::fs::read(&second[0].path).unwrap(), b"second run");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Context and this turn's uploads land in DIFFERENT directories, and a name
+    /// shared between the two resolves to the right bytes on both sides.
+    ///
+    /// This is what lets the prompt say "the reader just attached these" about
+    /// one set and "these are from earlier in the conversation" about the other
+    /// and have both be true. Distinguishing them by name would be guesswork the
+    /// moment a reader sends `report.html` twice, which is the ordinary case.
+    #[cfg(unix)]
+    #[test]
+    fn context_stages_apart_from_this_turns_uploads() {
+        let root = std::env::temp_dir().join(format!(
+            "neev-stage-context-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let fresh = vec![RunAttachment {
+            key: "11111111-1111-4111-8111-111111111111".into(),
+            file_name: "report.html".into(),
+            bytes: b"<p>just sent</p>".to_vec(),
+            is_image: false,
+        }];
+        let context = vec![
+            RunAttachment {
+                key: "22222222-2222-4222-8222-222222222222".into(),
+                file_name: super::super::transcript::TRANSCRIPT_NAME.into(),
+                bytes: b"# Conversation transcript\n".to_vec(),
+                is_image: false,
+            },
+            RunAttachment {
+                key: "33333333-3333-4333-8333-333333333333".into(),
+                // The same name as the fresh upload, deliberately.
+                file_name: "report.html".into(),
+                bytes: b"<p>from an earlier turn</p>".to_vec(),
+                is_image: false,
+            },
+        ];
+        let staged = stage_attachments(&root, &fresh).expect("uploads stage");
+        let carried = stage_context(&root, &context).expect("context stages");
+        assert!(
+            staged[0].path.contains(ATTACHMENT_DIR),
+            "this turn's uploads stay where the prompt says they are"
+        );
+        assert!(
+            carried.iter().all(|item| item.path.contains(CONTEXT_DIR)),
+            "and context is somewhere else entirely"
+        );
+        assert_eq!(
+            std::fs::read(&staged[0].path).unwrap(),
+            b"<p>just sent</p>"
+        );
+        assert_eq!(
+            std::fs::read(&carried[1].path).unwrap(),
+            b"<p>from an earlier turn</p>",
+            "the identically-named earlier file keeps its own bytes"
+        );
+        // The transcript is staged first, so a truncated path list still has it.
+        assert!(carried[0]
+            .path
+            .ends_with(super::super::transcript::TRANSCRIPT_NAME));
+        assert!(
+            image_paths(&carried).is_empty(),
+            "context is never offered as a native image input"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The briefing names a FILE; only the runtime can name a path. This is
+    /// where the two meet, and it must stay inside one argv argument.
+    #[test]
+    fn the_briefing_gains_the_staged_context_paths_and_stays_bounded() {
+        let staged = (0..CONTEXT_PATHS + 5)
+            .map(|index| StagedAttachment {
+                path: format!("/run/neev-context/abc/key--file{index}.txt"),
+                file_name: format!("file{index}.txt"),
+                is_image: false,
+            })
+            .collect::<Vec<_>>();
+        let text = briefing_with_context(Some("standing instructions"), &staged)
+            .expect("a briefing with context");
+        assert!(text.starts_with("standing instructions"));
+        assert!(
+            text.contains("directory: /run/neev-context/abc"),
+            "the directory is named, which is what makes the unlisted files reachable"
+        );
+        assert!(text.contains("/run/neev-context/abc/key--file0.txt"));
+        assert!(
+            text.contains("5 more file(s) in that directory"),
+            "and the ones not listed are counted rather than dropped in silence"
+        );
+        assert_eq!(
+            text.matches("/run/neev-context/abc/key--").count(),
+            CONTEXT_PATHS,
+            "the path list is bounded: one argv argument cannot hold thousands"
+        );
+        assert_eq!(
+            briefing_with_context(Some("standing instructions"), &[]).as_deref(),
+            Some("standing instructions"),
+            "and a run with no context gets no block at all"
+        );
     }
 
     /// An existing staging root is reused only when it is a real directory.
@@ -2289,6 +2498,7 @@ mod tests {
                 effort: None,
                 fast: false,
                 attachments: Vec::new(),
+                context_files: Vec::new(),
             })
             .await
             .unwrap();

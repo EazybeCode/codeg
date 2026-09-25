@@ -14,6 +14,7 @@ pub(crate) mod runs;
 pub(crate) mod sessions;
 pub(crate) mod status;
 pub(crate) mod supervisor;
+pub(crate) mod transcript;
 pub(super) mod store;
 pub(crate) mod types;
 

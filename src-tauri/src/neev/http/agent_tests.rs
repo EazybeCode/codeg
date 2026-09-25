@@ -97,6 +97,7 @@ fn run_request() -> RunRequest {
         effort: None,
         fast: false,
         attachments: Vec::new(),
+        context_files: Vec::new(),
     }
 }
 

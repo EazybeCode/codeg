@@ -72,6 +72,7 @@ impl Harness {
                 effort: None,
                 fast: false,
                 attachments: Vec::new(),
+                context_files: Vec::new(),
             })
             .await
             .unwrap();

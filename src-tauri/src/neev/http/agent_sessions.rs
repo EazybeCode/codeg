@@ -34,7 +34,7 @@ use super::{catalog, private_json, ApiError};
 use crate::neev::agents::execution::{RunAttachment, RunRequest};
 use crate::neev::agents::runs::{self, RunSignal};
 use crate::neev::agents::sessions::{self, AgentSession, AgentTurn, SessionInput, TurnStatus};
-use crate::neev::agents::{intents, supervisor, types::Provider};
+use crate::neev::agents::{intents, supervisor, transcript, types::Provider};
 use crate::neev::content::attachment::{self, Owner, StoredAttachment};
 use crate::neev::content::types::Page;
 use crate::neev::startup::ServerState;
@@ -525,6 +525,22 @@ pub(super) async fn start_turn(
     // Context is gathered BEFORE the new turn exists so it cannot include
     // itself, and only completed turns contribute (§ `conversation_prompt`).
     let history = sessions::recent_turns(&state, &actor, &session_id).await?;
+    // The whole session, as files the provider can open: the bounded replay
+    // above is orientation, and a reader whose earlier message was longer than
+    // the replay's per-message budget is entitled to have the agent able to read
+    // the rest rather than report it as missing. Also carries the files earlier
+    // turns of THIS session attached, so a follow-up question about a document
+    // does not require sending it again. Best effort, like the briefing: a run
+    // must not fail because its own history could not be assembled.
+    let context = transcript::build(
+        &state,
+        &actor,
+        transcript::Source::Session {
+            session_id: &session_id,
+        },
+        &keys,
+    )
+    .await;
     // The INVOKER's own per-user credential (§5.4). Looked up from the actor's
     // connection row, never supplied by the request; `None` here makes the
     // sandboxed runtime refuse rather than fall back to a host identity.
@@ -563,6 +579,7 @@ pub(super) async fn start_turn(
             node_id: session.node_id,
         },
         &turn.prompt,
+        context.as_ref().map(|bundle| &bundle.manifest),
     )
     .await;
     let run_request = RunRequest {
@@ -584,6 +601,12 @@ pub(super) async fn start_turn(
         // path, and a run that cannot stage them fails rather than mentioning
         // files it does not have.
         attachments: run_attachments(resolved),
+        // The session's own transcript and earlier files, staged separately from
+        // the uploads above so the prompt can keep telling the truth about which
+        // files arrived with this message.
+        context_files: context
+            .map(|bundle| bundle.files)
+            .unwrap_or_default(),
     };
     match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -1530,11 +1553,25 @@ pub(super) async fn team_invoke(
     // bounded tail of it is not a disclosure — it is what makes the answer
     // about the conversation instead of about one sentence pulled out of it.
     // The PRIVATE session's own turns are still never composed in.
+    //
+    // The COMPLETE thread goes the same way, as a staged file, along with the
+    // files the room has already sent. Both are the CHAT's own material, which
+    // is exactly the audience this reply is published to — the transcript proves
+    // that for itself before reading a single message, and every carried file is
+    // re-authorized against the chat's current ACL.
+    let context = transcript::build(
+        &state,
+        &actor,
+        transcript::Source::Chat { chat_id: &chat_id },
+        &keys,
+    )
+    .await;
     let briefing = crate::neev::agents::briefing::build(
         &state,
         &actor,
         crate::neev::agents::briefing::Scope::Chat { chat_id: &chat_id },
         &turn.prompt,
+        context.as_ref().map(|bundle| &bundle.manifest),
     )
     .await;
     let run_request = RunRequest {
@@ -1554,6 +1591,12 @@ pub(super) async fn team_invoke(
         // The bytes behind the message's persisted references; the runtime
         // stages them into its own workdir.
         attachments: run_attachments(resolved),
+        // The chat's own transcript and earlier files. Nothing private to the
+        // invoker is here: the set is scoped to this chat in SQL and re-proven
+        // against the chat's ACL, so it is the same material the room can read.
+        context_files: context
+            .map(|bundle| bundle.files)
+            .unwrap_or_default(),
     };
     let turn = match state.agents.run(run_request).await {
         Ok(handle) => {
