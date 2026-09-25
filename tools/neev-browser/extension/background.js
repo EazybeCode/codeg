@@ -86,6 +86,10 @@ chrome.runtime.onConnect.addListener((port) => {
     /* the panel closed between connect and this line */
   }
   port.onMessage.addListener((message) => {
+    // A superseded port must not drive the run. Chrome leaves its listeners
+    // attached, so without this a stale panel connection could still start,
+    // stop or approve — the same guard the disconnect below needs.
+    if (!panel.holds(port)) return
     Promise.resolve(controller.onPanelMessage(message)).catch(() => {})
   })
   port.onDisconnect.addListener(() => {

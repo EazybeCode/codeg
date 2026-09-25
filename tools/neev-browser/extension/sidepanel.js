@@ -57,17 +57,24 @@ let selectedTabId = null
 /** True while the worker holds a run that has not ended yet. */
 let liveRun = false
 
-const LOST_RUN_TEXT =
-  "Chrome shut down the extension's background service worker, and the run " +
-  "was running inside it, so the run is over. Nothing was replayed: no " +
-  "further action was taken on the page, and the agent process ended when " +
-  "its connection to the Neev companion closed. The run badge stays on that " +
-  "tab until you reload it."
+/**
+ * Both lines say only what the panel can actually see.
+ *
+ * A closed port is not a cause. It does not say the worker went idle rather
+ * than crashed, and it does not say what had or had not already happened on
+ * the page — an action dispatched a moment earlier may well have landed. So
+ * neither line claims the page was untouched, and neither names Chrome.
+ */
 
-const WORKER_GONE_TEXT =
-  "Chrome had already shut down the extension's background service worker, " +
-  "so this run is no longer attached. Nothing was sent and nothing further " +
-  "was done to the page."
+/** Said once the reconnected worker has confirmed it is holding no run. */
+const RUN_LOST_TEXT =
+  "Connection lost. This panel is no longer attached to the run. No commands " +
+  "were replayed. Start a new run to continue."
+
+/** Said when a control is used on a port that is already gone. */
+const NOT_ATTACHED_TEXT =
+  "Connection lost. This panel is no longer attached to the run. Nothing was " +
+  "sent and nothing was replayed. Start a new run to continue."
 
 const connection = new PanelConnection({
   connect: () => chrome.runtime.connect({ name: "neev-panel" }),
@@ -94,31 +101,27 @@ if (openFailure) {
 /**
  * Post to the service worker, or say plainly why it did not go.
  *
- * `reconnect` is for messages that start something new: Chrome shutting an
- * idle worker down costs nothing, and waking it is the normal way back. It is
- * deliberately *not* set for stop, approval or handoff — those name state
- * that lived in the worker that went away, so sending them to a fresh one
- * would be answering a question nobody is asking any more.
+ * `reconnect` is for messages that start something new, where opening a fresh
+ * connection is the whole point. It is deliberately *not* set for stop,
+ * approval or handoff — those name state that lived in the connection that
+ * went away, so sending them over a new one would be answering a question
+ * nobody is asking any more.
  */
 function send(message, { reconnect = false } = {}) {
   if (!connection.connected && reconnect) {
     const failure = connection.ensure()
     if (failure) {
-      showError(
-        "Could not reach the extension's background service worker (" +
-          failure +
-          "). Reload the extension."
-      )
+      showError("Could not connect to the extension (" + failure + ").")
       return false
     }
   }
   if (!connection.connected) {
-    showError(WORKER_GONE_TEXT)
+    showError(NOT_ATTACHED_TEXT)
     return false
   }
   const failure = connection.post(message)
   if (failure) {
-    showError("The background service worker went away: " + failure)
+    showError(NOT_ATTACHED_TEXT)
     return false
   }
   return true
@@ -127,10 +130,11 @@ function send(message, { reconnect = false } = {}) {
 function onWorkerMessage(message) {
   if (!message) return
   if (message.kind === "sync") {
-    // A snapshot with no run, when this panel had one, is the worker telling
-    // us it restarted empty. Keep what the panel already has so the run that
-    // died is still readable and exportable, and mark it ended for the reason
-    // it actually ended for.
+    // A snapshot with no run, when this panel had one, is the worker itself
+    // saying it is holding nothing. That is the only evidence the panel gets
+    // that the run is gone, and it is why the message below is said here and
+    // not the moment the port dropped. Keep what the panel already has so the
+    // run stays readable and exportable.
     if (liveRun && !(message.state && message.state.run)) {
       announceLostRun()
       return
@@ -165,14 +169,12 @@ function announceLostRun() {
     status: "idle",
     approval: null,
     handoff: null,
-    ended: {
-      state: "revoked",
-      reason: "service_worker_terminated",
-      at: Date.now(),
-    },
-    error: LOST_RUN_TEXT,
+    // "ended", not "revoked": the panel knows the run is no longer held, not
+    // how it ended. The transcript should not invent the difference.
+    ended: { state: "ended", reason: "connection_lost", at: Date.now() },
+    error: RUN_LOST_TEXT,
   }
-  const entry = { at: Date.now(), type: "error", text: LOST_RUN_TEXT }
+  const entry = { at: Date.now(), type: "error", text: RUN_LOST_TEXT }
   entries.push(entry)
   appendEntry(entry)
   renderState()
@@ -180,27 +182,27 @@ function announceLostRun() {
 
 function onWorkerDrop() {
   if (liveRun) {
-    // Something was riding on that port. Reconnect — bounded — so the panel
-    // can say what became of the run instead of guessing.
+    // Something was riding on that connection. Reconnect — bounded — so the
+    // worker itself can say whether the run survived, rather than the panel
+    // reading a fate into a closed port.
     connection.recover()
     return
   }
-  // Idle. Chrome terminates an idle service worker on purpose; nothing is
-  // wrong and nothing is lost, so the panel says nothing and the next thing
-  // the person does opens a fresh port.
+  // No run was attached, so there is nothing to report and nothing to
+  // reconnect for. The next thing the person does opens a fresh port.
 }
-
-// Hand the port back when the panel goes away, so the worker ends the run on
-// the panel's own teardown rather than on Chrome noticing later, and so a
-// scheduled retry cannot fire into a dying document.
-window.addEventListener("pagehide", () => connection.close())
 
 function onWorkerGaveUp() {
   report(
-    "The extension's background service worker disconnected and would not " +
-      "start again. Reload the extension, then reopen the panel."
+    "Could not reconnect to the extension. Reload the extension, then reopen " +
+      "the panel."
   )
 }
+
+// Hand the port back when the panel goes away, so the worker sees the panel
+// close on the panel's own teardown, and so a scheduled retry cannot fire
+// into a dying document.
+window.addEventListener("pagehide", () => connection.close())
 
 // ------------------------------------------------------------------ render
 

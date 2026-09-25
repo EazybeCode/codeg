@@ -254,6 +254,49 @@ test("close stops a retry that was already scheduled", () => {
   assert.equal(harness.link.connected, false)
 })
 
+test("a superseded port's late message is ignored", () => {
+  const harness = connected()
+  const stale = harness.last()
+  stale.drop()
+  assert.equal(harness.link.ensure(), null)
+  const live = harness.last()
+  live.emit({ kind: "sync", state: { status: "running", run: { id: "b" } } })
+  const before = harness.events.length
+
+  // Chrome leaves a dead port's listeners attached. Taking this would put the
+  // older snapshot over the newer one — and a `sync` would buy a backoff reset
+  // on the credit of a connection nobody is listening to.
+  stale.emit({ kind: "sync", state: { status: "idle", run: null } })
+  stale.emit({ kind: "log", entry: { text: "from the grave" } })
+
+  assert.equal(harness.events.length, before)
+})
+
+test("a late message after close is ignored", () => {
+  const harness = connected()
+  const port = harness.last()
+  harness.link.close()
+  const before = harness.events.length
+
+  port.emit({ kind: "log", entry: { text: "too late" } })
+
+  assert.equal(harness.events.length, before)
+})
+
+test("a stale sync does not reset the backoff", () => {
+  const harness = connected()
+  const stale = harness.last()
+  stale.drop()
+  harness.link.recover()
+  harness.flush()
+  assert.equal(harness.link.attempt, 1, "counter should still be advanced")
+
+  stale.emit({ kind: "sync", state: { status: "idle" } })
+
+  assert.equal(harness.link.attempt, 1)
+  assert.equal(harness.names().includes("restored"), false)
+})
+
 test("close disconnects the live port and silences the drop", () => {
   const harness = connected()
 
@@ -279,6 +322,31 @@ test("the panel slot ignores a superseded port's disconnect", () => {
 
   assert.equal(slot.release(first), false)
   assert.equal(slot.port, second)
+})
+
+test("the panel slot refuses a superseded port's messages too", () => {
+  const slot = makePanelSlot()
+  const first = makePort()
+  const second = makePort()
+  slot.adopt(first)
+  slot.adopt(second)
+
+  // Chrome does not detach the old port's listeners, so without this a stale
+  // panel connection could still start, stop or approve a run.
+  assert.equal(slot.holds(first), false)
+  assert.equal(slot.holds(second), true)
+})
+
+test("the panel slot holds nothing once the live port is released", () => {
+  const slot = makePanelSlot()
+  const port = makePort()
+  slot.adopt(port)
+  slot.release(port)
+
+  assert.equal(slot.holds(port), false)
+  // An empty slot holds nothing, not even the absence it is comparing against.
+  assert.equal(slot.holds(null), false)
+  assert.equal(slot.holds(undefined), false)
 })
 
 test("the panel slot reports the live port's disconnect exactly once", () => {

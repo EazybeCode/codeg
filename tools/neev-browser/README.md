@@ -179,32 +179,55 @@ involved and a slow load is never mistaken for a dead one.
   established** — nothing in this tool's source was shown to produce it, and
   nothing here should be read as a fix for it.
 
-### The service worker going away is not a fault
+### "Connection lost" is not necessarily a fault
 
-Chrome terminates an idle MV3 service worker on purpose, and the panel's port
-dies with it. The panel used to call that "disconnected — reload the extension"
-and stop, which asked the person to hand-repair Chrome's normal lifecycle. It
-now reconnects instead, under three rules in `lib/connection.js`:
+The panel used to say "the background service worker disconnected — reload the
+extension" and stop dead: the port was dropped and nothing ever reopened it, so
+every button stayed inert until a manual reload. It now reconnects instead.
+
+**Why a dropped port is expected.** Chrome's [service worker lifecycle
+docs][lifecycle] put the idle shutdown at 30 seconds, and say that opening a
+port does not reset that timer although messages over one do extend it. They
+also note that `runtime.connectNative` keeps the worker alive while a native
+messaging port is open (Chrome 105+), which is why an attached run is the case
+least likely to be cut short. So for an idle panel, losing the port is routine.
+
+**But the panel cannot prove that is what happened.** A closed port says only
+that the port closed. A crashed worker and a reloaded extension look identical
+from here, and the absence of a `chrome.runtime.lastError` narrows it without
+settling it. Nothing in `lib/connection.js` or in what the panel shows you
+names a cause, and nothing claims the page went untouched — an action
+dispatched a moment before the drop may well have landed.
+
+Four rules in `lib/connection.js`:
 
 - **Nothing is replayed.** A message that was not delivered stays undelivered.
-  Only **Grant access & run** may wake a shut-down worker, because it starts
+  Only **Grant access & run** may open a fresh connection, because it starts
   something new. Stop, Approve, Deny and the handoff buttons answer for state
-  that lived in the worker that went away, so they are never re-sent to a fresh
-  one — the panel says so instead.
+  that lived in the connection that went away, so they are never re-sent — the
+  panel says so instead.
 - **Recovery is bounded, and never periodic.** An idle panel does not reconnect
-  at all; it waits for the next thing you do. Waking the worker on a timer
-  would only restart the same idle clock forever. A panel that had a live run
-  reconnects with backoff — 0.25 s, 0.75 s, 2 s, 5 s — then gives up and says
-  so.
+  at all; it waits for the next thing you do. Reconnecting on a timer would buy
+  another 30 seconds and then do it again, forever — an extension keeping its
+  worker alive indefinitely, which [the same document][lifecycle] tells you not
+  to build. A panel that had a live run reconnects with backoff — 0.25 s,
+  0.75 s, 2 s, 5 s — then gives up and says so.
 - **A reconnect counts only once the worker speaks.** `chrome.runtime.connect`
   hands back a port even when the worker will not start, so the backoff resets
   on the snapshot the worker posts on connect, not on the connect itself.
+- **Only the live port is listened to.** Chrome leaves a superseded port's
+  listeners attached, so both ends gate messages *and* disconnects on port
+  identity. Otherwise a late message from a dead connection could overwrite
+  newer state, or drive a run nobody is watching.
 
-If the worker is terminated while a run is attached, the run is genuinely over:
-it lived in that worker, and the agent process ends when the native host's
-stdin closes. The panel reconnects only to confirm that and then says so,
-keeping the activity log so the transcript is still exportable. The run badge
-stays on the page until you reload that tab.
+**What it says when a run was attached.** The panel does not read a fate into a
+closed port. It reconnects, and if the worker's own snapshot comes back holding
+no run, *that* is the evidence — the panel says "Connection lost. This panel is
+no longer attached to the run. No commands were replayed. Start a new run to
+continue," keeps the activity log so the transcript is still exportable, and
+records the run as `ended / connection_lost` rather than guessing at a reason.
+
+[lifecycle]: https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle
 
 ## Limitations
 
@@ -232,7 +255,7 @@ network, or a provider. Nothing to install for either.
 
 ```bash
 tools/neev-browser/companion/run_tests.sh      # 156 tests, Python stdlib
-tools/neev-browser/extension-tests/run_tests.sh # 106 tests, node --test
+tools/neev-browser/extension-tests/run_tests.sh # 111 tests, node --test
 ```
 
 The extension suite syntax-checks every shipped `.js` file, then runs the
