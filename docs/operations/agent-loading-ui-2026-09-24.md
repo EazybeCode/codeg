@@ -102,3 +102,64 @@ Playwright package/browser is NOT installed by this change.
 Storage: removed 340 MB of unmounted provider build downloads and pruned the
 stopped neev-native-20260912 BuildKit cache (9.337 GB reported). Free host disk
 rose to ~9 GB. No application data, credentials, or application volumes removed.
+
+## Completion stability and mentions — release candidate
+
+Completed activity now remains below the answer in both chat surfaces, matching
+its position during streaming. Tool results without displayable output show a
+non-expandable Completed label. Human prompts use a quiet bordered background.
+
+The same candidate adds explicit coworker mention chips in shared chats, a scoped
+in-app inbox, and a paginated member picker. Private chats cannot notify coworkers.
+Unread receipts are marked only once the destination chat is visible and loaded.
+Notifications poll every 60 seconds; this is not push delivery.
+
+Frontend verification: 525 tests in 29 suites reported by the Claude worker;
+independent focused checks passed 38 tests, then a directory-pagination regression
+passed with the 9 chat/inbox tests. Production export passed. Candidate UI SHA256:
+`2e24f88e00329417041d799039ba3aa9cfa3f7ad28d5144b4cae6aa9fabb76d6`.
+
+Backend review caught a schema-15 migration guard defect before release; an
+isolated PostgreSQL schema-15 upgrade reproduced failure, then passed after the
+fix, including a restart. Additional review fixed unread-first inbox ordering,
+organization-aware validation cursors, and read-batch bounds. Empty mention arrays
+are omitted from message DTOs for compatibility with existing browser clients;
+messages with mentions require the new client. Do not use the old UI image as a
+complete rollback after users have created mentions.
+
+Deployment status: pending final Rust/PostgreSQL verification and backup.
+
+## Conductor transcript — UI-only release 2026-09-25
+
+Released the chronological transcript/compact tool rows/scroll override separately
+from mentions. Main implementation `1d12c72a`; isolated release commit `75ac7ac6`
+applies it to pre-mentions frontend `21fb4760`. One conflict in the team message
+renderer retained TranscriptBody without the unreleased MentionedText branch.
+
+Validation: 177 focused tests (8 suites), TypeScript, changed-file ESLint and
+production static export passed. Turbopack refused the node_modules symlink in
+the isolated checkout; `npm run build -- --webpack` passed with no config change.
+The main combined tree passed 186 focused tests but is not this release.
+
+Live image: `neev-native-agent:ux-docs-speed-conductor-ui-only-20260925`.
+UI SHA256: `ae74be18ff025771baa779ff1f5f95b6e7ee5bb99c8b8985c13cbe3002f25659`.
+Server SHA256 remains `6d20bbcdfa268a83830ff7ffe0d436ec329aa747992090f66019611046921239`.
+Idle precheck: 0 sign-ins/0 running turns. Health 200, UI hash, document creation
+flag verified after deployment. No database migration in this release.
+
+Mentions remains withheld: relevant SQLite suites passed 255 tests, PostgreSQL
+mention behavior passed, but the PostgreSQL migration test failed on first
+reopen after a successful schema-15 upgrade. Root cause under investigation.
+The combined image must not be deployed until this is resolved.
+
+Known remaining UX gap: the team-chat preview-to-stored-message handover still
+remounts expanded tool details; private agent-chat details now stay open through
+completion. This is not a claim of full Conductor feature parity.
+
+Live verification: disposable private node chat “Verification — Conductor transcript”,
+Codex GPT-5.6-Luna, harmless printf/sleep commands. Observed Starting check →
+printf FIRST row → First command finished → sleep/printf SECOND row → Check
+complete, in that exact order. Run completed in 22s and the loader cleared.
+Expanded first command row displayed its command and actual FIRST output.
+Screenshot checked compact rows, inline monospace command previews and composer
+spacing. Temporary chat moved to recoverable trash after verification.
