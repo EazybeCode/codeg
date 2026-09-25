@@ -163,3 +163,26 @@ complete, in that exact order. Run completed in 22s and the loader cleared.
 Expanded first command row displayed its command and actual FIRST output.
 Screenshot checked compact rows, inline monospace command previews and composer
 spacing. Temporary chat moved to recoverable trash after verification.
+
+## Combined release enabled after same-host verification
+
+The held migration assertion was a lost SSH database connection, not a validator
+refusal. See mentions-release-verification-2026-09-25.md for same-host evidence:
+three successful starts against the exact retained database and preserved rows.
+No production source change was needed after the tested backend commit.
+
+Final live image: `neev-native-agent:ux-docs-speed-conductor-chat-20260925`.
+UI SHA256: `36152a861d67cb53168d3b756608e41337aa9477aa32a87ce3ea7b885186e837`.
+Server SHA256: `cabc2f56593e068f157f9cb6177ddcef3222b8854d4d6317d373d9f86bd17cf2`.
+Before restart: zero pending sign-ins/running turns; verified private PostgreSQL
+backup (214281 bytes) retained on the server. After restart: health 200, schema16,
+UI hash and document creation flag verified. Live mentions inbox opened and showed
+No mentions yet. No notifications were sent to real coworkers during verification.
+
+Extension 0.1.0 is installed from the repo with its native host pinned to the
+user-provided extension ID. User screenshots confirm the panel renders after
+reload. Dropped background-port recovery now has 111 passing extension tests and
+156 companion tests; root independently ran 19 connection and 10 boot tests.
+Actual browser-agent action remains unverified: no run reached the companion as
+of this release. Browser policy prevented direct extension-page automation; user
+is conducting the disposable-page test. Do not call that integration complete.
