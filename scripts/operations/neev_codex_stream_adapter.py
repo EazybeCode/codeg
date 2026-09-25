@@ -30,9 +30,10 @@ import signal
 import subprocess
 import sys
 
-# One app-server message. Comfortably above a real delta or command output
-# (which the server chunks) and far below anything that could exhaust memory.
-MAX_LINE_BYTES = 1 * 1024 * 1024
+# App-server command completions repeat the full output, even after chunked
+# deltas. Allow large HTML results on input, then bound the displayed preview.
+MAX_LINE_BYTES = 64 * 1024 * 1024
+MAX_TOOL_PREVIEW_CHARS = 4096
 # How long the handshake may take before the turn is abandoned. It bounds ONLY
 # `initialize` → `thread/start` → `turn/start`, never the turn itself, which
 # legitimately takes minutes. Without it a provider that answers nothing is a
@@ -176,6 +177,8 @@ class Emitter:
         )
 
     def command_completed(self, item_id, command, output, exit_code):
+        if len(output) > MAX_TOOL_PREVIEW_CHARS:
+            output = output[:MAX_TOOL_PREVIEW_CHARS] + "\n[Output preview truncated]"
         self._write(
             {
                 "type": "item.completed",

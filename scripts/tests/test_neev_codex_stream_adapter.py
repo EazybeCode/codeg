@@ -89,8 +89,13 @@ for line in sys.stdin:
             # Report the process group we were started in, so the test can show
             # that one killpg reaches the adapter and the provider together.
             open(os.environ["FAKE_PGID_FILE"], "w").write(str(os.getpgid(0)))
+        if MODE == "largeTool":
+            note("item/completed", {"item": {"type": "commandExecution", "id": "large", "command": "rg HTML", "aggregatedOutput": "x" * (22 * 1024 * 1024), "exitCode": 0}})
+            note("item/agentMessage/delta", {"itemId": "m1", "delta": "Reviewed"})
+            note("turn/completed", {"turn": {"status": "completed"}})
+            sys.exit(0)
         if MODE == "oversized":
-            note("item/agentMessage/delta", {"itemId": "m1", "delta": "x" * (2 * 1024 * 1024)})
+            note("item/agentMessage/delta", {"itemId": "m1", "delta": "x" * (65 * 1024 * 1024)})
             note("turn/completed", {"turn": {"status": "completed"}})
             sys.exit(0)
         if MODE == "serverRequest":
@@ -388,6 +393,13 @@ class EndToEndTests(unittest.TestCase):
             capture_output=True, text=True, timeout=30,
         )
         self.assertEqual(process.returncode, 2)
+
+    def test_large_html_tool_output_does_not_abort_the_agent(self):
+        code, lines = self.run_adapter("largeTool")
+        self.assertEqual(code, 0)
+        self.assertEqual(lines[-1], {"type": "turn.completed"})
+        self.assertLess(len(json.dumps(lines[0])), 10000)
+        self.assertIn("truncated", lines[0]["item"]["aggregated_output"])
 
     def test_an_oversized_provider_message_ends_the_turn_rather_than_being_read(self):
         # Bounded BEFORE the allocation: a message larger than the cap is not

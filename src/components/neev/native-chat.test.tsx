@@ -1955,3 +1955,156 @@ it("draws the conversation before its history arrives, and posts nothing until t
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(posts()).toHaveLength(1))
 })
+
+/*
+ * ONE control in the composer's corner, whichever state the run is in.
+ *
+ * Send was already held for the whole run (`sendable` is false while the
+ * agent is busy), so the old pair put a live Stop beside a dead Send and
+ * shifted the row under the pointer at the moment someone reached for it.
+ */
+it("shows one composer control that turns into Stop while the invoked run streams", async () => {
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  let canceled: unknown = null
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            controller = c
+            c.enqueue(
+              new TextEncoder().encode(
+                'data: {"type":"chunk","text":"partial"}\n\n'
+              )
+            )
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      ),
+    "POST /api/neev/agent/runs/cancel": (init) => {
+      canceled = JSON.parse(init.body as string)
+      return json({ canceled: true, status: "running" })
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  // Idle: Send, and nothing beside it.
+  expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull()
+  const send = screen.getByRole("button", { name: "Send" })
+  const corner = send.parentElement!
+  await user.click(send)
+  await screen.findByText("partial")
+  // Running: Stop, in the same corner, and Send is GONE rather than disabled.
+  const stop = await screen.findByRole("button", { name: "Stop generation" })
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+  expect(stop.parentElement).toBe(corner)
+  expect(stop).toBeEnabled()
+  // Inside the form, but it must never submit it.
+  expect(stop).toHaveAttribute("type", "button")
+  await user.click(stop)
+  await waitFor(() => expect(canceled).toEqual({ runId: RUN_ID }))
+  act(() => {
+    controller.enqueue(
+      new TextEncoder().encode(
+        'data: {"type":"finished","status":"canceled","errorCode":null}\n\n'
+      )
+    )
+    controller.close()
+  })
+  // And back to one Send once the run is over.
+  expect(await screen.findByRole("button", { name: "Send" })).toHaveAttribute(
+    "type",
+    "submit"
+  )
+  expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull()
+}, 10000)
+
+/*
+ * Naming a chat from what was said first.
+ *
+ * The placeholder is the whole guard: a chat someone named is never renamed,
+ * and a chat with a transcript is never renamed either. What changed is that
+ * being unnamed and EMPTY is enough — a "New chat" made last week and opened
+ * from the sidebar today used to stay "New chat" forever, because only the
+ * tab that had just been created was armed.
+ */
+const unnamed: NativeResource = { ...resource, title: "New chat" }
+function nameMock(
+  start: NativeResource,
+  history: (typeof message)[],
+  record: { patched: Record<string, unknown>[]; posted: number }
+) {
+  let latest = start
+  return mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(latest),
+    [`GET ${path}`]: () => json({ items: history, nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}`]: (init) => {
+      record.posted += 1
+      const sent = JSON.parse(init.body as string)
+      return json({ ...message, sequence: "9", body: sent.body as string }, 201)
+    },
+    [`PATCH /api/neev/resources/${resource.id}`]: (init) => {
+      const body = JSON.parse(init.body as string)
+      record.patched.push(body)
+      latest = { ...latest, title: body.title as string, authRevision: "2" }
+      return json(latest)
+    },
+  })
+}
+async function sendWords(words: string) {
+  const user = userEvent.setup()
+  await typeInComposer(screen.getByRole("textbox", { name: "Message" }), words)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+}
+
+it("names an unnamed, never-used chat from its first message though the tab is not fresh", async () => {
+  const record = { patched: [] as Record<string, unknown>[], posted: 0 }
+  nameMock(unnamed, [], record)
+  mount(false)
+  await ready()
+  await sendWords("# Ship the parser rewrite")
+  await waitFor(() => expect(record.patched).toHaveLength(1))
+  // The heading marker is not part of the name, and the audience and the
+  // revision travel unchanged: naming must never widen who can read this.
+  expect(record.patched[0]).toEqual({
+    nodeId: resource.nodeId,
+    title: "Ship the parser rewrite",
+    visibility: "private",
+    archived: false,
+    expectedAuthRevision: "1",
+  })
+})
+
+it("never renames a chat that already holds messages", async () => {
+  const record = { patched: [] as Record<string, unknown>[], posted: 0 }
+  nameMock(unnamed, [message], record)
+  mount(false)
+  await ready()
+  await screen.findByText(message.body)
+  await sendWords("Second thought")
+  // The message landed; the name did not move with it.
+  await waitFor(() => expect(record.posted).toBe(1))
+  expect(record.patched).toEqual([])
+  expect(screen.getByRole("region", { name: "New chat" })).toBeVisible()
+})
+
+it("never renames a chat somebody named by hand", async () => {
+  const record = { patched: [] as Record<string, unknown>[], posted: 0 }
+  nameMock(resource, [], record)
+  mount(true)
+  await ready()
+  await sendWords("Ship the parser rewrite")
+  await waitFor(() => expect(record.posted).toBe(1))
+  expect(record.patched).toEqual([])
+  expect(screen.getByRole("region", { name: "Design chat" })).toBeVisible()
+})

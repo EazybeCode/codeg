@@ -2058,19 +2058,6 @@ function AgentSessionView({
                   </Button>
                 </>
               )}
-            {running && (
-              <Button
-                type="button"
-                size="icon"
-                variant="default"
-                className="ms-auto rounded-md"
-                aria-label={t("stopGeneration")}
-                title={t("stopGeneration")}
-                onClick={() => void cancel()}
-              >
-                <Square aria-hidden className="size-3.5 fill-current" />
-              </Button>
-            )}
             {phase === "lost" && running && (
               <Button
                 type="button"
@@ -2080,24 +2067,37 @@ function AgentSessionView({
                 {t("agentReconnect")}
               </Button>
             )}
+            {/* ONE control, one place. Send was disabled for the whole run
+                anyway, so a second button appeared beside a dead one and the
+                row shifted under the pointer at the exact moment someone
+                wanted to stop. While the run is up this IS Stop: same corner,
+                same size, a different job — and `type` changes with it so
+                Stop can never submit the form. */}
             <Button
-              type="submit"
+              type={running ? "button" : "submit"}
               size="icon"
-              className={cn("rounded-md", !running && "ms-auto")}
-              // Always "Send": it is what the button does. Busy is said once,
-              // on the activity line; this control only goes disabled.
-              aria-label={t("send")}
-              title={t("send")}
+              variant="default"
+              className="ms-auto rounded-md"
+              aria-label={running ? t("stopGeneration") : t("send")}
+              title={running ? t("stopGeneration") : t("send")}
+              // Stop is never held: the one thing that must stay pressable
+              // while everything else is busy is the way out of it.
               disabled={
-                sending ||
-                running ||
-                session.archived ||
-                !ready ||
-                attachments.uploading ||
-                (promptIsEmpty(draft) && attachments.empty)
+                running
+                  ? false
+                  : sending ||
+                    session.archived ||
+                    !ready ||
+                    attachments.uploading ||
+                    (promptIsEmpty(draft) && attachments.empty)
               }
+              onClick={running ? () => void cancel() : undefined}
             >
-              <ArrowUp aria-hidden />
+              {running ? (
+                <Square aria-hidden className="size-3.5 fill-current" />
+              ) : (
+                <ArrowUp aria-hidden />
+              )}
             </Button>
           </div>
         </div>

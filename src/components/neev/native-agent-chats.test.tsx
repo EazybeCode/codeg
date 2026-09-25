@@ -1157,3 +1157,64 @@ it("keeps a tool row the reader opened open when the run finishes under them", a
   expect(screen.getAllByText("Bash")).toHaveLength(1)
   act(() => stream.close())
 })
+
+/*
+ * ONE control in the composer's corner, whichever state the run is in.
+ *
+ * Send was already disabled for the whole run, so the old pair put a live
+ * Stop next to a dead Send and moved the row under the pointer at the moment
+ * someone reached for it. The regression this guards is the return of the
+ * second button — and, just as important, that Stop still cancels for real
+ * and still carries its own name for a screen reader.
+ */
+it("shows one composer control that turns into Stop while the run is up", async () => {
+  const stream = liveStream()
+  let canceled: unknown = null
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+    "POST /api/neev/agent/runs/cancel": (init) => {
+      canceled = JSON.parse(init.body as string)
+      return json({ canceled: true, status: "running" })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Summarise the parser")
+  // Idle: Send, and nothing beside it.
+  expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull()
+  const send = screen.getByRole("button", { name: "Send" })
+  const corner = send.parentElement!
+  await user.click(send)
+  act(() => stream.push({ type: "chunk", text: "Working on it" }))
+  expect(await screen.findByText("Working on it")).toBeVisible()
+  // Running: Stop, in the same corner, and Send is GONE rather than disabled.
+  const stop = screen.getByRole("button", { name: "Stop generation" })
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+  expect(stop.parentElement).toBe(corner)
+  expect(stop).toBeEnabled()
+  // Inside the form, but it must never submit it.
+  expect(stop).toHaveAttribute("type", "button")
+  await user.click(stop)
+  await waitFor(() => expect(canceled).toEqual({ runId: RUN_ID }))
+  act(() =>
+    stream.push({
+      type: "finished",
+      status: "canceled",
+      errorCode: "canceled",
+    })
+  )
+  // And back to one Send once the run is over.
+  expect(await screen.findByRole("button", { name: "Send" })).toHaveAttribute(
+    "type",
+    "submit"
+  )
+  expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull()
+  act(() => stream.close())
+})

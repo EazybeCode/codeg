@@ -1135,6 +1135,9 @@ function Chat({
       written,
       new Map(attachments.items.map((item) => [item.id, item.name]))
     )
+    // Read before the tray is cleared, because naming happens after the send
+    // and by then there are no staged files left to name it from.
+    const staged = attachments.items.map((item) => item.name)
     // The ask is posted as this person's own message in this shared thread, so
     // the people it names are named by them — the provider neither sees a
     // different prompt nor gains a way to notify anyone.
@@ -1221,7 +1224,7 @@ function Chat({
       retry.current = null
       followHistory.current = true
       absorb([invocation.message])
-      void nameFromFirstMessage(promptText(written))
+      void nameFromFirstMessage(promptText(written), staged)
       if (invocation.turn.status !== "running") {
         // Refused before it ever ran; the ask stays visible and the reason is
         // named rather than left as a fake pending state.
@@ -1271,6 +1274,9 @@ function Chat({
       written,
       new Map(attachments.items.map((item) => [item.id, item.name]))
     )
+    // Read before the tray is cleared, because naming happens after the send
+    // and by then there are no staged files left to name it from.
+    const staged = attachments.items.map((item) => item.name)
     // Belt and braces for the one thing that must never happen: a private
     // conversation cannot notify anybody, so a span that somehow survived a
     // visibility change under an open composer is dropped here rather than
@@ -1346,7 +1352,7 @@ function Chat({
       attachments.clear()
       retry.current = null
       pinned.current = latest.authRevision
-      void nameFromFirstMessage(promptText(written))
+      void nameFromFirstMessage(promptText(written), staged)
     } catch (e) {
       fail(e)
     } finally {
@@ -1388,16 +1394,31 @@ function Chat({
    * chose is never overwritten. It runs after the message landed, so the auth
    * revision it uses is the current one, and it takes the send mutex so a
    * second message cannot race the rename into a conflict.
+   *
+   * `fresh` is the tab that was just created, but it is not the only chat that
+   * has never been spoken in: one made yesterday and opened from the sidebar
+   * today arrives with `fresh` false and an empty transcript, and used to stay
+   * "New chat" forever. So an EMPTY thread arms it too. That is still not a
+   * rename of an existing chat — the transcript is read before the composer
+   * unlocks (`sendable` waits on `loading`), so an empty one here means empty
+   * on the server, and the placeholder check above it means a chat someone
+   * named by hand is left alone either way.
    */
   const pendingName = useRef(fresh)
-  async function nameFromFirstMessage(body: string) {
-    if (!pendingName.current || !auth.session) return
+  async function nameFromFirstMessage(body: string, files: readonly string[]) {
+    if (!auth.session) return
+    if (!pendingName.current && messages.length > 0) return
     // A chat already named by hand is never renamed by us.
     if (latest.title !== t("untitledChat")) {
       pendingName.current = false
       return
     }
-    const derived = firstLineTitle(body)
+    // What was WRITTEN names it — never the wire prompt, whose `[attachment
+    // 1: …]` markers are addressing for the provider and read as noise in a
+    // sidebar. A message that is only files takes the name of the first of
+    // them, which is a real thing the person chose, and matches what a private
+    // agent chat does with the same message.
+    const derived = firstLineTitle(body) || firstLineTitle(files[0] ?? "")
     // An empty message names nothing; keep the chance for the next one.
     if (!derived || derived === latest.title) return
     pendingName.current = false
@@ -2028,32 +2049,35 @@ function Chat({
                   )}
               </>
             )}
-            {agentBusy && (
-              <Button
-                type="button"
-                size="icon"
-                variant="default"
-                className="ms-auto rounded-md"
-                aria-label={t("stopGeneration")}
-                title={t("stopGeneration")}
-                onClick={() => void cancelAgent()}
-              >
-                <Square aria-hidden className="size-3.5 fill-current" />
-              </Button>
-            )}
+            {/* ONE control, one place. Send was disabled for the whole run
+                anyway, so a second button appeared beside a dead one and the
+                row shifted under the pointer at the exact moment someone
+                wanted to stop. While the run is up this IS Stop: same corner,
+                same size, a different job — and `type` changes with it so
+                Stop can never submit the form. */}
             <Button
-              type="submit"
+              type={agentBusy ? "button" : "submit"}
               size="icon"
-              className={cn("rounded-md", !agentBusy && "ms-auto")}
-              // Always "Send": it is what the button does. Busy is said once,
-              // on the activity line; this control only goes disabled.
-              aria-label={t("send")}
-              title={t("send")}
+              variant="default"
+              className="ms-auto rounded-md"
+              aria-label={agentBusy ? t("stopGeneration") : t("send")}
+              title={agentBusy ? t("stopGeneration") : t("send")}
+              // Stop is never held: the one thing that must stay pressable
+              // while everything else is busy is the way out of it.
               disabled={
-                loading || !sendable || (mode === "agent" && !runtimeEnabled)
+                agentBusy
+                  ? false
+                  : loading ||
+                    !sendable ||
+                    (mode === "agent" && !runtimeEnabled)
               }
+              onClick={agentBusy ? () => void cancelAgent() : undefined}
             >
-              <ArrowUp aria-hidden />
+              {agentBusy ? (
+                <Square aria-hidden className="size-3.5 fill-current" />
+              ) : (
+                <ArrowUp aria-hidden />
+              )}
             </Button>
           </div>
           {/*
