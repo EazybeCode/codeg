@@ -70,7 +70,8 @@ export type NativeErrorKind =
 export class NativeClientError extends Error {
   constructor(
     public readonly kind: NativeErrorKind,
-    public readonly status?: number
+    public readonly status?: number,
+    public readonly code?: string
   ) {
     super("Native request failed")
     this.name = "NativeClientError"
@@ -235,7 +236,8 @@ export function parseCapabilities(value: unknown): ServerCapabilities {
 export async function nativeRequest(
   path: string,
   init: RequestInit = {},
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: { timeoutMs?: number | null } = {}
 ): Promise<unknown> {
   if (
     (!path.startsWith("/api/neev/") && path !== "/api/workos/capabilities") ||
@@ -247,7 +249,9 @@ export async function nativeRequest(
   const controller = new AbortController(),
     abort = () => controller.abort()
   signal?.addEventListener("abort", abort, { once: true })
-  const timer = setTimeout(abort, TIMEOUT_MS)
+  const timeoutMs =
+    options.timeoutMs === undefined ? TIMEOUT_MS : options.timeoutMs
+  const timer = timeoutMs === null ? undefined : setTimeout(abort, timeoutMs)
   try {
     const response = await fetch(path, {
       ...init,
@@ -269,9 +273,13 @@ export async function nativeRequest(
         429: "limited",
         503: "unavailable",
       }
+      const errorBody = await response.json().catch(() => null)
+      const code =
+        errorBody?.code === "content_quota" ? "content_quota" : undefined
       throw new NativeClientError(
         kinds[response.status] ?? "unavailable",
-        response.status
+        response.status,
+        code
       )
     }
     if (response.status === 204) return null

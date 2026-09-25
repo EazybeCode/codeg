@@ -982,14 +982,13 @@ async fn owned_attachments(
         return Err(ContentError::Invalid);
     }
     let mut seen = std::collections::BTreeSet::new();
-    let mut total: i64 = 0;
     for key in keys {
         if !seen.insert(key.as_str()) {
             return Err(ContentError::Invalid);
         }
         let row = db::one(
             tx,
-            "SELECT session_id,byte_length FROM neev_attachments WHERE org_id=$1 AND key=$2",
+            "SELECT session_id FROM neev_attachments WHERE org_id=$1 AND key=$2",
             vec![actor.org_id.into(), key.clone().into()],
         )
         .await?
@@ -998,14 +997,9 @@ async fn owned_attachments(
         if owner.as_deref() != Some(session_id) {
             return Err(ContentError::Invalid);
         }
-        // The run's ceiling, applied where the turn becomes durable: a turn
-        // that could never be executed must not be storable either.
-        total += row
-            .try_get::<i64>("", "byte_length")
-            .map_err(database_error)?;
-        if total > crate::neev::content::attachment::MAX_RUN_ATTACHMENT_BYTES {
-            return Err(ContentError::Quota);
-        }
+        // No aggregate byte ceiling for the turn: the count cap bounds how many
+        // files a run stages, and the tenant storage quota already bounded each
+        // one at upload. A turn that stored its files must be executable.
     }
     Ok(())
 }

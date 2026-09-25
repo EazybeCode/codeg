@@ -62,14 +62,13 @@ async fn link_attachments(
         return Err(ContentError::Invalid);
     }
     let mut seen = std::collections::BTreeSet::new();
-    let mut total: i64 = 0;
     for key in keys {
         if !seen.insert(key.as_str()) {
             return Err(ContentError::Invalid);
         }
         let row = db::one(
             tx,
-            "SELECT chat_id,byte_length FROM neev_attachments WHERE org_id=$1 AND key=$2",
+            "SELECT chat_id FROM neev_attachments WHERE org_id=$1 AND key=$2",
             vec![actor.org_id.into(), key.clone().into()],
         )
         .await?
@@ -78,15 +77,9 @@ async fn link_attachments(
         if owner.as_deref() != Some(chat_id) {
             return Err(ContentError::Invalid);
         }
-        // The same ceiling the run enforces, applied where the files become
-        // durable: a message that could never be sent to an agent must not be
-        // storable either, or the thread accumulates sends nothing can act on.
-        total += row
-            .try_get::<i64>("", "byte_length")
-            .map_err(database_error)?;
-        if total > attachment::MAX_RUN_ATTACHMENT_BYTES {
-            return Err(ContentError::Quota);
-        }
+        // No aggregate byte ceiling: the count cap bounds the message and every
+        // file was already charged against the tenant budget at upload. Refusing
+        // by size here made a file that stored fine impossible to send.
     }
     attachment::link_to_message(tx, actor, message_id, keys).await
 }

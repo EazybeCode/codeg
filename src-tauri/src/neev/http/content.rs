@@ -31,9 +31,11 @@ const MESSAGE_BODY_LIMIT: usize = 6 * 32768 + 4096;
 const DOCUMENT_BODY_LIMIT: usize = 6 * 1048576 + 4096;
 // Matches content::blob::MAX_IMAGE_BYTES; a larger body is rejected before storage.
 const IMAGE_BODY_LIMIT: usize = 5 * 1024 * 1024;
-// Matches content::blob::MAX_ATTACHMENT_BYTES; a larger body is rejected before
-// storage rather than read into memory and then refused.
-const ATTACHMENT_BODY_LIMIT: usize = 10 * 1024 * 1024;
+// An attachment has NO per-file size limit. This bounds one request body at the
+// org's whole attachment storage budget — the largest body that could ever be
+// stored — so nothing unbounded is read into memory. Exceeding it is a quota
+// answer, not a bad request: see `upload_attachment`.
+const ATTACHMENT_BODY_LIMIT: usize = crate::neev::content::ATTACHMENT_STORAGE_CEILING;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -980,9 +982,12 @@ async fn upload_attachment(
     let now = state.clock.now_unix();
     let actor = session::organization(&state.database, token, now).await?;
     session::validate_csrf(&state.database, &actor.identity, cookie_csrf, now).await?;
+    // Over the frame bound is the tenant being out of storage, not a malformed or
+    // unsupported upload: the bound IS the org budget. Answering `Invalid` here
+    // made the client say "unsupported type" about a perfectly good file.
     let bytes = axum::body::to_bytes(body, ATTACHMENT_BODY_LIMIT)
         .await
-        .map_err(|_| ApiError::Invalid)?;
+        .map_err(|_| ApiError::ContentQuota)?;
     let owner = if session {
         attachment::Owner::Session(&id)
     } else {

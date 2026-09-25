@@ -210,15 +210,17 @@ async fn a_run_only_carries_attachments_from_its_own_chat() {
     assert!(matches!(duplicated, Err(ContentError::Invalid)));
 }
 
-/// A turn cannot exceed the per-run total even when each file is individually
-/// within its own cap.
+/// A turn carries its files however many bytes they add up to.
+///
+/// There is no aggregate per-turn ceiling any more. This is deliberately sized
+/// over the 25 MiB total that used to refuse it — five 6 MiB files, 30 MiB — so it
+/// fails if that cap is ever reintroduced. What still bounds a turn is the file
+/// COUNT, which is asserted separately.
 #[tokio::test]
-async fn a_run_refuses_more_bytes_than_one_turn_may_carry() {
+async fn a_run_carries_more_bytes_than_the_old_per_turn_cap() {
     let harness = Harness::new(h::database().await).await;
     let chat = chat(&harness).await;
     let mut keys = Vec::new();
-    // Six megabytes each: individually fine, and over the 25 MiB run total by
-    // the fifth.
     let big = {
         let mut bytes = png();
         bytes.resize(6 * 1024 * 1024, 0);
@@ -236,11 +238,41 @@ async fn a_run_refuses_more_bytes_than_one_turn_may_carry() {
         .unwrap();
         keys.push(stored.key);
     }
+    let resolved =
+        attachment::resolve_for_run(&harness.state, &harness.creator, Owner::Chat(&chat.id), &keys)
+            .await
+            .expect("30 MiB across five files is not a reason to refuse a turn");
+    assert_eq!(resolved.len(), 5);
+    // Every file is staged whole — a truncated attachment would be worse than a
+    // refused one, because the agent would open it and not know.
+    for attachment in &resolved {
+        assert_eq!(attachment.bytes.len(), 6 * 1024 * 1024);
+    }
+    let _ = patch;
+}
+
+/// The file count is still a limit, and it is the one that bounds a turn.
+#[tokio::test]
+async fn a_run_still_refuses_more_files_than_one_message_may_carry() {
+    let harness = Harness::new(h::database().await).await;
+    let chat = chat(&harness).await;
+    let mut keys = Vec::new();
+    for index in 0..(attachment::MAX_ATTACHMENTS_PER_MESSAGE + 1) {
+        let stored = attachment::store(
+            &harness.state,
+            &harness.creator,
+            Owner::Chat(&chat.id),
+            &format!("small{index}.png"),
+            &png(),
+        )
+        .await
+        .unwrap();
+        keys.push(stored.key);
+    }
     let refused =
         attachment::resolve_for_run(&harness.state, &harness.creator, Owner::Chat(&chat.id), &keys)
             .await;
-    assert!(matches!(refused, Err(ContentError::Quota)));
-    let _ = patch;
+    assert!(matches!(refused, Err(ContentError::Invalid)));
 }
 
 /// Insert an Agent Chat session directly.
@@ -454,26 +486,57 @@ async fn the_sweeper_reclaims_aged_orphans_and_keeps_what_a_message_carries() {
         .is_ok());
 }
 
-/// The per-organization cap is the one bound a reader can actually reach, so it
-/// is reported as a quota they can act on rather than a generic failure.
+/// There is no per-file size limit. Empty is still nothing to send.
+///
+/// The size here is the real file that could not be attached before this changed:
+/// a 44,778,046-byte generated HTML report. It is over BOTH retired caps (10 MiB
+/// per file, 25 MiB per turn), so a reintroduction of either fails this test
+/// rather than quietly turning a legitimate upload away again.
 #[tokio::test]
-async fn the_per_file_cap_refuses_before_anything_is_stored() {
+async fn there_is_no_per_file_size_limit() {
+    // 44,778,046 bytes: 4.2x the retired 10 MiB per-file cap and 1.7x the retired
+    // 25 MiB per-turn cap, so reintroducing either fails here.
+    const REAL_HTML_BYTES: usize = 44_778_046;
     let harness = Harness::new(h::database().await).await;
     let chat = chat(&harness).await;
-    // One byte over the per-file cap.
-    let oversized = vec![b'a'; 10 * 1024 * 1024 + 1];
-    assert!(matches!(
-        attachment::store(
-            &harness.state,
-            &harness.creator,
-            Owner::Chat(&chat.id),
-            "huge.txt",
-            &oversized,
-        )
-        .await,
-        Err(ContentError::Invalid)
-    ));
-    // Empty is refused too: there is nothing to give a provider.
+    // Valid UTF-8, so it classifies as text exactly as the HTML report does.
+    let html = {
+        let mut bytes = b"<!doctype html><title>report</title>".to_vec();
+        bytes.resize(REAL_HTML_BYTES, b' ');
+        bytes
+    };
+    let stored = attachment::store(
+        &harness.state,
+        &harness.creator,
+        Owner::Chat(&chat.id),
+        "report.html",
+        &html,
+    )
+    .await
+    .expect("a 44 MB attachment is not too large");
+    assert_eq!(stored.byte_length, REAL_HTML_BYTES as i64);
+    assert_eq!(stored.content_type, "text/plain");
+    // Readable back byte-for-byte: the read path had the same cap, so storing it
+    // and then failing to serve it would be the same bug one step later.
+    let (bytes, content_type, name) = attachment::load(&harness.state, &harness.creator, &stored.key)
+        .await
+        .expect("a stored 44 MB attachment must be readable");
+    assert_eq!(bytes.len(), REAL_HTML_BYTES);
+    assert_eq!(bytes, html);
+    assert_eq!(content_type, "text/plain");
+    assert_eq!(name, "report.html");
+    // And it can be staged for a run, which is the point of attaching it.
+    let resolved = attachment::resolve_for_run(
+        &harness.state,
+        &harness.creator,
+        Owner::Chat(&chat.id),
+        std::slice::from_ref(&stored.key),
+    )
+    .await
+    .expect("a 44 MB attachment must reach the agent");
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].bytes.len(), REAL_HTML_BYTES);
+    // Empty is still refused: there is nothing to give a provider.
     assert!(matches!(
         attachment::store(
             &harness.state,
@@ -485,6 +548,21 @@ async fn the_per_file_cap_refuses_before_anything_is_stored() {
         .await,
         Err(ContentError::Invalid)
     ));
+}
+
+/// The allocation guard must stay equal to the tenant storage quota.
+///
+/// "No per-file limit" is only safe while every buffer that holds a whole
+/// attachment is bounded by something — and the only honest bound left is the
+/// budget one file cannot exceed. If these two drift, either uploads are refused
+/// below the quota or a read is unbounded; both are bugs this catches at compile
+/// time rather than in production.
+#[test]
+fn the_allocation_guard_equals_the_tenant_storage_quota() {
+    assert_eq!(
+        attachment::MAX_ATTACHMENT_BYTES_PER_ORG,
+        crate::neev::content::ATTACHMENT_STORAGE_CEILING as i64
+    );
 }
 
 /// Exercise the ref helpers against the real tables.

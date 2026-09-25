@@ -9,7 +9,6 @@ import {
   filesFromDrop,
   filesFromPaste,
   formatBytes,
-  NEEV_MAX_ATTACHMENT_BYTES,
   parseAttachment,
   parseAttachments,
   pasteIsFileOnly,
@@ -109,20 +108,20 @@ describe("admission", () => {
     expect(rejected[0].reason).toBe("tooMany")
   })
 
-  it("refuses a file over the per-file limit", async () => {
-    const big = sized("huge.png", NEEV_MAX_ATTACHMENT_BYTES + 1)
+  it("accepts a file above the former per-file limit", async () => {
+    const big = sized("huge.png", 44_778_046)
     const { accepted, rejected } = await admitFiles([big])
-    expect(accepted).toEqual([])
-    expect(rejected).toEqual([{ name: "huge.png", reason: "tooLarge" }])
+    expect(accepted).toHaveLength(1)
+    expect(rejected).toEqual([])
   })
 
-  it("refuses a file that would take the turn over its total", async () => {
+  it("accepts a file above the former aggregate turn limit", async () => {
     const one = sized("a.png", 9 * 1024 * 1024)
     const { rejected } = await admitFiles(
       [one],
       [{ size: 9 * 1024 * 1024 }, { size: 9 * 1024 * 1024 }]
     )
-    expect(rejected).toEqual([{ name: "a.png", reason: "turnTooLarge" }])
+    expect(rejected).toEqual([])
   })
 
   it("refuses an unsupported type and an empty file, by name", async () => {
@@ -216,7 +215,9 @@ describe("parsing", () => {
 })
 
 describe("uploading", () => {
-  function stubFetch(handler: (init: RequestInit) => Response) {
+  function stubFetch(
+    handler: (init: RequestInit) => Response | Promise<Response>
+  ) {
     const fetcher = vi.fn(async (_path: string, init: RequestInit = {}) =>
       handler(init)
     )
@@ -250,6 +251,58 @@ describe("uploading", () => {
     expect(decodeURIComponent(headers["X-Neev-Filename"])).toBe("notes ü.txt")
   })
 
+  it("uploads and parses an attachment above the former size limits", async () => {
+    const value = sized("large.png", 44_778_046)
+    const large = { ...stored, fileName: value.name, byteLength: value.size }
+    const fetcher = stubFetch(
+      () =>
+        new Response(JSON.stringify(large), {
+          headers: { "Content-Type": "application/json" },
+        })
+    )
+    expect(await uploadChatAttachment(CHAT, value, "token")).toEqual(large)
+    expect(fetcher.mock.calls[0][1]?.body).toBe(value)
+  })
+
+  it("keeps large uploads alive past the normal request timeout", async () => {
+    vi.useFakeTimers()
+    try {
+      let finish!: (value: Response) => void
+      const fetcher = stubFetch(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve
+          })
+      )
+      const pending = uploadChatAttachment(
+        CHAT,
+        sized("large.png", 44_778_046),
+        "token"
+      )
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect(fetcher.mock.calls[0][1]?.signal?.aborted).toBe(false)
+      finish(ok())
+      await pending
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("distinguishes storage quota from rate limits and conflicts", async () => {
+    stubFetch(
+      () =>
+        new Response(JSON.stringify({ code: "content_quota" }), { status: 429 })
+    )
+    try {
+      await uploadChatAttachment(CHAT, file("notes.txt", "hello"), "token")
+      throw new Error("Expected storage rejection")
+    } catch (error) {
+      expect(uploadRejection(error)).toBe("quota")
+    }
+    expect(uploadRejection(new NativeClientError("limited", 429))).toBeNull()
+    expect(uploadRejection(new NativeClientError("conflict", 409))).toBeNull()
+  })
+
   it("posts a session upload to the session's own path", async () => {
     const fetcher = stubFetch(ok)
     await uploadSessionAttachment(KEY, file("notes.txt", "hello"), "token")
@@ -273,13 +326,13 @@ describe("uploading", () => {
   })
 
   it("names the refusals that are facts about this file", () => {
-    expect(uploadRejection(new NativeClientError("unavailable", 413))).toBe(
-      "tooLarge"
-    )
-    // 409 is the organization's storage quota, not this turn's 25 MB.
-    expect(uploadRejection(new NativeClientError("conflict", 409))).toBe(
-      "quota"
-    )
+    expect(
+      uploadRejection(new NativeClientError("unavailable", 413))
+    ).toBeNull()
+    // Only the explicit storage-quota code is a storage error.
+    expect(
+      uploadRejection(new NativeClientError("limited", 429, "content_quota"))
+    ).toBe("quota")
     expect(uploadRejection(new NativeClientError("invalid_request", 400))).toBe(
       "unsupportedType"
     )

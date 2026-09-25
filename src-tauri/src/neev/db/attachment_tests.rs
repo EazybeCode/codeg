@@ -258,3 +258,204 @@ async fn the_validator_refuses_a_reference_across_conversations() {
         "an attachment must not be reachable through another conversation"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The per-attachment byte ceiling, removed (`attachment_byte_cap_migration`)
+// ---------------------------------------------------------------------------
+
+/// The size of the real file that could not be attached before this changed: a
+/// generated HTML report. Over BOTH retired caps (10 MiB per file, 25 MiB per
+/// turn), so any reintroduction of either fails these tests.
+const REAL_HTML_BYTES: i64 = 44_778_046;
+
+/// The table's stored DDL, which is where SQLite keeps a baked CHECK.
+async fn attachments_ddl(db: &DatabaseConnection) -> String {
+    one(
+        db,
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='neev_attachments'",
+        vec![],
+    )
+    .await
+    .unwrap()
+    .expect("the attachment table exists")
+    .try_get::<String>("", "sql")
+    .unwrap()
+}
+
+/// Insert one attachment of `byte_length`, returning whether the database took it.
+///
+/// The point is the CHECK, so nothing else about the row varies: a failure here is
+/// the byte constraint and not a missing owner or a malformed hash.
+async fn try_insert_sized(
+    db: &DatabaseConnection,
+    org_id: i32,
+    chat_id: &str,
+    byte_length: i64,
+) -> bool {
+    db.execute(statement(
+        db,
+        "INSERT INTO neev_attachments(org_id,key,chat_id,session_id,file_name,content_type,byte_length,sha256,created_by,created_at) VALUES($1,$2,$3,NULL,'report.html','text/plain',$4,$5,1,0)",
+        vec![
+            org_id.into(),
+            uuid::Uuid::new_v4().hyphenated().to_string().into(),
+            chat_id.to_owned().into(),
+            byte_length.into(),
+            "b".repeat(64).into(),
+        ],
+    ))
+    .await
+    .is_ok()
+}
+
+/// Put schema 15's ranged CHECK back, so the forward migration has something to
+/// undo. This is the inverse of `relax_sqlite`, and the table is still empty here,
+/// so no rows are copied and the child ref table has nothing pointing at it.
+///
+/// Sound because the test connection pool is one SQLite connection
+/// (`test_support::database`), so these pragmas are the same session the rebuild
+/// runs on.
+async fn restore_the_old_byte_ceiling(db: &DatabaseConnection) {
+    let ddl = attachments_ddl(db).await;
+    assert!(
+        ddl.contains("byte_length>=1"),
+        "expected the relaxed bound to rewrite: {ddl}"
+    );
+    let old = ddl
+        .replacen("neev_attachments", "neev_attachments_old_bound", 1)
+        .replace("byte_length>=1", "byte_length BETWEEN 1 AND 10485760");
+    let indexes = db
+        .query_all(statement(
+            db,
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='neev_attachments' AND sql IS NOT NULL",
+            vec![],
+        ))
+        .await
+        .unwrap();
+    execute(db, "PRAGMA defer_foreign_keys=ON", vec![]).await;
+    execute(db, &old, vec![]).await;
+    execute(db, "DROP TABLE neev_attachments", vec![]).await;
+    execute(
+        db,
+        "ALTER TABLE neev_attachments_old_bound RENAME TO neev_attachments",
+        vec![],
+    )
+    .await;
+    for index in &indexes {
+        let sql: String = index.try_get("", "sql").unwrap();
+        execute(db, &sql, vec![]).await;
+    }
+    execute(db, "PRAGMA defer_foreign_keys=OFF", vec![]).await;
+    assert!(
+        attachments_ddl(db).await.contains("BETWEEN 1 AND 10485760"),
+        "the old ceiling must be back before the migration is asked to remove it"
+    );
+}
+
+/// A fresh install has no byte ceiling at all, and stores the real file.
+#[tokio::test]
+async fn a_fresh_install_has_no_attachment_byte_ceiling() {
+    let harness = h::OrgHarness::new().await;
+    let (org_id, chat_id, _, _) = seed(&harness).await;
+    let db = harness.state().database.clone();
+
+    let ddl = attachments_ddl(&db).await;
+    assert!(
+        !ddl.contains("BETWEEN 1 AND 10485760"),
+        "a fresh table must not bake the retired per-file cap: {ddl}"
+    );
+    assert!(ddl.contains("byte_length>=1"), "the lower bound stays: {ddl}");
+    assert_eq!(
+        attachment_byte_cap_migration::validate_attachment_byte_cap(&db).await,
+        Ok(())
+    );
+
+    // Over the old 10 MiB cap, and over the old 25 MiB turn total.
+    assert!(
+        try_insert_sized(&db, org_id, &chat_id, REAL_HTML_BYTES).await,
+        "a 44 MB attachment must be storable"
+    );
+    // The lower bound is still a bound: zero bytes is not an attachment.
+    assert!(
+        !try_insert_sized(&db, org_id, &chat_id, 0).await,
+        "byte_length=0 must still be refused"
+    );
+}
+
+/// The forward migration removes schema 15's ceiling, keeps every row, and is
+/// idempotent — the restart path runs it on every open.
+#[tokio::test]
+async fn the_migration_removes_the_old_ceiling_and_keeps_every_row() {
+    let harness = h::OrgHarness::new().await;
+    let (org_id, chat_id, message_id, session_id) = seed(&harness).await;
+    let db = harness.state().database.clone();
+
+    restore_the_old_byte_ceiling(&db).await;
+    // Rows written while the ceiling was in force, including references.
+    let (on_chat, on_session) = attach(&db, org_id, &chat_id, &message_id, &session_id).await;
+    let rows_before = count(&db, "neev_attachments").await;
+    let refs_before = count(&db, "neev_attachment_refs").await;
+    assert_eq!(rows_before, 2);
+    assert_eq!(refs_before, 2);
+    // The bug, reproduced: the real file cannot be stored.
+    assert!(
+        !try_insert_sized(&db, org_id, &chat_id, REAL_HTML_BYTES).await,
+        "precondition: the old ceiling refuses the 44 MB file"
+    );
+
+    // Re-open, exactly as a restart does. This is what applies the migration.
+    assert_eq!(initialize(&db).await, Ok(()));
+
+    assert_eq!(
+        attachment_byte_cap_migration::validate_attachment_byte_cap(&db).await,
+        Ok(())
+    );
+    assert!(!attachments_ddl(&db).await.contains("BETWEEN 1 AND 10485760"));
+    // Nothing was dropped, and the schema marker did not move.
+    assert_eq!(count(&db, "neev_attachments").await, rows_before);
+    assert_eq!(count(&db, "neev_attachment_refs").await, refs_before);
+    assert_eq!(
+        schema_version(&db).await,
+        mention_migration::SCHEMA_VERSION,
+        "relaxing a CHECK is not a new schema version"
+    );
+    // The rows are still reachable by key, not merely counted.
+    for key in [&on_chat, &on_session] {
+        assert!(one(
+            &db,
+            "SELECT key FROM neev_attachments WHERE org_id=$1 AND key=$2",
+            vec![org_id.into(), key.clone().into()],
+        )
+        .await
+        .unwrap()
+        .is_some());
+    }
+    // And the integrity validators still pass on those preserved rows.
+    assert_eq!(attachment_migration::validate(&db).await, Ok(()));
+
+    // The fix: the real file now stores.
+    assert!(
+        try_insert_sized(&db, org_id, &chat_id, REAL_HTML_BYTES).await,
+        "a 44 MB attachment must be storable after the migration"
+    );
+    // Idempotent: a second open changes nothing and still validates.
+    assert_eq!(initialize(&db).await, Ok(()));
+    assert_eq!(
+        attachment_byte_cap_migration::validate_attachment_byte_cap(&db).await,
+        Ok(())
+    );
+    assert_eq!(count(&db, "neev_attachments").await, rows_before + 1);
+}
+
+/// The validator is the canary's assertion, so it must actually fail when a
+/// ceiling is present — otherwise a database that was never migrated reports
+/// healthy.
+#[tokio::test]
+async fn the_validator_refuses_a_database_that_still_has_a_byte_ceiling() {
+    let harness = h::OrgHarness::new().await;
+    let db = harness.state().database.clone();
+    restore_the_old_byte_ceiling(&db).await;
+    assert_eq!(
+        attachment_byte_cap_migration::validate_attachment_byte_cap(&db).await,
+        Err(AuthError::Unavailable)
+    );
+}

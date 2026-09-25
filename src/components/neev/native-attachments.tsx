@@ -558,10 +558,6 @@ function rejectionMessage(
   switch (reason) {
     case "tooMany":
       return t("attachmentTooMany", { name })
-    case "tooLarge":
-      return t("attachmentTooLarge", { name })
-    case "turnTooLarge":
-      return t("attachmentTurnTooLarge", { name })
     case "badName":
       return t("attachmentBadName", { name })
     case "empty":

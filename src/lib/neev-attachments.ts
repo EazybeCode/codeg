@@ -19,10 +19,6 @@ import { NativeClientError, nativeRequest } from "./neev-client"
 
 /** `MAX_ATTACHMENTS_PER_MESSAGE` in `content/attachment.rs`. */
 export const NEEV_MAX_ATTACHMENTS = 5
-/** `MAX_ATTACHMENT_BYTES` in `content/blob.rs`. */
-export const NEEV_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
-/** `MAX_RUN_ATTACHMENT_BYTES` — every attachment on one turn, together. */
-export const NEEV_MAX_TURN_ATTACHMENT_BYTES = 25 * 1024 * 1024
 /** `MAX_NAME_CHARS` in `content/attachment.rs`. */
 const MAX_NAME_CHARS = 200
 
@@ -67,8 +63,6 @@ export interface NeevAttachment {
  */
 export type NeevAttachmentRejection =
   | "tooMany"
-  | "tooLarge"
-  | "turnTooLarge"
   | "unsupportedType"
   | "badName"
   | "empty"
@@ -209,7 +203,6 @@ export async function admitFiles(
   const accepted: { file: File; contentType: NeevAttachmentType }[] = []
   const rejected: NeevRejectedFile[] = []
   let count = existing.length
-  let total = existing.reduce((sum, item) => sum + item.size, 0)
   for (const file of files) {
     if (count >= NEEV_MAX_ATTACHMENTS) {
       rejected.push({ name: file.name, reason: "tooMany" })
@@ -217,14 +210,6 @@ export async function admitFiles(
     }
     if (file.size === 0) {
       rejected.push({ name: file.name, reason: "empty" })
-      continue
-    }
-    if (file.size > NEEV_MAX_ATTACHMENT_BYTES) {
-      rejected.push({ name: file.name, reason: "tooLarge" })
-      continue
-    }
-    if (total + file.size > NEEV_MAX_TURN_ATTACHMENT_BYTES) {
-      rejected.push({ name: file.name, reason: "turnTooLarge" })
       continue
     }
     if (canonicalAttachmentName(file.name) === null) {
@@ -238,7 +223,6 @@ export async function admitFiles(
     }
     accepted.push({ file, contentType })
     count += 1
-    total += file.size
   }
   return { accepted, rejected }
 }
@@ -312,9 +296,8 @@ export function parseAttachment(value: unknown): NeevAttachment {
     return invalid()
   if (
     typeof object.byteLength !== "number" ||
-    !Number.isInteger(object.byteLength) ||
-    object.byteLength <= 0 ||
-    object.byteLength > NEEV_MAX_ATTACHMENT_BYTES
+    !Number.isSafeInteger(object.byteLength) ||
+    object.byteLength <= 0
   )
     return invalid()
   return {
@@ -364,8 +347,7 @@ async function uploadTo(
 ): Promise<NeevAttachment> {
   if (!csrf) invalidRequest()
   const name = canonicalAttachmentName(file.name)
-  if (name === null || file.size === 0 || file.size > NEEV_MAX_ATTACHMENT_BYTES)
-    invalidRequest()
+  if (name === null || file.size === 0) invalidRequest()
   const result = await nativeRequest(
     path,
     {
@@ -377,7 +359,8 @@ async function uploadTo(
       },
       body: file,
     },
-    signal
+    signal,
+    { timeoutMs: null }
   )
   return parseAttachment(result)
 }
@@ -409,22 +392,12 @@ export async function uploadSessionAttachment(
   )
 }
 
-/**
- * Why one upload failed, in the same vocabulary as the local refusals.
- *
- * `413` is this file against the per-file limit. `409` is the ORGANIZATION'S
- * storage quota, not this turn's 25 MB — the turn cap is checked locally before
- * anything is uploaded and again when the run resolves, so calling a tenant out
- * of storage "too large for this message" would send them trimming a message
- * that was never the problem. Anything else stays an error for the shared error
- * surface to describe.
- */
+/** Storage exhaustion and unsupported content have specific messages. */
 export function uploadRejection(
   error: unknown
 ): NeevAttachmentRejection | null {
   if (!(error instanceof NativeClientError)) return null
-  if (error.status === 413) return "tooLarge"
-  if (error.status === 409) return "quota"
+  if (error.status === 429 && error.code === "content_quota") return "quota"
   if (error.status === 400) return "unsupportedType"
   return null
 }

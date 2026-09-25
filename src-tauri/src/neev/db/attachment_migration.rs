@@ -36,8 +36,11 @@ pub(super) const TABLE_NAMES: &[&str] = &["neev_attachments", "neev_attachment_r
 
 const NATIVE_MAX: i64 = 2_147_483_647;
 const TIME_MAX: i64 = 253_402_300_799;
-/// Mirrors `content::blob::MAX_ATTACHMENT_BYTES`.
-const MAX_ATTACHMENT_BYTES: i64 = 10 * 1024 * 1024;
+/// Mirrors `content::blob::ATTACHMENT_STORAGE_CEILING` — the tenant's whole
+/// storage budget, NOT a per-file limit. Used only by the snapshot verifier as a
+/// shape assertion; the table CHECK deliberately carries no upper bound, because
+/// baking one is what made a legitimate 44 MB attachment unstorable.
+const MAX_ATTACHMENT_BYTES: i64 = 256 * 1024 * 1024;
 /// Mirrors `content::attachment::MAX_ATTACHMENTS_PER_MESSAGE`.
 const MAX_PER_MESSAGE: i64 = 5;
 const UUID_CHARS: usize = 36;
@@ -103,7 +106,11 @@ fn tables() -> Vec<TableCreateStatement> {
         format!("(session_id IS NULL OR length(session_id)={UUID_CHARS})"),
         format!("length(file_name) BETWEEN 1 AND {MAX_NAME_CHARS}"),
         format!("content_type IN ({types})"),
-        format!("byte_length BETWEEN 1 AND {MAX_ATTACHMENT_BYTES}"),
+        // Lower bound only. An attachment has no size limit; what bounds it is the
+        // per-org storage quota, which the application enforces and may raise
+        // without a table rebuild. `attachment_byte_cap_migration` relaxes the
+        // ranged CHECK that databases created before this carry.
+        "byte_length>=1".to_owned(),
         format!("length(sha256)={HASH_CHARS}"),
         "created_by>0".to_owned(),
         "created_at>=0".to_owned(),

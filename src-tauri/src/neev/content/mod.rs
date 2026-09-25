@@ -34,4 +34,4 @@ mod rich_tests;
 mod test_support;
 pub(crate) mod types;
 
-pub(crate) use blob::{BlobInfo, BlobStore};
+pub(crate) use blob::{BlobInfo, BlobStore, ATTACHMENT_STORAGE_CEILING};

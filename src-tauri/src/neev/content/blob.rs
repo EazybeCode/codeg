@@ -7,10 +7,14 @@ const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 /// Uploaded images are larger than text documents but still bounded well below a
 /// photo-library scale; the editor embeds diagrams/screenshots, not galleries.
 pub(crate) const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
-/// One chat attachment. Larger than a document image because the things people
-/// attach to a conversation — a screenshot, a PDF, a log — are larger, and the
-/// per-run total below is what actually bounds a turn.
-pub(crate) const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+/// **Not a per-file limit** — a chat attachment has none.
+///
+/// This is the org's total attachment storage quota
+/// (`attachment::MAX_ATTACHMENT_BYTES_PER_ORG` is defined as this), reused as the
+/// allocation guard wherever a whole attachment must be held in memory. One file
+/// cannot exceed the entire tenant budget, so anything over it was never
+/// admissible; raise the quota and every buffer bound follows.
+pub(crate) const ATTACHMENT_STORAGE_CEILING: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BlobInfo {
@@ -40,7 +44,9 @@ mod unix {
 
     use sha2::{Digest, Sha256};
 
-    use super::{BlobInfo, ContentError, MAX_ATTACHMENT_BYTES, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES};
+    use super::{
+        BlobInfo, ContentError, ATTACHMENT_STORAGE_CEILING, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES,
+    };
 
     #[cfg(test)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,8 +251,10 @@ mod unix {
         }
 
         /// Store a chat attachment. Byte-for-byte the image path with its own
-        /// suffix and cap, so an attachment can never be served through the
-        /// image route and vice versa.
+        /// suffix, so an attachment can never be served through the image route
+        /// and vice versa — but with NO per-file size rule of its own. Empty is
+        /// still refused; the ceiling is the tenant quota `attachment::store`
+        /// already enforced, repeated here as defence in depth.
         pub(crate) async fn put_attachment(
             &self,
             org_id: i32,
@@ -254,7 +262,7 @@ mod unix {
             bytes: &[u8],
         ) -> Result<BlobInfo, ContentError> {
             validate_location(org_id, key)?;
-            if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+            if bytes.is_empty() || bytes.len() > ATTACHMENT_STORAGE_CEILING {
                 return Err(ContentError::Invalid);
             }
             let directory = self.open_org_directory(org_id, true)?;
@@ -282,8 +290,11 @@ mod unix {
             })
         }
 
-        /// Read a stored attachment for the tenant. Bounded by
-        /// `MAX_ATTACHMENT_BYTES`; a missing blob is `NotFound`.
+        /// Read a stored attachment for the tenant. A missing blob is `NotFound`.
+        ///
+        /// Bounded by `ATTACHMENT_STORAGE_CEILING`, the tenant budget rather than a
+        /// size rule: a blob over it was never admissible, so finding one means the
+        /// file no longer matches what was stored — `Storage`, like a corrupt blob.
         pub(crate) async fn read_attachment(
             &self,
             org_id: i32,
@@ -301,10 +312,10 @@ mod unix {
             })?;
             let mut bytes = Vec::new();
             (&mut file)
-                .take(MAX_ATTACHMENT_BYTES as u64 + 1)
+                .take(ATTACHMENT_STORAGE_CEILING as u64 + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|_| ContentError::Storage)?;
-            if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+            if bytes.is_empty() || bytes.len() > ATTACHMENT_STORAGE_CEILING {
                 return Err(ContentError::Storage);
             }
             Ok(bytes)

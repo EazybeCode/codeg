@@ -15,10 +15,7 @@ import {
   type InlineComposerHandle,
 } from "./native-inline-composer"
 import type { PromptSegment } from "@/lib/neev-inline-prompt"
-import {
-  NEEV_MAX_ATTACHMENT_BYTES,
-  NEEV_MAX_PREVIEW_BYTES,
-} from "@/lib/neev-attachments"
+import { NEEV_MAX_PREVIEW_BYTES } from "@/lib/neev-attachments"
 import { NativeClientError } from "@/lib/neev-client"
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1])
@@ -187,14 +184,11 @@ it("counts overlapping drops against one shared limit", async () => {
 it("says why a file was refused, naming it, and uploads nothing", async () => {
   const upload = vi.fn(async (file: File) => stored(file.name, 1))
   const { add } = mount(upload)
-  const big = png("huge.png")
-  Object.defineProperty(big, "size", { value: NEEV_MAX_ATTACHMENT_BYTES + 1 })
   await act(async () => {
-    await add([big, new File([new Uint8Array([0, 1, 2])], "a.bin")])
+    await add([new File([new Uint8Array([0, 1, 2])], "a.bin")])
   })
   expect(upload).not.toHaveBeenCalled()
   const alert = await screen.findByRole("alert")
-  expect(alert).toHaveTextContent("huge.png is larger than 10 MB.")
   expect(alert).toHaveTextContent("a.bin isn't a file an agent can open")
 })
 
@@ -273,7 +267,7 @@ it("drops a classification that finished after the chat changed", async () => {
 
 it("says the organization is out of storage rather than blaming the message", async () => {
   const upload = vi.fn(async () => {
-    throw new NativeClientError("conflict", 409)
+    throw new NativeClientError("limited", 429, "content_quota")
   })
   const { tray, add } = mount(upload)
   await act(async () => {

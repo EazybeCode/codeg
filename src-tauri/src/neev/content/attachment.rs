@@ -8,7 +8,7 @@
 //! sandbox working directory so the provider can actually open them. Nothing
 //! here sends a filename in place of content — if the bytes cannot be staged,
 //! the run is refused rather than quietly mentioning a file that is not there.
-use super::{access, blob::MAX_ATTACHMENT_BYTES, types::*};
+use super::{access, blob::ATTACHMENT_STORAGE_CEILING, types::*};
 use crate::neev::{db, error::database_error, startup::ServerState, types::OrgContext};
 use sea_orm::ConnectionTrait;
 use uuid::Uuid;
@@ -18,11 +18,13 @@ const MAX_ATTACHMENTS_PER_ORG: i64 = 20_000;
 /// Deliberately modest while the host is storage-constrained. This is the one
 /// bound a reader can actually hit, so it is reported as a quota error they can
 /// act on (remove something, or ask for more) rather than a generic failure.
-const MAX_ATTACHMENT_BYTES_PER_ORG: i64 = 256 * 1024 * 1024;
+///
+/// With no per-file limit this is also the largest one attachment can be — the
+/// arithmetic of a shared budget, not a rule about files. Defined as
+/// `blob::ATTACHMENT_STORAGE_CEILING` so the buffer bounds cannot drift from it.
+pub(super) const MAX_ATTACHMENT_BYTES_PER_ORG: i64 = ATTACHMENT_STORAGE_CEILING as i64;
 /// Per message, and therefore per run.
 pub(crate) const MAX_ATTACHMENTS_PER_MESSAGE: usize = 5;
-/// Every attachment on one turn, together.
-pub(crate) const MAX_RUN_ATTACHMENT_BYTES: i64 = 25 * 1024 * 1024;
 const MAX_NAME_CHARS: usize = 200;
 
 /// What an attachment hangs on.
@@ -171,7 +173,10 @@ pub(crate) async fn store(
     file_name: &str,
     bytes: &[u8],
 ) -> Result<StoredAttachment, ContentError> {
-    if bytes.is_empty() || bytes.len() > MAX_ATTACHMENT_BYTES {
+    // No per-file size rule. An upload is bounded by the tenant's remaining
+    // storage, checked under the admission guard below and reported as `Quota`;
+    // `Invalid` here means only "no bytes", which no quota would fix.
+    if bytes.is_empty() {
         return Err(ContentError::Invalid);
     }
     let content_type = sniff_attachment(bytes).ok_or(ContentError::Invalid)?;
@@ -298,8 +303,10 @@ pub(crate) async fn resolve_for_run(
             return Err(ContentError::Invalid);
         }
     }
+    // No aggregate byte ceiling for a turn: the count cap bounds this loop and the
+    // storage quota already admitted every file, so the staged total cannot pass
+    // the org budget however large the individual files are.
     let mut resolved = Vec::with_capacity(keys.len());
-    let mut total: i64 = 0;
     for key in keys {
         let (bytes, content_type, file_name) = load(state, actor, key).await?;
         // The chat is re-checked here rather than trusted from `load`: `load`
@@ -323,10 +330,6 @@ pub(crate) async fn resolve_for_run(
         };
         if !same {
             return Err(ContentError::Invalid);
-        }
-        total += bytes.len() as i64;
-        if total > MAX_RUN_ATTACHMENT_BYTES {
-            return Err(ContentError::Quota);
         }
         resolved.push(RunAttachment {
             key: key.clone(),
