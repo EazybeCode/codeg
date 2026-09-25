@@ -83,6 +83,7 @@ import {
   type ContentNavigationGuard,
 } from "./native-content"
 import { NativeAgentChats } from "./native-agent-chats"
+import { NativeMentionsIndicator } from "./native-mentions"
 import { NativeTabPanel } from "./native-suspended-surface"
 import {
   listAgentSessions,
@@ -2115,6 +2116,48 @@ function WorkspaceContent() {
         <span className="truncate text-sm font-medium" title={org.name}>
           {org.name}
         </span>
+        {/* Being named is one mark here and nothing anywhere else. Opening a
+            notice is the same opening the tree performs — the node it hangs
+            under, handed to the callback this shell already has — so the
+            indicator knows no routes of its own and says so when the chat is
+            not one this view can reach.
+
+            Answering `true` means the opening was asked for, never that it
+            happened: `openResource` goes through the same unsaved-work guard
+            every other navigation does, and the reader may answer "stay". The
+            receipt is written by the chat panel when it is actually showing
+            the conversation, so a declined question leaves it unread. */}
+        <NativeMentionsIndicator
+          onOpen={async (chatId) => {
+            if (orgId === undefined) return false
+            // Read at answer time, not captured: the ref is written on every
+            // render, so it says what the scope is NOW. Comparing the captured
+            // `orgId` with itself across the await could only ever agree.
+            const scope = scopeRef.current
+            try {
+              // The server is the authority, exactly as it is for a restored
+              // tab: this refuses a chat that was archived, or that this
+              // member may no longer read, since the notice was written.
+              const resource = await loadNativeResource(orgId, chatId)
+              // The organization can change while that request is in flight.
+              // Opening what the previous one pointed at would put another
+              // organization's conversation on screen under this one's shell.
+              if (scopeRef.current !== scope) return false
+              const node = nodes.find((item) => item.id === resource.nodeId)
+              if (resource.kind !== "chat" || !node) return false
+              setSectionState("team")
+              setActiveSection("team")
+              setExpanded(
+                (old) => new Set([...old, ...ancestry(nodes, resource.nodeId)])
+              )
+              openResource(node, resource)
+              void loadItems(resource.nodeId)
+              return true
+            } catch {
+              return false
+            }
+          }}
+        />
       </div>
       <div className="px-2.5 pb-2">
         <label className="sr-only" htmlFor="neev-workspace-search">

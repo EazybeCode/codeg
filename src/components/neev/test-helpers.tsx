@@ -129,6 +129,10 @@ export function mockNativeSession(
     // to the real deployed shape so unrelated tests need not mock it; a test
     // about the controls themselves overrides it with the case it is about.
     if (key === "GET /api/neev/agent/capabilities") return json(agentCatalog)
+    // The workspace always mounts the mentions indicator; default to an empty
+    // inbox so unrelated tests need not mock it. A test about being named
+    // overrides it with the notices it is about.
+    if (key === "GET /api/neev/mentions") return json({ items: [], unread: 0 })
     unknown.push(key)
     throw new Error(`Unexpected fetch: ${key}`)
   })

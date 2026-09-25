@@ -107,7 +107,11 @@ export function splitBodyParts(
     const from = indexOfCodePoint(text, span.start - offset)
     const to = indexOfCodePoint(text, span.start + span.length - offset)
     push(text.slice(cursor, from))
-    parts.push({ kind: "mention", text: text.slice(from, to), userId: span.userId })
+    parts.push({
+      kind: "mention",
+      text: text.slice(from, to),
+      userId: span.userId,
+    })
     cursor = to
     reach = span.start + span.length
   }

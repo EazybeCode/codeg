@@ -699,9 +699,17 @@ export function NativeInlineComposer({
    * LIST is on screen. What ends up in the message is the node the person then
    * chose, never the characters they typed.
    */
+  // Whether a query is up right now, for the one thing the state itself cannot
+  // answer without being read inside its own updater: was this `@` the one that
+  // opened the picker? That transition is when a caller is told to fetch its
+  // directory, and telling it twice per keystroke would be a request per letter.
+  const asking = useRef(false)
   useEffect(() => {
     if (!editor) return
-    const close = () => setPicker(null)
+    const close = () => {
+      asking.current = false
+      setPicker(null)
+    }
     const detect = () => {
       if (editor.isDestroyed || !sourceRef.current || !editor.isEditable)
         return close()
@@ -714,6 +722,12 @@ export function NativeInlineComposer({
       const query = match[1]
       const to = $from.pos
       const from = to - query.length - 1
+      // Asked for the first time in this run of typing: the surface may have a
+      // directory to fetch, and this is the moment it learns anybody wants one.
+      if (!asking.current) {
+        asking.current = true
+        sourceRef.current.onOpen?.()
+      }
       setPicker((previous) =>
         previous &&
         previous.from === from &&
@@ -943,7 +957,8 @@ export function NativeInlineComposer({
     dom.setAttribute("aria-expanded", pickerOpen ? "true" : "false")
     dom.setAttribute("aria-controls", listId)
     const active = pickerOpen ? options[activeIndex] : undefined
-    if (active) dom.setAttribute("aria-activedescendant", optionId(active.userId))
+    if (active)
+      dom.setAttribute("aria-activedescendant", optionId(active.userId))
     else dom.removeAttribute("aria-activedescendant")
   })
 

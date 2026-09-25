@@ -252,7 +252,8 @@
     "mentionsEmpty": "メンションはまだありません",
     "mentionedYou": "{name} さんがあなたをメンションしました",
     "mentionsUnread": "未読 {number} 件",
-    "mentionsOpen": "メンションを開く"
+    "mentionsOpen": "メンションを開く",
+    "mentionsUnreachable": "この会話はここでは開けませんでした。"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

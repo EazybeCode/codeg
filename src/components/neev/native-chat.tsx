@@ -12,7 +12,14 @@ import {
 import { NativeMarkdown } from "./native-markdown"
 import { usePublishRunningChat } from "@/lib/neev-running-chats"
 
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react"
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
@@ -23,7 +30,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
-import { NativeClientError } from "@/lib/neev-client"
+import {
+  NativeClientError,
+  loadMembers,
+  type NativeMember,
+} from "@/lib/neev-client"
 import { firstLineTitle } from "@/lib/neev-first-line-title"
 import { mergeActivity } from "@/lib/neev-agent-activity"
 import type { ResourceActions } from "./native-document"
@@ -31,6 +42,7 @@ import {
   appendNativeMessage,
   listNativeMessages,
   loadNativeResource,
+  markNativeMentionsRead,
   updateNativeResource,
   NativeContentNotFoundError,
   type NativeResource,
@@ -76,7 +88,16 @@ import {
   promptText,
   sameSegments,
   type PromptSegment,
+  type WireMention,
 } from "@/lib/neev-inline-prompt"
+import { matchCandidates } from "@/lib/neev-mentions"
+import {
+  claimMentionReads,
+  notifyMentionsRead,
+  stagedVersion,
+  subscribeStagedMentions,
+} from "@/lib/neev-mention-reads"
+import { MentionedText } from "./native-mentions"
 import { uploadChatAttachment } from "@/lib/neev-attachments"
 import { useNeevContentPoll } from "@/hooks/use-neev-content-poll"
 import { useNeevMessageStream } from "@/hooks/use-neev-message-stream"
@@ -84,6 +105,7 @@ import { useNativeAuth } from "./native-auth-provider"
 import {
   NativeDialogContent as DialogContent,
   NativeDropdownMenuContent as DropdownMenuContent,
+  useTabVisible,
 } from "./native-suspended-surface"
 import { NativeError } from "./native-boundary"
 import { ActivityTimeline, attachTurns } from "./native-chat-activity"
@@ -118,6 +140,31 @@ function sameKeys(
   return (
     (left ?? []).length === right.length &&
     (left ?? []).every((key, index) => key === right[index])
+  )
+}
+
+/**
+ * Whether two sends name the same people in the same places.
+ *
+ * Not implied by the body being identical: two coworkers can share a display
+ * name, so "@Ana, can you look?" addressed to one Ana and to the other is the
+ * same text and a different message. The server folds the triples into the
+ * receipt hash for exactly that reason, and reusing a request id across the
+ * difference would be a permanent conflict rather than a retry.
+ */
+function sameMentions(
+  left: readonly WireMention[] | undefined,
+  right: readonly WireMention[]
+): boolean {
+  const before = left ?? []
+  return (
+    before.length === right.length &&
+    before.every(
+      (span, index) =>
+        span.userId === right[index].userId &&
+        span.start === right[index].start &&
+        span.length === right[index].length
+    )
   )
 }
 
@@ -272,7 +319,12 @@ function Chat({
     // storing it is in flight. Cleared whenever the provider changes, so a
     // level only Codex advertises can never ride along into Claude.
     [desired, setDesired] = useState<NeevAgentSettings | null>(null),
-    [applying, setApplying] = useState(false)
+    [applying, setApplying] = useState(false),
+    // The coworkers this conversation may name. Fetched from the organization's
+    // own directory, which the server already scopes to the caller's
+    // organization and its ACTIVE members — so there is nobody in here who
+    // could not already read this chat.
+    [directory, setDirectory] = useState<NativeMember[]>([])
   // What the sidebar reads to mark this conversation as running. Published
   // from the state the run already sets here rather than polled for, so it
   // clears the moment the run finishes or is cancelled.
@@ -394,6 +446,7 @@ function Chat({
       id: string
       prompt: string
       keys: readonly string[]
+      mentions: readonly WireMention[]
     } | null>(null)
   /*
    * Whether the reply the live preview stands in for is in the thread already.
@@ -444,6 +497,69 @@ function Chat({
     if (!draftRef.current && !retry.current)
       pinned.current = resource.authRevision
   }, [resource])
+  /**
+   * A mention is read when its conversation is in front of the reader.
+   *
+   * Not when the notice was clicked: that is a request to come here, and an
+   * unsaved-work question can answer it with "stay". Not when this panel
+   * merely exists either — a tab stays MOUNTED while hidden, so a chat behind
+   * three others is loaded, connected, and seen by nobody.
+   *
+   * Three things therefore have to be true together, and all three can become
+   * true last: the thread has loaded, this tab is the one on screen, and there
+   * is a receipt waiting for it. `staged` is watched for the case with no
+   * other signal at all — following a notice for the conversation already in
+   * front changes nothing else about this panel.
+   */
+  const visible = useTabVisible()
+  const staged = useSyncExternalStore(
+    subscribeStagedMentions,
+    stagedVersion,
+    () => 0
+  )
+  useEffect(() => {
+    if (!visible || loading || revoked || !auth.session || !auth.scopeKey)
+      return
+    const claimed = claimMentionReads(auth.scopeKey, resource.id)
+    if (claimed.length === 0) return
+    void markNativeMentionsRead(claimed, auth.session.csrf, auth.signal)
+      .then(() => notifyMentionsRead())
+      .catch(() => {
+        // The conversation is open either way. A count that stays high for one
+        // more poll is the smaller failure, and re-staging would mark a
+        // conversation read the next time it is opened for any other reason.
+      })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, staged, loading, revoked, auth.scopeKey, resource.id])
+  /**
+   * Whether anybody here can be named.
+   *
+   * A private chat has an audience of one — whoever made it — so there is
+   * nobody to notify, and the composer is handed no directory at all: `@` is
+   * then an ordinary character. Deliberately not a disabled picker. A list of
+   * people who cannot read this conversation is an offer to share it, and
+   * naming somebody must never widen who can see anything.
+   */
+  const canMention = latest.visibility === "organization" && !latest.archived
+  /**
+   * Fetched when the picker first opens, not on mount: most conversations are
+   * read without anybody being named, and the directory is a request nobody
+   * asked for until the moment they type `@`.
+   */
+  const directoryRead = useRef(false)
+  async function loadDirectory() {
+    if (directoryRead.current || !canMention || !auth.session) return
+    directoryRead.current = true
+    try {
+      const members = await loadMembers(0, scope.signal)
+      if (scope.isCurrent()) setDirectory(members)
+    } catch {
+      // The picker then offers nobody, which is what it already shows while the
+      // read is in flight. A directory that could not be listed is not worth
+      // interrupting what somebody is writing, and the next `@` asks again.
+      directoryRead.current = false
+    }
+  }
   // A staged file is unsent work in exactly the way typed text is, so leaving
   // with one asks the same question.
   useEffect(() => {
@@ -917,10 +1033,14 @@ function Chat({
     // a numbered marker where it sat, and the keys go up in that same order, so
     // what the provider reads has the reference in the sentence it belongs to.
     const written = draft
-    const { prompt, ids } = composeWirePrompt(
+    const { prompt, ids, mentions } = composeWirePrompt(
       written,
       new Map(attachments.items.map((item) => [item.id, item.name]))
     )
+    // The ask is posted as this person's own message in this shared thread, so
+    // the people it names are named by them — the provider neither sees a
+    // different prompt nor gains a way to notify anyone.
+    const named = canMention ? mentions : []
     if ((promptIsEmpty(written) && attachments.empty) || !scope.isCurrent())
       return
     // Pressing Enter with no runtime bound must SAY so. Failing silently here
@@ -963,9 +1083,12 @@ function Chat({
       // old id would then be refused forever instead of retried.
       const previous = invokeRequest.current
       const request =
-        previous && previous.prompt === prompt && sameKeys(previous.keys, keys)
+        previous &&
+        previous.prompt === prompt &&
+        sameKeys(previous.keys, keys) &&
+        sameMentions(previous.mentions, named)
           ? previous
-          : { id: crypto.randomUUID(), prompt, keys }
+          : { id: crypto.randomUUID(), prompt, keys, mentions: named }
       invokeRequest.current = request
       const invocation = await invokeTeamAgent(
         latest.id,
@@ -982,6 +1105,8 @@ function Chat({
           // Persisted onto the message the server posts for this ask, and
           // staged for the run from that message — one list, not two.
           attachmentKeys: keys,
+          // Hung on the invoker's own message, the same way the files are.
+          mentions: named,
           requestId: request.id,
           expectedAuthRevision: pinned.current,
         },
@@ -1040,10 +1165,19 @@ function Chat({
     // Empty body + files is a message the server accepts and labels; empty
     // body with nothing attached is not a message at all.
     const written = draft
-    const { prompt: body, ids } = composeWirePrompt(
+    const {
+      prompt: body,
+      ids,
+      mentions,
+    } = composeWirePrompt(
       written,
       new Map(attachments.items.map((item) => [item.id, item.name]))
     )
+    // Belt and braces for the one thing that must never happen: a private
+    // conversation cannot notify anybody, so a span that somehow survived a
+    // visibility change under an open composer is dropped here rather than
+    // sent. The server refuses it too.
+    const named = canMention ? mentions : []
     if (
       (promptIsEmpty(written) && attachments.empty) ||
       sending.current ||
@@ -1083,6 +1217,7 @@ function Chat({
       body,
       expectedAuthRevision: pinned.current,
       attachmentKeys: keys,
+      mentions: named,
     }
     const previous = retry.current
     const input =
@@ -1091,7 +1226,10 @@ function Chat({
       previous.expectedAuthRevision === candidate.expectedAuthRevision &&
       // Same words but a different set of files is a different message, and
       // reusing the request id would make the server return the first one.
-      sameKeys(previous.attachmentKeys, keys)
+      sameKeys(previous.attachmentKeys, keys) &&
+      // Same words naming a different coworker is a different message too:
+      // two people can share a display name.
+      sameMentions(previous.mentions, named)
         ? previous
         : { ...candidate, requestId: crypto.randomUUID() }
     retry.current = input
@@ -1408,7 +1546,19 @@ function Chat({
                 message.authorName.slice(0, 1)
               )}
             </span>
-            <div className="min-w-0 flex-1 space-y-1.5">
+            {/* What a person said is given its own surface — a quiet fill and
+                a border — and what an agent answered is left on the page.
+                A thread is mostly agent prose, so boxing THAT would put a
+                frame around nearly every line and none of it would read as
+                separated. The contrast of the words is untouched either way:
+                this marks who is speaking, it does not mute anyone. */}
+            <div
+              className={cn(
+                "min-w-0 flex-1 space-y-1.5",
+                message.authorKind === "human" &&
+                  "rounded-lg border bg-muted/30 px-3 py-2"
+              )}
+            >
               <div className="flex flex-wrap items-baseline gap-2 text-xs text-muted-foreground">
                 {/* An agent reply names the provider that wrote it and the
                     human who invoked it. `authorId` is still the invoker,
@@ -1429,14 +1579,25 @@ function Chat({
                   {new Date(message.createdAt * 1000).toLocaleString()}
                 </time>
               </div>
-              {/* A message written here keeps its files where they were put;
-                  anything else — an agent's reply, a message from before this
-                  existed — is the markdown it always was. */}
+              {/* A message written here keeps its files where they were put
+                  and its chips where the people were named; anything else — an
+                  agent's reply, a message from before either existed — is the
+                  markdown it always was.
+
+                  A named message is drawn as the text that was typed, not as
+                  markdown, for the same reason one with inline files is: both
+                  are one sentence with things sitting inside it, and block
+                  rendering would take that apart. */}
               {message.attachments.length > 0 ? (
                 <SentPrompt
                   body={message.body}
                   attachments={message.attachments}
+                  mentions={message.mentions}
                 />
+              ) : message.mentions?.length ? (
+                <p className="whitespace-pre-wrap break-words">
+                  <MentionedText text={message.body} spans={message.mentions} />
+                </p>
               ) : (
                 <NativeMarkdown markdown={message.body} />
               )}
@@ -1578,6 +1739,22 @@ function Chat({
             readOnly={latest.archived}
             attachDisabled={latest.archived || !auth.session}
             autoFocus={fresh}
+            // No source at all in a private chat, so `@` stays a character
+            // there. The reader themself is never offered: you do not need to
+            // notify yourself, and the server drops a self-mention anyway.
+            mentions={
+              canMention
+                ? {
+                    candidates: (query) =>
+                      matchCandidates(
+                        directory,
+                        query,
+                        auth.session?.user.id ?? null
+                      ),
+                    onOpen: () => void loadDirectory(),
+                  }
+                : undefined
+            }
             className="min-h-14"
           />
           {/* Send is held while bytes are still going up. Holding it without

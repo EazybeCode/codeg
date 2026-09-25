@@ -12,12 +12,14 @@ import {
   attachmentKeys,
   contentGet,
   contentMutation,
+  mentionSpans,
   NativeContentNotFoundError,
   parseMessage,
   type NativeMessage,
   type NativePage,
 } from "./neev-content-client"
 import { parseAttachments, type NeevAttachment } from "./neev-attachments"
+import type { MentionSpan } from "./neev-mentions"
 
 /** Providers the server will accept for a session (`agents/sessions.rs`). */
 export const NEEV_AGENT_PROVIDERS = ["claude", "codex"] as const
@@ -1351,6 +1353,15 @@ export interface InvokeTeamAgentInput {
    * second list of ids that could disagree with it.
    */
   attachmentKeys?: readonly string[]
+  /**
+   * The coworkers this ask names, hung on the invoker's own message for the
+   * same reason the files are.
+   *
+   * The prompt the provider is given is unchanged either way — a mention is
+   * plain readable `@Name` in it — so this notifies people without handing the
+   * run anything it did not already have.
+   */
+  mentions?: readonly MentionSpan[]
   requestId: string
   expectedAuthRevision: string
 }
@@ -1384,6 +1395,7 @@ export async function invokeTeamAgent(
   assertUuid(chatId)
   assertUuid(input.requestId)
   const keys = attachmentKeys(input.attachmentKeys)
+  const named = mentionSpans(input.mentions, input.prompt)
   if (
     !NEEV_AGENT_PROVIDERS.includes(input.provider) ||
     !isSupportedModel(input.model) ||
@@ -1413,6 +1425,7 @@ export async function invokeTeamAgent(
   }
   if (input.fast === true) body.fast = true
   if (keys.length) body.attachmentKeys = keys
+  if (named.length) body.mentions = named
   const invocation = parseTeamInvocation(
     await contentMutation(`/api/neev/chats/${chatId}/agent`, body, csrf, signal)
   )

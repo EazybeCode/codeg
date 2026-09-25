@@ -19,6 +19,23 @@ import {
 const PortalContainer = createContext<HTMLElement | null>(null)
 
 /**
+ * Whether the panel this is rendered in is the one being looked at.
+ *
+ * A hidden tab is still MOUNTED — that is the whole point of these surfaces:
+ * it keeps its draft, its guard and its connection. So "am I on screen" is a
+ * question no panel can answer from its own props, and anything that means
+ * "the reader has now seen this" has to ask it.
+ *
+ * `true` with no provider: a surface rendered outside the tab strip — the
+ * standalone folder view, a test harness — is the only thing on screen.
+ */
+const TabVisible = createContext(true)
+
+export function useTabVisible(): boolean {
+  return useContext(TabVisible)
+}
+
+/**
  * A panel that stays MOUNTED while hidden, and takes its overlays with it.
  *
  * Unlike [`NativeSuspendedSurface`] this does not use `Activity`: hiding must
@@ -59,7 +76,7 @@ export function NativeTabPanel({
     <div ref={capture} inert={hidden} hidden={hidden} className={className}>
       {container && (
         <PortalContainer.Provider value={container}>
-          {children}
+          <TabVisible.Provider value={!hidden}>{children}</TabVisible.Provider>
         </PortalContainer.Provider>
       )}
     </div>
@@ -96,7 +113,9 @@ export function NativeSuspendedSurface({
       <div ref={capture} inert={hidden} className={className}>
         {container && (
           <PortalContainer.Provider value={container}>
-            {children}
+            <TabVisible.Provider value={!hidden}>
+              {children}
+            </TabVisible.Provider>
           </PortalContainer.Provider>
         )}
       </div>

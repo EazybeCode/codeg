@@ -5,6 +5,11 @@ import {
   parseAttachments,
   type NeevAttachment,
 } from "./neev-attachments"
+import {
+  MAX_MENTIONS_PER_MESSAGE,
+  countCodePoints,
+  type MentionSpan,
+} from "./neev-mentions"
 
 export type NativeResourceKind = "chat" | "document"
 export type NativeVisibility = "private" | "organization"
@@ -65,6 +70,20 @@ export interface NativeMessage {
    * and for a server that predates attachments.
    */
   attachments: NeevAttachment[]
+  /**
+   * The coworkers this message names, as stored spans over `body`.
+   *
+   * Absent — not `[]` — for the overwhelming majority of messages: everything
+   * written before mentions existed, everything an agent wrote, and everything
+   * that simply names nobody. Absent and empty mean the same thing to a reader,
+   * and leaving it off is what lets every message this client already knew how
+   * to describe keep its exact shape.
+   *
+   * Nothing here is derived from the text: a chip is drawn only where a stored
+   * span says one belongs, which is why an agent writing the characters `@Ana`
+   * renders those characters and notifies no one.
+   */
+  mentions?: MentionSpan[]
 }
 
 export interface NativeRevision {
@@ -115,6 +134,16 @@ export interface AppendNativeMessageInput {
    * learned about attachments sees exactly the payload it always did.
    */
   attachmentKeys?: readonly string[]
+  /**
+   * Who this message names, and where in `body` it says so.
+   *
+   * Omitted from the request when empty, for the same reason the keys are. The
+   * server proves every span against the body it stores and against the
+   * sender's own organization before a single row is written; this side checks
+   * what it can so an impossible send is refused here rather than by a round
+   * trip.
+   */
+  mentions?: readonly MentionSpan[]
 }
 
 export type SaveNativeDocumentInput = {
@@ -339,10 +368,13 @@ export function parseMessage(value: unknown): NativeMessage {
     labelled ? [...MESSAGE_KEYS, "authorKind", "agentLabel"] : MESSAGE_KEYS,
     // Attachments arrived after authorship did, and a message without files
     // carries no such field at all — so it is optional in both directions.
-    ["attachments"]
+    // Mentions arrived after those, and are optional for the same reason: every
+    // message stored before they existed names nobody.
+    ["attachments", "mentions"]
   )
   const body = text(object.body)
   const attachments = parseAttachments(object.attachments)
+  const mentions = parseMentions(object.mentions, body)
   // Files with no words is a real message; words with nothing in them is not.
   if (
     (body.length === 0 && attachments.length === 0) ||
@@ -361,6 +393,9 @@ export function parseMessage(value: unknown): NativeMessage {
     if (agentLabel !== null && !/^[a-z][a-z0-9_-]{0,31}$/.test(agentLabel))
       return invalid()
   }
+  // Nothing an agent writes can become a mention, so a reply that claims one
+  // is not a message this client will render.
+  if (authorKind === "agent" && mentions.length > 0) return invalid()
   return {
     id: uuid(object.id),
     sequence: integerString(object.sequence, false),
@@ -371,7 +406,88 @@ export function parseMessage(value: unknown): NativeMessage {
     authorKind,
     agentLabel,
     attachments,
+    // An agent-authored message carries no mentions by construction: the server
+    // path that writes one records no spans. Refused here too rather than
+    // rendered, so a reply can never be made to look like a provider pinging a
+    // teammate.
+    ...(mentions.length === 0 ? {} : { mentions }),
   }
+}
+
+/**
+ * The spans a stored message carries, checked against the body they describe.
+ *
+ * Strict, and strict in one direction only: the server proves each span against
+ * the body inside the transaction that writes it, so a response that disagrees
+ * with itself is not a message this client can render truthfully. Absent is the
+ * normal case — every message written before mentions existed, and every one
+ * that names nobody.
+ */
+function parseMentions(value: unknown, body: string): MentionSpan[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > MAX_MENTIONS_PER_MESSAGE)
+    return invalid()
+  const total = countCodePoints(body)
+  const spans: MentionSpan[] = []
+  let reach = 0
+  for (const item of value) {
+    const object = exact(item, ["userId", "start", "length"])
+    const start = object.start,
+      length = object.length
+    if (
+      typeof start !== "number" ||
+      !Number.isSafeInteger(start) ||
+      typeof length !== "number" ||
+      !Number.isSafeInteger(length) ||
+      // `@` plus at least one character: a span shorter than that cannot be a
+      // name, and a zero-length one would be a chip standing on nothing.
+      length < 2 ||
+      start < reach ||
+      start + length > total
+    )
+      return invalid()
+    spans.push({ userId: positiveId(object.userId), start, length })
+    reach = start + length
+  }
+  return spans
+}
+
+/**
+ * The spans a send may carry: no more than the server takes, each inside the
+ * body, in order, and never two claiming the same characters.
+ *
+ * Checked here so a composer bug becomes a refused request rather than a
+ * message whose chips point at the wrong words. It is not a substitute for the
+ * server's own proof — only that one can say whether a user id is a coworker.
+ */
+export function mentionSpans(
+  value: readonly MentionSpan[] | undefined,
+  body: string
+): MentionSpan[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > MAX_MENTIONS_PER_MESSAGE)
+    invalidRequest()
+  const total = countCodePoints(body)
+  let reach = 0
+  for (const span of value) {
+    if (
+      !span ||
+      !Number.isInteger(span.userId) ||
+      span.userId <= 0 ||
+      !Number.isSafeInteger(span.start) ||
+      !Number.isSafeInteger(span.length) ||
+      span.length < 2 ||
+      span.start < reach ||
+      span.start + span.length > total
+    )
+      invalidRequest()
+    reach = span.start + span.length
+  }
+  return value.map((span) => ({
+    userId: span.userId,
+    start: span.start,
+    length: span.length,
+  }))
 }
 
 export function parseRevision(value: unknown): NativeRevision {
@@ -656,6 +772,7 @@ export async function appendNativeMessage(
   assertPositiveRevision(input.expectedAuthRevision)
   if (typeof input.body !== "string") invalidRequest()
   const keys = attachmentKeys(input.attachmentKeys)
+  const named = mentionSpans(input.mentions, input.body)
   // An empty body is only a message when files carry it; the server accepts it
   // on exactly that condition, and refusing here keeps an empty send local.
   if (input.body.length === 0 && keys.length === 0) invalidRequest()
@@ -667,6 +784,7 @@ export async function appendNativeMessage(
         expectedAuthRevision: input.expectedAuthRevision,
         body: input.body,
         ...(keys.length ? { attachmentKeys: keys } : {}),
+        ...(named.length ? { mentions: named } : {}),
       },
       csrf,
       signal
@@ -693,6 +811,99 @@ export function attachmentKeys(value: readonly string[] | undefined): string[] {
       invalidRequest()
   if (new Set(value).size !== value.length) invalidRequest()
   return [...value]
+}
+
+/**
+ * One conversation the reader was named in.
+ *
+ * A pointer, not a copy: enough to recognise what is waiting and to open it.
+ * The excerpt is the server's own single bounded line of the message.
+ */
+export interface NeevMentionNotice {
+  messageId: string
+  chatId: string
+  chatTitle: string
+  authorName: string
+  excerpt: string
+  createdAt: number
+  read: boolean
+}
+
+export interface NeevMentionInbox {
+  items: NeevMentionNotice[]
+  /** How many listed conversations still hold something unread. */
+  unread: number
+}
+
+/** As many notices as the server will list at once. */
+export const NEEV_MENTION_INBOX_LIMIT = 50
+/** As many messages as one mark-read call may name. */
+export const NEEV_MENTION_READ_LIMIT = 100
+
+export function parseMentionInbox(value: unknown): NeevMentionInbox {
+  const object = exact(value, ["items", "unread"])
+  if (
+    !Array.isArray(object.items) ||
+    object.items.length > NEEV_MENTION_INBOX_LIMIT ||
+    typeof object.unread !== "number" ||
+    !Number.isSafeInteger(object.unread) ||
+    object.unread < 0
+  )
+    return invalid()
+  return {
+    items: object.items.map((item) => {
+      const notice = exact(item, [
+        "messageId",
+        "chatId",
+        "chatTitle",
+        "authorName",
+        "excerpt",
+        "createdAt",
+        "read",
+      ])
+      if (typeof notice.read !== "boolean") return invalid()
+      return {
+        messageId: uuid(notice.messageId),
+        chatId: uuid(notice.chatId),
+        chatTitle: text(notice.chatTitle),
+        authorName: text(notice.authorName),
+        excerpt: text(notice.excerpt),
+        createdAt: timestamp(notice.createdAt),
+        read: notice.read,
+      }
+    }),
+    unread: object.unread,
+  }
+}
+
+/**
+ * The reader's own mentions. The whole of the notification: nothing is mailed,
+ * pushed or sent anywhere, and every notice is re-proved against the
+ * conversation's CURRENT audience by the server on each read — so losing access
+ * to a chat removes its notices with it.
+ */
+export async function loadNativeMentions(
+  signal?: AbortSignal
+): Promise<NeevMentionInbox> {
+  return parseMentionInbox(await contentGet("/api/neev/mentions", signal))
+}
+
+/** Mark notices read. Idempotent, and only ever the caller's own rows. */
+export async function markNativeMentionsRead(
+  messageIds: readonly string[],
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevMentionInbox> {
+  if (messageIds.length > NEEV_MENTION_READ_LIMIT) invalidRequest()
+  for (const id of messageIds) assertUuid(id)
+  return parseMentionInbox(
+    await contentMutation(
+      "/api/neev/mentions/read",
+      { messageIds: [...messageIds] },
+      csrf,
+      signal
+    )
+  )
 }
 
 export async function listNativeDocumentRevisions(

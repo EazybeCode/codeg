@@ -35,7 +35,9 @@ import {
   type NeevAttachmentType,
   type NeevRejectedFile,
 } from "@/lib/neev-attachments"
-import { parseSentPrompt } from "@/lib/neev-inline-prompt"
+import { attachmentMarker, parseSentPrompt } from "@/lib/neev-inline-prompt"
+import { countCodePoints, type MentionSpan } from "@/lib/neev-mentions"
+import { MentionedText } from "./native-mentions"
 
 /** Where one file's bytes go. Resolves to the server's own row for them. */
 export type AttachmentUploader = (
@@ -844,21 +846,56 @@ function SentReference({
 export function SentPrompt({
   body,
   attachments,
+  mentions,
 }: {
   body: string
   attachments: readonly NeevAttachment[]
+  /**
+   * The people this message named, as stored spans over the WHOLE body.
+   *
+   * Passed through rather than searched for: the runs of text below are pieces
+   * of that body, so each one is decorated with the spans that fall inside it
+   * and nothing here ever reads the text looking for an `@`.
+   */
+  mentions?: readonly MentionSpan[]
 }) {
   const t = useTranslations("NativeContent")
   const { parts, trailing } = useMemo(
     () => parseSentPrompt(body, attachments),
     [body, attachments]
   )
+  // Where each run begins in the body, in code points — the unit the spans are
+  // measured in. An attachment part stands for exactly the marker that was
+  // matched to it, so its width is known rather than guessed.
+  const offsets = useMemo(() => {
+    const starts: number[] = []
+    let at = 0
+    for (const part of parts) {
+      starts.push(at)
+      at +=
+        part.kind === "text"
+          ? countCodePoints(part.text)
+          : countCodePoints(
+              attachmentMarker(part.index + 1, attachments[part.index].fileName)
+            )
+    }
+    return starts
+  }, [parts, attachments])
   return (
     <>
       <p className="whitespace-pre-wrap break-words">
         {parts.map((part, index) =>
           part.kind === "text" ? (
-            <span key={index}>{part.text}</span>
+            mentions?.length ? (
+              <MentionedText
+                key={index}
+                text={part.text}
+                spans={mentions}
+                offset={offsets[index]}
+              />
+            ) : (
+              <span key={index}>{part.text}</span>
+            )
           ) : (
             <SentReference
               key={index}

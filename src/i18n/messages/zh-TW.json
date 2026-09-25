@@ -252,7 +252,8 @@
     "mentionsEmpty": "尚無提及",
     "mentionedYou": "{name} 提到了你",
     "mentionsUnread": "{number} 則未讀",
-    "mentionsOpen": "開啟提及"
+    "mentionsOpen": "開啟提及",
+    "mentionsUnreachable": "無法在此處開啟該對話。"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

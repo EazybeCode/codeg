@@ -252,7 +252,8 @@
     "mentionsEmpty": "Noch keine Erwähnungen",
     "mentionedYou": "{name} hat dich erwähnt",
     "mentionsUnread": "{number} ungelesen",
-    "mentionsOpen": "Erwähnungen öffnen"
+    "mentionsOpen": "Erwähnungen öffnen",
+    "mentionsUnreachable": "Diese Unterhaltung kann hier nicht geöffnet werden."
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

@@ -252,7 +252,8 @@
     "mentionsEmpty": "暂无提及",
     "mentionedYou": "{name} 提到了你",
     "mentionsUnread": "{number} 条未读",
-    "mentionsOpen": "打开提及"
+    "mentionsOpen": "打开提及",
+    "mentionsUnreachable": "无法在此处打开该对话。"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",

@@ -114,7 +114,9 @@ it("offers coworkers for a query and names the one chosen with the keyboard", as
   })
   const { prompt, mentions } = composeWirePrompt(draft, new Map())
   expect(
-    [...prompt].slice(mentions[0].start, mentions[0].start + mentions[0].length).join("")
+    [...prompt]
+      .slice(mentions[0].start, mentions[0].start + mentions[0].length)
+      .join("")
   ).toBe("@Andrés Gil")
 })
 

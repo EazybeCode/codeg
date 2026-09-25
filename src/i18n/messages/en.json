@@ -252,7 +252,8 @@
     "mentionsEmpty": "No mentions yet",
     "mentionedYou": "{name} mentioned you",
     "mentionsUnread": "{number} unread",
-    "mentionsOpen": "Open mentions"
+    "mentionsOpen": "Open mentions",
+    "mentionsUnreachable": "This conversation could not be opened here."
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",
