@@ -52,7 +52,7 @@ async fn fresh_schema_is_version_eleven_with_separate_branding_revision() {
         .unwrap()
         .try_get::<i64>("", "version")
         .unwrap();
-    assert_eq!(version, attachment_migration::SCHEMA_VERSION);
+    assert_eq!(version, mention_migration::SCHEMA_VERSION);
 
     let user = h::native_account(&db, "schema-owner", "schema@example.test").await;
     let row = db
@@ -119,6 +119,16 @@ async fn postgres_schema_reinitialization_and_foreign_keys() {
 /// go first and the attachments they point at second. Dropping the other way
 /// round — or dropping the session and message tables before either — leaves a
 /// referencing table pointing at a parent that is gone.
+/// Take schema 16 off a fresh database: the mentions a message carries.
+///
+/// Separate from the attachment tables because the two versions are separate —
+/// a fixture that wants to BE schema 15 drops this and keeps those.
+pub(super) async fn drop_mention_tables(db: &DatabaseConnection) {
+    execute(db, "DROP TABLE neev_message_mentions", vec![])
+        .await
+        .unwrap();
+}
+
 pub(super) async fn drop_attachment_tables(db: &DatabaseConnection) {
     for table in ["neev_attachment_refs", "neev_attachments"] {
         execute(db, &format!("DROP TABLE {table}"), vec![])

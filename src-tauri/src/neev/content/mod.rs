@@ -15,6 +15,9 @@ pub(crate) mod image;
 #[cfg(all(test, unix))]
 mod image_tests;
 #[cfg(test)]
+mod mention_tests;
+pub(crate) mod mentions;
+#[cfg(test)]
 mod message_tests;
 pub(crate) mod messages;
 pub(crate) mod realtime;

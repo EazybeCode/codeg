@@ -91,6 +91,11 @@ async fn mixed_history(database: sea_orm::DatabaseConnection) {
     crate::neev::db::execute(&h.state.database,"UPDATE neev_requests SET body_hash=$1 WHERE user_id=$2 AND action='content.document.save' AND request_id=$3",vec![historical_hash.into(),h.creator.identity.user_id.into(),markdown_input.request_id.clone().into()]).await.unwrap();
     let historical_charge = h.usage("charged_bytes").await;
     for table in [
+        // Mentions point at messages and attachment references at turns and
+        // messages, so both come off before the tables they name.
+        "neev_message_mentions",
+        "neev_attachment_refs",
+        "neev_attachments",
         "neev_image_blobs",
         // Session turns reference their session; drop children first.
         "neev_agent_turns",

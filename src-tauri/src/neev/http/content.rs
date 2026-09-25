@@ -15,7 +15,7 @@ use crate::neev::{
     auth::session,
     content::{
         attachment,
-        documents, image, messages, resources, rich,
+        documents, image, mentions, messages, resources, rich,
         types::{
             ContentError, DocumentFormat, Message, Page, Resource, ResourceInput, ResourceKind,
             ResourcePatch, Revision, RichSaveInput, SaveInput, Visibility,
@@ -91,6 +91,44 @@ struct MessageInput {
     /// a client that predates attachments posts exactly the body it always did.
     #[serde(default)]
     attachment_keys: Vec<String>,
+    /// The coworkers this message names, in the order the body says them.
+    /// Defaulted for the same reason the keys are.
+    #[serde(default)]
+    mentions: Vec<MentionInputDto>,
+}
+
+/// One person a send names: who, and which characters of the body say so.
+///
+/// Offsets are Unicode code points, so neither side has to agree about bytes or
+/// UTF-16. The span is proved against the stored body before anything is
+/// written, so a client cannot claim a run of somebody else's words.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct MentionInputDto {
+    user_id: i32,
+    start: i64,
+    length: i64,
+}
+
+pub(super) fn requested_mentions(
+    input: &[MentionInputDto],
+) -> Result<Vec<mentions::MentionInput>, ApiError> {
+    if input.len() > mentions::MAX_MENTIONS_PER_MESSAGE {
+        return Err(ApiError::Invalid);
+    }
+    input
+        .iter()
+        .map(|mention| {
+            if mention.user_id <= 0 || mention.start < 0 || mention.length < 2 {
+                return Err(ApiError::Invalid);
+            }
+            Ok(mentions::MentionInput {
+                user_id: mention.user_id,
+                start: mention.start,
+                length: mention.length,
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -162,6 +200,29 @@ pub(super) struct MessageDto {
     /// them. Always present, `[]` when none — a client seeding a thread must
     /// not have to tell "no files" apart from "field missing".
     attachments: Vec<AttachmentDto>,
+    /// Omit empty mentions so already-open clients can still read ordinary
+    /// messages. Agent-authored messages never carry mentions.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<MentionDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MentionDto {
+    user_id: i32,
+    start: i64,
+    length: i64,
+}
+
+fn mention_dtos(stored: Vec<mentions::StoredMention>) -> Vec<MentionDto> {
+    stored
+        .into_iter()
+        .map(|mention| MentionDto {
+            user_id: mention.user_id,
+            start: mention.start,
+            length: mention.length,
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -425,6 +486,7 @@ pub(super) async fn append_message(
         catalog::organization_mutation::<MessageInput>(&state, request, MESSAGE_BODY_LIMIT).await?;
     canonical_uuid(&input.request_id)?;
     let keys = requested_keys(&input.attachment_keys)?;
+    let named = requested_mentions(&input.mentions)?;
     let body = sent_text(input.body, keys.len());
     let message = messages::append_with_attachments(
         &state,
@@ -434,14 +496,108 @@ pub(super) async fn append_message(
         catalog::canonical_revision(&input.expected_auth_revision)?,
         &body,
         &keys,
+        &named,
     )
     .await?;
-    // Read back from the refs the append just committed, so the response
-    // describes what is stored rather than what was asked for.
+    // Read back from what the append committed, so the response describes what
+    // is stored rather than what was asked for.
     let attachments = message_attachments(&state, &actor, &message.id).await?;
-    let mut response = private_json(message_dto(message, attachment_dtos(attachments))?);
+    let spans = mentions::for_messages(&state, &actor, &[message.id.clone()])
+        .await?
+        .remove(&message.id)
+        .unwrap_or_default();
+    let mut response =
+        private_json(message_dto(message, attachment_dtos(attachments), spans)?);
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
+}
+
+/// The reader's own mentions: the whole of the in-app notification.
+///
+/// There is no delivery queue behind this and nothing leaves the server — no
+/// mail, no push, no webhook. A notice is a row that still passes the
+/// conversation's CURRENT ACL when it is asked for, which is why the authority
+/// is proved here on every read rather than remembered from when it was written.
+pub(super) async fn list_mentions(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let (notices, unread) = mentions::inbox(&state, &actor).await?;
+    Ok(private_json(MentionInboxDto {
+        unread,
+        items: notices
+            .into_iter()
+            .map(|notice| NoticeDto {
+                message_id: notice.message_id,
+                chat_id: notice.chat_id,
+                chat_title: notice.chat_title,
+                author_name: notice.author_name,
+                excerpt: notice.excerpt,
+                created_at: notice.created_at,
+                read: notice.read,
+            })
+            .collect(),
+    }))
+}
+
+/// Mark notices read. Idempotent, and only ever the caller's own rows.
+pub(super) async fn read_mentions(
+    State(state): State<Arc<ServerState>>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    let (input, actor) =
+        catalog::organization_mutation::<MentionReadInput>(&state, request, SMALL_BODY_LIMIT)
+            .await?;
+    for id in &input.message_ids {
+        canonical_uuid(id)?;
+    }
+    mentions::mark_read(&state, &actor, &input.message_ids).await?;
+    let (notices, unread) = mentions::inbox(&state, &actor).await?;
+    Ok(private_json(MentionInboxDto {
+        unread,
+        items: notices
+            .into_iter()
+            .map(|notice| NoticeDto {
+                message_id: notice.message_id,
+                chat_id: notice.chat_id,
+                chat_title: notice.chat_title,
+                author_name: notice.author_name,
+                excerpt: notice.excerpt,
+                created_at: notice.created_at,
+                read: notice.read,
+            })
+            .collect(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MentionReadInput {
+    message_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MentionInboxDto {
+    items: Vec<NoticeDto>,
+    /// How many of the listed conversations still have something unread in
+    /// them, for the one discreet indicator this feature gets.
+    unread: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoticeDto {
+    message_id: String,
+    chat_id: String,
+    chat_title: String,
+    author_name: String,
+    excerpt: String,
+    created_at: i64,
+    read: bool,
 }
 
 pub(super) async fn list_revisions(
@@ -927,10 +1083,14 @@ async fn message_page_dto(
 ) -> Result<PageDto<MessageDto>, ApiError> {
     let ids: Vec<String> = page.items.iter().map(|item| item.id.clone()).collect();
     let mut carried = attachment::for_messages(state, actor, &ids).await?;
+    // One lookup for the whole page, as the files get: the spans live in a
+    // second table and a message without any simply has none.
+    let mut named = mentions::for_messages(state, actor, &ids).await?;
     let mut items = Vec::with_capacity(page.items.len());
     for message in page.items {
         let attachments = attachment_dtos(carried.remove(&message.id).unwrap_or_default());
-        items.push(message_dto(message, attachments)?);
+        let spans = named.remove(&message.id).unwrap_or_default();
+        items.push(message_dto(message, attachments, spans)?);
     }
     Ok(PageDto {
         items,
@@ -1002,6 +1162,7 @@ fn resource_dto(resource: Resource, engine_backed: bool) -> Result<ResourceDto, 
 pub(super) fn message_dto(
     message: Message,
     attachments: Vec<AttachmentDto>,
+    named: Vec<mentions::StoredMention>,
 ) -> Result<MessageDto, ApiError> {
     canonical_uuid(&message.id).map_err(|_| ApiError::StorageUnavailable)?;
     if message.sequence < 1 || message.author_id < 1 || message.created_at < 0 {
@@ -1009,6 +1170,7 @@ pub(super) fn message_dto(
     }
     Ok(MessageDto {
         attachments,
+        mentions: mention_dtos(named),
         id: message.id,
         sequence: message.sequence.to_string(),
         author_id: message.author_id,

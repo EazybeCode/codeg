@@ -175,7 +175,7 @@ async fn sqlite_gateway8_rich_format_six_seven_eight() {
 async fn sqlite_schema_nine_through_eleven_decode_rich_bodies_and_catch_corruption() {
     // Regression: a v9/v10 snapshot must decode block documents (not read them as
     // markdown) and reject a corrupt rich body at the rich-decode stage.
-    for schema_version in [9, 10, 11, 12, 13, 14, 15] {
+    for schema_version in [9, 10, 11, 12, 13, 14, 15, 16] {
         rich_snapshot_contract(h::database().await, schema_version).await;
     }
 }
@@ -304,7 +304,21 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
+    if schema_version == 16 {
+        return;
+    }
+    // 16 adds the mentions a message carries.
+    db::execute(database, "DROP TABLE neev_message_mentions", vec![])
+        .await
+        .unwrap();
     if schema_version == 15 {
+        db::execute(
+            database,
+            "UPDATE neev_schema_version SET version=15",
+            vec![],
+        )
+        .await
+        .unwrap();
         return;
     }
     // 15 adds two TABLES; a snapshot of an older version does not have them at
@@ -674,7 +688,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 15);
+    assert_eq!(manifest.schema_version, 16);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -704,7 +718,11 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     // This fixture rewinds the current schema to a historical inventory.
-    // Remove attachment children before dropping their session parents.
+    // Mentions first (they point at messages), then attachment children before
+    // dropping their session parents.
+    db::execute(&db, "DROP TABLE neev_message_mentions", vec![])
+        .await
+        .unwrap();
     db::execute(&db, "DROP TABLE neev_attachment_refs", vec![])
         .await
         .unwrap();
@@ -1271,7 +1289,7 @@ async fn attachment_snapshot_contract(database: DatabaseConnection) {
     let baseline = verify_snapshot(&h.state.database, &h.state.blobs)
         .await
         .unwrap();
-    assert_eq!(baseline.schema_version, 15);
+    assert_eq!(baseline.schema_version, 16);
 
     let png = attachment_png();
     let notes = b"attachment acceptance notes\n".to_vec();

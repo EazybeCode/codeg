@@ -1031,3 +1031,58 @@ async fn an_empty_message_without_files_is_still_refused() {
         .await,
     );
 }
+
+/// The wire shape of a message, for clients that are already open.
+///
+/// A deployed client parses this response with a strict schema: a field it has
+/// never heard of is not "extra information", it is a message it refuses. So a
+/// message that names nobody — every message written before this existed, and
+/// every agent-authored one — must serialize EXACTLY as it did before, and the
+/// mentions key must appear only when there is something in it.
+#[test]
+fn a_message_naming_nobody_serializes_as_it_always_did() {
+    use crate::neev::content::{
+        mentions::StoredMention,
+        types::{AuthorKind, Message},
+    };
+    let message = || Message {
+        id: "11111111-1111-4111-8111-111111111111".into(),
+        sequence: 1,
+        author_id: 7,
+        author_name: "Ana Duarte".into(),
+        body: "hi @Ana Duarte there".into(),
+        created_at: 1_700_000_000,
+        author_kind: AuthorKind::Human,
+        agent_label: None,
+    };
+
+    let plain = serde_json::to_value(
+        super::content::message_dto(message(), Vec::new(), Vec::new()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        plain.get("mentions").is_none(),
+        "a message with no mentions must not carry the key: {plain}"
+    );
+    // The neighbouring field is the control: `attachments` IS always present,
+    // so this is about the new key and not about empty collections generally.
+    assert_eq!(plain.get("attachments"), Some(&json!([])));
+
+    let named = serde_json::to_value(
+        super::content::message_dto(
+            message(),
+            Vec::new(),
+            vec![StoredMention {
+                user_id: 42,
+                start: 3,
+                length: 11,
+            }],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        named.get("mentions"),
+        Some(&json!([{"userId": 42, "start": 3, "length": 11}]))
+    );
+}

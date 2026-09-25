@@ -146,7 +146,7 @@ async fn assert_v2_upgrades(db: &DatabaseConnection) {
     assert_eq!(initialize(db).await, Ok(()));
     assert_eq!(
         schema_version(db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     assert_eq!(node_name(db, original_node_id).await, "Marketing");
     assert!(insert_cross_org_resource(db).await.is_err());
@@ -174,7 +174,7 @@ async fn fresh_database_initializes_at_version_eleven() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         schema_version(&db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_resources").await);
     assert!(table_exists(&db, "neev_content_leases").await);
@@ -379,11 +379,11 @@ async fn v3_forward_hardening(db: &DatabaseConnection, invalid: bool) {
         assert_eq!(initialize(db).await, Ok(()));
         assert_eq!(
             schema_version(db).await,
-            attachment_migration::SCHEMA_VERSION
+            mention_migration::SCHEMA_VERSION
         );
         assert_eq!(
             validate_content_snapshot(db).await,
-            Ok(attachment_migration::SCHEMA_VERSION)
+            Ok(mention_migration::SCHEMA_VERSION)
         );
         assert_eq!(node_name(db, NODE_ID).await, "Marketing");
         assert_eq!(
@@ -416,7 +416,8 @@ async fn postgres_v3_forward_origin_hardening() {
     use futures::FutureExt;
     for invalid in [false, true] {
         let (db, admin, schema) = h::postgres_database().await;
-        super::tests::drop_attachment_tables(&db).await;
+        super::tests::drop_mention_tables(&db).await;
+    super::tests::drop_attachment_tables(&db).await;
         for table in [
             "neev_gateway_revoke_intents",
             "neev_gateway_redemptions",

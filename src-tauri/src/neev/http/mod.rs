@@ -167,6 +167,8 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             post(content::upload_document_image),
         )
         .route("/api/neev/images/{key}", get(content::serve_image))
+        .route("/api/neev/mentions", get(content::list_mentions))
+        .route("/api/neev/mentions/read", post(content::read_mentions))
         .route(
             "/api/neev/chats/{id}/attachments",
             post(content::upload_chat_attachment),

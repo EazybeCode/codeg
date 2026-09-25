@@ -58,6 +58,7 @@ async fn table_exists(db: &DatabaseConnection, name: &str) -> bool {
 /// gate would refuse it before any migration ran, and the test would prove
 /// nothing about the 9→current path.
 async fn downgrade_to_nine(db: &DatabaseConnection) {
+    super::tests::drop_mention_tables(db).await;
     super::tests::drop_attachment_tables(db).await;
     for table in [
         "neev_agent_turns",
@@ -135,6 +136,7 @@ async fn project_node(db: &DatabaseConnection, org: i32) -> i32 {
 async fn downgrade_to_eleven(db: &DatabaseConnection) {
     // Schema 11 predates attachment storage, so those tables come off first —
     // and before the columns below, because a reference can hang on a turn.
+    super::tests::drop_mention_tables(db).await;
     super::tests::drop_attachment_tables(db).await;
     // Drop the columns rather than rebuilding the tables: `neev_agent_turns`
     // carries a foreign key to `neev_agent_sessions`, so dropping and
@@ -187,7 +189,7 @@ async fn fresh_install_creates_session_storage_at_version_eleven() {
     let db = h::database().await;
     assert_eq!(
         schema_version(&db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
@@ -219,7 +221,7 @@ async fn nine_to_eleven_upgrade_preserves_every_row() {
 
     assert_eq!(
         schema_version(&db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_agent_sessions").await);
     assert!(table_exists(&db, "neev_agent_turns").await);
@@ -248,6 +250,7 @@ async fn ten_to_eleven_preserves_content_and_image_inventory() {
     let db = h::database().await;
     seed(&db).await;
     // A schema-10 database has neither session nor attachment storage.
+    super::tests::drop_mention_tables(&db).await;
     super::tests::drop_attachment_tables(&db).await;
     for table in ["neev_agent_turns", "neev_agent_sessions"] {
         execute(&db, &format!("DROP TABLE {table}"), vec![])
@@ -261,7 +264,7 @@ async fn ten_to_eleven_preserves_content_and_image_inventory() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         validate_content_snapshot(&db).await,
-        Ok(attachment_migration::SCHEMA_VERSION)
+        Ok(mention_migration::SCHEMA_VERSION)
     );
     assert!(table_exists(&db, "neev_image_blobs").await);
     assert_eq!(count(&db, "neev_messages").await, 1);
@@ -278,7 +281,7 @@ async fn upgrade_is_replayable_when_message_columns_already_exist() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         schema_version(&db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     // Idempotent: initializing an already-current database validates in place.
     assert_eq!(initialize(&db).await, Ok(()));
@@ -298,7 +301,7 @@ async fn eleven_to_twelve_adds_the_node_column_and_leaves_sessions_unfiled() {
 
     assert_eq!(
         schema_version(&db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     // The session that existed before the column did is retained, and reads as
     // unfiled rather than being dropped or given an invented placement.
@@ -801,6 +804,7 @@ async fn thirteen_to_fourteen_and_back_again_preserves_everything_else() {
     // marker — leaving a database that is honestly schema 14 rather than a 15
     // wearing a 14 marker. This rewind is the test's setup; the 14→13 contract
     // below is what it is actually about, and is unchanged.
+    super::tests::drop_mention_tables(&db).await;
     super::tests::drop_attachment_tables(&db).await;
     execute(
         &db,
@@ -855,7 +859,7 @@ async fn thirteen_to_fourteen_and_back_again_preserves_everything_else() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         schema_version(&db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     assert_eq!(count(&db, "neev_agent_sessions").await, 1);
     // The selections were dropped with the columns and come back unset, which
@@ -872,7 +876,7 @@ async fn thirteen_to_fourteen_and_back_again_preserves_everything_else() {
     assert!(!row.try_get::<bool>("", "fast").unwrap());
     assert_eq!(
         validate_content_snapshot(&db).await,
-        Ok(attachment_migration::SCHEMA_VERSION)
+        Ok(mention_migration::SCHEMA_VERSION)
     );
 }
 
@@ -896,10 +900,11 @@ async fn the_downgrade_refuses_a_database_that_is_not_at_fourteen() {
     // Refused, not half-applied: schema 15 is still intact and still validates.
     assert_eq!(
         validate_content_snapshot(&db).await,
-        Ok(attachment_migration::SCHEMA_VERSION)
+        Ok(mention_migration::SCHEMA_VERSION)
     );
 
     // Now down to a genuine 14, where the downgrade is defined, and take it.
+    super::tests::drop_mention_tables(&db).await;
     super::tests::drop_attachment_tables(&db).await;
     execute(
         &db,

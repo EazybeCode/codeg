@@ -175,7 +175,7 @@ async fn fresh_install_creates_attachment_storage_at_version_fifteen() {
     let db = h::database().await;
     assert_eq!(
         schema_version(&db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     assert_eq!(count(&db, "neev_attachments").await, 0);
     assert_eq!(count(&db, "neev_attachment_refs").await, 0);
@@ -202,7 +202,7 @@ async fn reopening_a_migrated_database_succeeds() {
     );
     assert_eq!(
         schema_version(&db).await,
-        attachment_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
     );
     // And again, because a restart is not a one-off event.
     assert_eq!(initialize(&db).await, Ok(()));

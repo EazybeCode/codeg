@@ -1242,6 +1242,11 @@ struct TeamInvokeInput {
     /// the room can see — and the run is fed from those persisted references.
     #[serde(default)]
     attachment_keys: Vec<String>,
+    /// The coworkers the ask names. They hang on the invoker's own message for
+    /// exactly the same reason the files do; the prompt the provider is given
+    /// is unchanged either way, because a mention is plain readable text in it.
+    #[serde(default)]
+    mentions: Vec<super::content::MentionInputDto>,
 }
 
 #[derive(Serialize)]
@@ -1435,6 +1440,7 @@ pub(super) async fn team_invoke(
         expected,
         &prompt,
         &keys,
+        &super::content::requested_mentions(&input.mentions)?,
     )
     .await?;
     // What the run is fed comes from the PERSISTED message, never from the
@@ -1442,6 +1448,17 @@ pub(super) async fn team_invoke(
     // message's files, and a key the append did not record cannot be smuggled
     // into this turn.
     let carried = super::content::message_attachments(&state, &actor, &prompt_message.id).await?;
+    // Read back from what the append committed, the same way the files are: the
+    // response describes the message that exists, not the request that asked
+    // for it — so a retry resolving to an earlier message carries ITS mentions.
+    let named_in_prompt = crate::neev::content::mentions::for_messages(
+        &state,
+        &actor,
+        std::slice::from_ref(&prompt_message.id),
+    )
+    .await?
+    .remove(&prompt_message.id)
+    .unwrap_or_default();
     if stored_keys(&carried) != keys {
         return Err(ApiError::Conflict);
     }
@@ -1492,7 +1509,11 @@ pub(super) async fn team_invoke(
     // (or settle the shared turn as `busy` while the winner is still running).
     if !created {
         let mut response = private_json(TeamInvokeDto {
-            message: super::content::message_dto(prompt_message, attachment_dtos(carried))?,
+            message: super::content::message_dto(
+                prompt_message,
+                attachment_dtos(carried),
+                named_in_prompt,
+            )?,
             run_id: turn.run_id.clone(),
             turn: turn_dto(turn, Vec::new()),
         });
@@ -1557,7 +1578,11 @@ pub(super) async fn team_invoke(
         }
     };
     let mut response = private_json(TeamInvokeDto {
-        message: super::content::message_dto(prompt_message, attachment_dtos(carried))?,
+        message: super::content::message_dto(
+            prompt_message,
+            attachment_dtos(carried),
+            named_in_prompt,
+        )?,
         run_id: turn.run_id.clone(),
         turn: turn_dto(turn, Vec::new()),
     });

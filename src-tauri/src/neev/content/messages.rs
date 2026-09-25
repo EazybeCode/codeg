@@ -1,4 +1,4 @@
-use super::{access, attachment, resources, types::*};
+use super::{access, attachment, mentions, resources, types::*};
 use crate::neev::{
     auth::session, db, error::database_error, org, startup::ServerState, types::OrgContext,
 };
@@ -107,6 +107,7 @@ pub(crate) async fn append(
         expected_auth_revision,
         body,
         &[],
+        &[],
     )
     .await
 }
@@ -124,11 +125,15 @@ pub(crate) async fn append_with_attachments(
     expected_auth_revision: i64,
     body: &str,
     attachment_keys: &[String],
+    mentions: &[mentions::MentionInput],
 ) -> Result<Message, ContentError> {
     if body.is_empty() || body.len() > 32768 || expected_auth_revision < 1 {
         return Err(ContentError::Invalid);
     }
     if attachment_keys.len() > attachment::MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(ContentError::Invalid);
+    }
+    if mentions.len() > mentions::MAX_MENTIONS_PER_MESSAGE {
         return Err(ContentError::Invalid);
     }
     let request = org::normalize_request_id(request_id).map_err(|_| ContentError::Invalid)?;
@@ -149,6 +154,15 @@ pub(crate) async fn append_with_attachments(
     ];
     if !attachment_keys.is_empty() {
         parts.push(attached.as_str());
+    }
+    // The people named are part of what the request meant too, so a retry that
+    // changed them is a conflict rather than a replay. Appended only when there
+    // are any, for the same reason the files are: a send without mentions has
+    // to hash exactly as it did before mentions existed, or every receipt
+    // already in storage would start reading as a conflict.
+    let named = mentions::digest_part(mentions);
+    if !mentions.is_empty() {
+        parts.push(named.as_str());
     }
     let hash = org::digest_parts(&parts);
     let tx = resources::begin(state, actor).await?;
@@ -201,6 +215,10 @@ pub(crate) async fn append_with_attachments(
     // Before the receipt: if a key does not belong here the whole append rolls
     // back, so no request id is ever spent on a message that was refused.
     link_attachments(&tx, actor, chat_id, &id, attachment_keys).await?;
+    // Before the receipt as well: a mention this chat may not carry takes the
+    // whole append back with it, so no request id is ever spent on a message
+    // that was refused — and a retry can never leave a second notice.
+    mentions::link_to_message(&tx, actor, &chat, &id, body, mentions).await?;
     resources::record_receipt(&tx, actor, "content.message.append", &request, &hash, &id).await?;
     let result = load(&tx, actor.org_id, chat_id, &id).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
