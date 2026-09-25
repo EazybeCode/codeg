@@ -1117,6 +1117,9 @@ export function ActivityTimeline({
                   <button
                     type="button"
                     aria-expanded={shown === item.seq}
+                    disabled={
+                      item.kind === "tool_result" && !item.output.trim()
+                    }
                     onClick={() =>
                       setShown((value) =>
                         value === item.seq ? null : item.seq
@@ -1144,7 +1147,7 @@ export function ActivityTimeline({
                       >
                         {item.isError
                           ? t("activityFailed")
-                          : oneLineOf(item.output)}
+                          : oneLineOf(item.output) || t("activityCompleted")}
                       </span>
                     )}
                   </button>
