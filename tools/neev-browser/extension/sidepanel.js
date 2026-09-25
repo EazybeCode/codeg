@@ -8,6 +8,8 @@
  * be putting markup in the panel that approves actions against it.
  */
 
+import { describe, report } from "./lib/boot.js"
+
 const $ = (id) => document.getElementById(id)
 
 const els = {
@@ -51,9 +53,52 @@ let entries = []
 let candidates = []
 let selectedTabId = null
 
-const port = chrome.runtime.connect({ name: "neev-panel" })
+// Connecting is the first thing in this file that can fail, and a throw here
+// would abort the module before a single listener below is registered. Caught
+// so the panel stays rendered and says what went wrong instead.
+let port = null
+try {
+  port = chrome.runtime.connect({ name: "neev-panel" })
+} catch (error) {
+  report(
+    "The panel could not reach the extension's background service worker (" +
+      describe(error) +
+      "). Reload the extension."
+  )
+}
 
-port.onMessage.addListener((message) => {
+/** Post to the service worker, or say plainly that there is nobody to post to. */
+function send(message) {
+  if (!port) {
+    showError(
+      "Not connected to the extension's background service worker. Reload " +
+        "the extension, then reopen the panel."
+    )
+    return false
+  }
+  try {
+    port.postMessage(message)
+    return true
+  } catch (error) {
+    showError("The background service worker went away: " + describe(error))
+    port = null
+    return false
+  }
+}
+
+port?.onDisconnect.addListener(() => {
+  // A service worker that fails to register still hands back a port, then
+  // drops it immediately. Without this the panel would just sit there.
+  const why = chrome.runtime.lastError && chrome.runtime.lastError.message
+  port = null
+  report(
+    "The extension's background service worker disconnected" +
+      (why ? " (" + why + ")" : "") +
+      ". Reload the extension, then reopen the panel."
+  )
+})
+
+port?.onMessage.addListener((message) => {
   if (!message) return
   if (message.kind === "sync") {
     state = message.state
@@ -296,7 +341,7 @@ els.attach.addEventListener("click", () => {
         showError("Chrome did not grant access to " + origin + ".")
         return
       }
-      port.postMessage({
+      send({
         kind: "panel.start",
         provider: selectedProvider(),
         model: els.model.value.trim() || null,
@@ -313,7 +358,7 @@ function selectedProvider() {
 }
 
 els.stop.addEventListener("click", () => {
-  port.postMessage({ kind: "panel.stop" })
+  send({ kind: "panel.stop" })
 })
 
 els.approve.addEventListener("click", () => decide("approve"))
@@ -321,12 +366,14 @@ els.deny.addEventListener("click", () => decide("deny"))
 
 function decide(decision) {
   if (!state.approval) return
-  port.postMessage({
+  // Only dismissed once the decision is actually on its way: a swallowed
+  // send would otherwise take the prompt away with the answer unrecorded.
+  const sent = send({
     kind: "panel.approval",
     id: state.approval.id,
     decision,
   })
-  els.approvalCard.hidden = true
+  if (sent) els.approvalCard.hidden = true
 }
 
 els.handoffDone.addEventListener("click", () => handoff("done"))
@@ -334,8 +381,8 @@ els.handoffSkip.addEventListener("click", () => handoff("skipped"))
 
 function handoff(outcome) {
   if (!state.handoff) return
-  port.postMessage({ kind: "panel.handoff", id: state.handoff.id, outcome })
-  els.handoffCard.hidden = true
+  const sent = send({ kind: "panel.handoff", id: state.handoff.id, outcome })
+  if (sent) els.handoffCard.hidden = true
 }
 
 // ------------------------------------------------------------------ export

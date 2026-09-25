@@ -152,6 +152,31 @@ so no credential survives in the preserved output.
 The side panel shows the directory path, and **Export transcript** saves a
 Markdown copy.
 
+## When the panel misbehaves
+
+The panel is a module script, so one throw while it evaluates registers none of
+the listeners below it: the panel paints correctly and then ignores every
+click. Chrome reports that only in the panel's own devtools. To make it visible
+without them, `sidepanel.html` loads exactly one script — `boot.js` — which
+installs an error reporter and then imports `sidepanel.js` itself. Success and
+failure are the two settlements of that import, so there is no timing guess
+involved and a slow load is never mistaken for a dead one.
+
+- **"The panel script did not start: …"** — the import rejected. The message
+  after the colon is the real error. The panel is dead; reload the extension.
+- **"Panel error: …"** — an uncaught error or rejection after load. The panel
+  may be partly working.
+- **"The background service worker disconnected."** The panel loaded but
+  `background.js` did not register, or it crashed. Check the service worker's
+  own errors.
+- **A panel that is genuinely blank** — no header, no banner, no buttons — is
+  none of the above, because all of those still leave the static HTML painted.
+  Reading the source, everything but `#boot`, `#error` and the three
+  conditional cards is unconditionally visible and no CSS rule hides a
+  container at load, so a fully blank panel points at the document never
+  loading rather than at the panel script. That is an inference from the
+  source; it has not been confirmed against a real Chrome.
+
 ## Limitations
 
 Read these; they are real.
@@ -178,7 +203,7 @@ network, or a provider. Nothing to install for either.
 
 ```bash
 tools/neev-browser/companion/run_tests.sh      # 156 tests, Python stdlib
-tools/neev-browser/extension-tests/run_tests.sh # 82 tests, node --test
+tools/neev-browser/extension-tests/run_tests.sh # 92 tests, node --test
 ```
 
 The extension suite syntax-checks every shipped `.js` file, then runs the

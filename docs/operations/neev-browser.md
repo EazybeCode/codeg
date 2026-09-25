@@ -71,7 +71,7 @@ extension, or a provider:
 
 ```bash
 tools/neev-browser/companion/run_tests.sh        # 156 tests, Python stdlib
-tools/neev-browser/extension-tests/run_tests.sh  #  82 tests, node --test
+tools/neev-browser/extension-tests/run_tests.sh  #  92 tests, node --test
 ```
 
 Both green — 156 and 82 — on Python 3.9.6 and Node v18.15.0. The extension
