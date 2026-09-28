@@ -146,6 +146,9 @@
   ];
   function draw() {
     const stage = Math.min(3, Math.floor(elapsed / 4));
+    preview.dataset.stage = String(stage);
+    const collaboration = document.getElementById('collab-status-text');
+    if (collaboration) collaboration.textContent = ['Maya is refining the brief', 'Sam added his feedback', 'Jamie is preparing the next draft', 'Ready for the next step'][stage];
     status.textContent = steps[stage][0];
     response.textContent = steps[stage][1];
     timer.textContent = '0:' + String(Math.min(elapsed,12)).padStart(2,'0');
@@ -161,7 +164,6 @@
     }
   }
   toggle.addEventListener('click', function () {
-    if (!enabled) document.getElementById('tab-chat').click();
     enabled = !enabled; refresh();
   });
   document.querySelectorAll('[role="tab"]').forEach(function(tab) {

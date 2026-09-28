@@ -31,3 +31,14 @@ On verification failure the publisher restores the old config and reloads it. Ma
 - Live HTTPS homepage and existing app health verified; application container unchanged.
 - Only observed browser console errors came from an unrelated installed capture extension.
 - No Git push performed. Existing app CSS/workspace edits were excluded from the website commit.
+
+
+## Multiplayer and knowledge update — 2026-09-29 IST
+
+- Multiplayer is now the initial product preview, with an illustrative shared document, collaborator presence, moving cursors, and team conversation. Animation pause/play and reduced-motion controls remain in place.
+- Added original CSS/vector artwork to document and generated-output visuals, plus a layered organization knowledge illustration.
+- Added a Team knowledge preview and FAQ grounded in current shared documents/files/skills capabilities. Does not claim automatic indexing or access to all organization content.
+- Claude and Codex labeled available; additional agents explicitly coming soon.
+- Kept the approved hero and colors; the supporting line stays short.
+- Release `20260928T190939Z`; HTML SHA-256 `f354ce2be9ac13359c4845ead37a2fa5e51f59b4666d52d2a5f0dfacbbdb170d`.
+- Verified all six deployed assets, initial tab state, keyboard Home/End switching, animation controls, and 390px layout without horizontal overflow. Existing app health/container unchanged.
