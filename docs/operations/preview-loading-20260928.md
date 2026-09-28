@@ -15,3 +15,7 @@ Backend unchanged, schema 17. Fresh database backup verified before deployment;
 zero active sign-ins or agent turns at release time.
 
 This fixes repeated preview downloads, not general document-editor startup.
+
+Live browser verification: the 21.6 MB V106 attachment completed and rendered
+Conversation Management inside the sandboxed preview. Large-file transfer still
+adds latency; this release does not claim instant previews or faster editor boot.
