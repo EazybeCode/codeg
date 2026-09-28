@@ -8,7 +8,6 @@ import {
   listAgentSessionFiles,
   formatFileSize,
 } from "@/lib/neev-session-files"
-import { listTrashedChatFiles } from "@/lib/neev-file-actions"
 import type { NeevAttachment } from "@/lib/neev-attachments"
 import { FileActions } from "./native-file-actions"
 
@@ -19,7 +18,7 @@ interface ChatFilesListProps {
   isRunning?: boolean
 }
 
-/** Only mounted when expanded. Reads current authorized files, never bytes. */
+/** Only mounted when expanded. Reads current authorized active files only. */
 export function ChatFilesList({
   id,
   kind,
@@ -30,7 +29,6 @@ export function ChatFilesList({
   const [files, setFiles] = useState<NeevAttachment[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<unknown>(null)
-  const [trash, setTrash] = useState(false)
   const [revision, setRevision] = useState(0)
   useEffect(() => {
     const changed = () => setRevision((n) => n + 1)
@@ -43,11 +41,9 @@ export function ChatFilesList({
       setLoading(true)
       setError(null)
       try {
-        const result = await (trash
-          ? listTrashedChatFiles(kind, id, controller.signal)
-          : kind === "chat"
-            ? listResourceChatFiles(id, controller.signal)
-            : listAgentSessionFiles(id, controller.signal))
+        const result = await (kind === "chat"
+          ? listResourceChatFiles(id, controller.signal)
+          : listAgentSessionFiles(id, controller.signal))
         if (!controller.signal.aborted) {
           setFiles(result)
           setLoading(false)
@@ -61,18 +57,9 @@ export function ChatFilesList({
     }
     void load()
     return () => controller.abort()
-  }, [id, kind, scopeKey, isRunning, revision, trash])
+  }, [id, kind, scopeKey, isRunning, revision])
   return (
     <div>
-      <div className="flex justify-end px-2">
-        <button
-          type="button"
-          className="py-1 text-[11px] text-muted-foreground hover:text-foreground"
-          onClick={() => setTrash((value) => !value)}
-        >
-          {t(trash ? "activeFiles" : "fileTrash")}
-        </button>
-      </div>
       {loading ? (
         <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-muted-foreground">
           <Loader2 aria-hidden className="size-3 animate-spin" />
@@ -84,15 +71,15 @@ export function ChatFilesList({
         </div>
       ) : !files?.length ? (
         <div className="px-2 py-1 text-xs text-muted-foreground">
-          {t(trash ? "noDeletedFiles" : "noGeneratedFiles")}
+          {t("noGeneratedFiles")}
         </div>
       ) : (
         <ul className="space-y-0.5">
           {files.map((file) => (
-            <li key={`${trash}:${file.key}`}>
+            <li key={file.key}>
               <FileActions
                 file={file}
-                archived={trash}
+                archived={false}
                 className="w-full text-xs text-muted-foreground"
               >
                 <FileText aria-hidden className="size-3 shrink-0" />

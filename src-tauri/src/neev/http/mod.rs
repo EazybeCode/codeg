@@ -182,6 +182,10 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             "/api/neev/attachments/{key}",
             get(content::serve_attachment).patch(content::archive_attachment),
         )
+        .route(
+            "/api/neev/attachments",
+            get(content::list_org_archived_attachments),
+        )
         .route("/api/neev/organizations", get(org::list).post(org::create))
         .route("/api/neev/organizations/select", post(org::select))
         .route(

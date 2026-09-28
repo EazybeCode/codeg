@@ -1,5 +1,11 @@
 {
   "NativeContent": {
+    "previewUnsupported": "المعاينة غير متاحة لهذا النوع من الملفات.",
+    "htmlStaticPreview": "معاينة ثابتة — تم تعطيل البرامج النصية والموارد الخارجية.",
+    "htmlPreviewTruncated": "عرض أول 2 ميجابايت من ملف HTML هذا.",
+    "trash": "سلة المهملات",
+    "deletedAttachments": "الملفات المحذوفة",
+    "trashDescription": "جميع المرفقات المحذوفة في المؤسسة",
     "noDeletedFiles": "لا توجد ملفات محذوفة",
     "fileActions": "إجراءات لـ {name}",
     "openFile": "فتح",

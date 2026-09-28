@@ -1738,10 +1738,21 @@ async fn list_archived_session_attachments_requires_ownership() {
         .await
         .assert_status_ok();
 
+    let global = client.get("/api/neev/attachments?archived=true").await;
+    global.assert_status_ok();
+    assert_eq!(global.json::<Value>()["items"][0]["key"], key);
+
     // Another org member cannot list archived.
     let peer_user = h::native_account(&database, "peer", "peer@example.test").await;
     h::add_membership(&database, org, peer_user, "member").await;
     let peer = sign_in(&state, &database, peer_user).await;
+
+    let hidden = peer.get("/api/neev/attachments?archived=true").await;
+    hidden.assert_status_ok();
+    assert!(hidden.json::<Value>()["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     peer.get(&format!(
         "/api/neev/agent/sessions/{id}/attachments?archived=true"

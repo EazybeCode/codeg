@@ -640,6 +640,22 @@ pub(crate) struct ArchivedPage {
     pub(crate) next_after: Option<String>,
 }
 
+/// Archived attachment with parent context for org-wide listing.
+pub(crate) struct OrgArchivedAttachment {
+    pub(crate) key: String,
+    pub(crate) file_name: String,
+    pub(crate) content_type: &'static str,
+    pub(crate) byte_length: i64,
+    pub(crate) parent_id: String,
+    pub(crate) parent_kind: String,
+}
+
+/// A page of org-wide archived attachments.
+pub(crate) struct OrgArchivedPage {
+    pub(crate) items: Vec<OrgArchivedAttachment>,
+    pub(crate) next_after: Option<String>,
+}
+
 /// List archived attachments for a chat. Requires READ authorization.
 /// Returns up to 100 attachments, with cursor pagination.
 pub(crate) async fn list_archived_for_chat(
@@ -739,4 +755,84 @@ pub(crate) async fn list_archived_for_session(
 #[cfg(test)]
 pub(crate) fn canonical_name_for_test(raw: &str) -> Option<String> {
     canonical_name(raw)
+}
+
+/// List all archived attachments across the org. Respects parent chat/session ACL.
+/// Returns attachments from accessible chats (org-scoped) and owned agent sessions.
+pub(crate) async fn list_org_archived(
+    state: &ServerState,
+    actor: &OrgContext,
+    after: Option<&str>,
+) -> Result<OrgArchivedPage, ContentError> {
+    if let Some(after) = after {
+        access::canonical_id(after)?;
+    }
+    let tx = super::resources::begin(state, actor).await?;
+    let cursor = after.map(|s| s.to_owned()).unwrap_or_default();
+
+    // Union query: org chats + owned agent sessions, both archived only
+    let rows = tx
+        .query_all(db::statement(
+            &tx,
+            &format!(
+                "SELECT a.key, a.file_name, a.content_type, a.byte_length, \
+                 COALESCE(a.chat_id, '') as chat_id, COALESCE(a.session_id, '') as session_id \
+                 FROM neev_attachments a \
+                 LEFT JOIN neev_resources r ON a.chat_id = r.id AND r.org_id = $1 \
+                 LEFT JOIN neev_agent_sessions s ON a.session_id = s.id AND s.org_id = $1 AND s.owner_id = $2 \
+                 WHERE a.org_id = $1 AND a.archived = TRUE AND a.key > $3 \
+                 AND (r.id IS NOT NULL OR s.id IS NOT NULL) \
+                 ORDER BY a.key LIMIT {}",
+                ARCHIVED_PAGE_SIZE + 1
+            ),
+            vec![actor.org_id.into(), actor.identity.user_id.into(), cursor.into()],
+        ))
+        .await
+        .map_err(database_error)?;
+
+    let has_more = rows.len() > ARCHIVED_PAGE_SIZE;
+    let mut items = Vec::with_capacity(ARCHIVED_PAGE_SIZE);
+
+    for row in rows.iter().take(ARCHIVED_PAGE_SIZE) {
+        let stored = read_stored(row)?;
+        let chat_id: String = row.try_get("", "chat_id").map_err(database_error)?;
+        let session_id: String = row.try_get("", "session_id").map_err(database_error)?;
+
+        let (parent_id, parent_kind) = if !chat_id.is_empty() {
+            (chat_id, "chat".to_owned())
+        } else {
+            (session_id, "agent".to_owned())
+        };
+
+        let owner = if parent_kind == "chat" {
+            Owner::Chat(&parent_id)
+        } else {
+            Owner::Session(&parent_id)
+        };
+        match authorize(&tx, actor, owner, false).await {
+            Ok(()) => {}
+            Err(ContentError::NotFound) => continue,
+            Err(error) => return Err(error),
+        }
+        items.push(OrgArchivedAttachment {
+            key: stored.key,
+            file_name: stored.file_name,
+            content_type: stored.content_type,
+            byte_length: stored.byte_length,
+            parent_id,
+            parent_kind,
+        });
+    }
+    // Advance by the scanned rows, even when a page contains private files the
+    // caller cannot see. Never expose their names or stop pagination early.
+    let next_after = if has_more {
+        rows.get(ARCHIVED_PAGE_SIZE - 1)
+            .map(|row| row.try_get::<String>("", "key").map_err(database_error))
+            .transpose()?
+    } else {
+        None
+    };
+    tx.commit().await.map_err(database_error)?;
+
+    Ok(OrgArchivedPage { items, next_after })
 }

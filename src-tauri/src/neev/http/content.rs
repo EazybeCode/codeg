@@ -1420,3 +1420,61 @@ impl From<ContentError> for ApiError {
         }
     }
 }
+
+/// DTO for org-wide archived attachments with parent context.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrgArchivedAttachmentDto {
+    key: String,
+    file_name: String,
+    content_type: &'static str,
+    byte_length: i64,
+    parent_id: String,
+    parent_kind: String,
+}
+
+/// Response for org-wide trash listing.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrgArchivedAttachmentsPage {
+    items: Vec<OrgArchivedAttachmentDto>,
+    next_after: Option<String>,
+}
+
+/// List all archived attachments across the org.
+///
+/// GET /api/neev/attachments?archived=true
+pub(super) async fn list_org_archived_attachments(
+    State(state): State<Arc<ServerState>>,
+    query: Result<Query<ArchivedAttachmentsQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let query = safe_query(query)?;
+    if let Some(after) = query.after.as_deref() {
+        canonical_uuid(after)?;
+    }
+    // Only serve archived listing when explicitly requested.
+    if query.archived != Some(true) {
+        return Err(ApiError::Invalid);
+    }
+    let _permit = catalog::permit(&state)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+
+    let page = attachment::list_org_archived(&state, &actor, query.after.as_deref()).await?;
+
+    Ok(private_json(OrgArchivedAttachmentsPage {
+        items: page
+            .items
+            .into_iter()
+            .map(|a| OrgArchivedAttachmentDto {
+                key: a.key,
+                file_name: a.file_name,
+                content_type: a.content_type,
+                byte_length: a.byte_length,
+                parent_id: a.parent_id,
+                parent_kind: a.parent_kind,
+            })
+            .collect(),
+        next_after: page.next_after,
+    }))
+}

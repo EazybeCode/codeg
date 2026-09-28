@@ -1,5 +1,11 @@
 {
   "NativeContent": {
+    "previewUnsupported": "此檔案類型不支援預覽。",
+    "htmlStaticPreview": "靜態預覽 — 已停用指令碼和外部資源。",
+    "htmlPreviewTruncated": "顯示此 HTML 檔案的前 2 MB。",
+    "trash": "資源回收桶",
+    "deletedAttachments": "已刪除的檔案",
+    "trashDescription": "組織內所有已刪除的附件",
     "noDeletedFiles": "沒有已刪除的檔案",
     "fileActions": "{name} 的操作",
     "openFile": "開啟",

@@ -1,5 +1,11 @@
 {
   "NativeContent": {
+    "previewUnsupported": "Vorschau für diesen Dateityp nicht verfügbar.",
+    "htmlStaticPreview": "Statische Vorschau — Skripte und externe Ressourcen deaktiviert.",
+    "htmlPreviewTruncated": "Zeigt die ersten 2 MB dieser HTML-Datei an.",
+    "trash": "Papierkorb",
+    "deletedAttachments": "Gelöschte Dateien",
+    "trashDescription": "Alle gelöschten Anhänge in der Organisation",
     "noDeletedFiles": "Keine gelöschten Dateien",
     "fileActions": "Aktionen für {name}",
     "openFile": "Öffnen",

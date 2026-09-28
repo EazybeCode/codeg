@@ -73,6 +73,7 @@ import {
 import { useNativeAuth } from "./native-auth-provider"
 import { AgentRunIndicator } from "./agent-run-indicator"
 import { runningChatKey, useRunningChats } from "@/lib/neev-running-chats"
+import { AttachmentTrash } from "./native-trash-modal"
 import {
   NativeDialogContent as DialogContent,
   NativeDropdownMenuContent as DropdownMenuContent,
@@ -2326,6 +2327,7 @@ function WorkspaceContent() {
           />
           {/* Said here, beside the rows it is about. */}
           <NativeError error={mutationError} />
+          {showTrash && <AttachmentTrash key={auth.scopeKey} />}
           {!loading && nodes.length === 0 && !query.trim() && (
             <p className="px-2 text-sm text-muted-foreground">
               {t("emptyProjects")}

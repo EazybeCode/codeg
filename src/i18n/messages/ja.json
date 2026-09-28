@@ -1,5 +1,11 @@
 {
   "NativeContent": {
+    "previewUnsupported": "このファイルタイプのプレビューは利用できません。",
+    "htmlStaticPreview": "静的プレビュー — スクリプトと外部リソースは無効です。",
+    "htmlPreviewTruncated": "このHTMLファイルの最初の2MBを表示しています。",
+    "trash": "ごみ箱",
+    "deletedAttachments": "削除されたファイル",
+    "trashDescription": "組織全体の削除済み添付ファイル",
     "noDeletedFiles": "削除済みファイルはありません",
     "fileActions": "{name} の操作",
     "openFile": "開く",

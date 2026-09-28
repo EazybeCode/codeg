@@ -21,6 +21,7 @@ import {
   archiveChatFile,
   previewKind,
   readTextPreview,
+  readHtmlPreview,
 } from "@/lib/neev-file-actions"
 import { useOptionalNativeAuth } from "./native-auth-provider"
 import { useTabVisible } from "./native-suspended-surface"
@@ -38,6 +39,9 @@ function FilePreview({ file }: { file: NeevAttachment }) {
   const [text, setText] = useState<{ text: string; truncated: boolean } | null>(
     null
   )
+  const [html, setHtml] = useState<{ html: string; truncated: boolean } | null>(
+    null
+  )
   const [failed, setFailed] = useState(false)
   useEffect(() => {
     if (kind !== "text") return
@@ -51,11 +55,23 @@ function FilePreview({ file }: { file: NeevAttachment }) {
       })
     return () => controller.abort()
   }, [file, kind])
+  useEffect(() => {
+    if (kind !== "html") return
+    const controller = new AbortController()
+    void readHtmlPreview(file, controller.signal)
+      .then((value) => {
+        if (!controller.signal.aborted) setHtml(value)
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setFailed(true)
+      })
+    return () => controller.abort()
+  }, [file, kind])
   if (failed) return <p role="alert">{t("previewError")}</p>
   if (kind === "unsupported")
     return (
       <p className="p-4 text-sm text-muted-foreground">
-        {t("htmlPreviewUnavailable")}
+        {t("previewUnsupported")}
       </p>
     )
   if (kind === "pdf")
@@ -76,6 +92,27 @@ function FilePreview({ file }: { file: NeevAttachment }) {
         />
       </div>
     )
+  if (kind === "html") {
+    if (!html) return <p role="status">{t("loadingFiles")}</p>
+    return (
+      <div className="h-full overflow-auto">
+        {html.truncated && (
+          <p className="mb-3 text-sm text-muted-foreground">
+            {t("htmlPreviewTruncated")}
+          </p>
+        )}
+        <p className="mb-3 text-sm text-muted-foreground">
+          {t("htmlStaticPreview")}
+        </p>
+        <iframe
+          title={file.fileName}
+          srcDoc={html.html}
+          sandbox=""
+          className="size-full min-h-96 border bg-white"
+        />
+      </div>
+    )
+  }
   if (!text) return <p role="status">{t("loadingFiles")}</p>
   return (
     <div className="h-full overflow-auto">
@@ -139,6 +176,8 @@ export function FileActions({
       setBusy(false)
     }
   }
+  // Deleted chips are hidden in chat context; only shown in main trash
+  if (deleted && !archived) return null
   return (
     <span
       className={cn(

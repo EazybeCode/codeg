@@ -1582,3 +1582,97 @@ async fn new_uploads_default_to_active() {
         .json();
     assert!(archived["items"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn organization_attachment_trash_respects_current_chat_acl_and_restore() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let id = chat["id"].as_str().unwrap();
+    let uploaded: Value = h
+        .upload(
+            &format!("/api/neev/chats/{id}/attachments"),
+            "actual-type.txt",
+            png(1),
+        )
+        .await
+        .json();
+    let key = uploaded["key"].as_str().unwrap();
+    h.mutation(
+        "PATCH",
+        &format!("/api/neev/attachments/{key}"),
+        json!({"archived":true}),
+    )
+    .await
+    .assert_status_ok();
+    let route = "/api/neev/attachments?archived=true";
+    let own = h
+        .server
+        .get(route)
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    own.assert_status_ok();
+    let own: Value = own.json();
+    assert_eq!(own["items"][0]["key"], key);
+    assert_eq!(own["items"][0]["contentType"], "image/png");
+    for cookies in [&h.member_cookies, &h.foreign_cookies] {
+        let page = h
+            .server
+            .get(route)
+            .add_header(header::COOKIE, cookies)
+            .await;
+        page.assert_status_ok();
+        assert!(page.json::<Value>()["items"].as_array().unwrap().is_empty());
+    }
+    // Changing the parent audience changes trash visibility immediately.
+    crate::neev::db::execute(
+        &h.database,
+        "UPDATE neev_resources SET visibility='organization' WHERE id=$1",
+        vec![id.to_owned().into()],
+    )
+    .await
+    .unwrap();
+    let shared = h
+        .server
+        .get(route)
+        .add_header(header::COOKIE, &h.member_cookies)
+        .await;
+    shared.assert_status_ok();
+    assert_eq!(shared.json::<Value>()["items"][0]["key"], key);
+    crate::neev::db::execute(
+        &h.database,
+        "UPDATE neev_resources SET visibility='private' WHERE id=$1",
+        vec![id.to_owned().into()],
+    )
+    .await
+    .unwrap();
+    let hidden = h
+        .server
+        .get(route)
+        .add_header(header::COOKIE, &h.member_cookies)
+        .await;
+    assert!(hidden.json::<Value>()["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    h.mutation(
+        "PATCH",
+        &format!("/api/neev/attachments/{key}"),
+        json!({"archived":false}),
+    )
+    .await
+    .assert_status_ok();
+    assert!(h
+        .server
+        .get(route)
+        .add_header(header::COOKIE, &h.cookies)
+        .await
+        .json::<Value>()["items"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    h.server
+        .get("/api/neev/attachments?archived=true&after=bad")
+        .add_header(header::COOKIE, &h.cookies)
+        .await
+        .assert_status_bad_request();
+}

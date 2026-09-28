@@ -1,3 +1,4 @@
+import { staticHtmlDocument } from "./neev-html-sandbox"
 import { NativeClientError, nativeRequest } from "./neev-client"
 import {
   attachmentUrl,
@@ -5,13 +6,18 @@ import {
   type NeevAttachment,
 } from "./neev-attachments"
 
-export type PreviewKind = "text" | "image" | "pdf" | "unsupported"
+export type PreviewKind = "text" | "image" | "pdf" | "html" | "unsupported"
 export function previewKind(
   file: Pick<NeevAttachment, "fileName" | "contentType">
 ): PreviewKind {
-  // HTML preview is deliberately unavailable. In particular, do not re-fetch
-  // a policy-blocked HTML download through an alternate preview channel.
-  if (/\.(?:html?|xhtml|svg)$/i.test(file.fileName)) return "unsupported"
+  // HTML files as text/plain: sandboxed static preview, no scripts/active content
+  if (
+    /\.(?:html?|xhtml)$/i.test(file.fileName) &&
+    file.contentType === "text/plain"
+  )
+    return "html"
+  // SVG deliberately unsupported: vector images can embed scripts
+  if (/\.svg$/i.test(file.fileName)) return "unsupported"
   if (file.contentType.startsWith("image/")) return "image"
   if (file.contentType === "application/pdf") return "pdf"
   if (file.contentType === "text/plain") return "text"
@@ -82,6 +88,62 @@ export async function listTrashedChatFiles(
   return [...files.values()]
 }
 
+export interface OrgArchivedAttachment extends NeevAttachment {
+  /** Parent chat/session ID for trash listing */
+  parentId: string
+  /** Chat or agent session */
+  parentKind: "chat" | "agent"
+}
+
+/** List all archived attachments across the org, respecting parent ACL. */
+export async function listOrgArchivedAttachments(
+  signal?: AbortSignal
+): Promise<OrgArchivedAttachment[]> {
+  const files = new Map<string, OrgArchivedAttachment>()
+  const cursors = new Set<string>()
+  let after: string | null = null
+  do {
+    const page = (await nativeRequest(
+      `/api/neev/attachments?archived=true${after ? `&after=${encodeURIComponent(after)}` : ""}`,
+      {},
+      signal
+    )) as { items?: unknown; nextAfter?: unknown }
+    if (
+      !page ||
+      !Array.isArray(page.items) ||
+      page.items.length > 100 ||
+      !(page.nextAfter === null || typeof page.nextAfter === "string")
+    )
+      throw new NativeClientError("invalid_response")
+    for (const raw of page.items) {
+      if (
+        !raw ||
+        typeof raw !== "object" ||
+        !("parentId" in raw) ||
+        typeof raw.parentId !== "string" ||
+        !("parentKind" in raw) ||
+        (raw.parentKind !== "chat" && raw.parentKind !== "agent")
+      )
+        throw new NativeClientError("invalid_response")
+      attachmentUrl(raw.parentId)
+      const { parentId, parentKind, ...attachment } = raw
+      const file: OrgArchivedAttachment = {
+        ...parseAttachment(attachment),
+        parentId,
+        parentKind,
+      }
+      files.set(file.key, file)
+    }
+    after = page.nextAfter
+    if (after !== null) {
+      attachmentUrl(after)
+      if (cursors.has(after)) throw new NativeClientError("invalid_response")
+      cursors.add(after)
+    }
+  } while (after !== null)
+  return [...files.values()]
+}
+
 /** Bounded text rendering is a preview limit, not an upload/storage limit. */
 export async function readTextPreview(
   file: NeevAttachment,
@@ -123,4 +185,24 @@ export async function readTextPreview(
     reader.releaseLock()
   }
   return { text, truncated }
+}
+
+/** Read HTML attachment bytes for sandboxed static preview. */
+export async function readHtmlPreview(
+  file: NeevAttachment,
+  signal?: AbortSignal
+): Promise<{ html: string; truncated: boolean }> {
+  if (previewKind(file) !== "html")
+    throw new NativeClientError("invalid_request")
+  const response = await fetch(attachmentUrl(file.key), {
+    credentials: "same-origin",
+    cache: "no-store",
+    redirect: "error",
+    referrerPolicy: "no-referrer",
+    signal,
+  })
+  if (!response.ok || !response.body) throw new NativeClientError("unavailable")
+  const html = await response.text()
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError")
+  return { html: staticHtmlDocument(html), truncated: false }
 }

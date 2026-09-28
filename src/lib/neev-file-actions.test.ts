@@ -2,8 +2,10 @@ import { beforeEach, expect, it, vi } from "vitest"
 import {
   archiveChatFile,
   listTrashedChatFiles,
+  listOrgArchivedAttachments,
   previewKind,
   readTextPreview,
+  readHtmlPreview,
 } from "./neev-file-actions"
 const key = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 const file = {
@@ -13,12 +15,19 @@ const file = {
   byteLength: 8,
 }
 beforeEach(() => vi.stubGlobal("fetch", vi.fn()))
-it("never requests HTML bytes through a preview", async () => {
-  expect(previewKind({ ...file, fileName: "page.HTML" })).toBe("unsupported")
+it("classifies HTML files as html preview kind", () => {
+  expect(previewKind({ ...file, fileName: "page.HTML" })).toBe("html")
+  expect(previewKind({ ...file, fileName: "doc.htm" })).toBe("html")
+  expect(previewKind({ ...file, fileName: "index.xhtml" })).toBe("html")
+})
+it("rejects HTML through text preview", async () => {
   await expect(
     readTextPreview({ ...file, fileName: "page.html" })
   ).rejects.toThrow()
   expect(fetch).not.toHaveBeenCalled()
+})
+it("rejects SVG files as unsupported", () => {
+  expect(previewKind({ ...file, fileName: "image.svg" })).toBe("unsupported")
 })
 it("loads text with same-origin credentials and rejects redirects", async () => {
   vi.mocked(fetch).mockResolvedValue(new Response("hello"))
@@ -71,4 +80,41 @@ it("paginates trash and deduplicates files", async () => {
     )
   expect(await listTrashedChatFiles("chat", key)).toEqual([file])
   expect(fetch).toHaveBeenCalledTimes(2)
+})
+it("reads HTML preview with same-origin fetch", async () => {
+  vi.mocked(fetch).mockResolvedValue(
+    new Response("<html><body>content</body></html>")
+  )
+  const result = await readHtmlPreview({ ...file, fileName: "page.html" })
+  expect(result.truncated).toBe(false)
+  expect(result.html).toContain("content")
+  expect(fetch).toHaveBeenCalledWith(
+    `/api/neev/attachments/${key}`,
+    expect.objectContaining({
+      credentials: "same-origin",
+      redirect: "error",
+    })
+  )
+})
+it("fetches org-wide archived attachments from correct endpoint", async () => {
+  // Server returns base attachment plus parent context
+  // Note: parseAttachment validates only 4 keys, so response must separate them
+  const serverResponse = {
+    byteLength: 8,
+    contentType: "text/plain" as const,
+    fileName: "notes.txt",
+    key,
+    parentId: "33333333-3333-4333-8333-333333333333",
+    parentKind: "chat" as const,
+  }
+  vi.mocked(fetch).mockResolvedValueOnce(
+    new Response(JSON.stringify({ items: [serverResponse], nextAfter: null }), {
+      headers: { "Content-Type": "application/json" },
+    })
+  )
+  await expect(listOrgArchivedAttachments()).resolves.toEqual([serverResponse])
+  expect(fetch).toHaveBeenCalledWith(
+    `/api/neev/attachments?archived=true`,
+    expect.objectContaining({ credentials: "same-origin" })
+  )
 })

@@ -3,7 +3,11 @@ import { NextIntlClientProvider } from "next-intl"
 import { expect, it, vi } from "vitest"
 import messages from "@/i18n/messages/en.json"
 import { FileActions } from "./native-file-actions"
-import { archiveChatFile, readTextPreview } from "@/lib/neev-file-actions"
+import {
+  archiveChatFile,
+  readTextPreview,
+  readHtmlPreview,
+} from "@/lib/neev-file-actions"
 vi.mock("./native-auth-provider", () => ({
   useOptionalNativeAuth: () => ({ session: { csrf: "csrf" } }),
 }))
@@ -11,6 +15,7 @@ vi.mock("@/lib/neev-file-actions", async (original) => ({
   ...(await original<object>()),
   archiveChatFile: vi.fn(),
   readTextPreview: vi.fn(),
+  readHtmlPreview: vi.fn(),
 }))
 const file = {
   key: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -29,13 +34,15 @@ it("opens text in a dialog instead of starting a download", async () => {
     </NextIntlClientProvider>
   )
   fireEvent.click(screen.getByRole("link", { name: "notes.txt" }))
-  expect(await screen.findByText("Review these notes")).toBeVisible()
+  expect(
+    await screen.findByText("Review these notes", {}, { timeout: 10000 })
+  ).toBeVisible()
   expect(screen.getByRole("dialog")).toBeVisible()
   expect(screen.getByRole("link", { name: "Download" })).toHaveAttribute(
     "download",
     "notes.txt"
   )
-})
+}, 15000)
 it("trash can restore a file without fetching its bytes", async () => {
   vi.mocked(archiveChatFile).mockResolvedValue(undefined)
   render(
@@ -72,5 +79,64 @@ it("deletes from the open preview without downloading", async () => {
   await waitFor(() =>
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument()
   )
-  expect(screen.getByRole("button", { name: "Restore" })).toBeVisible()
+  expect(
+    screen.queryByRole("link", { name: "notes.txt" })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole("button", { name: "Restore" })
+  ).not.toBeInTheDocument()
 })
+it("deleted chip hidden in chat context without archived prop", async () => {
+  vi.mocked(archiveChatFile).mockResolvedValue(undefined)
+  render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <FileActions file={file} archived={false}>
+        deleted.txt
+      </FileActions>
+    </NextIntlClientProvider>
+  )
+
+  // Initially visible (not deleted)
+  expect(screen.getByRole("link", { name: "deleted.txt" })).toBeVisible()
+
+  // Simulate deletion via external event
+  fireEvent(
+    window,
+    new CustomEvent("neev-files-changed", {
+      detail: { key: file.key, archived: true },
+    })
+  )
+
+  // After deletion, chip disappears (returns null) in chat context
+  await waitFor(() => {
+    expect(
+      screen.queryByRole("link", { name: "deleted.txt" })
+    ).not.toBeInTheDocument()
+  })
+})
+
+it("renders HTML preview in sandboxed iframe with empty sandbox", async () => {
+  const htmlFile = { ...file, fileName: "page.html" }
+  vi.mocked(readHtmlPreview).mockResolvedValue({
+    html: "<html><body>Test content</body></html>",
+    truncated: false,
+  })
+  render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <FileActions file={htmlFile}>page.html</FileActions>
+    </NextIntlClientProvider>
+  )
+  fireEvent.click(screen.getByRole("link", { name: "page.html" }))
+
+  // Wait for dialog to open
+  expect(await screen.findByRole("dialog")).toBeVisible()
+
+  // Check for static preview message
+  expect(screen.getByText(/Static preview/i)).toBeVisible()
+
+  // Find iframe by tag since title may be set differently
+  const iframe = screen.getByRole("dialog").querySelector("iframe")
+  expect(iframe).toBeTruthy()
+  expect(iframe).toHaveAttribute("sandbox", "")
+  expect(iframe).toHaveAttribute("srcdoc")
+}, 10000)

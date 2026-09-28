@@ -1,5 +1,11 @@
 {
   "NativeContent": {
+    "previewUnsupported": "Vista previa no disponible para este tipo de archivo.",
+    "htmlStaticPreview": "Vista previa estática — scripts y recursos externos deshabilitados.",
+    "htmlPreviewTruncated": "Mostrando los primeros 2 MB de este archivo HTML.",
+    "trash": "Papelera",
+    "deletedAttachments": "Archivos eliminados",
+    "trashDescription": "Todos los archivos adjuntos eliminados en la organización",
     "noDeletedFiles": "No hay archivos eliminados",
     "fileActions": "Acciones para {name}",
     "openFile": "Abrir",
