@@ -1,6 +1,13 @@
 "use client"
 
-import { lazy, Suspense, useEffect, useState, type ReactNode } from "react"
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react"
 import { useTranslations } from "next-intl"
 import { Download, MoreHorizontal, Trash2 } from "lucide-react"
 import {
@@ -33,7 +40,14 @@ const PdfPreview = lazy(() =>
   }))
 )
 
-function FilePreview({ file }: { file: NeevAttachment }) {
+function FilePreview({ file: incomingFile }: { file: NeevAttachment }) {
+  const { key, fileName, contentType, byteLength } = incomingFile
+  // Polling returns new attachment objects. Preserve an in-flight download
+  // unless the actual attachment metadata changes.
+  const file = useMemo(
+    () => ({ key, fileName, contentType, byteLength }),
+    [key, fileName, contentType, byteLength]
+  )
   const t = useTranslations("NativeContent")
   const kind = previewKind(file)
   const [text, setText] = useState<{ text: string; truncated: boolean } | null>(

@@ -140,3 +140,33 @@ it("renders HTML preview in sandboxed iframe with empty sandbox", async () => {
   expect(iframe).toHaveAttribute("sandbox", "")
   expect(iframe).toHaveAttribute("srcdoc")
 }, 10000)
+
+it("keeps an in-flight preview across chat refreshes", async () => {
+  const htmlFile = { ...file, fileName: "page.html" }
+  let finish!: (value: { html: string; truncated: boolean }) => void
+  vi.mocked(readHtmlPreview).mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve
+      })
+  )
+  const view = (attachment: typeof htmlFile) => (
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <FileActions file={attachment}>page.html</FileActions>
+    </NextIntlClientProvider>
+  )
+  const { rerender } = render(view(htmlFile))
+  fireEvent.click(screen.getByRole("link", { name: "page.html" }))
+  await screen.findByRole("dialog")
+  const signal = vi.mocked(readHtmlPreview).mock.calls[0][1]
+  rerender(view({ ...htmlFile }))
+  expect(signal?.aborted).toBe(false)
+  expect(readHtmlPreview).toHaveBeenCalledTimes(1)
+  finish({ html: "<p>Ready</p>", truncated: false })
+  await waitFor(() =>
+    expect(screen.getByRole("dialog").querySelector("iframe")).toHaveAttribute(
+      "srcdoc",
+      "<p>Ready</p>"
+    )
+  )
+})
