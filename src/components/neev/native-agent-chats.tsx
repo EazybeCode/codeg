@@ -1207,7 +1207,7 @@ function ActivityRow({
         className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-start hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
       >
         <ToolIcon name={item.name} />
-        <span className="shrink-0 text-[13px] font-medium leading-5">
+        <span className="shrink-0 text-[13px] font-normal leading-5 text-muted-foreground">
           {item.name}
         </span>
         {/* The command as it was given, clipped to one line on a quiet pill.
@@ -1295,6 +1295,10 @@ export function TranscriptBody({
   const visible = visibleActivity(items)
   const { resultOf, absorbed } = pairResults(visible)
   const segments = splitByActivity(text, visible)
+  const finalTextIndex = segments.reduce(
+    (last, segment, index) => (segment.text.trim() ? index : last),
+    -1
+  )
   /*
    * Only the segments that will actually draw something.
    *
@@ -1345,10 +1349,24 @@ export function TranscriptBody({
             </ul>
           )}
           {segment.text.trim() && (
-            <NativeMarkdown
-              markdown={segment.text}
-              streaming={streaming && segment.index === segments.length - 1}
-            />
+            <div
+              data-agent-prose={
+                streaming || segment.index !== finalTextIndex
+                  ? "progress"
+                  : "final"
+              }
+              className={cn(
+                "font-normal",
+                streaming || segment.index !== finalTextIndex
+                  ? "text-muted-foreground"
+                  : "text-foreground"
+              )}
+            >
+              <NativeMarkdown
+                markdown={segment.text}
+                streaming={streaming && segment.index === segments.length - 1}
+              />
+            </div>
           )}
         </div>
       ))}

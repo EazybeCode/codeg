@@ -1218,3 +1218,29 @@ it("shows one composer control that turns into Stop while the run is up", async 
   expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull()
   act(() => stream.close())
 })
+
+it("keeps progress prose muted and the completed final answer normal", () => {
+  const props = {
+    text: "Checking.\n\nFinal answer.",
+    items: [bashCall(1, 11, "ls"), bashResult(2, 11, 1, "ok")],
+  }
+  const { container, rerender } = renderBody({ ...props, streaming: true })
+  expect(
+    container.querySelectorAll('[data-agent-prose="progress"]')
+  ).toHaveLength(2)
+  rerender(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <TranscriptBody {...props} />
+    </NextIntlClientProvider>
+  )
+  expect(container.querySelector('[data-agent-prose="progress"]')).toHaveClass(
+    "text-muted-foreground"
+  )
+  expect(container.querySelector('[data-agent-prose="final"]')).toHaveClass(
+    "text-foreground",
+    "font-normal"
+  )
+  expect(
+    container.querySelector('[data-agent-prose="final"]')
+  ).toHaveTextContent("Final answer.")
+})
