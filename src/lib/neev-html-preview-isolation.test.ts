@@ -48,3 +48,33 @@ describe("HTML preview integrity and isolation", () => {
     expect(html).toContain("data:image/png;base64,aGVsbG8=")
   })
 })
+
+it("preserves script-bootstrapped header templates without executing their scripts", async () => {
+  respond(
+    '<div id="hero"><template><style>:host{display:block}</style><header>Header navigation</header><h1>Hero headline</h1><img src="/private" onerror="bad()"><script>bad()</script></template></div><script>const host=document.currentScript.previousElementSibling;host.attachShadow({mode:"open"})</script>'
+  )
+  const { html } = await readHtmlPreview(file)
+  const doc = new DOMParser().parseFromString(html, "text/html")
+  const template = doc.querySelector(
+    'template[shadowrootmode="open"]'
+  ) as HTMLTemplateElement
+  expect(template).not.toBeNull()
+  expect(template.content.querySelector("header")?.textContent).toBe(
+    "Header navigation"
+  )
+  expect(template.content.querySelector("script,[onerror],[src]")).toBeNull()
+  expect(doc.querySelector("script")).toBeNull()
+  expect(html).toContain("script-src 'none'")
+})
+
+it("sanitizes nested declarative shadow content and discards unrelated inert templates", async () => {
+  respond(
+    '<div><template shadowrootmode="open"><section><template shadowrootmode="closed"><h1>Nested</h1><iframe src="/workspace"></iframe><img src="data:image/png;base64,aGVsbG8=" onload="bad()"></template></section></template></div><template id="unused">Hidden template</template>'
+  )
+  const { html } = await readHtmlPreview(file)
+  expect(html).toContain("Nested")
+  expect(html).toContain("data:image/png;base64,aGVsbG8=")
+  expect(html).not.toContain("<iframe")
+  expect(html).not.toContain("onload")
+  expect(html).not.toContain("Hidden template")
+})
