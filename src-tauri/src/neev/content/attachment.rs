@@ -251,6 +251,9 @@ pub(crate) async fn store(
 /// Read an attachment, enforcing the bound chat's CURRENT read ACL. Returns the
 /// bytes, the freshly re-sniffed content type (never the stored label) and the
 /// stored name.
+///
+/// Archived (soft-deleted) attachments are not served: they return `NotFound`
+/// as if they do not exist, same as a revoked access or missing key.
 pub(crate) async fn load(
     state: &ServerState,
     actor: &OrgContext,
@@ -262,7 +265,7 @@ pub(crate) async fn load(
     let tx = db::begin(&state.database).await?;
     let row = db::one(
         &tx,
-        "SELECT chat_id,session_id,file_name FROM neev_attachments WHERE org_id=$1 AND key=$2",
+        "SELECT chat_id,session_id,file_name,archived FROM neev_attachments WHERE org_id=$1 AND key=$2",
         vec![actor.org_id.into(), key.to_owned().into()],
     )
     .await?
@@ -270,6 +273,12 @@ pub(crate) async fn load(
     let chat_id: Option<String> = row.try_get("", "chat_id").map_err(database_error)?;
     let session_id: Option<String> = row.try_get("", "session_id").map_err(database_error)?;
     let file_name: String = row.try_get("", "file_name").map_err(database_error)?;
+    let archived: bool = row.try_get("", "archived").map_err(database_error)?;
+    // Archived attachments are not served: uniform NotFound keeps the existence
+    // of a soft-deleted file unobservable to the reader.
+    if archived {
+        return Err(ContentError::NotFound);
+    }
     // Re-check the owner's audience at READ time: revoked access, a chat turned
     // private, or a session that is not the caller's denies immediately and
     // uniformly as NotFound.
@@ -415,6 +424,9 @@ fn read_stored(row: &sea_orm::QueryResult) -> Result<StoredAttachment, ContentEr
 /// ONE query for the whole page. A statement per message was the obvious
 /// shape and the wrong one: a hundred-message page became a hundred round
 /// trips on a surface people already find slow to open.
+///
+/// Archived attachments are excluded: they do not appear in thread listings,
+/// so future agent history staging does not fail or include deleted files.
 pub(crate) async fn for_messages(
     state: &ServerState,
     actor: &OrgContext,
@@ -434,7 +446,7 @@ pub(crate) async fn for_messages(
         args.push(id.clone().into());
     }
     let sql = format!(
-        "SELECT l.message_id AS owner,a.key,a.file_name,a.content_type,a.byte_length FROM neev_attachment_refs l JOIN neev_attachments a ON a.org_id=l.org_id AND a.key=l.attachment_key WHERE l.org_id=$1 AND l.message_id IN ({}) ORDER BY l.message_id,l.position",
+        "SELECT l.message_id AS owner,a.key,a.file_name,a.content_type,a.byte_length FROM neev_attachment_refs l JOIN neev_attachments a ON a.org_id=l.org_id AND a.key=l.attachment_key WHERE l.org_id=$1 AND l.message_id IN ({}) AND a.archived=FALSE ORDER BY l.message_id,l.position",
         placeholders(message_ids.len(), 2)
     );
     let rows = tx
@@ -480,6 +492,9 @@ pub(crate) async fn link_to_turn(
 
 /// The attachments carried by each of a session's turns, by sequence. One query
 /// for the page, for the same reason as `for_messages`.
+///
+/// Archived attachments are excluded: they do not appear in turn listings,
+/// so future agent history staging does not fail or include deleted files.
 pub(crate) async fn for_turns(
     state: &ServerState,
     actor: &OrgContext,
@@ -500,7 +515,7 @@ pub(crate) async fn for_turns(
         args.push((*sequence).into());
     }
     let sql = format!(
-        "SELECT l.turn_sequence AS owner,a.key,a.file_name,a.content_type,a.byte_length FROM neev_attachment_refs l JOIN neev_attachments a ON a.org_id=l.org_id AND a.key=l.attachment_key WHERE l.org_id=$1 AND l.turn_session_id=$2 AND l.turn_sequence IN ({}) ORDER BY l.turn_sequence,l.position",
+        "SELECT l.turn_sequence AS owner,a.key,a.file_name,a.content_type,a.byte_length FROM neev_attachment_refs l JOIN neev_attachments a ON a.org_id=l.org_id AND a.key=l.attachment_key WHERE l.org_id=$1 AND l.turn_session_id=$2 AND l.turn_sequence IN ({}) AND a.archived=FALSE ORDER BY l.turn_sequence,l.position",
         placeholders(sequences.len(), 3)
     );
     let rows = tx
@@ -571,6 +586,153 @@ pub(crate) async fn sweep_orphans(state: &ServerState) -> Result<u64, ContentErr
         let _ = state.blobs.remove_attachment(*org_id, key).await;
     }
     Ok(doomed.len() as u64)
+}
+
+/// Set or clear the archived flag on an attachment.
+///
+/// Archiving soft-deletes an attachment: it cannot be downloaded or appear in
+/// listings, but the blob and refs are retained for restore. Requires WRITE
+/// authorization on the owning chat or session. Idempotent: archiving an
+/// already-archived attachment, or restoring an already-active one, succeeds.
+pub(crate) async fn set_archived(
+    state: &ServerState,
+    actor: &OrgContext,
+    key: &str,
+    archived: bool,
+) -> Result<(), ContentError> {
+    if !uuid::Uuid::parse_str(key).is_ok_and(|parsed| parsed.hyphenated().to_string() == key) {
+        return Err(ContentError::NotFound);
+    }
+    let tx = super::resources::begin(state, actor).await?;
+    let row = db::one(
+        &tx,
+        "SELECT chat_id,session_id FROM neev_attachments WHERE org_id=$1 AND key=$2",
+        vec![actor.org_id.into(), key.to_owned().into()],
+    )
+    .await?
+    .ok_or(ContentError::NotFound)?;
+    let chat_id: Option<String> = row.try_get("", "chat_id").map_err(database_error)?;
+    let session_id: Option<String> = row.try_get("", "session_id").map_err(database_error)?;
+    // Require WRITE authorization (same as upload).
+    let owner = match (chat_id.as_deref(), session_id.as_deref()) {
+        (Some(id), None) => Owner::Chat(id),
+        (None, Some(id)) => Owner::Session(id),
+        _ => return Err(ContentError::Storage),
+    };
+    authorize(&tx, actor, owner, true).await?;
+    db::execute(
+        &tx,
+        "UPDATE neev_attachments SET archived=$1 WHERE org_id=$2 AND key=$3",
+        vec![archived.into(), actor.org_id.into(), key.to_owned().into()],
+    )
+    .await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(())
+}
+
+/// Page size for archived attachment listing.
+const ARCHIVED_PAGE_SIZE: usize = 100;
+
+/// A page of archived attachments for a chat or session.
+pub(crate) struct ArchivedPage {
+    pub(crate) items: Vec<StoredAttachment>,
+    /// The key to use as `after` for the next page, if there are more.
+    pub(crate) next_after: Option<String>,
+}
+
+/// List archived attachments for a chat. Requires READ authorization.
+/// Returns up to 100 attachments, with cursor pagination.
+pub(crate) async fn list_archived_for_chat(
+    state: &ServerState,
+    actor: &OrgContext,
+    chat_id: &str,
+    after: Option<&str>,
+) -> Result<ArchivedPage, ContentError> {
+    access::canonical_id(chat_id)?;
+    let tx = db::begin(&state.database).await?;
+    // Verify READ access to the chat.
+    let resource = access::authorized(&tx, actor, chat_id, false).await?;
+    if resource.kind != ResourceKind::Chat {
+        return Err(ContentError::NotFound);
+    }
+    let cursor = after.map(|s| s.to_owned()).unwrap_or_default();
+    let rows = tx
+        .query_all(db::statement(
+            &tx,
+            &format!(
+                "SELECT key,file_name,content_type,byte_length FROM neev_attachments WHERE org_id=$1 AND chat_id=$2 AND archived=TRUE AND key>$3 ORDER BY key LIMIT {}",
+                ARCHIVED_PAGE_SIZE + 1
+            ),
+            vec![actor.org_id.into(), chat_id.to_owned().into(), cursor.into()],
+        ))
+        .await
+        .map_err(database_error)?;
+    tx.commit().await.map_err(database_error)?;
+
+    let has_more = rows.len() > ARCHIVED_PAGE_SIZE;
+    let items: Result<Vec<StoredAttachment>, ContentError> = rows
+        .iter()
+        .take(ARCHIVED_PAGE_SIZE)
+        .map(read_stored)
+        .collect();
+    let items = items?;
+    let next_after = if has_more {
+        items.last().map(|a| a.key.clone())
+    } else {
+        None
+    };
+    Ok(ArchivedPage { items, next_after })
+}
+
+/// List archived attachments for an agent session. Requires ownership.
+/// Returns up to 100 attachments, with cursor pagination.
+pub(crate) async fn list_archived_for_session(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+    after: Option<&str>,
+) -> Result<ArchivedPage, ContentError> {
+    access::canonical_id(session_id)?;
+    let tx = db::begin(&state.database).await?;
+    // Verify ownership of the session.
+    db::one(
+        &tx,
+        "SELECT id FROM neev_agent_sessions WHERE org_id=$1 AND id=$2 AND owner_id=$3",
+        vec![
+            actor.org_id.into(),
+            session_id.to_owned().into(),
+            actor.identity.user_id.into(),
+        ],
+    )
+    .await?
+    .ok_or(ContentError::NotFound)?;
+    let cursor = after.map(|s| s.to_owned()).unwrap_or_default();
+    let rows = tx
+        .query_all(db::statement(
+            &tx,
+            &format!(
+                "SELECT key,file_name,content_type,byte_length FROM neev_attachments WHERE org_id=$1 AND session_id=$2 AND archived=TRUE AND key>$3 ORDER BY key LIMIT {}",
+                ARCHIVED_PAGE_SIZE + 1
+            ),
+            vec![actor.org_id.into(), session_id.to_owned().into(), cursor.into()],
+        ))
+        .await
+        .map_err(database_error)?;
+    tx.commit().await.map_err(database_error)?;
+
+    let has_more = rows.len() > ARCHIVED_PAGE_SIZE;
+    let items: Result<Vec<StoredAttachment>, ContentError> = rows
+        .iter()
+        .take(ARCHIVED_PAGE_SIZE)
+        .map(read_stored)
+        .collect();
+    let items = items?;
+    let next_after = if has_more {
+        items.last().map(|a| a.key.clone())
+    } else {
+        None
+    };
+    Ok(ArchivedPage { items, next_after })
 }
 
 /// `canonical_name`, for the tests that prove what it refuses.

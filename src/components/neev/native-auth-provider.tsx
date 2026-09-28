@@ -71,8 +71,11 @@ interface NativeAuth {
   handleAuthorityError: (error: unknown) => void
 }
 const Context = createContext<NativeAuth | null>(null)
+export function useOptionalNativeAuth() {
+  return useContext(Context)
+}
 export function useNativeAuth() {
-  const value = useContext(Context)
+  const value = useOptionalNativeAuth()
   if (!value) throw new Error("NativeAuthProvider required")
   return value
 }

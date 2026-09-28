@@ -14,8 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::neev::{
     auth::session,
     content::{
-        attachment,
-        documents, image, mentions, messages, resources, rich,
+        attachment, documents, image, mentions, messages, resources, rich,
         types::{
             ContentError, DocumentFormat, Message, Page, Resource, ResourceInput, ResourceKind,
             ResourcePatch, Revision, RichSaveInput, SaveInput, Visibility,
@@ -471,9 +470,7 @@ pub(super) async fn list_messages(
         .transpose()
         .map_err(|_| ApiError::NotFound)?;
     let page = messages::list(&state, &actor, &id, after).await?;
-    Ok(private_json(
-        message_page_dto(&state, &actor, page).await?,
-    ))
+    Ok(private_json(message_page_dto(&state, &actor, page).await?))
 }
 
 pub(super) async fn append_message(
@@ -508,8 +505,7 @@ pub(super) async fn append_message(
         .await?
         .remove(&message.id)
         .unwrap_or_default();
-    let mut response =
-        private_json(message_dto(message, attachment_dtos(attachments), spans)?);
+    let mut response = private_json(message_dto(message, attachment_dtos(attachments), spans)?);
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
 }
@@ -902,6 +898,127 @@ pub(super) fn sent_text(body: String, attachments: usize) -> String {
     body
 }
 
+// ============================================================================
+// Attachment archive (soft-delete) types and handlers
+// ============================================================================
+
+/// Request body for PATCH /api/neev/attachments/{key}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AttachmentArchiveInput {
+    archived: bool,
+}
+
+/// Query params for listing archived attachments.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ArchivedAttachmentsQuery {
+    archived: Option<bool>,
+    after: Option<String>,
+}
+
+/// Response for listing archived attachments.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ArchivedAttachmentsPage {
+    items: Vec<AttachmentDto>,
+    next_after: Option<String>,
+}
+
+/// Set or clear the archived flag on an attachment (soft-delete or restore).
+///
+/// Requires WRITE authorization on the owning chat or session, same as upload.
+/// CSRF and origin checks apply as for any mutation.
+pub(super) async fn archive_attachment(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+    body: Result<axum::Json<AttachmentArchiveInput>, axum::extract::rejection::JsonRejection>,
+) -> Result<Response, ApiError> {
+    let key = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    let input = body.map_err(|_| ApiError::Invalid)?.0;
+
+    // Mutation auth: origin + cookie + CSRF.
+    if !cookies::exact_origin(&headers, &state.config.origin_header) {
+        return Err(ApiError::Forbidden);
+    }
+    let names = cookies::CookieNames::for_preview(state.config.preview);
+    let token = cookies::required(&headers, names.session)?;
+    let cookie_csrf = cookies::required(&headers, names.csrf)?;
+    if cookie_csrf != cookies::csrf_header(&headers)? {
+        return Err(ApiError::Unauthorized);
+    }
+    let now = state.clock.now_unix();
+    let actor = session::organization(&state.database, token, now).await?;
+    session::validate_csrf(&state.database, &actor.identity, cookie_csrf, now).await?;
+
+    attachment::set_archived(&state, &actor, &key, input.archived).await?;
+
+    Ok(private_json(serde_json::json!({"ok": true})))
+}
+
+/// List archived attachments for a chat.
+///
+/// GET /api/neev/chats/{id}/attachments?archived=true
+pub(super) async fn list_chat_archived_attachments(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<ArchivedAttachmentsQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let chat_id = safe_path(path)?;
+    let query = safe_query(query)?;
+    if let Some(after) = query.after.as_deref() {
+        canonical_uuid(after)?;
+    }
+    // Only serve archived listing when explicitly requested.
+    if query.archived != Some(true) {
+        return Err(ApiError::Invalid);
+    }
+    let _permit = catalog::permit(&state)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+
+    let page = attachment::list_archived_for_chat(&state, &actor, &chat_id, query.after.as_deref())
+        .await?;
+
+    Ok(private_json(ArchivedAttachmentsPage {
+        items: page.items.into_iter().map(attachment_dto).collect(),
+        next_after: page.next_after,
+    }))
+}
+
+/// List archived attachments for an agent session.
+///
+/// GET /api/neev/agent/sessions/{id}/attachments?archived=true
+pub(super) async fn list_session_archived_attachments(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    query: Result<Query<ArchivedAttachmentsQuery>, QueryRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let session_id = safe_path(path)?;
+    let query = safe_query(query)?;
+    if let Some(after) = query.after.as_deref() {
+        canonical_uuid(after)?;
+    }
+    // Only serve archived listing when explicitly requested.
+    if query.archived != Some(true) {
+        return Err(ApiError::Invalid);
+    }
+    let _permit = catalog::permit(&state)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+
+    let page =
+        attachment::list_archived_for_session(&state, &actor, &session_id, query.after.as_deref())
+            .await?;
+
+    Ok(private_json(ArchivedAttachmentsPage {
+        items: page.items.into_iter().map(attachment_dto).collect(),
+        next_after: page.next_after,
+    }))
+}
+
 /// The attachment's name, from `X-Neev-Filename`.
 ///
 /// Percent-decoded ONCE and then required to be strict UTF-8. Decoding twice
@@ -927,8 +1044,8 @@ fn attachment_name(headers: &HeaderMap) -> Result<String, ApiError> {
             if index + 2 >= bytes.len() {
                 return Err(ApiError::Invalid);
             }
-            let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
-                .map_err(|_| ApiError::Invalid)?;
+            let hex =
+                std::str::from_utf8(&bytes[index + 1..index + 3]).map_err(|_| ApiError::Invalid)?;
             out.push(u8::from_str_radix(hex, 16).map_err(|_| ApiError::Invalid)?);
             index += 3;
         } else {

@@ -7,6 +7,7 @@ mod agent_migration;
 mod agent_status_migration;
 #[cfg(test)]
 mod agent_status_tests;
+mod attachment_archived_migration;
 mod attachment_byte_cap_migration;
 mod attachment_migration;
 mod attachment_position_cap_migration;
@@ -192,6 +193,10 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         let v16_expected: std::collections::BTreeSet<String> = v15_expected.iter().cloned()
             .chain(mention_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
 
+        // Schema17 adds NO new tables, only a column for attachment soft-delete.
+        // It shares v16's table inventory.
+        let v17_expected = v16_expected.clone();
+
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
             for table in migration::tables() {
@@ -222,10 +227,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
             attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
             mention_migration::upgrade(&tx).await?;
+            attachment_archived_migration::add_archived_column(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![mention_migration::SCHEMA_VERSION.into()],
+                vec![attachment_archived_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -246,6 +252,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             // started again.
             && names != v15_expected
             && names != v16_expected
+            && names != v17_expected
         {
             return Err(AuthError::Unavailable);
         }
@@ -395,7 +402,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
                 attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
             }
-            // Current. Validate in place and preserve every row.
+            // Schema16 has mentions but not the archived column.
             mention_migration::SCHEMA_VERSION if names == v16_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
@@ -411,25 +418,45 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 // Relax BEFORE validating: a database at this version still carries
                 // schema 15's ranged byte CHECK, and it is this call that removes it.
                 attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
-            attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
-            attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
+                attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+                attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
                 attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
                 mention_migration::validate(&tx).await?;
+            }
+            // Current. Validate in place and preserve every row.
+            attachment_archived_migration::SCHEMA_VERSION if names == v17_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
+                session_migration::validate(&tx).await?;
+                session_migration::validate_node_link(&tx).await?;
+                session_migration::validate_activity(&tx).await?;
+                session_migration::validate_effort(&tx).await?;
+                content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
+                attachment_migration::validate(&tx).await?;
+                attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
+                attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+                attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
+                attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
+                mention_migration::validate(&tx).await?;
+                attachment_archived_migration::validate_archived_column(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
         }
-        // Apply missing additive storage in order, then publish schema 16.
-        if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected {
+        // Apply missing additive storage in order, then publish schema 17.
+        if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected {
             gateway_migration::upgrade(&tx).await?;
         }
-        if names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected {
+        if names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected {
             org_code_migration::upgrade(&tx).await?;
         }
-        if names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected {
+        if names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected {
             image_blob_migration::upgrade(&tx).await?;
         }
-        if names != v11_expected && names != v15_expected && names != v16_expected {
+        if names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected {
             session_migration::upgrade(&tx).await?;
         }
         // Both are column-guarded, so every path can apply them unconditionally
@@ -438,21 +465,24 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         session_migration::record_activity(&tx).await?;
         session_migration::record_effort(&tx).await?;
         content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
-        if names != v15_expected && names != v16_expected {
+        if names != v15_expected && names != v16_expected && names != v17_expected {
             attachment_migration::upgrade(&tx).await?;
         }
         // Constraint-guarded and idempotent, so every path applies it: a database
         // that never had the ranged CHECK is unchanged, one that has it is relaxed.
         attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
-            attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
-            attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
-        if names != v16_expected {
+        attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+        attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
+        if names != v16_expected && names != v17_expected {
             mention_migration::upgrade(&tx).await?;
         }
+        // Column-guarded and idempotent: a database that already has the column
+        // is unchanged. Adds the archived column for attachment soft-delete.
+        attachment_archived_migration::add_archived_column(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![mention_migration::SCHEMA_VERSION.into()],
+            vec![attachment_archived_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -608,7 +638,8 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         | session_migration::EFFORT_SCHEMA_VERSION => names == session_expected,
         // 15 and 16 add TABLES, so each has its own inventory.
         attachment_migration::SCHEMA_VERSION => names == attachment_expected,
-        mention_migration::SCHEMA_VERSION => {
+        mention_migration::SCHEMA_VERSION | attachment_archived_migration::SCHEMA_VERSION => {
+            // Both schema 16 and 17 share the same table inventory (17 only adds a column).
             names
                 == attachment_expected
                     .iter()
@@ -625,28 +656,31 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     if !valid {
         return Err(AuthError::Unavailable);
     }
-    if matches!(version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16) {
+    if matches!(
+        version,
+        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17
+    ) {
         document_format_migration::validate(db).await?;
     }
-    if matches!(version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16) {
+    if matches!(version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
         agent_status_migration::validate(db).await?;
     }
-    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16) {
+    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
         gateway_migration::validate(db).await?;
     }
-    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16) {
+    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
         org_code_migration::validate(db).await?;
     }
-    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15 | 16) {
+    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
         image_blob_migration::validate(db).await?;
     }
-    if matches!(version, 11 | 12 | 13 | 14 | 15 | 16) {
+    if matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | 17) {
         session_migration::validate(db).await?;
     }
-    if matches!(version, 12 | 13 | 14 | 15 | 16) {
+    if matches!(version, 12 | 13 | 14 | 15 | 16 | 17) {
         session_migration::validate_node_link(db).await?;
     }
-    if matches!(version, 13 | 14 | 15 | 16) {
+    if matches!(version, 13 | 14 | 15 | 16 | 17) {
         session_migration::validate_activity(db).await?;
     }
     if matches!(
@@ -654,6 +688,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         session_migration::EFFORT_SCHEMA_VERSION
             | attachment_migration::SCHEMA_VERSION
             | mention_migration::SCHEMA_VERSION
+            | attachment_archived_migration::SCHEMA_VERSION
     ) {
         session_migration::validate_effort(db).await?;
         // 13 only. A schema-12 snapshot still has the historical 1000 bound and
@@ -663,12 +698,20 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     }
     if matches!(
         version,
-        attachment_migration::SCHEMA_VERSION | mention_migration::SCHEMA_VERSION
+        attachment_migration::SCHEMA_VERSION
+            | mention_migration::SCHEMA_VERSION
+            | attachment_archived_migration::SCHEMA_VERSION
     ) {
         attachment_migration::validate(db).await?;
     }
-    if version == mention_migration::SCHEMA_VERSION {
+    if matches!(
+        version,
+        mention_migration::SCHEMA_VERSION | attachment_archived_migration::SCHEMA_VERSION
+    ) {
         mention_migration::validate(db).await?;
+    }
+    if version == attachment_archived_migration::SCHEMA_VERSION {
+        attachment_archived_migration::validate_archived_column(db).await?;
     }
     Ok(version)
 }

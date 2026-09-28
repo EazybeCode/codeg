@@ -891,10 +891,7 @@ async fn chat_attachments_persist_reload_and_replay() {
     assert_eq!(first["fileName"], "notes.png");
     assert_eq!(first["contentType"], "image/png");
     assert_eq!(first["byteLength"], 32);
-    let second: Value = h
-        .upload(&upload_path, "second.png", png(2))
-        .await
-        .json();
+    let second: Value = h.upload(&upload_path, "second.png", png(2)).await.json();
     let (key_a, key_b) = (
         first["key"].as_str().unwrap().to_owned(),
         second["key"].as_str().unwrap().to_owned(),
@@ -910,7 +907,11 @@ async fn chat_attachments_persist_reload_and_replay() {
         "attachmentKeys": [key_a.clone(), key_b.clone()],
     });
     let sent = h
-        .mutation("POST", &format!("/api/neev/chats/{chat_id}/messages"), send.clone())
+        .mutation(
+            "POST",
+            &format!("/api/neev/chats/{chat_id}/messages"),
+            send.clone(),
+        )
         .await;
     sent.assert_status(StatusCode::CREATED);
     let message: Value = sent.json();
@@ -1085,4 +1086,499 @@ fn a_message_naming_nobody_serializes_as_it_always_did() {
         named.get("mentions"),
         Some(&json!([{"userId": 42, "start": 3, "length": 11}]))
     );
+}
+
+// ============================================================================
+// Attachment soft-delete (archive/restore/trash listing)
+// ============================================================================
+
+/// Archiving an attachment makes it undownloadable; restoring brings it back.
+#[tokio::test]
+async fn archived_attachment_cannot_be_downloaded_but_can_be_restored() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let upload_path = format!("/api/neev/chats/{chat_id}/attachments");
+
+    let uploaded: Value = h.upload(&upload_path, "deleteme.png", png(1)).await.json();
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+
+    // The file is downloadable before archiving.
+    let before = h
+        .server
+        .get(&format!("/api/neev/attachments/{key}"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    before.assert_status_ok();
+
+    // Archive the attachment.
+    let archived = h
+        .mutation(
+            "PATCH",
+            &format!("/api/neev/attachments/{key}"),
+            json!({"archived": true}),
+        )
+        .await;
+    archived.assert_status_ok();
+    archived.assert_json(&json!({"ok": true}));
+
+    // Now the file is not downloadable.
+    let after = h
+        .server
+        .get(&format!("/api/neev/attachments/{key}"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    after.assert_status_not_found();
+
+    // Restore the attachment.
+    let restored = h
+        .mutation(
+            "PATCH",
+            &format!("/api/neev/attachments/{key}"),
+            json!({"archived": false}),
+        )
+        .await;
+    restored.assert_status_ok();
+    restored.assert_json(&json!({"ok": true}));
+
+    // The file is downloadable again.
+    let final_check = h
+        .server
+        .get(&format!("/api/neev/attachments/{key}"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    final_check.assert_status_ok();
+    assert_eq!(final_check.as_bytes().as_ref(), png(1).as_slice());
+}
+
+/// Archiving is idempotent: archive+archive and restore+restore are fine.
+#[tokio::test]
+async fn archiving_and_restoring_are_idempotent() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let uploaded: Value = h
+        .upload(
+            &format!("/api/neev/chats/{chat_id}/attachments"),
+            "test.png",
+            png(1),
+        )
+        .await
+        .json();
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+
+    // Archive twice.
+    for _ in 0..2 {
+        let resp = h
+            .mutation(
+                "PATCH",
+                &format!("/api/neev/attachments/{key}"),
+                json!({"archived": true}),
+            )
+            .await;
+        resp.assert_status_ok();
+    }
+
+    // Restore twice.
+    for _ in 0..2 {
+        let resp = h
+            .mutation(
+                "PATCH",
+                &format!("/api/neev/attachments/{key}"),
+                json!({"archived": false}),
+            )
+            .await;
+        resp.assert_status_ok();
+    }
+}
+
+/// Archiving requires WRITE authorization (same as upload).
+#[tokio::test]
+async fn archiving_requires_write_authorization() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let uploaded: Value = h
+        .upload(
+            &format!("/api/neev/chats/{chat_id}/attachments"),
+            "owned.png",
+            png(1),
+        )
+        .await
+        .json();
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+
+    // Another org member (not the chat owner) cannot archive on private chat.
+    let member_archive = h
+        .server
+        .patch(&format!("/api/neev/attachments/{key}"))
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &h.member_cookies)
+        .add_header("x-neev-csrf", &h.member_csrf)
+        .json(&json!({"archived": true}))
+        .await;
+    member_archive.assert_status_not_found();
+
+    // Foreign user cannot archive.
+    let foreign_archive = h
+        .server
+        .patch(&format!("/api/neev/attachments/{key}"))
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &h.foreign_cookies)
+        .add_header("x-neev-csrf", &h.foreign_csrf)
+        .json(&json!({"archived": true}))
+        .await;
+    foreign_archive.assert_status_not_found();
+}
+
+/// Archiving respects CSRF and origin checks.
+#[tokio::test]
+async fn archiving_requires_csrf_and_origin() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let uploaded: Value = h
+        .upload(
+            &format!("/api/neev/chats/{chat_id}/attachments"),
+            "csrf.png",
+            png(1),
+        )
+        .await
+        .json();
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+
+    // Wrong CSRF.
+    let wrong_csrf = h
+        .server
+        .patch(&format!("/api/neev/attachments/{key}"))
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &h.cookies)
+        .add_header("x-neev-csrf", "wrong")
+        .json(&json!({"archived": true}))
+        .await;
+    wrong_csrf.assert_status_unauthorized();
+
+    // Wrong origin.
+    let wrong_origin = h
+        .server
+        .patch(&format!("/api/neev/attachments/{key}"))
+        .add_header(header::ORIGIN, "https://evil.example")
+        .add_header(header::COOKIE, &h.cookies)
+        .add_header("x-neev-csrf", &h.csrf)
+        .json(&json!({"archived": true}))
+        .await;
+    wrong_origin.assert_status_forbidden();
+}
+
+/// Archiving a nonexistent attachment returns not found (uniform response).
+#[tokio::test]
+async fn archiving_nonexistent_attachment_returns_not_found() {
+    let h = Harness::new().await;
+    let fake_key = "00000000-0000-4000-8000-000000000000";
+    let response = h
+        .mutation(
+            "PATCH",
+            &format!("/api/neev/attachments/{fake_key}"),
+            json!({"archived": true}),
+        )
+        .await;
+    response.assert_status_not_found();
+}
+
+/// Archived attachments are excluded from message listings (for_messages).
+#[tokio::test]
+async fn archived_attachments_are_excluded_from_message_listings() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let upload_path = format!("/api/neev/chats/{chat_id}/attachments");
+
+    let first: Value = h.upload(&upload_path, "keep.png", png(1)).await.json();
+    let second: Value = h.upload(&upload_path, "delete.png", png(2)).await.json();
+    let first_key = first["key"].as_str().unwrap().to_owned();
+    let second_key = second["key"].as_str().unwrap().to_owned();
+
+    // Send a message with both attachments.
+    let send = h
+        .mutation(
+            "POST",
+            &format!("/api/neev/chats/{chat_id}/messages"),
+            json!({
+                "requestId": uuid::Uuid::new_v4().to_string(),
+                "expectedAuthRevision": "1",
+                "body": "look at these",
+                "attachmentKeys": [first_key.clone(), second_key.clone()],
+            }),
+        )
+        .await;
+    send.assert_status(StatusCode::CREATED);
+    let message: Value = send.json();
+    assert_eq!(message["attachments"].as_array().unwrap().len(), 2);
+
+    // Archive the second attachment.
+    h.mutation(
+        "PATCH",
+        &format!("/api/neev/attachments/{second_key}"),
+        json!({"archived": true}),
+    )
+    .await
+    .assert_status_ok();
+
+    // Reload messages: only one attachment visible.
+    let listed: Value = h
+        .server
+        .get(&format!("/api/neev/chats/{chat_id}/messages"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await
+        .json();
+    let attachments = listed["items"][0]["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["key"], first_key.as_str());
+}
+
+/// GET /api/neev/chats/{id}/attachments?archived=true lists only archived.
+#[tokio::test]
+async fn list_archived_chat_attachments() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let upload_path = format!("/api/neev/chats/{chat_id}/attachments");
+
+    let kept: Value = h.upload(&upload_path, "keep.png", png(1)).await.json();
+    let deleted: Value = h.upload(&upload_path, "delete.png", png(2)).await.json();
+    let deleted_key = deleted["key"].as_str().unwrap().to_owned();
+
+    // Archive one attachment.
+    h.mutation(
+        "PATCH",
+        &format!("/api/neev/attachments/{deleted_key}"),
+        json!({"archived": true}),
+    )
+    .await
+    .assert_status_ok();
+
+    // List archived attachments.
+    let listed = h
+        .server
+        .get(&format!(
+            "/api/neev/chats/{chat_id}/attachments?archived=true"
+        ))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    listed.assert_status_ok();
+    let body: Value = listed.json();
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["key"], deleted_key.as_str());
+    assert_eq!(items[0]["fileName"], "delete.png");
+    assert_eq!(items[0]["contentType"], "image/png");
+    assert_eq!(items[0]["byteLength"], 32);
+    assert_eq!(body["nextAfter"], Value::Null);
+}
+
+/// List archived attachments requires READ authorization.
+#[tokio::test]
+async fn list_archived_requires_read_authorization() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let deleted: Value = h
+        .upload(
+            &format!("/api/neev/chats/{chat_id}/attachments"),
+            "del.png",
+            png(1),
+        )
+        .await
+        .json();
+    let key = deleted["key"].as_str().unwrap().to_owned();
+
+    h.mutation(
+        "PATCH",
+        &format!("/api/neev/attachments/{key}"),
+        json!({"archived": true}),
+    )
+    .await
+    .assert_status_ok();
+
+    // Another org member cannot list archived on private chat.
+    h.server
+        .get(&format!(
+            "/api/neev/chats/{chat_id}/attachments?archived=true"
+        ))
+        .add_header(header::COOKIE, &h.member_cookies)
+        .await
+        .assert_status_not_found();
+
+    // Foreign user cannot list archived.
+    h.server
+        .get(&format!(
+            "/api/neev/chats/{chat_id}/attachments?archived=true"
+        ))
+        .add_header(header::COOKIE, &h.foreign_cookies)
+        .await
+        .assert_status_not_found();
+}
+
+/// Pagination for archived attachments listing (cap 100, cursor support).
+#[tokio::test]
+async fn list_archived_attachments_with_pagination() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let upload_path = format!("/api/neev/chats/{chat_id}/attachments");
+
+    // Upload and archive 3 attachments.
+    let mut keys = Vec::new();
+    for i in 0..3 {
+        let uploaded: Value = h
+            .upload(&upload_path, &format!("file{i}.png"), png(i as u8))
+            .await
+            .json();
+        let key = uploaded["key"].as_str().unwrap().to_owned();
+        h.mutation(
+            "PATCH",
+            &format!("/api/neev/attachments/{key}"),
+            json!({"archived": true}),
+        )
+        .await
+        .assert_status_ok();
+        keys.push(key);
+    }
+
+    // First page (no cursor).
+    let first_page: Value = h
+        .server
+        .get(&format!(
+            "/api/neev/chats/{chat_id}/attachments?archived=true"
+        ))
+        .add_header(header::COOKIE, &h.cookies)
+        .await
+        .json();
+    assert!(first_page["items"].as_array().unwrap().len() <= 100);
+
+    // If nextAfter is present, use it for pagination.
+    if let Some(cursor) = first_page["nextAfter"].as_str() {
+        let next_page: Value = h
+            .server
+            .get(&format!(
+                "/api/neev/chats/{chat_id}/attachments?archived=true&after={cursor}"
+            ))
+            .add_header(header::COOKIE, &h.cookies)
+            .await
+            .json();
+        assert!(next_page["items"].is_array());
+    }
+}
+
+/// Quota is not double-counted when archiving/restoring.
+/// Attachments use their own storage accounting via SUM(byte_length) from the
+/// attachments table, NOT neev_content_usage.
+#[tokio::test]
+async fn archiving_does_not_affect_quota_accounting() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let uploaded: Value = h
+        .upload(
+            &format!("/api/neev/chats/{chat_id}/attachments"),
+            "quota.png",
+            png(1),
+        )
+        .await
+        .json();
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+    let byte_length = uploaded["byteLength"].as_i64().unwrap();
+
+    // Check initial quota usage (attachments use SUM(byte_length) from the table).
+    let initial_usage: i64 = crate::neev::db::one(
+        &h.database,
+        "SELECT CAST(COALESCE(SUM(byte_length),0) AS BIGINT) AS n FROM neev_attachments WHERE org_id=$1",
+        vec![h.org_id.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "n")
+    .unwrap();
+    assert!(initial_usage >= byte_length);
+
+    // Archive.
+    h.mutation(
+        "PATCH",
+        &format!("/api/neev/attachments/{key}"),
+        json!({"archived": true}),
+    )
+    .await
+    .assert_status_ok();
+
+    // Quota unchanged (soft delete, blob retained).
+    let after_archive: i64 = crate::neev::db::one(
+        &h.database,
+        "SELECT CAST(COALESCE(SUM(byte_length),0) AS BIGINT) AS n FROM neev_attachments WHERE org_id=$1",
+        vec![h.org_id.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "n")
+    .unwrap();
+    assert_eq!(initial_usage, after_archive);
+
+    // Restore.
+    h.mutation(
+        "PATCH",
+        &format!("/api/neev/attachments/{key}"),
+        json!({"archived": false}),
+    )
+    .await
+    .assert_status_ok();
+
+    // Quota still unchanged.
+    let after_restore: i64 = crate::neev::db::one(
+        &h.database,
+        "SELECT CAST(COALESCE(SUM(byte_length),0) AS BIGINT) AS n FROM neev_attachments WHERE org_id=$1",
+        vec![h.org_id.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "n")
+    .unwrap();
+    assert_eq!(initial_usage, after_restore);
+}
+
+/// New uploads default to non-archived (active).
+#[tokio::test]
+async fn new_uploads_default_to_active() {
+    let h = Harness::new().await;
+    let chat = h.create("chat", None).await;
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    let uploaded: Value = h
+        .upload(
+            &format!("/api/neev/chats/{chat_id}/attachments"),
+            "new.png",
+            png(1),
+        )
+        .await
+        .json();
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+
+    // Should be downloadable immediately (not archived).
+    let download = h
+        .server
+        .get(&format!("/api/neev/attachments/{key}"))
+        .add_header(header::COOKIE, &h.cookies)
+        .await;
+    download.assert_status_ok();
+
+    // Should NOT appear in archived listing.
+    let archived: Value = h
+        .server
+        .get(&format!(
+            "/api/neev/chats/{chat_id}/attachments?archived=true"
+        ))
+        .add_header(header::COOKIE, &h.cookies)
+        .await
+        .json();
+    assert!(archived["items"].as_array().unwrap().is_empty());
 }

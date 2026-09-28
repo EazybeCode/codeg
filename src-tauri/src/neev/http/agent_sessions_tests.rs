@@ -68,7 +68,9 @@ impl Client {
 
 /// A server with `runtime` bound, plus a signed-in owner and (optionally) a
 /// second member of the same org.
-async fn fixture(runtime: AgentRuntime) -> (Arc<ServerState>, Client, sea_orm::DatabaseConnection, i32) {
+async fn fixture(
+    runtime: AgentRuntime,
+) -> (Arc<ServerState>, Client, sea_orm::DatabaseConnection, i32) {
     let database = h::database().await;
     let user = h::native_account(&database, "owner", "owner@example.test").await;
     let (org, _) = h::organization(&database, user, "admin").await;
@@ -198,9 +200,7 @@ async fn another_member_cannot_reach_the_session_or_its_turns() {
         .await
         .assert_status_not_found();
     assert_eq!(
-        peer.get("/api/neev/agent/sessions")
-            .await
-            .json::<Value>()["sessions"]
+        peer.get("/api/neev/agent/sessions").await.json::<Value>()["sessions"]
             .as_array()
             .unwrap()
             .len(),
@@ -322,9 +322,10 @@ async fn an_interrupted_run_replays_as_failed_and_is_never_auto_rerun() {
     .try_get::<i32>("", "owner_id")
     .unwrap();
     let actor = h::scoped_context(&database, user, org, NOW).await;
-    let (turn, _) = crate::neev::agents::sessions::begin_turn(&state, &actor, &id, "long task", None)
-        .await
-        .unwrap();
+    let (turn, _) =
+        crate::neev::agents::sessions::begin_turn(&state, &actor, &id, "long task", None)
+            .await
+            .unwrap();
     let run_id = turn.run_id.clone();
     crate::neev::agents::sessions::persist_response(&database, &run_id, "partial", NOW + 1)
         .await
@@ -392,10 +393,7 @@ async fn rename_and_archive_go_through_one_field_at_a_time() {
     assert_eq!(archived["archived"], true);
     // Archived sessions leave the default list but are still reachable.
     assert_eq!(
-        client
-            .get("/api/neev/agent/sessions")
-            .await
-            .json::<Value>()["sessions"]
+        client.get("/api/neev/agent/sessions").await.json::<Value>()["sessions"]
             .as_array()
             .unwrap()
             .len(),
@@ -476,9 +474,10 @@ async fn a_stream_stops_the_moment_its_browser_session_is_revoked() {
     let actor = crate::neev::auth::session::organization(&database, &scoped.session, NOW)
         .await
         .unwrap();
-    let (turn, _) = crate::neev::agents::sessions::begin_turn(&state, &actor, &id, "long task", None)
-        .await
-        .unwrap();
+    let (turn, _) =
+        crate::neev::agents::sessions::begin_turn(&state, &actor, &id, "long task", None)
+            .await
+            .unwrap();
 
     // While the cookie is live, re-authorization succeeds.
     assert!(
@@ -529,10 +528,9 @@ async fn a_leaked_run_id_cannot_be_streamed_with_another_members_cookie() {
 
 #[tokio::test]
 async fn the_event_sink_is_bounded_so_a_stalled_reader_cannot_grow_the_server() {
-    let (mut sender, _receiver) =
-        futures::channel::mpsc::channel::<Result<axum::response::sse::Event, std::convert::Infallible>>(
-            super::SSE_BUFFER,
-        );
+    let (mut sender, _receiver) = futures::channel::mpsc::channel::<
+        Result<axum::response::sse::Event, std::convert::Infallible>,
+    >(super::SSE_BUFFER);
     // Push without ever reading, exactly like a stalled client. A bounded sink
     // must refuse at some point; an unbounded one would accept forever.
     // (`futures::channel::mpsc` guarantees the requested buffer plus one slot
@@ -701,7 +699,9 @@ async fn a_team_invocation_never_carries_private_session_history() {
     // A private saved session with a completed exchange the agent must not see.
     let private = client.create_session().await;
     let private_id = private["id"].as_str().unwrap().to_owned();
-    let first = client.start_turn(&private_id, "the secret is hunter2").await;
+    let first = client
+        .start_turn(&private_id, "the secret is hunter2")
+        .await;
     client
         .get(&format!(
             "/api/neev/agent/runs/{}/events",
@@ -1540,4 +1540,212 @@ async fn a_turn_with_neither_words_nor_files_is_refused() {
         .json(&serde_json::json!({"prompt": ""}))
         .await;
     assert!(refused.status_code().is_client_error());
+}
+
+// ============================================================================
+// Attachment soft-delete (archive/restore/trash listing) for agent sessions
+// ============================================================================
+
+/// Archived session attachments cannot be downloaded but can be restored.
+#[tokio::test]
+async fn archived_session_attachment_cannot_be_downloaded() {
+    let (_state, client, _db, _org) = fixture(fake(&["done"])).await;
+    let session = client.create_session().await;
+    let id = session["id"].as_str().unwrap().to_owned();
+
+    let uploaded = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{id}/attachments"),
+            "test.png",
+            png(1),
+        )
+        .await;
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+
+    // The file is downloadable before archiving.
+    let before = client.get(&format!("/api/neev/attachments/{key}")).await;
+    before.assert_status_ok();
+
+    // Archive the attachment.
+    let archived = client
+        .patch(&format!("/api/neev/attachments/{key}"))
+        .json(&serde_json::json!({"archived": true}))
+        .await;
+    archived.assert_status_ok();
+    archived.assert_json(&serde_json::json!({"ok": true}));
+
+    // Now the file is not downloadable.
+    let after = client.get(&format!("/api/neev/attachments/{key}")).await;
+    after.assert_status_not_found();
+
+    // Restore the attachment.
+    let restored = client
+        .patch(&format!("/api/neev/attachments/{key}"))
+        .json(&serde_json::json!({"archived": false}))
+        .await;
+    restored.assert_status_ok();
+
+    // The file is downloadable again.
+    let final_check = client.get(&format!("/api/neev/attachments/{key}")).await;
+    final_check.assert_status_ok();
+}
+
+/// Session attachment archiving requires ownership.
+#[tokio::test]
+async fn session_attachment_archiving_requires_ownership() {
+    let (state, client, database, org) = fixture(fake(&["done"])).await;
+    let session = client.create_session().await;
+    let id = session["id"].as_str().unwrap().to_owned();
+
+    let uploaded = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{id}/attachments"),
+            "owned.png",
+            png(1),
+        )
+        .await;
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+
+    // Another org member cannot archive.
+    let peer_user = h::native_account(&database, "peer", "peer@example.test").await;
+    h::add_membership(&database, org, peer_user, "member").await;
+    let peer = sign_in(&state, &database, peer_user).await;
+
+    let denied = peer
+        .patch(&format!("/api/neev/attachments/{key}"))
+        .json(&serde_json::json!({"archived": true}))
+        .await;
+    denied.assert_status_not_found();
+}
+
+/// Archived session attachments are excluded from turn listings.
+#[tokio::test]
+async fn archived_session_attachments_excluded_from_turns() {
+    let (_state, client, _db, _org) = fixture(fake(&["done"])).await;
+    let session = client.create_session().await;
+    let id = session["id"].as_str().unwrap().to_owned();
+
+    let first = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{id}/attachments"),
+            "keep.png",
+            png(1),
+        )
+        .await;
+    let second = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{id}/attachments"),
+            "delete.png",
+            png(2),
+        )
+        .await;
+    let first_key = first["key"].as_str().unwrap().to_owned();
+    let second_key = second["key"].as_str().unwrap().to_owned();
+
+    // Start a turn with both files.
+    let started = client
+        .post(&format!("/api/neev/agent/sessions/{id}/turns"))
+        .json(&serde_json::json!({
+            "prompt": "look",
+            "attachmentKeys": [first_key.clone(), second_key.clone()]
+        }))
+        .await;
+    started.assert_status(axum::http::StatusCode::CREATED);
+    let started = started.json::<Value>();
+    assert_eq!(started["turn"]["attachments"].as_array().unwrap().len(), 2);
+
+    // Archive the second attachment.
+    client
+        .patch(&format!("/api/neev/attachments/{second_key}"))
+        .json(&serde_json::json!({"archived": true}))
+        .await
+        .assert_status_ok();
+
+    // Reload turns: only one attachment visible.
+    let turns = client
+        .get(&format!("/api/neev/agent/sessions/{id}/turns"))
+        .await
+        .json::<Value>();
+    let attachments = turns["items"][0]["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["key"], first_key.as_str());
+}
+
+/// GET /api/neev/agent/sessions/{id}/attachments?archived=true lists only archived.
+#[tokio::test]
+async fn list_archived_session_attachments() {
+    let (_state, client, _db, _org) = fixture(fake(&["done"])).await;
+    let session = client.create_session().await;
+    let id = session["id"].as_str().unwrap().to_owned();
+
+    let kept = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{id}/attachments"),
+            "keep.png",
+            png(1),
+        )
+        .await;
+    let deleted = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{id}/attachments"),
+            "delete.png",
+            png(2),
+        )
+        .await;
+    let deleted_key = deleted["key"].as_str().unwrap().to_owned();
+
+    // Archive one.
+    client
+        .patch(&format!("/api/neev/attachments/{deleted_key}"))
+        .json(&serde_json::json!({"archived": true}))
+        .await
+        .assert_status_ok();
+
+    // List archived.
+    let listed = client
+        .get(&format!(
+            "/api/neev/agent/sessions/{id}/attachments?archived=true"
+        ))
+        .await;
+    listed.assert_status_ok();
+    let body = listed.json::<Value>();
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["key"], deleted_key.as_str());
+    assert_eq!(items[0]["fileName"], "delete.png");
+    assert_eq!(body["nextAfter"], serde_json::Value::Null);
+}
+
+/// List archived session attachments requires ownership.
+#[tokio::test]
+async fn list_archived_session_attachments_requires_ownership() {
+    let (state, client, database, org) = fixture(fake(&["done"])).await;
+    let session = client.create_session().await;
+    let id = session["id"].as_str().unwrap().to_owned();
+
+    let uploaded = client
+        .upload(
+            &format!("/api/neev/agent/sessions/{id}/attachments"),
+            "del.png",
+            png(1),
+        )
+        .await;
+    let key = uploaded["key"].as_str().unwrap().to_owned();
+
+    client
+        .patch(&format!("/api/neev/attachments/{key}"))
+        .json(&serde_json::json!({"archived": true}))
+        .await
+        .assert_status_ok();
+
+    // Another org member cannot list archived.
+    let peer_user = h::native_account(&database, "peer", "peer@example.test").await;
+    h::add_membership(&database, org, peer_user, "member").await;
+    let peer = sign_in(&state, &database, peer_user).await;
+
+    peer.get(&format!(
+        "/api/neev/agent/sessions/{id}/attachments?archived=true"
+    ))
+    .await
+    .assert_status_not_found();
 }

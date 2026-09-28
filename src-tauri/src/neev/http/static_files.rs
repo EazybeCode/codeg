@@ -189,7 +189,7 @@ fn exported_asset(path: &str) -> Option<(&str, &'static str)> {
     }
     let content_type = if file.starts_with("_next/static/") {
         match file.rsplit('.').next()? {
-            "js" => "text/javascript; charset=utf-8",
+            "js" | "mjs" => "text/javascript; charset=utf-8",
             "css" => "text/css; charset=utf-8",
             "woff2" => "font/woff2",
             "woff" => "font/woff",
@@ -244,4 +244,20 @@ pub(super) async fn fallback(
         return Err(ApiError::NotFound);
     }
     asset(state, uri).await
+}
+
+#[cfg(test)]
+mod attachment_preview_asset_tests {
+    #[test]
+    fn pdf_worker_is_only_served_from_exported_build_assets() {
+        assert_eq!(
+            super::exported_asset("/_next/static/media/pdf.worker.min.hash.mjs"),
+            Some((
+                "_next/static/media/pdf.worker.min.hash.mjs",
+                "text/javascript; charset=utf-8"
+            ))
+        );
+        assert!(super::exported_asset("/uploads/file.mjs").is_none());
+        assert!(super::exported_asset("/_next/static/../secret.mjs").is_none());
+    }
 }

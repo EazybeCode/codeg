@@ -18,6 +18,7 @@ import { useTranslations } from "next-intl"
 import { FileText, ImageIcon, ImageOff, Paperclip } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { FileActions } from "./native-file-actions"
 import { NativeClientError } from "@/lib/neev-client"
 import {
   admitFiles,
@@ -780,7 +781,6 @@ function SentReference({
       return null
     }
   }, [attachment.key])
-  const label = `${attachment.fileName} · ${formatBytes(attachment.byteLength)}`
   const inside = (
     <>
       <AttachmentThumb
@@ -808,20 +808,15 @@ function SentReference({
       </span>
     )
   return (
-    // `download`, not a viewer: these are served as attachments with
-    // `nosniff`, so framing one from this origin would be a different promise
-    // than the endpoint makes.
-    <a
-      href={href}
-      download={attachment.fileName}
-      title={label}
+    <FileActions
+      file={attachment}
       className={cn(
-        "inline-flex h-8 max-w-64 items-center gap-1.5 rounded-md border px-1 align-middle hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring",
+        "h-8 max-w-72 rounded-md border px-1 align-middle",
         className
       )}
     >
       {inside}
-    </a>
+    </FileActions>
   )
 }
 

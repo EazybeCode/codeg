@@ -91,7 +91,7 @@ async fn seed(harness: &h::OrgHarness) -> (i32, String, String, String) {
     let session = uuid::Uuid::new_v4().hyphenated().to_string();
     execute(
         &state.database,
-        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,archived,revision,created_at,updated_at) VALUES($1,$2,$3,'S','claude','default','private','chat',NULL,NULL,0,1,0,0)",
+        "INSERT INTO neev_agent_sessions(org_id,id,owner_id,title,provider,model,visibility,kind,bound_chat_id,bound_kind,archived,revision,created_at,updated_at) VALUES($1,$2,$3,'S','claude','default','private','chat',NULL,NULL,FALSE,1,0,0)",
         vec![
             actor.org_id.into(),
             session.clone().into(),
@@ -175,7 +175,7 @@ async fn fresh_install_creates_attachment_storage_at_version_fifteen() {
     let db = h::database().await;
     assert_eq!(
         schema_version(&db).await,
-        mention_migration::SCHEMA_VERSION
+        attachment_archived_migration::SCHEMA_VERSION
     );
     assert_eq!(count(&db, "neev_attachments").await, 0);
     assert_eq!(count(&db, "neev_attachment_refs").await, 0);
@@ -202,7 +202,7 @@ async fn reopening_a_migrated_database_succeeds() {
     );
     assert_eq!(
         schema_version(&db).await,
-        mention_migration::SCHEMA_VERSION
+        attachment_archived_migration::SCHEMA_VERSION
     );
     // And again, because a restart is not a one-off event.
     assert_eq!(initialize(&db).await, Ok(()));
@@ -363,7 +363,10 @@ async fn a_fresh_install_has_no_attachment_byte_ceiling() {
         !ddl.contains("BETWEEN 1 AND 10485760"),
         "a fresh table must not bake the retired per-file cap: {ddl}"
     );
-    assert!(ddl.contains("byte_length>=1"), "the lower bound stays: {ddl}");
+    assert!(
+        ddl.contains("byte_length>=1"),
+        "the lower bound stays: {ddl}"
+    );
     assert_eq!(
         attachment_byte_cap_migration::validate_attachment_byte_cap(&db).await,
         Ok(())
@@ -409,14 +412,16 @@ async fn the_migration_removes_the_old_ceiling_and_keeps_every_row() {
         attachment_byte_cap_migration::validate_attachment_byte_cap(&db).await,
         Ok(())
     );
-    assert!(!attachments_ddl(&db).await.contains("BETWEEN 1 AND 10485760"));
+    assert!(!attachments_ddl(&db)
+        .await
+        .contains("BETWEEN 1 AND 10485760"));
     // Nothing was dropped, and the schema marker did not move.
     assert_eq!(count(&db, "neev_attachments").await, rows_before);
     assert_eq!(count(&db, "neev_attachment_refs").await, refs_before);
     assert_eq!(
         schema_version(&db).await,
-        mention_migration::SCHEMA_VERSION,
-        "relaxing a CHECK is not a new schema version"
+        attachment_archived_migration::SCHEMA_VERSION,
+        "initialization advances to the current schema"
     );
     // The rows are still reachable by key, not merely counted.
     for key in [&on_chat, &on_session] {
@@ -458,4 +463,93 @@ async fn the_validator_refuses_a_database_that_still_has_a_byte_ceiling() {
         attachment_byte_cap_migration::validate_attachment_byte_cap(&db).await,
         Err(AuthError::Unavailable)
     );
+}
+
+#[tokio::test]
+async fn schema_sixteen_upgrade_preserves_attachment_refs_and_archive_on_reopen() {
+    let harness = h::OrgHarness::new().await;
+    let (org_id, chat_id, message_id, session_id) = seed(&harness).await;
+    let db = harness.state().database.clone();
+    let (key, _) = attach(&db, org_id, &chat_id, &message_id, &session_id).await;
+    execute(&db, "DROP INDEX neev_attachments_chat_archived", vec![]).await;
+    execute(&db, "DROP INDEX neev_attachments_session_archived", vec![]).await;
+    execute(
+        &db,
+        "ALTER TABLE neev_attachments DROP COLUMN archived",
+        vec![],
+    )
+    .await;
+    execute(
+        &db,
+        "UPDATE neev_schema_version SET version=16 WHERE id=1",
+        vec![],
+    )
+    .await;
+    assert_eq!(initialize(&db).await, Ok(()));
+    assert_eq!(schema_version(&db).await, 17);
+    assert_eq!(count(&db, "neev_attachment_refs").await, 2);
+    execute(
+        &db,
+        "UPDATE neev_attachments SET archived=TRUE WHERE key=$1",
+        vec![key.clone().into()],
+    )
+    .await;
+    assert_eq!(initialize(&db).await, Ok(()));
+    let archived: bool = one(
+        &db,
+        "SELECT archived FROM neev_attachments WHERE key=$1",
+        vec![key.into()],
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "archived")
+    .unwrap();
+    assert!(archived);
+    assert_eq!(count(&db, "neev_attachment_refs").await, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires isolated NEEV_TEST_DATABASE_URL"]
+async fn postgres_attachment_archive_migration_and_restore_preserve_refs() {
+    let (db, admin, schema) = h::postgres_database().await;
+    let harness = h::OrgHarness::new_with_gateway_events_on(db.clone()).await;
+    let (org_id, chat_id, message_id, session_id) = seed(&harness).await;
+    let (key, _) = attach(&db, org_id, &chat_id, &message_id, &session_id).await;
+    execute(
+        &db,
+        "ALTER TABLE neev_attachments DROP COLUMN archived",
+        vec![],
+    )
+    .await;
+    execute(
+        &db,
+        "UPDATE neev_schema_version SET version=16 WHERE id=1",
+        vec![],
+    )
+    .await;
+    assert_eq!(initialize(&db).await, Ok(()));
+    assert_eq!(schema_version(&db).await, 17);
+    assert_eq!(count(&db, "neev_attachment_refs").await, 2);
+    let actor = harness.owner_context().clone();
+    crate::neev::content::attachment::set_archived(harness.state(), &actor, &key, true)
+        .await
+        .unwrap();
+    assert_eq!(initialize(&db).await, Ok(()));
+    let page = crate::neev::content::attachment::list_archived_for_chat(
+        harness.state(),
+        &actor,
+        &chat_id,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+    crate::neev::content::attachment::set_archived(harness.state(), &actor, &key, false)
+        .await
+        .unwrap();
+    assert_eq!(initialize(&db).await, Ok(()));
+    assert_eq!(count(&db, "neev_attachment_refs").await, 2);
+    drop(harness);
+    h::cleanup_postgres(db, admin, schema).await;
 }

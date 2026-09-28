@@ -171,15 +171,16 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/neev/mentions/read", post(content::read_mentions))
         .route(
             "/api/neev/chats/{id}/attachments",
-            post(content::upload_chat_attachment),
+            post(content::upload_chat_attachment).get(content::list_chat_archived_attachments),
         )
         .route(
             "/api/neev/agent/sessions/{id}/attachments",
-            post(content::upload_session_attachment),
+            post(content::upload_session_attachment)
+                .get(content::list_session_archived_attachments),
         )
         .route(
             "/api/neev/attachments/{key}",
-            get(content::serve_attachment),
+            get(content::serve_attachment).patch(content::archive_attachment),
         )
         .route("/api/neev/organizations", get(org::list).post(org::create))
         .route("/api/neev/organizations/select", post(org::select))
@@ -209,10 +210,7 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             post(org::preview_invitation),
         )
         .route("/api/neev/invitations/accept", post(org::accept_invitation))
-        .route(
-            "/api/neev/organization/join-code",
-            get(org::view_join_code),
-        )
+        .route("/api/neev/organization/join-code", get(org::view_join_code))
         .route(
             "/api/neev/organization/join-code/rotate",
             post(org::rotate_join_code),
@@ -264,7 +262,10 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             "/api/neev/agent/runs/{run_id}/events",
             get(agent_sessions::run_events),
         )
-        .route("/api/neev/agent/runs/cancel", post(agent_sessions::cancel_run))
+        .route(
+            "/api/neev/agent/runs/cancel",
+            post(agent_sessions::cancel_run),
+        )
         // Explicit team invocation (§5.3): posts the ask, then publishes an
         // agent-authored reply into the same chat when the run completes.
         .route(
@@ -327,10 +328,7 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             "/document-engine/{*rest}",
             any(crate::neev::engine::proxy::handle),
         );
-        router = router.route(
-            "/document-engine",
-            any(crate::neev::engine::proxy::handle),
-        );
+        router = router.route("/document-engine", any(crate::neev::engine::proxy::handle));
     }
     if email_available {
         router = router

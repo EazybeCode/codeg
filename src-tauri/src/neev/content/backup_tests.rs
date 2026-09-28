@@ -175,7 +175,7 @@ async fn sqlite_gateway8_rich_format_six_seven_eight() {
 async fn sqlite_schema_nine_through_eleven_decode_rich_bodies_and_catch_corruption() {
     // Regression: a v9/v10 snapshot must decode block documents (not read them as
     // markdown) and reject a corrupt rich body at the rich-decode stage.
-    for schema_version in [9, 10, 11, 12, 13, 14, 15, 16] {
+    for schema_version in [9, 10, 11, 12, 13, 14, 15, 16, 17] {
         rich_snapshot_contract(h::database().await, schema_version).await;
     }
 }
@@ -304,7 +304,38 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
+    if schema_version == 17 {
+        return;
+    }
+    db::execute(
+        database,
+        "DROP INDEX neev_attachments_chat_archived",
+        vec![],
+    )
+    .await
+    .unwrap();
+    db::execute(
+        database,
+        "DROP INDEX neev_attachments_session_archived",
+        vec![],
+    )
+    .await
+    .unwrap();
+    db::execute(
+        database,
+        "ALTER TABLE neev_attachments DROP COLUMN archived",
+        vec![],
+    )
+    .await
+    .unwrap();
     if schema_version == 16 {
+        db::execute(
+            database,
+            "UPDATE neev_schema_version SET version=16",
+            vec![],
+        )
+        .await
+        .unwrap();
         return;
     }
     // 16 adds the mentions a message carries.
@@ -688,7 +719,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 16);
+    assert_eq!(manifest.schema_version, 17);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -1289,7 +1320,7 @@ async fn attachment_snapshot_contract(database: DatabaseConnection) {
     let baseline = verify_snapshot(&h.state.database, &h.state.blobs)
         .await
         .unwrap();
-    assert_eq!(baseline.schema_version, 16);
+    assert_eq!(baseline.schema_version, 17);
 
     let png = attachment_png();
     let notes = b"attachment acceptance notes\n".to_vec();

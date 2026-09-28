@@ -13,7 +13,7 @@ const key = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 const file = {
   key,
   fileName: "result.html",
-  contentType: "text/plain",
+  contentType: "text/plain" as const,
   byteLength: 80,
   sequence: "1",
 }
