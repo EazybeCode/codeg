@@ -356,6 +356,7 @@
     "workspaceDescription": "チームの働き方に合わせてプロジェクトと入れ子のフォルダーを整理しましょう。",
     "agentUnavailable": "エージェントとのチャットを準備中です",
     "agentDescription": "ワークスペースの探索と整理は利用できます。エージェントの実行はまだ有効になっていません。利用開始後は、各自が対応するAIツールの個人契約を使用します。Neevは共有AIアカウントや代替クレジットを提供しません。",
+    "sharedLibrary": "Shared library",
     "personalAgents": "個人のAI接続",
     "insideFolder": "{name}内",
     "projectDescription": "プロジェクトはチームのワークスペースの最上位階層です。",

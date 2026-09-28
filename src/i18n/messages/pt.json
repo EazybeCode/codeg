@@ -356,6 +356,7 @@
     "workspaceDescription": "Organize projetos e pastas aninhadas de acordo com a forma de trabalhar da equipe.",
     "agentUnavailable": "As conversas com agentes estão sendo preparadas",
     "agentDescription": "Você já pode explorar e organizar seu espaço. A execução de agentes ainda não está habilitada. Cada pessoa usará sua própria assinatura compatível de uma ferramenta de IA. O Neev não fornece conta de IA compartilhada nem créditos de reserva.",
+    "sharedLibrary": "Shared library",
     "personalAgents": "Conexões pessoais de IA",
     "insideFolder": "Dentro de {name}",
     "projectDescription": "Um projeto é o nível superior do espaço da sua equipe.",

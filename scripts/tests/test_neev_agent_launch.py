@@ -1384,5 +1384,34 @@ class ExportSecurityTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(saved).hexdigest(), item["sha256"])
 
 
+class SharedLibraryMcpTests(unittest.TestCase):
+    def test_shared_mcp_overrides_reach_app_server(self):
+        overrides = [
+            'mcp_servers.team_123.command="python3"',
+            'mcp_servers.team_123.args=[]',
+            'mcp_servers.remote_123.url="https://tools.example.com/mcp"',
+        ]
+        argv = ["/usr/local/bin/codex", "exec", "--json", "Use team tools"]
+        for override in overrides:
+            argv += ["-c", override]
+        mapped = launch.app_server_argv("codex", argv)
+        for override in overrides:
+            self.assertIn(override, mapped)
+            self.assertEqual(mapped[mapped.index(override)-1], "--config")
+
+    def test_shared_mcp_override_validator_refuses_other_settings(self):
+        for value in [
+            'mcp_servers.team.env="credential"',
+            'mcp_servers.team.command=123',
+            'mcp_servers.team.args=[1]',
+            'mcp_servers.team.url="http://localhost/mcp"',
+            'mcp_servers.team.url="https://user:secret@example.com/mcp"',
+            'mcp_servers.team.url="https://example.com/mcp?token=secret"',
+            'mcp_servers.team.command="python3"\nnotify=["sh"]',
+        ]:
+            with self.subTest(value=value), self.assertRaises(sandbox.SandboxError):
+                launch._config_argument(value)
+
+
 if __name__ == "__main__":
     unittest.main()

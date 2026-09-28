@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use super::{cookies, ApiError};
 use crate::neev::agents::execution::{ExecutionError, RunEvent, RunRequest};
+use crate::neev::agents::library_runtime::LibraryRunItem;
 use crate::neev::auth::session;
 use crate::neev::startup::ServerState;
 use crate::neev::types::OrgContext;
@@ -119,6 +120,9 @@ pub(super) async fn run(
             .map_err(super::agent_error)?,
         None => None,
     };
+    // Load library items for the org.
+    let library_items = load_library_items(&state, &context).await?;
+
     let request = RunRequest {
         // Server-authoritative identity: never trust a client-supplied user/org.
         user_id,
@@ -139,6 +143,8 @@ pub(super) async fn run(
         // Nor any conversation: it has no session and no thread to be the
         // continuation of, so there is no transcript to stage.
         context_files: Vec::new(),
+        // Shared org library items (skills and MCP configs).
+        library_items,
     };
     let mut handle = match state.agents.run(request).await {
         Ok(handle) => handle,
@@ -225,6 +231,18 @@ pub(super) async fn cancel(
         format!("{{\"canceled\":{canceled}}}"),
     )
         .into_response())
+}
+
+/// Load enabled library items for the caller's org.
+async fn load_library_items(
+    state: &ServerState,
+    actor: &OrgContext,
+) -> Result<Vec<LibraryRunItem>, ApiError> {
+    let items = crate::neev::library::load_enabled(state, actor)
+        .await
+        .map_err(|_| ApiError::Unavailable)?;
+
+    Ok(items.into_iter().map(LibraryRunItem::from).collect())
 }
 
 #[cfg(test)]

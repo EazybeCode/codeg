@@ -356,6 +356,7 @@
     "workspaceDescription": "Organisez les projets et les dossiers imbriqués selon vos méthodes de travail.",
     "agentUnavailable": "Les discussions avec les agents sont en préparation",
     "agentDescription": "Vous pouvez déjà explorer et organiser votre espace. Les agents ne sont pas encore activés. Chaque personne utilisera son propre abonnement compatible à un outil d’IA. Neev ne fournit ni compte d’IA partagé ni crédits de secours.",
+    "sharedLibrary": "Shared library",
     "personalAgents": "Connexions IA personnelles",
     "insideFolder": "Dans {name}",
     "projectDescription": "Un projet constitue le premier niveau de l’espace de votre équipe.",

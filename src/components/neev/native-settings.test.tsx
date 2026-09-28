@@ -74,6 +74,7 @@ function fixtures(owner = 1) {
         ],
       }),
     "GET /api/neev/auth/methods": () => json({ methods: ["email"] }),
+    "GET /api/neev/library": () => json({ items: [] }),
   }
 }
 it("protects the owner, exposes only own sign-in methods, and keeps back navigation", async () => {
@@ -527,6 +528,8 @@ it("walks the sections with the arrow, home and end keys", async () => {
   await user.keyboard("{ArrowDown}")
   expect(screen.getByRole("tab", { name: MEMBERS })).toHaveFocus()
   expect(panelOf(MEMBERS)).toBeVisible()
+  await user.keyboard("{ArrowRight}")
+  expect(screen.getByRole("tab", { name: "Shared library" })).toHaveFocus()
   await user.keyboard("{ArrowRight}")
   expect(screen.getByRole("tab", { name: AGENTS })).toHaveFocus()
   await user.keyboard("{End}")

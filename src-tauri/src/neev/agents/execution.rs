@@ -34,7 +34,7 @@ pub(crate) enum ExecutionError {
 }
 
 /// An author-scoped request to run one prompt in one chat with a connected model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct RunRequest {
     pub(crate) user_id: i32,
     pub(crate) org_id: i32,
@@ -78,6 +78,12 @@ pub(crate) struct RunRequest {
     /// and mean it — and what keeps a name shared between a new upload and an
     /// old one from resolving to the wrong bytes.
     pub(crate) context_files: Vec<RunAttachment>,
+    /// Enabled library items (skills and MCP configs) for the caller's org.
+    ///
+    /// Loaded BEFORE the pending turn is created so a failure can be reported
+    /// honestly. Skills are staged as files the agent can read and reference;
+    /// MCP servers are injected into the provider's configuration.
+    pub(crate) library_items: Vec<super::library_runtime::LibraryRunItem>,
 }
 
 /// One file the user attached: its bytes, and enough to name and classify it.
@@ -589,6 +595,23 @@ fn image_paths(staged: &[StagedAttachment]) -> Vec<String> {
         .collect()
 }
 
+/// Combine all briefing elements: context files and library skills.
+///
+/// The library skills briefing is appended AFTER the context files so the agent
+/// sees its workspace first, then learns about shared skills it can invoke.
+fn briefing_with_library(
+    briefing: Option<String>,
+    skills: &[super::library_runtime::StagedSkill],
+) -> Option<String> {
+    let skills_section = super::library_runtime::skills_briefing(skills);
+    match (briefing, skills_section) {
+        (Some(base), Some(skills)) => Some(format!("{base}\n{skills}")),
+        (Some(base), None) => Some(base),
+        (None, Some(skills)) => Some(skills),
+        (None, None) => None,
+    }
+}
+
 /// Forward one mapped stream item to the run's consumer.
 ///
 /// Empty text is dropped rather than sent: a zero-length delta would spend a
@@ -872,12 +895,15 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
         }
         let staged = stage_attachments(&self.workspace, &request.attachments)?;
         let context = stage_context(&self.workspace, &request.context_files)?;
+        // Stage library items (skills and MCP configs)
+        let library =
+            super::library_runtime::stage_library(&self.workspace, &request.library_items)?;
+        // Combine briefing: context files + library skills
         let briefing = briefing_with_context(request.briefing.as_deref(), &context);
+        let briefing = briefing_with_library(briefing, &library.skill_dirs);
         let prompt = prompt_with_attachments(&request.prompt, &staged);
-        let mut command = Command::new(&self.binary);
-        // Shares `provider_argv` with the sandboxed runtime, so dev cannot drift
-        // into invoking a provider differently from production.
-        command.args(provider_argv(
+        // Build provider arguments
+        let mut argv = provider_argv(
             &request.provider,
             &prompt,
             &request.model,
@@ -885,7 +911,34 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
             request.effort.as_deref(),
             request.fast,
             &image_paths(&staged),
-        ));
+        );
+        // Add MCP config for Claude, or overrides for Codex
+        if !library.mcp_servers.is_empty() {
+            match request.provider.as_str() {
+                "claude" => {
+                    if let Some(config_path) = super::library_runtime::write_claude_mcp_config(
+                        &self.workspace,
+                        &library.mcp_servers,
+                    )? {
+                        argv.push("--mcp-config".into());
+                        argv.push(config_path.to_string_lossy().into_owned());
+                    }
+                }
+                "codex" => {
+                    for override_str in
+                        super::library_runtime::codex_mcp_config(&library.mcp_servers)
+                    {
+                        argv.push("-c".into());
+                        argv.push(override_str);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut command = Command::new(&self.binary);
+        // Shares `provider_argv` with the sandboxed runtime, so dev cannot drift
+        // into invoking a provider differently from production.
+        command.args(argv);
         let mut child = command
             .current_dir(&self.workspace)
             .stdin(Stdio::null())
@@ -1188,9 +1241,12 @@ impl SandboxedProviderCliRuntime {
         handle: &str,
         staged: &[StagedAttachment],
         context: &[StagedAttachment],
+        library: &super::library_runtime::StagedLibrary,
     ) -> Result<Vec<String>, ExecutionError> {
         let prompt = prompt_with_attachments(&request.prompt, staged);
+        // Combine briefing: context files + library skills
         let briefing = briefing_with_context(request.briefing.as_deref(), context);
+        let briefing = briefing_with_library(briefing, &library.skill_dirs);
         let mut argv = vec![
             "--tenant".into(),
             format!("org:{}/user:{}", request.org_id, request.user_id),
@@ -1221,7 +1277,8 @@ impl SandboxedProviderCliRuntime {
         }
         argv.push("--".into());
         argv.push(binary.to_owned());
-        argv.extend(provider_argv(
+        // Build provider arguments
+        let mut provider_args = provider_argv(
             &request.provider,
             &prompt,
             &request.model,
@@ -1229,7 +1286,31 @@ impl SandboxedProviderCliRuntime {
             request.effort.as_deref(),
             request.fast,
             &image_paths(staged),
-        ));
+        );
+        // Add MCP config for Claude, or overrides for Codex
+        if !library.mcp_servers.is_empty() {
+            match request.provider.as_str() {
+                "claude" => {
+                    if let Some(config_path) = super::library_runtime::write_claude_mcp_config(
+                        workdir,
+                        &library.mcp_servers,
+                    )? {
+                        provider_args.push("--mcp-config".into());
+                        provider_args.push(config_path.to_string_lossy().into_owned());
+                    }
+                }
+                "codex" => {
+                    for override_str in
+                        super::library_runtime::codex_mcp_config(&library.mcp_servers)
+                    {
+                        provider_args.push("-c".into());
+                        provider_args.push(override_str);
+                    }
+                }
+                _ => {}
+            }
+        }
+        argv.extend(provider_args);
         Ok(argv)
     }
 
@@ -1248,6 +1329,8 @@ impl SandboxedProviderCliRuntime {
         // is the only place a path for these files can honestly be chosen.
         let staged = stage_attachments(workdir, &request.attachments)?;
         let context = stage_context(workdir, &request.context_files)?;
+        // Stage library items (skills and MCP configs)
+        let library = super::library_runtime::stage_library(workdir, &request.library_items)?;
         let mut argv = match &self.cap_helper {
             Some(helper) => vec![helper.clone()],
             None => vec![
@@ -1255,7 +1338,9 @@ impl SandboxedProviderCliRuntime {
                 self.launcher.to_string_lossy().into_owned(),
             ],
         };
-        argv.extend(self.launcher_args(request, lane, workdir, binary, handle, &staged, &context)?);
+        argv.extend(self.launcher_args(
+            request, lane, workdir, binary, handle, &staged, &context, &library,
+        )?);
         Ok(argv)
     }
 
@@ -1280,9 +1365,19 @@ impl SandboxedProviderCliRuntime {
                 self.launcher.to_string_lossy().into_owned(),
             ],
         };
-        // Discovery carries no attachments and no context: it asks the provider
-        // for metadata, not for work on a file or on a conversation.
-        let full = self.launcher_args(request, lane, workdir, binary, handle, &[], &[])?;
+        // Discovery carries no attachments, no context, and no library: it asks
+        // the provider for metadata, not for work on a file or on a conversation.
+        let empty_library = super::library_runtime::StagedLibrary::default();
+        let full = self.launcher_args(
+            request,
+            lane,
+            workdir,
+            binary,
+            handle,
+            &[],
+            &[],
+            &empty_library,
+        )?;
         let cut = full
             .iter()
             .position(|arg| arg == "--")
@@ -1388,6 +1483,8 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
             // Discovery asks the provider for its catalogue. There is no
             // conversation to carry and nothing to be continuous with.
             context_files: Vec::new(),
+            // Discovery is not a run, so no library items apply.
+            library_items: Vec::new(),
         };
         let mut argv = self.launch_prefix(&probe, lane, &workdir, &binary, &handle)?;
         argv.push("app-server".into());
@@ -1679,6 +1776,7 @@ mod tests {
             fast: false,
             attachments: Vec::new(),
             context_files: Vec::new(),
+            library_items: Vec::new(),
         }
     }
 
@@ -2607,6 +2705,7 @@ mod tests {
                 fast: false,
                 attachments: Vec::new(),
                 context_files: Vec::new(),
+                library_items: Vec::new(),
             })
             .await
             .unwrap();
@@ -2728,5 +2827,82 @@ mod tests {
         let provider_argv = &argv[separator + 1..];
         assert_eq!(provider_argv.last().map(String::as_str), Some("app-server"));
         assert!(!provider_argv.iter().any(|arg| arg == "exec"));
+    }
+    fn shared_library_request(provider: &str) -> RunRequest {
+        use super::super::library_runtime::{LibraryItemKind, LibraryRunFile, LibraryRunItem};
+        let mut req = request("Use the workspace tools");
+        req.provider = provider.into();
+        req.library_items = vec![LibraryRunItem {
+            id: "workspace-tools".into(),
+            name: "Team tools".into(),
+            kind: LibraryItemKind::Mcp,
+            files: vec![LibraryRunFile {
+                path: "mcp.json".into(),
+                content: serde_json::to_vec(&serde_json::json!({
+                    "name":"echo", "type":"stdio", "command":"python3", "args":[]
+                }))
+                .unwrap(),
+            }],
+            setup_note: None,
+        }];
+        req
+    }
+
+    #[test]
+    fn library_configuration_reaches_both_provider_launches() {
+        for provider in ["claude", "codex"] {
+            let dir = tempfile::tempdir().unwrap();
+            let req = shared_library_request(provider);
+            let argv = sandboxed()
+                .launch_argv(
+                    &req,
+                    Lane {
+                        slot: "a",
+                        uid: 61000,
+                    },
+                    dir.path(),
+                    provider,
+                    HANDLE,
+                )
+                .unwrap();
+            if provider == "claude" {
+                let idx = argv
+                    .iter()
+                    .position(|arg| arg == "--mcp-config")
+                    .expect("Claude MCP config argument");
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&argv[idx + 1]).unwrap()).unwrap();
+                assert_eq!(value["mcpServers"].as_object().unwrap().len(), 1);
+            } else {
+                let overrides: Vec<_> = argv
+                    .windows(2)
+                    .filter(|p| p[0] == "-c" && p[1].starts_with("mcp_servers."))
+                    .map(|p| &p[1])
+                    .collect();
+                assert!(!overrides.is_empty());
+                assert!(overrides.iter().any(|arg| arg.ends_with(".args=[]")));
+                for arg in overrides {
+                    toml::from_str::<toml::Value>(arg).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn library_configuration_write_failure_refuses_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("neev-library/mcp.json")).unwrap();
+        assert!(sandboxed()
+            .launch_argv(
+                &shared_library_request("claude"),
+                Lane {
+                    slot: "a",
+                    uid: 61000
+                },
+                dir.path(),
+                "claude",
+                HANDLE
+            )
+            .is_err());
     }
 }

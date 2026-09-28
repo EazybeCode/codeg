@@ -356,6 +356,7 @@
     "workspaceDescription": "按照團隊的工作方式整理專案和巢狀資料夾。",
     "agentUnavailable": "代理程式聊天正在準備中",
     "agentDescription": "您現在可以瀏覽和整理工作空間。代理程式執行尚未啟用。開放後，每個人都將使用自己受支援的AI工具訂閱。Neev不提供共用AI帳戶或備用額度。",
+    "sharedLibrary": "Shared library",
     "personalAgents": "個人AI連線",
     "insideFolder": "位於{name}內",
     "projectDescription": "專案是團隊工作空間的最上層。",

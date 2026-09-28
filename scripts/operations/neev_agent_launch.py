@@ -185,8 +185,49 @@ _DEVELOPER_INSTRUCTIONS_OVERRIDE = re.compile(
 )
 
 
+# Only the configuration fields emitted by the shared-library runtime. This
+# extends the existing exact override allowlist, not sandbox/network policy.
+_MCP_OVERRIDE = re.compile(
+    r"\Amcp_servers\.[A-Za-z0-9_-]{1,160}\.(command|args|url)=(.+)\Z", re.DOTALL
+)
+
+
+def _shared_mcp_argument(value):
+    match = _MCP_OVERRIDE.fullmatch(value)
+    if not match or len(value) > 65536:
+        return None
+    field, encoded = match.groups()
+    try:
+        decoded = json.loads(encoded)
+    except ValueError as error:
+        raise sandbox.SandboxError("invalid") from error
+    if field == "args":
+        valid = (isinstance(decoded, list) and len(decoded) <= 50
+                 and all(isinstance(arg, str) and len(arg) <= 1000
+                         and "\x00" not in arg for arg in decoded))
+    else:
+        valid = isinstance(decoded, str) and bool(decoded.strip()) and "\x00" not in decoded
+        if valid and field == "command":
+            valid = len(decoded) <= 500
+        elif valid:
+            from urllib.parse import urlsplit
+            try:
+                url = urlsplit(decoded)
+                valid = (url.scheme == "https" and bool(url.hostname)
+                         and not url.username and not url.password
+                         and not url.query and not url.fragment)
+            except ValueError:
+                valid = False
+    if not valid:
+        raise sandbox.SandboxError("invalid")
+    return ["--config", value]
+
+
 def _config_argument(value):
     """Pure: one `-c` override -> the adapter's arguments for it."""
+    shared = _shared_mcp_argument(value)
+    if shared is not None:
+        return shared
     effort = _EFFORT_OVERRIDE.match(value)
     if effort:
         return ["--effort", effort.group(1)]

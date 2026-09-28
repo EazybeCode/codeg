@@ -98,6 +98,7 @@ fn run_request() -> RunRequest {
         fast: false,
         attachments: Vec::new(),
         context_files: Vec::new(),
+        library_items: Vec::new(),
     }
 }
 

@@ -10,6 +10,7 @@ pub(crate) mod control_wire;
 pub(crate) mod execution;
 pub(crate) mod generated;
 pub(crate) mod intents;
+pub(crate) mod library_runtime;
 pub(crate) mod recovery;
 pub(crate) mod runs;
 pub(crate) mod sessions;

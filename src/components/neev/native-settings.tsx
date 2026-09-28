@@ -24,6 +24,7 @@ import { useNativeAuth } from "./native-auth-provider"
 import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
 import { NativeSignInMethods } from "./native-login"
 import { NativeAgentConnectionsPanel } from "./native-agent-connections"
+import { NativeLibrary } from "./native-library"
 import { NativeJoinCode } from "./native-join-code"
 
 type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
@@ -37,7 +38,13 @@ type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
  * Section labels reuse existing `Native` messages, so this adds no translation
  * keys and reads correctly in all ten locales immediately.
  */
-const SECTIONS = ["organization", "members", "agents", "profile"] as const
+const SECTIONS = [
+  "organization",
+  "members",
+  "library",
+  "agents",
+  "profile",
+] as const
 type Section = (typeof SECTIONS)[number]
 
 /**
@@ -61,6 +68,7 @@ const SECTION_LABEL = {
   organization: "organization",
   members: "members",
   agents: "personalAgents",
+  library: "sharedLibrary",
   profile: "yourProfile",
 } as const satisfies Record<Section, string>
 
@@ -604,6 +612,13 @@ function SettingsContent() {
                   people rather than with the branding. */}
               <NativeJoinCode />
             </>
+          )}
+          {panel(
+            "library",
+            section === "library" ? (
+              <NativeLibrary key={organizationId} />
+            ) : null,
+            false
           )}
           {/* The caller's own provider connections, read live from the server
               (spec §5.4). Credentials never reach the browser. */}

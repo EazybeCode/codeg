@@ -19,6 +19,7 @@ mod content;
 #[cfg(test)]
 mod content_tests;
 pub(crate) mod cookies;
+mod library;
 mod org;
 mod realtime;
 mod static_files;
@@ -185,6 +186,12 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route(
             "/api/neev/attachments",
             get(content::list_org_archived_attachments),
+        )
+        .route("/api/neev/library", get(library::list))
+        .route("/api/neev/library/import", post(library::import))
+        .route(
+            "/api/neev/library/{id}",
+            patch(library::update).delete(library::delete),
         )
         .route("/api/neev/organizations", get(org::list).post(org::create))
         .route("/api/neev/organizations/select", post(org::select))

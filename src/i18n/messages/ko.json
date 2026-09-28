@@ -356,6 +356,7 @@
     "workspaceDescription": "팀의 업무 방식에 맞게 프로젝트와 중첩 폴더를 정리하세요.",
     "agentUnavailable": "에이전트 채팅을 준비하고 있습니다",
     "agentDescription": "지금 워크스페이스를 둘러보고 정리할 수 있습니다. 에이전트 실행은 아직 활성화되지 않았습니다. 사용 가능해지면 각자 지원되는 AI 도구의 개인 구독을 사용합니다. Neev는 공유 AI 계정이나 대체 크레딧을 제공하지 않습니다.",
+    "sharedLibrary": "Shared library",
     "personalAgents": "개인 AI 연결",
     "insideFolder": "{name} 내부",
     "projectDescription": "프로젝트는 팀 워크스페이스의 최상위 단계입니다.",

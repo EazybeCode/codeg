@@ -21,6 +21,7 @@ mod gateway_migration;
 #[cfg(test)]
 mod gateway_migration_tests;
 mod image_blob_migration;
+pub(crate) mod library_migration;
 mod mention_migration;
 mod migration;
 mod org_code_migration;
@@ -197,6 +198,10 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         // It shares v16's table inventory.
         let v17_expected = v16_expected.clone();
 
+        // Schema18 adds library tables (skills and MCP configs).
+        let v18_expected: std::collections::BTreeSet<String> = v17_expected.iter().cloned()
+            .chain(library_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
+
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
             for table in migration::tables() {
@@ -228,10 +233,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
             mention_migration::upgrade(&tx).await?;
             attachment_archived_migration::add_archived_column(&tx).await?;
+            library_migration::upgrade(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![attachment_archived_migration::SCHEMA_VERSION.into()],
+                vec![library_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -253,6 +259,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             && names != v15_expected
             && names != v16_expected
             && names != v17_expected
+            && names != v18_expected
         {
             return Err(AuthError::Unavailable);
         }
@@ -423,7 +430,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
                 mention_migration::validate(&tx).await?;
             }
-            // Current. Validate in place and preserve every row.
+            // Schema17 has all columns but no library tables.
             attachment_archived_migration::SCHEMA_VERSION if names == v17_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
@@ -442,21 +449,42 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
                 mention_migration::validate(&tx).await?;
                 attachment_archived_migration::validate_archived_column(&tx).await?;
+            }
+            // Current. Validate in place and preserve every row.
+            library_migration::SCHEMA_VERSION if names == v18_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
+                session_migration::validate(&tx).await?;
+                session_migration::validate_node_link(&tx).await?;
+                session_migration::validate_activity(&tx).await?;
+                session_migration::validate_effort(&tx).await?;
+                content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
+                attachment_migration::validate(&tx).await?;
+                attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
+                attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+                attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
+                attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
+                mention_migration::validate(&tx).await?;
+                attachment_archived_migration::validate_archived_column(&tx).await?;
+                library_migration::validate(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
         }
-        // Apply missing additive storage in order, then publish schema 17.
-        if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected {
+        // Apply missing additive storage in order, then publish schema 18.
+        if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected {
             gateway_migration::upgrade(&tx).await?;
         }
-        if names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected {
+        if names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected {
             org_code_migration::upgrade(&tx).await?;
         }
-        if names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected {
+        if names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected {
             image_blob_migration::upgrade(&tx).await?;
         }
-        if names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected {
+        if names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected {
             session_migration::upgrade(&tx).await?;
         }
         // Both are column-guarded, so every path can apply them unconditionally
@@ -465,7 +493,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         session_migration::record_activity(&tx).await?;
         session_migration::record_effort(&tx).await?;
         content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
-        if names != v15_expected && names != v16_expected && names != v17_expected {
+        if names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected {
             attachment_migration::upgrade(&tx).await?;
         }
         // Constraint-guarded and idempotent, so every path applies it: a database
@@ -473,16 +501,20 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
         attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
         attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
-        if names != v16_expected && names != v17_expected {
+        if names != v16_expected && names != v17_expected && names != v18_expected {
             mention_migration::upgrade(&tx).await?;
         }
         // Column-guarded and idempotent: a database that already has the column
         // is unchanged. Adds the archived column for attachment soft-delete.
         attachment_archived_migration::add_archived_column(&tx).await?;
+        // Table-guarded and idempotent: adds library tables if not present.
+        if names != v18_expected {
+            library_migration::upgrade(&tx).await?;
+        }
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![attachment_archived_migration::SCHEMA_VERSION.into()],
+            vec![library_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -651,6 +683,24 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
                     )
                     .collect::<std::collections::BTreeSet<String>>()
         }
+        library_migration::SCHEMA_VERSION => {
+            // Schema 18 adds library tables.
+            names
+                == attachment_expected
+                    .iter()
+                    .cloned()
+                    .chain(
+                        mention_migration::TABLE_NAMES
+                            .iter()
+                            .map(|name| (*name).to_owned()),
+                    )
+                    .chain(
+                        library_migration::TABLE_NAMES
+                            .iter()
+                            .map(|name| (*name).to_owned()),
+                    )
+                    .collect::<std::collections::BTreeSet<String>>()
+        }
         _ => false,
     };
     if !valid {
@@ -658,29 +708,32 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     }
     if matches!(
         version,
-        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17
+        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18
     ) {
         document_format_migration::validate(db).await?;
     }
-    if matches!(version, 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
+    if matches!(
+        version,
+        7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18
+    ) {
         agent_status_migration::validate(db).await?;
     }
-    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
+    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
         gateway_migration::validate(db).await?;
     }
-    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
+    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
         org_code_migration::validate(db).await?;
     }
-    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17) {
+    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
         image_blob_migration::validate(db).await?;
     }
-    if matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | 17) {
+    if matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
         session_migration::validate(db).await?;
     }
-    if matches!(version, 12 | 13 | 14 | 15 | 16 | 17) {
+    if matches!(version, 12 | 13 | 14 | 15 | 16 | 17 | 18) {
         session_migration::validate_node_link(db).await?;
     }
-    if matches!(version, 13 | 14 | 15 | 16 | 17) {
+    if matches!(version, 13 | 14 | 15 | 16 | 17 | 18) {
         session_migration::validate_activity(db).await?;
     }
     if matches!(
@@ -689,6 +742,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             | attachment_migration::SCHEMA_VERSION
             | mention_migration::SCHEMA_VERSION
             | attachment_archived_migration::SCHEMA_VERSION
+            | library_migration::SCHEMA_VERSION
     ) {
         session_migration::validate_effort(db).await?;
         // 13 only. A schema-12 snapshot still has the historical 1000 bound and
@@ -701,17 +755,25 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         attachment_migration::SCHEMA_VERSION
             | mention_migration::SCHEMA_VERSION
             | attachment_archived_migration::SCHEMA_VERSION
+            | library_migration::SCHEMA_VERSION
     ) {
         attachment_migration::validate(db).await?;
     }
     if matches!(
         version,
-        mention_migration::SCHEMA_VERSION | attachment_archived_migration::SCHEMA_VERSION
+        mention_migration::SCHEMA_VERSION
+            | attachment_archived_migration::SCHEMA_VERSION
+            | library_migration::SCHEMA_VERSION
     ) {
         mention_migration::validate(db).await?;
     }
-    if version == attachment_archived_migration::SCHEMA_VERSION {
+    if version == attachment_archived_migration::SCHEMA_VERSION
+        || version == library_migration::SCHEMA_VERSION
+    {
         attachment_archived_migration::validate_archived_column(db).await?;
+    }
+    if version == library_migration::SCHEMA_VERSION {
+        library_migration::validate(db).await?;
     }
     Ok(version)
 }

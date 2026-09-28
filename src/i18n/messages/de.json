@@ -356,6 +356,7 @@
     "workspaceDescription": "Organisieren Sie Projekte und verschachtelte Ordner passend zur Arbeitsweise Ihres Teams.",
     "agentUnavailable": "Agenten-Chats werden vorbereitet",
     "agentDescription": "Sie können Ihren Arbeitsbereich bereits erkunden und organisieren. Die Agentenausführung ist noch nicht aktiviert. Jede Person wird ihr eigenes unterstütztes KI-Abonnement verwenden. Neev stellt weder ein gemeinsames KI-Konto noch Ersatzguthaben bereit.",
+    "sharedLibrary": "Shared library",
     "personalAgents": "Persönliche KI-Verbindungen",
     "insideFolder": "In {name}",
     "projectDescription": "Ein Projekt bildet die oberste Ebene Ihres Team-Arbeitsbereichs.",

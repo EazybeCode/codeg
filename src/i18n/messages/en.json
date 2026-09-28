@@ -356,6 +356,7 @@
     "workspaceDescription": "Organize projects and nested folders around the way your team works.",
     "agentUnavailable": "Agent chats are being enabled",
     "agentDescription": "You can explore and organize your workspace now. Agent runtime is not yet enabled. When available, each person will use their own supported AI-tool subscription. Neev does not provide a shared AI account or credit fallback.",
+    "sharedLibrary": "Shared library",
     "personalAgents": "Personal AI connections",
     "insideFolder": "Inside {name}",
     "projectDescription": "A project is the top level of your team’s workspace.",

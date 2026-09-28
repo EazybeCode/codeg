@@ -12,6 +12,7 @@ pub(crate) mod engine;
 pub(crate) mod error;
 mod gateway;
 pub(crate) mod http;
+pub(crate) mod library;
 #[cfg(feature = "dev-agent")]
 pub mod dev_agent;
 pub(crate) mod mail;

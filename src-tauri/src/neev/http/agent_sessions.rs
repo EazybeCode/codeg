@@ -32,6 +32,7 @@ use super::content::{
 };
 use super::{catalog, private_json, ApiError};
 use crate::neev::agents::execution::{RunAttachment, RunRequest};
+use crate::neev::agents::library_runtime::LibraryRunItem;
 use crate::neev::agents::runs::{self, RunSignal};
 use crate::neev::agents::sessions::{self, AgentSession, AgentTurn, SessionInput, TurnStatus};
 use crate::neev::agents::{intents, supervisor, transcript, types::Provider};
@@ -544,6 +545,11 @@ pub(super) async fn start_turn(
             .map_err(super::agent_error)?,
         None => None,
     };
+    // Load enabled library items for the org BEFORE creating the pending turn.
+    // A failure here is reported honestly as Unavailable rather than leaving a
+    // forever-running turn.
+    let library_items = load_library_items(&state, &actor).await?;
+
     // A saved-session turn carries no request id, so this caller is always
     // its creator. The references commit with the turn row.
     let (turn, _created) =
@@ -576,6 +582,7 @@ pub(super) async fn start_turn(
         context.as_ref().map(|bundle| &bundle.manifest),
     )
     .await;
+
     let run_request = RunRequest {
         // Server-authoritative identity: never a client-supplied user/org.
         user_id: actor.identity.user_id,
@@ -599,6 +606,8 @@ pub(super) async fn start_turn(
         // the uploads above so the prompt can keep telling the truth about which
         // files arrived with this message.
         context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
+        // Shared org library items (skills and MCP configs).
+        library_items,
     };
     match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -1449,6 +1458,8 @@ pub(super) async fn team_invoke(
     //    same transaction. This also proves write access to the chat and
     //    applies the org's message quota, so an unauthorized or over-quota
     //    invocation never reaches the runtime.
+    // Resolve shared instructions before persisting a new user message or turn.
+    let library_items = load_library_items(&state, &actor).await?;
     let prompt_message = crate::neev::content::messages::append_with_attachments(
         &state,
         &actor,
@@ -1501,6 +1512,7 @@ pub(super) async fn team_invoke(
     let credential_handle = intents::credential(&state, &actor, provider)
         .await
         .map_err(super::agent_error)?;
+
     // `requestId` makes the whole invocation idempotent — a retry (racing or
     // long after the fact) resolves to the SAME turn and run, so the provider
     // never executes one ask twice and no duplicate reply can be published.
@@ -1568,6 +1580,7 @@ pub(super) async fn team_invoke(
         context.as_ref().map(|bundle| &bundle.manifest),
     )
     .await;
+
     let run_request = RunRequest {
         user_id: actor.identity.user_id,
         org_id: actor.org_id,
@@ -1589,6 +1602,8 @@ pub(super) async fn team_invoke(
         // invoker is here: the set is scoped to this chat in SQL and re-proven
         // against the chat's ACL, so it is the same material the room can read.
         context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
+        // Shared org library items (skills and MCP configs).
+        library_items,
     };
     let turn = match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -2061,6 +2076,21 @@ pub(super) async fn list_connections(
             .map(|view| connection_dto(view, runtime_enabled))
             .collect(),
     }))
+}
+
+/// Load enabled library items for the caller's org, converting to runtime form.
+///
+/// Called BEFORE the pending turn is created so a failure can be reported
+/// honestly as Unavailable rather than leaving a forever-running turn.
+async fn load_library_items(
+    state: &ServerState,
+    actor: &OrgContext,
+) -> Result<Vec<LibraryRunItem>, ApiError> {
+    let items = crate::neev::library::load_enabled(state, actor)
+        .await
+        .map_err(|_| ApiError::Unavailable)?;
+
+    Ok(items.into_iter().map(LibraryRunItem::from).collect())
 }
 
 #[cfg(test)]

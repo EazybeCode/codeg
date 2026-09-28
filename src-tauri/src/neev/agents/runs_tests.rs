@@ -74,6 +74,7 @@ impl Harness {
                 fast: false,
                 attachments: Vec::new(),
                 context_files: Vec::new(),
+                library_items: Vec::new(),
             })
             .await
             .unwrap();
@@ -665,6 +666,7 @@ async fn drive_spooled_output(corrupt: bool) {
             fast: false,
             attachments: vec![],
             context_files: vec![],
+            library_items: vec![],
         })
         .await
         .unwrap();

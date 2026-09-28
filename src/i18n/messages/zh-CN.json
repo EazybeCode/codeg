@@ -356,6 +356,7 @@
     "workspaceDescription": "按照团队的工作方式整理项目和嵌套文件夹。",
     "agentUnavailable": "智能体聊天正在准备中",
     "agentDescription": "您现在可以浏览和整理工作空间。智能体运行尚未启用。开放后，每个人都将使用自己受支持的AI工具订阅。Neev不提供共享AI账户或备用额度。",
+    "sharedLibrary": "Shared library",
     "personalAgents": "个人AI连接",
     "insideFolder": "位于{name}内",
     "projectDescription": "项目是团队工作空间的最上层。",
