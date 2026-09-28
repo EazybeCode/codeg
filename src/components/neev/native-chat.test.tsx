@@ -531,6 +531,26 @@ const teamSession = {
 }
 /** No invocation has ever been made here — an empty history, not an error. */
 const noSessions = {
+  "GET /api/neev/agent/connections": () =>
+    json({
+      runtimeEnabled: true,
+      connections: [
+        {
+          provider: "claude",
+          state: "connected",
+          accountLabel: "test",
+          checkedAt: 1700000000,
+          errorCode: null,
+        },
+        {
+          provider: "codex",
+          state: "connected",
+          accountLabel: "test",
+          checkedAt: 1700000000,
+          errorCode: null,
+        },
+      ],
+    }),
   [TEAM_SESSION("claude")]: () => json({ code: "not_found" }, 404),
   [TEAM_SESSION("codex")]: () => json({ code: "not_found" }, 404),
 }
@@ -812,6 +832,7 @@ it("hands the streamed reply to the stored one with no gap and no double", async
   let replied = false
   mockNativeSession(undefined, {
     "GET /api/workos/capabilities": capable,
+    ...noSessions,
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}`]: async () => {
       if (replied) await history
@@ -1262,8 +1283,9 @@ it("points an unconnected provider at the one place it can be fixed", async () =
   // describing the state. The sentence is still there as the control's
   // accessible description — honest, without a standing line under every
   // composer — and a provider that needs re-authorising says Reconnect.
-  const connect = await screen.findByRole("link", { name: "Reconnect" })
-  expect(connect).toHaveAttribute("href", "/settings?section=agents")
+  const connect = await screen.findByRole("button", { name: "Reconnect" })
+  fireEvent.click(connect)
+  expect(await screen.findByRole("dialog")).toBeVisible()
   expect(
     document.getElementById(connect.getAttribute("aria-describedby") ?? "")
   ).toHaveTextContent("claude is not connected yet.")
@@ -1410,6 +1432,7 @@ it("re-reads only what is new after a run completes", async () => {
   const reads: string[] = []
   const mock = mockNativeSession(undefined, {
     "GET /api/workos/capabilities": capable,
+    ...noSessions,
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}`]: () =>
       json({ items: [askMessage, replyMessage], nextAfter: null }),
@@ -1823,6 +1846,7 @@ it("switches provider through the model menu and keeps each holder's own configu
   const invocations: Record<string, unknown>[] = []
   mockNativeSession(undefined, {
     "GET /api/workos/capabilities": capable,
+    ...noSessions,
     [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
     [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
     [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
@@ -2138,4 +2162,68 @@ it("keeps an agent reply formatted when it carries a generated download", async 
     "href",
     `/api/neev/attachments/${key}`
   )
+})
+
+const connectionRow = (provider: string, state: string) => ({
+  provider,
+  state,
+  accountLabel: state === "connected" ? "sagar@example.test" : null,
+  checkedAt: state === "connected" ? 1700000000 : null,
+  errorCode: null,
+})
+it("defaults a new chat to the connected provider", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [
+          connectionRow("claude", "not_signed_in"),
+          connectionRow("codex", "connected"),
+        ],
+      }),
+  })
+  mount(true)
+  await ready()
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Model" })).toHaveAttribute(
+      "title",
+      expect.stringContaining("Codex")
+    )
+  )
+  const user = userEvent.setup()
+  await pickFromMoreModels(user, "Claude Code", "Haiku")
+  expect(await screen.findByRole("dialog")).toBeVisible()
+  expect(
+    within(screen.getByRole("dialog")).getByRole("heading", {
+      name: "Connect · Claude",
+    })
+  ).toBeVisible()
+})
+it("opens connection dialog without invoking or losing the draft when disconnected", async () => {
+  const invoke = vi.fn(() => json({ code: "unavailable" }, 503))
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [connectionRow("claude", "not_signed_in")],
+      }),
+    [AGENT_PATH]: invoke,
+  })
+  mount(true)
+  await ready()
+  await typeAsk()
+  fireEvent.click(screen.getByRole("button", { name: "Send" }))
+  expect(await screen.findByRole("dialog")).toBeVisible()
+  expect(invoke).not.toHaveBeenCalled()
+  expect(
+    composerText(screen.getByRole("textbox", { name: "Message", hidden: true }))
+  ).toBe("help")
 })

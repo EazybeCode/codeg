@@ -1,0 +1,10 @@
+/var/log/neev-disk-cleanup.log {
+    su root root
+    weekly
+    rotate 4
+    size 1M
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

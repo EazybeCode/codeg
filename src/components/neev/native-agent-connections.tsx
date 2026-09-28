@@ -160,6 +160,7 @@ function CodexSetupHelp() {
 
 export function NativeAgentConnectionsPanel({
   connections,
+  providerFilter,
   onRefresh,
   onRequestSettings,
   showSettingsLink = true,
@@ -167,6 +168,7 @@ export function NativeAgentConnectionsPanel({
   pollMs = ATTEMPT_POLL_MS,
 }: {
   /** Supplied when a parent already loaded them; otherwise this loads its own. */
+  providerFilter?: NeevAgentProvider
   connections?: NeevAgentConnections | null
   onRefresh?: () => void
   onRequestSettings?: () => void
@@ -614,78 +616,83 @@ export function NativeAgentConnectionsPanel({
             </p>
           )}
           <ul className="space-y-3">
-            {state.connections.map((connection) => (
-              <li key={connection.provider} className="space-y-2">
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-                  <span className="font-medium">
-                    {label(connection.provider)}
-                  </span>
-                  <span className="text-muted-foreground">
-                    {attempt?.provider === connection.provider
-                      ? t("awaitingSignIn")
-                      : testing === connection.provider
-                        ? t("testingConnection")
-                        : t(
-                            `connectionState_${
-                              tested?.provider === connection.provider
-                                ? tested.state
-                                : connection.state
-                            }`
-                          )}
-                  </span>
-                  {connection.accountLabel && (
-                    <span className="min-w-0 truncate text-xs text-muted-foreground">
-                      {connection.accountLabel}
+            {state.connections
+              .filter(
+                (connection) =>
+                  !providerFilter || connection.provider === providerFilter
+              )
+              .map((connection) => (
+                <li key={connection.provider} className="space-y-2">
+                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+                    <span className="font-medium">
+                      {label(connection.provider)}
                     </span>
-                  )}
-                  {/* A check that finds nothing wrong leaves every other word on
+                    <span className="text-muted-foreground">
+                      {attempt?.provider === connection.provider
+                        ? t("awaitingSignIn")
+                        : testing === connection.provider
+                          ? t("testingConnection")
+                          : t(
+                              `connectionState_${
+                                tested?.provider === connection.provider
+                                  ? tested.state
+                                  : connection.state
+                              }`
+                            )}
+                    </span>
+                    {connection.accountLabel && (
+                      <span className="min-w-0 truncate text-xs text-muted-foreground">
+                        {connection.accountLabel}
+                      </span>
+                    )}
+                    {/* A check that finds nothing wrong leaves every other word on
                       this row identical, so without the time it reads as a
                       button that does nothing. The server's own `checkedAt` is
                       what moves; `role="status"` announces it. */}
-                  {checkedAt(connection) !== null && (
-                    <span
-                      role="status"
-                      className="text-xs text-muted-foreground"
-                    >
-                      {n("connectionCheckedAt", {
-                        time: new Date(
-                          checkedAt(connection)! * 1000
-                        ).toLocaleTimeString(),
-                      })}
-                    </span>
-                  )}
-                  {attempt?.provider === connection.provider ? (
-                    <span className="text-xs text-muted-foreground">
-                      {t("signInExpires")}{" "}
-                      <time
-                        dateTime={new Date(
-                          attempt.expiresAt * 1000
-                        ).toISOString()}
+                    {checkedAt(connection) !== null && (
+                      <span
+                        role="status"
+                        className="text-xs text-muted-foreground"
                       >
-                        {new Date(attempt.expiresAt * 1000).toLocaleString()}
-                      </time>
-                    </span>
-                  ) : null}
-                </div>
-                {connection.provider === "codex" &&
-                  connection.state !== "connected" &&
-                  connection.state !== "disabled" &&
-                  connection.state !== "unavailable" && <CodexSetupHelp />}
-                {attempt?.provider === connection.provider &&
-                  approval !== null && (
-                    <ApprovalPrompt
-                      approval={approval}
-                      code={code}
-                      submitting={submitting}
-                      onCode={setCode}
-                      onSubmit={() => void submitCode()}
-                    />
-                  )}
-                <div className="flex flex-wrap gap-2">
-                  {actionsFor(connection)}
-                </div>
-              </li>
-            ))}
+                        {n("connectionCheckedAt", {
+                          time: new Date(
+                            checkedAt(connection)! * 1000
+                          ).toLocaleTimeString(),
+                        })}
+                      </span>
+                    )}
+                    {attempt?.provider === connection.provider ? (
+                      <span className="text-xs text-muted-foreground">
+                        {t("signInExpires")}{" "}
+                        <time
+                          dateTime={new Date(
+                            attempt.expiresAt * 1000
+                          ).toISOString()}
+                        >
+                          {new Date(attempt.expiresAt * 1000).toLocaleString()}
+                        </time>
+                      </span>
+                    ) : null}
+                  </div>
+                  {connection.provider === "codex" &&
+                    connection.state !== "connected" &&
+                    connection.state !== "disabled" &&
+                    connection.state !== "unavailable" && <CodexSetupHelp />}
+                  {attempt?.provider === connection.provider &&
+                    approval !== null && (
+                      <ApprovalPrompt
+                        approval={approval}
+                        code={code}
+                        submitting={submitting}
+                        onCode={setCode}
+                        onSubmit={() => void submitCode()}
+                      />
+                    )}
+                  <div className="flex flex-wrap gap-2">
+                    {actionsFor(connection)}
+                  </div>
+                </li>
+              ))}
           </ul>
         </>
       )}

@@ -14,6 +14,7 @@ import { NativeMarkdown } from "./native-markdown"
 import { usePublishRunningChat } from "@/lib/neev-running-chats"
 
 import {
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -21,7 +22,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react"
-import Link from "next/link"
+import { NativeAgentConnectionsPanel } from "./native-agent-connections"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog"
@@ -346,7 +347,6 @@ function Chat({
   onBack,
   onChanged,
   onDirtyChange,
-  onRequestSettings,
   actions,
   fresh = false,
   showBack = false,
@@ -454,6 +454,14 @@ function Chat({
   // this person last used it. Either is one click from the other.
   const [mode, setMode] = useState<ChatMode>(fresh ? "agent" : "team")
   const chose = useRef(false)
+  const providerChosen = useRef(false)
+  const checkingConnection = useRef(false)
+  const [connectOpen, setConnectOpen] = useState(false)
+  const refreshConnections = useCallback(async () => {
+    const value = await loadAgentConnections(auth.signal)
+    if (!auth.signal?.aborted) setConnections(value)
+    return value
+  }, [auth.signal])
   const storageKey = auth.session
     ? preferenceKey(
         `${auth.session.user.id}:${auth.session.organization?.id ?? "identity"}`,
@@ -480,6 +488,16 @@ function Chat({
   function choose(next: ChatMode, provider = agentProvider) {
     chose.current = true
     setMode(next)
+    if (provider !== agentProvider) {
+      providerChosen.current = true
+      const target = connections?.connections.find(
+        (row) => row.provider === provider
+      )
+      if (target && target.state !== "connected") {
+        setError(null)
+        setConnectOpen(true)
+      }
+    }
     setAgentProvider(provider)
     if (storageKey) writePreference(storageKey, { mode: next, provider })
   }
@@ -908,6 +926,22 @@ function Chat({
     }
   }, [runtimeEnabled, auth.signal])
   useEffect(() => {
+    if (!connections || providerChosen.current || agentBusy) return
+    if (
+      connections.connections.some(
+        (row) => row.provider === agentProvider && row.state === "connected"
+      )
+    )
+      return
+    const connected = connections.connections.find(
+      (row) => row.state === "connected"
+    )
+    if (connected) {
+      setAgentProvider(connected.provider)
+      setDesired(null)
+    }
+  }, [connections, agentProvider, agentBusy])
+  useEffect(() => {
     if (!runtimeEnabled) return
     let live = true
     loadAgentCapabilities(auth.signal)
@@ -1165,6 +1199,27 @@ function Chat({
       !auth.session
     )
       return
+    if (checkingConnection.current) return
+    checkingConnection.current = true
+    try {
+      const wiring = await refreshConnections()
+      if (!scope.isCurrent()) return
+      if (
+        !wiring.connections.some(
+          (row) => row.provider === agentProvider && row.state === "connected"
+        )
+      ) {
+        providerChosen.current = true
+        setError(null)
+        setConnectOpen(true)
+        return
+      }
+    } catch (cause) {
+      if (scope.isCurrent()) fail(cause)
+      return
+    } finally {
+      checkingConnection.current = false
+    }
     // The run reads the HOLDER, so an unstored choice would be ignored by the
     // very turn it was chosen for. Store it first, and if that fails do not
     // invoke: the prompt stays exactly where it was typed, with the reason
@@ -1975,6 +2030,14 @@ function Chat({
                   settings={shown}
                   disabled={agentBusy || applying || latest.archived}
                   onChange={(next, nextProvider) => {
+                    providerChosen.current = true
+                    const target = connections?.connections.find(
+                      (row) => row.provider === nextProvider
+                    )
+                    if (target && target.state !== "connected") {
+                      setError(null)
+                      setConnectOpen(true)
+                    }
                     if (nextProvider !== agentProvider) {
                       // Each provider keeps its OWN holder. Switching shows
                       // that holder's stored configuration with the model just
@@ -2007,14 +2070,7 @@ function Chat({
                     {t("settingsPending")}
                   </span>
                 )}
-                {/* The one thing that is actually broken, as the one thing
-                    that fixes it. This was a sentence and a link under the
-                    composer — permanent, a full line wide, and describing a
-                    state rather than offering a way out of it. It is now a
-                    button that says Connect and goes where connecting
-                    happens. Nothing here claims the provider IS connected:
-                    the chip appears precisely because it is not, and the run
-                    still fails honestly if one is started anyway. */}
+                {/* Connect in place, preserving the message and staged files. */}
                 {runtimeEnabled &&
                   connection &&
                   connection.state !== "connected" && (
@@ -2023,31 +2079,20 @@ function Chat({
                         {t("providerNotConnected", { name: agentProvider })}
                       </p>
                       <Button
-                        asChild
                         size="sm"
                         variant="outline"
+                        type="button"
                         className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs font-normal"
+                        aria-describedby={connectNote}
+                        onClick={() => {
+                          setError(null)
+                          setConnectOpen(true)
+                        }}
                       >
-                        {/* Still a link, so it opens in a new tab the way a link
-                          does and works with the panel closed. */}
-                        <Link
-                          href="/settings?section=agents"
-                          aria-describedby={connectNote}
-                          title={t("providerNotConnected", {
-                            name: agentProvider,
-                          })}
-                          onClick={(event) => {
-                            if (onRequestSettings) {
-                              event.preventDefault()
-                              onRequestSettings()
-                            }
-                          }}
-                        >
-                          <PlugZap aria-hidden className="size-3.5" />
-                          {connection.state === "reconnect_required"
-                            ? t("reconnectProvider")
-                            : t("connectProvider")}
-                        </Link>
+                        <PlugZap aria-hidden className="size-3.5" />
+                        {connection.state === "reconnect_required"
+                          ? t("reconnectProvider")
+                          : t("connectProvider")}
                       </Button>
                     </>
                   )}
@@ -2108,6 +2153,32 @@ function Chat({
           )}
         </div>
       </form>
+      <Dialog
+        open={connectOpen}
+        onOpenChange={(open) => {
+          setConnectOpen(open)
+          if (!open) void refreshConnections().catch(() => {})
+        }}
+      >
+        <DialogContent className="max-h-[85dvh] overflow-y-auto">
+          <DialogTitle>
+            {t("connectProvider")} ·{" "}
+            {agentProvider === "claude" ? "Claude" : "Codex"}
+          </DialogTitle>
+          <DialogDescription>
+            {t("providerNotConnected", { name: agentProvider })}
+          </DialogDescription>
+          {connectOpen && (
+            <NativeAgentConnectionsPanel
+              providerFilter={agentProvider}
+              showSettingsLink={false}
+              onRefresh={() => {
+                void refreshConnections().catch(() => {})
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
       <Dialog open={review} onOpenChange={setReview}>
         <DialogContent>
           <DialogTitle>{t("reviewAudience")}</DialogTitle>
