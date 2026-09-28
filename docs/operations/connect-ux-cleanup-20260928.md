@@ -24,3 +24,11 @@ containers, volumes, uploads, database files, backups, or tagged release images.
 First run increased free space from 530 MB to 1.4 GB. Cron is active; shell syntax
 and logrotate config validated. Capacity remains tight: retained images/data
 need a separate retention decision or a larger disk if growth continues.
+
+Production build/typecheck and lint passed. Released frontend-only image
+`neev-native-agent:connect-ux-20260928`; live workspace SHA256
+`7b0faf95bcaba0254dcdf6d45a052a76c7a69c8b9ab11e180f1f089d8aaacbff`.
+Guard confirmed no running turns/sign-ins; fresh backup verified. Schema17 and
+backend binary unchanged. Live browser showed connected Codex selected; selecting
+Claude Default opened Connect · Claude with Not signed in and Connect claude.
+No test prompt was posted or sign-in started. Popup left open for user review.
