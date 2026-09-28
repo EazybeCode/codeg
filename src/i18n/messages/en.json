@@ -255,7 +255,13 @@
     "mentionedYou": "{name} mentioned you",
     "mentionsUnread": "{number} unread",
     "mentionsOpen": "Open mentions",
-    "mentionsUnreachable": "This conversation could not be opened here."
+    "mentionsUnreachable": "This conversation could not be opened here.",
+    "loadingFiles": "Loading files…",
+    "filesError": "Could not load files",
+    "noGeneratedFiles": "No generated files",
+    "generatedFiles": "Generated files",
+    "expandFiles": "Show generated files",
+    "collapseFiles": "Hide generated files"
   },
   "Native": {
     "callbackConflict": "This sign-in method conflicts with an existing account. Use your original sign-in method, then open Settings to link another method. Accounts are never merged automatically.",

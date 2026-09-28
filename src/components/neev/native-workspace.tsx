@@ -17,6 +17,7 @@ import {
 import { useTranslations } from "next-intl"
 import {
   Bot,
+  ChevronDown,
   ChevronRight,
   File,
   FileText,
@@ -99,6 +100,8 @@ import {
   type NativeResource,
   type NativeResourceKind,
 } from "@/lib/neev-content-client"
+import { ChatFilesList } from "./native-chat-files"
+import { useExpandedItems } from "@/lib/neev-session-files-state"
 
 /**
  * The container and every ancestor above it, so revealing a nested resource
@@ -626,6 +629,8 @@ function NativeWorkspaceTree({
     const key = runningChatKey(auth.session, kind, id)
     return key !== null && runningChats.has(key)
   }
+  // Track which chats/sessions are expanded to show generated files.
+  const expandedFiles = useExpandedItems(auth.scopeKey)
   return (
     <ul
       className={cn(
@@ -769,49 +774,54 @@ function NativeWorkspaceTree({
                     */}
                     {(list?.items ?? [])
                       .filter((resource) => showTrash || !resource.archived)
-                      .map((resource) => (
-                        <li key={resource.id}>
-                          {/* A row and its menu, in one hoverable group. The
-                              menu button is always in the tree for keyboard and
-                              screen-reader users; it only *appears* on hover or
-                              focus, so a quiet sidebar stays quiet. */}
-                          <div
-                            className={cn(
-                              "group/item flex min-h-8 min-w-0 items-center rounded-lg pe-1",
-                              openResourceId === resource.id
-                                ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
-                                : "text-muted-foreground hover:bg-sidebar-accent/60"
-                            )}
-                          >
-                            <button
-                              onClick={() => selectResource(node, resource)}
-                              aria-current={
+                      .map((resource) => {
+                        const filesExpanded =
+                          resource.kind === "chat" &&
+                          expandedFiles.isExpanded(resource.id)
+                        return (
+                          <li key={resource.id}>
+                            {/* A row and its menu, in one hoverable group. The
+                                menu button is always in the tree for keyboard and
+                                screen-reader users; it only *appears* on hover or
+                                focus, so a quiet sidebar stays quiet. */}
+                            <div
+                              className={cn(
+                                "group/item flex min-h-8 min-w-0 items-center rounded-lg pe-1",
                                 openResourceId === resource.id
-                                  ? "page"
-                                  : undefined
-                              }
-                              className="flex min-h-8 w-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              {resource.kind === "document" ? (
-                                <FileText
-                                  aria-hidden
-                                  className="size-3.5 shrink-0"
-                                />
-                              ) : (
-                                <MessagesSquare
-                                  aria-hidden
-                                  className="size-3.5 shrink-0"
-                                />
+                                  ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+                                  : "text-muted-foreground hover:bg-sidebar-accent/60"
                               )}
-                              <span
-                                className={cn(
-                                  "truncate",
-                                  resource.archived && "line-through opacity-70"
-                                )}
-                                title={resource.title}
+                            >
+                              <button
+                                onClick={() => selectResource(node, resource)}
+                                aria-current={
+                                  openResourceId === resource.id
+                                    ? "page"
+                                    : undefined
+                                }
+                                className="flex min-h-8 w-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
                               >
-                                {resource.title}
-                              </span>
+                                {resource.kind === "document" ? (
+                                  <FileText
+                                    aria-hidden
+                                    className="size-3.5 shrink-0"
+                                  />
+                                ) : (
+                                  <MessagesSquare
+                                    aria-hidden
+                                    className="size-3.5 shrink-0"
+                                  />
+                                )}
+                                <span
+                                  className={cn(
+                                    "truncate",
+                                    resource.archived &&
+                                      "line-through opacity-70"
+                                  )}
+                                  title={resource.title}
+                                >
+                                  {resource.title}
+                                </span>
                               {resource.kind === "chat" &&
                                 isRunning("chat", resource.id) && (
                                   <span
@@ -823,59 +833,108 @@ function NativeWorkspaceTree({
                                     <AgentRunIndicator className="size-3 text-muted-foreground" />
                                   </span>
                                 )}
-                              {/* Says where it is, so a struck-through row is
-                                  not left to be guessed at. */}
-                              {resource.archived && (
-                                <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
-                                  {c("inTrash")}
-                                </span>
-                              )}
-                            </button>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
+                                {/* Says where it is, so a struck-through row is
+                                    not left to be guessed at. */}
+                                {resource.archived && (
+                                  <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
+                                    {c("inTrash")}
+                                  </span>
+                                )}
+                              </button>
+                              {/* Expand/collapse generated files for chats. */}
+                              {resource.kind === "chat" && (
                                 <button
-                                  aria-label={c("itemActions", {
-                                    title: resource.title,
-                                  })}
+                                  aria-label={c(
+                                    filesExpanded
+                                      ? "collapseFiles"
+                                      : "expandFiles"
+                                  )}
+                                  title={c(
+                                    filesExpanded
+                                      ? "collapseFiles"
+                                      : "expandFiles"
+                                  )}
+                                  onClick={() =>
+                                    expandedFiles.toggle(resource.id)
+                                  }
                                   className={cn(
                                     "flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring",
-                                    // Hidden until hover ONLY where hovering
-                                    // exists. On a touch screen there is no
-                                    // hover, so an opacity-0 control is simply
-                                    // a control nobody can find.
                                     "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/item:opacity-100",
-                                    "group-focus-within/item:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                                    "group-focus-within/item:opacity-100 focus-visible:opacity-100",
+                                    filesExpanded && "opacity-100"
                                   )}
                                 >
-                                  <MoreHorizontal
-                                    aria-hidden
-                                    className="size-3.5"
-                                  />
+                                  {filesExpanded ? (
+                                    <ChevronDown
+                                      aria-hidden
+                                      className="size-3.5"
+                                    />
+                                  ) : (
+                                    <ChevronRight
+                                      aria-hidden
+                                      className="size-3.5"
+                                    />
+                                  )}
                                 </button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuItem
-                                  onSelect={() =>
-                                    renameResource(node, resource)
-                                  }
-                                >
-                                  {c("rename")}
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  disabled={actionsBusy}
-                                  onSelect={() => trashResource(resource)}
-                                >
-                                  {c(
-                                    resource.archived
-                                      ? "restoreFromTrash"
-                                      : "moveToTrash"
-                                  )}
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </div>
-                        </li>
-                      ))}
+                              )}
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <button
+                                    aria-label={c("itemActions", {
+                                      title: resource.title,
+                                    })}
+                                    className={cn(
+                                      "flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring",
+                                      // Hidden until hover ONLY where hovering
+                                      // exists. On a touch screen there is no
+                                      // hover, so an opacity-0 control is simply
+                                      // a control nobody can find.
+                                      "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/item:opacity-100",
+                                      "group-focus-within/item:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                                    )}
+                                  >
+                                    <MoreHorizontal
+                                      aria-hidden
+                                      className="size-3.5"
+                                    />
+                                  </button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onSelect={() =>
+                                      renameResource(node, resource)
+                                    }
+                                  >
+                                    {c("rename")}
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    disabled={actionsBusy}
+                                    onSelect={() => trashResource(resource)}
+                                  >
+                                    {c(
+                                      resource.archived
+                                        ? "restoreFromTrash"
+                                        : "moveToTrash"
+                                    )}
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                            {/* Generated files list, shown when expanded. */}
+                            {filesExpanded && (
+                              <div className="ms-6 border-s border-sidebar-border/60 ps-1.5 pt-0.5">
+                                <ChatFilesList
+                                  key={`${auth.scopeKey}:${resource.id}`}
+                                  id={resource.id}
+                                  kind="chat"
+                                  scopeKey={auth.scopeKey}
+                                  isRunning={isRunning("chat", resource.id)}
+                                />
+                              </div>
+                            )}
+                          </li>
+                        )
+                      })}
                     {/* A folder's own items, not the workspace. This said
                         "Loading your workspace…" inside an already-loaded
                         sidebar — including every time the trash was toggled or
@@ -942,6 +1001,25 @@ function NativeWorkspaceTree({
                                 {item.archived ? c("inTrash") : item.provider}
                               </span>
                             </button>
+                            <button
+                              aria-label={c(
+                                expandedFiles.isExpanded(item.id)
+                                  ? "collapseFiles"
+                                  : "expandFiles"
+                              )}
+                              aria-expanded={expandedFiles.isExpanded(item.id)}
+                              onClick={() => expandedFiles.toggle(item.id)}
+                              className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              {expandedFiles.isExpanded(item.id) ? (
+                                <ChevronDown aria-hidden className="size-3.5" />
+                              ) : (
+                                <ChevronRight
+                                  aria-hidden
+                                  className="size-3.5"
+                                />
+                              )}
+                            </button>
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
                                 <button
@@ -979,6 +1057,17 @@ function NativeWorkspaceTree({
                               </DropdownMenuContent>
                             </DropdownMenu>
                           </div>
+                          {expandedFiles.isExpanded(item.id) && (
+                            <div className="ms-6 border-s border-sidebar-border/60 ps-1.5 pt-0.5">
+                              <ChatFilesList
+                                key={`${auth.scopeKey}:${item.id}`}
+                                id={item.id}
+                                kind="agent"
+                                scopeKey={auth.scopeKey}
+                                isRunning={isRunning("agent", item.id)}
+                              />
+                            </div>
+                          )}
                         </li>
                       ))}
                   </ul>

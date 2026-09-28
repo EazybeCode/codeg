@@ -255,7 +255,13 @@
     "mentionedYou": "{name} 提到了你",
     "mentionsUnread": "{number} 則未讀",
     "mentionsOpen": "開啟提及",
-    "mentionsUnreachable": "無法在此處開啟該對話。"
+    "mentionsUnreachable": "無法在此處開啟該對話。",
+    "loadingFiles": "載入檔案中…",
+    "filesError": "無法載入檔案",
+    "noGeneratedFiles": "無生成檔案",
+    "generatedFiles": "生成的檔案",
+    "expandFiles": "顯示生成的檔案",
+    "collapseFiles": "隱藏生成的檔案"
   },
   "Native": {
     "callbackConflict": "此登入方式與現有帳戶衝突。請使用原來的登入方式，然後開啟設定連結其他方式。帳戶絕不會自動合併。",

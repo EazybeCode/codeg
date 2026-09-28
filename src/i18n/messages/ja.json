@@ -255,7 +255,13 @@
     "mentionedYou": "{name} さんがあなたをメンションしました",
     "mentionsUnread": "未読 {number} 件",
     "mentionsOpen": "メンションを開く",
-    "mentionsUnreachable": "この会話はここでは開けませんでした。"
+    "mentionsUnreachable": "この会話はここでは開けませんでした。",
+    "loadingFiles": "ファイルを読み込み中…",
+    "filesError": "ファイルを読み込めませんでした",
+    "noGeneratedFiles": "生成されたファイルはありません",
+    "generatedFiles": "生成されたファイル",
+    "expandFiles": "生成されたファイルを表示",
+    "collapseFiles": "生成されたファイルを非表示"
   },
   "Native": {
     "callbackConflict": "このログイン方法は既存のアカウントと競合しています。元のログイン方法でログインしてから、設定で別の方法を連携してください。アカウントが自動的に統合されることはありません。",

@@ -255,7 +255,13 @@
     "mentionedYou": "{name}님이 회원님을 멘션했습니다",
     "mentionsUnread": "읽지 않음 {number}개",
     "mentionsOpen": "멘션 열기",
-    "mentionsUnreachable": "이 대화를 여기서 열 수 없습니다."
+    "mentionsUnreachable": "이 대화를 여기서 열 수 없습니다.",
+    "loadingFiles": "파일 로드 중…",
+    "filesError": "파일을 로드할 수 없습니다",
+    "noGeneratedFiles": "생성된 파일 없음",
+    "generatedFiles": "생성된 파일",
+    "expandFiles": "생성된 파일 표시",
+    "collapseFiles": "생성된 파일 숨기기"
   },
   "Native": {
     "callbackConflict": "이 로그인 방식이 기존 계정과 충돌합니다. 원래 로그인 방식으로 로그인한 뒤 설정에서 다른 방식을 연결하세요. 계정은 자동으로 병합되지 않습니다.",

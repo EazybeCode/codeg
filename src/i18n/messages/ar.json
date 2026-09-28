@@ -255,7 +255,13 @@
     "mentionedYou": "{name} أشار إليك",
     "mentionsUnread": "{number} غير مقروءة",
     "mentionsOpen": "فتح الإشارات",
-    "mentionsUnreachable": "تعذّر فتح هذه المحادثة من هنا."
+    "mentionsUnreachable": "تعذّر فتح هذه المحادثة من هنا.",
+    "loadingFiles": "جارٍ تحميل الملفات…",
+    "filesError": "تعذّر تحميل الملفات",
+    "noGeneratedFiles": "لا توجد ملفات مُنشأة",
+    "generatedFiles": "الملفات المُنشأة",
+    "expandFiles": "عرض الملفات المُنشأة",
+    "collapseFiles": "إخفاء الملفات المُنشأة"
   },
   "Native": {
     "callbackConflict": "تتعارض طريقة تسجيل الدخول هذه مع حساب موجود. استخدم طريقة تسجيل الدخول الأصلية، ثم افتح الإعدادات لربط طريقة أخرى. لا تُدمج الحسابات تلقائيًا أبدًا.",

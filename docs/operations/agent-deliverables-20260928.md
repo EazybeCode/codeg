@@ -72,3 +72,23 @@ HTML attachment. The user’s Chrome download UI reported an organisation securi
 policy block for that HTML; no bypass or alternative delivery channel was attempted.
 Agent-reported offline checks found no JavaScript errors or mobile overflow, but
 17 external resource requests were blocked and remain unverified.
+
+## Chat-generated file hierarchy
+
+Added expandable generated-file children to resource chats and private agent
+sessions in the workspace sidebar. Lists load only when expanded, paginate through
+history, deduplicate attachment keys, exclude uploaded inputs, and refresh with
+run state. Expansion is scoped to the current user/organisation and requests are
+aborted on collapse. Links retain the existing authenticated download endpoint;
+no HTML preview, alternate delivery channel or security-policy bypass was added.
+
+Focused tests: 56 passed, including workspace navigation and the new file list.
+The existing JSDOM hit-testing shim was extended with `elementsFromPoint` for
+BlockNote's sidebar events. TypeScript and targeted ESLint passed.
+
+Released the hierarchy UI as `neev-native-agent:deliverables-composer-20260928-r3`.
+Production build passed; health and workspace hash verified:
+`b20c59fc892e97fa7d0af9d4d03db3e104b363ee9f3954cfc238b96fc23f3969`.
+Live browser verification: expanding the originating chat lists the 80-byte
+verification HTML and the 21.6 MB V105 HTML as children. The blocked HTML download
+was not retried. No claim is made that the browser security-policy block is fixed.

@@ -255,7 +255,13 @@
     "mentionedYou": "{name} hat dich erwähnt",
     "mentionsUnread": "{number} ungelesen",
     "mentionsOpen": "Erwähnungen öffnen",
-    "mentionsUnreachable": "Diese Unterhaltung kann hier nicht geöffnet werden."
+    "mentionsUnreachable": "Diese Unterhaltung kann hier nicht geöffnet werden.",
+    "loadingFiles": "Dateien werden geladen…",
+    "filesError": "Dateien konnten nicht geladen werden",
+    "noGeneratedFiles": "Keine generierten Dateien",
+    "generatedFiles": "Generierte Dateien",
+    "expandFiles": "Generierte Dateien anzeigen",
+    "collapseFiles": "Generierte Dateien ausblenden"
   },
   "Native": {
     "callbackConflict": "Diese Anmeldemethode steht im Konflikt mit einem bestehenden Konto. Verwende deine ursprüngliche Anmeldemethode und verknüpfe dann eine weitere Methode in den Einstellungen. Konten werden nie automatisch zusammengeführt.",

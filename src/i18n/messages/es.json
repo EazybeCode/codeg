@@ -255,7 +255,13 @@
     "mentionedYou": "{name} te mencionó",
     "mentionsUnread": "{number} sin leer",
     "mentionsOpen": "Abrir menciones",
-    "mentionsUnreachable": "Esta conversación no se pudo abrir aquí."
+    "mentionsUnreachable": "Esta conversación no se pudo abrir aquí.",
+    "loadingFiles": "Cargando archivos…",
+    "filesError": "No se pudieron cargar los archivos",
+    "noGeneratedFiles": "Sin archivos generados",
+    "generatedFiles": "Archivos generados",
+    "expandFiles": "Mostrar archivos generados",
+    "collapseFiles": "Ocultar archivos generados"
   },
   "Native": {
     "callbackConflict": "Este método de acceso entra en conflicto con una cuenta existente. Usa tu método de acceso original y luego abre Configuración para vincular otro método. Las cuentas nunca se fusionan automáticamente.",

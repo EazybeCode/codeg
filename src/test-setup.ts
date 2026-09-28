@@ -4,6 +4,10 @@ import "@testing-library/jest-dom/vitest"
 // touches on mount (used by Tiptap-based editors such as the message composer).
 // Polyfill them as no-ops so headless/component editor tests can construct a
 // view. Only defined when missing, so real browsers/environments are untouched.
+// JSDOM has no layout hit-testing; BlockNote also calls the plural API.
+if (typeof document !== "undefined" && !document.elementsFromPoint) {
+  document.elementsFromPoint = () => []
+}
 if (typeof document !== "undefined" && !document.elementFromPoint) {
   document.elementFromPoint = () => null
 }

@@ -255,7 +255,13 @@
     "mentionedYou": "{name} vous a mentionné",
     "mentionsUnread": "{number} non lues",
     "mentionsOpen": "Ouvrir les mentions",
-    "mentionsUnreachable": "Cette conversation n’a pas pu être ouverte ici."
+    "mentionsUnreachable": "Cette conversation n'a pas pu être ouverte ici.",
+    "loadingFiles": "Chargement des fichiers…",
+    "filesError": "Impossible de charger les fichiers",
+    "noGeneratedFiles": "Aucun fichier généré",
+    "generatedFiles": "Fichiers générés",
+    "expandFiles": "Afficher les fichiers générés",
+    "collapseFiles": "Masquer les fichiers générés"
   },
   "Native": {
     "callbackConflict": "Cette méthode de connexion entre en conflit avec un compte existant. Utilisez votre méthode de connexion initiale, puis ouvrez les paramètres pour en associer une autre. Les comptes ne sont jamais fusionnés automatiquement.",

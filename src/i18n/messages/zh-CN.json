@@ -255,7 +255,13 @@
     "mentionedYou": "{name} 提到了你",
     "mentionsUnread": "{number} 条未读",
     "mentionsOpen": "打开提及",
-    "mentionsUnreachable": "无法在此处打开该对话。"
+    "mentionsUnreachable": "无法在此处打开该对话。",
+    "loadingFiles": "加载文件中…",
+    "filesError": "无法加载文件",
+    "noGeneratedFiles": "无生成文件",
+    "generatedFiles": "生成的文件",
+    "expandFiles": "显示生成的文件",
+    "collapseFiles": "隐藏生成的文件"
   },
   "Native": {
     "callbackConflict": "此登录方式与现有账户冲突。请使用原来的登录方式，然后打开设置关联其他方式。账户绝不会自动合并。",
