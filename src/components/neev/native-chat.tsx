@@ -74,6 +74,7 @@ import { AgentControls, reconcileAgentSettings } from "./native-agent-controls"
 import {
   AttachmentButton,
   SentPrompt,
+  SentAttachments,
   useAttachmentTray,
   useFileDrop,
   type AttachmentUploader,
@@ -1699,7 +1700,8 @@ function Chat({
                   markdown, for the same reason one with inline files is: both
                   are one sentence with things sitting inside it, and block
                   rendering would take that apart. */}
-              {message.attachments.length > 0 ? (
+              {message.authorKind === "human" &&
+              message.attachments.length > 0 ? (
                 <SentPrompt
                   body={message.body}
                   attachments={message.attachments}
@@ -1716,15 +1718,17 @@ function Chat({
                    only on a reply they invoked.
 
                    Reached only on the plain-markdown branch, which is where
-                   every agent reply lands — attachments and mention chips
-                   belong to what a PERSON wrote, and `attachTurns` pairs a
-                   trace with an agent message or with nothing. */
+                   agent replies retain their formatted prose and tools. Generated
+                   attachments are rendered separately below the reply. */
                 <TranscriptBody
                   text={message.body}
                   items={traces.get(message.id)!.activity}
                 />
               ) : (
                 <NativeMarkdown markdown={message.body} />
+              )}
+              {message.authorKind === "agent" && (
+                <SentAttachments attachments={message.attachments} />
               )}
               {/* Below the reply, where the live footer is: a run that put its
                   progress above the answer moved every word of that answer up

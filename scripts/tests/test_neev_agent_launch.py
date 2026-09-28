@@ -33,6 +33,24 @@ def args(extra):
 
 
 class LaunchSpecTests(unittest.TestCase):
+    def test_failed_export_cannot_report_a_successful_run(self):
+        import contextlib
+        from unittest.mock import patch
+        parsed = args(["--", "claude", "-p", "hi"])
+        delivery = credentials.Delivery(home="/mnt/vol", env={"HOME": "/mnt/vol"})
+        with patch.object(credentials, "deliver", return_value=contextlib.nullcontext(delivery)), \
+             patch.object(launch, "_run_child", return_value=0), \
+             patch.object(launch, "_export_generated_outputs", return_value="export refused"), \
+             patch.object(launch, "_cleanup_run_workdir", return_value=True) as cleanup, \
+             patch.object(sys, "stderr", io.StringIO()):
+            result = launch._deliver_run_cleanup(object(), parsed, launch.build_spec(parsed, style=""), None, None)
+        self.assertEqual(result, 8)
+        cleanup.assert_called_once_with(parsed.workdir)
+
+    def test_browser_and_provider_have_a_bounded_shared_process_budget(self):
+        spec = launch.build_spec(args(["--", "claude", "-p", "hi"]), style="")
+        self.assertEqual(spec.limits.processes, 256)
+
     def test_deny_all_when_no_provider_ip(self):
         # `style=""` keeps this about the egress policy; the response style has
         # its own tests below.
@@ -415,10 +433,6 @@ class CredentialWiringTests(unittest.TestCase):
         # Reached credential delivery (parser + spec + workdir all valid) and
         # refused BEFORE any sandbox launch.
         self.assertEqual(rc, 5)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class _Sink:
@@ -1057,14 +1071,14 @@ class AddressSpaceTests(unittest.TestCase):
     RLIMIT_AS was never doing: the cage is reserved and never committed.
     """
 
-    def test_codex_clears_the_measured_v8_reservation_and_claude_is_unchanged(self):
+    def test_provider_limits_allow_v8_and_local_browser_reservations(self):
         measured_cage_bytes = 1_452_350_852 * 1024
         codex = launch.address_space_bytes("codex", None)
         self.assertGreater(codex, measured_cage_bytes)
         self.assertEqual(codex, 2 * 1024**4)
         # Finite, not unlimited: a ceiling is still a ceiling.
         self.assertIsNotNone(codex)
-        self.assertEqual(launch.address_space_bytes("claude", None), 2 * 1024**3)
+        self.assertEqual(launch.address_space_bytes("claude", None), 128 * 1024**3)
 
     def test_an_explicit_operator_value_wins_for_every_provider(self):
         for provider in ("codex", "claude"):
@@ -1082,7 +1096,7 @@ class AddressSpaceTests(unittest.TestCase):
                 "--", f"/usr/local/bin/{provider}", "exec", "--json", "hi",
             ]))
         self.assertEqual(spec_for("codex").limits.address_space_bytes, 2 * 1024**4)
-        self.assertEqual(spec_for("claude").limits.address_space_bytes, 2 * 1024**3)
+        self.assertEqual(spec_for("claude").limits.address_space_bytes, 128 * 1024**3)
         self.assertEqual(
             spec_for("codex", ["--address-space-bytes", "12345"])
             .limits.address_space_bytes,
@@ -1196,6 +1210,178 @@ class AppServerTransportTests(unittest.TestCase):
         parsed, spec = self.spec_for("codex", ["exec", "--json", "hi"])
         self.assertFalse(launch.is_metadata_probe(parsed.provider, spec))
         self.assertNotIn("app-server", spec.provider_argv)
+
+
+class ExportSecurityTests(unittest.TestCase):
+    """Security tests for _export_generated_outputs."""
+
+    def setUp(self):
+        import tempfile
+        from unittest.mock import patch
+        self.owner_patch = patch.multiple(launch, _SERVER_UID=os.getuid(), _SERVER_GID=os.getgid())
+        self.owner_patch.start()
+        self.addCleanup(self.owner_patch.stop)
+        self.root = tempfile.mkdtemp()
+        self.workdir = os.path.join(self.root, "run-test123")
+        os.mkdir(self.workdir)
+        os.environ["NEEV_AGENT_WORKSPACE_ROOT"] = self.root
+
+    def tearDown(self):
+        import shutil
+        os.environ.pop("NEEV_AGENT_WORKSPACE_ROOT", None)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_safe_output_name_rejects_path_traversal(self):
+        self.assertIsNone(launch._safe_output_name(".."))
+        self.assertIsNone(launch._safe_output_name("."))
+        self.assertIsNone(launch._safe_output_name("../etc/passwd"))
+        self.assertIsNone(launch._safe_output_name("foo/bar"))
+        self.assertIsNone(launch._safe_output_name("foo\\bar"))
+        self.assertIsNone(launch._safe_output_name(".hidden"))
+        self.assertIsNone(launch._safe_output_name(".env"))
+
+    def test_safe_output_name_rejects_sensitive_files(self):
+        for name in launch._REJECTED_NAMES:
+            with self.subTest(name=name):
+                self.assertIsNone(launch._safe_output_name(name))
+        # Case insensitive
+        self.assertIsNone(launch._safe_output_name("CREDENTIALS.JSON"))
+        self.assertIsNone(launch._safe_output_name("Config.Json"))
+
+    def test_safe_output_name_rejects_control_chars(self):
+        self.assertIsNone(launch._safe_output_name("file\x00name"))
+        self.assertIsNone(launch._safe_output_name("file\nname"))
+        self.assertIsNone(launch._safe_output_name("file\tname"))
+
+    def test_safe_output_name_accepts_valid_names(self):
+        self.assertEqual(launch._safe_output_name("report.html"), "report.html")
+        self.assertEqual(launch._safe_output_name("analysis-v2.pdf"), "analysis-v2.pdf")
+        self.assertEqual(launch._safe_output_name("data_export.csv"), "data_export.csv")
+
+    def test_no_output_dir_is_not_an_error(self):
+        # No outputs/ or neev-output/ dir - should return None (success)
+        result = launch._export_generated_outputs(self.workdir, "run-test123")
+        self.assertIsNone(result)
+
+    def test_empty_output_dir_is_not_an_error(self):
+        os.mkdir(os.path.join(self.workdir, "outputs"))
+        result = launch._export_generated_outputs(self.workdir, "run-test123")
+        self.assertIsNone(result)
+
+    def test_symlink_in_output_dir_rejected(self):
+        out_dir = os.path.join(self.workdir, "outputs")
+        os.mkdir(out_dir)
+        # Create a symlink to /etc/passwd
+        link = os.path.join(out_dir, "link.txt")
+        os.symlink("/etc/passwd", link)
+        # Should succeed but reject the symlink
+        result = launch._export_generated_outputs(self.workdir, "run-test123")
+        # Empty manifest (symlink rejected), so spool cleaned up
+        self.assertIsNotNone(result)
+
+    def test_valid_file_exported(self):
+        out_dir = os.path.join(self.workdir, "outputs")
+        os.mkdir(out_dir)
+        # Write a valid file
+        test_file = os.path.join(out_dir, "report.html")
+        with open(test_file, "w") as f:
+            f.write("<!DOCTYPE html><html><body>Test</body></html>")
+
+        result = launch._export_generated_outputs(self.workdir, "run-test123")
+        self.assertIsNone(result)  # Success
+
+        # Check spool was created
+        spool_dir = os.path.join(self.root, "spool", "run-test123")
+        self.assertTrue(os.path.isdir(spool_dir))
+
+        # Check manifest
+        manifest_path = os.path.join(spool_dir, "manifest.json")
+        self.assertTrue(os.path.exists(manifest_path))
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        self.assertEqual(len(manifest["files"]), 1)
+        self.assertEqual(manifest["files"][0]["name"], "report.html")
+
+    def test_both_declared_output_directories_are_saved(self):
+        # Create both dirs
+        os.mkdir(os.path.join(self.workdir, "outputs"))
+        os.mkdir(os.path.join(self.workdir, "neev-output"))
+
+        # Put different files in each
+        with open(os.path.join(self.workdir, "outputs", "a.txt"), "w") as f:
+            f.write("from outputs")
+        with open(os.path.join(self.workdir, "neev-output", "b.txt"), "w") as f:
+            f.write("from neev-output")
+
+        result = launch._export_generated_outputs(self.workdir, "run-test123")
+        self.assertIsNone(result)
+
+        # Both declared output directories must be saved.
+        manifest_path = os.path.join(self.root, "spool", "run-test123", "manifest.json")
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        self.assertEqual({item["name"] for item in manifest["files"]}, {"a.txt", "b.txt"})
+
+    def test_hardlink_rejected(self):
+        out_dir = os.path.join(self.workdir, "outputs")
+        os.mkdir(out_dir)
+
+        # Create a file and hardlink to it
+        orig = os.path.join(self.workdir, "original.txt")
+        with open(orig, "w") as f:
+            f.write("test")
+        link = os.path.join(out_dir, "hardlink.txt")
+        os.link(orig, link)
+
+        result = launch._export_generated_outputs(self.workdir, "run-test123")
+        # Hardlink rejected, empty manifest -> spool cleaned up
+        self.assertIsNotNone(result)
+
+    def test_writeall_handles_partial_writes(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            fd = f.fileno()
+            data = b"x" * 100000  # Large enough to potentially trigger partial writes
+            written = launch._writeall(fd, data)
+            self.assertEqual(written, len(data))
+
+    def test_spool_symlink_is_refused_without_writing_to_target(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as outside:
+            os.symlink(outside, os.path.join(self.root, "spool"))
+            os.mkdir(os.path.join(self.workdir, "outputs"))
+            Path(self.workdir, "outputs", "a.txt").write_text("deliverable")
+            self.assertIsNotNone(launch._export_generated_outputs(self.workdir, "run-test123"))
+            self.assertEqual(os.listdir(outside), [])
+
+    def test_output_directory_symlink_is_an_error(self):
+        os.symlink(self.root, os.path.join(self.workdir, "outputs"))
+        self.assertIsNotNone(launch._export_generated_outputs(self.workdir, "run-test123"))
+
+    def test_one_rejected_file_prevents_a_partial_success(self):
+        os.mkdir(os.path.join(self.workdir, "outputs"))
+        Path(self.workdir, "outputs", "a.txt").write_text("deliverable")
+        os.symlink('/etc/passwd', os.path.join(self.workdir, "outputs", "bad.txt"))
+        self.assertIsNotNone(launch._export_generated_outputs(self.workdir, "run-test123"))
+        self.assertFalse(Path(self.root, "spool", "run-test123", "manifest.json").exists())
+
+    def test_named_pipe_is_rejected_without_waiting_for_a_writer(self):
+        os.mkdir(os.path.join(self.workdir, "outputs"))
+        os.mkfifo(os.path.join(self.workdir, "outputs", "pipe.txt"))
+        self.assertIsNotNone(launch._export_generated_outputs(self.workdir, "run-test123"))
+
+    def test_large_html_is_copied_completely(self):
+        import hashlib
+        os.mkdir(os.path.join(self.workdir, "outputs"))
+        data = b"<!doctype html>" + b"x" * (22 * 1024 * 1024)
+        Path(self.workdir, "outputs", "large.html").write_bytes(data)
+        self.assertIsNone(launch._export_generated_outputs(self.workdir, "run-test123"))
+        spool = Path(self.root, "spool", "run-test123")
+        manifest = json.loads((spool / "manifest.json").read_text())
+        item = manifest["files"][0]
+        saved = (spool / "files" / (item["key"] + "--" + item["name"])).read_bytes()
+        self.assertEqual(len(saved), len(data))
+        self.assertEqual(hashlib.sha256(saved).hexdigest(), item["sha256"])
 
 
 if __name__ == "__main__":

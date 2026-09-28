@@ -197,6 +197,20 @@ describe("parsing", () => {
     expect(parseAttachments([row])).toEqual([row])
   })
 
+  it("reads generated outputs alongside input uploads without widening the composer limit", () => {
+    const files = Array.from({ length: 105 }, (_, i) => ({
+      ...row,
+      key: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`,
+    }))
+    expect(parseAttachments(files)).toHaveLength(105)
+    expect(() =>
+      parseAttachments([
+        ...files,
+        { ...row, key: "22222222-2222-4222-8222-222222222222" },
+      ])
+    ).toThrow(NativeClientError)
+  })
+
   it("refuses a row this server could not have written", () => {
     expect(() => parseAttachment({ ...row, contentType: "image/gif" })).toThrow(
       NativeClientError

@@ -186,6 +186,7 @@
     "activityWorking": "جارٍ العمل…",
     "activityRunningTool": "يشغّل {name}…",
     "activityElapsed": "{number} ث",
+    "activityElapsedMinutes": "{minutes} د {seconds} ث",
     "richTooLarge": "تعذّر اللصق: هذا المحتوى أكبر مما يتّسع له مستند واحد. الصقه على أجزاء أصغر.",
     "pastedCellLines": "تم اللصق في سطر واحد: لا يمكن لخلية الجدول أن تحتوي على فواصل أسطر.",
     "cellNoLineBreak": "لا يمكن لخلية الجدول أن تحتوي على فاصل أسطر. استخدم صفًا جديدًا أو اكتب النص في سطر واحد.",

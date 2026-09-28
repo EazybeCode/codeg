@@ -248,6 +248,24 @@ pub(crate) async fn publish_agent_reply(
     agent_label: &str,
     turn_id: &str,
 ) -> Result<Message, ContentError> {
+    publish_agent_reply_with_attachments(state, invoker, chat_id, body, agent_label, turn_id, &[])
+        .await
+}
+
+/// Publish an agent reply with generated attachments linked to the message.
+///
+/// This is the extended version of `publish_agent_reply` that also links
+/// attachment keys to the published message, so team members can access
+/// agent-generated files via the message's attachment list.
+pub(crate) async fn publish_agent_reply_with_attachments(
+    state: &ServerState,
+    invoker: &OrgContext,
+    chat_id: &str,
+    body: &str,
+    agent_label: &str,
+    turn_id: &str,
+    attachment_keys: &[String],
+) -> Result<Message, ContentError> {
     if body.is_empty() || body.len() > 32768 {
         return Err(ContentError::Invalid);
     }
@@ -268,7 +286,8 @@ pub(crate) async fn publish_agent_reply(
     ]);
     let tx = db::begin(&state.database).await?;
     db::lock_admission_guard(&tx).await?;
-    if let Some(id) = resources::receipt(&tx, invoker, "agent.team.publish", &request, &hash).await?
+    if let Some(id) =
+        resources::receipt(&tx, invoker, "agent.team.publish", &request, &hash).await?
     {
         let existing = load(&tx, invoker.org_id, chat_id, &id).await?;
         tx.commit().await.map_err(database_error)?;
@@ -308,6 +327,30 @@ pub(crate) async fn publish_agent_reply(
         ],
     )
     .await?;
+    // Link generated attachments to the message transactionally
+    if !attachment_keys.is_empty() {
+        if attachment_keys.len() > 100 {
+            return Err(ContentError::Invalid);
+        }
+        for (position, key) in attachment_keys.iter().enumerate() {
+            let row = db::one(
+                &tx,
+                "SELECT chat_id FROM neev_attachments WHERE org_id=$1 AND key=$2",
+                vec![invoker.org_id.into(), key.clone().into()],
+            )
+            .await?
+            .ok_or(ContentError::NotFound)?;
+            if row
+                .try_get::<Option<String>>("", "chat_id")
+                .map_err(database_error)?
+                .as_deref()
+                != Some(chat_id)
+            {
+                return Err(ContentError::NotFound);
+            }
+            db::execute(&tx, "INSERT INTO neev_attachment_refs(org_id,attachment_key,message_id,position) VALUES($1,$2,$3,$4)", vec![invoker.org_id.into(), key.clone().into(), id.clone().into(), (position as i32).into()]).await?;
+        }
+    }
     resources::record_receipt(&tx, invoker, "agent.team.publish", &request, &hash, &id).await?;
     let result = load(&tx, invoker.org_id, chat_id, &id).await?;
     tx.commit().await.map_err(database_error)?;

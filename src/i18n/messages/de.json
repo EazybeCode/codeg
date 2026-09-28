@@ -186,6 +186,7 @@
     "activityWorking": "Arbeitet…",
     "activityRunningTool": "Führt {name} aus…",
     "activityElapsed": "{number}s",
+    "activityElapsedMinutes": "{minutes}m {seconds}s",
     "richTooLarge": "Einfügen abgelehnt: Dieser Inhalt ist größer, als ein einzelnes Dokument fassen kann. Füge ihn in kleineren Teilen ein.",
     "pastedCellLines": "Als eine Zeile eingefügt: Eine Tabellenzelle kann keine Zeilenumbrüche enthalten.",
     "cellNoLineBreak": "Eine Tabellenzelle kann keinen Zeilenumbruch enthalten. Nutze eine neue Zeile oder schreibe den Text einzeilig.",

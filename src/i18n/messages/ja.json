@@ -186,6 +186,7 @@
     "activityWorking": "作業中…",
     "activityRunningTool": "{name} を実行中…",
     "activityElapsed": "{number}秒",
+    "activityElapsedMinutes": "{minutes}分 {seconds}秒",
     "richTooLarge": "貼り付けを拒否しました: この内容は1つのドキュメントの上限を超えています。分割して貼り付けてください。",
     "pastedCellLines": "1行として貼り付けました: 表のセルは改行を保持できません。",
     "cellNoLineBreak": "表のセルには改行を入れられません。新しい行を使うか、1行で記述してください。",

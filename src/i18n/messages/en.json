@@ -186,6 +186,7 @@
     "activityWorking": "Working…",
     "activityRunningTool": "Running {name}…",
     "activityElapsed": "{number}s",
+    "activityElapsedMinutes": "{minutes}m {seconds}s",
     "richTooLarge": "Paste refused: this content is larger than a single document can hold. Paste it in smaller pieces.",
     "pastedCellLines": "Pasted as one line: a table cell cannot hold line breaks.",
     "cellNoLineBreak": "A table cell cannot hold a line break. Use a new row, or write the text on one line.",

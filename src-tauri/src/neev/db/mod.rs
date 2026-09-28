@@ -7,7 +7,11 @@ mod agent_migration;
 mod agent_status_migration;
 #[cfg(test)]
 mod agent_status_tests;
+mod attachment_byte_cap_migration;
+mod attachment_migration;
+mod attachment_position_cap_migration;
 mod content_migration;
+mod content_revision_cap_migration;
 mod document_format_migration;
 #[cfg(test)]
 mod document_format_tests;
@@ -15,13 +19,10 @@ pub(crate) mod entities;
 mod gateway_migration;
 #[cfg(test)]
 mod gateway_migration_tests;
-mod attachment_migration;
 mod image_blob_migration;
 mod mention_migration;
 mod migration;
 mod org_code_migration;
-mod attachment_byte_cap_migration;
-mod content_revision_cap_migration;
 mod session_migration;
 #[cfg(test)]
 mod session_tests;
@@ -218,6 +219,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
             attachment_migration::upgrade(&tx).await?;
             attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
+            attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+            attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
             mention_migration::upgrade(&tx).await?;
             execute(
                 &tx,
@@ -388,6 +391,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 // Relax BEFORE validating: a database at this version still carries
                 // schema 15's ranged byte CHECK, and it is this call that removes it.
                 attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
+            attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+            attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
                 attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
             }
             // Current. Validate in place and preserve every row.
@@ -406,6 +411,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 // Relax BEFORE validating: a database at this version still carries
                 // schema 15's ranged byte CHECK, and it is this call that removes it.
                 attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
+            attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+            attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
                 attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
                 mention_migration::validate(&tx).await?;
                 return Ok(());
@@ -437,6 +444,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         // Constraint-guarded and idempotent, so every path applies it: a database
         // that never had the ranged CHECK is unchanged, one that has it is relaxed.
         attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
+            attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+            attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
         if names != v16_expected {
             mention_migration::upgrade(&tx).await?;
         }

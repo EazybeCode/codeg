@@ -22,7 +22,7 @@ import {
   useState,
 } from "react"
 import Link from "next/link"
-import { useFormatter, useTranslations } from "next-intl"
+import { useTranslations } from "next-intl"
 import {
   ArrowUp,
   Square,
@@ -50,8 +50,8 @@ import {
 import {
   describeToolInput,
   ELAPSED_TICK_MS,
-  elapsedDisplay,
   elapsedMs,
+  elapsedParts,
   mergeActivity,
   pairResults,
   runningTool,
@@ -91,6 +91,7 @@ import { AgentControls } from "./native-agent-controls"
 import {
   AttachmentButton,
   SentPrompt,
+  SentAttachments,
   useAttachmentTray,
   useFileDrop,
   type AttachmentUploader,
@@ -949,7 +950,6 @@ function CreateSessionDialog({
  */
 function ElapsedClock({ startedAt }: { startedAt: number }) {
   const t = useTranslations("NativeContent")
-  const format = useFormatter()
   const [ms, setMs] = useState(() => elapsedMs(startedAt, Date.now()))
   useEffect(() => {
     const base = elapsedMs(startedAt, Date.now())
@@ -961,20 +961,22 @@ function ElapsedClock({ startedAt }: { startedAt: number }) {
     return () => window.clearInterval(timer)
   }, [startedAt])
 
-  // Always one decimal, including a trailing `.0` — plain number formatting
-  // drops it, and a digit that comes and goes makes the whole line twitch
-  // sideways ten times a second. `tabular-nums` fixes the width of the rest.
+  // `elapsedParts` returns components for localized display.
+  // `tabular-nums` fixes the width so digits don't twitch on every tick.
   // `aria-hidden`: the team chat reads its agent reply from inside an
   // `aria-live` region, and a number that changes ten times a second would be
   // announced ten times a second. The turn's status is said in words beside it.
+  const parts = elapsedParts(ms, true)
+  const display = parts.hasMinutes
+    ? t("activityElapsedMinutes", {
+        minutes: parts.minutes,
+        seconds: parts.seconds,
+      })
+    : t("activityElapsed", { number: parts.seconds })
+
   return (
     <span aria-hidden className="min-w-[5ch] shrink-0 tabular-nums opacity-70">
-      {t("activityElapsed", {
-        number: format.number(elapsedDisplay(ms, true), {
-          minimumFractionDigits: 1,
-          maximumFractionDigits: 1,
-        }),
-      })}
+      {display}
     </span>
   )
 }
@@ -1030,17 +1032,27 @@ export function ActivityTimeline({
 
   const visible = visibleActivity(items)
   // What the turn ended up costing, once it is over. Whole seconds: the two
-  // timestamps it is read from are stored that way.
-  const took =
+  // timestamps it is read from are stored that way; `elapsedParts` with
+  // `precise: false` renders "37s" or "2m 13s" without decimal places.
+  const tookParts =
     !running && startedAt !== null && finishedAt !== null
-      ? elapsedDisplay(elapsedMs(startedAt, finishedAt), false)
+      ? elapsedParts(elapsedMs(startedAt, finishedAt), false)
       : null
   // A turn that ran no tools still took time and still finished, and that is
   // worth one quiet line. Only a turn with NOTHING to say — no duration, no
   // outcome, not running — renders nothing at all.
-  if (!running && took === null && !completed) return null
+  if (!running && tookParts === null && !completed) return null
   const summary = summariseActivity(visible)
   const current = running ? runningTool(visible) : null
+
+  const tookDisplay = tookParts
+    ? tookParts.hasMinutes
+      ? t("activityElapsedMinutes", {
+          minutes: tookParts.minutes,
+          seconds: tookParts.seconds,
+        })
+      : t("activityElapsed", { number: tookParts.seconds })
+    : null
 
   return (
     <div className="my-1.5 flex min-w-0 max-w-full items-center gap-1.5 px-1.5 py-0.5 text-[13px] leading-5 text-muted-foreground">
@@ -1060,10 +1072,8 @@ export function ActivityTimeline({
             : t("activityWorking")}
         </span>
       )}
-      {took !== null && (
-        <span className="shrink-0 tabular-nums opacity-70">
-          {t("activityElapsed", { number: took })}
-        </span>
+      {tookDisplay !== null && (
+        <span className="shrink-0 tabular-nums opacity-70">{tookDisplay}</span>
       )}
       {summary.errors > 0 && (
         <span className="shrink-0 text-destructive">
@@ -1857,6 +1867,14 @@ function AgentSessionView({
             const items = live
               ? mergeActivity(turn.activity, liveActivity)
               : turn.activity
+            const generatedAttachments = turn.attachments.filter(
+              (file) =>
+                turn.response.includes(`/api/neev/attachments/${file.key}`) &&
+                !turn.prompt.includes(file.key)
+            )
+            const inputAttachments = turn.attachments.filter(
+              (file) => !generatedAttachments.includes(file)
+            )
             return (
               <li
                 key={turn.id}
@@ -1871,7 +1889,7 @@ function AgentSessionView({
                   <div className="max-w-[85%] rounded-2xl border border-chat-user-foreground/10 bg-chat-user-surface px-3.5 py-2 text-chat-user-foreground">
                     <SentPrompt
                       body={turn.prompt}
-                      attachments={turn.attachments}
+                      attachments={inputAttachments}
                     />
                   </div>
                 </div>
@@ -1891,6 +1909,7 @@ function AgentSessionView({
                       streaming={live}
                     />
                   </div>
+                  <SentAttachments attachments={generatedAttachments} />
                   {/* Progress after the newest output, near the composer. The
                       clock stays outside the response live region, and the trace
                       is NOT repeated here — it is above, in place. */}

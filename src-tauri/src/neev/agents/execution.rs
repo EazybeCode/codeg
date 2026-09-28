@@ -10,8 +10,8 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
@@ -168,7 +168,8 @@ fn stage_files(
                 .map_err(|_| ExecutionError::Unavailable)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = std::fs::symlink_metadata(&root).map_err(|_| ExecutionError::Unavailable)?;
+            let existing =
+                std::fs::symlink_metadata(&root).map_err(|_| ExecutionError::Unavailable)?;
             if !existing.is_dir() || existing.file_type().is_symlink() {
                 return Err(ExecutionError::Unauthorized);
             }
@@ -461,7 +462,8 @@ fn provider_argv(
         match provider {
             "codex" => {
                 let last = argv.len() - 1;
-                argv[last] = format!("<workspace-context>\n{briefing}\n</workspace-context>\n\n{prompt}");
+                argv[last] =
+                    format!("<workspace-context>\n{briefing}\n</workspace-context>\n\n{prompt}");
             }
             _ => {
                 argv.push("--append-system-prompt".into());
@@ -511,7 +513,11 @@ fn provider_argv(
     // An explicitly chosen model is passed through, so the UI's selection is the
     // one the provider actually runs. Codex spells it `-m`.
     if model != "default" {
-        argv.push(if provider == "codex" { "-m".into() } else { "--model".into() });
+        argv.push(if provider == "codex" {
+            "-m".into()
+        } else {
+            "--model".into()
+        });
         argv.push(model.to_owned());
     }
     // Images, where the provider takes them natively. Codex `exec` has
@@ -615,6 +621,10 @@ pub(crate) struct RunHandle {
     pub(crate) run_id: String,
     events: mpsc::Receiver<RunEvent>,
     cancel: Option<oneshot::Sender<()>>,
+    /// The workspace root where spool directories live. Used by the server to
+    /// find generated output files after the run completes. Only set for sandboxed
+    /// runtimes that actually produce a spool.
+    pub(crate) workspace_root: Option<PathBuf>,
 }
 
 impl RunHandle {
@@ -745,8 +755,6 @@ async fn app_server_models(mut command: Command) -> Result<String, ExecutionErro
     result
 }
 
-
-
 /// The execution port. The real implementation authorizes (user, org, chat),
 /// binds an isolated per-tenant workspace, spawns via ACP, and maps its stream.
 pub(crate) trait AgentExecutionRuntime: Send + Sync {
@@ -820,6 +828,7 @@ impl AgentExecutionRuntime for FakeRuntime {
             run_id,
             events: rx,
             cancel: Some(cancel_tx),
+            workspace_root: None, // FakeRuntime has no spool
         })
     }
 }
@@ -845,7 +854,6 @@ impl ProviderCliRuntime {
             workspace: workspace.into(),
         }
     }
-
 }
 
 #[cfg(any(test, feature = "dev-agent"))]
@@ -949,6 +957,7 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
             run_id,
             events: rx,
             cancel: Some(cancel_tx),
+            workspace_root: Some(self.workspace.clone()), // ProviderCliRuntime workspace
         })
     }
 }
@@ -978,8 +987,14 @@ impl SlotPool {
     pub(crate) fn new() -> Self {
         Self {
             free: std::sync::Arc::new(std::sync::Mutex::new(vec![
-                Lane { slot: "a", uid: 61000 },
-                Lane { slot: "b", uid: 61001 },
+                Lane {
+                    slot: "a",
+                    uid: 61000,
+                },
+                Lane {
+                    slot: "b",
+                    uid: 61001,
+                },
             ])),
         }
     }
@@ -1527,6 +1542,7 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
             run_id,
             events: rx,
             cancel: Some(cancel_tx),
+            workspace_root: Some(self.workspace_root.clone()), // SandboxedProviderCliRuntime workspace
         })
     }
 }
@@ -1604,9 +1620,8 @@ impl RunHandle {
 /// Live-run cancel handles keyed by run id, each tagged with the owning user id
 /// so a cancel request can only interrupt a run the caller started. Shared across
 /// requests so a separate cancel/restart call can reach an in-flight run.
-pub(crate) type JobRegistry = std::sync::Arc<
-    std::sync::Mutex<std::collections::HashMap<String, (i32, oneshot::Sender<()>)>>,
->;
+pub(crate) type JobRegistry =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (i32, oneshot::Sender<()>)>>>;
 
 /// The production-default runtime (refuses; keeps agents off until an isolated
 /// adapter replaces it).
@@ -1701,7 +1716,10 @@ mod tests {
         while let Some(event) = handle.next().await {
             events.push(event);
         }
-        assert_eq!(events.first(), Some(&RunEvent::Started("run-7-chat-1".into())));
+        assert_eq!(
+            events.first(),
+            Some(&RunEvent::Started("run-7-chat-1".into()))
+        );
         assert_eq!(events.last(), Some(&RunEvent::Failed("canceled".into())));
         // The full chunk stream never completed.
         assert!(!events.contains(&RunEvent::Completed));
@@ -1739,7 +1757,10 @@ mod tests {
         let runtime = ProviderCliRuntime::new("claude", std::env::temp_dir());
         let mut bad = request("hi");
         bad.user_id = 0;
-        assert_eq!(runtime.run(bad).await.err(), Some(ExecutionError::Unauthorized));
+        assert_eq!(
+            runtime.run(bad).await.err(),
+            Some(ExecutionError::Unauthorized)
+        );
     }
 
     fn sandboxed() -> SandboxedProviderCliRuntime {
@@ -1765,14 +1786,28 @@ mod tests {
             Some("/opt/neev/bin/neev-agent-caplaunch".into()),
             CodexStream::Exec,
         );
-        let lane = Lane { slot: "a", uid: 61000 };
-        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/data/agents/run-x"), "/usr/local/bin/claude", HANDLE).unwrap();
+        let lane = Lane {
+            slot: "a",
+            uid: 61000,
+        };
+        let argv = runtime
+            .launch_argv(
+                &request("hi"),
+                lane,
+                Path::new("/data/agents/run-x"),
+                "/usr/local/bin/claude",
+                HANDLE,
+            )
+            .unwrap();
         // The privileged fixed-command helper is argv[0] — NOT python and NOT the
         // provider; the server execs only the helper (keeps itself unprivileged).
         assert_eq!(argv[0], "/opt/neev/bin/neev-agent-caplaunch");
         assert!(!argv.contains(&"python3".to_string()));
         assert!(argv.contains(&"--tenant".to_string()));
-        let sep = argv.iter().position(|a| a == "--").expect("has -- separator");
+        let sep = argv
+            .iter()
+            .position(|a| a == "--")
+            .expect("has -- separator");
         assert!(!argv[..sep].contains(&"/usr/local/bin/claude".to_string()));
         assert_eq!(argv[sep + 1], "/usr/local/bin/claude");
     }
@@ -1780,9 +1815,20 @@ mod tests {
     #[test]
     fn sandboxed_launch_argv_goes_through_the_launcher_not_bare_provider() {
         let runtime = sandboxed();
-        let lane = Lane { slot: "a", uid: 61000 };
+        let lane = Lane {
+            slot: "a",
+            uid: 61000,
+        };
         let workdir = Path::new("/var/lib/neev-native/agents/run-abc");
-        let argv = runtime.launch_argv(&request("draft"), lane, workdir, "/usr/local/bin/claude", HANDLE).unwrap();
+        let argv = runtime
+            .launch_argv(
+                &request("draft"),
+                lane,
+                workdir,
+                "/usr/local/bin/claude",
+                HANDLE,
+            )
+            .unwrap();
         // First tokens are the launcher, never the provider binary.
         assert_eq!(argv[0], "python3");
         assert!(argv[1].ends_with("neev_agent_launch.py"));
@@ -1790,16 +1836,24 @@ mod tests {
         assert!(argv.contains(&"org:3/user:7".to_string()));
         assert!(argv.contains(&"--slot".to_string()) && argv.contains(&"a".to_string()));
         assert!(argv.contains(&"--uid".to_string()) && argv.contains(&"61000".to_string()));
-        assert!(argv.contains(&"--workdir".to_string()) && argv.iter().any(|a| a.ends_with("run-abc")));
+        assert!(
+            argv.contains(&"--workdir".to_string()) && argv.iter().any(|a| a.ends_with("run-abc"))
+        );
         // Provider allowlist is passed through.
         assert!(argv.contains(&"--provider-ipv4".to_string()));
         assert!(argv.contains(&"140.82.112.3".to_string()));
         // The provider argv is AFTER the `--` separator (sandboxed), and the
         // provider binary never appears before it.
-        let sep = argv.iter().position(|a| a == "--").expect("has -- separator");
+        let sep = argv
+            .iter()
+            .position(|a| a == "--")
+            .expect("has -- separator");
         assert!(!argv[..sep].contains(&"/usr/local/bin/claude".to_string()));
         assert_eq!(argv[sep + 1], "/usr/local/bin/claude");
-        assert_eq!(&argv[sep + 2..sep + 4], &["-p".to_string(), "draft".to_string()]);
+        assert_eq!(
+            &argv[sep + 2..sep + 4],
+            &["-p".to_string(), "draft".to_string()]
+        );
         assert!(argv.contains(&"stream-json".to_string()));
     }
 
@@ -1838,7 +1892,10 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--model".to_string(), "opus".to_string()]));
         // "default" means the provider's own default: nothing is passed.
-        assert!(!provider_argv("codex", "d", "default", None, None, false, &[]).contains(&"-m".to_string()));
+        assert!(
+            !provider_argv("codex", "d", "default", None, None, false, &[])
+                .contains(&"-m".to_string())
+        );
     }
 
     /// Pinned Codex (`rust-v0.155.1`) exposes `-i, --image <FILE>...` on `exec`,
@@ -1864,8 +1921,9 @@ mod tests {
         assert_eq!(argv[positions[1] + 1], "/w/attachments/c,d.png");
         // The prompt is untouched: the files are arguments, not text.
         assert!(argv.contains(&"draft".to_string()));
-        assert!(!argv.iter().any(|value| value.contains("attachments/a b.png")
-            && value.contains("draft")));
+        assert!(!argv
+            .iter()
+            .any(|value| value.contains("attachments/a b.png") && value.contains("draft")));
     }
 
     /// The dev runtime reuses ONE workspace for every run, so staging has to be
@@ -1954,10 +2012,7 @@ mod tests {
             carried.iter().all(|item| item.path.contains(CONTEXT_DIR)),
             "and context is somewhere else entirely"
         );
-        assert_eq!(
-            std::fs::read(&staged[0].path).unwrap(),
-            b"<p>just sent</p>"
-        );
+        assert_eq!(std::fs::read(&staged[0].path).unwrap(), b"<p>just sent</p>");
         assert_eq!(
             std::fs::read(&carried[1].path).unwrap(),
             b"<p>from an earlier turn</p>",
@@ -2133,12 +2188,19 @@ mod tests {
             .any(|pair| pair == ["--effort".to_string(), "xhigh".to_string()]));
         assert!(claude
             .windows(2)
-            .any(|pair| pair
-                == ["--settings".to_string(), "{\"fastMode\":true}".to_string()]));
+            .any(|pair| pair == ["--settings".to_string(), "{\"fastMode\":true}".to_string()]));
 
         // Codex: config overrides for both. `service_tier` and
         // `features.fast_mode` are the two the docs pair together.
-        let codex = provider_argv("codex", "draft", "default", None, Some("minimal"), true, &[]);
+        let codex = provider_argv(
+            "codex",
+            "draft",
+            "default",
+            None,
+            Some("minimal"),
+            true,
+            &[],
+        );
         assert!(codex.windows(2).any(|pair| pair
             == [
                 "-c".to_string(),
@@ -2160,8 +2222,7 @@ mod tests {
         let claude = provider_argv("claude", "draft", "opus", None, None, false, &[]);
         assert!(claude
             .windows(2)
-            .any(|pair| pair
-                == ["--settings".to_string(), "{\"fastMode\":false}".to_string()]));
+            .any(|pair| pair == ["--settings".to_string(), "{\"fastMode\":false}".to_string()]));
         let codex = provider_argv("codex", "draft", "default", None, None, false, &[]);
         assert!(codex
             .windows(2)
@@ -2185,7 +2246,10 @@ mod tests {
 
     #[test]
     fn the_codex_transport_is_a_launcher_argument_and_defaults_to_exec() {
-        let lane = Lane { slot: "a", uid: 61000 };
+        let lane = Lane {
+            slot: "a",
+            uid: 61000,
+        };
         let workdir = Path::new("/w/run-x");
         let mut codex = request("hi");
         codex.provider = "codex".into();
@@ -2230,7 +2294,10 @@ mod tests {
     #[test]
     fn an_unknown_codex_transport_is_refused_rather_than_read_as_a_default() {
         assert_eq!(CodexStream::parse("exec"), Some(CodexStream::Exec));
-        assert_eq!(CodexStream::parse("app-server"), Some(CodexStream::AppServer));
+        assert_eq!(
+            CodexStream::parse("app-server"),
+            Some(CodexStream::AppServer)
+        );
         assert_eq!(CodexStream::default(), CodexStream::Exec);
         // A typo must not be read as either choice: startup aborts on `None`.
         for value in ["appserver", "app_server", "APP-SERVER", "true", ""] {
@@ -2241,11 +2308,27 @@ mod tests {
     #[test]
     fn sandboxed_deny_all_when_no_provider_ip() {
         let runtime = SandboxedProviderCliRuntime::new(
-            "python3", "/l/launch.py", ProviderBinaries::claude("/usr/local/bin/claude"), "/w", vec![], None,
+            "python3",
+            "/l/launch.py",
+            ProviderBinaries::claude("/usr/local/bin/claude"),
+            "/w",
+            vec![],
+            None,
             CodexStream::Exec,
         );
-        let lane = Lane { slot: "b", uid: 61001 };
-        let argv = runtime.launch_argv(&request("hi"), lane, Path::new("/w/run-x"), "/usr/local/bin/claude", HANDLE).unwrap();
+        let lane = Lane {
+            slot: "b",
+            uid: 61001,
+        };
+        let argv = runtime
+            .launch_argv(
+                &request("hi"),
+                lane,
+                Path::new("/w/run-x"),
+                "/usr/local/bin/claude",
+                HANDLE,
+            )
+            .unwrap();
         assert!(!argv.contains(&"--provider-ipv4".to_string()));
     }
 
@@ -2281,13 +2364,18 @@ mod tests {
         codex.provider = "codex".into();
         let (binary, _) = both.resolve(&codex).expect("codex resolves");
         assert_eq!(binary, "/usr/local/bin/codex");
-        let argv = both.launch_argv(
-            &codex,
-            Lane { slot: "a", uid: 61000 },
-            Path::new("/w/run-x"),
-            &binary,
-            HANDLE,
-        ).unwrap();
+        let argv = both
+            .launch_argv(
+                &codex,
+                Lane {
+                    slot: "a",
+                    uid: 61000,
+                },
+                Path::new("/w/run-x"),
+                &binary,
+                HANDLE,
+            )
+            .unwrap();
         let sep = argv.iter().position(|a| a == "--").expect("separator");
         assert_eq!(argv[sep + 1], "/usr/local/bin/codex");
         // The launcher is told which provider scope to open credentials for.
@@ -2324,13 +2412,18 @@ mod tests {
     #[test]
     fn the_credential_handle_is_passed_to_the_launcher_not_the_provider() {
         let runtime = sandboxed();
-        let argv = runtime.launch_argv(
-            &request("hi"),
-            Lane { slot: "a", uid: 61000 },
-            Path::new("/data/agents/run-x"),
-            "/usr/local/bin/claude",
-            HANDLE,
-        ).unwrap();
+        let argv = runtime
+            .launch_argv(
+                &request("hi"),
+                Lane {
+                    slot: "a",
+                    uid: 61000,
+                },
+                Path::new("/data/agents/run-x"),
+                "/usr/local/bin/claude",
+                HANDLE,
+            )
+            .unwrap();
         let sep = argv.iter().position(|a| a == "--").expect("separator");
         // The handle is a LAUNCHER argument: the privileged side opens the
         // volume and mounts it as HOME. The provider argv never sees it.
@@ -2344,25 +2437,32 @@ mod tests {
     #[test]
     fn an_explicit_model_reaches_the_provider_and_default_means_no_flag() {
         let runtime = sandboxed();
-        let lane = Lane { slot: "a", uid: 61000 };
+        let lane = Lane {
+            slot: "a",
+            uid: 61000,
+        };
         let workdir = Path::new("/w/run-x");
 
         // "default" is expressed by passing no --model at all, so the provider
         // picks its own; we never invent a model name on the user's behalf.
-        let argv = runtime.launch_argv(
-            &request("hi"),
-            lane,
-            workdir,
-            "/usr/local/bin/claude",
-            HANDLE,
-        ).unwrap();
+        let argv = runtime
+            .launch_argv(
+                &request("hi"),
+                lane,
+                workdir,
+                "/usr/local/bin/claude",
+                HANDLE,
+            )
+            .unwrap();
         assert!(!argv.contains(&"--model".to_string()));
 
         // A chosen model is actually passed through — the UI's selection is what
         // runs, so the session's stored model is not a decorative label.
         let mut chosen = request("hi");
         chosen.model = "claude-opus-4-1".into();
-        let argv = runtime.launch_argv(&chosen, lane, workdir, "/usr/local/bin/claude", HANDLE).unwrap();
+        let argv = runtime
+            .launch_argv(&chosen, lane, workdir, "/usr/local/bin/claude", HANDLE)
+            .unwrap();
         let position = argv
             .iter()
             .position(|arg| arg == "--model")
@@ -2376,7 +2476,12 @@ mod tests {
     #[tokio::test]
     async fn a_model_that_could_be_read_as_a_flag_is_refused() {
         let runtime = sandboxed();
-        for bad in ["--dangerously-skip-permissions", "a b", "model;rm", &"m".repeat(81)] {
+        for bad in [
+            "--dangerously-skip-permissions",
+            "a b",
+            "model;rm",
+            &"m".repeat(81),
+        ] {
             let mut request = request("hi");
             request.model = bad.to_owned();
             assert_eq!(
@@ -2470,7 +2575,10 @@ mod tests {
         let runtime = sandboxed();
         let mut bad = request("hi");
         bad.org_id = 0;
-        assert_eq!(runtime.run(bad).await.err(), Some(ExecutionError::Unauthorized));
+        assert_eq!(
+            runtime.run(bad).await.err(),
+            Some(ExecutionError::Unauthorized)
+        );
         // Both slots remain available (none consumed by the rejected run).
         assert!(runtime.slots.acquire().is_some());
         assert!(runtime.slots.acquire().is_some());
@@ -2508,7 +2616,7 @@ mod tests {
         while let Some(event) = handle.next().await {
             match event {
                 RunEvent::Started(_) => started = true,
-                RunEvent::Activity(_) => {},
+                RunEvent::Activity(_) => {}
                 // Raw stream: this harness accumulates what arrived, without
                 // the seam handling that `LiveRun::append_message` adds.
                 RunEvent::Chunk(chunk) | RunEvent::Message(chunk) => text.push_str(&chunk),
@@ -2608,7 +2716,10 @@ mod tests {
             name.starts_with("run-"),
             "the launcher only accepts a run- workdir, got {name}"
         );
-        assert!(name.starts_with("run-probe-"), "and it is still identifiable as a probe: {name}");
+        assert!(
+            name.starts_with("run-probe-"),
+            "and it is still identifiable as a probe: {name}"
+        );
         // It drives `app-server`, never a turn the reader would be charged for.
         // Read from the PROVIDER's own arguments — after the sandbox separator
         // — because `exec` is also the name of a transport the launcher is told

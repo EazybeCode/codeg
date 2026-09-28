@@ -1,0 +1,9 @@
+ARG NEEV_BASE_IMAGE=neev-native-agent:history-context-20260925
+FROM ${NEEV_BASE_IMAGE}
+USER root
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/neev/browser-tools/browsers
+RUN npm install --prefix /opt/neev/browser-tools --omit=dev --ignore-scripts --no-audit --no-fund playwright@1.63.0 \
+ && /opt/neev/node/bin/node /opt/neev/browser-tools/node_modules/playwright/cli.js install --with-deps --only-shell chromium \
+ && chmod -R a+rX /opt/neev/browser-tools \
+ && rm -rf /var/lib/apt/lists/* /root/.npm /tmp/playwright-download-*
+USER 65532:65532

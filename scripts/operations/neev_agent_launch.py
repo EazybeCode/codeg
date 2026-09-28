@@ -21,12 +21,14 @@ one or more it is a provider allowlist wired through the slot proxy.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import signal
 import sys
 import threading
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import neev_agent_sandbox as sandbox
@@ -60,7 +62,9 @@ def _parse(argv):
     # replaced by the per-provider default below.
     parser.add_argument("--address-space-bytes", type=int, default=None)
     parser.add_argument("--open-files", type=int, default=256)
-    parser.add_argument("--processes", type=int, default=64)
+    # Chromium needs more than 64 threads even without the provider process.
+    # Keep a finite shared budget for the provider and one local HTML preview.
+    parser.add_argument("--processes", type=int, default=256)
     # Everything after `--` is the provider argv.
     parser.add_argument("provider_argv", nargs=argparse.REMAINDER)
     return parser.parse_args(argv)
@@ -103,9 +107,10 @@ _EXTERNALLY_SANDBOXED = "--dangerously-bypass-approvals-and-sandbox"
 # stays bounded where it already was — the container's own cgroup (`memory.max`
 # 2 GiB, swap capped to match, pids 512). RLIMIT_AS does impose an upper bound;
 # it just cannot distinguish reserved from committed memory, and the cage is
-# reserved `PROT_NONE` and never committed. Claude keeps the 2 GiB default, and
-# an operator's explicit `--address-space-bytes` still wins over both.
-_ADDRESS_SPACE_BYTES = 2 * 1024**3
+# reserved `PROT_NONE` and never committed. Claude's local browser helper also
+# needs V8 reservation space: 2 GiB fails before preview, 128 GiB was verified.
+# An operator's explicit `--address-space-bytes` still wins over both.
+_ADDRESS_SPACE_BYTES = 128 * 1024**3
 _CODEX_ADDRESS_SPACE_BYTES = 2 * 1024**4
 
 
@@ -643,6 +648,16 @@ def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as):
             file=sys.stderr,
         )
         return 5
+
+    # Export generated outputs to the server-readable spool BEFORE cleanup.
+    # The runtime derives the spool path from its own workdir, not from stdout.
+    run_id = os.path.basename(args.workdir)
+    export_error = _export_generated_outputs(args.workdir, run_id)
+    if export_error:
+        # Export was attempted but failed - this is an error, not silent skip
+        print(f"neev_agent_launch: output export failed: {export_error}", file=sys.stderr)
+        # Continue to cleanup - don't leave orphan spool dirs
+
     # The child has terminated and the sandbox is torn down. Remove THIS run's workdir
     # tree ourselves (we are the privileged, euid-0 launcher) BEFORE returning: the
     # provider ran as the lane uid and may have left files in its CWD owned by that
@@ -656,10 +671,188 @@ def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as):
             file=sys.stderr,
         )
         return 6
-    return rc
+    return 8 if export_error else rc
 
 
 _MAX_RUN_ENTRIES = 8192
+
+# --- Generated output export ---
+# Agent saves deliverables to outputs/ (canonical) or neev-output/.
+# After run completes but BEFORE cleanup, export to server-readable spool.
+# Server validates content types; exporter treats files as opaque bytes.
+
+_OUTPUT_DIRS = ("outputs", "neev-output")
+_SPOOL_ROOT = "spool"
+_MAX_OUTPUT_FILES = 100
+# Per-run total matches org storage ceiling (256 MiB) - server enforces quota
+_MAX_OUTPUT_TOTAL_BYTES = 256 * 1024 * 1024
+_SERVER_UID = 65532
+_SERVER_GID = 65532
+# Reject names that look like auth/config files
+_REJECTED_NAMES = frozenset((
+    ".env", ".envrc", ".npmrc", ".pypirc", ".netrc", ".gitconfig",
+    "credentials", "credentials.json", "config.json", "secrets.json",
+))
+
+
+def _safe_output_name(name):
+    """Validate output filename. Returns None if invalid or sensitive."""
+    if not name or not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name or len(name) > 200:
+        return None
+    if name in (".", "..") or name.startswith("."):
+        return None
+    if any(c in name for c in ("/", "\\", "\x00", ":")):
+        return None
+    if any(ord(c) < 32 for c in name):
+        return None
+    if name.lower() in _REJECTED_NAMES:
+        return None
+    return name
+
+
+def _writeall(fd, data):
+    """Write all bytes to fd, handling partial writes."""
+    total = 0
+    mv = memoryview(data)
+    while total < len(data):
+        written = os.write(fd, mv[total:])
+        if written == 0:
+            raise OSError("write returned 0")
+        total += written
+    return total
+
+
+def _export_generated_outputs(workdir, run_id):
+    """Copy declared outputs via anchored descriptors; publish a manifest last."""
+    import stat
+    from contextlib import ExitStack
+
+    root = os.environ.get("NEEV_AGENT_WORKSPACE_ROOT")
+    if not root:
+        return "workspace_root_unavailable"
+    if (_RUN_DIR.fullmatch(run_id) is None or os.path.basename(workdir) != run_id
+            or os.path.realpath(os.path.dirname(workdir)) != os.path.realpath(root)):
+        return "invalid_run_directory"
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    made_run = False
+    committed = False
+    spool_fd = run_fd = files_fd = None
+    created = []
+    with ExitStack() as stack:
+        def keep(fd):
+            stack.callback(os.close, fd)
+            return fd
+        try:
+            root_fd = keep(os.open(root, directory_flags))
+            work_fd = keep(os.open(run_id, directory_flags, dir_fd=root_fd))
+            sources = []
+            names = set()
+            declared_bytes = 0
+            for dirname in _OUTPUT_DIRS:
+                try:
+                    output_fd = keep(os.open(dirname, directory_flags, dir_fd=work_fd))
+                except FileNotFoundError:
+                    continue
+                for name in sorted(os.listdir(output_fd)):
+                    safe_name = _safe_output_name(name)
+                    if not safe_name or safe_name in names:
+                        raise ValueError("invalid_or_duplicate_output_name")
+                    if len(sources) >= _MAX_OUTPUT_FILES:
+                        raise ValueError("output_count_exceeded")
+                    fd = keep(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=output_fd))
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError("output_not_single_regular_file")
+                    declared_bytes += info.st_size
+                    if info.st_size <= 0 or declared_bytes > _MAX_OUTPUT_TOTAL_BYTES:
+                        raise ValueError("output_storage_bound_exceeded")
+                    sources.append((safe_name, fd, info.st_size))
+                    names.add(safe_name)
+            if not sources:
+                return None
+            try:
+                os.mkdir(_SPOOL_ROOT, 0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+            spool_fd = keep(os.open(_SPOOL_ROOT, directory_flags, dir_fd=root_fd))
+            info = os.fstat(spool_fd)
+            if info.st_uid not in (0, _SERVER_UID) or info.st_mode & 0o022:
+                raise ValueError("unsafe_spool_owner_or_mode")
+            # The privileged helper has CAP_CHOWN but deliberately no CAP_FOWNER.
+            # chmod while self-owned, then hand the protected spool to the server.
+            os.fchown(spool_fd, os.geteuid(), os.getegid())
+            os.fchmod(spool_fd, 0o700)
+            os.fchown(spool_fd, _SERVER_UID, _SERVER_GID)
+            os.mkdir(run_id, 0o700, dir_fd=spool_fd)
+            made_run = True
+            run_fd = keep(os.open(run_id, directory_flags, dir_fd=spool_fd))
+            os.mkdir("files", 0o700, dir_fd=run_fd)
+            files_fd = keep(os.open("files", directory_flags, dir_fd=run_fd))
+            manifest = {"run_id": run_id, "files": [], "errors": []}
+            total_bytes = 0
+            for name, source_fd, expected_bytes in sources:
+                key = str(uuid.uuid4())
+                leaf = f"{key}--{name}"
+                dest_fd = keep(os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                       0o600, dir_fd=files_fd))
+                created.append(leaf)
+                digest = hashlib.sha256()
+                length = 0
+                while True:
+                    chunk = os.read(source_fd, 65536)
+                    if not chunk:
+                        break
+                    length += len(chunk)
+                    total_bytes += len(chunk)
+                    if total_bytes > _MAX_OUTPUT_TOTAL_BYTES:
+                        raise ValueError("output_storage_bound_exceeded")
+                    _writeall(dest_fd, chunk)
+                    digest.update(chunk)
+                if length != expected_bytes:
+                    raise ValueError("output_changed_during_export")
+                os.fsync(dest_fd)
+                os.fchown(dest_fd, _SERVER_UID, _SERVER_GID)
+                manifest["files"].append({"key": key, "name": name,
+                                          "byte_length": length, "sha256": digest.hexdigest()})
+            manifest_fd = keep(os.open("manifest.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                      0o600, dir_fd=run_fd))
+            _writeall(manifest_fd, json.dumps(manifest).encode("utf-8"))
+            os.fsync(manifest_fd)
+            os.fchown(manifest_fd, _SERVER_UID, _SERVER_GID)
+            os.rename("manifest.tmp", "manifest.json", src_dir_fd=run_fd, dst_dir_fd=run_fd)
+            os.fsync(files_fd)
+            os.fsync(run_fd)
+            os.fchown(files_fd, _SERVER_UID, _SERVER_GID)
+            os.fchown(run_fd, _SERVER_UID, _SERVER_GID)
+            committed = True
+            return None
+        except (OSError, ValueError) as error:
+            return f"output_export_refused: {type(error).__name__}"
+        finally:
+            if made_run and not committed:
+                # Only unlink entries created here, relative to still-open fds.
+                for leaf in created:
+                    try:
+                        os.unlink(leaf, dir_fd=files_fd)
+                    except OSError:
+                        pass
+                if run_fd is not None:
+                    for name in ("manifest.tmp", "manifest.json"):
+                        try:
+                            os.unlink(name, dir_fd=run_fd)
+                        except OSError:
+                            pass
+                    try:
+                        os.rmdir("files", dir_fd=run_fd)
+                    except OSError:
+                        pass
+                try:
+                    os.rmdir(run_id, dir_fd=spool_fd)
+                except OSError:
+                    pass
 
 
 def _cleanup_run_workdir(workdir):

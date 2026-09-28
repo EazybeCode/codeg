@@ -27,7 +27,7 @@ pub(crate) const MAX_ATTACHMENTS_PER_ORG: i64 = 20_000;
 /// With no per-file limit this is also the largest one attachment can be — the
 /// arithmetic of a shared budget, not a rule about files. Defined as
 /// `blob::ATTACHMENT_STORAGE_CEILING` so the buffer bounds cannot drift from it.
-pub(super) const MAX_ATTACHMENT_BYTES_PER_ORG: i64 = ATTACHMENT_STORAGE_CEILING as i64;
+pub(crate) const MAX_ATTACHMENT_BYTES_PER_ORG: i64 = ATTACHMENT_STORAGE_CEILING as i64;
 /// Per message, and therefore per run.
 pub(crate) const MAX_ATTACHMENTS_PER_MESSAGE: usize = 5;
 const MAX_NAME_CHARS: usize = 200;
@@ -57,7 +57,7 @@ impl Owner<'_> {
 /// A chat defers to the resource ACL. A session is private to its owner and has
 /// no sharing, so ownership IS the check — and the uniform `NotFound` keeps the
 /// existence of someone else's session unobservable.
-async fn authorize(
+pub(crate) async fn authorize(
     db: &sea_orm::DatabaseTransaction,
     actor: &OrgContext,
     owner: Owner<'_>,
@@ -148,7 +148,7 @@ pub(crate) fn sniff_attachment(bytes: &[u8]) -> Option<&'static str> {
 /// reaches a filesystem inside the sandbox, so anything that could climb out of
 /// the staging directory — separators, `..`, control characters, NUL — is not
 /// sanitised into something plausible but refused outright.
-fn canonical_name(raw: &str) -> Option<String> {
+pub(crate) fn canonical_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.chars().count() > MAX_NAME_CHARS {
         return None;
@@ -205,15 +205,17 @@ pub(crate) async fn store(
     .ok_or(ContentError::Storage)?;
     let count: i64 = usage.try_get("", "c").map_err(database_error)?;
     let used: i64 = usage.try_get("", "b").map_err(database_error)?;
-    if count >= MAX_ATTACHMENTS_PER_ORG
-        || used + bytes.len() as i64 > MAX_ATTACHMENT_BYTES_PER_ORG
+    if count >= MAX_ATTACHMENTS_PER_ORG || used + bytes.len() as i64 > MAX_ATTACHMENT_BYTES_PER_ORG
     {
         return Err(ContentError::Quota);
     }
     let key = Uuid::new_v4().hyphenated().to_string();
     // Write the blob before the row: a failed commit leaves a byte-bounded
     // orphan blob (never served, GC-able), never a row pointing at no file.
-    let info = state.blobs.put_attachment(actor.org_id, &key, bytes).await?;
+    let info = state
+        .blobs
+        .put_attachment(actor.org_id, &key, bytes)
+        .await?;
     db::execute(
         &tx,
         "INSERT INTO neev_attachments(org_id,key,chat_id,session_id,file_name,content_type,byte_length,sha256,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",

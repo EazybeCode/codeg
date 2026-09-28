@@ -145,6 +145,19 @@ staged sets — a file listed with this turn's own upload and a file from earlie
 in the conversation can share a name — so the PATH decides which one you are \
 opening, never the name.\n",
     );
+    // Output directory instructions
+    text.push_str(
+        "\n<output-directory>\n\
+To attach generated files to this conversation (HTML reports, documents, analysis \
+results, code artifacts, etc.), save them to a directory named `outputs/` in your \
+working directory. Create it if needed: `mkdir -p outputs`. Files saved there will \
+be automatically persisted and shown as attachments after this turn completes. \
+Supported formats: HTML, PDF, PNG, JPEG, WebP, and plain text. Each file must be a \
+regular file (no symlinks) with a simple name (no path separators, no dotfiles). \
+When you produce downloadable deliverables, save them to outputs/ rather than \
+describing them inline or offering fake local links.\n\
+</output-directory>\n",
+    );
     text
 }
 

@@ -153,6 +153,9 @@ async fn relax_sqlite(tx: &DatabaseTransaction) -> Result<(), AuthError> {
         .replacen("neev_attachments", "neev_attachments_new", 1)
         .replace(OLD_BOUND_SQLITE, NEW_BOUND);
 
+    // DROP of the parent fires ON DELETE CASCADE even with deferred FKs.
+    // Preserve child references explicitly before rebuilding the parent table.
+    super::execute(tx, "CREATE TEMP TABLE neev_attachment_refs_byte_migration AS SELECT * FROM neev_attachment_refs", vec![]).await?;
     super::execute(tx, "PRAGMA defer_foreign_keys=ON", vec![]).await?;
     super::execute(tx, &rebuilt, vec![]).await?;
     super::execute(
@@ -168,6 +171,13 @@ async fn relax_sqlite(tx: &DatabaseTransaction) -> Result<(), AuthError> {
         vec![],
     )
     .await?;
+    super::execute(
+        tx,
+        "INSERT INTO neev_attachment_refs SELECT * FROM neev_attachment_refs_byte_migration",
+        vec![],
+    )
+    .await?;
+    super::execute(tx, "DROP TABLE neev_attachment_refs_byte_migration", vec![]).await?;
     for index in index_ddls {
         super::execute(tx, &index, vec![]).await?;
     }

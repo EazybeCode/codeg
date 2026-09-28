@@ -15,13 +15,16 @@
 //! entirely after it.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, oneshot};
 
 use super::execution::{RunEvent, RunHandle};
+use super::generated::{self, PersistContext, SpoolError};
 use super::sessions::{self, TurnStatus, MAX_RESPONSE_CHARS};
 use crate::neev::startup::ServerState;
+use crate::neev::types::OrgContext;
 
 /// Persist the accumulated reply once it has grown by this many characters, so
 /// a reload mid-run shows recent output without writing on every token.
@@ -169,6 +172,20 @@ impl LiveRun {
         (guard.0.clone(), guard.1)
     }
 
+    /// Replace the buffer contents with rewritten text.
+    ///
+    /// Used after link rewriting so the live buffer agrees with what will be
+    /// persisted and published. The character count stays the same (rewriting
+    /// preserves length approximately, and the cap was already enforced).
+    fn replace_buffer(&self, text: &str) {
+        let mut guard = match self.buffer.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.0 = text.to_owned();
+        guard.1 = text.chars().count();
+    }
+
     /// Record one step of the provider's work at the reply's current length.
     ///
     /// The offset is read under the same lock discipline as the text, so an
@@ -304,20 +321,25 @@ pub(crate) struct TeamPublication {
 /// `publish` is `None` for a private Agent Chat session — the ONLY way a reply
 /// reaches team-visible storage is by being handed a publication here, so a
 /// private session cannot leak by omission.
+///
+/// `actor` is the authenticated invoker, used for ACL enforcement on generated
+/// output persistence.
 pub(crate) fn start(
     state: Arc<ServerState>,
     run_id: String,
-    org_id: i32,
-    owner_id: i32,
+    actor: OrgContext,
     session_id: String,
     turn_id: String,
     mut handle: RunHandle,
     publish: Option<TeamPublication>,
 ) -> Arc<LiveRun> {
     let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
+    let workspace_root = handle.workspace_root.take();
+    // Capture runtime's own run_id BEFORE consuming events - distinct from durable run_id
+    let runtime_id = handle.run_id.clone();
     let live = Arc::new(LiveRun {
-        org_id,
-        owner_id,
+        org_id: actor.org_id,
+        owner_id: actor.identity.user_id,
         session_id,
         turn_id,
         buffer: Mutex::new((String::new(), 0)),
@@ -326,17 +348,32 @@ pub(crate) fn start(
         cancel: Mutex::new(handle.take_canceler()),
     });
     lock(&state.agent_runs).insert(run_id.clone(), live.clone());
-    tokio::spawn(drive(state, run_id, live.clone(), handle, publish));
+    tokio::spawn(drive(
+        state,
+        run_id,
+        runtime_id,
+        actor,
+        live.clone(),
+        handle,
+        publish,
+        workspace_root,
+    ));
     live
 }
 
 /// Consume the runtime's stream: accumulate, broadcast, persist, settle.
+///
+/// `run_id` is the durable turn run_id (for database operations).
+/// `runtime_id` is the runtime's actual UUID (for spool operations).
 async fn drive(
     state: Arc<ServerState>,
     run_id: String,
+    runtime_id: String,
+    actor: OrgContext,
     live: Arc<LiveRun>,
     mut handle: RunHandle,
     publish: Option<TeamPublication>,
+    workspace_root: Option<PathBuf>,
 ) {
     let database = state.database.clone();
     let mut flushed = 0usize;
@@ -407,15 +444,58 @@ async fn drive(
     }
     let (mut status, mut error_code) = settled.unwrap_or((TurnStatus::Failed, Some("interrupted")));
     // The buffer is capped on append, so it is always storable as-is.
-    let response = live.snapshot().0;
+    let mut response = live.snapshot().0;
+
+    // Persist generated outputs from the spool BEFORE publication or settlement.
+    // Only on successful completion - a failed run's outputs are not trusted.
+    // Persistence failure MUST fail the run, not be swallowed silently.
+    //
+    // Use runtime_id (not durable run_id) for spool operations - the launcher
+    // creates spool/run-{runtime_id}/, and mismatched ids MUST be rejected.
+    // For team chats, pass the chat_id so attachments are owned by the chat.
+    let mut generated_keys: Vec<String> = Vec::new();
+    let chat_id = publish.as_ref().map(|p| p.chat_id.as_str());
+    if status == TurnStatus::Completed {
+        if let Some(ref workspace_root) = workspace_root {
+            match persist_generated_outputs(
+                &state,
+                &runtime_id,
+                &run_id,
+                &actor,
+                &live,
+                workspace_root,
+                chat_id,
+            )
+            .await
+            {
+                Ok(stored) => {
+                    // Rewrite output links in response text before publication
+                    if !stored.is_empty() {
+                        response = generated::rewrite_output_links(&response, &stored);
+                        generated_keys = stored.iter().map(|(_, key)| key.clone()).collect();
+                        // Update the live buffer so refresh sees rewritten links too
+                        live.replace_buffer(&response);
+                    }
+                }
+                Err(code) => {
+                    // Persistence failure fails the run - generated files lost is a lie
+                    status = TurnStatus::Failed;
+                    error_code = Some(code);
+                }
+            }
+        }
+    }
 
     // An explicitly team-invoked run publishes BEFORE it settles: the
     // team-visible message is the product, so a turn is only "completed" once
     // the team can actually see the reply. A publish that fails (the invoker
     // lost write access, the chat was archived, the org hit its quota) turns
     // the run into an honest failure and posts nothing.
+    //
+    // Generated keys are passed so attachments can be linked to the assistant message.
     if let (Some(publication), TurnStatus::Completed) = (&publish, status) {
-        match publish_reply(&state, publication, &response).await {
+        match publish_reply_with_attachments(&state, publication, &response, &generated_keys).await
+        {
             Ok(()) => {}
             Err(code) => {
                 status = TurnStatus::Failed;
@@ -467,12 +547,15 @@ async fn drive(
 /// are reconciled here rather than by silently cutting the text.
 const MAX_TEAM_MESSAGE_BYTES: usize = 32_768;
 
-/// Publish a completed team-invoked reply, mapping any refusal to the durable
-/// error code the turn will carry.
-async fn publish_reply(
+/// Publish a completed team-invoked reply with generated attachments.
+///
+/// Links the provided attachment keys to the published message so team members
+/// can access agent-generated files.
+async fn publish_reply_with_attachments(
     state: &ServerState,
     publication: &TeamPublication,
     response: &str,
+    attachment_keys: &[String],
 ) -> Result<(), &'static str> {
     use crate::neev::content::types::ContentError;
     if response.trim().is_empty() {
@@ -483,13 +566,14 @@ async fn publish_reply(
         // Truncating would publish something the agent did not say.
         return Err("too_large");
     }
-    match crate::neev::content::messages::publish_agent_reply(
+    match crate::neev::content::messages::publish_agent_reply_with_attachments(
         state,
         &publication.invoker,
         &publication.chat_id,
         response,
         &publication.agent_label,
         &publication.turn_id,
+        attachment_keys,
     )
     .await
     {
@@ -571,9 +655,11 @@ async fn persist_terminal(
     let mut delay = FINISH_BACKOFF_MS;
     for attempt in 0..FINISH_ATTEMPTS {
         let now = state.clock.now_unix();
-        if sessions::finish(database, run_id, response, activity, status, error_code, now)
-            .await
-            .is_ok()
+        if sessions::finish(
+            database, run_id, response, activity, status, error_code, now,
+        )
+        .await
+        .is_ok()
         {
             return true;
         }
@@ -606,6 +692,67 @@ pub(crate) async fn settle_refusal(
         now,
     )
     .await
+}
+
+/// Persist generated outputs from the spool to attachment storage.
+///
+/// Called after a successful run completion, BEFORE publication or settlement.
+/// Reads the spool left by the launcher, validates and stores files,
+/// links them to the turn, and cleans up the spool directory ONLY on success.
+///
+/// `runtime_id` is the launcher's actual run UUID (for spool path).
+/// `durable_run_id` is the turn's run_id (for database lookup).
+/// `chat_id` is Some for team publications (attachments owned by chat), None for private.
+///
+/// Returns the stored (filename, key) pairs for link rewriting, or an error code
+/// that MUST fail the run. No silent swallowing.
+async fn persist_generated_outputs(
+    state: &ServerState,
+    runtime_id: &str,
+    durable_run_id: &str,
+    actor: &OrgContext,
+    live: &LiveRun,
+    workspace_root: &PathBuf,
+    chat_id: Option<&str>,
+) -> Result<Vec<(String, String)>, &'static str> {
+    // Read spool using runtime_id - the launcher writes to spool/run-{runtime_id}/
+    let files = match generated::read_spool(workspace_root, runtime_id) {
+        Ok(f) => f,
+        Err(SpoolError::NotFound) => return Ok(Vec::new()), // No outputs is normal
+        Err(SpoolError::InvalidManifest) => return Err("export_failed"), // Mismatched run_id or corrupt
+        Err(SpoolError::FileError) => return Err("export_failed"),       // Missing/corrupt files
+        Err(SpoolError::ExportFailed(_)) => return Err("export_failed"), // Launcher reported errors
+    };
+
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Get turn sequence using durable_run_id (database lookup)
+    let turn = match sessions::turn_by_run_id(&state.database, durable_run_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return Err("unavailable"), // Turn not found
+        Err(_) => return Err("unavailable"),
+    };
+
+    let ctx = PersistContext {
+        actor,
+        session_id: &live.session_id,
+        sequence: turn.sequence,
+        chat_id,
+    };
+
+    // Persist with proper ACL - all files must succeed or fail together
+    match generated::persist_generated_files(state, &ctx, files).await {
+        Ok(result) => {
+            // Only clean up spool AFTER successful storage - use runtime_id
+            generated::cleanup_spool(workspace_root, runtime_id);
+            Ok(result.stored)
+        }
+        Err(crate::neev::content::types::ContentError::Quota) => Err("quota"),
+        Err(crate::neev::content::types::ContentError::Auth(_)) => Err("unauthorized"),
+        Err(_) => Err("unavailable"),
+    }
 }
 
 #[cfg(test)]

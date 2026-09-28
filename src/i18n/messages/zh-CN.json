@@ -186,6 +186,7 @@
     "activityWorking": "处理中…",
     "activityRunningTool": "正在运行 {name}…",
     "activityElapsed": "{number} 秒",
+    "activityElapsedMinutes": "{minutes} 分 {seconds} 秒",
     "richTooLarge": "已拒绝粘贴：此内容超出单个文档的容量上限。请分批粘贴。",
     "pastedCellLines": "已作为单行粘贴：表格单元格不能包含换行。",
     "cellNoLineBreak": "表格单元格不能包含换行。请另起一行，或将文字写在一行内。",

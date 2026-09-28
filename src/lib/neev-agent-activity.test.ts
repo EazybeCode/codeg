@@ -3,6 +3,8 @@ import {
   describeToolInput,
   elapsedDisplay,
   elapsedMs,
+  elapsedParts,
+  formatElapsed,
   isNoise,
   mergeActivity,
   pairResults,
@@ -202,4 +204,67 @@ it("shows tenths only where a tenth was actually measured", () => {
   expect(elapsedDisplay(37_000, false)).toBe(37)
   expect(elapsedDisplay(37_240, false)).toBe(37)
   expect(elapsedDisplay(-5, true)).toBe(0)
+})
+
+it("returns elapsed parts for localized display", () => {
+  // Under 60 seconds: hasMinutes is false
+  const under60 = elapsedParts(37_240, true)
+  expect(under60.hasMinutes).toBe(false)
+  if (!under60.hasMinutes) {
+    expect(under60.seconds).toBe("37.2")
+  }
+
+  // At 60 seconds: hasMinutes is true
+  const at60 = elapsedParts(60_000, true)
+  expect(at60.hasMinutes).toBe(true)
+  if (at60.hasMinutes) {
+    expect(at60.minutes).toBe("1")
+    expect(at60.seconds).toBe("0.0")
+  }
+
+  // Over 60 seconds: correct minutes and seconds
+  const over60 = elapsedParts(133_200, true)
+  expect(over60.hasMinutes).toBe(true)
+  if (over60.hasMinutes) {
+    expect(over60.minutes).toBe("2")
+    expect(over60.seconds).toBe("13.2")
+  }
+
+  // Imprecise mode: whole seconds
+  const imprecise = elapsedParts(133_000, false)
+  expect(imprecise.hasMinutes).toBe(true)
+  if (imprecise.hasMinutes) {
+    expect(imprecise.minutes).toBe("2")
+    expect(imprecise.seconds).toBe("13")
+  }
+
+  // Negative clamps to zero
+  const negative = elapsedParts(-5, true)
+  expect(negative.hasMinutes).toBe(false)
+  if (!negative.hasMinutes) {
+    expect(negative.seconds).toBe("0.0")
+  }
+})
+
+it("formats elapsed time with minutes when >= 60 seconds", () => {
+  // Under 60 seconds: shows just seconds with 's' suffix
+  expect(formatElapsed(37_240, true)).toBe("37.2s")
+  expect(formatElapsed(59_900, true)).toBe("59.9s")
+  expect(formatElapsed(0, true)).toBe("0.0s")
+  expect(formatElapsed(999, true)).toBe("0.9s")
+
+  // At and above 60 seconds: shows minutes and seconds
+  expect(formatElapsed(60_000, true)).toBe("1m 0.0s")
+  expect(formatElapsed(61_400, true)).toBe("1m 1.4s")
+  expect(formatElapsed(133_200, true)).toBe("2m 13.2s") // 2m 13.2s
+  expect(formatElapsed(612_400, true)).toBe("10m 12.4s") // 10m 12.4s
+  expect(formatElapsed(754_000, true)).toBe("12m 34.0s") // 12m 34s
+
+  // Imprecise mode (whole seconds): no decimal
+  expect(formatElapsed(37_000, false)).toBe("37s")
+  expect(formatElapsed(133_000, false)).toBe("2m 13s")
+  expect(formatElapsed(60_000, false)).toBe("1m 0s")
+
+  // Negative values clamp to zero
+  expect(formatElapsed(-5, true)).toBe("0.0s")
 })

@@ -316,7 +316,9 @@ export function parseAttachment(value: unknown): NeevAttachment {
  */
 export function parseAttachments(value: unknown): NeevAttachment[] {
   if (value === undefined || value === null) return []
-  if (!Array.isArray(value) || value.length > NEEV_MAX_ATTACHMENTS)
+  // A persisted turn can carry five input uploads plus up to 100 outputs.
+  // The composer upload limit remains five.
+  if (!Array.isArray(value) || value.length > NEEV_MAX_ATTACHMENTS + 100)
     return invalid()
   const items = value.map(parseAttachment)
   if (new Set(items.map((item) => item.key)).size !== items.length)

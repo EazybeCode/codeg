@@ -186,6 +186,7 @@
     "activityWorking": "A trabalhar…",
     "activityRunningTool": "A executar {name}…",
     "activityElapsed": "{number}s",
+    "activityElapsedMinutes": "{minutes}m {seconds}s",
     "richTooLarge": "Colagem recusada: este conteúdo é maior do que um documento comporta. Cole-o em partes menores.",
     "pastedCellLines": "Colado numa só linha: uma célula de tabela não comporta quebras de linha.",
     "cellNoLineBreak": "Uma célula de tabela não comporta quebras de linha. Use uma nova linha ou escreva o texto numa só linha.",

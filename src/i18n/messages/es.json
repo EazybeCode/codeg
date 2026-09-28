@@ -186,6 +186,7 @@
     "activityWorking": "Trabajando…",
     "activityRunningTool": "Ejecutando {name}…",
     "activityElapsed": "{number}s",
+    "activityElapsedMinutes": "{minutes}m {seconds}s",
     "richTooLarge": "Pegado rechazado: este contenido supera lo que cabe en un documento. Pégalo por partes.",
     "pastedCellLines": "Pegado en una sola línea: una celda de tabla no admite saltos de línea.",
     "cellNoLineBreak": "Una celda de tabla no admite saltos de línea. Usa una fila nueva o escribe el texto en una sola línea.",

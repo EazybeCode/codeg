@@ -250,3 +250,60 @@ export function elapsedDisplay(ms: number, precise: boolean): number {
   if (!precise) return Math.floor(value / 1000)
   return Math.floor(value / 100) / 10
 }
+
+/**
+ * Elapsed time parts for localized display.
+ */
+export type ElapsedParts =
+  | { hasMinutes: false; seconds: string }
+  | { hasMinutes: true; minutes: string; seconds: string }
+
+/**
+ * Compute elapsed time components for display.
+ *
+ * Returns minutes and seconds as formatted strings for use with i18n.
+ * The `precise` flag controls whether tenths are shown (live clock) or not
+ * (stored whole-second timestamps).
+ */
+export function elapsedParts(ms: number, precise: boolean): ElapsedParts {
+  const value = Math.max(0, ms)
+  const totalSeconds = precise
+    ? Math.floor(value / 100) / 10
+    : Math.floor(value / 1000)
+
+  if (totalSeconds < 60) {
+    return {
+      hasMinutes: false,
+      seconds: precise
+        ? totalSeconds.toFixed(1)
+        : String(Math.floor(totalSeconds)),
+    }
+  }
+
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds - minutes * 60
+
+  return {
+    hasMinutes: true,
+    minutes: String(minutes),
+    seconds: precise ? seconds.toFixed(1) : String(Math.floor(seconds)),
+  }
+}
+
+/**
+ * Format an elapsed time as a readable string with minutes when >= 60 seconds.
+ *
+ * Returns "37.2s" for durations under a minute, and "2m 13.2s" for longer ones.
+ * The `precise` flag controls whether tenths are shown (live clock) or not
+ * (stored whole-second timestamps).
+ *
+ * NOTE: This function returns English literals. For localized display, use
+ * `elapsedParts()` with i18n translation keys instead.
+ */
+export function formatElapsed(ms: number, precise: boolean): string {
+  const parts = elapsedParts(ms, precise)
+  if (!parts.hasMinutes) {
+    return `${parts.seconds}s`
+  }
+  return `${parts.minutes}m ${parts.seconds}s`
+}

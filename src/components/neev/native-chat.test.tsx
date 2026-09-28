@@ -2108,3 +2108,34 @@ it("never renames a chat somebody named by hand", async () => {
   expect(record.patched).toEqual([])
   expect(screen.getByRole("region", { name: "Design chat" })).toBeVisible()
 })
+
+it("keeps an agent reply formatted when it carries a generated download", async () => {
+  const key = "99999999-9999-4999-8999-999999999999"
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({
+        items: [
+          {
+            ...replyMessage,
+            body: "**Saved report**",
+            attachments: [
+              {
+                key,
+                fileName: "report.html",
+                contentType: "text/plain",
+                byteLength: 123,
+              },
+            ],
+          },
+        ],
+        nextAfter: null,
+      }),
+  })
+  mount()
+  expect((await screen.findByText("Saved report")).tagName).toBe("STRONG")
+  expect(screen.getByRole("link", { name: /report.html/ })).toHaveAttribute(
+    "href",
+    `/api/neev/attachments/${key}`
+  )
+})

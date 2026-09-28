@@ -8,6 +8,7 @@ pub(crate) mod control_dto;
 pub(crate) mod control_transport;
 pub(crate) mod control_wire;
 pub(crate) mod execution;
+pub(crate) mod generated;
 pub(crate) mod intents;
 pub(crate) mod recovery;
 pub(crate) mod runs;

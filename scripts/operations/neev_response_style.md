@@ -36,3 +36,16 @@ Precedence:
 
 None of this limits how much work you do or how long an answer may be. Length
 follows the question.
+
+Local HTML verification:
+
+- Node and an offline Chromium preview tool are already installed. Run
+  `neev-preview path/to/page.html` from the run directory. It returns a screenshot
+  path, page title, and JavaScript errors. Use a new PNG path as a second argument
+  for another capture. Its default screenshot is a verification file, not a
+  deliverable.
+- The preview blocks external resources and verifies local HTML only. Report
+  that limitation when external fonts, images, or services affect the result.
+- Do not install Playwright or browsers during a run: package downloads are
+  blocked by the sandbox. Use the installed tool, and report any check that
+  could not be completed rather than claiming browser verification passed.

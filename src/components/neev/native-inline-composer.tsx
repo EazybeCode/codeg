@@ -14,6 +14,7 @@
 // file still uploading says so inside the sentence, and a node can never be
 // mistaken for a file the server has.
 
+import { continueNumberedList } from "@/lib/neev-numbered-list"
 import {
   createContext,
   useCallback,
@@ -288,7 +289,9 @@ const HardBreakExtension = Node.create({
   addKeyboardShortcuts() {
     const insert = () =>
       this.editor.commands.insertContent({ type: "hardBreak" })
-    return { "Shift-Enter": insert, "Mod-Enter": insert }
+    // Shift+Enter always inserts a line break. Mod+Enter is handled by the
+    // numbered list extension or falls through to the composer's send logic.
+    return { "Shift-Enter": insert }
   },
 })
 
@@ -598,6 +601,25 @@ export function NativeInlineComposer({
               return true
             }
           }
+
+          // Handle Enter for numbered list continuation/exit.
+          // This runs BEFORE send logic: within a list, Enter continues;
+          // Mod+Enter always sends; Shift+Enter is a hard break (handled by
+          // extension); IME composition is never intercepted.
+          if (
+            event.key === "Enter" &&
+            !composing &&
+            !event.shiftKey &&
+            !event.metaKey &&
+            !event.ctrlKey &&
+            editor
+          ) {
+            if (continueNumberedList(_view.state, _view.dispatch)) {
+              event.preventDefault()
+              return true
+            }
+          }
+
           if (
             !sendsOnEnter(
               {

@@ -5,6 +5,13 @@ import { useTranslations } from "next-intl"
 
 function safeUrl(value: string): string | undefined {
   if (value.startsWith("#")) return value
+  // Exact attachment route only; the server enforces the conversation ACL.
+  if (
+    /^\/api\/neev\/attachments\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+      value
+    )
+  )
+    return value
   // No base URL: relative, protocol-relative and custom-protocol links stay inert.
   if (!/^https?:\/\//i.test(value) || /[\u0000-\u0020\u007f]/.test(value))
     return

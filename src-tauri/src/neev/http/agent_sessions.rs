@@ -469,8 +469,7 @@ pub(super) async fn move_session(
         catalog::organization_mutation::<MoveSessionInput>(&state, request, SESSION_BODY_LIMIT)
             .await?;
     let expected = catalog::canonical_revision(&input.expected_revision)?;
-    let updated =
-        sessions::move_to_node(&state, &actor, &id, input.node_id, expected).await?;
+    let updated = sessions::move_to_node(&state, &actor, &id, input.node_id, expected).await?;
     Ok(private_json(session_dto(updated)))
 }
 
@@ -515,13 +514,8 @@ pub(super) async fn start_turn(
     // Resolved BEFORE the turn exists: an unreadable key, one uploaded to
     // another conversation, or a set over the per-turn budget is a plain
     // refusal here rather than a turn that has to be settled as failed.
-    let resolved = attachment::resolve_for_run(
-        &state,
-        &actor,
-        Owner::Session(&session_id),
-        &keys,
-    )
-    .await?;
+    let resolved =
+        attachment::resolve_for_run(&state, &actor, Owner::Session(&session_id), &keys).await?;
     // Context is gathered BEFORE the new turn exists so it cannot include
     // itself, and only completed turns contribute (§ `conversation_prompt`).
     let history = sessions::recent_turns(&state, &actor, &session_id).await?;
@@ -604,17 +598,14 @@ pub(super) async fn start_turn(
         // The session's own transcript and earlier files, staged separately from
         // the uploads above so the prompt can keep telling the truth about which
         // files arrived with this message.
-        context_files: context
-            .map(|bundle| bundle.files)
-            .unwrap_or_default(),
+        context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
     };
     match state.agents.run(run_request).await {
         Ok(handle) => {
             runs::start(
                 state.clone(),
                 turn.run_id.clone(),
-                actor.org_id,
-                actor.identity.user_id,
+                actor.clone(),
                 session_id,
                 turn.id.clone(),
                 handle,
@@ -719,7 +710,9 @@ impl Authority {
     /// Re-prove authority. `Err(())` the moment the caller is no longer
     /// entitled to this run, which ends the stream without delivering.
     async fn ensure(&mut self, state: &ServerState) -> Result<(), ()> {
-        reauthorize(state, &self.token, &self.run_id).await.map(|_| ())
+        reauthorize(state, &self.token, &self.run_id)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -1319,7 +1312,8 @@ pub(super) async fn set_settings(
     let _permit = catalog::permit(&state)?;
     canonical_uuid(&id)?;
     let (input, actor) =
-        catalog::organization_mutation::<SettingsInput>(&state, request, SESSION_BODY_LIMIT).await?;
+        catalog::organization_mutation::<SettingsInput>(&state, request, SESSION_BODY_LIMIT)
+            .await?;
     let expected = catalog::canonical_revision(&input.expected_revision)?;
     Ok(private_json(session_dto(
         sessions::set_settings(
@@ -1594,17 +1588,14 @@ pub(super) async fn team_invoke(
         // The chat's own transcript and earlier files. Nothing private to the
         // invoker is here: the set is scoped to this chat in SQL and re-proven
         // against the chat's ACL, so it is the same material the room can read.
-        context_files: context
-            .map(|bundle| bundle.files)
-            .unwrap_or_default(),
+        context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
     };
     let turn = match state.agents.run(run_request).await {
         Ok(handle) => {
             runs::start(
                 state.clone(),
                 turn.run_id.clone(),
-                actor.org_id,
-                actor.identity.user_id,
+                actor.clone(),
                 session.id.clone(),
                 turn.id.clone(),
                 handle,

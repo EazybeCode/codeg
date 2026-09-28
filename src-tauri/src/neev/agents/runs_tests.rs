@@ -56,9 +56,10 @@ impl Harness {
 
     /// Begin a turn and drive it with a fake runtime producing `chunks`.
     async fn run(&self, prompt: &str, chunks: Vec<String>) -> (String, Arc<LiveRun>) {
-        let (turn, _) = sessions::begin_turn(&self.state, &self.actor, &self.session.id, prompt, None)
-            .await
-            .unwrap();
+        let (turn, _) =
+            sessions::begin_turn(&self.state, &self.actor, &self.session.id, prompt, None)
+                .await
+                .unwrap();
         let handle = FakeRuntime::new(chunks)
             .run(RunRequest {
                 user_id: self.actor.identity.user_id,
@@ -79,8 +80,7 @@ impl Harness {
         let live = start(
             self.state.clone(),
             turn.run_id.clone(),
-            self.actor.org_id,
-            self.actor.identity.user_id,
+            self.actor.clone(),
             self.session.id.clone(),
             turn.id.clone(),
             handle,
@@ -150,7 +150,7 @@ async fn a_reader_attaching_after_the_first_chunks_still_sees_all_of_them() {
                     emitted = end;
                     seen.push_str(&text);
                 }
-                RunSignal::Activity(_) => {},
+                RunSignal::Activity(_) => {}
                 RunSignal::Finished { .. } => break,
             }
         }
@@ -234,9 +234,11 @@ async fn a_refusal_before_any_stream_is_recorded_on_the_durable_turn() {
     assert_eq!(settled.error_code.as_deref(), Some("disabled"));
     assert_eq!(settled.prompt, "q");
     // And the session is free to take a new turn immediately.
-    assert!(sessions::begin_turn(&h.state, &h.actor, &h.session.id, "retry", None)
-        .await
-        .is_ok());
+    assert!(
+        sessions::begin_turn(&h.state, &h.actor, &h.session.id, "retry", None)
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -266,10 +268,7 @@ async fn a_run_whose_result_cannot_be_stored_never_reports_success() {
     // "completed" is claimed even though the provider produced a full reply.
     assert_eq!(
         reported,
-        Some((
-            sessions::TurnStatus::Failed,
-            Some("unavailable".to_owned())
-        )),
+        Some((sessions::TurnStatus::Failed, Some("unavailable".to_owned()))),
         "a run that could not be stored must not report completion"
     );
 
@@ -299,14 +298,16 @@ async fn a_run_whose_result_cannot_be_stored_never_reports_success() {
 #[tokio::test]
 async fn over_limit_text_is_never_broadcast_only_never_stored() {
     let h = Harness::new().await;
-    let (run_id, live) = h.run("huge", (0..30).map(|_| "x".repeat(10_000)).collect()).await;
+    let (run_id, live) = h
+        .run("huge", (0..30).map(|_| "x".repeat(10_000)).collect())
+        .await;
     let mut events = live.subscribe_for_test();
     let mut broadcast_chars = 0usize;
     while let Ok(signal) = events.recv().await {
         match signal {
             RunSignal::Delta(delta) => broadcast_chars += delta.text.chars().count(),
-            RunSignal::Activity(_) => {},
-                RunSignal::Finished { .. } => break,
+            RunSignal::Activity(_) => {}
+            RunSignal::Finished { .. } => break,
         }
     }
     let turn = h.settled(&run_id).await;
@@ -361,9 +362,15 @@ async fn a_transient_storage_outage_does_not_wedge_the_session() {
     // And the session is usable again — this is the whole point: a one-second
     // database blip must not cost a tenant their session until a restart.
     assert!(
-        sessions::begin_turn(&h.state, &h.actor, &h.session.id, "retry after outage", None)
-            .await
-            .is_ok(),
+        sessions::begin_turn(
+            &h.state,
+            &h.actor,
+            &h.session.id,
+            "retry after outage",
+            None
+        )
+        .await
+        .is_ok(),
         "the session is still wedged by the stranded run"
     );
 }
@@ -419,7 +426,10 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
     )
     .await
     .unwrap();
-    assert!(!created, "a late replay must not be told it created the turn");
+    assert!(
+        !created,
+        "a late replay must not be told it created the turn"
+    );
     assert_eq!(sequential.id, first.id);
     assert_eq!(sequential.run_id, first.run_id);
     assert_eq!(sequential.status, sessions::TurnStatus::Completed);
@@ -449,9 +459,10 @@ async fn a_replayed_request_id_returns_the_same_turn_and_never_runs_twice() {
 async fn a_replay_is_answered_even_after_the_session_is_archived() {
     let h = Harness::new().await;
     let request_id = uuid::Uuid::new_v4().to_string();
-    let (first, _) = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "ask", Some(&request_id))
-        .await
-        .unwrap();
+    let (first, _) =
+        sessions::begin_turn(&h.state, &h.actor, &h.session.id, "ask", Some(&request_id))
+            .await
+            .unwrap();
     sessions::finish(
         &h.state.database,
         &first.run_id,
@@ -463,15 +474,18 @@ async fn a_replay_is_answered_even_after_the_session_is_archived() {
     )
     .await
     .unwrap();
-    let session = sessions::get(&h.state, &h.actor, &h.session.id).await.unwrap();
+    let session = sessions::get(&h.state, &h.actor, &h.session.id)
+        .await
+        .unwrap();
     sessions::set_archived(&h.state, &h.actor, &h.session.id, true, session.revision)
         .await
         .unwrap();
     // Retrying a request that already succeeded returns its result rather than
     // a late objection about the session's current state.
-    let (replay, created) = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "ask", Some(&request_id))
-        .await
-        .unwrap();
+    let (replay, created) =
+        sessions::begin_turn(&h.state, &h.actor, &h.session.id, "ask", Some(&request_id))
+            .await
+            .unwrap();
     assert!(!created);
     assert_eq!(replay.id, first.id);
 }
@@ -518,13 +532,12 @@ async fn settle_refusal_refuses_a_run_id_that_is_not_the_caller_s() {
         settle_refusal(&h.state, "ffffffffffffffffffffffffffffffff", "disabled").await,
         Ok::<(), ContentError>(())
     );
-    assert!(sessions::turn_by_run_id(
-        &h.state.database,
-        "ffffffffffffffffffffffffffffffff"
-    )
-    .await
-    .unwrap()
-    .is_none());
+    assert!(
+        sessions::turn_by_run_id(&h.state.database, "ffffffffffffffffffffffffffffffff")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// A `LiveRun` with nothing behind it, for exercising the buffer alone.
@@ -581,7 +594,11 @@ fn a_break_is_topped_up_never_stacked() {
         let live = buffer_only();
         live.append_message(first);
         live.append_message(second);
-        assert_eq!(live.snapshot().0, expected, "joining {first:?} to {second:?}");
+        assert_eq!(
+            live.snapshot().0,
+            expected,
+            "joining {first:?} to {second:?}"
+        );
     }
 }
 
@@ -619,8 +636,94 @@ fn a_break_cannot_push_a_reply_past_the_cap_unnoticed() {
     // append that overflows is the one that reports it, so the run still stops
     // rather than silently dropping the tail.
     let appended = live.append_message("b");
-    assert!(appended.overflowed, "an overrun at the seam must be reported");
+    assert!(
+        appended.overflowed,
+        "an overrun at the seam must be reported"
+    );
     let (stored, count) = live.snapshot();
     assert_eq!(count, MAX_RESPONSE_CHARS, "never stores past the cap");
     assert_eq!(count, stored.chars().count());
+}
+
+async fn drive_spooled_output(corrupt: bool) {
+    use sha2::{Digest, Sha256};
+    let h = Harness::new().await;
+    let (turn, _) = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "Make a file", None)
+        .await
+        .unwrap();
+    let mut handle = FakeRuntime::new(vec!["[Report](outputs/report.html)".into()])
+        .run(RunRequest {
+            user_id: h.actor.identity.user_id,
+            org_id: h.actor.org_id,
+            chat_id: h.session.id.clone(),
+            provider: "claude".into(),
+            model: "default".into(),
+            prompt: "Make a file".into(),
+            credential_handle: None,
+            briefing: None,
+            effort: None,
+            fast: false,
+            attachments: vec![],
+            context_files: vec![],
+        })
+        .await
+        .unwrap();
+    assert_ne!(turn.run_id, handle.run_id);
+    let root = tempfile::TempDir::new().unwrap();
+    let spool = root
+        .path()
+        .join("spool")
+        .join(format!("run-{}", handle.run_id));
+    std::fs::create_dir_all(spool.join("files")).unwrap();
+    let key = uuid::Uuid::new_v4().to_string();
+    let bytes = b"<!doctype html><title>Durable report</title>";
+    let hash = if corrupt {
+        "bad".into()
+    } else {
+        format!("{:x}", Sha256::digest(bytes))
+    };
+    std::fs::write(
+        spool.join("files").join(format!("{key}--report.html")),
+        bytes,
+    )
+    .unwrap();
+    std::fs::write(
+        spool.join("manifest.json"),
+        serde_json::json!({
+            "run_id": format!("run-{}", handle.run_id), "errors": [],
+            "files": [{"key":key,"name":"report.html","byte_length":bytes.len(),"sha256":hash}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    handle.workspace_root = Some(root.path().to_owned());
+    start(
+        h.state.clone(),
+        turn.run_id.clone(),
+        h.actor.clone(),
+        h.session.id.clone(),
+        turn.id,
+        handle,
+        None,
+    );
+    let settled = h.settled(&turn.run_id).await;
+    if corrupt {
+        assert_eq!(settled.status, TurnStatus::Failed);
+        assert!(spool.exists(), "failed persistence must retain the spool");
+    } else {
+        assert_eq!(settled.status, TurnStatus::Completed);
+        assert!(settled.response.contains("/api/neev/attachments/"));
+        assert!(!settled.response.contains("outputs/report.html"));
+        assert!(!spool.exists());
+    }
+}
+
+#[tokio::test]
+async fn runtime_spool_id_is_distinct_from_durable_run_id_and_files_survive() {
+    drive_spooled_output(false).await;
+}
+
+#[tokio::test]
+async fn broken_export_never_reports_completed() {
+    drive_spooled_output(true).await;
 }

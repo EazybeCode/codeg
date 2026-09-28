@@ -177,3 +177,20 @@ it("leaves the blocks it has already drawn alone while the last one grows", asyn
   // The same node, not an equal one: it was never torn down and rebuilt.
   expect(container.querySelectorAll("p")[0]).toBe(first)
 })
+
+it("allows authenticated generated-file downloads but keeps arbitrary local paths inert", () => {
+  const key = "11111111-1111-4111-8111-111111111111"
+  render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <NativeMarkdown
+        markdown={`[Report](/api/neev/attachments/${key}) [Bad](/api/neev/attachments/../../settings) [Local](outputs/report.html)`}
+      />
+    </NextIntlClientProvider>
+  )
+  expect(screen.getByRole("link", { name: "Report" })).toHaveAttribute(
+    "href",
+    `/api/neev/attachments/${key}`
+  )
+  expect(screen.queryByRole("link", { name: "Bad" })).toBeNull()
+  expect(screen.queryByRole("link", { name: "Local" })).toBeNull()
+})

@@ -186,6 +186,7 @@
     "activityWorking": "En cours…",
     "activityRunningTool": "Exécute {name}…",
     "activityElapsed": "{number}s",
+    "activityElapsedMinutes": "{minutes}m {seconds}s",
     "richTooLarge": "Collage refusé : ce contenu dépasse la taille d’un document. Collez-le en plusieurs fois.",
     "pastedCellLines": "Collé sur une seule ligne : une cellule de tableau n’accepte pas les sauts de ligne.",
     "cellNoLineBreak": "Une cellule de tableau n’accepte pas de saut de ligne. Utilisez une nouvelle ligne, ou écrivez le texte sur une seule ligne.",
