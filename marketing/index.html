@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Neev — A shared workspace for your team's AI work</title>
+<meta content="Neev brings your team's Claude and Codex conversations, documents, and generated files into one organized workspace. Projects keep everything together." name="description"/>
+<meta content="Neev — A shared workspace for your team's AI work" property="og:title"/>
+<meta content="Projects, conversations, documents, and shared skills for teams using Claude and Codex." property="og:description"/>
+<meta content="website" property="og:type"/>
+<meta content="https://neev.so/" property="og:url"/>
+<link href="https://neev.so/" rel="canonical"/>
+<link href="favicon.svg" rel="icon" type="image/svg+xml"/>
+<link href="styles.css" rel="stylesheet"/>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="site-header">
+<nav aria-label="Main navigation" class="nav-container">
+<a aria-label="Neev home" class="logo-link" href="/">
+<svg aria-hidden="true" class="logo-mark" fill="none" height="28" viewbox="0 0 28 28" width="28">
+<rect fill="currentColor" height="10" rx="2" width="10" x="2" y="2"></rect>
+<rect fill="currentColor" height="10" opacity="0.6" rx="2" width="10" x="16" y="2"></rect>
+<rect fill="currentColor" height="10" opacity="0.6" rx="2" width="10" x="2" y="16"></rect>
+<rect fill="currentColor" height="10" rx="2" width="10" x="16" y="16"></rect>
+</svg>
+<span class="logo-wordmark">neev</span>
+</a>
+<button aria-controls="nav-menu" aria-expanded="false" aria-label="Open menu" class="mobile-nav-toggle">
+<span class="hamburger-line"></span>
+<span class="hamburger-line"></span>
+<span class="hamburger-line"></span>
+</button>
+<ul class="nav-menu" id="nav-menu">
+<li><a href="#workspace">Workspace</a></li>
+<li><a href="#team">For your team</a></li>
+<li><a href="#questions">Questions</a></li>
+<li><a class="nav-link-login" href="https://app.neev.so/">Log in</a></li>
+<li><a class="nav-cta" href="https://app.neev.so/">Open Neev</a></li>
+</ul>
+</nav>
+</header>
+<main id="main">
+<section class="hero">
+<div class="hero-content">
+<p class="hero-kicker">A shared home for your team's AI work</p>
+<h1 class="hero-headline">Your team’s AI work.<br/>In one shared space.</h1>
+<p class="hero-subtext">Your team, Claude, and Codex. One shared workspace.</p>
+<div class="hero-cta-group">
+<a class="btn btn-primary" href="https://app.neev.so/">Open Neev</a>
+<a class="btn btn-secondary" href="#workspace">Explore the workspace</a>
+</div>
+</div>
+<div class="hero-preview" id="workspace">
+<div aria-label="Interactive workspace preview" class="preview-window" role="region">
+<div aria-label="Workspace views" class="preview-tabs" role="tablist">
+<button aria-controls="panel-chat" aria-selected="true" class="preview-tab active" id="tab-chat" role="tab">Agent chat</button>
+<button aria-controls="panel-docs" aria-selected="false" class="preview-tab" id="tab-docs" role="tab">Documents</button>
+<button aria-controls="panel-skills" aria-selected="false" class="preview-tab" id="tab-skills" role="tab">Shared skills</button>
+</div>
+<div class="preview-body">
+<aside class="preview-sidebar">
+<div class="sidebar-project">
+<span class="project-icon">◈</span>
+<span class="project-name">Product launch</span>
+</div>
+<ul class="sidebar-items">
+<li class="sidebar-item active">Campaign brief</li>
+<li class="sidebar-item">Launch research</li>
+<li class="sidebar-item">Shared skills</li>
+</ul>
+</aside>
+<div class="preview-main">
+<div aria-labelledby="tab-chat" class="preview-panel active" id="panel-chat" role="tabpanel" tabindex="0">
+<div class="chat-thread">
+<div class="chat-message user-message">
+<div class="message-avatar">JL</div>
+<div class="message-content">
+<div class="message-meta">Jamie · 2:14 PM</div>
+<p>Turn this product brief into a launch plan. Use our brand voice and save a first draft for the team.</p>
+</div>
+</div>
+<div class="chat-message agent-message">
+<div class="message-avatar agent">◇</div>
+<div class="message-content">
+<div class="message-meta">Claude · Agent</div><div aria-live="off" class="demo-run-status"><span aria-hidden="true" class="activity-dot"></span><span id="demo-status">Reading the attached brief</span><span aria-hidden="true" class="demo-timer">0:00</span></div>
+<details class="tool-trace">
+<summary>Read 3 attached files</summary>
+<div class="trace-detail">product-specs.md · target-audience.md · brand-guide.md</div>
+</details>
+<p id="demo-response">I’ll read the brief and turn it into a campaign plan your team can review.</p>
+<div class="artifact-preview">
+<div class="artifact-header">
+<span class="artifact-icon">↗</span>
+<span class="artifact-name">launch-brief.html</span>
+</div>
+<div class="artifact-content">
+<div class="artifact-title">A launch plan the team can build on</div>
+<div class="artifact-text">Positioning &amp; audience<br/>Launch channels &amp; key messages<br/>Next steps for the team</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<div aria-labelledby="tab-docs" class="preview-panel" hidden="" id="panel-docs" role="tabpanel" tabindex="0">
+<div class="doc-preview">
+<h2 class="doc-title">Campaign Brief</h2>
+<p class="doc-meta">Last edited by Jamie · Today</p>
+<div class="doc-content">
+<h3>Objective</h3>
+<p>Launch the Q1 collaboration features to startup teams who currently use AI tools individually.</p>
+<h3>Key Messages</h3>
+<ul class="doc-list">
+<li>Your team's AI work deserves a shared home</li>
+<li>Keep conversations and outputs together</li>
+<li>Build on each other's work, not from scratch</li>
+</ul>
+<h3>Tasks</h3>
+<ul class="doc-checklist">
+<li class="checked">Define target audience</li>
+<li class="checked">Draft key messages</li>
+<li>Review with design team</li>
+<li>Finalize launch timeline</li>
+</ul>
+</div>
+</div>
+</div>
+<div aria-labelledby="tab-skills" class="preview-panel" hidden="" id="panel-skills" role="tabpanel" tabindex="0">
+<div class="skills-preview">
+<h2 class="skills-title">Shared Skills</h2>
+<p class="skills-meta">Available to all team members</p>
+<ul class="skills-list">
+<li class="skill-item">
+<span class="skill-icon">CR</span>
+<div class="skill-info">
+<span class="skill-name">Code review</span>
+<span class="skill-desc">Review PRs with team conventions</span>
+</div>
+</li>
+<li class="skill-item">
+<span class="skill-icon">Aa</span>
+<div class="skill-info">
+<span class="skill-name">Write documentation</span>
+<span class="skill-desc">Follow the team style guide</span>
+</div>
+</li>
+<li class="skill-item">
+<span class="skill-icon">RS</span>
+<div class="skill-info">
+<span class="skill-name">Research competitor</span>
+<span class="skill-desc">Structured competitive analysis</span>
+</div>
+</li>
+<li class="skill-item">
+<span class="skill-icon">MX</span>
+<div class="skill-info">
+<span class="skill-name">Summarize metrics</span>
+<span class="skill-desc">Weekly metrics digest format</span>
+</div>
+</li>
+</ul>
+</div>
+</div>
+</div>
+</div>
+</div>
+<p class="preview-caption">Example workspace · Watch an idea become a first draft.</p><button aria-pressed="false" class="demo-control" id="demo-toggle" type="button">Pause preview</button>
+</div>
+</section>
+<section class="capabilities">
+<ul class="capabilities-list">
+<li>Claude</li>
+<li>Codex</li>
+<li>Collaborative docs</li>
+<li>Shared skills</li>
+</ul>
+</section><section aria-labelledby="everyday-title" class="everyday-features"><div class="section-intro"><p class="eyebrow">BUILT AROUND THE WAY YOU WORK</p><h2 id="everyday-title">From the first question<br/>to the finished work.</h2><p>Everything your team needs to keep moving.</p></div><div class="feature-grid"><article><span aria-hidden="true" class="feature-symbol">01</span><h3>Claude or Codex. Your choice.</h3><p>Connect your subscription and choose the right agent for the task.</p></article><article><span aria-hidden="true" class="feature-symbol">02</span><h3>See the work as it happens.</h3><p>Follow live responses and tool activity. Stop a run when you need to.</p></article><article><span aria-hidden="true" class="feature-symbol">03</span><h3>Docs you can work on together.</h3><p>Write, edit, and keep the brief beside the conversation.</p></article><article><span aria-hidden="true" class="feature-symbol">04</span><h3>Bring someone into the loop.</h3><p>Mention a teammate and share the conversation with your organization.</p></article><article><span aria-hidden="true" class="feature-symbol">05</span><h3>Find the file, with its context.</h3><p>Generated files live with their chat. Preview supported formats before downloading.</p></article><article><span aria-hidden="true" class="feature-symbol">06</span><h3>Give your team a shared toolkit.</h3><p>Upload reusable skills and MCP configurations for your organization.</p></article></div></section>
+<section class="features" id="team">
+<article class="feature feature-left">
+<div class="feature-visual">
+<div class="mini-ui mini-collab"><div class="sample-label">PRODUCT LAUNCH <span>Shared project</span></div><div class="mini-avatars"><span class="mini-avatar">MK</span><span class="mini-avatar">JL</span><span class="mini-avatar">SR</span></div><div class="sample-note"><strong>Jamie</strong><p>The campaign brief is ready for a first look.</p></div><div class="sample-note reply"><strong>Maya</strong><p><span class="mention">@Sam</span> Let’s review the launch story together.</p></div><div class="sample-footer">3 teammates · One place to move forward</div></div>
+</div>
+<div class="feature-content">
+<h2 class="feature-title">Work together</h2>
+<p class="feature-text">One project for the whole team. Share the brief, discuss the details, and bring in a teammate with an @mention.</p>
+</div>
+</article>
+<article class="feature feature-right">
+<div class="feature-content">
+<h2 class="feature-title">Keep the output with the conversation</h2>
+<p class="feature-text">The HTML page. The research notes. The next draft. Keep them with the conversation, ready to review and improve.</p>
+</div>
+<div class="feature-visual">
+<div class="mini-ui mini-artifacts"><div class="sample-label">LAUNCH RESEARCH</div><p class="sample-result">Your files, right beside the conversation.</p><div class="sample-file"><span class="file-badge">HTML</span><div><strong>launch-page.html</strong><small>Website preview</small></div><span aria-hidden="true">↗</span></div><div class="sample-file"><span class="file-badge paper">MD</span><div><strong>campaign-brief.md</strong><small>Draft for review</small></div><span aria-hidden="true">↗</span></div><div class="sample-footer">Created in this chat · Ready to review</div></div>
+</div>
+</article>
+<article class="feature feature-left">
+<div class="feature-visual">
+<div class="mini-ui mini-skills"><div class="sample-label">YOUR TEAM’S TOOLKIT</div><div class="sample-skill"><span class="skill-letter">Aa</span><div><strong>Brand voice</strong><small>Write like your team</small></div><span class="enabled">Enabled</span></div><div class="sample-skill"><span class="skill-letter">&lt;/&gt;</span><div><strong>Code review</strong><small>Your conventions, built in</small></div><span class="enabled">Enabled</span></div><div class="sample-skill"><span class="skill-letter">✓</span><div><strong>Launch checklist</strong><small>Every detail accounted for</small></div><span class="enabled">Enabled</span></div><div class="sample-footer">Managed by admins · Available to the team</div></div>
+</div>
+<div class="feature-content">
+<h2 class="feature-title">Teach it how your team works</h2>
+<p class="feature-text">Your brand voice, review checklist, or research process. Upload a skill once and enable it for the team’s next agent turns.</p>
+</div>
+</article>
+</section>
+<section class="getting-started">
+<h2 class="section-title">Get started</h2>
+<ol class="steps">
+<li class="step">
+<span class="step-number">1</span>
+<div class="step-content">
+<h3>Create your workspace</h3>
+<p>Set up your organization and invite your team with a simple join code.</p>
+</div>
+</li>
+<li class="step">
+<span class="step-number">2</span>
+<div class="step-content">
+<h3>Connect your AI</h3>
+<p>Each person uses their own Claude or Codex subscription. No shared credentials.</p>
+</div>
+</li>
+<li class="step">
+<span class="step-number">3</span>
+<div class="step-content">
+<h3>Start a project</h3>
+<p>Create a project, add conversations, documents, and shared skills. Everything stays organized.</p>
+</div>
+</li>
+</ol>
+</section>
+<section class="faq" id="questions">
+<h2 class="section-title">Questions</h2>
+<div class="faq-list">
+<details class="faq-item">
+<summary>Do team members need their own Claude or Codex subscription?</summary>
+<p>To run an agent, connect your own supported Claude or Codex subscription. Teammates can collaborate in the workspace without sharing AI sign-ins. Each connected account stays personal.</p>
+</details>
+<details class="faq-item">
+<summary>How do people join my team?</summary>
+<p>When you create an organization, you get a join code. Share it with teammates and they can join directly. Admins can manage who's in the organization.</p>
+</details>
+<details class="faq-item">
+<summary>What happens to files generated in conversations?</summary>
+<p>Generated files are saved with the chat that created them. Open supported previews before downloading, keep reviewing with teammates, or ask the agent to create a new version.</p>
+</details>
+<details class="faq-item">
+<summary>What are shared skills?</summary>
+<p>Skills are reusable instructions and supporting files for your team. Organization admins can upload SKILL.md files or ZIP bundles in Settings → Shared library. Once enabled, they are available to subsequent agent turns across the organization.</p>
+</details>
+<details class="faq-item">
+<summary>Can we share MCP integrations?</summary>
+<p>Yes. Admins can import MCP configurations into the shared library. Remote services may need server allowlisting, and local tools need their dependencies installed. Imports with embedded credentials are not supported; your personal AI connections stay separate.</p>
+</details>
+</div>
+</section>
+<section class="final-cta">
+<h2>Your team's AI work, organized.</h2>
+<p>Stop losing context. Start building together.</p>
+<a class="btn btn-primary btn-large" href="https://app.neev.so/">Open Neev</a>
+</section>
+</main>
+<footer class="site-footer">
+<div class="footer-content">
+<div class="footer-logo">
+<svg aria-hidden="true" class="logo-mark" fill="none" height="24" viewbox="0 0 28 28" width="24">
+<rect fill="currentColor" height="10" rx="2" width="10" x="2" y="2"></rect>
+<rect fill="currentColor" height="10" opacity="0.6" rx="2" width="10" x="16" y="2"></rect>
+<rect fill="currentColor" height="10" opacity="0.6" rx="2" width="10" x="2" y="16"></rect>
+<rect fill="currentColor" height="10" rx="2" width="10" x="16" y="16"></rect>
+</svg>
+<span>neev</span>
+</div>
+<nav aria-label="Footer navigation" class="footer-nav">
+<a href="#workspace">Workspace</a>
+<a href="#team">For your team</a>
+<a href="#questions">Questions</a>
+<a href="https://app.neev.so/">Open Neev</a>
+</nav>
+<p class="footer-copyright">© 2026 Neev</p>
+</div>
+</footer>
+<script src="script.js"></script>
+</body>
+</html>
