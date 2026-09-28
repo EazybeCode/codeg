@@ -170,3 +170,44 @@ it("keeps an in-flight preview across chat refreshes", async () => {
     )
   )
 })
+
+it("offers retry after a stalled HTML preview fails", async () => {
+  vi.mocked(readHtmlPreview)
+    .mockRejectedValueOnce(new Error("Stalled"))
+    .mockResolvedValueOnce({ html: "<p>Recovered</p>", truncated: false })
+  render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <FileActions file={{ ...file, fileName: "page.html" }}>
+        page.html
+      </FileActions>
+    </NextIntlClientProvider>
+  )
+  fireEvent.click(screen.getByRole("link", { name: "page.html" }))
+  await screen.findByRole("alert")
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }))
+  await waitFor(() =>
+    expect(screen.getByRole("dialog").querySelector("iframe")).toHaveAttribute(
+      "srcdoc",
+      "<p>Recovered</p>"
+    )
+  )
+})
+
+it("shows received bytes while a large HTML download is pending", async () => {
+  vi.mocked(readHtmlPreview).mockImplementation((_file, _signal, progress) => {
+    progress?.(1024 * 1024)
+    return new Promise(() => {})
+  })
+  render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <FileActions
+        file={{ ...file, fileName: "page.html", byteLength: 2 * 1024 * 1024 }}
+      >
+        page.html
+      </FileActions>
+    </NextIntlClientProvider>
+  )
+  fireEvent.click(screen.getByRole("link", { name: "page.html" }))
+  expect(await screen.findByRole("status")).toHaveTextContent("1.0 / 2.0 MB")
+  expect(screen.getByRole("progressbar")).toHaveAttribute("value", "1048576")
+})

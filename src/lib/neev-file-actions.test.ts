@@ -118,3 +118,48 @@ it("fetches org-wide archived attachments from correct endpoint", async () => {
     expect.objectContaining({ credentials: "same-origin" })
   )
 })
+
+it("reports HTML bytes while the response is still streaming", async () => {
+  let stream!: ReadableStreamDefaultController<Uint8Array>
+  vi.mocked(fetch).mockResolvedValue(
+    new Response(
+      new ReadableStream({
+        start(c) {
+          stream = c
+        },
+      })
+    )
+  )
+  const progress = vi.fn()
+  const pending = readHtmlPreview(
+    { ...file, fileName: "page.html" },
+    undefined,
+    progress
+  )
+  stream.enqueue(new TextEncoder().encode("<p>Hello"))
+  await vi.waitFor(() => expect(progress).toHaveBeenCalledWith(8))
+  stream.enqueue(new TextEncoder().encode("</p>"))
+  stream.close()
+  expect((await pending).html).toContain("Hello")
+  expect(progress).toHaveBeenLastCalledWith(12)
+})
+
+it("aborts a transfer that makes no progress for 30 seconds", async () => {
+  vi.useFakeTimers()
+  try {
+    vi.mocked(fetch).mockImplementation(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError"))
+          )
+        })
+    )
+    const pending = readHtmlPreview({ ...file, fileName: "page.html" })
+    const rejected = expect(pending).rejects.toThrow("Aborted")
+    await vi.advanceTimersByTimeAsync(30_000)
+    await rejected
+  } finally {
+    vi.useRealTimers()
+  }
+})

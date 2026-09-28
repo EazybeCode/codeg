@@ -1,5 +1,7 @@
 {
   "NativeContent": {
+    "retryPreview": "حاول مرة أخرى",
+    "previewTransfer": "جارٍ تحميل المعاينة · {received} / {total} MB",
     "previewUnsupported": "المعاينة غير متاحة لهذا النوع من الملفات.",
     "htmlStaticPreview": "معاينة ثابتة — تم تعطيل البرامج النصية والموارد الخارجية.",
     "htmlPreviewTruncated": "عرض أول 2 ميجابايت من ملف HTML هذا.",

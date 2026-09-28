@@ -1,5 +1,7 @@
 {
   "NativeContent": {
+    "retryPreview": "重試",
+    "previewTransfer": "正在載入預覽 · {received} / {total} MB",
     "previewUnsupported": "此檔案類型不支援預覽。",
     "htmlStaticPreview": "靜態預覽 — 已停用指令碼和外部資源。",
     "htmlPreviewTruncated": "顯示此 HTML 檔案的前 2 MB。",

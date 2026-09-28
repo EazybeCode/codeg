@@ -1,5 +1,7 @@
 {
   "NativeContent": {
+    "retryPreview": "다시 시도",
+    "previewTransfer": "미리보기 로딩 중 · {received} / {total} MB",
     "previewUnsupported": "이 파일 형식은 미리보기를 사용할 수 없습니다.",
     "htmlStaticPreview": "정적 미리보기 — 스크립트 및 외부 리소스가 비활성화됩니다.",
     "htmlPreviewTruncated": "이 HTML 파일의 처음 2MB를 표시합니다.",

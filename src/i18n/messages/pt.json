@@ -1,5 +1,7 @@
 {
   "NativeContent": {
+    "retryPreview": "Tentar novamente",
+    "previewTransfer": "Carregando prévia · {received} / {total} MB",
     "previewUnsupported": "Pré-visualização não disponível para este tipo de arquivo.",
     "htmlStaticPreview": "Pré-visualização estática — scripts e recursos externos desabilitados.",
     "htmlPreviewTruncated": "Mostrando os primeiros 2 MB deste arquivo HTML.",

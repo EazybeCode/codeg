@@ -1,5 +1,7 @@
 {
   "NativeContent": {
+    "retryPreview": "再試行",
+    "previewTransfer": "プレビューを読み込み中 · {received} / {total} MB",
     "previewUnsupported": "このファイルタイプのプレビューは利用できません。",
     "htmlStaticPreview": "静的プレビュー — スクリプトと外部リソースは無効です。",
     "htmlPreviewTruncated": "このHTMLファイルの最初の2MBを表示しています。",

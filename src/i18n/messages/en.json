@@ -13,6 +13,8 @@
     "deleteFile": "Delete",
     "restoreFile": "Restore",
     "filePreview": "File preview",
+    "retryPreview": "Try again",
+    "previewTransfer": "Loading preview · {received} / {total} MB",
     "previewError": "Could not open this file. Try again later.",
     "htmlPreviewUnavailable": "HTML preview is not available. An organisation security block must be resolved before opening a blocked file.",
     "textPreviewTruncated": "Showing the first 2 MB of this text file.",

@@ -1,5 +1,7 @@
 {
   "NativeContent": {
+    "retryPreview": "Réessayer",
+    "previewTransfer": "Chargement de l’aperçu · {received} / {total} Mo",
     "previewUnsupported": "Aperçu non disponible pour ce type de fichier.",
     "htmlStaticPreview": "Aperçu statique — scripts et ressources externes désactivés.",
     "htmlPreviewTruncated": "Affichage des 2 premiers Mo de ce fichier HTML.",

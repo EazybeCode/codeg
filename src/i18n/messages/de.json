@@ -1,5 +1,7 @@
 {
   "NativeContent": {
+    "retryPreview": "Erneut versuchen",
+    "previewTransfer": "Vorschau wird geladen · {received} / {total} MB",
     "previewUnsupported": "Vorschau für diesen Dateityp nicht verfügbar.",
     "htmlStaticPreview": "Statische Vorschau — Skripte und externe Ressourcen deaktiviert.",
     "htmlPreviewTruncated": "Zeigt die ersten 2 MB dieser HTML-Datei an.",

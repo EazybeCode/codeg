@@ -190,19 +190,53 @@ export async function readTextPreview(
 /** Read HTML attachment bytes for sandboxed static preview. */
 export async function readHtmlPreview(
   file: NeevAttachment,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onProgress?: (bytes: number) => void
 ): Promise<{ html: string; truncated: boolean }> {
   if (previewKind(file) !== "html")
     throw new NativeClientError("invalid_request")
-  const response = await fetch(attachmentUrl(file.key), {
-    credentials: "same-origin",
-    cache: "no-store",
-    redirect: "error",
-    referrerPolicy: "no-referrer",
-    signal,
-  })
-  if (!response.ok || !response.body) throw new NativeClientError("unavailable")
-  const html = await response.text()
-  if (signal?.aborted) throw new DOMException("Aborted", "AbortError")
-  return { html: staticHtmlDocument(html), truncated: false }
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  signal?.addEventListener("abort", abort, { once: true })
+  if (signal?.aborted) controller.abort()
+  let timer = setTimeout(abort, 30_000)
+  const resetTimeout = () => {
+    clearTimeout(timer)
+    timer = setTimeout(abort, 30_000)
+  }
+  try {
+    const response = await fetch(attachmentUrl(file.key), {
+      credentials: "same-origin",
+      cache: "no-store",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+    })
+    if (!response.ok || !response.body)
+      throw new NativeClientError("unavailable")
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    const chunks: string[] = []
+    let bytes = 0
+    resetTimeout()
+    try {
+      for (;;) {
+        const part = await reader.read()
+        if (part.done) break
+        resetTimeout()
+        bytes += part.value.byteLength
+        chunks.push(decoder.decode(part.value, { stream: true }))
+        onProgress?.(bytes)
+      }
+      chunks.push(decoder.decode())
+    } finally {
+      reader.releaseLock()
+    }
+    if (controller.signal.aborted)
+      throw new DOMException("Aborted", "AbortError")
+    return { html: staticHtmlDocument(chunks.join("")), truncated: false }
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener("abort", abort)
+  }
 }

@@ -57,6 +57,8 @@ function FilePreview({ file: incomingFile }: { file: NeevAttachment }) {
     null
   )
   const [failed, setFailed] = useState(false)
+  const [received, setReceived] = useState(0)
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     if (kind !== "text") return
     const controller = new AbortController()
@@ -72,7 +74,7 @@ function FilePreview({ file: incomingFile }: { file: NeevAttachment }) {
   useEffect(() => {
     if (kind !== "html") return
     const controller = new AbortController()
-    void readHtmlPreview(file, controller.signal)
+    void readHtmlPreview(file, controller.signal, setReceived)
       .then((value) => {
         if (!controller.signal.aborted) setHtml(value)
       })
@@ -80,8 +82,25 @@ function FilePreview({ file: incomingFile }: { file: NeevAttachment }) {
         if (!controller.signal.aborted) setFailed(true)
       })
     return () => controller.abort()
-  }, [file, kind])
-  if (failed) return <p role="alert">{t("previewError")}</p>
+  }, [file, kind, attempt])
+  if (failed)
+    return (
+      <div className="space-y-3">
+        <p role="alert">{t("previewError")}</p>
+        {kind === "html" && (
+          <Button
+            variant="outline"
+            onClick={() => {
+              setFailed(false)
+              setReceived(0)
+              setAttempt((value) => value + 1)
+            }}
+          >
+            {t("retryPreview")}
+          </Button>
+        )}
+      </div>
+    )
   if (kind === "unsupported")
     return (
       <p className="p-4 text-sm text-muted-foreground">
@@ -107,7 +126,23 @@ function FilePreview({ file: incomingFile }: { file: NeevAttachment }) {
       </div>
     )
   if (kind === "html") {
-    if (!html) return <p role="status">{t("loadingFiles")}</p>
+    if (!html)
+      return (
+        <div className="max-w-sm space-y-3 py-4" role="status">
+          <p className="text-sm text-muted-foreground">
+            {t("previewTransfer", {
+              received: (received / 1024 / 1024).toFixed(1),
+              total: (byteLength / 1024 / 1024).toFixed(1),
+            })}
+          </p>
+          <progress
+            className="h-2 w-full accent-primary"
+            value={received}
+            max={Math.max(byteLength, received, 1)}
+            aria-label={t("loadingFiles")}
+          />
+        </div>
+      )
     return (
       <div className="h-full overflow-auto">
         {html.truncated && (
