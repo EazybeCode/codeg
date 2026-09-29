@@ -49,6 +49,9 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -89,6 +92,7 @@ import { NativeMentionsIndicator } from "./native-mentions"
 import { NativeTabPanel } from "./native-suspended-surface"
 import {
   listAgentSessions,
+  setAgentSessionNode,
   updateAgentSession,
   type NeevAgentProvider,
   type NeevAgentSession,
@@ -103,6 +107,14 @@ import {
 } from "@/lib/neev-content-client"
 import { ChatFilesList } from "./native-chat-files"
 import { useExpandedItems } from "@/lib/neev-session-files-state"
+import {
+  extractMovePayload,
+  isNeevMoveEvent,
+  isValidMove,
+  NEEV_MOVE_MIME,
+  serializeMovePayload,
+  type MovePayload,
+} from "./native-workspace-move-helpers"
 
 /**
  * The container and every ancestor above it, so revealing a nested resource
@@ -587,6 +599,12 @@ function NativeWorkspaceTree({
   renameSession,
   trashSession,
   actionsBusy,
+  currentUserId,
+  currentOrgId,
+  moveItem,
+  movePending,
+  dropTargetNodeId,
+  setDropTargetNodeId,
 }: {
   nodes: NativeNode[]
   parentId?: number | null
@@ -620,6 +638,18 @@ function NativeWorkspaceTree({
   trashSession: (session: NeevAgentSession) => void
   /** A sidebar mutation is in flight; a second one must not be started. */
   actionsBusy: boolean
+  /** Current user ID for ownership checks */
+  currentUserId: number | undefined
+  /** Current org ID for cross-org validation */
+  currentOrgId: number | undefined
+  /** Handler to move an item to a target node */
+  moveItem: (payload: MovePayload, targetNodeId: number) => void
+  /** Whether a move mutation is currently in flight */
+  movePending: boolean
+  /** The node ID currently being hovered as a drop target, or null */
+  dropTargetNodeId: number | null
+  /** Setter for the active drop target */
+  setDropTargetNodeId: (nodeId: number | null) => void
 }) {
   const t = useTranslations("Native")
   const c = useTranslations("NativeContent")
@@ -646,7 +676,47 @@ function NativeWorkspaceTree({
           const isOpen = expanded.has(node.id)
           return (
             <li key={node.id}>
-              <div className="group flex min-h-9 min-w-0 items-center rounded-lg pe-1 hover:bg-sidebar-accent">
+              <div
+                data-drop-target
+                data-drop-active={dropTargetNodeId === node.id || undefined}
+                className={cn(
+                  "group flex min-h-9 min-w-0 items-center rounded-lg pe-1 hover:bg-sidebar-accent",
+                  dropTargetNodeId === node.id &&
+                    "ring-2 ring-primary ring-offset-1 ring-offset-background"
+                )}
+                onDragEnter={(e) => {
+                  if (movePending || !isNeevMoveEvent(e.nativeEvent)) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setDropTargetNodeId(node.id)
+                }}
+                onDragOver={(e) => {
+                  if (movePending || !isNeevMoveEvent(e.nativeEvent)) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  e.dataTransfer.dropEffect = "move"
+                }}
+                onDragLeave={(e) => {
+                  // Only clear if leaving the actual target, not entering a child
+                  const related = e.relatedTarget as Element | null
+                  if (!e.currentTarget.contains(related)) {
+                    setDropTargetNodeId(null)
+                  }
+                }}
+                onDrop={(e) => {
+                  if (!isNeevMoveEvent(e.nativeEvent)) return
+                  e.stopPropagation()
+                  e.preventDefault()
+                  setDropTargetNodeId(null)
+                  if (movePending || currentOrgId === undefined) return
+                  const payload = extractMovePayload(
+                    e.nativeEvent,
+                    currentOrgId
+                  )
+                  if (!payload || !isValidMove(payload, node.id)) return
+                  moveItem(payload, node.id)
+                }}
+              >
                 <button
                   aria-label={t(isOpen ? "collapse" : "expand", {
                     name: node.name,
@@ -764,6 +834,12 @@ function NativeWorkspaceTree({
                     renameSession={renameSession}
                     trashSession={trashSession}
                     actionsBusy={actionsBusy}
+                    currentUserId={currentUserId}
+                    currentOrgId={currentOrgId}
+                    moveItem={moveItem}
+                    movePending={movePending}
+                    dropTargetNodeId={dropTargetNodeId}
+                    setDropTargetNodeId={setDropTargetNodeId}
                   />
                   <ul className="ms-3 space-y-0.5 border-s border-sidebar-border/60 ps-1.5">
                     {/*
@@ -779,6 +855,16 @@ function NativeWorkspaceTree({
                         const filesExpanded =
                           resource.kind === "chat" &&
                           expandedFiles.isExpanded(resource.id)
+                        // Only the owner can drag; archived items cannot be moved
+                        const canDrag =
+                          currentUserId !== undefined &&
+                          currentOrgId !== undefined &&
+                          resource.creatorId === currentUserId &&
+                          !resource.archived &&
+                          !(
+                            resource.kind === "chat" &&
+                            isRunning("chat", resource.id)
+                          )
                         return (
                           <li key={resource.id}>
                             {/* A row and its menu, in one hoverable group. The
@@ -786,11 +872,32 @@ function NativeWorkspaceTree({
                                 screen-reader users; it only *appears* on hover or
                                 focus, so a quiet sidebar stays quiet. */}
                             <div
+                              draggable={canDrag}
+                              onDragStart={
+                                canDrag
+                                  ? (e) => {
+                                      const payload: MovePayload = {
+                                        kind: "resource",
+                                        id: resource.id,
+                                        nodeId: resource.nodeId,
+                                        orgId: currentOrgId,
+                                        expectedRevision: resource.authRevision,
+                                      }
+                                      e.dataTransfer.setData(
+                                        NEEV_MOVE_MIME,
+                                        serializeMovePayload(payload)
+                                      )
+                                      e.dataTransfer.effectAllowed = "move"
+                                    }
+                                  : undefined
+                              }
+                              onDragEnd={() => setDropTargetNodeId(null)}
                               className={cn(
                                 "group/item flex min-h-8 min-w-0 items-center rounded-lg pe-1",
                                 openResourceId === resource.id
                                   ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
-                                  : "text-muted-foreground hover:bg-sidebar-accent/60"
+                                  : "text-muted-foreground hover:bg-sidebar-accent/60",
+                                canDrag && "cursor-grab active:cursor-grabbing"
                               )}
                             >
                               <button
@@ -823,17 +930,17 @@ function NativeWorkspaceTree({
                                 >
                                   {resource.title}
                                 </span>
-                              {resource.kind === "chat" &&
-                                isRunning("chat", resource.id) && (
-                                  <span
-                                    className="ms-auto shrink-0"
-                                    role="img"
-                                    aria-label={c("activityWorking")}
-                                    title={c("activityWorking")}
-                                  >
-                                    <AgentRunIndicator className="size-3 text-muted-foreground" />
-                                  </span>
-                                )}
+                                {resource.kind === "chat" &&
+                                  isRunning("chat", resource.id) && (
+                                    <span
+                                      className="ms-auto shrink-0"
+                                      role="img"
+                                      aria-label={c("activityWorking")}
+                                      title={c("activityWorking")}
+                                    >
+                                      <AgentRunIndicator className="size-3 text-muted-foreground" />
+                                    </span>
+                                  )}
                                 {/* Says where it is, so a struck-through row is
                                     not left to be guessed at. */}
                                 {resource.archived && (
@@ -908,6 +1015,49 @@ function NativeWorkspaceTree({
                                   >
                                     {c("rename")}
                                   </DropdownMenuItem>
+                                  {canDrag && (
+                                    <DropdownMenuSub>
+                                      <DropdownMenuSubTrigger
+                                        disabled={actionsBusy || movePending}
+                                      >
+                                        Move to…
+                                      </DropdownMenuSubTrigger>
+                                      <DropdownMenuSubContent>
+                                        {nodes
+                                          .filter(
+                                            (target) =>
+                                              target.id !== resource.nodeId
+                                          )
+                                          .map((target) => (
+                                            <DropdownMenuItem
+                                              key={target.id}
+                                              onSelect={() =>
+                                                moveItem(
+                                                  {
+                                                    kind: "resource",
+                                                    id: resource.id,
+                                                    nodeId: resource.nodeId!,
+                                                    orgId: currentOrgId!,
+                                                    expectedRevision:
+                                                      resource.authRevision,
+                                                  },
+                                                  target.id
+                                                )
+                                              }
+                                            >
+                                              {ancestry(nodes, target.id)
+                                                .map(
+                                                  (id) =>
+                                                    nodes.find(
+                                                      (n) => n.id === id
+                                                    )?.name
+                                                )
+                                                .join(" / ")}
+                                            </DropdownMenuItem>
+                                          ))}
+                                      </DropdownMenuSubContent>
+                                    </DropdownMenuSub>
+                                  )}
                                   <DropdownMenuItem
                                     disabled={actionsBusy}
                                     onSelect={() => trashResource(resource)}
@@ -954,123 +1104,206 @@ function NativeWorkspaceTree({
                     {agentSessions
                       .filter((item) => item.nodeId === node.id)
                       .filter((item) => showTrash || !item.archived)
-                      .map((item) => (
-                        <li key={item.id}>
-                          {/* An agent chat gets the same two actions as
+                      .map((item) => {
+                        // Only the owner can drag; archived items cannot be moved
+                        const canDragSession =
+                          currentUserId !== undefined &&
+                          currentOrgId !== undefined &&
+                          item.ownerId === currentUserId &&
+                          !item.archived &&
+                          item.nodeId !== null &&
+                          !isRunning("agent", item.id)
+                        return (
+                          <li key={item.id}>
+                            {/* An agent chat gets the same two actions as
                               everything else in the tree. Its API takes one
                               field per request, so rename and trash are
                               separate calls — but to the reader they are the
                               same menu on the same kind of row. */}
-                          <div
-                            className={cn(
-                              "group/item flex min-h-8 min-w-0 items-center rounded-lg pe-1",
-                              openAgentSessionId === item.id
-                                ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
-                                : "text-muted-foreground hover:bg-sidebar-accent/60"
-                            )}
-                          >
-                            <button
-                              onClick={() => openAgentSession(node, item)}
-                              aria-current={
-                                openAgentSessionId === item.id
-                                  ? "page"
+                            <div
+                              draggable={canDragSession}
+                              onDragStart={
+                                canDragSession
+                                  ? (e) => {
+                                      const payload: MovePayload = {
+                                        kind: "session",
+                                        id: item.id,
+                                        nodeId: item.nodeId as number,
+                                        orgId: currentOrgId,
+                                        expectedRevision: item.revision,
+                                      }
+                                      e.dataTransfer.setData(
+                                        NEEV_MOVE_MIME,
+                                        serializeMovePayload(payload)
+                                      )
+                                      e.dataTransfer.effectAllowed = "move"
+                                    }
                                   : undefined
                               }
-                              className="flex min-h-8 w-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
+                              onDragEnd={() => setDropTargetNodeId(null)}
+                              className={cn(
+                                "group/item flex min-h-8 min-w-0 items-center rounded-lg pe-1",
+                                openAgentSessionId === item.id
+                                  ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+                                  : "text-muted-foreground hover:bg-sidebar-accent/60",
+                                canDragSession &&
+                                  "cursor-grab active:cursor-grabbing"
+                              )}
                             >
-                              <Bot aria-hidden className="size-3.5 shrink-0" />
-                              <span
-                                className={cn(
-                                  "truncate",
-                                  item.archived && "line-through opacity-70"
-                                )}
-                                title={item.title}
+                              <button
+                                onClick={() => openAgentSession(node, item)}
+                                aria-current={
+                                  openAgentSessionId === item.id
+                                    ? "page"
+                                    : undefined
+                                }
+                                className="flex min-h-8 w-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
                               >
-                                {item.title}
-                              </span>
-                              {isRunning("agent", item.id) && (
-                                <span
-                                  className="ms-auto shrink-0"
-                                  role="img"
-                                  aria-label={c("activityWorking")}
-                                  title={c("activityWorking")}
-                                >
-                                  <AgentRunIndicator className="size-3 text-muted-foreground" />
-                                </span>
-                              )}
-                              <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
-                                {item.archived ? c("inTrash") : item.provider}
-                              </span>
-                            </button>
-                            <button
-                              aria-label={c(
-                                expandedFiles.isExpanded(item.id)
-                                  ? "collapseFiles"
-                                  : "expandFiles"
-                              )}
-                              aria-expanded={expandedFiles.isExpanded(item.id)}
-                              onClick={() => expandedFiles.toggle(item.id)}
-                              className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
-                            >
-                              {expandedFiles.isExpanded(item.id) ? (
-                                <ChevronDown aria-hidden className="size-3.5" />
-                              ) : (
-                                <ChevronRight
+                                <Bot
                                   aria-hidden
-                                  className="size-3.5"
+                                  className="size-3.5 shrink-0"
                                 />
-                              )}
-                            </button>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <button
-                                  aria-label={c("itemActions", {
-                                    title: item.title,
-                                  })}
+                                <span
                                   className={cn(
-                                    "flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring",
-                                    "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/item:opacity-100",
-                                    "group-focus-within/item:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                                    "truncate",
+                                    item.archived && "line-through opacity-70"
                                   )}
+                                  title={item.title}
                                 >
-                                  <MoreHorizontal
+                                  {item.title}
+                                </span>
+                                {isRunning("agent", item.id) && (
+                                  <span
+                                    className="ms-auto shrink-0"
+                                    role="img"
+                                    aria-label={c("activityWorking")}
+                                    title={c("activityWorking")}
+                                  >
+                                    <AgentRunIndicator className="size-3 text-muted-foreground" />
+                                  </span>
+                                )}
+                                <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
+                                  {item.archived ? c("inTrash") : item.provider}
+                                </span>
+                              </button>
+                              <button
+                                aria-label={c(
+                                  expandedFiles.isExpanded(item.id)
+                                    ? "collapseFiles"
+                                    : "expandFiles"
+                                )}
+                                aria-expanded={expandedFiles.isExpanded(
+                                  item.id
+                                )}
+                                onClick={() => expandedFiles.toggle(item.id)}
+                                className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+                              >
+                                {expandedFiles.isExpanded(item.id) ? (
+                                  <ChevronDown
                                     aria-hidden
                                     className="size-3.5"
                                   />
-                                </button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuItem
-                                  onSelect={() => renameSession(item)}
-                                >
-                                  {c("rename")}
-                                </DropdownMenuItem>
-                                <DropdownMenuItem
-                                  disabled={actionsBusy}
-                                  onSelect={() => trashSession(item)}
-                                >
-                                  {c(
-                                    item.archived
-                                      ? "restoreFromTrash"
-                                      : "moveToTrash"
+                                ) : (
+                                  <ChevronRight
+                                    aria-hidden
+                                    className="size-3.5"
+                                  />
+                                )}
+                              </button>
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <button
+                                    aria-label={c("itemActions", {
+                                      title: item.title,
+                                    })}
+                                    className={cn(
+                                      "flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring",
+                                      "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/item:opacity-100",
+                                      "group-focus-within/item:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                                    )}
+                                  >
+                                    <MoreHorizontal
+                                      aria-hidden
+                                      className="size-3.5"
+                                    />
+                                  </button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    onSelect={() => renameSession(item)}
+                                  >
+                                    {c("rename")}
+                                  </DropdownMenuItem>
+                                  {canDragSession && (
+                                    <DropdownMenuSub>
+                                      <DropdownMenuSubTrigger
+                                        disabled={actionsBusy || movePending}
+                                      >
+                                        Move to…
+                                      </DropdownMenuSubTrigger>
+                                      <DropdownMenuSubContent>
+                                        {nodes
+                                          .filter(
+                                            (target) =>
+                                              target.id !== item.nodeId
+                                          )
+                                          .map((target) => (
+                                            <DropdownMenuItem
+                                              key={target.id}
+                                              onSelect={() =>
+                                                moveItem(
+                                                  {
+                                                    kind: "session",
+                                                    id: item.id,
+                                                    nodeId: item.nodeId!,
+                                                    orgId: currentOrgId!,
+                                                    expectedRevision:
+                                                      item.revision,
+                                                  },
+                                                  target.id
+                                                )
+                                              }
+                                            >
+                                              {ancestry(nodes, target.id)
+                                                .map(
+                                                  (id) =>
+                                                    nodes.find(
+                                                      (n) => n.id === id
+                                                    )?.name
+                                                )
+                                                .join(" / ")}
+                                            </DropdownMenuItem>
+                                          ))}
+                                      </DropdownMenuSubContent>
+                                    </DropdownMenuSub>
                                   )}
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </div>
-                          {expandedFiles.isExpanded(item.id) && (
-                            <div className="ms-6 border-s border-sidebar-border/60 ps-1.5 pt-0.5">
-                              <ChatFilesList
-                                key={`${auth.scopeKey}:${item.id}`}
-                                id={item.id}
-                                kind="agent"
-                                scopeKey={auth.scopeKey}
-                                isRunning={isRunning("agent", item.id)}
-                              />
+                                  <DropdownMenuItem
+                                    disabled={actionsBusy}
+                                    onSelect={() => trashSession(item)}
+                                  >
+                                    {c(
+                                      item.archived
+                                        ? "restoreFromTrash"
+                                        : "moveToTrash"
+                                    )}
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
                             </div>
-                          )}
-                        </li>
-                      ))}
+                            {expandedFiles.isExpanded(item.id) && (
+                              <div className="ms-6 border-s border-sidebar-border/60 ps-1.5 pt-0.5">
+                                <ChatFilesList
+                                  key={`${auth.scopeKey}:${item.id}`}
+                                  id={item.id}
+                                  kind="agent"
+                                  scopeKey={auth.scopeKey}
+                                  isRunning={isRunning("agent", item.id)}
+                                />
+                              </div>
+                            )}
+                          </li>
+                        )
+                      })}
                   </ul>
                 </>
               )}
@@ -1926,6 +2159,212 @@ function WorkspaceContent() {
     },
     [auth, applySession, guardAll, mutationBusy]
   )
+
+  // Drag and drop move state
+  const [movePending, setMovePending] = useState(false)
+  /**
+   * Synchronous ref lock for duplicate drop prevention.
+   * setState alone races: two rapid drops can both read movePending=false
+   * before either setState takes effect. This ref is set synchronously.
+   */
+  const movingRef = useRef(false)
+  const [dropTargetNodeId, setDropTargetNodeId] = useState<number | null>(null)
+  const currentUserId = auth.session?.user.id
+  const currentOrgId = orgId
+  const runningChats = useRunningChats()
+
+  /**
+   * Check if a chat or agent session is currently running.
+   */
+  const isRunningItem = useCallback(
+    (
+      kind: "resource" | "session",
+      id: string,
+      resourceKind?: "chat" | "document"
+    ) => {
+      // Documents never "run"
+      if (kind === "resource" && resourceKind === "document") return false
+      const chatKind = kind === "resource" ? "chat" : "agent"
+      const key = runningChatKey(auth.session, chatKind, id)
+      return key !== null && runningChats.has(key)
+    },
+    [auth.session, runningChats]
+  )
+
+  /**
+   * Move a resource or agent session to a new parent node.
+   *
+   * Updates both source and destination caches after a successful move.
+   * Running chats/sessions are rejected to avoid interrupting agent authRevision.
+   */
+  const moveItem = useCallback(
+    (payload: MovePayload, targetNodeId: number) => {
+      if (
+        !auth.session ||
+        movingRef.current ||
+        mutationBusy ||
+        payload.orgId !== orgId ||
+        payload.nodeId === targetNodeId ||
+        !nodes.some((node) => node.id === targetNodeId && node.orgId === orgId)
+      )
+        return
+      const execute = () => {
+        if (movingRef.current || auth.signal.aborted) return
+        movingRef.current = true
+        setMovePending(true)
+        setMutationError(null)
+        void (async () => {
+          try {
+            if (payload.kind === "resource") {
+              const resource = await loadNativeResource(
+                payload.orgId,
+                payload.id,
+                auth.signal
+              )
+              if (
+                resource.creatorId !== auth.session!.user.id ||
+                resource.archived ||
+                resource.nodeId !== payload.nodeId ||
+                resource.authRevision !== payload.expectedRevision
+              )
+                throw new Error("This item changed. Refresh it before moving.")
+              if (isRunningItem("resource", payload.id, resource.kind))
+                throw new Error(
+                  "Wait for this chat to finish before moving it."
+                )
+              // Populate an unopened destination before merging the moved row;
+              // a partial list must never hide its existing contents.
+              if (
+                !itemsByNode[targetNodeId] ||
+                itemsByNode[targetNodeId].loading
+              )
+                await loadItems(targetNodeId)
+              const updated = await updateNativeResource(
+                payload.orgId,
+                payload.id,
+                {
+                  nodeId: targetNodeId,
+                  title: resource.title,
+                  visibility: resource.visibility,
+                  archived: resource.archived,
+                  expectedAuthRevision: resource.authRevision,
+                },
+                auth.session!.csrf,
+                auth.signal
+              )
+              if (auth.signal.aborted) return
+              // Discard list responses begun before this successful relocation.
+              for (const id of [payload.nodeId, targetNodeId])
+                itemGeneration.current.set(
+                  id,
+                  (itemGeneration.current.get(id) ?? 0) + 1
+                )
+              setItemsByNode((old) => {
+                const source = old[payload.nodeId]
+                const destination = old[targetNodeId]
+                return {
+                  ...old,
+                  ...(source
+                    ? {
+                        [payload.nodeId]: {
+                          ...source,
+                          loading: false,
+                          items: source.items.filter(
+                            (item) => item.id !== updated.id
+                          ),
+                        },
+                      }
+                    : {}),
+                  [targetNodeId]: {
+                    ...destination,
+                    loading: false,
+                    error: null,
+                    items: [
+                      ...(destination?.items ?? []).filter(
+                        (item) => item.id !== updated.id
+                      ),
+                      updated,
+                    ].sort((a, b) => a.title.localeCompare(b.title)),
+                  },
+                }
+              })
+              noteResource(updated)
+              setOpen((old) =>
+                old?.resource.id === updated.id
+                  ? { ...old, resource: updated }
+                  : old
+              )
+              commitTabs(
+                tabsRef.current.map((tab) =>
+                  tab.kind === "resource" && tab.resourceId === updated.id
+                    ? { ...tab, nodeId: updated.nodeId }
+                    : tab
+                ),
+                activeTabRef.current
+              )
+            } else {
+              const session = agentSessions.find(
+                (item) => item.id === payload.id
+              )
+              if (
+                !session ||
+                session.ownerId !== auth.session!.user.id ||
+                session.archived ||
+                session.orgId !== orgId ||
+                session.nodeId !== payload.nodeId ||
+                session.revision !== payload.expectedRevision
+              )
+                throw new Error("This chat changed. Refresh it before moving.")
+              if (isRunningItem("session", payload.id))
+                throw new Error(
+                  "Wait for this chat to finish before moving it."
+                )
+              const updated = await setAgentSessionNode(
+                payload.id,
+                targetNodeId,
+                payload.expectedRevision,
+                auth.session!.csrf,
+                auth.signal
+              )
+              if (auth.signal.aborted) return
+              applySession(updated)
+            }
+            setExpanded(
+              (old) => new Set([...old, ...ancestry(nodes, targetNodeId)])
+            )
+          } catch (cause) {
+            if (!auth.signal.aborted) {
+              setMutationError(cause)
+              auth.handleError(cause)
+            }
+          } finally {
+            movingRef.current = false
+            setMovePending(false)
+          }
+        })()
+      }
+      // Moving changes the editor's node key. Its normal save/discard guard
+      // must finish before that remount, even for a background tab.
+      if (payload.kind === "resource")
+        guardTab(`resource:${payload.id}`, execute)
+      else execute()
+    },
+    [
+      auth,
+      orgId,
+      nodes,
+      mutationBusy,
+      agentSessions,
+      itemsByNode,
+      loadItems,
+      noteResource,
+      isRunningItem,
+      commitTabs,
+      applySession,
+      guardTab,
+    ]
+  )
+
   const saveRename = useCallback(async () => {
     if (!renameTarget || !auth.session || renameBusy) return
     const title = renameValue.trim()
@@ -2324,6 +2763,12 @@ function WorkspaceContent() {
             renameSession={renameSession}
             trashSession={trashSession}
             actionsBusy={mutationBusy}
+            currentUserId={currentUserId}
+            currentOrgId={currentOrgId}
+            moveItem={moveItem}
+            movePending={movePending}
+            dropTargetNodeId={dropTargetNodeId}
+            setDropTargetNodeId={setDropTargetNodeId}
           />
           {/* Said here, beside the rows it is about. */}
           <NativeError error={mutationError} />
