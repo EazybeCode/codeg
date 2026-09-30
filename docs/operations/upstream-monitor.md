@@ -104,8 +104,45 @@ On 2026-09-30 the recorded checkpoint `ccc420c2` was 530 commits behind upstream
 - 448 skipped
 - the remaining 80 were clean merges or empty
 
-This backlog exceeds the 300-commit limit, so the updater stays blocked until one of these happens:
-- **Manual catch-up merge:** the audit recommends this. Afterwards, run `record-baseline` with the merged upstream SHA.
-- **Start from the current tip:** run `record-baseline --upstream <current tip> --allow-unmerged-baseline`, so only new upstream commits are considered.
+The default example limit is 300 commits. The installed server config deliberately
+uses 1,000 for the initial backlog, classifying every commit and retaining the
+same protected-path rules. This does not merge the protected backlog.
 
-The backlog stays human work in both cases.
+## Installed server schedule (2026-09-30)
+
+The server job is enabled independently of the GitHub workflow:
+
+- `/etc/cron.d/neev-upstream`: daily **23:00 UTC / 04:30 IST**.
+- User: `neev-upstream`; the Git repository, reports, and worktrees are under
+  `/var/lib/neev-upstream/`.
+- Trusted code: `/opt/neev-upstream/code/scripts/upstream/`.
+- Config: `/etc/neev-upstream/config.json`, mode `deploy`.
+- Root-owned release-hook config: `/etc/neev-upstream-release/release.json`.
+- Only the seven fixed release-hook commands may run through sudo, with isolated
+  Python. The updater user has no general Docker or root access.
+- Frontend builder: `neev-upstream-frontend:20260930-v2`, pinned by image ID.
+  Candidate tests/builds run offline, without host mounts, capabilities, or root.
+- Runtime image base is pinned when recording a manual release. Each update adds
+  only the latest static UI layer, so daily updates do not accumulate old UI layers.
+- Reports: `/var/lib/neev-upstream/reports/latest.json` and each run directory.
+  Cron output: `/var/log/neev-upstream/cron.log`, rotated daily.
+- The first dry run passed type checking, 123 UI tests, and the production build.
+- The first automatic deployment succeeded: run `20260930T071745Z-3711046`,
+  source `3ee1e7a29ccfb80a3f69a7f1884ed0d30ea0490d`. Two documentation-image
+  commits applied; 448 commits were skipped and 80 were clean merges. Live health,
+  exported UI hash, and unchanged backend hash were independently verified.
+
+Read status as the service user:
+
+```sh
+runuser -u neev-upstream -- /usr/local/libexec/neev-upstream/node \
+  /opt/neev-upstream/code/scripts/upstream/updater.mjs status \
+  --config /etc/neev-upstream/config.json
+```
+
+Before each manual release, bring back the applied commits from
+`refs/workos-upstream/deployed` in the server's bare repo. Preserve the original
+user worktree changes when doing so. After the release, import the exact released
+source commit into that repo and use the root hook's `record-current` command to
+record its source SHA, image, and immutable runtime base. Dependency changes also
+require rebuilding and re-pinning the frontend builder. No automation pushes Git.
