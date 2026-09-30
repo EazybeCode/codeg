@@ -1087,6 +1087,63 @@ def is_metadata_probe(provider, spec):
     return provider == "codex" and tuple(spec.provider_argv[1:]) == _METADATA_ARGV
 
 
+class _FdReader:
+    """The launcher's stdin, read with plain `os.read` on a PRIVATE duplicate fd.
+
+    Never `sys.stdin` / `sys.stdin.buffer` from a relay thread. Those are the
+    interpreter's own buffered objects: a daemon thread blocked in their
+    `readline` holds the buffer lock, and when the main thread then exits (the
+    runtime still holding our stdin open, as it does for the whole of a
+    steerable run) interpreter shutdown tries to take that lock and ABORTS —
+    `Fatal Python error: _enter_buffered_busy`, SIGABRT. The reply had already
+    streamed and the turn had completed, but the launcher's exit status said
+    failure, so every steerable Codex turn that outlived its first read was
+    recorded as "the provider stopped without a reply" (live QA, 2026-09-30).
+    A raw fd has no such lock; shutdown has nothing to contend for.
+
+    Offers exactly what the relays use: `read1(n)` and a bounded `readline(n)`.
+    """
+
+    def __init__(self, fd=0):
+        self._fd = os.dup(fd)
+        self._pending = bytearray()
+        self._eof = False
+
+    def _fill(self):
+        if self._eof:
+            return
+        chunk = os.read(self._fd, 65536)
+        if chunk:
+            self._pending += chunk
+        else:
+            self._eof = True
+
+    def _take(self, count):
+        out = bytes(self._pending[:count])
+        del self._pending[:count]
+        return out
+
+    def read1(self, size):
+        if not self._pending:
+            self._fill()
+        return self._take(size)
+
+    def readline(self, limit=-1):
+        while True:
+            newline = self._pending.find(b"\n")
+            if newline >= 0 and (limit < 0 or newline < limit):
+                return self._take(newline + 1)
+            if 0 <= limit <= len(self._pending):
+                return self._take(limit)
+            if self._eof:
+                return self._take(len(self._pending))
+            self._fill()
+
+
+# How the relays open the launcher's stdin. A seam for tests only.
+_stdin_reader = _FdReader
+
+
 def _relay_stdin(destination, source, limit=_STDIN_RELAY_MAX_BYTES):
     """Copy at most `limit` bytes from `source` to `destination`, then close it.
 
@@ -1131,7 +1188,7 @@ def _relay_steering(destination, source, max_line=_STEER_MAX_LINE_BYTES,
     - Closes destination only when source EOF or total exceeded
 
     BYTES in, bytes out. `destination` is the sandbox's binary `Popen` pipe, so
-    `source` must be binary too (`sys.stdin.buffer`, never the text `sys.stdin`):
+    `source` must be binary too (an `_FdReader`, never the text `sys.stdin`):
     writing a `str` there raised `TypeError`, which killed this thread on the
     first steer and — through the `finally` — closed the adapter's stdin, so
     every follow-up after that went unanswered. Lines are read with a bound, so
@@ -1189,15 +1246,16 @@ def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=Fa
     if relay_stdin and handle.stdin is not None:
         threading.Thread(
             target=_relay_stdin,
-            args=(handle.stdin, sys.stdin.buffer),
+            args=(handle.stdin, _stdin_reader()),
             daemon=True,
         ).start()
     elif relay_steering and handle.stdin is not None:
         # Steering relay: read JSON lines from launcher stdin, relay to adapter.
-        # `.buffer`: the sandbox pipe is binary (see `_relay_steering`).
+        # Binary (the sandbox pipe is binary, see `_relay_steering`) and read
+        # through a raw fd, NEVER `sys.stdin.buffer` (see `_FdReader`).
         threading.Thread(
             target=_relay_steering,
-            args=(handle.stdin, sys.stdin.buffer),
+            args=(handle.stdin, _stdin_reader()),
             daemon=True,
         ).start()
 

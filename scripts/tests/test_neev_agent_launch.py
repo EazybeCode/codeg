@@ -662,8 +662,8 @@ class RelayWiringTests(unittest.TestCase):
         real_launch, real_signal = launch.sandbox.launch, launch.signal.signal
         launch.sandbox.launch = fake_launch
         launch.signal.signal = lambda *_a: None  # not the main thread under unittest
-        real_stdin = sys.stdin
-        sys.stdin = type("S", (), {"buffer": io.BytesIO(b'{"id":1}\n')})()
+        real_reader = launch._stdin_reader
+        launch._stdin_reader = lambda: io.BytesIO(b'{"id":1}\n')
         try:
             spec = launch.build_spec(launch._parse([
                 "--tenant", "org:3/user:7", "--slot", "a",
@@ -676,7 +676,7 @@ class RelayWiringTests(unittest.TestCase):
         finally:
             launch.sandbox.launch = real_launch
             launch.signal.signal = real_signal
-            sys.stdin = real_stdin
+            launch._stdin_reader = real_reader
         return rc, captured, written
 
     def test_a_probe_opens_the_pipe_and_the_handshake_reaches_the_child(self):
@@ -754,10 +754,11 @@ class SteeringRelaySubprocessTests(unittest.TestCase):
                 self.ECHO, stdin=subprocess.PIPE, stdout=subprocess.PIPE))
 
         forwarded = io.BytesIO()
-        saved = (launch.sandbox.launch, launch.signal.signal, sys.stdin, sys.stdout)
+        saved = (launch.sandbox.launch, launch.signal.signal, launch._stdin_reader, sys.stdout)
         launch.sandbox.launch = real_launch
         launch.signal.signal = lambda *_a: None  # not the main thread under unittest
-        sys.stdin = self._launcher_stdin(steer)
+        stdin = self._launcher_stdin(steer)  # held: GC would close the fd
+        launch._stdin_reader = lambda: launch._FdReader(stdin.fileno())
         sys.stdout = type("Out", (), {"buffer": forwarded})()
         try:
             spec = launch.build_spec(launch._parse([
@@ -769,7 +770,7 @@ class SteeringRelaySubprocessTests(unittest.TestCase):
             ]))
             rc = launch._run_child(spec, {}, relay_steering=True)
         finally:
-            launch.sandbox.launch, launch.signal.signal, sys.stdin, sys.stdout = saved
+            launch.sandbox.launch, launch.signal.signal, launch._stdin_reader, sys.stdout = saved
         self.assertEqual(rc, 0)
         # The child echoed what the relay wrote: the steer arrived intact.
         self.assertEqual(forwarded.getvalue(), steer)
@@ -781,6 +782,82 @@ class SteeringRelaySubprocessTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             launch._relay_steering(sink, io.StringIO('{"requestId":"a","text":"t"}\n'))
         self.assertEqual(written, [])
+
+
+class LauncherExitWithOpenStdinTests(unittest.TestCase):
+    """The launcher must EXIT 0 while the runtime still holds its stdin open.
+
+    Live QA 2026-09-30: a Codex team turn ran `sleep 20`, streamed its reply
+    and completed — and was stored as "the provider stopped without a reply".
+    The steering relay was a daemon thread blocked in `sys.stdin.buffer`, the
+    runtime (rightly) still held the launcher's stdin open, and interpreter
+    shutdown aborted on that buffer's lock: SIGABRT, a failed exit status, a
+    failed turn. This runs the REAL `_run_child` in a REAL process under the
+    same conditions and checks the exit status the runtime would see.
+    """
+
+    SCRIPT = r'''
+import sys, subprocess
+sys.path.insert(0, sys.argv[1])
+import neev_agent_launch as launch
+
+class Handle:
+    def __init__(self, process):
+        self._process = process
+        self.stdin, self.stdout, self.pid = process.stdin, process.stdout, process.pid
+    def wait(self):
+        return self._process.wait(timeout=20)
+    def teardown(self):
+        pass
+
+def fake_launch(spec, env=None, bind_source=None, stdin_pipe=False):
+    # A provider that takes ONE follow-up, answers, and exits — while the
+    # launcher's own stdin stays open behind it.
+    return Handle(subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys; line = sys.stdin.buffer.readline(); "
+         "sys.stdout.buffer.write(b'got ' + line); sys.stdout.flush()"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE))
+
+launch.sandbox.launch = fake_launch
+spec = launch.build_spec(launch._parse([
+    "--tenant", "org:3/user:7", "--slot", "a",
+    "--workdir", "/var/lib/neev-native/agents/run-exit-abc",
+    "--uid", "61000", "--gid", "61000",
+    "--provider", "codex", "--credential-handle", "h",
+    "--", "/usr/local/bin/codex", "app-server",
+]))
+raise SystemExit(launch._run_child(spec, {}, relay_steering=True))
+'''
+
+    def test_a_steerable_run_exits_zero_with_its_stdin_still_open(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", self.SCRIPT, str(OPERATIONS)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        process.stdin.write(b'{"requestId":"r1","text":"say QA FOLLOWUP RECEIVED"}\n')
+        process.stdin.flush()
+        # stdin deliberately NOT closed: the runtime holds it for the run.
+        out = process.stdout.read()
+        rc = process.wait(timeout=30)
+        err = process.stderr.read().decode(errors="replace")
+        process.stdin.close()
+        self.assertIn(b"got {", out)
+        self.assertNotIn("Fatal Python error", err)
+        self.assertEqual(rc, 0, err[-500:])
+
+    def test_fd_reader_lines_are_bounded_and_eof_returns_the_tail(self):
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"one\n" + b"x" * 10 + b"\ntail")
+        os.close(write_fd)
+        reader = launch._FdReader(read_fd)
+        os.close(read_fd)  # the reader holds its own duplicate
+        self.assertEqual(reader.readline(64), b"one\n")
+        self.assertEqual(reader.readline(4), b"xxxx")
+        self.assertEqual(reader.readline(64), b"xxxxxx\n")
+        self.assertEqual(reader.read1(2), b"ta")
+        self.assertEqual(reader.readline(64), b"il")
+        self.assertEqual(reader.readline(64), b"")
 
 
 class PromptArgvBoundaryTests(unittest.TestCase):
