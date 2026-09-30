@@ -361,6 +361,7 @@ function Chat({
   // Same reasoning, for the Connect control's honest description of WHICH
   // provider is not connected.
   const connectNote = useId()
+  const stopHint = useId()
   /**
    * Opens when this mount's first metadata read has settled.
    *
@@ -1652,6 +1653,21 @@ function Chat({
     (!promptIsEmpty(draft) || !attachments.empty) &&
     !composerBusy &&
     !latest.archived
+  // A run that takes follow-ups is the one busy state Enter still submits in:
+  // `submit` steers it. Held as busy, Enter fell through to the editor and a
+  // follow-up became a new line instead of a message.
+  const steerable = mode === "agent" && agentBusy && supportsSteering
+  const enterBusy = steerable
+    ? steeringInFlight !== null || attachments.uploading
+    : composerBusy
+  // The composer's one button is Stop for as long as a run has nothing typed
+  // it could take. A follow-up waiting to go into the run makes it Send — but
+  // only until it is sent: a follow-up in flight shows Stop again, so a steer
+  // that never answers cannot leave a disabled Send where Stop should be.
+  // Escape stops the run from the composer whichever it shows.
+  const stopping =
+    agentBusy &&
+    (steeringInFlight !== null || !(steerable && !promptIsEmpty(draft)))
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
       {/* ONE row, title and standing included. It was a title stacked over a
@@ -1780,7 +1796,7 @@ function Chat({
                   disabled={actions.disabled}
                   onSelect={actions.onArchiveToggle}
                 >
-                  {t(actions.archived ? "reopen" : "archive")}
+                  {t(actions.archived ? "restoreFromTrash" : "moveToTrash")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={actions.disabled}
@@ -1974,6 +1990,21 @@ function Chat({
           event.preventDefault()
           submit()
         }}
+        onKeyDown={(event) => {
+          // Stop is always one key away, even while the corner shows Send.
+          // Not when something inside claimed Escape first (the mention
+          // picker), and not from a portalled menu opened from this row,
+          // whose Escape only closes that menu.
+          if (
+            event.key !== "Escape" ||
+            !agentBusy ||
+            event.defaultPrevented ||
+            !event.currentTarget.contains(event.target as Node)
+          )
+            return
+          event.preventDefault()
+          void cancelAgent()
+        }}
         className="mx-auto w-full max-w-[832px] shrink-0 px-4 pb-3 pt-1 sm:px-8 sm:pb-5"
       >
         <div
@@ -2027,7 +2058,7 @@ function Chat({
                   : t("message")
             }
             onSubmit={submit}
-            busy={composerBusy}
+            busy={enterBusy}
             readOnly={latest.archived}
             attachDisabled={latest.archived || !auth.session}
             autoFocus={fresh}
@@ -2214,56 +2245,43 @@ function Chat({
                   )}
               </>
             )}
-            {/* When steering is supported, show Stop + Send side by side.
-                Stop remains always available; Send submits the follow-up. */}
-            {agentBusy && supportsSteering && (
-              <Button
-                type="button"
-                size="icon"
-                variant="outline"
-                className="ms-auto rounded-md"
-                aria-label={t("stopGeneration")}
-                title={t("stopGeneration")}
-                onClick={() => void cancelAgent()}
-              >
-                <Square aria-hidden className="size-3.5 fill-current" />
-              </Button>
+            {/* ONE control, always in the same corner. A run shows Stop; typing
+                a follow-up the run can take turns it into Send, and clearing
+                the text turns it back. */}
+            {agentBusy && (
+              <p id={stopHint} className="sr-only">
+                {t("stopShortcutHint")}
+              </p>
             )}
-            {/* ONE control when not steering, or the Send beside Stop when
-                steering. The Send button becomes type="submit" for steering
-                so Enter and click both work. */}
             <Button
-              type={agentBusy && !supportsSteering ? "button" : "submit"}
+              type={stopping ? "button" : "submit"}
               size="icon"
               variant="default"
-              className={cn(
-                "rounded-md",
-                !(agentBusy && supportsSteering) && "ms-auto"
-              )}
-              aria-label={
-                agentBusy && !supportsSteering ? t("stopGeneration") : t("send")
-              }
+              className="ms-auto rounded-md"
+              aria-label={stopping ? t("stopGeneration") : t("send")}
+              // During a run the key that stops it is announced on the one
+              // control, and repeated in the tooltip when that control is Send.
+              aria-keyshortcuts={agentBusy ? "Escape" : undefined}
+              aria-describedby={agentBusy && !stopping ? stopHint : undefined}
               title={
-                agentBusy && !supportsSteering ? t("stopGeneration") : t("send")
+                stopping
+                  ? t("stopGeneration")
+                  : agentBusy
+                    ? `${t("send")} · ${t("stopShortcutHint")}`
+                    : t("send")
               }
               disabled={
-                agentBusy && !supportsSteering
+                stopping
                   ? false
-                  : agentBusy && supportsSteering
-                    ? steeringInFlight !== null ||
-                      promptIsEmpty(draft) ||
-                      !attachments.empty
+                  : agentBusy && mode === "agent"
+                    ? steeringInFlight !== null || !attachments.empty
                     : loading ||
                       !sendable ||
                       (mode === "agent" && !runtimeEnabled)
               }
-              onClick={
-                agentBusy && !supportsSteering
-                  ? () => void cancelAgent()
-                  : undefined
-              }
+              onClick={stopping ? () => void cancelAgent() : undefined}
             >
-              {agentBusy && !supportsSteering ? (
+              {stopping ? (
                 <Square aria-hidden className="size-3.5 fill-current" />
               ) : (
                 <ArrowUp aria-hidden />

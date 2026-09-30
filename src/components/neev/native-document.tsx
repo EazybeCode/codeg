@@ -1211,7 +1211,7 @@ function Document({
                   disabled={actions.disabled}
                   onSelect={actions.onArchiveToggle}
                 >
-                  {t(actions.archived ? "reopen" : "archive")}
+                  {t(actions.archived ? "restoreFromTrash" : "moveToTrash")}
                 </DropdownMenuItem>
               )}
               {actions?.isCreator && (

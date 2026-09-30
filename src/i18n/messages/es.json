@@ -24,6 +24,7 @@
     "fileTrash": "Archivos eliminados",
     "activeFiles": "Archivos generados",
     "stopGeneration": "Detener generación",
+    "stopShortcutHint": "Esc detiene la generación",
     "copyRichDraft": "Copiar JSON estructurado",
     "convertRich": "Convertir en documento enriquecido",
     "conversionPreview": "Revisar conversión",

@@ -968,6 +968,8 @@ function ElapsedClock({ startedAt }: { startedAt: number }) {
   // `aria-hidden`: the team chat reads its agent reply from inside an
   // `aria-live` region, and a number that changes ten times a second would be
   // announced ten times a second. The turn's status is said in words beside it.
+  // Tenths at every length: the live clock is asked to be precise, and past a
+  // minute it reads minutes plus the remaining seconds ("2m 13.4s").
   const parts = elapsedParts(ms, true)
   const display = parts.hasMinutes
     ? t("activityElapsedMinutes", {
@@ -1439,7 +1441,11 @@ export function TranscriptBody({
                 data-agent-prose={progress ? "progress" : "final"}
                 className={cn(
                   "font-normal",
-                  progress ? "text-muted-foreground" : "text-foreground"
+                  // Progress reads a size down from the answer. Set on the
+                  // markdown root itself, which carries its own `text-sm`.
+                  progress
+                    ? "text-muted-foreground [&>div]:text-[13px] [&>div]:leading-relaxed"
+                    : "text-foreground"
                 )}
               >
                 <NativeMarkdown
@@ -1495,6 +1501,7 @@ function AgentSessionView({
   // Per instance: several composers stay mounted at once, so a fixed id would
   // point every Connect control at the first one's description.
   const connectNote = useId()
+  const stopHint = useId()
   const [turns, setTurns] = useState<NeevAgentTurn[] | null>(null),
     [draft, setDraft] = useState<PromptSegment[]>([]),
     [error, setError] = useState<unknown>(null),
@@ -1760,6 +1767,14 @@ function AgentSessionView({
   )
   const ready = runtimeEnabled && connection?.state === "connected"
   const running = activeRun !== null
+  // The composer's one button is Stop for as long as a run has nothing typed
+  // it could take. A follow-up waiting to go into the run makes it Send — but
+  // only until it is sent: a follow-up in flight shows Stop again, so a steer
+  // that never answers cannot leave a disabled Send where Stop should be.
+  // Escape stops the run from the composer whichever it shows.
+  const stopping =
+    running &&
+    (steeringInFlight !== null || !(supportsSteering && !promptIsEmpty(draft)))
   usePublishRunningChat(auth.session, "agent", session.id, running)
   /**
    * What this session runs as, from the SESSION — not from local state.
@@ -2031,7 +2046,7 @@ function AgentSessionView({
             <DropdownMenuItem
               onSelect={() => void mutate({ archived: !session.archived })}
             >
-              {t(session.archived ? "reopen" : "archive")}
+              {t(session.archived ? "restoreFromTrash" : "moveToTrash")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -2159,6 +2174,21 @@ function AgentSessionView({
           // (text is kept for the next turn). Otherwise it starts a new turn.
           if (running && supportsSteering) void steer()
           else if (!running) void send()
+        }}
+        onKeyDown={(event) => {
+          // Stop is always one key away, even while the corner shows Send.
+          // Not when something inside claimed Escape first (the mention
+          // picker), and not from a portalled menu opened from this row,
+          // whose Escape only closes that menu.
+          if (
+            event.key !== "Escape" ||
+            !running ||
+            event.defaultPrevented ||
+            !event.currentTarget.contains(event.target as Node)
+          )
+            return
+          event.preventDefault()
+          void cancel()
         }}
         className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-4 pb-3 pt-2 sm:px-8 sm:pb-5 sm:pt-3"
       >
@@ -2323,40 +2353,34 @@ function AgentSessionView({
                 {t("agentReconnect")}
               </Button>
             )}
-            {/* When steering is supported, show Stop + Send side by side.
-                Stop remains always available; Send submits the follow-up. */}
-            {running && supportsSteering && (
-              <Button
-                type="button"
-                size="icon"
-                variant="outline"
-                className="ms-auto rounded-md"
-                aria-label={t("stopGeneration")}
-                title={t("stopGeneration")}
-                onClick={() => void cancel()}
-              >
-                <Square aria-hidden className="size-3.5 fill-current" />
-              </Button>
+            {/* ONE control, always in the same corner. A run shows Stop; typing
+                a follow-up the run can take turns it into Send, and clearing
+                the text turns it back. Two buttons side by side moved Stop
+                left the moment steering was on. */}
+            {running && (
+              <p id={stopHint} className="sr-only">
+                {t("stopShortcutHint")}
+              </p>
             )}
-            {/* ONE control when not steering, or the Send beside Stop when
-                steering. The Send button becomes type="submit" for steering
-                so Enter and click both work. */}
             <Button
-              type={running && !supportsSteering ? "button" : "submit"}
+              type={stopping ? "button" : "submit"}
               size="icon"
               variant="default"
-              className={cn(
-                "rounded-md",
-                !(running && supportsSteering) && "ms-auto"
-              )}
-              aria-label={
-                running && !supportsSteering ? t("stopGeneration") : t("send")
-              }
+              className="ms-auto rounded-md"
+              aria-label={stopping ? t("stopGeneration") : t("send")}
+              // During a run the key that stops it is announced on the one
+              // control, and repeated in the tooltip when that control is Send.
+              aria-keyshortcuts={running ? "Escape" : undefined}
+              aria-describedby={running && !stopping ? stopHint : undefined}
               title={
-                running && !supportsSteering ? t("stopGeneration") : t("send")
+                stopping
+                  ? t("stopGeneration")
+                  : running
+                    ? `${t("send")} · ${t("stopShortcutHint")}`
+                    : t("send")
               }
               disabled={
-                running && !supportsSteering
+                stopping
                   ? false
                   : sending ||
                     steeringInFlight !== null ||
@@ -2365,11 +2389,9 @@ function AgentSessionView({
                     attachments.uploading ||
                     (promptIsEmpty(draft) && attachments.empty)
               }
-              onClick={
-                running && !supportsSteering ? () => void cancel() : undefined
-              }
+              onClick={stopping ? () => void cancel() : undefined}
             >
-              {running && !supportsSteering ? (
+              {stopping ? (
                 <Square aria-hidden className="size-3.5 fill-current" />
               ) : (
                 <ArrowUp aria-hidden />

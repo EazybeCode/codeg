@@ -24,6 +24,7 @@
     "fileTrash": "الملفات المحذوفة",
     "activeFiles": "الملفات المُنشأة",
     "stopGeneration": "إيقاف التوليد",
+    "stopShortcutHint": "اضغط Esc لإيقاف الإنشاء",
     "copyRichDraft": "نسخ JSON المنظم",
     "convertRich": "تحويل إلى مستند منسق",
     "conversionPreview": "مراجعة التحويل",

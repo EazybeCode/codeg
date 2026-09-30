@@ -24,6 +24,7 @@
     "fileTrash": "삭제된 파일",
     "activeFiles": "생성된 파일",
     "stopGeneration": "생성 중지",
+    "stopShortcutHint": "Esc로 생성 중지",
     "copyRichDraft": "구조화된 JSON 복사",
     "convertRich": "서식 있는 문서로 변환",
     "conversionPreview": "변환 검토",

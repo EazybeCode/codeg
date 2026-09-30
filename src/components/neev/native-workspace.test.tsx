@@ -1906,3 +1906,68 @@ it("carries a sidebar rename into the chat that is already open", async () => {
     within(tree).getByRole("button", { name: "Parser notes" })
   ).toBeInTheDocument()
 })
+
+/*
+ * A team chat and an agent chat are the same kind of row, so their files
+ * toggle is the same control: named, with its state announced, and folded
+ * away from a quiet sidebar until hover or focus — the agent row's used to
+ * stand visible on every row, one size smaller, while the team chat's had no
+ * `aria-expanded` at all.
+ */
+it("gives team and agent chats the same files toggle", async () => {
+  const agent = {
+    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    orgId: 3,
+    ownerId: 1,
+    nodeId: 7,
+    title: "Refactor the parser",
+    provider: "claude",
+    model: "default",
+    boundChatId: null,
+    archived: false,
+    revision: "1",
+    createdAt: 1_700_000_000,
+    updatedAt: 1_700_000_000,
+  }
+  mockNativeSession(undefined, {
+    ...treeRoutes({
+      ...resource,
+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      kind: "document" as const,
+      title: "Brief",
+    }),
+    "GET /api/neev/agent/sessions": () => json({ sessions: [agent] }),
+    "GET /api/neev/nodes/7/chats": () =>
+      json({ items: [resource], nextAfter: null }),
+    [`GET /api/neev/chats/${resource.id}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+    [`GET /api/neev/agent/sessions/${agent.id}/turns`]: () =>
+      json({ items: [], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  await within(tree).findByRole("button", { name: "Alpha" })
+  await within(tree).findByText("Refactor the parser")
+  const toggles = within(tree).getAllByRole("button", {
+    name: "Show generated files",
+  })
+  expect(toggles).toHaveLength(2)
+  for (const toggle of toggles) {
+    expect(toggle).toHaveAttribute("aria-expanded", "false")
+    expect(toggle).toHaveAttribute("title", "Show generated files")
+  }
+  // One treatment, not two: same size, same hover reveal.
+  expect(toggles[0].className).toBe(toggles[1].className)
+  expect(toggles[0]).toHaveClass("size-7", "[@media(hover:hover)]:opacity-0")
+
+  await user.click(toggles[0])
+  const open = within(tree).getByRole("button", {
+    name: "Hide generated files",
+  })
+  expect(open).toHaveAttribute("aria-expanded", "true")
+  // Kept on screen while its list is showing, hover or not.
+  expect(open).toHaveClass("[@media(hover:hover)]:opacity-100")
+  expect(await within(tree).findByText("No generated files")).toBeVisible()
+})

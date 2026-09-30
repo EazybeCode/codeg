@@ -24,6 +24,7 @@
     "fileTrash": "已删除的文件",
     "activeFiles": "生成的文件",
     "stopGeneration": "停止生成",
+    "stopShortcutHint": "按 Esc 停止生成",
     "copyRichDraft": "复制结构化 JSON",
     "convertRich": "转换为富文档",
     "conversionPreview": "查看转换",

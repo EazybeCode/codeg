@@ -238,7 +238,7 @@ it.each([false, true])(
     expect(mock.unknown).toEqual([])
   }
 )
-it.each(["Make private", "Archive", "Reopen"] as const)(
+it.each(["Make private", "Move to trash", "Restore"] as const)(
   "executes retained %s intent on its original target with fresh metadata after visibility recovery",
   async (action) => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
@@ -277,7 +277,7 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
       await screen.findByRole("textbox", { name: "Message" }),
       "draft before privacy action"
     )
-    if (action === "Reopen") {
+    if (action === "Restore") {
       latest = { ...latest, archived: true }
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5000)
@@ -303,7 +303,7 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
       title: "Fresh title",
       authRevision: "2",
       visibility: action === "Make private" ? "organization" : "private",
-      archived: action === "Archive",
+      archived: action === "Move to trash",
     }
     revalidating = false
     await act(async () => release(json(orgSession)))
@@ -319,13 +319,13 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
       title: "Fresh title",
       nodeId: 4,
       visibility: "private",
-      archived: action === "Archive",
+      archived: action === "Move to trash",
     })
     expect(screen.getByRole("heading", { name: "Fresh title" })).toBeVisible()
     expect(
       screen.getByRole("button", { name: "Share with organization" })
     ).toBeVisible()
-    if (action === "Archive") {
+    if (action === "Move to trash") {
       expect(
         composerEditable(screen.getByRole("textbox", { name: "Message" }))
       ).toBe(false)
@@ -341,7 +341,7 @@ it.each(["Make private", "Archive", "Reopen"] as const)(
     await openContentMenu()
     expect(
       await screen.findByRole("menuitem", {
-        name: action === "Archive" ? "Reopen" : "Archive",
+        name: action === "Move to trash" ? "Restore" : "Move to trash",
       })
     ).toBeVisible()
     expect(mock.unknown).toEqual([])
@@ -1153,14 +1153,14 @@ it("immediately applies creator archive/reopen actions and moves with the curren
   mount()
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
   await screen.findByRole("textbox", { name: "Message" })
-  await triggerAction(user, "Archive")
+  await triggerAction(user, "Move to trash")
   await waitFor(() =>
     expect(
       composerEditable(screen.getByRole("textbox", { name: "Message" }))
     ).toBe(false)
   )
   await user.click(screen.getByRole("button", { name: "Content actions" }))
-  const reopen = await screen.findByRole("menuitem", { name: "Reopen" })
+  const reopen = await screen.findByRole("menuitem", { name: "Restore" })
   expect(reopen).toBeEnabled()
   await user.click(reopen)
   await waitFor(() =>
@@ -1316,7 +1316,18 @@ it("shows a truthful Agent chats placeholder without faking a list or fetching",
   expect(mock.unknown).toEqual([])
 })
 
-it("auth invalidation clears a private draft even while its Settings guard is open", async () => {
+/*
+ * The invariant: a navigation guard that is on screen when the session goes
+ * away must not survive it. The draft is private to the reader who wrote it,
+ * so it is cleared with the scope, the question closes, and the navigation the
+ * reader was being asked about never runs.
+ *
+ * This used to reach the guard through a Settings link in the agent composer.
+ * That link is now an in-place Connect dialog (86cb041f), which navigates
+ * nowhere, so the guard is reached the way it still is: leaving the chat for
+ * its folder.
+ */
+it("auth invalidation clears a private draft even while its navigation guard is open", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
   let expired = false
   const mock = mockNativeSession(undefined, {
@@ -1373,14 +1384,13 @@ it("auth invalidation clears a private draft even while its Settings guard is op
     await screen.findByRole("textbox", { name: "Message" }),
     "secret pending draft"
   )
-  // The link lives with the agent composer now: the mode is the thing that
-  // decides what Send does, so what it needs to work is offered next to it —
-  // as Connect, the remedy, rather than as a sentence naming the problem.
-  await user.click(screen.getByRole("button", { name: "Ask agent" }))
-  await user.click(await screen.findByRole("link", { name: "Connect" }))
+  // Leaving the chat destroys the draft, so it asks first.
+  await user.click(screen.getByRole("button", { name: "Back to folder" }))
   expect(screen.getByRole("dialog")).toHaveTextContent(
     "Discard unsaved changes?"
   )
+  // Still in the chat: the question is holding the navigation.
+  expect(screen.getByText("secret pending draft")).toBeInTheDocument()
   expired = true
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000)
@@ -1427,7 +1437,7 @@ it("ignores a delayed PATCH for A after navigating to B and writing a draft", as
   mount()
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
   await screen.findByRole("textbox", { name: "Message" })
-  await triggerAction(user, "Archive")
+  await triggerAction(user, "Move to trash")
   await user.click(screen.getByRole("button", { name: "Back to folder" }))
   await user.click(await screen.findByRole("button", { name: /Chat B/ }))
   await typeInComposer(

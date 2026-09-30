@@ -24,6 +24,7 @@
     "fileTrash": "削除済みファイル",
     "activeFiles": "生成されたファイル",
     "stopGeneration": "生成を停止",
+    "stopShortcutHint": "Esc で生成を停止",
     "copyRichDraft": "構造化JSONをコピー",
     "convertRich": "リッチ文書に変換",
     "conversionPreview": "変換を確認",

@@ -2357,6 +2357,159 @@ it("sends a follow-up to the running invocation and clears composer on acceptanc
   act(() => stream.close())
 })
 
+/*
+ * The run is what made the composer busy, and a run that takes follow-ups is
+ * the one busy state Enter must still submit in. Held busy, Enter fell through
+ * to the editor and the follow-up became a second line of the draft. The
+ * corner keeps ONE control: Stop until there is something to send, then Send
+ * in the same place, then Stop again once it is taken.
+ */
+it("steers the run on Enter and keeps one corner control through a follow-up", async () => {
+  const stream = liveStream()
+  const steers: { text: string; requestId: string }[] = []
+  let canceled = false
+  let sseConnected = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () => {
+      sseConnected = true
+      return stream.response
+    },
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: (init) => {
+      const body = JSON.parse(init.body as string)
+      steers.push({ text: body.text, requestId: body.requestId })
+      return json({ accepted: true, runId: RUN_ID, requestId: body.requestId })
+    },
+    "POST /api/neev/agent/runs/cancel": () => {
+      canceled = true
+      return json({ canceled: true, status: "running" })
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  const corner = screen.getByRole("button", { name: "Send" }).parentElement!
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(sseConnected).toBe(true))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: runningTurn.id,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working on it..." })
+  })
+  expect(await screen.findByText("Working on it...")).toBeVisible()
+  // Nothing typed: Stop alone, where Send was.
+  expect(
+    screen.getByRole("button", { name: "Stop generation" })
+  ).toHaveProperty("parentElement", corner)
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+
+  const box = screen.getByRole("textbox", { name: "Message" })
+  await typeInComposer(box, "Focus on edge cases")
+  // Something to send: the same corner is Send now, and there is no Stop.
+  expect(screen.getByRole("button", { name: "Send" })).toHaveProperty(
+    "parentElement",
+    corner
+  )
+  expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull()
+
+  fireEvent.keyDown(box, { key: "Enter" })
+  await waitFor(() => expect(steers).toHaveLength(1))
+  expect(steers[0].text).toBe("Focus on edge cases")
+  act(() => {
+    stream.push({
+      type: "input",
+      runId: RUN_ID,
+      requestId: steers[0].requestId,
+      text: "Focus on edge cases",
+      createdAt: Date.now(),
+      responseOffset: 17,
+    })
+  })
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  // Taken: back to Stop, and it still cancels.
+  await user.click(
+    await screen.findByRole("button", { name: "Stop generation" })
+  )
+  await waitFor(() => expect(canceled).toBe(true))
+  act(() => stream.close())
+})
+
+/*
+ * Stop never goes out of reach in team chat either: Escape in the composer
+ * stops the run while the corner shows Send, and a follow-up whose request
+ * never answers puts an enabled Stop back in the corner.
+ */
+it("keeps Stop reachable in team chat while a follow-up is typed or stuck", async () => {
+  const stream = liveStream()
+  let steered = 0
+  let canceled = 0
+  let sseConnected = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () => {
+      sseConnected = true
+      return stream.response
+    },
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: () => {
+      steered += 1
+      return new Promise<Response>(() => {})
+    },
+    "POST /api/neev/agent/runs/cancel": () => {
+      canceled += 1
+      return json({ canceled: true, status: "running" })
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(sseConnected).toBe(true))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: runningTurn.id,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working on it..." })
+  })
+  expect(await screen.findByText("Working on it...")).toBeVisible()
+  const box = screen.getByRole("textbox", { name: "Message" })
+  await typeInComposer(box, "Focus on edge cases")
+  const send = screen.getByRole("button", { name: "Send" })
+  expect(send).toHaveAttribute("aria-keyshortcuts", "Escape")
+  expect(send).toHaveAttribute("title", "Send · Esc stops generation")
+  fireEvent.keyDown(box, { key: "Escape" })
+  await waitFor(() => expect(canceled).toBe(1))
+
+  fireEvent.keyDown(box, { key: "Enter" })
+  await waitFor(() => expect(steered).toBe(1))
+  const stop = await screen.findByRole("button", { name: "Stop generation" })
+  expect(stop).toBeEnabled()
+  expect(composerText(box)).toBe("Focus on edge cases")
+  await user.click(stop)
+  await waitFor(() => expect(canceled).toBe(2))
+  act(() => stream.close())
+})
+
 it("retries a follow-up with the same requestId after network failure", async () => {
   const stream = liveStream()
   let steerCalls = 0

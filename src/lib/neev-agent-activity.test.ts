@@ -246,6 +246,21 @@ it("returns elapsed parts for localized display", () => {
   }
 })
 
+it("splits every tenth up to an hour into whole minutes and an exact remainder", () => {
+  // Subtracting whole minutes from a tenth-rounded float is where "59.99999"
+  // or "60.0" would creep in. Every tenth is checked, not a few samples.
+  for (let tenths = 600; tenths <= 36_000; tenths += 1) {
+    const parts = elapsedParts(tenths * 100, true)
+    expect(parts.hasMinutes).toBe(true)
+    if (!parts.hasMinutes) continue
+    expect(parts.seconds).toMatch(/^\d{1,2}\.\d$/)
+    expect(Number(parts.seconds)).toBeLessThan(60)
+    expect(
+      Math.round(Number(parts.minutes) * 600 + Number(parts.seconds) * 10)
+    ).toBe(tenths)
+  }
+})
+
 it("formats elapsed time with minutes when >= 60 seconds", () => {
   // Under 60 seconds: shows just seconds with 's' suffix
   expect(formatElapsed(37_240, true)).toBe("37.2s")

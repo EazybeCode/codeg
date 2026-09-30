@@ -424,7 +424,9 @@ it("archives a session with its expected revision", async () => {
   await user.click(
     await screen.findByRole("button", { name: "Content actions" })
   )
-  await user.click(await screen.findByRole("menuitem", { name: "Archive" }))
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Move to trash" })
+  )
   await waitFor(() => expect(patches).toHaveLength(1))
   expect(patches[0]).toEqual({ archived: true, expectedRevision: "1" })
 })
@@ -851,6 +853,30 @@ it("counts a running turn in tenths, and stops counting when it ends", async () 
   expect(screen.getByText("3s")).toBeVisible()
 })
 
+it("keeps counting tenths past a minute, as minutes plus the remainder", () => {
+  vi.useFakeTimers()
+  vi.setSystemTime(1_700_000_000_000)
+  let elapsed = 0
+  vi.spyOn(performance, "now").mockImplementation(() => elapsed)
+  renderTimeline({
+    items: [],
+    running: true,
+    startedAt: 1_700_000_000_000 - 59_800,
+  })
+  expect(screen.getByText("59.8s")).toBeVisible()
+  // Across the minute: "1m" and the seconds left over, still in tenths.
+  act(() => {
+    elapsed = 5_500
+    vi.advanceTimersByTime(5_500)
+  })
+  expect(screen.getByText("1m 5.3s")).toBeVisible()
+  act(() => {
+    elapsed = 5_500 + 60_100
+    vi.advanceTimersByTime(60_100)
+  })
+  expect(screen.getByText("2m 5.4s")).toBeVisible()
+})
+
 it("keeps the duration of a turn that finished without running a tool", () => {
   renderTimeline({
     items: [],
@@ -1246,6 +1272,144 @@ it("shows one composer control that turns into Stop while the run is up", async 
   act(() => stream.close())
 })
 
+/*
+ * The same one control when the run takes follow-ups. Steering used to add a
+ * second, outlined Stop to the left of Send — so Stop sat in a different place
+ * depending on the provider. Now the corner is Stop until a follow-up is
+ * typed, Send while there is one, and Stop again when it is cleared.
+ */
+it("keeps Stop and Send in one corner while a steerable run is up", async () => {
+  const stream = liveStream()
+  const steers: string[] = []
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: (init) => {
+      const body = JSON.parse(init.body as string)
+      steers.push(body.text)
+      return json({ accepted: true, runId: RUN_ID, requestId: body.requestId })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Summarise the parser")
+  const send = screen.getByRole("button", { name: "Send" })
+  const corner = send.parentElement!
+  await user.click(send)
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  const followUp = screen.getByRole("textbox", {
+    name: messages.NativeContent.agentFollowUp,
+  })
+  // Empty: ONE Stop, in the corner, and no Send beside it.
+  expect(
+    screen.getAllByRole("button", { name: "Stop generation" })
+  ).toHaveLength(1)
+  expect(
+    screen.getByRole("button", { name: "Stop generation" })
+  ).toHaveProperty("parentElement", corner)
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+  // Typed: the corner is Send, and it goes into the same run.
+  await typeInComposer(followUp, "Focus on error handling")
+  expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull()
+  const steer = screen.getByRole("button", { name: "Send" })
+  expect(steer.parentElement).toBe(corner)
+  expect(steer).toHaveAttribute("type", "submit")
+  await user.click(steer)
+  await waitFor(() => expect(steers).toEqual(["Focus on error handling"]))
+  act(() => stream.close())
+})
+
+/*
+ * Stop never goes out of reach. While the corner shows Send for a typed
+ * follow-up, Escape in the composer stops the run and the control says so;
+ * and a follow-up whose request never answers puts Stop back in the corner,
+ * enabled, instead of leaving a disabled Send there for as long as it hangs.
+ */
+it("keeps Stop reachable while a follow-up is typed or stuck in flight", async () => {
+  const stream = liveStream()
+  const canceled: unknown[] = []
+  let steered = 0
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+    // Accepted by nobody: the request simply never comes back.
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: () => {
+      steered += 1
+      return new Promise<Response>(() => {})
+    },
+    "POST /api/neev/agent/runs/cancel": (init) => {
+      canceled.push(JSON.parse(init.body as string))
+      return json({ canceled: true, status: "running" })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Summarise the parser")
+  // Idle: no shortcut is claimed, because there is nothing to stop.
+  expect(screen.getByRole("button", { name: "Send" })).not.toHaveAttribute(
+    "aria-keyshortcuts"
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  expect(
+    screen.getByRole("button", { name: "Stop generation" })
+  ).toHaveAttribute("aria-keyshortcuts", "Escape")
+
+  const followUp = screen.getByRole("textbox", {
+    name: messages.NativeContent.agentFollowUp,
+  })
+  await typeInComposer(followUp, "Focus on error handling")
+  const send = screen.getByRole("button", { name: "Send" })
+  expect(send).toHaveAttribute("aria-keyshortcuts", "Escape")
+  expect(send).toHaveAttribute("title", "Send · Esc stops generation")
+  expect(send).toHaveAccessibleDescription("Esc stops generation")
+  // Escape from the composer stops the run even though the corner says Send.
+  fireEvent.keyDown(followUp, { key: "Escape" })
+  await waitFor(() => expect(canceled).toEqual([{ runId: RUN_ID }]))
+
+  // The follow-up goes, and hangs.
+  await user.click(send)
+  await waitFor(() => expect(steered).toBe(1))
+  const stop = await screen.findByRole("button", { name: "Stop generation" })
+  expect(stop).toBeEnabled()
+  expect(screen.queryByRole("button", { name: "Send" })).toBeNull()
+  // The words are still there, not lost to a request nobody answered.
+  expect(composerText(followUp)).toBe("Focus on error handling")
+  await user.click(stop)
+  await waitFor(() => expect(canceled).toHaveLength(2))
+  act(() => stream.close())
+})
+
 it("keeps progress prose muted and the completed final answer normal", () => {
   const props = {
     text: "Checking.\n\nFinal answer.",
@@ -1261,11 +1425,16 @@ it("keeps progress prose muted and the completed final answer normal", () => {
     </NextIntlClientProvider>
   )
   expect(container.querySelector('[data-agent-prose="progress"]')).toHaveClass(
-    "text-muted-foreground"
+    "text-muted-foreground",
+    // A size down from the answer, on the markdown root that sets its own.
+    "[&>div]:text-[13px]"
   )
   expect(container.querySelector('[data-agent-prose="final"]')).toHaveClass(
     "text-foreground",
     "font-normal"
+  )
+  expect(container.querySelector('[data-agent-prose="final"]')).not.toHaveClass(
+    "[&>div]:text-[13px]"
   )
   expect(
     container.querySelector('[data-agent-prose="final"]')

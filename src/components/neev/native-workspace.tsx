@@ -181,6 +181,21 @@ function trail(nodes: NativeNode[], nodeId: number): string[] {
  * resource may not be in any loaded list. That gets the neutral sheet rather
  * than a guess, because guessing is what put a chat behind a page icon.
  */
+/**
+ * The files toggle on a chat row, team or agent alike.
+ *
+ * Revealed on hover where hovering exists, like the row's menu beside it, and
+ * kept visible while open so a list that is showing can always be folded.
+ */
+function filesToggleClass(expanded: boolean) {
+  return cn(
+    "flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring",
+    "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/item:opacity-100",
+    "group-focus-within/item:opacity-100 focus-visible:opacity-100",
+    expanded && "[@media(hover:hover)]:opacity-100"
+  )
+}
+
 function TabIcon({
   tab,
   resourceKind,
@@ -960,15 +975,11 @@ function NativeWorkspaceTree({
                                       ? "collapseFiles"
                                       : "expandFiles"
                                   )}
+                                  aria-expanded={filesExpanded}
                                   onClick={() =>
                                     expandedFiles.toggle(resource.id)
                                   }
-                                  className={cn(
-                                    "flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring",
-                                    "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/item:opacity-100",
-                                    "group-focus-within/item:opacity-100 focus-visible:opacity-100",
-                                    filesExpanded && "opacity-100"
-                                  )}
+                                  className={filesToggleClass(filesExpanded)}
                                 >
                                   {filesExpanded ? (
                                     <ChevronDown
@@ -1191,11 +1202,18 @@ function NativeWorkspaceTree({
                                     ? "collapseFiles"
                                     : "expandFiles"
                                 )}
+                                title={c(
+                                  expandedFiles.isExpanded(item.id)
+                                    ? "collapseFiles"
+                                    : "expandFiles"
+                                )}
                                 aria-expanded={expandedFiles.isExpanded(
                                   item.id
                                 )}
                                 onClick={() => expandedFiles.toggle(item.id)}
-                                className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+                                className={filesToggleClass(
+                                  expandedFiles.isExpanded(item.id)
+                                )}
                               >
                                 {expandedFiles.isExpanded(item.id) ? (
                                   <ChevronDown
