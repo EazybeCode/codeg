@@ -475,11 +475,17 @@ fn provider_argv(
             }
             None => prompt.to_owned(),
         };
-        return vec![
-            super::acp_providers::LAUNCH_MARKER.to_owned(),
-            "--".to_owned(),
-            prompt,
-        ];
+        // Staged images travel as `--image <path>` so the adapter can send them
+        // as native ACP image blocks when the agent advertises support (all
+        // three pinned agents do); the prompt names them as files regardless.
+        let mut argv = vec![super::acp_providers::LAUNCH_MARKER.to_owned()];
+        for path in images {
+            argv.push("--image".to_owned());
+            argv.push(path.clone());
+        }
+        argv.push("--".to_owned());
+        argv.push(prompt);
+        return argv;
     }
     let mut argv: Vec<String> = match provider {
         "codex" => vec![
@@ -1364,6 +1370,24 @@ impl SandboxedProviderCliRuntime {
                         provider_args.push(override_str);
                     }
                 }
+                provider if super::acp_providers::is_acp(provider) => {
+                    // ACP `session/new` takes MCP servers natively: inserted
+                    // before the prompt separator as `--mcp <json>`.
+                    let separator = provider_args.len() - 2;
+                    // Tools over the argv budget travel by name only, so the
+                    // trace can say they were left out.
+                    let acp = super::library_runtime::acp_mcp_servers(&library.mcp_servers);
+                    let mut servers = Vec::new();
+                    for server in acp.forwarded {
+                        servers.push("--mcp".to_owned());
+                        servers.push(server);
+                    }
+                    for name in acp.skipped {
+                        servers.push("--mcp-skipped".to_owned());
+                        servers.push(name);
+                    }
+                    provider_args.splice(separator..separator, servers);
+                }
                 _ => {}
             }
         }
@@ -2179,6 +2203,81 @@ mod tests {
                 provider
             );
         }
+    }
+
+    #[test]
+    fn an_acp_turn_carries_staged_images_and_library_tools_before_the_prompt() {
+        use super::super::library_runtime::{StagedLibrary, StagedMcpServer};
+        let runtime = acp_runtime();
+        let lane = Lane {
+            slot: "a",
+            uid: 61000,
+        };
+        let workdir = Path::new("/data/agents/run-x");
+        let staged = vec![
+            StagedAttachment {
+                path: "/data/agents/run-x/inputs/k--shot.png".into(),
+                file_name: "shot.png".into(),
+                is_image: true,
+            },
+            StagedAttachment {
+                path: "/data/agents/run-x/inputs/k--notes.txt".into(),
+                file_name: "notes.txt".into(),
+                is_image: false,
+            },
+        ];
+        let library = StagedLibrary {
+            skill_dirs: Vec::new(),
+            mcp_servers: vec![
+                StagedMcpServer {
+                    id: "abc123".into(),
+                    name: "Docs".into(),
+                    config: crate::neev::library::McpServerConfig::Http {
+                        url: "https://mcp.example.com/sse".into(),
+                    },
+                },
+                StagedMcpServer {
+                    id: "def456".into(),
+                    name: "fs".into(),
+                    config: crate::neev::library::McpServerConfig::Stdio {
+                        command: "npx".into(),
+                        args: vec!["-y".into(), "server".into()],
+                    },
+                },
+            ],
+        };
+        let mut run = request("look");
+        run.provider = "gemini".into();
+        let argv = runtime
+            .launcher_args(&run, lane, workdir, "/usr/local/bin/gemini", HANDLE, &staged, &[], &library)
+            .unwrap();
+        let sep = argv.iter().position(|a| a == "--").unwrap();
+        let tail = &argv[sep + 1..];
+        assert_eq!(tail[0], "/usr/local/bin/gemini");
+        assert_eq!(tail[1], "--neev-acp");
+        // Only the IMAGE is passed as an image; the text file is named in the
+        // prompt like every attachment.
+        assert_eq!(
+            &tail[2..4],
+            &["--image".to_owned(), "/data/agents/run-x/inputs/k--shot.png".to_owned()]
+        );
+        let mcp: Vec<&String> = tail
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0 && tail[i - 1] == "--mcp")
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(mcp.len(), 2);
+        let http: serde_json::Value = serde_json::from_str(mcp[0]).unwrap();
+        assert_eq!(http["type"], "http");
+        assert_eq!(http["url"], "https://mcp.example.com/sse");
+        let stdio: serde_json::Value = serde_json::from_str(mcp[1]).unwrap();
+        assert_eq!(stdio["command"], "npx");
+        assert!(stdio.get("env").is_none(), "no env ever travels");
+        // The prompt stays last, behind its own separator.
+        assert_eq!(tail[tail.len() - 2], "--");
+        assert!(tail[tail.len() - 1].contains("look"));
+        assert!(tail[tail.len() - 1].contains("notes.txt"));
     }
 
     #[test]

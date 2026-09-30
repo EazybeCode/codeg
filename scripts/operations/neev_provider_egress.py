@@ -48,7 +48,7 @@ IDLE_SECONDS = login.IDLE_SECONDS
 _RESPONSES = login._RESPONSES
 _ESTABLISHED = login._ESTABLISHED
 
-_ALLOWED_HEADERS = frozenset((b"host", b"user-agent", b"proxy-connection"))
+_ALLOWED_HEADERS = frozenset((b"host", b"user-agent", b"proxy-connection", b"connection"))
 
 # --------------------------------------------------------------------------- #
 # Safe, fixed-vocabulary CONNECT diagnostics (no header values/auth/TLS/URLs)
@@ -247,7 +247,15 @@ def parse_connect(header: bytes, policy: DestinationPolicy) -> str:
             raise EgressError("invalid")
         if not value or any(byte < 0x20 or byte > 0x7E for byte in value):
             raise EgressError("invalid")
-        if lowered == b"host" and value != authority:
+        # Host must name the SAME authority: exactly, or with the default https
+        # port left out (RFC 9110 7.2). The pinned Cursor CLI's Node client sends
+        # "Host: api2.cursor.sh" on CONNECT api2.cursor.sh:443 (captured on the
+        # pinned image) and was refused before it ever reached the allowlisted host.
+        if lowered == b"host" and value != authority and not (
+                authority.endswith(b":443") and value == authority[:-4]):
+            raise EgressError("invalid")
+        # Same client, "Connection: close"; a validated token like Proxy-Connection.
+        if lowered == b"connection" and value.lower() not in (b"keep-alive", b"close"):
             raise EgressError("invalid")
         # The pinned Claude CLI's Bun HTTP client sends "Proxy-Connection: close" on its
         # CONNECT; accept keep-alive AND close, case-insensitively (a validated token) —

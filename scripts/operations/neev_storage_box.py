@@ -18,6 +18,7 @@ Exit codes: 0 ok, 1 configuration, 2 local integrity, 3 remote unavailable,
 4 remote verification mismatch.
 """
 import argparse
+import contextlib
 import datetime
 import fcntl
 import hashlib
@@ -69,6 +70,11 @@ class RemoteUnavailable(Exception):
 
 class RemoteMismatch(Exception):
     code = 4
+
+
+class EvictionBlocked(Exception):
+    """Local disk is under pressure but no candidate is provably durable."""
+    code = 5
 
 
 def _private_file(path, label, allow_world_read=False):
@@ -266,6 +272,46 @@ def load_tombstones(config):
         return {}
 
 
+SNAPSHOT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$")
+
+
+def newest_snapshot(config, run=subprocess.run):
+    """Newest Storage Box snapshot (read-only `.zfs/snapshot`), or None."""
+    listing = _call(run, remote_command(config, ["ls", "-1", ".zfs/snapshot"]), tolerated=(0,))
+    names = [n for n in listing.stdout.split() if SNAPSHOT_NAME.match(n)][-30:]
+    if not names:
+        return None
+    dated = []
+    for name in names:
+        result = _call(run, remote_command(config, ["stat", "-c", "%Y", f".zfs/snapshot/{name}"]), tolerated=(0, 1))
+        stamp = result.stdout.strip()
+        dated.append((int(stamp) if stamp.isdigit() else 0, name))
+    return max(dated)[1]
+
+
+@contextlib.contextmanager
+def blob_lock(config, relative, blocking=True):
+    """Cross-process per-blob lock shared by the evictor and the broker.
+    Yields True when held; with blocking=False yields False if busy."""
+    directory = os.path.join(config["state_dir"], "locks")
+    os.makedirs(directory, 0o700, exist_ok=True)
+    path = os.path.join(directory, relative.replace("/", "-") + ".lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)
+
+
+def evict_record_path(config):
+    return os.path.join(config["state_dir"], "last-evict.json")
+
+
 def verify_record_path(config):
     return os.path.join(config["state_dir"], "last-verify.json")
 
@@ -425,6 +471,7 @@ def status(config, log=print):
         "evicted": sum(1 for path in remote_only if ledger.entries[path].get("evicted_at")),
         "forgotten": len(load_tombstones(config)),
         "last_verify": last_verify,
+        "last_evict": (json.load(open(evict_record_path(config))) if os.path.exists(evict_record_path(config)) else None),
         "eviction": "configured" if config.get("eviction") else "not configured",
     }
     log(json.dumps(summary, indent=1))
@@ -491,11 +538,32 @@ def evict(config, run=subprocess.run, now=None, broker_ping=None, dry_run=False,
     need = max(0,
                local_bytes - settings.get("max_local_bytes", local_bytes),
                settings.get("min_free_bytes", 0) - free)
-    summary = {"local_bytes": local_bytes, "free_bytes": free, "need_bytes": need,
-               "evicted": 0, "evicted_bytes": 0, "skipped_changed": 0, "remote_unverified": 0}
-    if need == 0:
+    summary = {"at": int(now), "local_bytes": local_bytes, "free_bytes": free, "need_bytes": need,
+               "evicted": 0, "evicted_bytes": 0, "skipped_changed": 0, "skipped_locked": 0,
+               "remote_unverified": 0, "not_in_snapshot": 0, "snapshot": None, "blocked": None}
+
+    def finish():
+        if not dry_run:
+            save_json(evict_record_path(config), summary)
         log(json.dumps(summary))
         return summary
+
+    if need == 0:
+        return finish()
+    # Durability gate first, whenever there is pressure: the local copy of any
+    # blob may go only if an immutable Storage Box snapshot (which this host's
+    # key cannot delete) holds the same bytes. No snapshot: blocked, loudly.
+    try:
+        snapshot = newest_snapshot(config, run)
+    except RemoteUnavailable:
+        summary["blocked"] = "Storage Box unavailable"
+        finish()
+        raise
+    summary["snapshot"] = snapshot
+    if snapshot is None:
+        summary["blocked"] = "no Storage Box snapshot exists; enable automatic snapshots"
+        finish()
+        raise EvictionBlocked(summary["blocked"])
     cutoff = now - settings["min_idle_seconds"]
     candidates = sorted(
         (blob for blob in local
@@ -512,11 +580,20 @@ def evict(config, run=subprocess.run, now=None, broker_ping=None, dry_run=False,
         chosen.append(blob)
         planned += blob["size"]
     if not chosen:
-        log(json.dumps(summary))
-        return summary
-    remote = remote_hashes(config, [blob["path"] for blob in chosen], run=run)
-    confirmed = [blob for blob in chosen if remote.get(blob["path"]) == blob["sha256"]]
-    summary["remote_unverified"] = len(chosen) - len(confirmed)
+        return finish()
+    paths = [blob["path"] for blob in chosen]
+    try:
+        remote = remote_hashes(config, paths, run=run)
+        in_snapshot = remote_hashes({**config, "remote_root": f".zfs/snapshot/{snapshot}/{config['remote_root']}"},
+                                    paths, run=run)
+    except RemoteUnavailable:
+        summary["blocked"] = "Storage Box unavailable"
+        finish()
+        raise
+    current = [blob for blob in chosen if remote.get(blob["path"]) == blob["sha256"]]
+    summary["remote_unverified"] = len(chosen) - len(current)
+    confirmed = [blob for blob in current if in_snapshot.get(blob["path"]) == blob["sha256"]]
+    summary["not_in_snapshot"] = len(current) - len(confirmed)
     if confirmed and not dry_run:
         # Record intent before unlinking: the broker hydrates only entries marked
         # evicted, so a crash mid-run can never leave an unrestorable blob.
@@ -530,24 +607,32 @@ def evict(config, run=subprocess.run, now=None, broker_ping=None, dry_run=False,
             summary["evicted_bytes"] += blob["size"]
             continue
         org, name = blob["path"].split("/")
-        org_fd = os.open(os.path.join(config["local_root"], org), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
+        # Same per-blob lock as the broker's hydrate/forget: never unlink while
+        # the broker is publishing or tombstoning this blob; skip if busy.
+        with blob_lock(config, blob["path"], blocking=False) as held:
+            if not held:
+                summary["skipped_locked"] += 1
+                continue
+            org_fd = os.open(os.path.join(config["local_root"], org), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
-                info = os.stat(name, dir_fd=org_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            if ((info.st_dev, info.st_ino, info.st_mtime_ns, info.st_atime_ns, info.st_size) != blob["identity"]
-                    or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
-                summary["skipped_changed"] += 1  # read or replaced since selection
-                continue
-            # A reader holding it open keeps its bytes; a later open hydrates.
-            os.unlink(name, dir_fd=org_fd)
-            os.fsync(org_fd)
-        finally:
-            os.close(org_fd)
+                try:
+                    info = os.stat(name, dir_fd=org_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if ((info.st_dev, info.st_ino, info.st_mtime_ns, info.st_atime_ns, info.st_size) != blob["identity"]
+                        or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+                    summary["skipped_changed"] += 1  # read or replaced since selection
+                    continue
+                # A reader holding it open keeps its bytes; a later open hydrates.
+                os.unlink(name, dir_fd=org_fd)
+                os.fsync(org_fd)
+            finally:
+                os.close(org_fd)
         summary["evicted"] += 1
         summary["evicted_bytes"] += blob["size"]
-    log(json.dumps(summary))
+    finish()
+    if not confirmed and summary["not_in_snapshot"]:
+        raise EvictionBlocked("under pressure, but no candidate is in the newest snapshot yet")
     if summary["remote_unverified"]:
         raise RemoteMismatch(f"{summary['remote_unverified']} candidates failed the fresh remote check and were kept")
     return summary
@@ -695,7 +780,7 @@ def main(argv=None, run=subprocess.run, lock_wait_seconds=1800):
             else:
                 status(config)
         return 0
-    except (ConfigError, LocalIntegrityError, RemoteUnavailable, RemoteMismatch) as error:
+    except (ConfigError, LocalIntegrityError, RemoteUnavailable, RemoteMismatch, EvictionBlocked) as error:
         print(f"neev_storage_box: {error}", file=sys.stderr)
         return error.code
     except (OSError, ValueError) as error:

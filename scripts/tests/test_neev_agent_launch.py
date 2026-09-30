@@ -1433,6 +1433,44 @@ class AcpTransportTests(unittest.TestCase):
                 with self.assertRaises(sandbox.SandboxError):
                     self.spec_for(provider, tail, binary=binary)
 
+    def test_images_and_library_tools_are_mapped_and_bounded(self):
+        stdio = json.dumps({"name": "fs-def456", "command": "npx", "args": ["-y", "server"]})
+        http = json.dumps({"name": "Docs-abc123", "type": "http", "url": "https://mcp.example.com/sse"})
+        image = "/var/lib/neev-native/agents/run-x/inputs/k--shot.png"
+        spec = self.spec_for("gemini", ["--neev-acp", "--image", image, "--mcp", stdio,
+                                        "--mcp", http, "--", "look"])
+        argv = list(spec.provider_argv)
+        self.assertEqual(argv[argv.index("--image") + 1], image)
+        self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == "--mcp-server"],
+                         [stdio, http])
+        self.assertEqual(argv[-2:], ["--", "look"])
+        # Tools the server left out travel by name; the org library limit fits.
+        many = []
+        for i in range(99):
+            many += ["--mcp", json.dumps({"name": f"t-{i}", "command": "c", "args": []})]
+        spec = self.spec_for("gemini", ["--neev-acp", *many, "--mcp-skipped", "big-1",
+                                        "--", "look"])
+        argv = list(spec.provider_argv)
+        self.assertEqual(argv.count("--mcp-server"), 99)
+        self.assertEqual(argv[argv.index("--mcp-skipped") + 1], "big-1")
+        refused = [
+            ["--neev-acp", *many, "--mcp", stdio, "--mcp", http, "--", "x"],    # 101 > library limit
+            ["--neev-acp", "--mcp-skipped", "../x", "--", "x"],
+            ["--neev-acp", "--image", "/etc/passwd", "--", "x"],               # outside workdir
+            ["--neev-acp", "--image", "relative.png", "--", "x"],
+            ["--neev-acp", "--image", "/var/lib/neev-native/agents/run-x/../run-y/a.png", "--", "x"],
+            ["--neev-acp", "--mcp", json.dumps({"name": "x", "type": "http", "url": "http://plain"}), "--", "x"],
+            ["--neev-acp", "--mcp", json.dumps({"name": "x", "type": "http", "url": "https://u:p@h/"}), "--", "x"],
+            ["--neev-acp", "--mcp", json.dumps({"name": "x", "command": "c", "args": [], "env": {"K": "v"}}), "--", "x"],
+            ["--neev-acp", "--mcp", "not json", "--", "x"],
+            ["--neev-acp", "--other", "v", "--", "x"],
+            ["--neev-acp", "--image", "--", "x"],
+        ]
+        for tail in refused:
+            with self.subTest(tail=tail[1:3]):
+                with self.assertRaises(sandbox.SandboxError):
+                    self.spec_for("gemini", tail)
+
     def test_steering_is_refused_for_acp(self):
         with self.assertRaises(sandbox.SandboxError):
             self.spec_for("cursor", ["--neev-acp", "--", "hi"], steering=True)

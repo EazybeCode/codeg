@@ -143,3 +143,53 @@ describe("ACP providers in the server's lists", () => {
     expect(view.speed).toBe("provider")
   })
 })
+
+describe("attachment and library-tool honesty", () => {
+  const gemini = {
+    provider: "gemini",
+    label: "Gemini CLI",
+    models: [
+      {
+        id: "default",
+        label: "Default",
+        default: true,
+        supportsSpeed: false,
+        efforts: null,
+      },
+    ],
+    efforts: [],
+    defaultEffort: null,
+    supportsSpeed: false,
+    speedUnavailableReason: "Fast mode is not available for this provider.",
+  }
+
+  it("reads imageInput and libraryMcp when the server sends them", () => {
+    const [catalog] = parseAgentCapabilities({
+      providers: [
+        { ...gemini, imageInput: "native_if_supported", libraryMcp: "stdio" },
+      ],
+    }).providers
+    expect(catalog.imageInput).toBe("native_if_supported")
+    expect(catalog.libraryMcp).toBe("stdio")
+  })
+
+  it("treats an older server that says nothing as unknown, not false", () => {
+    const [catalog] = parseAgentCapabilities({ providers: [gemini] }).providers
+    expect(catalog.imageInput).toBeNull()
+    expect(catalog.libraryMcp).toBeNull()
+  })
+
+  it("refuses values the server never sends", () => {
+    for (const bad of [
+      { imageInput: "base64" },
+      { imageInput: true },
+      { libraryMcp: "yes" },
+      // The old boolean shape overstated HTTP tools; it is not accepted.
+      { libraryMcp: true },
+    ]) {
+      expect(() =>
+        parseAgentCapabilities({ providers: [{ ...gemini, ...bad }] })
+      ).toThrow(NativeClientError)
+    }
+  })
+})

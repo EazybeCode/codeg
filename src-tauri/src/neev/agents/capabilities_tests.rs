@@ -258,3 +258,20 @@ fn acp_providers_are_not_advertised_until_gated_on() {
     let listed: Vec<&str> = catalogue().providers.iter().map(|p| p.provider).collect();
     assert_eq!(listed, vec!["claude", "codex"]);
 }
+
+#[test]
+fn attachments_and_library_tools_are_described_truthfully() {
+    assert_eq!(provider_capabilities("codex").image_input, "native");
+    assert_eq!(provider_capabilities("claude").image_input, "file");
+    for provider in ["claude", "codex", "cursor", "gemini", "opencode"] {
+        let caps = provider_capabilities(provider);
+        // HTTP tool hosts are outside sandbox egress: only stdio tools work.
+        assert_eq!(caps.library_mcp, "stdio", "{provider}");
+        let json = serde_json::to_value(&caps).unwrap();
+        assert!(json.get("imageInput").is_some() && json.get("libraryMcp").is_some());
+    }
+    for provider in ["cursor", "gemini", "opencode"] {
+        // Decided per run from the agent's own initialize, never promised.
+        assert_eq!(provider_capabilities(provider).image_input, "native_if_supported");
+    }
+}

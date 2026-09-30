@@ -2,7 +2,7 @@
 // panel as Claude and Codex. What matters here: a provider appears only when
 // the server lists it, each sign-in shape is rendered as the one thing the user
 // can actually do, and an approval URL is held to its own provider's host.
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeAgentConnectionsPanel } from "./native-agent-connections"
@@ -226,4 +226,32 @@ it("refuses a Cursor attempt pointing anywhere but cursor.com", async () => {
   expect(
     screen.getByRole("button", { name: "Cancel cursor sign-in" })
   ).toBeEnabled()
+})
+
+it("marks only the offered newer providers as Beta; Claude and Codex unchanged", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/connections": () =>
+      listing([
+        row("claude", "connected"),
+        row("codex", "not_signed_in"),
+        row("gemini", "not_signed_in"),
+        row("opencode", "connected"),
+      ]),
+  })
+  mount()
+  const item = async (name: string) =>
+    (await screen.findByText(name)).closest("li") as HTMLElement
+  for (const name of ["Gemini CLI", "OpenCode"]) {
+    const badge = within(await item(name)).getByText("Beta")
+    expect(badge).toBeVisible()
+    expect(badge).toHaveAttribute(
+      "title",
+      "Newer integration. Fewer options than Claude and Codex for now."
+    )
+  }
+  for (const name of ["Claude", "Codex"])
+    expect(within(await item(name)).queryByText("Beta")).toBeNull()
+  // Cursor is not offered by this server: no row, so no badge for it either.
+  expect(screen.queryByText("Cursor")).toBeNull()
+  expect(screen.getAllByText("Beta")).toHaveLength(2)
 })

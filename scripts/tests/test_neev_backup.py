@@ -149,6 +149,17 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(record["canary"]["dump_bytes"], len(b"PGDMP fake dump"))
         self.assertTrue(json.loads(Path(self.config["state_dir"], "last-success.json").read_text())["ok"])
 
+    def test_stages_are_logged_and_a_failure_records_its_stage(self):
+        lines = []
+        nb.backup(self.configured(), run=self.world, log=lines.append)
+        stages = [line.split(": ", 1)[1] for line in lines if line.startswith("stage: ")]
+        self.assertEqual(stages, ["preflight", "content-backup", "verify-local", "upload", "check",
+                                  "restore-canary", "promote", "cleanup", "retention-prune", "done"])
+        self.world.fail.add("check")
+        with self.assertRaises(nb.BackupError):
+            nb.backup(self.configured(), run=self.world, log=lambda *_: None)
+        self.assertEqual(json.loads(Path(self.config["state_dir"], "last-run.json").read_text())["stage"], "check")
+
     def test_restic_uses_the_separate_repository_and_existing_ssh_alias(self):
         self.backup()
         for step, args in self.world.calls:

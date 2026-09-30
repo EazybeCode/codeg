@@ -178,6 +178,7 @@ export type NeevActivityState =
   | "result"
   | "truncated"
   | "unsupported"
+  | "library_tool_skipped"
   /** The provider's own failure: `detail` is its redacted, bounded message. */
   | "error"
 
@@ -624,7 +625,22 @@ export interface NeevAgentProviderCatalog {
    * is a claim the server never made.
    */
   discoveryUnavailable: boolean
+  /**
+   * How an attached image reaches the model. `"native"`: as an image input.
+   * `"native_if_supported"`: as an image input when the agent says per run
+   * that it takes one, otherwise as a staged, named file.
+   * `"file"`: staged and named; the agent opens it with its own tools.
+   * `null`: an older server that does not say.
+   */
+  imageInput?: NeevImageInput | null
+  /**
+   * Which shared-library MCP tools can work in a run: `"stdio"` (local tools;
+   * HTTP tool hosts are outside the sandbox). `null`: not said.
+   */
+  libraryMcp?: "stdio" | null
 }
+
+export type NeevImageInput = "native" | "native_if_supported" | "file"
 
 export interface NeevAgentCapabilities {
   providers: readonly NeevAgentProviderCatalog[]
@@ -742,11 +758,24 @@ function providerCatalog(value: unknown): NeevAgentProviderCatalog {
     "supportsSpeed",
     "speedUnavailableReason",
   ]
-  const told = record(value).discoveryUnavailableReason !== undefined
-  const object = exact(
-    value,
-    told ? [...KEYS, "discoveryUnavailableReason"] : KEYS
+  // `imageInput` / `libraryMcp` are OPTIONAL too: added with the ACP
+  // providers; an older server simply does not say (read as `null`).
+  const raw = record(value)
+  const optional = [
+    "discoveryUnavailableReason",
+    "imageInput",
+    "libraryMcp",
+  ].filter((key) => raw[key] !== undefined)
+  const object = exact(value, [...KEYS, ...optional])
+  if (
+    object.imageInput !== undefined &&
+    object.imageInput !== "native" &&
+    object.imageInput !== "native_if_supported" &&
+    object.imageInput !== "file"
   )
+    return invalid()
+  if (object.libraryMcp !== undefined && object.libraryMcp !== "stdio")
+    return invalid()
   // Both reason strings are validated and then deliberately left unrendered;
   // see `reasonText`.
   reasonText(object.speedUnavailableReason)
@@ -806,6 +835,8 @@ function providerCatalog(value: unknown): NeevAgentProviderCatalog {
     defaultEffort: (object.defaultEffort as string | null) ?? null,
     supportsSpeed: object.supportsSpeed,
     discoveryUnavailable,
+    imageInput: (object.imageInput as NeevImageInput | undefined) ?? null,
+    libraryMcp: (object.libraryMcp as "stdio" | undefined) ?? null,
   }
 }
 
@@ -845,6 +876,7 @@ const ACTIVITY_STATES: readonly NeevActivityState[] = [
   "result",
   "truncated",
   "unsupported",
+  "library_tool_skipped",
   "error",
 ]
 

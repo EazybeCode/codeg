@@ -438,6 +438,169 @@ def check_protocol(provider: str, timeout: float = 60.0) -> Check:
                  "real ACP v1 capabilities recorded" if ok else "no ACP v1 initialize", facts)
 
 
+class _Lines:
+    """A file-like sink for the adapter's Emitter: keeps parsed lines."""
+
+    def __init__(self, on_line=None):
+        self.lines = []
+        self._on_line = on_line
+
+    def write(self, text):
+        for raw in text.splitlines():
+            if raw.strip():
+                record = json.loads(raw)
+                self.lines.append(record)
+                if self._on_line:
+                    self._on_line(record)
+
+    def flush(self):
+        pass
+
+
+def check_anonymous_run(provider: str = "opencode", cancel: bool = False,
+                        timeout: float = 180.0) -> Check:
+    """OPT-IN (`--anonymous-run`). A real ACP turn through the REAL adapter
+    against the pinned `opencode acp`, with no account: OpenCode answers on its
+    own anonymous models. Production refuses that (the adapter pins OpenCode to
+    the signed-in `openai/` upstream); this lifts the pin ONLY inside this test
+    process, so it proves streaming and cancel of the real agent over ACP, not
+    anybody's sign-in. The prompt is a fixed test string; no user data."""
+    import threading
+
+    import neev_acp_stream_adapter as adapter
+    import neev_agent_credentials as credentials
+
+    if provider != "opencode":
+        return Check(provider, "anon-run", False, "only opencode runs without an account")
+    path = PINS[provider]["path"]
+    name = "anon-cancel" if cancel else "anon-run"
+    prompt = ("Count from 1 to 400, one number per line, nothing else." if cancel
+              else "Reply with exactly this text and nothing else: NEEV-ACP-OK")
+    saved = adapter.PROVIDERS[provider]["model_prefix"]
+    adapter.PROVIDERS[provider]["model_prefix"] = "opencode/"   # test process only
+    stop = threading.Event()
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            credentials._ensure_provider_home(home, provider)
+            env = headless_env(home, provider)
+            args = adapter._parse(["--provider", provider, "--agent", path,
+                                   "--allowed-agent", path, "--cwd", home, "--", prompt])
+            args.mcp_server_objects = []
+            first_text = []
+
+            def on_line(record):
+                if cancel and record.get("type") == "item.delta" and not first_text:
+                    first_text.append(time.monotonic())
+                    stop.set()   # what SIGTERM does in production
+
+            sink = _Lines(on_line)
+            child = subprocess.Popen(adapter.agent_argv(provider, path), stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     cwd=home, env=adapter.agent_env(env, provider))
+            watchdog = threading.Timer(timeout, stop.set)
+            watchdog.start()
+            started = time.monotonic()
+            try:
+                code = adapter.drive(child, args, adapter.Emitter(sink), home, stop)
+            finally:
+                watchdog.cancel()
+                adapter.shutdown_child(child)
+            elapsed = time.monotonic() - started
+    finally:
+        adapter.PROVIDERS[provider]["model_prefix"] = saved
+    kinds = [line.get("type") for line in sink.lines]
+    text = "".join(line["item"].get("delta", "") for line in sink.lines
+                   if line.get("type") == "item.delta")
+    last = sink.lines[-1] if sink.lines else {}
+    evidence = {"exit": code, "seconds": round(elapsed, 1), "deltas": kinds.count("item.delta"),
+                "last": last, "child_reaped": child.poll() is not None}
+    if cancel:
+        cancel_seconds = round(elapsed - (first_text[0] - started), 1) if first_text else None
+        evidence["cancel_seconds_after_first_text"] = cancel_seconds
+        ok = (bool(first_text) and last == {"type": "turn.failed", "reason": "cancelled"}
+              and code == 4 and child.poll() is not None
+              and cancel_seconds is not None and cancel_seconds <= adapter.CANCEL_GRACE_SECS + 2)
+        return Check(provider, name, ok, "streamed, then cancelled cleanly" if ok
+                     else "cancel did not end the turn cleanly", evidence)
+    evidence["text"] = text[:80]
+    ok = code == 0 and last == {"type": "turn.completed"} and "NEEV-ACP-OK" in text
+    return Check(provider, name, ok, "real turn streamed and completed" if ok
+                 else "real turn did not complete as expected", evidence)
+
+
+def check_session_inputs(provider: str, timeout: float = 60.0) -> Check:
+    """The real agent's answer to `session/new` carrying one stdio and one http
+    library MCP server in exactly the adapter's shape (no account; the servers
+    need not work — this checks the agent ACCEPTS the ACP McpServer shape)."""
+    import neev_acp_stream_adapter as adapter
+    import neev_agent_credentials as credentials
+
+    servers = [adapter.mcp_server(json.dumps({"name": "neev-probe-stdio",
+                                              "command": "/bin/true", "args": []})),
+               adapter.mcp_server(json.dumps({"name": "neev-probe-http", "type": "http",
+                                              "url": "https://mcp.invalid/sse"}))]
+    path = PINS[provider]["path"]
+    with tempfile.TemporaryDirectory() as home:
+        credentials._ensure_provider_home(home, provider)
+        process = subprocess.Popen(adapter.agent_argv(provider, path), stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   env=headless_env(home, provider), cwd=home,
+                                   start_new_session=True)
+        replies = {}
+        try:
+            def send(payload):
+                process.stdin.write((json.dumps(payload) + "\n").encode())
+                process.stdin.flush()
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": adapter.initialize_params()})
+            buffer = b""
+            deadline = time.monotonic() + timeout
+            fd = process.stdout.fileno()
+            while time.monotonic() < deadline and 2 not in replies:
+                ready, _, _ = select.select([fd], [], [], 0.2)
+                if not ready:
+                    if process.poll() is not None:
+                        break
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        if adapter.is_signin_prompt(provider, line.decode("utf-8", "replace")):
+                            replies[2] = {"signin_prompt": True}
+                        continue
+                    if isinstance(message, dict) and message.get("id") in (1, 2):
+                        replies[message["id"]] = message
+                        if message["id"] == 1:
+                            send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                                  "params": adapter.session_new_params(home, servers)})
+        finally:
+            _stop(process)
+    reply = replies.get(2, {})
+    if "result" in reply:
+        outcome = {"accepted": True}
+    elif isinstance(reply.get("error"), dict):
+        code = reply["error"].get("code")
+        outcome = {"error": code}
+    elif reply.get("signin_prompt"):
+        outcome = {"signinPromptOnStdout": True}
+    else:
+        outcome = {"noAnswer": True}
+    # Accepted, or refused ONLY for missing sign-in (-32000 / sign-in prompt),
+    # is fine: an invalid-params refusal (-32602) would mean our shape is wrong.
+    ok = outcome.get("accepted") is True or outcome.get("error") == -32000 or \
+        outcome.get("signinPromptOnStdout") is True
+    return Check(provider, "mcp-shape", ok,
+                 "agent accepts the ACP McpServer shape" if outcome.get("accepted")
+                 else ("refused only for sign-in" if ok else "agent rejected the shape"),
+                 outcome)
+
+
 def _proxy(environ=None):
     value = (environ or os.environ).get("HTTPS_PROXY") or (environ or os.environ).get(
         "https_proxy")
@@ -479,7 +642,7 @@ def check_egress(provider: str, reach=tls_reachable) -> Check:
                  else "unreachable allowlisted host(s)", {"hosts": results})
 
 
-def run_checks(providers, network: bool) -> List[Check]:
+def run_checks(providers, network: bool, anonymous_run: bool = False) -> List[Check]:
     checks: List[Check] = []
     for provider in providers:
         pin = check_pin(provider)
@@ -493,6 +656,10 @@ def run_checks(providers, network: bool) -> List[Check]:
             checks.append(check_egress(provider))
             checks.append(check_acp_probe(provider))
             checks.append(check_login_challenge(provider))
+            checks.append(check_session_inputs(provider))
+            if anonymous_run and provider == "opencode":
+                checks.append(check_anonymous_run(provider))
+                checks.append(check_anonymous_run(provider, cancel=True))
     return checks
 
 
@@ -501,12 +668,15 @@ def main(argv=None) -> int:
     parser.add_argument("--provider", action="append", choices=sorted(PINS))
     parser.add_argument("--skip-network", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--anonymous-run", action="store_true",
+                        help="also run a real OpenCode turn + cancel on its anonymous models")
     args = parser.parse_args(argv)
     if sys.platform != "linux":
         print("neev_acp_provider_acceptance: run inside the Linux image", file=sys.stderr)
         return 2
     providers = args.provider or sorted(PINS)
-    report = summarize(run_checks(providers, network=not args.skip_network))
+    report = summarize(run_checks(providers, network=not args.skip_network,
+                                  anonymous_run=args.anonymous_run))
     if args.json:
         print(json.dumps(report, indent=2))
     else:

@@ -41,6 +41,17 @@ class RemovingStorageBox(FakeStorageBox):
     def __call__(self, args, **kwargs):
         if args[0] == "ssh" and self.available:
             words = args[args.index("--") + 1:]
+            if words[:2] == ["ls", "-1"]:
+                self.calls.append(list(args))
+                path = self.home / words[2]
+                names = sorted(p.name for p in path.iterdir()) if path.is_dir() else []
+                return subprocess.CompletedProcess(args, 0, stdout="\n".join(names) + "\n", stderr="")
+            if words[:3] == ["stat", "-c", "%Y"]:
+                self.calls.append(list(args))
+                path = self.home / words[3]
+                if not path.exists():
+                    return subprocess.CompletedProcess(args, 1, stdout="", stderr="")
+                return subprocess.CompletedProcess(args, 0, stdout=f"{int(path.stat().st_mtime)}\n", stderr="")
             if words[0] == "rm":
                 self.calls.append(list(args))
                 path = self.home / words[1]
@@ -479,8 +490,20 @@ class EvictionTests(Harness):
                                    "max_local_bytes": 0}
         self.box = RemovingStorageBox(self.root, self.remote)
 
-    def replicate(self):
+    def replicate(self, snapshot=True):
         box.replicate(self.config, run=self.box, log=lambda *_: None)
+        if snapshot:
+            self.take_snapshot()
+
+    def take_snapshot(self, name=None, age=0):
+        """A Storage Box snapshot: an immutable copy of the account home."""
+        name = name or f"snap-{len(list((self.remote / '.zfs' / 'snapshot').glob('*'))) if (self.remote / '.zfs' / 'snapshot').exists() else 0}"
+        target = self.remote / ".zfs" / "snapshot" / name
+        shutil.copytree(self.remote / "neev-originals", target / "neev-originals")
+        if age:
+            moment = time.time() - age
+            os.utime(target, (moment, moment))
+        return name
 
     def verified(self):
         box.verify(self.config, run=self.box, log=lambda *_: None)
@@ -629,6 +652,93 @@ class EvictionTests(Harness):
         self.assertEqual((summary["local_originals"], summary["remote_only_verified"], summary["evicted"]),
                          (0, 1, 1))
         self.assertTrue(summary["last_verify"]["ok"])
+
+    def test_no_storage_box_snapshot_blocks_eviction_under_pressure(self):
+        blob = self.local_blob(7, f"{KEY}.att", b"idle", age=30 * DAY)
+        self.replicate(snapshot=False)
+        self.verified()
+        with self.assertRaisesRegex(box.EvictionBlocked, "no Storage Box snapshot"):
+            self.evict()
+        self.assertTrue(blob.exists())
+        self.assertNotIn("evicted_at", self.ledger()[f"7/{KEY}.att"])
+        record = json.loads(Path(box.evict_record_path(self.config)).read_text())
+        self.assertIn("snapshot", record["blocked"])
+        # Without pressure there is nothing to block: success, no remote calls.
+        self.config["eviction"]["max_local_bytes"] = 10 ** 12
+        self.box.calls.clear()
+        self.assertEqual(self.evict()["evicted"], 0)
+        self.assertEqual(self.box.calls, [])
+
+    def test_pressure_without_snapshots_is_blocked_even_with_no_idle_candidates(self):
+        self.local_blob(7, f"{KEY}.att", b"recently used")  # not idle
+        self.replicate(snapshot=False)
+        self.verified()
+        with self.assertRaisesRegex(box.EvictionBlocked, "no Storage Box snapshot"):
+            self.evict()
+        self.replicate()  # now a snapshot exists: pressure with no idle blob is not an error
+        self.assertEqual(self.evict()["evicted"], 0)
+
+    def test_only_blobs_inside_the_newest_snapshot_are_evicted(self):
+        old = self.local_blob(7, f"{KEY}.att", b"in snapshot", age=30 * DAY)
+        self.replicate()  # snapshot contains KEY only
+        newer = self.local_blob(7, f"{OTHER}.att", b"after snapshot", age=30 * DAY)
+        self.replicate(snapshot=False)
+        self.verified()
+        summary = self.evict()
+        self.assertEqual((summary["evicted"], summary["not_in_snapshot"]), (1, 1))
+        self.assertFalse(old.exists())
+        self.assertTrue(newer.exists())
+
+    def test_newest_snapshot_is_chosen_by_time_not_name(self):
+        self.replicate(snapshot=False)
+        self.take_snapshot("aa-recent", age=60)
+        self.take_snapshot("zz-old", age=10 * DAY)  # sorts last by name, but older
+        self.assertEqual(box.newest_snapshot(self.config, run=self.box), "aa-recent")
+        (self.remote / ".zfs" / "snapshot" / "bad name; rm").mkdir()  # never passed to the shell
+        self.assertEqual(box.newest_snapshot(self.config, run=self.box), "aa-recent")
+
+    def test_under_pressure_with_nothing_in_a_snapshot_is_blocked(self):
+        blob = self.local_blob(7, f"{KEY}.att", b"idle", age=30 * DAY)
+        (self.remote / ".zfs" / "snapshot" / "empty" / "neev-originals").mkdir(parents=True)
+        self.replicate(snapshot=False)
+        self.verified()
+        with self.assertRaisesRegex(box.EvictionBlocked, "no candidate is in the newest snapshot"):
+            self.evict()
+        self.assertTrue(blob.exists())
+
+    def test_an_unavailable_storage_box_is_recorded_not_left_stale(self):
+        self.local_blob(7, f"{KEY}.att", b"idle", age=30 * DAY)
+        self.replicate()
+        self.verified()
+        self.box.available = False
+        with self.assertRaises(box.RemoteUnavailable):
+            self.evict()
+        record = json.loads(Path(box.evict_record_path(self.config)).read_text())
+        self.assertEqual((record["blocked"], record["evicted"]), ("Storage Box unavailable", 0))
+
+    def test_a_blob_locked_by_the_broker_is_skipped(self):
+        blob = self.local_blob(7, f"{KEY}.att", b"idle", age=30 * DAY)
+        self.replicate()
+        self.verified()
+        with box.blob_lock(self.config, f"7/{KEY}.att") as held:
+            self.assertTrue(held)
+            summary = self.evict()
+        self.assertEqual((summary["evicted"], summary["skipped_locked"]), (0, 1))
+        self.assertTrue(blob.exists())
+        self.assertEqual(self.evict()["evicted"], 1)
+
+    def test_the_broker_waits_for_the_evictor_lock(self):
+        data = b"evicted bytes"
+        self.remote_blob(7, f"{KEY}.att", data)
+        self.start()
+        replies = []
+        with box.blob_lock(self.config, f"7/{KEY}.att"):
+            reader = threading.Thread(target=lambda: replies.append(self.hydrate(7, KEY, "att", data)))
+            reader.start()
+            time.sleep(0.5)
+            self.assertEqual(replies, [], "hydrate must wait while the evictor holds the blob lock")
+        reader.join(10)
+        self.assertEqual(replies, [{"ok": True, "result": "fetched"}])
 
     def test_real_broker_ping_gates_the_cli(self):
         self.assertFalse(box._broker_ping(self.config))  # not running yet

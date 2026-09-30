@@ -273,6 +273,21 @@ pub(crate) struct ProviderCapabilities {
     /// account's own. `null` when the list came from the provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) discovery_unavailable_reason: Option<String>,
+    /// How an attached image reaches the model:
+    /// - `"native"`: as an image input (Codex `--image`);
+    /// - `"native_if_supported"`: an ACP image content block, sent only when
+    ///   the agent's `initialize` advertises `promptCapabilities.image` and the
+    ///   file's bytes are PNG, JPEG or WebP; otherwise the staged file, named in
+    ///   the prompt, is what the agent gets (decided per run by the adapter);
+    /// - `"file"`: staged in the run directory and named in the prompt; the
+    ///   agent opens it with its own file tools (Claude).
+    pub(crate) image_input: &'static str,
+    /// Which shared-library MCP servers can actually work in a run: `"stdio"`.
+    /// Every library server is handed to the provider, but the agent sandbox's
+    /// egress admits only the provider's own endpoints, so an HTTP tool's host
+    /// (or a stdio tool that downloads itself, e.g. `npx -y`) is unreachable.
+    /// ACP runs skip such HTTP tools with a named trace notice.
+    pub(crate) library_mcp: &'static str,
 }
 
 fn label(provider: &str) -> &'static str {
@@ -328,6 +343,12 @@ pub(crate) fn provider_capabilities(provider: &'static str) -> ProviderCapabilit
             _ => "Fast mode is not available for this model.",
         }),
         discovery_unavailable_reason: None,
+        image_input: match provider {
+            "claude" => "file",
+            _ if super::acp_providers::is_acp(provider) => "native_if_supported",
+            _ => "native",
+        },
+        library_mcp: "stdio",
     }
 }
 

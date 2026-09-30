@@ -195,7 +195,8 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
                 self._config.lane_uid, self._config.lane_gid, home_as=home,
             )
             delivery = self._delivery_cm.__enter__()
-            spec = _login_spec(self._config, tenant, self._argv, self._workdir)
+            spec = _login_spec(self._config, tenant, self._argv, self._workdir,
+                               provider=self._provider.value)
             env = _login_env(self._config, self._provider, home, proxy_env, pty=self._pty,
                              browser_capture=(_capture_path(self._workdir)
                                               if self._direct else None))
@@ -333,7 +334,28 @@ def _make_run_dir(config) -> str:  # pragma: no cover - creates a real dir
     return tempfile.mkdtemp(prefix="run-", dir=config.workspace_root)
 
 
-def _login_spec(config, tenant, argv_tuple, workdir):
+_LOGIN_ADDRESS_SPACE_BYTES = 2 * 1024 * 1024 * 1024
+_ACP_PROVIDERS = ("cursor", "gemini", "opencode")
+
+
+def login_address_space_bytes(provider):
+    """Pure: the address-space ceiling for a sign-in or probe process.
+
+    Claude and Codex keep the 2 GiB they have always had. The ACP CLIs cannot
+    live under it: measured on the pinned image, Cursor's `agent` and Gemini
+    CLI (Node) do not even print `--version` below 24/32 GiB, and OpenCode
+    (Bun) prints its device URL and then dies of SIGILL at 2 GiB. They get the
+    same bounded ceiling their RUNS already get (`neev_agent_launch`): address
+    space is reserved, not used, and physical memory stays capped by the
+    container's own cgroup."""
+    if provider in _ACP_PROVIDERS:
+        import neev_agent_launch as launch
+
+        return launch.address_space_bytes(provider, None)
+    return _LOGIN_ADDRESS_SPACE_BYTES
+
+
+def _login_spec(config, tenant, argv_tuple, workdir, provider=None):
     import neev_agent_sandbox as sandbox
 
     return sandbox.SandboxSpec(
@@ -341,7 +363,7 @@ def _login_spec(config, tenant, argv_tuple, workdir):
         run_uid=config.lane_uid, run_gid=config.lane_gid,
         provider_argv=tuple(argv_tuple),
         limits=sandbox.ResourceLimits(
-            cpu_seconds=300, address_space_bytes=2 * 1024 * 1024 * 1024,
+            cpu_seconds=300, address_space_bytes=login_address_space_bytes(provider),
             open_files=256, processes=64,
         ),
         egress=sandbox.EgressPolicy.provider_allowlist(config.egress_ipv4),

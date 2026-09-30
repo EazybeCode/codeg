@@ -27,6 +27,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { BrowserLink } from "@/components/ui/browser-link"
 import {
@@ -44,6 +45,7 @@ import {
   submitConnectCode,
   NEEV_MAX_AUTH_CODE_CHARS,
   NEEV_AGENT_PROVIDERS,
+  NEEV_CORE_AGENT_PROVIDERS,
   type NeevApproval,
   type NeevAgentConnection,
   type NeevAgentConnections,
@@ -769,6 +771,19 @@ export function NativeAgentConnectionsPanel({
                     <span className="font-medium">
                       {label(connection.provider)}
                     </span>
+                    {/* Only rows the server lists reach here, so this marks an
+                        offered provider — never advertises one. */}
+                    {!NEEV_CORE_AGENT_PROVIDERS.includes(
+                      connection.provider
+                    ) && (
+                      <Badge
+                        variant="secondary"
+                        className="self-center"
+                        title={t("providerBetaHint")}
+                      >
+                        {t("providerBeta")}
+                      </Badge>
+                    )}
                     <span className="text-muted-foreground">
                       {attempt?.provider === connection.provider
                         ? t("awaitingSignIn")

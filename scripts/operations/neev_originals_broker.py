@@ -220,7 +220,7 @@ class Broker:
             # Same per-blob lock as hydrate: a forget waits for an in-flight
             # fetch to publish (or fail), so the app's unlink that follows the
             # forget always removes what was published. It can never land after.
-            with self._lock(relative):
+            with self._lock(relative), box.blob_lock(self.config, relative):
                 return self._forget(relative)
         entry = self._entry(relative, request)
         if request["op"] == "stream":
@@ -229,7 +229,8 @@ class Broker:
         # was never evicted and is missing is lost locally: an operator matter.
         if not entry.get("evicted_at"):
             raise BrokerError("not_verified")
-        with self._lock(relative):
+        # Thread lock plus the cross-process lock the evictor also takes.
+        with self._lock(relative), box.blob_lock(self.config, relative):
             if relative in self.tombstones.get():  # forgotten while queued
                 raise BrokerError("forgotten")
             return self._hydrate(request, name, relative)

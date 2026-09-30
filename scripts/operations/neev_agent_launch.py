@@ -382,8 +382,55 @@ def claude_stream_argv(provider, provider_argv, adapter=CLAUDE_ADAPTER, python=s
     return [python, "-I", adapter] + mapped + ["--", prompt]
 
 
+_ACP_MAX_IMAGES = 8
+
+
+def _acp_inputs(options, workdir):
+    """Pure: the adapter arguments for the canonical ACP options, or SandboxError.
+
+    `--image <abs path under workdir>`, `--mcp <ACP McpServer JSON>` and
+    `--mcp-skipped <name>` (a library tool the server left out) only, bounded
+    together by the org library's own item limit; anything else is refused
+    rather than guessed at."""
+    import neev_acp_stream_adapter as acp
+
+    mapped, images, servers = [], 0, 0
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option not in ("--image", "--mcp", "--mcp-skipped") or index + 1 >= len(options):
+            raise sandbox.SandboxError("invalid")
+        value = options[index + 1]
+        if not isinstance(value, str) or "\x00" in value:
+            raise sandbox.SandboxError("invalid")
+        if option == "--image":
+            images += 1
+            root = os.path.normpath(workdir or "")
+            path = os.path.normpath(value)
+            if (images > _ACP_MAX_IMAGES or not workdir or not os.path.isabs(value)
+                    or not path.startswith(root + os.sep)):
+                raise sandbox.SandboxError("invalid")
+            mapped += ["--image", value]
+        else:
+            servers += 1
+            if servers > acp.MAX_MCP_SERVERS:
+                raise sandbox.SandboxError("invalid")
+            if option == "--mcp-skipped":
+                if not acp._MCP_NAME.match(value):
+                    raise sandbox.SandboxError("invalid")
+                mapped += ["--mcp-skipped", value]
+            else:
+                try:
+                    acp.mcp_server(value)
+                except acp.AdapterError as error:
+                    raise sandbox.SandboxError("invalid") from error
+                mapped += ["--mcp-server", value]
+        index += 2
+    return mapped
+
+
 def acp_stream_argv(provider, provider_argv, style="", adapter=ACP_ADAPTER,
-                    python=sandbox.PYTHON, pins=None):
+                    python=sandbox.PYTHON, pins=None, workdir=None):
     """Pure: rewrite the canonical ACP turn into the in-sandbox adapter's argv.
 
     Only `[<pinned binary>, "--neev-acp", "--", <prompt>]` is accepted; anything
@@ -398,17 +445,20 @@ def acp_stream_argv(provider, provider_argv, style="", adapter=ACP_ADAPTER,
     argv = list(provider_argv)
     if not allowed:
         raise sandbox.SandboxError("invalid")
-    if len(argv) != 4 or argv[1] != ACP_MARKER or argv[2] != "--":
+    # `[binary, --neev-acp, <options>..., --, prompt]`: the separator is the
+    # SECOND-TO-LAST element, so a prompt that is itself "--" stays the prompt.
+    if len(argv) < 4 or argv[1] != ACP_MARKER or argv[-2] != "--":
         raise sandbox.SandboxError("invalid")
-    binary, prompt = argv[0], argv[3]
+    binary, prompt, options = argv[0], argv[-1], argv[2:-2]
     if binary not in allowed or not prompt:
         raise sandbox.SandboxError("invalid")
+    inputs = _acp_inputs(options, workdir)
     mapped = [python, "-I", adapter, "--provider", provider, "--agent", binary]
     for path in allowed:
         mapped += ["--allowed-agent", path]
     if style:
         mapped += ["--context", style]
-    return mapped + ["--", prompt]
+    return mapped + inputs + ["--", prompt]
 
 
 def acp_probe_argv(provider, adapter=ACP_ADAPTER, python=sandbox.PYTHON, pins=None):
@@ -600,7 +650,8 @@ def build_spec(args, style=None):
         # ACP runs have no steering; a runtime asking for it is misconfigured.
         if enable_steering:
             raise sandbox.SandboxError("invalid")
-        provider_argv = acp_stream_argv(args.provider, provider_argv, style)
+        provider_argv = acp_stream_argv(args.provider, provider_argv, style,
+                                        workdir=args.workdir)
     elif args.provider == "claude" and enable_steering:
         # Claude with steering uses stream-json + interrupt-and-continue
         provider_argv = claude_stream_argv(args.provider, provider_argv,

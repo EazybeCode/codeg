@@ -875,3 +875,32 @@ fn acp_providers_are_read_with_the_codex_mapping_the_adapter_writes() {
     );
     assert_eq!(text_of(&items), "");
 }
+
+#[test]
+fn an_acp_skipped_library_tool_is_a_named_status_not_an_unsupported_trace() {
+    let lines = [
+        r#"{"type":"neev.notice","state":"library_tool_skipped","name":"docs-http-0f3a"}"#,
+        // Unknown notice states and unsafe names are recognised and dropped.
+        r#"{"type":"neev.notice","state":"something_else","name":"x"}"#,
+        r#"{"type":"neev.notice","state":"library_tool_skipped","name":"<b>bad</b>"}"#,
+        r#"{"type":"turn.completed"}"#,
+    ];
+    let mut parser = StreamParser::new("opencode", Vec::new());
+    let items = drain(&mut parser, &lines);
+    let drafts = activity(&items);
+    let skipped: Vec<_> = drafts
+        .iter()
+        .filter_map(|draft| match &draft.kind {
+            ActivityKind::Status { state, detail, .. } if state == STATE_LIBRARY_TOOL_SKIPPED => {
+                Some(detail.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(skipped, vec![Some("docs-http-0f3a".to_owned())]);
+    assert!(!drafts.iter().any(|draft| matches!(
+        &draft.kind,
+        ActivityKind::Status { state, .. } if state == STATE_UNSUPPORTED
+    )));
+    assert_eq!(text_of(&items), "");
+}

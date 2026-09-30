@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 OPERATIONS = Path(__file__).parents[1] / "operations"
@@ -179,7 +180,9 @@ for line in sys.stdin:
             for chatter in scenario["session_chatter"]:
                 sys.stdout.write(chatter + "\n"); sys.stdout.flush()
             continue
-        if "session_result" in scenario:
+        if scenario.get("refuse_mcp") and msg["params"].get("mcpServers"):
+            send({"jsonrpc": "2.0", "id": msg["id"], "error": scenario["refuse_mcp"]})
+        elif "session_result" in scenario:
             send({"jsonrpc": "2.0", "id": msg["id"], "result": scenario["session_result"]})
         elif "session_error" in scenario:
             send({"jsonrpc": "2.0", "id": msg["id"], "error": scenario["session_error"]})
@@ -519,3 +522,223 @@ class ShutdownTests(unittest.TestCase):
         # Observed on the pinned image before the fix: verdict printed, then a
         # hang until killed from outside.
         self.assertLess(elapsed, adapter.CANCEL_GRACE_SECS + 8)
+
+
+class InputsTests(unittest.TestCase):
+    """Images as native ACP blocks and library MCP servers in session/new, each
+    only when the agent advertises support."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+    def run_inputs(self, init, extra_images=True, mcp=(), scenario_extra=None,
+                   extra_args=()):
+        tmp = tempfile.mkdtemp()
+        inputs = os.path.join(tmp, "inputs")
+        os.mkdir(inputs)
+        image = os.path.join(inputs, "k--shot.png")
+        with open(image, "wb") as handle:
+            handle.write(self.PNG)
+        extra = ["--cwd", tmp]
+        if extra_images:
+            extra += ["--image", image]
+        for server in mcp:
+            extra += ["--mcp-server", json.dumps(server)]
+        extra += list(extra_args)
+        scenario = {"init": init}
+        scenario.update(scenario_extra or {})
+        path = os.path.join(tmp, "agent")
+        source = FAKE_AGENT.replace("{python}", sys.executable)
+        source = "\n".join([source.split("\n", 1)[0], "INIT = " + repr(INIT_RESPONSE),
+                            "SESSION_NEW = " + repr(SESSION_NEW_RESPONSE),
+                            "PERMISSION = " + repr(PERMISSION_REQUEST),
+                            "PROMPT = " + repr(PROMPT_RESPONSE), source.split("\n", 1)[1]])
+        with open(path, "w") as handle:
+            handle.write(source)
+        os.chmod(path, stat.S_IRWXU)
+        with open(os.path.join(tmp, "scenario.json"), "w") as handle:
+            json.dump(scenario, handle)
+        home = os.path.join(tmp, "home")
+        os.mkdir(home)
+        proc = subprocess.run(
+            [sys.executable, ADAPTER, "--provider", "cursor", "--agent", path,
+             "--allowed-agent", path, *extra, "--", "look"],
+            capture_output=True, text=True, timeout=30,
+            env={"PATH": "/usr/bin:/bin", "HOME": home}, cwd=tmp)
+        received_path = os.path.join(tmp, "received.jsonl")
+        received = ([json.loads(l) for l in open(received_path)]
+                    if os.path.exists(received_path) else [])
+        lines = [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+        return proc.returncode, lines, received
+
+    def test_images_go_as_native_blocks_when_advertised(self):
+        code, _, received = self.run_inputs(INIT_RESPONSE)  # image: True in the fixture
+        self.assertEqual(code, 0)
+        prompt = [m for m in received if m.get("method") == "session/prompt"][0]
+        blocks = prompt["params"]["prompt"]
+        self.assertEqual(blocks[-1]["type"], "image")
+        self.assertEqual(blocks[-1]["mimeType"], "image/png")
+        import base64
+        self.assertEqual(base64.b64decode(blocks[-1]["data"]), self.PNG)
+
+    def test_no_image_blocks_when_the_agent_does_not_advertise_them(self):
+        init = json.loads(json.dumps(INIT_RESPONSE))
+        init["result"]["agentCapabilities"]["promptCapabilities"]["image"] = False
+        code, _, received = self.run_inputs(init)
+        self.assertEqual(code, 0)
+        prompt = [m for m in received if m.get("method") == "session/prompt"][0]
+        self.assertTrue(all(block["type"] == "text" for block in prompt["params"]["prompt"]))
+
+    def notices(self, lines):
+        return [l["name"] for l in lines if l.get("type") == "neev.notice"
+                and l.get("state") == "library_tool_skipped"]
+
+    def test_stdio_tools_go_to_session_new_and_http_tools_are_skipped_by_name(self):
+        # HTTP tool hosts are outside sandbox egress: never forwarded to fail,
+        # even to an agent that advertises mcpCapabilities.http.
+        servers = [{"name": "fs-1", "command": "npx", "args": ["-y", "s"]},
+                   {"name": "docs-2", "type": "http", "url": "https://mcp.example.com/sse"}]
+        code, lines, received = self.run_inputs(INIT_RESPONSE, extra_images=False, mcp=servers)
+        self.assertEqual(code, 0)
+        new = [m for m in received if m.get("method") == "session/new"][0]
+        self.assertEqual(new["params"]["mcpServers"], [
+            {"name": "fs-1", "command": "npx", "args": ["-y", "s"], "env": []}])
+        self.assertEqual(self.notices(lines), ["docs-2"])
+        self.assertEqual(lines[-1], {"type": "turn.completed"})
+
+    def test_an_http_tool_the_agent_cannot_load_is_skipped_and_the_chat_runs(self):
+        init = json.loads(json.dumps(INIT_RESPONSE))
+        init["result"]["agentCapabilities"]["mcpCapabilities"]["http"] = False
+        code, lines, received = self.run_inputs(
+            init, extra_images=False,
+            mcp=[{"name": "docs-2", "type": "http", "url": "https://mcp.example.com/sse"}])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.notices(lines), ["docs-2"])
+        new = [m for m in received if m.get("method") == "session/new"][0]
+        self.assertEqual(new["params"]["mcpServers"], [])
+        self.assertEqual(lines[-1], {"type": "turn.completed"})
+
+    def test_http_tools_are_forwarded_only_once_egress_admits_them(self):
+        server = {"type": "http", "name": "d", "url": "https://h/", "headers": []}
+        init = INIT_RESPONSE["result"]
+        self.assertEqual(adapter.usable_mcp_servers([server], init), ([], ["d"]))
+        with mock.patch.object(adapter, "HTTP_LIBRARY_TOOLS_REACHABLE", True):
+            self.assertEqual(adapter.usable_mcp_servers([server], init), ([server], []))
+            no_http = {"agentCapabilities": {"mcpCapabilities": {"http": False}}}
+            self.assertEqual(adapter.usable_mcp_servers([server], no_http), ([], ["d"]))
+
+    def test_a_session_refused_with_tools_is_retried_once_without_them(self):
+        servers = [{"name": "fs-1", "command": "tool", "args": []}]
+        code, lines, received = self.run_inputs(
+            INIT_RESPONSE, extra_images=False, mcp=servers,
+            scenario_extra={"refuse_mcp": {"code": -32603, "message": "mcp failed"}})
+        self.assertEqual(code, 0)
+        news = [m["params"]["mcpServers"] for m in received if m.get("method") == "session/new"]
+        self.assertEqual(len(news), 2)
+        self.assertEqual(news[1], [])
+        self.assertEqual(self.notices(lines), ["fs-1"])
+        self.assertEqual(lines[-1], {"type": "turn.completed"})
+
+    def test_tools_are_not_blamed_when_the_retry_fails_too(self):
+        code, lines, received = self.run_inputs(
+            INIT_RESPONSE, extra_images=False,
+            mcp=[{"name": "fs-1", "command": "tool", "args": []}],
+            scenario_extra={"session_error": {"code": -32603, "message": "directory"}})
+        self.assertEqual(code, 4)
+        self.assertEqual(len([m for m in received if m.get("method") == "session/new"]), 2)
+        self.assertEqual(self.notices(lines), [])
+        self.assertEqual(lines[-1], {"type": "turn.failed", "reason": "provider refused request"})
+
+    def test_a_sign_in_refusal_is_never_retried_as_a_tool_problem(self):
+        code, lines, received = self.run_inputs(
+            INIT_RESPONSE, extra_images=False,
+            mcp=[{"name": "fs-1", "command": "tool", "args": []}],
+            scenario_extra={"refuse_mcp": {"code": -32000, "message": "auth"}})
+        self.assertEqual(code, 4)
+        self.assertEqual(lines[-1], {"type": "turn.failed", "reason": "provider sign-in required"})
+        self.assertEqual(len([m for m in received if m.get("method") == "session/new"]), 1)
+        self.assertEqual(self.notices(lines), [])
+
+    def test_tools_the_server_left_out_are_named_too(self):
+        tmp_lines = self.run_inputs(INIT_RESPONSE, extra_images=False,
+                                    mcp=[{"name": "fs-1", "command": "tool", "args": []}],
+                                    extra_args=["--mcp-skipped", "big-9"])
+        code, lines, received = tmp_lines
+        self.assertEqual(code, 0)
+        self.assertEqual(self.notices(lines), ["big-9"])
+        new = [m for m in received if m.get("method") == "session/new"][0]
+        self.assertEqual([s["name"] for s in new["params"]["mcpServers"]], ["fs-1"])
+
+    def test_the_org_library_limit_is_accepted_not_refused(self):
+        servers = [{"name": f"t-{i}", "command": "tool", "args": []} for i in range(100)]
+        code, lines, received = self.run_inputs(INIT_RESPONSE, extra_images=False, mcp=servers)
+        self.assertEqual(code, 0)
+        new = [m for m in received if m.get("method") == "session/new"][0]
+        self.assertEqual(len(new["params"]["mcpServers"]), 100)
+        self.assertEqual(adapter.MAX_MCP_SERVERS, 100)
+
+    def test_images_are_typed_by_content_not_by_name(self):
+        tmp = tempfile.mkdtemp()
+        jpeg = os.path.join(tmp, "chart")                 # no extension at all
+        with open(jpeg, "wb") as handle:
+            handle.write(b"\xff\xd8\xff\xe0" + b"\x00" * 16)
+        webp = os.path.join(tmp, "IMG.jpg.download")
+        with open(webp, "wb") as handle:
+            handle.write(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+        fake = os.path.join(tmp, "fake.png")              # a PNG name, text inside
+        with open(fake, "w") as handle:
+            handle.write("not an image")
+        self.assertEqual(adapter.image_block(jpeg, tmp)["mimeType"], "image/jpeg")
+        self.assertEqual(adapter.image_block(webp, tmp)["mimeType"], "image/webp")
+        self.assertIsNone(adapter.image_block(fake, tmp))
+
+    def test_an_unusable_image_is_left_out_and_the_turn_still_runs(self):
+        tmp_png = self.PNG
+        try:
+            self.PNG = b"GIF89a-not-staged-as-image"
+            code, lines, received = self.run_inputs(INIT_RESPONSE)
+        finally:
+            self.PNG = tmp_png
+        self.assertEqual(code, 0)
+        prompt = [m for m in received if m.get("method") == "session/prompt"][0]
+        self.assertTrue(all(block["type"] == "text" for block in prompt["params"]["prompt"]))
+        self.assertEqual(lines[-1], {"type": "turn.completed"})
+
+    def test_bad_inputs_are_refused_or_left_out(self):
+        tmp = tempfile.mkdtemp()
+        outside = os.path.join(tempfile.mkdtemp(), "x.png")
+        with open(outside, "wb") as handle:
+            handle.write(self.PNG)
+        link = os.path.join(tmp, "link.png")
+        os.symlink(outside, link)
+        text = os.path.join(tmp, "notes.txt")
+        with open(text, "w") as handle:
+            handle.write("x")
+        self.assertIsNone(adapter.image_block(outside, tmp))
+        self.assertIsNone(adapter.image_block(link, tmp))   # symlink out of the run dir
+        self.assertIsNone(adapter.image_block(text, tmp))   # not an image
+        self.assertIsNone(adapter.image_block("relative.png", tmp))
+        for bad in ('{"name":"x","command":"c","args":[],"env":{"K":"v"}}',
+                    '{"name":"x","type":"http","url":"http://plain"}',
+                    '{"name":"../x","command":"c","args":[]}', "nope"):
+            with self.assertRaises(adapter.AdapterError):
+                adapter.mcp_server(bad)
+
+
+class OpenCodeSandboxEnvTests(unittest.TestCase):
+    """Found in the production sandbox: OpenCode's ACP server calls its own
+    loopback HTTP server, which the slot-proxy env must not capture."""
+
+    def test_only_loopback_bypasses_the_slot_proxy(self):
+        env = adapter.agent_env({"HOME": "/h", "HTTPS_PROXY": "http://10.0.0.1:3128",
+                                 "HTTP_PROXY": "http://10.0.0.1:3128", "NO_PROXY": ""},
+                                "opencode")
+        self.assertEqual(env["HTTPS_PROXY"], "http://10.0.0.1:3128")
+        for key in ("NO_PROXY", "no_proxy"):
+            self.assertEqual(set(env[key].split(",")), {"127.0.0.1", "localhost", "::1"})
+        self.assertEqual(env["OPENCODE_DISABLE_AUTOUPDATE"], "1")
+        self.assertEqual(env["OPENCODE_DISABLE_MODELS_FETCH"], "1")
+
+    def test_other_providers_keep_the_authoritative_empty_no_proxy(self):
+        for provider in ("cursor", "gemini"):
+            env = adapter.agent_env({"HOME": "/h", "NO_PROXY": ""}, provider)
+            self.assertEqual(env["NO_PROXY"], "", provider)

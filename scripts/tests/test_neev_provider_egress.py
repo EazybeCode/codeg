@@ -146,6 +146,35 @@ class PolicyAndParseTests(unittest.TestCase):
             egress.parse_connect(bad, policy)
         self.assertEqual(caught.exception.code, "invalid")
 
+    def test_parse_connect_accepts_the_pinned_cursor_cli_shape(self):
+        # Captured from the pinned Cursor CLI (Node) behind a proxy:
+        # CONNECT api2.cursor.sh:443 / host: api2.cursor.sh / connection: close.
+        # Refused before, so a Cursor sign-in could never reach its own host.
+        policy = egress.policy_for("cursor", "login")
+        request = (b"CONNECT api2.cursor.sh:443 HTTP/1.1\r\n"
+                   b"host: api2.cursor.sh\r\nconnection: close\r\n\r\n")
+        self.assertEqual(egress.parse_connect(request, policy), "api2.cursor.sh")
+
+    def test_the_host_relaxation_is_only_the_default_port_of_the_same_host(self):
+        policy = egress.policy_for("cursor", "login")
+        for bad in (
+            b"host: prod.authentication.cursor.sh",       # a different host
+            b"host: api2.cursor.sh:8443",                 # a different port
+            b"host: api2.cursor.sh.evil.example",         # a suffix, not the host
+            b"connection: upgrade",                       # not a plain token we accept
+            b"connection: close\r\nconnection: close",    # duplicated
+        ):
+            with self.subTest(bad=bad):
+                request = b"CONNECT api2.cursor.sh:443 HTTP/1.1\r\n" + bad + b"\r\n\r\n"
+                with self.assertRaises(egress.EgressError) as caught:
+                    egress.parse_connect(request, policy)
+                self.assertEqual(caught.exception.code, "invalid")
+        # The destination allowlist itself is unchanged: an unlisted host is denied.
+        with self.assertRaises(egress.EgressError) as caught:
+            egress.parse_connect(b"CONNECT models.opencode.ai:443 HTTP/1.1\r\n"
+                                 b"host: models.opencode.ai\r\n\r\n", policy)
+        self.assertEqual(caught.exception.code, "denied")
+
     def test_connect_classifier_is_fixed_vocab_and_leaks_no_values(self):
         header = (
             b"CONNECT platform.claude.com:443 HTTP/1.1\r\n"

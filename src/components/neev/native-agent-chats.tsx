@@ -1163,7 +1163,9 @@ function ActivityRow({
         <p role="status" className="px-1.5 py-1 text-xs text-muted-foreground">
           {item.state === "truncated"
             ? t("activityTruncated")
-            : t("activityUnsupported", { name: item.detail ?? "" })}
+            : item.state === "library_tool_skipped"
+              ? t("activityLibraryToolSkipped", { name: item.detail ?? "" })
+              : t("activityUnsupported", { name: item.detail ?? "" })}
         </p>
       </li>
     )

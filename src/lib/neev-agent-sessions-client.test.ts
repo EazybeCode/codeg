@@ -1054,6 +1054,15 @@ describe("agent run stream", () => {
 })
 
 describe("activity traces", () => {
+  it("preserves skipped library tool notices in stored and streamed activity", () => {
+    const notice = {
+      seq: 1, offset: 0, id: "library-notice", kind: "status",
+      state: "library_tool_skipped", detail: "workspace_search",
+    }
+    expect(parseAgentTurn({ ...turn, activity: [notice] }).activity).toEqual([notice])
+    expect(parseActivityEvent({ type: "activity", ...notice })).toEqual(notice)
+  })
+
   const call = {
     seq: 1,
     offset: 4,

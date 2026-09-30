@@ -316,26 +316,64 @@ class BaseImageTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
         self.assertNotIn("neev_acp_login_protocol.py", listed)
 
-    def test_the_acp_layer_ships_the_acp_modules(self):
+    def test_the_acp_layer_adds_only_clis_and_the_tool_over_a_current_base(self):
         root = Path(__file__).parents[2]
         layer = (root / "Dockerfile.native.agent.acp").read_text()
-        for name in ("neev_acp_stream_adapter.py", "neev_acp_login_protocol.py",
-                     "neev_acp_provider_acceptance.py"):
-            self.assertIn("scripts/operations/" + name, layer)
-            self.assertTrue((OPERATIONS / name).is_file(), name)
-        # Every downloaded artifact is sha256-pinned, one per provider, and the
-        # linked paths are exactly the launcher's pins.
+        # The base (signin-24ca1b36+) already ships every ACP runtime module;
+        # the layer must never re-copy one over a newer base.
+        import re as _re
+
+        copies = _re.findall(r"(?<![/\w])scripts/operations/[a-z_]+\.py", layer)
+        self.assertEqual(sorted(copies), sorted([
+            "scripts/operations/neev_acp_provider_acceptance.py",
+            "scripts/operations/neev_acp_sandbox_acceptance.py",
+            "scripts/operations/neev_acp_stream_adapter.py",
+            "scripts/operations/neev_agent_launch.py",
+            "scripts/operations/neev_agent_supervisor_main.py",
+            "scripts/operations/neev_provider_egress.py",
+        ]))
+        # The launcher it ships must be this source's, hotfix included.
+        self.assertIn("class _FdReader", (OPERATIONS / "neev_agent_launch.py").read_text())
+        self.assertIn("grep -q \"_FdReader\"", layer)
+        self.assertIn("ARG AGENT_IMAGE=neev-native-agent:signin-24ca1b36", layer)
         import neev_agent_launch as launch
 
         self.assertEqual(layer.count("ADD --checksum=sha256:"), 3)
-        for line in layer.splitlines():
-            if line.startswith("ADD "):
-                self.assertIn("--checksum=sha256:", line)
         for provider, (path,) in launch.ACP_AGENT_PINS.items():
             self.assertIn(f" {path}", layer, provider)
-        self.assertIn("6e4cd936a4866b8a77c50ff51a564460d715772fabc477a01aa0f0455d9559f0", layer)
-        # Still opt-in: the layer never turns a provider on.
         self.assertNotIn("NEEV_AGENT_ACP_PROVIDERS=", layer)
+
+    def test_every_acp_download_is_checksum_pinned_to_an_exact_version(self):
+        # Supply chain: a dropped or loosened pin must fail here, not in a build.
+        import re as _re
+
+        layer = (Path(__file__).parents[2] / "Dockerfile.native.agent.acp").read_text()
+        instructions = [line.strip() for line in layer.splitlines()
+                        if line.strip() and not line.lstrip().startswith("#")]
+        adds = [line for line in instructions if line.startswith("ADD ")]
+        self.assertEqual(len(adds), 3)
+        for line in adds:
+            self.assertRegex(line, r"^ADD --checksum=sha256:[0-9a-f]{64} \\$")
+        # No other way to fetch anything at build time.
+        for line in instructions:
+            self.assertNotRegex(line, r"\b(curl|wget|npm install|npx|pip install)\b", line)
+        urls = _re.findall(r"^\s+(https://\S+) \\$", layer, _re.M)
+        self.assertEqual(sorted(urls), sorted([
+            "https://github.com/anomalyco/opencode/releases/download/"
+            "v1.18.33/opencode-linux-x64.tar.gz",
+            "https://downloads.cursor.com/lab/2026.09.28-64d2043/linux/x64/"
+            "agent-cli-package.tar.gz",
+            # The Gemini CLI pin: an exact registry tarball, never a range.
+            "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.62.0.tgz",
+        ]))
+
+    def test_the_acp_layer_stays_opt_in(self):
+        # Providers are offered only by an explicit server gate, never by the
+        # image: no ENV, ARG or RUN in the layer may set it.
+        layer = (Path(__file__).parents[2] / "Dockerfile.native.agent.acp").read_text()
+        code = "\n".join(line for line in layer.splitlines()
+                         if not line.lstrip().startswith("#"))
+        self.assertNotIn("NEEV_AGENT_ACP_PROVIDERS", code)
 
 
 if __name__ == "__main__":

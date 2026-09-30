@@ -275,17 +275,30 @@ def backup(config, run=subprocess.run, now=None, log=print):
     now = time.time() if now is None else now
     state_dir = config["state_dir"]
     record = {"started_at": int(now), "ok": False}
+
+    def stage(name):
+        # One line per stage so `journalctl -u neev-backup` shows progress.
+        record["stage"] = name
+        log(f"stage: {name}")
+
     try:
+        stage("preflight")
         record["disk"] = preflight_disk(config)
+        stage("content-backup")
         output = run_content_backup(config, run)
         record["output"] = os.path.basename(output)
+        stage("verify-local")
         manifest = verify_local(output, run)
         record.update(blobs=len(manifest["blobs"]), blob_bytes=sum(b["byte_length"] for b in manifest["blobs"]),
                       dump_bytes=manifest["dump"]["byte_length"])
+        stage("upload")
         snapshot = upload(config, output, run)
         record["snapshot"] = snapshot
+        stage("check")
         _call(run, restic(config, ["check"]), stdout=subprocess.DEVNULL)
+        stage("restore-canary")
         record["canary"] = restore_canary(config, snapshot, output, manifest, run)
+        stage("promote")
         _call(run, restic(config, ["tag", "--remove", "neev-pending", "--add", "neev-daily", snapshot]),
               stdout=subprocess.DEVNULL)
         # `restic tag` rewrites the snapshot under a new id (keeping the old as
@@ -295,12 +308,15 @@ def backup(config, run=subprocess.run, now=None, log=print):
         state = load_state(config)
         state["verified_outputs"][os.path.basename(output)] = {"snapshot": record["promoted_snapshot"],
                                                                "uploaded_snapshot": snapshot, "verified_at": int(now)}
+        stage("cleanup")
         record["removed_local"] = cleanup(config, state, now)
         state["verified_outputs"] = {name: meta for name, meta in state["verified_outputs"].items()
                                      if os.path.isdir(os.path.join(config["staging_dir"], name))}
         save_json(os.path.join(state_dir, "state.json"), state)
+        stage("retention-prune")
         _call(run, restic(config, retention_args(config)), stdout=subprocess.DEVNULL)
         record["retention"] = "applied"
+        stage("done")
         record["ok"] = True
         save_json(os.path.join(state_dir, "last-success.json"), record)
         log(json.dumps(record))
@@ -312,6 +328,10 @@ def backup(config, run=subprocess.run, now=None, log=print):
     finally:
         if record["ok"]:
             save_json(os.path.join(state_dir, "last-run.json"), record)
+
+
+def _log(message):
+    print(message, flush=True)
 
 
 def main(argv=None, run=subprocess.run):
@@ -340,7 +360,7 @@ def main(argv=None, run=subprocess.run):
             except BlockingIOError:
                 raise BackupError("another neev_backup run holds the lock") from None
             if options.command == "backup":
-                backup(config, run=run)
+                backup(config, run=run, log=_log)
             elif options.command == "init":
                 # Explicit only: an existing repository is never re-initialised.
                 exists = run(restic(config, ["cat", "config"]), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

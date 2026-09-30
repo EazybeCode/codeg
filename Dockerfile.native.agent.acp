@@ -26,7 +26,7 @@
 #     fails the build. Layout mirrors the installer: dist-package/cursor-agent,
 #     linked as `agent` (the name the docs and the adapter use).
 
-ARG AGENT_IMAGE=neev-native-agent:latest
+ARG AGENT_IMAGE=neev-native-agent:signin-24ca1b36
 FROM ${AGENT_IMAGE}
 
 USER 0:0
@@ -63,27 +63,32 @@ RUN install -d -o 0 -g 0 -m 0755 /opt/neev/gemini \
     && ln -s /opt/neev/gemini/bundle/gemini.js /usr/local/bin/gemini \
     && /usr/local/bin/gemini --version
 
-# The in-sandbox ACP pieces, beside the launcher (same 0555 root-owned dir),
-# plus every operations module the ACP providers changed, so the layer is
-# internally consistent with the source it was built from even on an older base
-# image (whose copies predate the ACP providers).
-COPY --chown=0:0 scripts/operations/neev_acp_stream_adapter.py \
-     scripts/operations/neev_acp_login_protocol.py \
-     scripts/operations/neev_acp_provider_acceptance.py \
-     scripts/operations/neev_claude_stream_adapter.py \
-     scripts/operations/neev_agent_credentials.py \
-     scripts/operations/neev_credential_store.py \
-     scripts/operations/neev_provider_endpoints.py \
-     scripts/operations/neev_provider_egress.py \
-     scripts/operations/neev_slot_proxy.py \
-     scripts/operations/neev_agent_sandbox.py \
+# The base image (signin-24ca1b36 and later) already ships every ACP runtime
+# module from this source. This layer adds the credential-free acceptance tools
+# and ONLY the four modules the next release changes on top of that base: the
+# adapter and the launcher's canonical ACP argv (image/MCP inputs), the
+# supervisor's sign-in address-space ceiling for the ACP CLIs, and the egress
+# proxy's acceptance of the pinned Cursor client's CONNECT shape. The launcher
+# copy is this source's, which carries the _FdReader hotfix; the build asserts
+# that, and that every other runtime module still comes from the base.
+COPY --chown=0:0 scripts/operations/neev_acp_provider_acceptance.py \
+     scripts/operations/neev_acp_sandbox_acceptance.py \
+     scripts/operations/neev_acp_stream_adapter.py \
      scripts/operations/neev_agent_launch.py \
-     scripts/operations/neev_agent_login_drivers.py \
-     scripts/operations/neev_agent_supervisor.py \
      scripts/operations/neev_agent_supervisor_main.py \
-     scripts/operations/neev_supervisor_dto.py \
+     scripts/operations/neev_provider_egress.py \
      /opt/neev/scripts/operations/
-RUN chmod 0555 /opt/neev/scripts/operations/*.py \
+RUN chmod 0555 /opt/neev/scripts/operations/neev_acp_provider_acceptance.py \
+       /opt/neev/scripts/operations/neev_acp_sandbox_acceptance.py \
+       /opt/neev/scripts/operations/neev_acp_stream_adapter.py \
+       /opt/neev/scripts/operations/neev_agent_launch.py \
+       /opt/neev/scripts/operations/neev_agent_supervisor_main.py \
+       /opt/neev/scripts/operations/neev_provider_egress.py \
+    && for module in neev_acp_stream_adapter neev_acp_login_protocol \
+         neev_login_callback neev_browser_capture neev_agent_launch; do \
+         test -f /opt/neev/scripts/operations/$module.py || { echo "base lacks $module"; exit 1; }; \
+       done \
+    && grep -q "_FdReader" /opt/neev/scripts/operations/neev_agent_launch.py \
     # Re-assert the base image's escalation invariants after adding files.
     && test -z "$(getcap -r / 2>/dev/null | grep -v '^/usr/local/bin/neev-agent-caplaunch ')" \
     && test -z "$(find / -xdev -perm /6000 -type f 2>/dev/null)"

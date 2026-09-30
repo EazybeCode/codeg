@@ -459,6 +459,57 @@ pub(crate) fn write_claude_mcp_config(
     Err(ExecutionError::Unavailable)
 }
 
+/// One ACP server's JSON may be at most this many bytes: the adapter's own
+/// bound (`neev_acp_stream_adapter.mcp_server`), and half the kernel's limit on
+/// a single argv string, which it travels as.
+pub(crate) const ACP_MCP_MAX_SERVER_BYTES: usize = 65_536;
+/// All forwarded servers' JSON together: far inside the kernel's argv limit
+/// whatever the prompt and the rest of the launch line take.
+pub(crate) const ACP_MCP_MAX_TOTAL_BYTES: usize = 256 * 1024;
+
+/// Library MCP servers for an ACP run: those forwarded, and those left out.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AcpMcpServers {
+    /// One JSON object per server in the adapter's input shape.
+    pub(crate) forwarded: Vec<String>,
+    /// Names of servers over the argv budget, reported in the trace by the
+    /// adapter rather than failing the launch.
+    pub(crate) skipped: Vec<String>,
+}
+
+/// Shared-library MCP servers for an ACP agent's `session/new`, one JSON object
+/// per server in the adapter's input shape (`neev_acp_stream_adapter.mcp_server`):
+/// stdio `{name, command, args}` or `{name, type:"http", url}`. No env and no
+/// headers: nothing secret travels this way.
+///
+/// Every library server is accounted for (the library holds at most 100 items,
+/// the adapter's limit). One whose JSON would not fit the argv budget is named
+/// in `skipped` instead: the run goes ahead without it, and says so.
+pub(crate) fn acp_mcp_servers(servers: &[StagedMcpServer]) -> AcpMcpServers {
+    let mut result = AcpMcpServers::default();
+    let mut total = 0usize;
+    for server in servers {
+        let name = safe_mcp_name(&server.name, &server.id);
+        let value = match &server.config {
+            McpServerConfig::Stdio { command, args } => {
+                serde_json::json!({ "name": name, "command": command, "args": args })
+            }
+            McpServerConfig::Http { url } => {
+                serde_json::json!({ "name": name, "type": "http", "url": url })
+            }
+        }
+        .to_string();
+        if value.len() > ACP_MCP_MAX_SERVER_BYTES || total + value.len() > ACP_MCP_MAX_TOTAL_BYTES
+        {
+            result.skipped.push(name);
+        } else {
+            total += value.len();
+            result.forwarded.push(value);
+        }
+    }
+    result
+}
+
 /// Generate Codex MCP config overrides.
 ///
 /// Codex takes `-c mcp_servers.<name>.<field>=<value>` for each config field.
@@ -853,5 +904,43 @@ mod tests {
         assert!(!is_safe_path(".hidden"));
         assert!(!is_safe_path("dir/.hidden"));
         assert!(!is_safe_path(".."));
+    }
+
+    fn stdio(id: &str, args: Vec<String>) -> StagedMcpServer {
+        StagedMcpServer {
+            id: id.to_string(),
+            name: "tool".to_string(),
+            config: McpServerConfig::Stdio { command: "tool".to_string(), args },
+        }
+    }
+
+    #[test]
+    fn acp_servers_are_all_accounted_for_up_to_the_library_limit() {
+        // 100 ordinary servers (the org library limit) all travel.
+        let servers: Vec<_> = (0..100).map(|i| stdio(&format!("id{i}"), vec![])).collect();
+        let acp = acp_mcp_servers(&servers);
+        assert_eq!(acp.forwarded.len(), 100);
+        assert!(acp.skipped.is_empty());
+        assert!(acp.forwarded[0].contains("\"name\":\"tool-id0\""));
+    }
+
+    #[test]
+    fn acp_servers_over_the_argv_budget_are_named_not_dropped_or_fatal() {
+        // A server whose JSON exceeds one argv string's budget (50 args of 1000
+        // 4-byte characters) and then enough large ones to pass the total.
+        let huge = stdio("huge", vec!["\u{1F600}".repeat(1000); 50]);
+        let big = |i: usize| stdio(&format!("big{i}"), vec!["x".repeat(1000); 50]);
+        let mut servers = vec![huge];
+        servers.extend((0..6).map(big));
+        servers.push(stdio("small", vec![]));
+        let acp = acp_mcp_servers(&servers);
+        assert!(acp.skipped.contains(&"tool-huge".to_string()));
+        assert!(acp.forwarded.iter().all(|s| s.len() <= ACP_MCP_MAX_SERVER_BYTES));
+        let total: usize = acp.forwarded.iter().map(String::len).sum();
+        assert!(total <= ACP_MCP_MAX_TOTAL_BYTES);
+        assert!(!acp.skipped.is_empty() && acp.skipped.len() >= 2);
+        // Every server is either forwarded or named; the small one still fits.
+        assert_eq!(acp.forwarded.len() + acp.skipped.len(), servers.len());
+        assert!(acp.forwarded.iter().any(|s| s.contains("tool-small")));
     }
 }

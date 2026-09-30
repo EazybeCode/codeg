@@ -61,6 +61,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -94,6 +95,7 @@ FOLLOW_UP_UNSUPPORTED = "follow-up not supported by provider"
 # `signin_markers`: stdout text a provider prints INSTEAD of protocol when it
 # wants an interactive sign-in (source-verified, see module docstring).
 # `model_prefix`: the model id prefix of the upstream Neev signs the user into.
+OPENCODE_LOOPBACK = "127.0.0.1,localhost,::1"
 PROVIDERS = {
     "cursor": {"args": ("acp",), "binaries": ("agent", "cursor-agent"),
                "env": {"NO_OPEN_BROWSER": "1", "AGENT_CLI_CREDENTIAL_STORE": "file"},
@@ -106,8 +108,19 @@ PROVIDERS = {
                    "Enter the authorization code",
                ),
                "model_prefix": None},
+    # OpenCode's ACP server calls its OWN in-process HTTP server on loopback; with
+    # the sandbox's proxy env and an empty NO_PROXY those calls went to the slot
+    # proxy, were refused as malformed, and every session/new failed ("directory"
+    # service) — observed in the production sandbox, not in an open container.
+    # Loopback is the sandbox netns's own, so exempting it reaches nothing
+    # outside. The pinned binary must never self-update (npm registry), and its
+    # bundled model catalogue is used instead of models.opencode.ai; both hosts
+    # are outside run egress by design (neev_provider_endpoints).
     "opencode": {"args": ("acp",), "binaries": ("opencode",),
-                 "env": {}, "signin_markers": (), "model_prefix": "openai/"},
+                 "env": {"NO_PROXY": OPENCODE_LOOPBACK, "no_proxy": OPENCODE_LOOPBACK,
+                         "OPENCODE_DISABLE_AUTOUPDATE": "1",
+                         "OPENCODE_DISABLE_MODELS_FETCH": "1"},
+                 "signin_markers": (), "model_prefix": "openai/"},
 }
 MAX_CONTEXT_CHARS = 64 * 1024
 PROBE_TIMEOUT_SECS = 45
@@ -150,11 +163,13 @@ def capabilities(provider):
         "reasoning": False,
         "followUp": False,
         "cancel": True,
-        "images": False,
+        # Image blocks only when the agent's initialize says it takes them.
+        "images": "if-agent-supports",
         "modelSelection": False,
         "effort": False,
         "speed": False,
-        "libraryMcp": False,
+        # stdio library tools only: HTTP tool hosts are outside sandbox egress.
+        "libraryMcp": "stdio",
         "context": True,
         "probe": True,
         "modelPinnedTo": PROVIDERS[provider]["model_prefix"],
@@ -183,6 +198,16 @@ def _parse(argv):
     # Trusted instructions from the launcher (the response-style policy). ACP has
     # no system-prompt parameter, so it travels as a leading, delimited text block.
     parser.add_argument("--context", default=None)
+    # Staged image attachments (absolute paths under --cwd), sent as ACP image
+    # blocks when the agent advertises promptCapabilities.image; otherwise the
+    # prompt already names them as files. Repeatable.
+    parser.add_argument("--image", action="append", default=[], dest="images")
+    # Shared-library MCP servers, one ACP McpServer JSON each (validated by
+    # mcp_server()). Repeatable.
+    parser.add_argument("--mcp-server", action="append", default=[], dest="mcp_servers")
+    # Library MCP servers the server already left out (over its argv budget), by
+    # name, so the trace can say so. Repeatable.
+    parser.add_argument("--mcp-skipped", action="append", default=[], dest="mcp_skipped")
     parser.add_argument("prompt", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     prompt = list(args.prompt)
@@ -234,17 +259,133 @@ def initialize_params():
     }
 
 
-def session_new_params(cwd):
-    return {"cwd": cwd, "mcpServers": []}
+def session_new_params(cwd, mcp_servers=()):
+    return {"cwd": cwd, "mcpServers": list(mcp_servers)}
 
 
-def prompt_params(session_id, prompt, context=None):
+MAX_IMAGES = 8
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# The org library's own item limit (library.rs MAX_ITEMS_PER_ORG): every MCP
+# server a library can hold is accepted, never refused for being one too many.
+MAX_MCP_SERVERS = 100
+# safe_mcp_name(): up to 100 name characters, "-", and an item id of up to 64.
+_MCP_NAME = re.compile(r"[A-Za-z0-9_-]{1,200}\Z")
+# The agent sandbox's egress admits only the provider's own endpoints
+# (neev_provider_endpoints.py), so no library HTTP tool host is reachable from
+# inside it. Such tools are skipped with a notice rather than forwarded to fail.
+HTTP_LIBRARY_TOOLS_REACHABLE = False
+NOTICE_LIBRARY_TOOL_SKIPPED = "library_tool_skipped"
+
+
+def mcp_server(raw):
+    """Pure: one validated ACP McpServer from JSON, or AdapterError.
+
+    stdio: {"name","command","args"} -> {"name","command","args","env":[]}
+    http:  {"name","type":"http","url"} -> {"type":"http","name","url","headers":[]}
+    No env and no headers are ever forwarded: no secret travels this way."""
+    try:
+        value = json.loads(raw) if isinstance(raw, str) and len(raw) <= 65536 else None
+    except ValueError:
+        value = None
+    if not isinstance(value, dict) or not isinstance(value.get("name"), str) \
+            or not _MCP_NAME.match(value["name"]):
+        raise AdapterError("invalid library tool")
+    if value.get("type") == "http":
+        if set(value) != {"name", "type", "url"}:
+            raise AdapterError("invalid library tool")
+        from urllib.parse import urlsplit
+        try:
+            url = urlsplit(value["url"]) if isinstance(value["url"], str) else None
+        except ValueError:
+            url = None
+        if (url is None or url.scheme != "https" or not url.hostname or url.username
+                or url.password or url.query or url.fragment or "\x00" in value["url"]):
+            raise AdapterError("invalid library tool")
+        return {"type": "http", "name": value["name"], "url": value["url"], "headers": []}
+    if set(value) != {"name", "command", "args"}:
+        raise AdapterError("invalid library tool")
+    command, args = value["command"], value["args"]
+    if (not isinstance(command, str) or not command.strip() or len(command) > 500
+            or "\x00" in command or not isinstance(args, list) or len(args) > 50
+            or not all(isinstance(a, str) and len(a) <= 1000 and "\x00" not in a
+                       for a in args)):
+        raise AdapterError("invalid library tool")
+    return {"name": value["name"], "command": command, "args": list(args), "env": []}
+
+
+def sniff_image(data):
+    """Pure: the image MIME type from leading magic bytes, or None. The same
+    classes the server stages as images (content/attachment.rs sniff_attachment);
+    the file name is never consulted, so `chart` or `x.jpg.download` still works."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def image_block(path, cwd):
+    """Pure-ish: one ACP image ContentBlock for a staged file under `cwd`, or
+    None when the file is not usable as one. Only regular files inside the run
+    directory (symlinks out of it are refused), bounded, whose CONTENT is a known
+    image type. None is not an error: the prompt already names every staged file,
+    so the agent can still open it with its own tools."""
+    import base64
+
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return None
+    real = os.path.realpath(path)
+    root = os.path.realpath(cwd)
+    if not real.startswith(root + os.sep) or not os.path.isfile(real):
+        return None
+    try:
+        size = os.path.getsize(real)
+        if size <= 0 or size > MAX_IMAGE_BYTES:
+            return None
+        with open(real, "rb") as handle:
+            data = handle.read(MAX_IMAGE_BYTES + 1)
+    except OSError:
+        return None
+    mime = sniff_image(data)
+    if mime is None or len(data) > MAX_IMAGE_BYTES:
+        return None
+    return {"type": "image", "mimeType": mime,
+            "data": base64.b64encode(data).decode("ascii")}
+
+
+def usable_mcp_servers(servers, init_result):
+    """Pure: (forward, skipped_names). A library tool is forwarded only when the
+    agent can load its transport AND the sandbox can reach it; every other one
+    is skipped by name, so one unusable tool never costs the turn."""
+    forward, skipped = [], []
+    for server in servers:
+        if server.get("type") == "http" and not (
+                HTTP_LIBRARY_TOOLS_REACHABLE
+                and agent_supports(init_result, "mcpCapabilities", "http")):
+            skipped.append(server["name"])
+        else:
+            forward.append(server)
+    return forward, skipped
+
+
+def prompt_params(session_id, prompt, context=None, images=()):
     blocks = []
     if context:
         blocks.append({"type": "text",
                        "text": f"<neev-instructions>\n{context}\n</neev-instructions>"})
     blocks.append({"type": "text", "text": prompt})
+    blocks.extend(images)
     return {"sessionId": session_id, "prompt": blocks}
+
+
+def agent_supports(init_result, *path):
+    """Pure: a boolean capability from the agent's initialize result."""
+    node = init_result.get("agentCapabilities") if isinstance(init_result, dict) else None
+    for key in path:
+        node = node.get(key) if isinstance(node, dict) else None
+    return node is True
 
 
 def _option_values(options):
@@ -371,6 +512,9 @@ class Emitter:
 
     def turn_failed(self, reason):
         self._write({"type": "turn.failed", "reason": reason})
+
+    def notice(self, state, name):
+        self._write({"type": "neev.notice", "state": state, "name": name})
 
     def account(self, status):
         self._write({"type": "neev.account", "status": status})
@@ -545,12 +689,16 @@ def drive(child, args, emit, cwd, stop, now=time.monotonic):
         emit.turn_failed(reason)
         return 4
 
+    image_blocks = []
+    forwarded_mcp = []  # what the pending session/new carries
+    retried_without = []  # tools dropped by the one retry, named once it works
+
     def start_prompt():
         if probe:
             emit.account("supported")
             return 0
         request(_REQ_PROMPT, "session/prompt",
-                prompt_params(session_id, args.prompt, context))
+                prompt_params(session_id, args.prompt, context, image_blocks))
         return None
 
     try:
@@ -631,6 +779,20 @@ def drive(child, args, emit, cwd, stop, now=time.monotonic):
                 # The signed-in upstream's model could not be selected: never fall
                 # back to whatever model the provider would otherwise use.
                 return fail(SIGNIN_REQUIRED)
+            if (msg_id == _REQ_SESSION_NEW and session_id is None and forwarded_mcp
+                    and error_reason(message.get("error")) != SIGNIN_REQUIRED
+                    and cancel_deadline is None):
+                # The agent refused a session WITH the library tools. The chat
+                # still runs: once more without them. They are named as skipped
+                # only if THAT session starts — if it fails too, the tools were
+                # not the problem and the turn's own failure is the story.
+                retried_without.extend(server["name"] for server in forwarded_mcp)
+                del forwarded_mcp[:]
+                try:
+                    request(_REQ_SESSION_NEW, "session/new", session_new_params(cwd, []))
+                except (BrokenPipeError, OSError):
+                    return fail("provider closed the stream")
+                continue
             if msg_id in (_REQ_INITIALIZE, _REQ_SESSION_NEW, _REQ_PROMPT):
                 if cancel_deadline is not None and msg_id == _REQ_PROMPT:
                     return fail("cancelled")
@@ -641,12 +803,31 @@ def drive(child, args, emit, cwd, stop, now=time.monotonic):
             if msg_id == _REQ_INITIALIZE and session_id is None:
                 if not isinstance(result, dict) or result.get("protocolVersion") != PROTOCOL_VERSION:
                     return fail("unsupported provider protocol version")
-                request(_REQ_SESSION_NEW, "session/new", session_new_params(cwd))
+                # Library tools the agent cannot load, or the sandbox cannot
+                # reach, are skipped by name: the chat runs without them and the
+                # trace says so, instead of the turn failing.
+                forward, skipped = usable_mcp_servers(
+                    getattr(args, "mcp_server_objects", []), result)
+                for name in list(getattr(args, "mcp_skipped", [])) + skipped:
+                    emit.notice(NOTICE_LIBRARY_TOOL_SKIPPED, name)
+                forwarded_mcp.extend(forward)
+                if getattr(args, "images", None) and agent_supports(
+                        result, "promptCapabilities", "image"):
+                    # Built only now, once the agent has said it takes images. A
+                    # file that is not usable as one is left out: the prompt
+                    # already names every staged file.
+                    for path in args.images:
+                        block = image_block(path, cwd)
+                        if block is not None:
+                            image_blocks.append(block)
+                request(_REQ_SESSION_NEW, "session/new", session_new_params(cwd, forward))
             elif msg_id == _REQ_SESSION_NEW and session_id is None:
                 sid = result.get("sessionId") if isinstance(result, dict) else None
                 if not isinstance(sid, str) or not sid:
                     return fail("provider started no session")
                 session_id = sid
+                for name in retried_without:
+                    emit.notice(NOTICE_LIBRARY_TOOL_SKIPPED, name)
                 if prefix is not None:
                     verdict, change = model_choice(result.get("configOptions"), prefix)
                     if verdict == "missing":
@@ -718,6 +899,9 @@ def main(argv=None, steer_input=None, environ=None):
     if not args.probe and not args.prompt:
         emit.turn_failed("empty prompt")
         return 2
+    if args.probe and (args.images or args.mcp_servers or args.mcp_skipped):
+        emit.account("unavailable")
+        return 2
     if args.context is not None and (not args.context or len(args.context) > MAX_CONTEXT_CHARS):
         emit.turn_failed("invalid context")
         return 2
@@ -731,6 +915,20 @@ def main(argv=None, steer_input=None, environ=None):
             emit.turn_failed(str(error))
         return 2
     cwd = args.cwd or os.getcwd()
+    # Inputs are validated BEFORE any provider process exists.
+    try:
+        if (len(args.images) > MAX_IMAGES
+                or len(args.mcp_servers) + len(args.mcp_skipped) > MAX_MCP_SERVERS):
+            raise AdapterError("too many inputs")
+        if not all(_MCP_NAME.match(name) for name in args.mcp_skipped):
+            raise AdapterError("invalid library tool")
+        args.mcp_server_objects = [mcp_server(raw) for raw in args.mcp_servers]
+        names = [server["name"] for server in args.mcp_server_objects] + args.mcp_skipped
+        if len(set(names)) != len(names):
+            raise AdapterError("invalid library tool")
+    except AdapterError as error:
+        emit.turn_failed(str(error))
+        return 2
 
     stop = threading.Event()
 

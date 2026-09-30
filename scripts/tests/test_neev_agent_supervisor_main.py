@@ -103,6 +103,69 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(self.built[-1], (dto.Provider.CLAUDE, ("claude", "auth", "status", "--json")))
 
 
+class LoginAddressSpaceTests(unittest.TestCase):
+    def test_claude_and_codex_keep_their_two_gib(self):
+        for provider in ("claude", "codex", None):
+            self.assertEqual(main.login_address_space_bytes(provider), 2 * 1024**3)
+
+    def test_acp_sign_in_gets_the_run_ceiling_the_pinned_clis_need(self):
+        # Measured: agent/gemini need >= 24/32 GiB just to start; opencode's
+        # login dies of SIGILL at 2 GiB after printing its device URL.
+        import neev_agent_launch as launch
+
+        for provider in ("cursor", "gemini", "opencode"):
+            self.assertEqual(main.login_address_space_bytes(provider),
+                             launch.address_space_bytes(provider, None))
+            self.assertGreaterEqual(main.login_address_space_bytes(provider), 32 * 1024**3)
+
+
+class LoginChannelLimitWiringTests(unittest.TestCase):
+    """The ceiling reaches the spec LoginChannel.start really builds, not only
+    the pure function (review N2)."""
+
+    def spec_for(self, provider, argv):
+        import contextlib
+        from unittest import mock
+
+        import neev_agent_credentials as credentials
+        import neev_agent_sandbox as sandbox
+        import neev_slot_proxy as slot_proxy
+
+        captured = {}
+
+        @contextlib.contextmanager
+        def fake_proxy(*_a, **_k):
+            yield {}
+
+        @contextlib.contextmanager
+        def fake_deliver(*_a, **_k):
+            yield type("D", (), {"mount": "/nonexistent"})()
+
+        def fake_launch(spec, **_k):
+            captured["spec"] = spec
+            raise RuntimeError("stop here")
+
+        with tempfile.TemporaryDirectory() as root:
+            config = main.config_from_env(_full_env(root))
+            channel = main.LoginChannel(config, object(), provider, _Scope(3, 7), "h" * 32,
+                                        argv, cleanup=lambda path: True, quarantine_dir=root)
+            with mock.patch.object(slot_proxy, "slot_proxy", fake_proxy), \
+                    mock.patch.object(credentials, "deliver", fake_deliver), \
+                    mock.patch.object(sandbox, "launch", fake_launch), \
+                    mock.patch.object(main, "_make_run_dir", lambda _c: root):
+                with self.assertRaises(RuntimeError):
+                    channel.start()
+        return captured["spec"]
+
+    def test_an_acp_sign_in_is_launched_with_the_run_ceiling(self):
+        spec = self.spec_for(dto.Provider.CURSOR, ("/usr/local/bin/agent", "login"))
+        self.assertGreaterEqual(spec.limits.address_space_bytes, 32 * 1024**3)
+
+    def test_a_codex_sign_in_is_launched_with_exactly_two_gib(self):
+        spec = self.spec_for(dto.Provider.CODEX, ("codex", "app-server"))
+        self.assertEqual(spec.limits.address_space_bytes, 2 * 1024**3)
+
+
 class SlotQuarantineTests(unittest.TestCase):
     """A login channel whose sandbox child / run workdir did not tear down cleanly must
     write the DURABLE slot_proxy quarantine (fixed lane) so the next login AND probe are

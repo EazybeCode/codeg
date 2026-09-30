@@ -127,6 +127,9 @@ pub(crate) enum StreamItem {
 /// Statuses the server itself emits, as opposed to relaying.
 pub(crate) const STATE_TRUNCATED: &str = "truncated";
 pub(crate) const STATE_UNSUPPORTED: &str = "unsupported";
+/// A shared-library tool this run went ahead without (the agent cannot load it,
+/// or the sandbox cannot reach it). `detail` is the tool's name.
+pub(crate) const STATE_LIBRARY_TOOL_SKIPPED: &str = "library_tool_skipped";
 
 fn truncate(value: &str, limit: usize) -> (String, bool) {
     if value.chars().count() <= limit {
@@ -640,6 +643,27 @@ impl StreamParser {
                     "reasoning" => Some(Vec::new()),
                     _ => Some(Vec::new()),
                 }
+            }
+            // The ACP adapter's own notice. Only the known state is recorded,
+            // and only for a name in the adapter's tool-name alphabet.
+            "neev.notice" => {
+                if value.get("state").and_then(|v| v.as_str()) != Some(STATE_LIBRARY_TOOL_SKIPPED) {
+                    return Some(Vec::new());
+                }
+                let name = value.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+                if name.is_empty()
+                    || name.len() > 200
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return Some(Vec::new());
+                }
+                Some(vec![self.status(
+                    &format!("library-tool-{name}"),
+                    STATE_LIBRARY_TOOL_SKIPPED,
+                    Some(name.to_owned()),
+                )])
             }
             "thread.started" | "turn.started" => Some(Vec::new()),
             "turn.completed" => Some(vec![self.status("result", "result", None)]),
