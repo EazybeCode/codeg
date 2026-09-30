@@ -303,6 +303,73 @@ async fn a_run_streams_then_persists_and_replays_identically() {
 }
 
 #[tokio::test]
+async fn a_replay_after_started_carries_each_accepted_follow_up_once() {
+    let (_state, client, database, org) = fixture(fake(&["hé", "llo 😀"])).await;
+    let session = client.create_session().await;
+    let id = session["id"].as_str().unwrap().to_owned();
+    let started = client.start_turn(&id, "greet me").await;
+    let run_id = started["runId"].as_str().unwrap().to_owned();
+    // Drain the live stream so the turn has settled.
+    client
+        .get(&format!("/api/neev/agent/runs/{run_id}/events"))
+        .await
+        .text();
+    let turn = crate::neev::agents::sessions::turn_by_run_id(&database, &run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let accepted = uuid::Uuid::new_v4().to_string();
+    let pending = uuid::Uuid::new_v4().to_string();
+    for request_id in [&accepted, &pending] {
+        crate::neev::db::record_steer_input(
+            &database, org, &id, turn.sequence, request_id, "also wave", NOW,
+        )
+        .await
+        .unwrap();
+    }
+    // Offset counts Unicode scalars: "hé" is two, though three UTF-8 bytes.
+    crate::neev::db::accept_steer_input(&database, org, &id, turn.sequence, &accepted, 2)
+        .await
+        .unwrap();
+
+    // The client resets live inputs on `started`, so the replay must carry
+    // the accepted follow-up again — once, before `finished`, and never the
+    // unacknowledged one.
+    let replay = sse_events(
+        &client
+            .get(&format!("/api/neev/agent/runs/{run_id}/events"))
+            .await
+            .text(),
+    );
+    assert_eq!(replay[0]["type"], "started");
+    let inputs: Vec<&Value> = replay.iter().filter(|e| e["type"] == "input").collect();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0]["runId"], run_id.as_str());
+    assert_eq!(inputs[0]["requestId"], accepted.as_str());
+    assert_eq!(inputs[0]["text"], "also wave");
+    assert_eq!(inputs[0]["responseOffset"], 2);
+    assert_eq!(replay.last().unwrap()["type"], "finished");
+}
+
+#[tokio::test]
+async fn steer_text_is_bounded_in_bytes_before_any_reservation() {
+    let (_state, client, _db, _org) = fixture(fake(&["x"])).await;
+    let run_id = uuid::Uuid::new_v4().simple().to_string();
+    let steer = |text: String| {
+        client
+            .post(&format!("/api/neev/agent/runs/{run_id}/steer"))
+            .json(&serde_json::json!({
+                "text": text,
+                "requestId": uuid::Uuid::new_v4().to_string(),
+            }))
+    };
+    // 2049 four-byte scalars: well under 32768 characters, over 8192 bytes.
+    steer("😀".repeat(2049)).await.assert_status_bad_request();
+    // Exactly at the cap passes validation and reaches the ownership lookup.
+    steer("😀".repeat(2048)).await.assert_status_not_found();
+}
+
+#[tokio::test]
 async fn an_interrupted_run_replays_as_failed_and_is_never_auto_rerun() {
     let (state, client, database, org) = fixture(fake(&["partial"])).await;
     let session = client.create_session().await;

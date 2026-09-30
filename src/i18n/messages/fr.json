@@ -146,6 +146,8 @@
     "agentChatMissing": "Cette discussion n’est plus dans ce projet.",
     "agentModel": "Modèle",
     "agentPrompt": "Demander à l'agent",
+    "agentFollowUp": "Ajouter un suivi…",
+    "agentFollowUpTextOnly": "Pendant que l’agent travaille, les suivis peuvent contenir uniquement du texte. Gardez ces fichiers pour votre prochain message.",
     "agentTurns": "Historique de la session",
     "activitySummary": "{number} appels d’outils, {name} résultats",
     "activityErrors": "{number, plural, one {# étape en échec} other {# étapes en échec}}",

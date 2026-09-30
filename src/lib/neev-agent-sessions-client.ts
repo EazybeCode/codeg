@@ -21,6 +21,25 @@ import {
 import { parseAttachments, type NeevAttachment } from "./neev-attachments"
 import type { MentionSpan } from "./neev-mentions"
 
+/**
+ * A follow-up input sent into an active run via steering.
+ *
+ * The server records these in the turn's `inputs` array, and sends them
+ * via the SSE stream so they display alongside the streaming response.
+ * Defined early so NeevAgentTurn can reference it.
+ */
+export interface NeevRunInput {
+  requestId: string
+  text: string
+  createdAt: number
+  /**
+   * Where in the reply text this input was delivered, counted in Unicode
+   * scalar values (same unit as activity offsets). The frontend interleaves
+   * the user follow-up at this position in the transcript.
+   */
+  responseOffset: number
+}
+
 /** Providers the server will accept for a session (`agents/sessions.rs`). */
 export const NEEV_AGENT_PROVIDERS = ["claude", "codex"] as const
 export type NeevAgentProvider = (typeof NEEV_AGENT_PROVIDERS)[number]
@@ -211,6 +230,17 @@ export interface NeevAgentTurn {
    * turn that carried none, and for a server that predates attachments.
    */
   attachments: NeevAttachment[]
+  /**
+   * Follow-up inputs sent into this run via steering. Empty for a run that
+   * received none, and for a server that predates steering. Sorted by
+   * `responseOffset` so interleaving is straightforward.
+   */
+  inputs: NeevRunInput[]
+  /**
+   * Whether this turn's run supports live steering. False for legacy servers
+   * and for providers that do not support mid-run input.
+   */
+  supportsSteering: boolean
   createdAt: number
   updatedAt: number
   completedAt: number | null
@@ -269,7 +299,14 @@ export type UpdateNeevAgentSessionInput = { expectedRevision: string } & (
 )
 
 export type NeevRunEvent =
-  | { type: "started"; runId: string; turnId: string; sequence: string | null }
+  | {
+      type: "started"
+      runId: string
+      turnId: string
+      sequence: string | null
+      /** Whether this run supports live steering for follow-up inputs. */
+      supportsSteering: boolean
+    }
   | { type: "chunk"; text: string }
   | { type: "finished"; status: NeevTurnStatus; errorCode: string | null }
 
@@ -848,6 +885,8 @@ export function parseActivityEvent(value: unknown): NeevActivityItem | null {
 }
 
 export function parseAgentTurn(value: unknown): NeevAgentTurn {
+  // `inputs` and `supportsSteering` are optional for backwards compatibility
+  // with servers that predate steering. Absent reads as empty/false.
   const object = exact(
     value,
     [
@@ -866,7 +905,7 @@ export function parseAgentTurn(value: unknown): NeevAgentTurn {
       "updatedAt",
       "completedAt",
     ],
-    ["attachments"]
+    ["attachments", "inputs", "supportsSteering"]
   )
   const status = text(object.status)
   if (!TURN_STATUSES.includes(status as NeevTurnStatus)) return invalid()
@@ -874,6 +913,12 @@ export function parseAgentTurn(value: unknown): NeevAgentTurn {
   // A settled turn has a completion time and a running one does not; the pair
   // disagreeing means the row is not something we can display truthfully.
   if ((status === "running") === (completedAt !== null)) return invalid()
+  // supportsSteering must be a boolean when present
+  if (
+    object.supportsSteering !== undefined &&
+    typeof object.supportsSteering !== "boolean"
+  )
+    return invalid()
   return {
     // The TURN is a real UUID; the session it belongs to may be a digest.
     id: uuid(object.id),
@@ -888,9 +933,61 @@ export function parseAgentTurn(value: unknown): NeevAgentTurn {
     provider: text(object.provider),
     model: text(object.model),
     attachments: parseAttachments(object.attachments),
+    inputs: parseRunInputsLazy(object.inputs),
+    supportsSteering: object.supportsSteering === true,
     createdAt: timestamp(object.createdAt),
     updatedAt: timestamp(object.updatedAt),
     completedAt,
+  }
+}
+
+/**
+ * Parse inputs lazily - function is defined later in the file but we need
+ * to call it from parseAgentTurn which is earlier.
+ */
+function parseRunInputsLazy(value: unknown): NeevRunInput[] {
+  if (!Array.isArray(value)) return []
+  const inputs: NeevRunInput[] = []
+  const seen = new Set<string>()
+  for (const entry of value) {
+    const input = parseRunInputLazy(entry)
+    if (!input || seen.has(input.requestId)) continue
+    seen.add(input.requestId)
+    inputs.push(input)
+  }
+  return inputs.sort(
+    (left, right) => left.responseOffset - right.responseOffset
+  )
+}
+
+function parseRunInputLazy(value: unknown): NeevRunInput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const item = value as Record<string, unknown>
+  const requestId = item.requestId
+  const inputText = item.text
+  const createdAt = item.createdAt
+  const responseOffset = item.responseOffset
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  if (
+    typeof requestId !== "string" ||
+    !uuidRegex.test(requestId) ||
+    typeof inputText !== "string" ||
+    inputText.length === 0 ||
+    [...inputText].length > NEEV_MAX_PROMPT_CHARS ||
+    typeof createdAt !== "number" ||
+    !Number.isSafeInteger(createdAt) ||
+    createdAt < 0 ||
+    typeof responseOffset !== "number" ||
+    !Number.isSafeInteger(responseOffset) ||
+    responseOffset < 0
+  )
+    return null
+  return {
+    requestId,
+    text: inputText,
+    createdAt,
+    responseOffset,
   }
 }
 
@@ -1291,6 +1388,8 @@ export function parseRunEvent(json: string): NeevRunEvent | null {
             object.sequence === undefined
               ? null
               : integerString(object.sequence),
+          // Optional for backwards compatibility; defaults false.
+          supportsSteering: object.supportsSteering === true,
         }
       case "chunk":
         return { type: "chunk", text: text(object.text) }
@@ -1896,6 +1995,20 @@ export async function testProviderConnection(
 
 export type NeevRunPhase = "streaming" | "reconnecting" | "lost"
 
+/** Response from a successful steer request. */
+export interface NeevSteerResult {
+  accepted: true
+  runId: string
+  requestId: string
+}
+
+/** Error codes the steer endpoint can return. */
+export type NeevSteerErrorCode =
+  | "finished"
+  | "unsupported"
+  | "unavailable"
+  | "rejected"
+
 /** Backoff between reattach attempts; exhausting it reports the run as lost. */
 const RUN_RETRY_DELAYS = [500, 1000, 2000, 4000] as const
 /**
@@ -1919,6 +2032,7 @@ export async function followAgentRun({
   signal,
   onEvent,
   onActivity,
+  onInput,
   onPhase,
   retryDelays = RUN_RETRY_DELAYS,
   healthyAfterMs = RUN_HEALTHY_AFTER_MS,
@@ -1935,6 +2049,13 @@ export async function followAgentRun({
    * so the receiver upserts on `seq` rather than appending.
    */
   onActivity?: (item: NeevActivityItem) => void
+  /**
+   * User follow-up inputs sent via steering, as they arrive.
+   *
+   * A reattach replays persisted inputs, so the receiver upserts on
+   * `requestId` rather than appending.
+   */
+  onInput?: (input: NeevRunInput) => void
   onPhase: (phase: NeevRunPhase) => void
   retryDelays?: readonly number[]
   healthyAfterMs?: number
@@ -1973,6 +2094,11 @@ export async function followAgentRun({
           if (done()) return
           delivered = true
           onActivity?.(item)
+        },
+        (input) => {
+          if (done()) return
+          delivered = true
+          onInput?.(input)
         }
       )
     } catch (error) {
@@ -2009,7 +2135,8 @@ export async function openAgentRunStream(
   runIdValue: string,
   onEvent: (event: NeevRunEvent) => void,
   signal?: AbortSignal,
-  onActivity?: (item: NeevActivityItem) => void
+  onActivity?: (item: NeevActivityItem) => void,
+  onInput?: (input: NeevRunInput) => void
 ): Promise<void> {
   assertRunId(runIdValue)
   const response = await fetch(`/api/neev/agent/runs/${runIdValue}/events`, {
@@ -2042,22 +2169,145 @@ export async function openAgentRunStream(
           const raw = line.slice(5).trim()
           const event = parseRunEvent(raw)
           if (event) onEvent(event)
-          else if (onActivity) {
+          else {
             // `parseRunEvent` returns null for anything it does not know,
-            // which includes the activity frame and any future one. Only a
-            // readable activity item is forwarded; the rest stays ignored.
+            // which includes activity frames, input frames, and any future one.
+            // Only a readable item is forwarded; the rest stays ignored.
             let value: unknown
             try {
               value = JSON.parse(raw)
             } catch {
               value = null
             }
-            const item = value === null ? null : parseActivityEvent(value)
-            if (item) onActivity(item)
+            if (value !== null) {
+              const item = parseActivityEvent(value)
+              if (item && onActivity) onActivity(item)
+              else {
+                const input = parseInputEvent(value)
+                if (input && onInput) onInput(input)
+              }
+            }
           }
         }
       boundary = buffer.indexOf("\n\n")
     }
     if (done) break
+  }
+}
+
+/**
+ * Parse a single run input from the turn's `inputs` array or an SSE frame.
+ *
+ * Validates all fields strictly: `requestId` must be a UUID, `text` must be
+ * a non-empty string within the character limit, `createdAt` a valid
+ * timestamp, and `responseOffset` a non-negative integer.
+ */
+export function parseRunInput(value: unknown): NeevRunInput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const item = value as Record<string, unknown>
+  const requestId = item.requestId
+  const inputText = item.text
+  const createdAt = item.createdAt
+  const responseOffset = item.responseOffset
+  if (
+    typeof requestId !== "string" ||
+    !UUID.test(requestId) ||
+    typeof inputText !== "string" ||
+    inputText.length === 0 ||
+    [...inputText].length > NEEV_MAX_PROMPT_CHARS ||
+    typeof createdAt !== "number" ||
+    !Number.isSafeInteger(createdAt) ||
+    createdAt < 0 ||
+    typeof responseOffset !== "number" ||
+    !Number.isSafeInteger(responseOffset) ||
+    responseOffset < 0
+  )
+    return null
+  return {
+    requestId,
+    text: inputText,
+    createdAt,
+    responseOffset,
+  }
+}
+
+/**
+ * Parse the `inputs` array from a turn DTO.
+ *
+ * Returns an array of valid inputs, dropping any that fail validation.
+ * Sorted by `responseOffset` so interleaving is straightforward.
+ */
+export function parseRunInputs(value: unknown): NeevRunInput[] {
+  if (!Array.isArray(value)) return []
+  const inputs: NeevRunInput[] = []
+  const seen = new Set<string>()
+  for (const entry of value) {
+    const input = parseRunInput(entry)
+    if (!input || seen.has(input.requestId)) continue
+    seen.add(input.requestId)
+    inputs.push(input)
+  }
+  return inputs.sort(
+    (left, right) => left.responseOffset - right.responseOffset
+  )
+}
+
+/**
+ * Parse an `input` SSE event from the run stream.
+ *
+ * The event has `type: "input"` and carries the same fields as a stored input.
+ */
+export function parseInputEvent(value: unknown): NeevRunInput | null {
+  if (!value || typeof value !== "object") return null
+  if ((value as Record<string, unknown>).type !== "input") return null
+  return parseRunInput(value)
+}
+
+/**
+ * Send a follow-up input into an active run.
+ *
+ * The server delivers the text to the provider and returns `{accepted: true}`
+ * only after the provider has acknowledged receipt. If the run has already
+ * finished, does not support steering, or cannot accept input, the request
+ * fails with 409 and an appropriate error code.
+ *
+ * `requestId` is idempotent: retrying with the same id after a network failure
+ * returns the same result and cannot duplicate the input. The frontend should
+ * retain the text until `accepted: true` is confirmed.
+ */
+export async function steerAgentRun(
+  runId: string,
+  text: string,
+  requestId: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevSteerResult> {
+  assertRunId(runId)
+  assertUuid(requestId)
+  if (
+    typeof text !== "string" ||
+    text.length === 0 ||
+    [...text].length > NEEV_MAX_PROMPT_CHARS
+  )
+    invalidRequest()
+  const response = await contentMutation(
+    `/api/neev/agent/runs/${runId}/steer`,
+    { text, requestId },
+    csrf,
+    signal
+  )
+  const object = exact(response, ["accepted", "runId", "requestId"])
+  if (
+    object.accepted !== true ||
+    typeof object.runId !== "string" ||
+    !RUN_ID.test(object.runId) ||
+    typeof object.requestId !== "string" ||
+    !UUID.test(object.requestId)
+  )
+    return invalid()
+  return {
+    accepted: true,
+    runId: object.runId,
+    requestId: object.requestId,
   }
 }

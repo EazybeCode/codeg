@@ -38,6 +38,8 @@ function makeTurn(
     prompt: options?.prompt ?? "user prompt",
     response: options?.response ?? "",
     activity: [],
+    inputs: [],
+    supportsSteering: false,
     status: "completed",
     errorCode: null,
     provider: "claude",

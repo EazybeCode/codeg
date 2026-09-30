@@ -146,6 +146,8 @@
     "agentChatMissing": "そのチャットはこのプロジェクトにはありません。",
     "agentModel": "モデル",
     "agentPrompt": "エージェントに質問",
+    "agentFollowUp": "追加の指示を入力…",
+    "agentFollowUpTextOnly": "エージェントの実行中はテキストのみ送信できます。ファイルは次のメッセージ用に保持してください。",
     "agentTurns": "セッション履歴",
     "activitySummary": "ツール呼び出し {number} 件、結果 {name} 件",
     "activityErrors": "{number, plural, other {# ステップが失敗}}",

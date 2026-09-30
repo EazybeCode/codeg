@@ -277,6 +277,10 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             "/api/neev/agent/runs/cancel",
             post(agent_sessions::cancel_run),
         )
+        .route(
+            "/api/neev/agent/runs/{run_id}/steer",
+            post(agent_sessions::steer_run),
+        )
         // Explicit team invocation (§5.3): posts the ask, then publishes an
         // agent-authored reply into the same chat when the run completes.
         .route(

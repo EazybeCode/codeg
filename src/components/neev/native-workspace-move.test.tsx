@@ -92,7 +92,7 @@ const agentSession = {
 /** Two projects where items can be moved between. */
 function twoProjectsRoutes(
   options: {
-    chats?: (typeof chatResource)[]
+    chats?: (Omit<typeof chatResource, "visibility"> & { visibility: "private" | "organization" })[]
     documents?: (typeof documentResource)[]
     sessions?: (typeof agentSession)[]
     patchResource?: (init: RequestInit) => Response | Promise<Response>
@@ -1143,7 +1143,6 @@ describe("Move to menu fallback", () => {
     // Should have a Move to option
     const moveOption = await screen.findByRole("menuitem", {
       name: "Move to…",
-      exact: true,
     })
     expect(moveOption).toBeInTheDocument()
 

@@ -146,6 +146,8 @@
     "agentChatMissing": "That chat is no longer in this project.",
     "agentModel": "Model",
     "agentPrompt": "Ask the agent",
+    "agentFollowUp": "Add a follow-up…",
+    "agentFollowUpTextOnly": "Follow-ups can contain text only while the agent is running. Keep these files for your next message.",
     "agentTurns": "Session history",
     "activitySummary": "{number} tool calls, {name} results",
     "activityErrors": "{number, plural, one {# step failed} other {# steps failed}}",

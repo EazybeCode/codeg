@@ -146,6 +146,8 @@
     "agentChatMissing": "لم تعد هذه المحادثة في هذا المشروع.",
     "agentModel": "النموذج",
     "agentPrompt": "اسأل الوكيل",
+    "agentFollowUp": "أضف متابعة…",
+    "agentFollowUpTextOnly": "يمكن أن تتضمن المتابعات نصًا فقط أثناء تشغيل الوكيل. احتفظ بهذه الملفات لرسالتك التالية.",
     "agentTurns": "سجل الجلسة",
     "activitySummary": "{number} استدعاء أدوات، {name} نتيجة",
     "activityErrors": "{number, plural, zero {لم تفشل أي خطوة} one {فشلت خطوة واحدة} two {فشلت خطوتان} few {فشلت # خطوات} many {فشلت # خطوة} other {فشلت # خطوة}}",

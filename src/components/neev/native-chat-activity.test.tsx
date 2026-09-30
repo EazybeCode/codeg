@@ -51,6 +51,8 @@ function turn(
     prompt: "help",
     response: "do X",
     activity: [],
+    inputs: [],
+    supportsSteering: false,
     status: "completed",
     errorCode: null,
     provider: "claude",

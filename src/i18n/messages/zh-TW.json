@@ -146,6 +146,8 @@
     "agentChatMissing": "該對話已不在此專案中。",
     "agentModel": "模型",
     "agentPrompt": "向智能體提問",
+    "agentFollowUp": "新增後續指示…",
+    "agentFollowUpTextOnly": "代理執行時，後續訊息只能包含文字。請保留這些檔案，待下次傳送。",
     "agentTurns": "工作階段歷史",
     "activitySummary": "{number} 次工具呼叫，{name} 個結果",
     "activityErrors": "{number, plural, other {# 個步驟失敗}}",

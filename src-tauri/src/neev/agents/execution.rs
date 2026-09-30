@@ -648,6 +648,11 @@ pub(crate) struct RunHandle {
     /// find generated output files after the run completes. Only set for sandboxed
     /// runtimes that actually produce a spool.
     pub(crate) workspace_root: Option<PathBuf>,
+    /// Channel to relay follow-up user input to the adapter for mid-run steering.
+    /// `None` for transports that don't support steering (e.g., `codex exec`).
+    pub(crate) steer_tx: Option<mpsc::Sender<super::runs::SteerInput>>,
+    /// Whether this run's transport supports mid-run steering.
+    pub(crate) supports_steering: bool,
 }
 
 impl RunHandle {
@@ -852,6 +857,8 @@ impl AgentExecutionRuntime for FakeRuntime {
             events: rx,
             cancel: Some(cancel_tx),
             workspace_root: None, // FakeRuntime has no spool
+            steer_tx: None,       // FakeRuntime does not support steering
+            supports_steering: false,
         })
     }
 }
@@ -1011,6 +1018,8 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
             events: rx,
             cancel: Some(cancel_tx),
             workspace_root: Some(self.workspace.clone()), // ProviderCliRuntime workspace
+            steer_tx: None, // ProviderCliRuntime is dev-only, no steering yet
+            supports_steering: false,
         })
     }
 }
@@ -1271,6 +1280,15 @@ impl SandboxedProviderCliRuntime {
             "--codex-stream".into(),
             self.codex_stream.as_arg().to_owned(),
         ];
+        // Enable steering for providers that support it:
+        // - Codex app-server mode: relay JSON {requestId, text} to launcher stdin
+        // - Claude: launcher routes through stream-json adapter with interrupt steering
+        // The Python launcher handles the provider-specific adapter routing.
+        if (request.provider == "codex" && matches!(self.codex_stream, CodexStream::AppServer))
+            || request.provider == "claude"
+        {
+            argv.push("--enable-steering".into());
+        }
         for ip in &self.provider_ipv4 {
             argv.push("--provider-ipv4".into());
             argv.push(ip.clone());
@@ -1543,6 +1561,11 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
         if std::fs::create_dir_all(&workdir).is_err() {
             return Err(ExecutionError::Isolation); // guard drops -> releases lane
         }
+        // Steering: Codex app-server mode and Claude support mid-run steering.
+        // The Python launcher routes to the appropriate adapter for each provider.
+        let supports_steering = (request.provider == "codex"
+            && matches!(self.codex_stream, CodexStream::AppServer))
+            || request.provider == "claude";
         let argv = self.launch_argv(&request, lane, &workdir, &binary, &handle)?;
         let mut child = match Command::new(&argv[0])
             .args(&argv[1..])
@@ -1554,7 +1577,8 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_DATA_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
-            .stdin(Stdio::null())
+            // Open stdin for steering in app-server mode; null otherwise.
+            .stdin(if supports_steering { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true) // last-resort safety only; all paths stop gracefully first
@@ -1567,9 +1591,13 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
             Some(stdout) => stdout,
             None => return Err(ExecutionError::Unavailable), // guard drops
         };
+        // Take stdin for steering relay in app-server mode
+        let child_stdin = if supports_steering { child.stdin.take() } else { None };
         let pid = child.id();
         let (tx, rx) = mpsc::channel::<RunEvent>(16);
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+        // Steering channel: bounded to prevent runaway input
+        let (steer_tx, mut steer_rx) = mpsc::channel::<super::runs::SteerInput>(8);
         let started = run_id.clone();
         // The credential handle names this user's volume; scrub it from traces.
         let mut parser = super::activity::StreamParser::new(
@@ -1584,6 +1612,53 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
                 graceful_stop(&mut child, pid).await;
                 return;
             }
+
+            // Steering relay: read from steer_rx and write JSON to child stdin.
+            // Track pending requests so we can resolve reply channels on ack/error.
+            // Runs concurrently with the output stream reader.
+            let pending_steers: std::sync::Arc<
+                std::sync::Mutex<
+                    std::collections::HashMap<String, oneshot::Sender<Result<(), super::runs::SteerError>>>,
+                >,
+            > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let pending_steers_clone = pending_steers.clone();
+            if let Some(stdin) = child_stdin {
+                use tokio::io::AsyncWriteExt;
+                tokio::spawn(async move {
+                    let mut stdin = stdin;
+                    while let Some(input) = steer_rx.recv().await {
+                        // Store the reply channel keyed by request_id
+                        {
+                            let mut pending = pending_steers_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            pending.insert(input.request_id.clone(), input.reply);
+                        }
+                        // Format: {"requestId": "...", "text": "..."}
+                        let json = serde_json::json!({
+                            "requestId": input.request_id,
+                            "text": input.text,
+                        });
+                        let line = format!("{}\n", json);
+                        if stdin.write_all(line.as_bytes()).await.is_err() {
+                            // Write failed - resolve pending reply with error
+                            let mut pending = pending_steers_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(reply) = pending.remove(&input.request_id) {
+                                let _ = reply.send(Err(super::runs::SteerError::Unavailable));
+                            }
+                            break;
+                        }
+                        if stdin.flush().await.is_err() {
+                            let mut pending = pending_steers_clone.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(reply) = pending.remove(&input.request_id) {
+                                let _ = reply.send(Err(super::runs::SteerError::Unavailable));
+                            }
+                            break;
+                        }
+                    }
+                    // Close stdin when steer_rx is closed or on error
+                    let _ = stdin.shutdown().await;
+                });
+            }
+
             let mut lines = BufReader::new(stdout).lines();
             // `needs_stop` is true whenever WE end the run early (so we must tell
             // the launcher to tear down); a clean provider EOF leaves it false
@@ -1592,6 +1667,31 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
                 loop {
                     match lines.next_line().await {
                         Ok(Some(line)) => {
+                            // Check for steering acknowledgment before parser
+                            // Format: {"type":"neev.steer","requestId":"...","accepted":true/false}
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                                if json.get("type").and_then(|v| v.as_str()) == Some("neev.steer") {
+                                    if let Some(request_id) = json.get("requestId").and_then(|v| v.as_str()) {
+                                        let accepted = json.get("accepted").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        let mut pending = pending_steers.lock().unwrap_or_else(|e| e.into_inner());
+                                        if let Some(reply) = pending.remove(request_id) {
+                                            if accepted {
+                                                let _ = reply.send(Ok(()));
+                                            } else {
+                                                let reason = json.get("reason").and_then(|v| v.as_str()).unwrap_or("rejected");
+                                                // Map reason to SteerError
+                                                let error = if reason.contains("not active") || reason.contains("finished") {
+                                                    super::runs::SteerError::Finished
+                                                } else {
+                                                    super::runs::SteerError::Rejected
+                                                };
+                                                let _ = reply.send(Err(error));
+                                            }
+                                        }
+                                    }
+                                    continue; // Don't pass steering acks to parser
+                                }
+                            }
                             for event in parser.push(&line) {
                                 if send_item(&tx, event).await.is_err() {
                                     return true; // receiver gone -> stop launcher
@@ -1621,16 +1721,37 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
                         let _ = tx.send(RunEvent::Failed("provider".into())).await;
                     }
                 }
+                // Resolve any pending steering requests as finished (run completed)
+                {
+                    let mut pending = pending_steers.lock().unwrap_or_else(|e| e.into_inner());
+                    for (_, reply) in pending.drain() {
+                        let _ = reply.send(Err(super::runs::SteerError::Finished));
+                    }
+                }
                 false // clean EOF: launcher already exiting + tearing down itself
             };
             tokio::select! {
                 _ = &mut cancel_rx => {
                     graceful_stop(&mut child, pid).await;
+                    // Resolve pending steers as finished (canceled)
+                    {
+                        let mut pending = pending_steers.lock().unwrap_or_else(|e| e.into_inner());
+                        for (_, reply) in pending.drain() {
+                            let _ = reply.send(Err(super::runs::SteerError::Finished));
+                        }
+                    }
                     let _ = tx.send(RunEvent::Failed("canceled".into())).await;
                 }
                 needs_stop = stream => {
                     if needs_stop {
                         graceful_stop(&mut child, pid).await;
+                        // Resolve pending steers as unavailable (early stop)
+                        {
+                            let mut pending = pending_steers.lock().unwrap_or_else(|e| e.into_inner());
+                            for (_, reply) in pending.drain() {
+                                let _ = reply.send(Err(super::runs::SteerError::Unavailable));
+                            }
+                        }
                     }
                 }
             }
@@ -1640,6 +1761,8 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
             events: rx,
             cancel: Some(cancel_tx),
             workspace_root: Some(self.workspace_root.clone()), // SandboxedProviderCliRuntime workspace
+            steer_tx: if supports_steering { Some(steer_tx) } else { None },
+            supports_steering,
         })
     }
 }
@@ -1711,6 +1834,11 @@ impl RunHandle {
     /// separate request. Leaves `cancel()` on this handle a no-op afterwards.
     pub(crate) fn take_canceler(&mut self) -> Option<oneshot::Sender<()>> {
         self.cancel.take()
+    }
+
+    /// Take the steering channel so the live run registry can relay input.
+    pub(crate) fn take_steer_tx(&mut self) -> Option<mpsc::Sender<super::runs::SteerInput>> {
+        self.steer_tx.take()
     }
 }
 

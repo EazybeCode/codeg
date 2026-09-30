@@ -153,6 +153,7 @@ async fn a_reader_attaching_after_the_first_chunks_still_sees_all_of_them() {
                 }
                 RunSignal::Activity(_) => {}
                 RunSignal::Finished { .. } => break,
+                RunSignal::Input { .. } => panic!("unexpected follow-up in a run without steering input"),
             }
         }
     }
@@ -309,6 +310,7 @@ async fn over_limit_text_is_never_broadcast_only_never_stored() {
             RunSignal::Delta(delta) => broadcast_chars += delta.text.chars().count(),
             RunSignal::Activity(_) => {}
             RunSignal::Finished { .. } => break,
+                RunSignal::Input { .. } => panic!("unexpected follow-up in a run without steering input"),
         }
     }
     let turn = h.settled(&run_id).await;
@@ -553,6 +555,8 @@ fn buffer_only() -> LiveRun {
         activity: std::sync::Mutex::new(crate::neev::agents::activity::ActivityLog::new()),
         events,
         cancel: std::sync::Mutex::new(None),
+        steer_tx: None,
+        supports_steering: false,
     }
 }
 

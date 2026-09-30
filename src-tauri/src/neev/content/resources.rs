@@ -75,7 +75,12 @@ pub(crate) async fn record_receipt(
     Ok(())
 }
 
-pub(super) async fn initialize_usage(
+/// Ensure the usage tracking row exists for an org before charging quota.
+///
+/// Idempotent: a row that already exists is unchanged. Called inside
+/// transactions that charge bytes or counts, so the subsequent UPDATE
+/// has something to modify.
+pub(crate) async fn initialize_usage(
     tx: &DatabaseTransaction,
     org_id: i32,
 ) -> Result<(), ContentError> {

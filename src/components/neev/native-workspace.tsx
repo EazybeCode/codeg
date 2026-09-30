@@ -2209,7 +2209,7 @@ function WorkspaceContent() {
       )
         return
       const execute = () => {
-        if (movingRef.current || auth.signal.aborted) return
+        if (movingRef.current || auth.signal?.aborted) return
         movingRef.current = true
         setMovePending(true)
         setMutationError(null)
@@ -2252,7 +2252,7 @@ function WorkspaceContent() {
                 auth.session!.csrf,
                 auth.signal
               )
-              if (auth.signal.aborted) return
+              if (auth.signal?.aborted) return
               // Discard list responses begun before this successful relocation.
               for (const id of [payload.nodeId, targetNodeId])
                 itemGeneration.current.set(
@@ -2326,14 +2326,14 @@ function WorkspaceContent() {
                 auth.session!.csrf,
                 auth.signal
               )
-              if (auth.signal.aborted) return
+              if (auth.signal?.aborted) return
               applySession(updated)
             }
             setExpanded(
               (old) => new Set([...old, ...ancestry(nodes, targetNodeId)])
             )
           } catch (cause) {
-            if (!auth.signal.aborted) {
+            if (!auth.signal?.aborted) {
               setMutationError(cause)
               auth.handleError(cause)
             }

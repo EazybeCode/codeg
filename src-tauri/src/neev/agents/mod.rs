@@ -15,6 +15,7 @@ pub(crate) mod recovery;
 pub(crate) mod runs;
 pub(crate) mod sessions;
 pub(crate) mod status;
+pub(crate) mod steering_history;
 pub(crate) mod supervisor;
 pub(crate) mod transcript;
 pub(super) mod store;

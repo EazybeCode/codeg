@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::execution::{RunEvent, RunHandle};
 use super::generated::{self, PersistContext, SpoolError};
@@ -46,10 +46,52 @@ pub(crate) enum RunSignal {
     /// One recorded step of the provider's work. Carries its own `seq`, which
     /// is what lets a reattached reader drop an item it already has.
     Activity(super::activity::ActivityItem),
+    /// A follow-up user input accepted mid-run (steering). Carries the request_id
+    /// for deduplication on replay and the response_offset for interleaving.
+    Input {
+        request_id: String,
+        text: String,
+        created_at: i64,
+        response_offset: usize,
+    },
     Finished {
         status: TurnStatus,
         error_code: Option<String>,
     },
+}
+
+/// User input sent mid-run to steer the active turn.
+///
+/// Text only: attachments are bounded by what the initial turn staged, and
+/// adding files mid-run would require staging to a directory that already
+/// exists only because the run did. Carry bounded text, reject anything else
+/// at the endpoint.
+///
+/// Not Clone: each input carries a oneshot reply channel that MUST be consumed
+/// exactly once — by the runtime worker resolving the provider's ack or error.
+#[derive(Debug)]
+pub(crate) struct SteerInput {
+    /// The follow-up text the user typed.
+    pub(crate) text: String,
+    /// Caller's idempotency key, so a retry is identified.
+    pub(crate) request_id: String,
+    /// Reply channel: the runtime resolves this ONLY after the provider has
+    /// acknowledged the input or returned an error. The HTTP handler awaits
+    /// this before returning `accepted: true`.
+    pub(crate) reply: oneshot::Sender<Result<(), SteerError>>,
+}
+
+/// Why a steer request could not be accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SteerError {
+    /// The run has already finished — cannot steer a completed turn.
+    Finished,
+    /// This provider transport does not support mid-run steering.
+    Unsupported,
+    /// The steering channel is full or broken.
+    Unavailable,
+    /// The provider explicitly rejected the steering input.
+    Rejected,
 }
 
 /// A run currently executing in this process.
@@ -66,6 +108,11 @@ pub(crate) struct LiveRun {
     activity: Mutex<super::activity::ActivityLog>,
     events: broadcast::Sender<RunSignal>,
     cancel: Mutex<Option<oneshot::Sender<()>>>,
+    /// Channel to send follow-up input during the run. `None` if the transport
+    /// does not support steering (e.g., `codex exec` mode).
+    steer_tx: Option<mpsc::Sender<SteerInput>>,
+    /// Whether this run's transport supports mid-run steering.
+    pub(crate) supports_steering: bool,
 }
 
 /// The outcome of appending one runtime chunk to the shared buffer.
@@ -234,6 +281,26 @@ impl LiveRun {
         self.events.subscribe()
     }
 
+    /// Broadcast an accepted steering input to all SSE listeners.
+    ///
+    /// Called by the HTTP handler after the provider has acknowledged the input.
+    /// The signal carries all the data needed to interleave the user's follow-up
+    /// at the correct position in the transcript.
+    pub(crate) fn broadcast_input(
+        &self,
+        request_id: String,
+        text: String,
+        created_at: i64,
+        response_offset: usize,
+    ) {
+        let _ = self.events.send(RunSignal::Input {
+            request_id,
+            text,
+            created_at,
+            response_offset,
+        });
+    }
+
     /// Interrupt the turn. Idempotent — a second cancel is a no-op, so a retry
     /// or a double click cannot fail.
     pub(crate) fn cancel(&self) {
@@ -243,6 +310,48 @@ impl LiveRun {
         };
         if let Some(sender) = sender {
             let _ = sender.send(());
+        }
+    }
+
+    /// Send follow-up input to the running turn (steering) and await provider ack.
+    ///
+    /// This is async because it waits for the runtime worker to relay the input
+    /// to the provider and receive acknowledgment. Returns `Ok(())` ONLY after
+    /// the provider has confirmed receipt — never on mere channel enqueue.
+    ///
+    /// The timeout is bounded (default 30s) to prevent indefinite hangs when the
+    /// provider or relay is stuck.
+    pub(crate) async fn steer(&self, text: String, request_id: String) -> Result<(), SteerError> {
+        if !self.supports_steering {
+            return Err(SteerError::Unsupported);
+        }
+        // Check if cancel channel is taken — run is finishing
+        let cancel_taken = match self.cancel.lock() {
+            Ok(guard) => guard.is_none(),
+            Err(poisoned) => poisoned.into_inner().is_none(),
+        };
+        if cancel_taken {
+            return Err(SteerError::Finished);
+        }
+        let tx = self.steer_tx.as_ref().ok_or(SteerError::Unsupported)?;
+
+        // Create the oneshot for this specific request's reply
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let input = SteerInput {
+            text,
+            request_id,
+            reply: reply_tx,
+        };
+
+        // Try to send to the runtime's steering channel
+        tx.try_send(input).map_err(|_| SteerError::Unavailable)?;
+
+        // Await the provider's acknowledgment with a timeout
+        const STEER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        match tokio::time::timeout(STEER_TIMEOUT, reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(SteerError::Unavailable), // Channel dropped
+            Err(_) => Err(SteerError::Unavailable),     // Timeout
         }
     }
 }
@@ -337,6 +446,8 @@ pub(crate) fn start(
     let workspace_root = handle.workspace_root.take();
     // Capture runtime's own run_id BEFORE consuming events - distinct from durable run_id
     let runtime_id = handle.run_id.clone();
+    let supports_steering = handle.supports_steering;
+    let steer_tx = handle.take_steer_tx();
     let live = Arc::new(LiveRun {
         org_id: actor.org_id,
         owner_id: actor.identity.user_id,
@@ -346,6 +457,8 @@ pub(crate) fn start(
         activity: Mutex::new(super::activity::ActivityLog::new()),
         events,
         cancel: Mutex::new(handle.take_canceler()),
+        steer_tx,
+        supports_steering,
     });
     lock(&state.agent_runs).insert(run_id.clone(), live.clone());
     tokio::spawn(drive(

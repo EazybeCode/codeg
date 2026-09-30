@@ -35,8 +35,12 @@ use crate::neev::agents::execution::{RunAttachment, RunRequest};
 use crate::neev::agents::library_runtime::LibraryRunItem;
 use crate::neev::agents::runs::{self, RunSignal};
 use crate::neev::agents::sessions::{self, AgentSession, AgentTurn, SessionInput, TurnStatus};
+use crate::neev::agents::steering_history::STEER_TEXT_MAX_BYTES;
 use crate::neev::agents::{intents, supervisor, transcript, types::Provider};
 use crate::neev::content::attachment::{self, Owner, StoredAttachment};
+use crate::neev::db::{
+    get_steer_input, record_steer_input, ReserveResult,
+};
 use crate::neev::content::types::Page;
 use crate::neev::startup::ServerState;
 use crate::neev::types::OrgContext;
@@ -78,6 +82,18 @@ struct SessionDto {
     updated_at: i64,
 }
 
+/// A follow-up input sent mid-run (steering).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SteerInputDto {
+    request_id: String,
+    text: String,
+    created_at: i64,
+    /// Character offset into the response where this input was accepted.
+    /// The frontend uses it to interleave user messages at the correct position.
+    response_offset: i64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TurnDto {
@@ -94,6 +110,14 @@ struct TurnDto {
     /// The files this turn was started with, in send order. Always present,
     /// `[]` when none — same reason as `activity`.
     attachments: Vec<AttachmentDto>,
+    /// Follow-up inputs sent mid-run (steering). Always present, `[]` when none.
+    /// Only includes accepted inputs — inputs that the provider acknowledged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    inputs: Vec<SteerInputDto>,
+    /// Whether this run supports mid-run steering. `false` for old backend or
+    /// providers that don't support it (e.g., codex exec mode).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    supports_steering: bool,
     status: &'static str,
     error_code: Option<String>,
     provider: String,
@@ -271,7 +295,11 @@ fn session_dto(session: AgentSession) -> SessionDto {
     }
 }
 
-fn turn_dto(turn: AgentTurn, attachments: Vec<AttachmentDto>) -> TurnDto {
+fn turn_dto(
+    turn: AgentTurn,
+    attachments: Vec<AttachmentDto>,
+    inputs: Vec<SteerInputDto>,
+) -> TurnDto {
     TurnDto {
         id: turn.id,
         session_id: turn.session_id,
@@ -281,6 +309,10 @@ fn turn_dto(turn: AgentTurn, attachments: Vec<AttachmentDto>) -> TurnDto {
         response: turn.response,
         activity: turn.activity,
         attachments,
+        inputs,
+        // Whether steering is supported is determined at runtime by the live run.
+        // Historic turns show false; live runs check the run's supports_steering flag.
+        supports_steering: false,
         status: turn.status.name(),
         error_code: turn.error_code,
         provider: turn.provider,
@@ -288,6 +320,30 @@ fn turn_dto(turn: AgentTurn, attachments: Vec<AttachmentDto>) -> TurnDto {
         created_at: turn.created_at,
         updated_at: turn.updated_at,
         completed_at: turn.completed_at,
+    }
+}
+
+/// Load accepted steering inputs for a turn from the database.
+async fn steer_inputs_for_turn(
+    state: &ServerState,
+    org_id: i32,
+    session_id: &str,
+    turn_sequence: i64,
+) -> Vec<SteerInputDto> {
+    match crate::neev::db::list_steer_inputs(&state.database, org_id, session_id, turn_sequence).await {
+        Ok(inputs) => inputs
+            .into_iter()
+            .filter_map(|input| {
+                // Only include inputs that have a response_offset (accepted)
+                input.response_offset.map(|offset| SteerInputDto {
+                    request_id: input.request_id,
+                    text: input.text,
+                    created_at: input.created_at,
+                    response_offset: offset,
+                })
+            })
+            .collect(),
+        Err(_) => Vec::new(), // On error, return empty - don't fail the whole request
     }
 }
 
@@ -304,7 +360,8 @@ async fn turn_page_dto(
     let mut items = Vec::with_capacity(page.items.len());
     for turn in page.items {
         let attachments = attachment_dtos(carried.remove(&turn.sequence).unwrap_or_default());
-        items.push(turn_dto(turn, attachments));
+        let inputs = steer_inputs_for_turn(state, actor.org_id, session_id, turn.sequence).await;
+        items.push(turn_dto(turn, attachments, inputs));
     }
     Ok(TurnPageDto {
         items,
@@ -564,7 +621,8 @@ pub(super) async fn start_turn(
         let settled = sessions::turn_by_run(&state, &actor, &turn.run_id).await?;
         let mut response = private_json(StartedTurnDto {
             run_id: settled.run_id.clone(),
-            turn: turn_dto(settled, attachment_dtos(carried)),
+            // Immediately settled turns have no steering inputs
+            turn: turn_dto(settled, attachment_dtos(carried), Vec::new()),
         });
         *response.status_mut() = StatusCode::CREATED;
         return Ok(response);
@@ -621,9 +679,10 @@ pub(super) async fn start_turn(
                 // A saved Agent Chat is private: no publication, ever.
                 None,
             );
+            // Just-started turns have no steering inputs yet
             let mut response = private_json(StartedTurnDto {
                 run_id: turn.run_id.clone(),
-                turn: turn_dto(turn, attachment_dtos(carried)),
+                turn: turn_dto(turn, attachment_dtos(carried), Vec::new()),
             });
             *response.status_mut() = StatusCode::CREATED;
             Ok(response)
@@ -635,9 +694,10 @@ pub(super) async fn start_turn(
             let code = sessions::execution_error_code(&error);
             runs::settle_refusal(&state, &turn.run_id, code).await?;
             let settled = sessions::turn_by_run(&state, &actor, &turn.run_id).await?;
+            // Immediately settled turns have no steering inputs
             let mut response = private_json(StartedTurnDto {
                 run_id: settled.run_id.clone(),
-                turn: turn_dto(settled, attachment_dtos(carried)),
+                turn: turn_dto(settled, attachment_dtos(carried), Vec::new()),
             });
             *response.status_mut() = StatusCode::CREATED;
             Ok(response)
@@ -681,6 +741,62 @@ fn finished_event(status: TurnStatus, error_code: Option<&str>) -> Event {
         "status": status.name(),
         "errorCode": error_code,
     }))
+}
+
+/// A follow-up input accepted mid-run (steering).
+///
+/// The frontend uses this to display the user's follow-up in the transcript
+/// at the correct position (responseOffset).
+fn input_event(
+    run_id: &str,
+    request_id: &str,
+    text: &str,
+    created_at: i64,
+    response_offset: i64,
+) -> Event {
+    json_event(&serde_json::json!({
+        "type": "input",
+        "runId": run_id,
+        "requestId": request_id,
+        "text": text,
+        "createdAt": created_at,
+        "responseOffset": response_offset,
+    }))
+}
+
+/// The durable turn a stream follows, for reading its accepted follow-ups.
+#[derive(Clone)]
+struct StreamTurn {
+    org_id: i32,
+    session_id: String,
+    sequence: i64,
+}
+
+/// Deliver every durably accepted follow-up this stream has not yet sent.
+///
+/// The client resets its live inputs on `started`, so a reattaching reader must
+/// be told again about follow-ups accepted before it subscribed. A follow-up is
+/// committed before it is broadcast, so reading storage AFTER subscribing loses
+/// nothing: one committed before the read is here, one committed after it
+/// arrives live. `delivered` drops the overlap by request id.
+async fn deliver_stored_inputs(
+    state: &ServerState,
+    run_id: &str,
+    turn: &StreamTurn,
+    delivered: &mut std::collections::HashSet<String>,
+    sender: &mut EventSink,
+) -> Result<(), ()> {
+    for input in steer_inputs_for_turn(state, turn.org_id, &turn.session_id, turn.sequence).await {
+        if !delivered.insert(input.request_id.clone()) {
+            continue;
+        }
+        deliver(
+            sender,
+            input_event(run_id, &input.request_id, &input.text, input.created_at, input.response_offset),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// How long a stream may run before it is closed and the client must reattach.
@@ -784,10 +900,17 @@ pub(super) async fn run_events(
         token,
         run_id: run_id.clone(),
     };
+    let stream_turn = StreamTurn {
+        org_id: actor.org_id,
+        session_id: turn.session_id.clone(),
+        sequence: turn.sequence,
+    };
 
     if turn.status != TurnStatus::Running {
         // Already settled: replay the stored result exactly once. Spawned so the
         // bounded sink can apply backpressure instead of being pre-filled.
+        let state = state.clone();
+        let run_id = run_id.clone();
         tokio::spawn(async move {
             if deliver(&mut sender, started_event(&turn)).await.is_err() {
                 return;
@@ -803,6 +926,13 @@ pub(super) async fn run_events(
                 if deliver(&mut sender, activity_event(item)).await.is_err() {
                     return;
                 }
+            }
+            let mut delivered = std::collections::HashSet::new();
+            if deliver_stored_inputs(&state, &run_id, &stream_turn, &mut delivered, &mut sender)
+                .await
+                .is_err()
+            {
+                return;
             }
             let _ = deliver(
                 &mut sender,
@@ -825,6 +955,7 @@ pub(super) async fn run_events(
             tokio::spawn(bounded_stream(
                 state.clone(),
                 run_id.clone(),
+                stream_turn,
                 sender,
                 authority,
                 StreamSource::Live(attachment),
@@ -837,6 +968,7 @@ pub(super) async fn run_events(
             tokio::spawn(bounded_stream(
                 state.clone(),
                 run_id.clone(),
+                stream_turn,
                 sender,
                 authority,
                 StreamSource::Stored {
@@ -860,6 +992,7 @@ enum StreamSource {
 async fn bounded_stream(
     state: Arc<ServerState>,
     run_id: String,
+    turn: StreamTurn,
     mut sender: EventSink,
     mut authority: Authority,
     source: StreamSource,
@@ -867,10 +1000,12 @@ async fn bounded_stream(
     let work = async {
         match source {
             StreamSource::Live(attachment) => {
-                follow_live(&state, &run_id, attachment, &mut sender, &mut authority).await
+                follow_live(&state, &run_id, &turn, attachment, &mut sender, &mut authority)
+                    .await
             }
             StreamSource::Stored { emitted } => {
-                follow_stored(&state, &run_id, emitted, &mut sender, &mut authority).await
+                follow_stored(&state, &run_id, &turn, emitted, &mut sender, &mut authority)
+                    .await
             }
         }
     };
@@ -883,6 +1018,7 @@ async fn bounded_stream(
 async fn follow_live(
     state: &Arc<ServerState>,
     run_id: &str,
+    turn: &StreamTurn,
     mut attachment: runs::Attachment,
     sender: &mut EventSink,
     authority: &mut Authority,
@@ -910,6 +1046,14 @@ async fn follow_live(
         }
         delivered_seq = delivered_seq.max(item.seq);
     }
+    // Read AFTER `attach` subscribed, so no accepted follow-up falls between.
+    let mut delivered_inputs = std::collections::HashSet::new();
+    if deliver_stored_inputs(state, run_id, turn, &mut delivered_inputs, sender)
+        .await
+        .is_err()
+    {
+        return;
+    }
     let mut emitted = attachment.snapshot_chars;
     loop {
         // An IDLE stream still has to notice a revocation. The timeout turns a
@@ -936,13 +1080,17 @@ async fn follow_live(
                 // re-proving authority before every delivery costs one check
                 // per burst rather than one per token.
                 let mut finished = None;
-                let mut pending: Vec<crate::neev::agents::activity::ActivityItem> = Vec::new();
+                let mut pending_activity: Vec<crate::neev::agents::activity::ActivityItem> = Vec::new();
+                let mut pending_inputs: Vec<(String, String, i64, usize)> = Vec::new();
                 loop {
                     match attachment.events.try_recv() {
                         Ok(RunSignal::Delta(next)) => text.push_str(&splice(next, &mut emitted)),
                         // Pulled off the queue while coalescing text; held so it
                         // is delivered after this frame rather than dropped.
-                        Ok(RunSignal::Activity(item)) => pending.push(item),
+                        Ok(RunSignal::Activity(item)) => pending_activity.push(item),
+                        Ok(RunSignal::Input { request_id, text, created_at, response_offset }) => {
+                            pending_inputs.push((request_id, text, created_at, response_offset));
+                        }
                         Ok(RunSignal::Finished { status, error_code }) => {
                             finished = Some((status, error_code));
                             break;
@@ -958,11 +1106,19 @@ async fn follow_live(
                 if !text.is_empty() && deliver(sender, chunk_event(&text)).await.is_err() {
                     return;
                 }
-                for item in &pending {
+                for item in &pending_activity {
                     if deliver(sender, activity_event(item)).await.is_err() {
                         return;
                     }
                     delivered_seq = delivered_seq.max(item.seq);
+                }
+                for (request_id, input_text, created_at, response_offset) in pending_inputs {
+                    if !delivered_inputs.insert(request_id.clone()) {
+                        continue;
+                    }
+                    if deliver(sender, input_event(run_id, &request_id, &input_text, created_at, response_offset as i64)).await.is_err() {
+                        return;
+                    }
                 }
                 if let Some((status, error_code)) = finished {
                     let _ = deliver(sender, finished_event(status, error_code.as_deref())).await;
@@ -977,6 +1133,17 @@ async fn follow_live(
                     return;
                 }
                 delivered_seq = delivered_seq.max(item.seq);
+            }
+            Ok(RunSignal::Input { request_id, text, created_at, response_offset }) => {
+                if !delivered_inputs.insert(request_id.clone()) {
+                    continue;
+                }
+                if authority.ensure(state).await.is_err() {
+                    return;
+                }
+                if deliver(sender, input_event(run_id, &request_id, &text, created_at, response_offset as i64)).await.is_err() {
+                    return;
+                }
             }
             Ok(RunSignal::Finished { status, error_code }) => {
                 if authority.ensure(state).await.is_err() {
@@ -1020,13 +1187,24 @@ async fn follow_live(
                     }
                     delivered_seq = item.seq;
                 }
+                // Follow-ups share the channel too; recover them from storage.
+                if authority.ensure(state).await.is_err() {
+                    return;
+                }
+                if deliver_stored_inputs(state, run_id, turn, &mut delivered_inputs, sender)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
             }
             // The run ended and its sender was dropped without us seeing the
             // terminal signal: read the durable row, which is written first.
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
     }
-    finish_from_storage(state, run_id, emitted, sender, authority).await;
+    finish_from_storage(state, run_id, turn, emitted, &mut delivered_inputs, sender, authority)
+        .await;
 }
 
 /// The portion of a delta not already delivered, advancing the emitted cursor.
@@ -1050,6 +1228,7 @@ fn started_event_for(run_id: &str, attachment: &runs::Attachment) -> Event {
         "type": "started",
         "runId": run_id,
         "turnId": attachment.run.turn_id,
+        "supportsSteering": attachment.run.supports_steering,
     }))
 }
 
@@ -1058,11 +1237,13 @@ fn started_event_for(run_id: &str, attachment: &runs::Attachment) -> Event {
 async fn follow_stored(
     state: &Arc<ServerState>,
     run_id: &str,
+    stream_turn: &StreamTurn,
     already_emitted: usize,
     sender: &mut EventSink,
     authority: &mut Authority,
 ) {
     let mut emitted = already_emitted;
+    let mut delivered_inputs = std::collections::HashSet::new();
     for _ in 0..POLL_ATTEMPTS {
         // Every poll re-derives the actor when stale, so this loop cannot keep
         // serving a session that has since been revoked.
@@ -1081,6 +1262,12 @@ async fn follow_stored(
                 return;
             }
             emitted = chars;
+        }
+        if deliver_stored_inputs(state, run_id, stream_turn, &mut delivered_inputs, sender)
+            .await
+            .is_err()
+        {
+            return;
         }
         if turn.status != TurnStatus::Running {
             let _ = deliver(
@@ -1106,7 +1293,9 @@ async fn follow_stored(
 async fn finish_from_storage(
     state: &Arc<ServerState>,
     run_id: &str,
+    stream_turn: &StreamTurn,
     emitted: usize,
+    delivered_inputs: &mut std::collections::HashSet<String>,
     sender: &mut EventSink,
     authority: &mut Authority,
 ) {
@@ -1121,6 +1310,12 @@ async fn finish_from_storage(
                 if deliver(sender, chunk_event(&tail)).await.is_err() {
                     return;
                 }
+            }
+            if deliver_stored_inputs(state, run_id, stream_turn, delivered_inputs, sender)
+                .await
+                .is_err()
+            {
+                return;
             }
             let _ = deliver(
                 sender,
@@ -1537,6 +1732,8 @@ pub(super) async fn team_invoke(
     // the runtime, and the loser could then start a second provider execution
     // (or settle the shared turn as `busy` while the winner is still running).
     if !created {
+        // Idempotent retry - load any steering inputs that may have been recorded
+        let inputs = steer_inputs_for_turn(&state, actor.org_id, &session.id, turn.sequence).await;
         let mut response = private_json(TeamInvokeDto {
             message: super::content::message_dto(
                 prompt_message,
@@ -1544,7 +1741,7 @@ pub(super) async fn team_invoke(
                 named_in_prompt,
             )?,
             run_id: turn.run_id.clone(),
-            turn: turn_dto(turn, Vec::new()),
+            turn: turn_dto(turn, Vec::new(), inputs),
         });
         *response.status_mut() = StatusCode::CREATED;
         return Ok(response);
@@ -1626,6 +1823,7 @@ pub(super) async fn team_invoke(
             sessions::turn_by_run(&state, &actor, &turn.run_id).await?
         }
     };
+    // Just-started turns have no steering inputs yet
     let mut response = private_json(TeamInvokeDto {
         message: super::content::message_dto(
             prompt_message,
@@ -1633,7 +1831,7 @@ pub(super) async fn team_invoke(
             named_in_prompt,
         )?,
         run_id: turn.run_id.clone(),
-        turn: turn_dto(turn, Vec::new()),
+        turn: turn_dto(turn, Vec::new(), Vec::new()),
     });
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
@@ -1670,6 +1868,141 @@ pub(super) async fn cancel_run(
         "canceled": canceled,
         "status": turn.status.name(),
     })))
+}
+
+/// Request body cap: the text may be JSON-escaped (`\u0000` is six bytes per
+/// input byte) plus the envelope.
+const STEER_BODY_LIMIT: usize = 6 * STEER_TEXT_MAX_BYTES + 1_024;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SteerInput {
+    /// The follow-up text to send. Bounded by the adapters' stdin record cap.
+    text: String,
+    /// Caller-chosen idempotency key. Retrying the same key for the same run
+    /// returns the same response without re-sending.
+    request_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SteerDto {
+    /// Whether the input was accepted by the provider. `true` means the
+    /// provider acknowledged receipt — NOT merely queued to an internal channel.
+    accepted: bool,
+    /// The run id, echoed back for confirmation.
+    run_id: String,
+    /// The request id, echoed back for idempotency correlation.
+    request_id: String,
+}
+
+/// Steer a live run by sending follow-up input. Ownership is checked against
+/// the durable turn, so a run id alone is not authority.
+///
+/// POST /api/neev/agent/runs/{run_id}/steer
+///
+/// Returns 200 `{accepted:true, runId, requestId}` ONLY after provider ack.
+/// Returns 409 Conflict (standard error) when run is finished, stale, or unsupported.
+/// Returns 404 Not Found when the run doesn't exist or isn't the caller's.
+/// Returns 400 Bad Request for malformed input.
+///
+/// **Idempotency**: An already-accepted request_id returns 200 immediately,
+/// even after the run has completed. A pending (recorded but not accepted)
+/// request_id with matching text retries transport; with different text rejects.
+///
+/// **Atomic reservation**: Uses INSERT ON CONFLICT to ensure exactly one caller
+/// wins the right to transport. Concurrent retries see the existing row.
+pub(super) async fn steer_run(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let run_id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    let (input, actor) =
+        catalog::organization_mutation::<SteerInput>(&state, request, STEER_BODY_LIMIT)
+            .await?;
+
+    // Validate run_id format
+    canonical_run_id(&run_id)?;
+
+    // Validate request_id format (same as other idempotency keys)
+    canonical_uuid(&input.request_id)?;
+
+    // Validate text is non-empty and bounded in UTF-8 bytes, the unit the
+    // provider adapters enforce: a longer text would be reserved, then
+    // refused by the adapter after the reservation was spent.
+    let text = input.text.trim();
+    if text.is_empty() || text.len() > STEER_TEXT_MAX_BYTES {
+        return Err(ApiError::Invalid);
+    }
+
+    // Prove ownership before detaching the operation. The detached task owns
+    // reservation, transport, and persistence, so disconnecting the HTTP client
+    // cannot strand an acknowledged input between these steps.
+    let turn = sessions::turn_by_run(&state, &actor, &run_id).await?;
+    let bound_chat_id = sessions::get(&state, &actor, &turn.session_id).await?.bound_chat_id;
+    let text = text.to_owned();
+    let state = state.clone();
+    tokio::spawn(async move {
+        let existing = get_steer_input(
+            &state.database, actor.org_id, &turn.session_id,
+            turn.sequence, &input.request_id,
+        ).await.map_err(|_| ApiError::Unavailable)?;
+        if let Some(existing) = existing {
+            if existing.text != text { return Err(ApiError::Invalid); }
+            if existing.accepted {
+                return Ok(private_json(SteerDto {
+                    accepted: true, run_id: run_id, request_id: input.request_id,
+                }));
+            }
+            // Pending/unknown is never permission to redeliver. The first
+            // owner may still be awaiting an acknowledgment or committing it.
+            return Err(ApiError::Unavailable);
+        }
+        let run = match runs::find(&state.agent_runs, &run_id) {
+            Some(run) if run.org_id == actor.org_id && run.owner_id == actor.identity.user_id => run,
+            Some(_) => return Err(ApiError::NotFound),
+            None => return Err(ApiError::Conflict),
+        };
+        let now = state.clock.now_unix();
+        match record_steer_input(
+            &state.database, actor.org_id, &turn.session_id, turn.sequence,
+            &input.request_id, &text, now,
+        ).await.map_err(|_| ApiError::Unavailable)? {
+            ReserveResult::Won => {},
+            ReserveResult::AlreadyExists => return Err(ApiError::Unavailable),
+            ReserveResult::TextMismatch => return Err(ApiError::Invalid),
+        }
+        run.steer(text.clone(), input.request_id.clone()).await.map_err(|error| match error {
+            runs::SteerError::Unavailable => ApiError::Unavailable,
+            _ => ApiError::Conflict,
+        })?;
+        let (_, response_chars) = run.snapshot();
+        // Do not publish success until history is durable. Retries can read
+        // the committed receipt without executing the provider input again.
+        let mut persisted = false;
+        for attempt in 0..6 {
+            if crate::neev::agents::steering_history::accept_steer_input_and_publish(
+                &state, &actor, &turn.session_id, turn.sequence, &input.request_id,
+                &text, response_chars as i64, now, bound_chat_id.as_deref(),
+            ).await.is_ok() {
+                persisted = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))).await;
+        }
+        if !persisted {
+            tracing::error!(run_id = %run_id, request_id = %input.request_id,
+                "Provider accepted follow-up but durable receipt could not be saved");
+            return Err(ApiError::Unavailable);
+        }
+        run.broadcast_input(input.request_id.clone(), text, now, response_chars);
+        Ok(private_json(SteerDto {
+            accepted: true, run_id: run_id, request_id: input.request_id,
+        }))
+    }).await.map_err(|_| ApiError::Unavailable)?
+
 }
 
 #[derive(Deserialize)]

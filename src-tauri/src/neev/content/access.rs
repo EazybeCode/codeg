@@ -103,7 +103,7 @@ pub(crate) async fn authorized(
 
 /// Discover the complete lock set before locking anything; PostgreSQL acquires
 /// rows after ORDER BY. Admission/session locks keep the graph stable meanwhile.
-pub(super) async fn lock_resources(
+pub(crate) async fn lock_resources(
     tx: &DatabaseTransaction,
     actor: &OrgContext,
     id: &str,

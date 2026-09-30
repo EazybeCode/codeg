@@ -60,6 +60,7 @@ import {
   loadAgentConnections,
   loadAgentSession,
   loadTeamAgentSession,
+  steerAgentRun,
   updateAgentSessionSettings,
   NEEV_AGENT_PROVIDERS,
   NEEV_DEFAULT_MODEL,
@@ -70,6 +71,7 @@ import {
   type NeevAgentSession,
   type NeevAgentSettings,
   type NeevAgentTurn,
+  type NeevRunInput,
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls, reconcileAgentSettings } from "./native-agent-controls"
 import {
@@ -397,6 +399,14 @@ function Chat({
     // stored row arriving, so the preview reads like that row already.
     [runFinishedAt, setRunFinishedAt] = useState<number | null>(null),
     [runCompleted, setRunCompleted] = useState(false),
+    // User inputs sent into the running turn via steering. Upserted by
+    // `requestId` so a reattach never shows duplicates.
+    [liveInputs, setLiveInputs] = useState<NeevRunInput[]>([]),
+    // Whether the current run supports steering (provider acknowledged).
+    [supportsSteering, setSupportsSteering] = useState(false),
+    // A steering request in flight: the requestId, so the same id is retried
+    // if the first attempt fails. Cleared on success or when the run ends.
+    [steeringInFlight, setSteeringInFlight] = useState<string | null>(null),
     // The caller's own stored turns for this chat: what makes a reopened
     // conversation show the trace it showed before.
     [turns, setTurns] = useState<NeevAgentTurn[]>([]),
@@ -535,6 +545,13 @@ function Chat({
     // would not.
     previewFloor = useRef(0n),
     previewProvider = useRef<string>("claude"),
+    // The requestId for the steering request to retry on failure. Kept across
+    // failed sends so the same id is used, preventing duplicates.
+    steeringRetryId = useRef<{
+      id: string
+      text: string
+      runId: string
+    } | null>(null),
     draftRef = useRef(""),
     sequence = useRef<string | null>(null),
     retry = useRef<AppendNativeMessageInput | null>(null),
@@ -1093,6 +1110,8 @@ function Chat({
     setRunFinishedAt(null)
     setRunCompleted(false)
     setLiveActivity(mergeActivity([], seed))
+    setLiveInputs([])
+    setSupportsSteering(false)
     followHistory.current = true
     let answered = false
     try {
@@ -1109,10 +1128,32 @@ function Chat({
           // upserts rather than appends and the trace cannot double.
           setLiveActivity((old) => mergeActivity(old, [item]))
         },
+        onInput: (input) => {
+          if (!current()) return
+          // Shared follow-ups are durable human messages. Fetch that canonical
+          // row instead of duplicating it inside the agent transcript.
+          void refresh()
+          // Upsert by requestId: a reattach replays persisted inputs.
+          setLiveInputs((old) => {
+            if (old.some((item) => item.requestId === input.requestId))
+              return old
+            return [...old, input].sort(
+              (left, right) => left.responseOffset - right.responseOffset
+            )
+          })
+          // Clear pending steering request when our input is acknowledged.
+          setSteeringInFlight((pending) =>
+            pending === input.requestId ? null : pending
+          )
+        },
         onEvent: (event) => {
           if (!current()) return
-          if (event.type === "started") setAgentText("")
-          else if (event.type === "chunk")
+          if (event.type === "started") {
+            setAgentText("")
+            setLiveInputs([])
+            // Set supportsSteering from the SSE event on both initial and reconnect.
+            setSupportsSteering(event.supportsSteering)
+          } else if (event.type === "chunk")
             setAgentText((current) => current + event.text)
           else {
             // How it ended, so the preview's trace line reads like the stored
@@ -1120,6 +1161,9 @@ function Chat({
             // under the reader by a line.
             answered = event.status === "completed"
             setRunCompleted(answered)
+            // Run ended: clear steering state.
+            setSteeringInFlight(null)
+            setSupportsSteering(false)
             if (!answered && event.status !== "canceled")
               setError(new NativeClientError("unavailable"))
           }
@@ -1149,6 +1193,7 @@ function Chat({
   function clearPreview() {
     setAgentText("")
     setLiveActivity([])
+    setLiveInputs([])
     setRunStartedAt(null)
     setRunFinishedAt(null)
     setRunCompleted(false)
@@ -1318,6 +1363,63 @@ function Chat({
       // Best-effort: the run stream ends with a canceled `finished` event.
     }
   }
+  /**
+   * Send a follow-up input into the active run via steering.
+   *
+   * The request is idempotent on requestId: on failure we keep the same id
+   * so a retry cannot duplicate. Text is retained in the composer until
+   * the server acknowledges receipt via the SSE input event.
+   */
+  async function steerAgent() {
+    const runId = agentRunId
+    if (!runId || !auth.session || !supportsSteering) return
+    // Capture the draft at the start of the attempt for later clearing.
+    const sentDraft = draft
+    const { prompt } = composeWirePrompt(
+      sentDraft,
+      new Map(attachments.items.map((item) => [item.id, item.name]))
+    )
+    if (!prompt || steeringInFlight) return
+    // Attachments are not supported mid-run; refuse honestly.
+    if (!attachments.empty) return
+    // Reuse the same requestId on retry so duplicates cannot happen.
+    // The retry ref persists the id across failed attempts.
+    const previous = steeringRetryId.current
+    const requestId =
+      previous?.text === prompt && previous.runId === runId
+        ? previous.id
+        : crypto.randomUUID()
+    steeringRetryId.current = { id: requestId, text: prompt, runId: runId }
+    setSteeringInFlight(requestId)
+    setError(null)
+    try {
+      await steerAgentRun(
+        runId,
+        prompt,
+        requestId,
+        auth.session.csrf,
+        auth.signal
+      )
+      // Success: clear only the captured draft if the composer still holds it.
+      // If the user has edited while waiting, preserve their new text.
+      steeringRetryId.current = null
+      setSteeringInFlight((pending) => (pending === requestId ? null : pending))
+      clearSent(sentDraft)
+      // steeringInFlight is cleared by the SSE input event when it matches.
+    } catch (cause) {
+      // On conflict (finished/unsupported), the run ended while we were
+      // typing. Keep text for a new turn. Clear retry id since a new turn
+      // needs a new id. For network errors, keep text and requestId in the
+      // ref so Enter retries with the same id.
+      if (cause instanceof NativeClientError && cause.kind === "conflict") {
+        // Run finished; steering no longer available. User can start new turn.
+        setSupportsSteering(false)
+        steeringRetryId.current = null
+      }
+      setSteeringInFlight(null)
+      fail(cause)
+    }
+  }
   async function send() {
     // Empty body + files is a message the server accepts and labels; empty
     // body with nothing attached is not a message at all.
@@ -1440,7 +1542,10 @@ function Chat({
   }
   /** Whichever way this composer is pointed. */
   function submit() {
-    if (mode === "agent") void askAgent()
+    // When a run is active and supports steering, Enter sends into
+    // the same run. Otherwise it starts a new turn or posts a message.
+    if (mode === "agent" && agentBusy && supportsSteering) void steerAgent()
+    else if (mode === "agent") void askAgent()
     else void send()
   }
   /**
@@ -1833,7 +1938,9 @@ function Chat({
                   real to show, and used to show nothing until the first
                   token. */}
               <div aria-live="polite">
-                {(agentText || liveActivity.length > 0) && (
+                {(agentText ||
+                  liveActivity.length > 0 ||
+                  liveInputs.length > 0) && (
                   <TranscriptBody
                     text={agentText}
                     items={liveActivity}
@@ -1913,7 +2020,11 @@ function Chat({
             tray={attachments}
             label={t("message")}
             placeholder={
-              mode === "agent" ? t("agentPromptPlaceholder") : t("message")
+              mode === "agent" && agentBusy && supportsSteering
+                ? t("agentFollowUp")
+                : mode === "agent"
+                  ? t("agentPromptPlaceholder")
+                  : t("message")
             }
             onSubmit={submit}
             busy={composerBusy}
@@ -1944,6 +2055,11 @@ function Chat({
           {attachments.uploading && (
             <p role="status" className="px-1 text-xs text-muted-foreground">
               {t("attachmentsPending")}
+            </p>
+          )}
+          {agentBusy && !attachments.empty && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {t("agentFollowUpTextOnly")}
             </p>
           )}
           <NativeError error={error} />
@@ -2098,31 +2214,56 @@ function Chat({
                   )}
               </>
             )}
-            {/* ONE control, one place. Send was disabled for the whole run
-                anyway, so a second button appeared beside a dead one and the
-                row shifted under the pointer at the exact moment someone
-                wanted to stop. While the run is up this IS Stop: same corner,
-                same size, a different job — and `type` changes with it so
-                Stop can never submit the form. */}
+            {/* When steering is supported, show Stop + Send side by side.
+                Stop remains always available; Send submits the follow-up. */}
+            {agentBusy && supportsSteering && (
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="ms-auto rounded-md"
+                aria-label={t("stopGeneration")}
+                title={t("stopGeneration")}
+                onClick={() => void cancelAgent()}
+              >
+                <Square aria-hidden className="size-3.5 fill-current" />
+              </Button>
+            )}
+            {/* ONE control when not steering, or the Send beside Stop when
+                steering. The Send button becomes type="submit" for steering
+                so Enter and click both work. */}
             <Button
-              type={agentBusy ? "button" : "submit"}
+              type={agentBusy && !supportsSteering ? "button" : "submit"}
               size="icon"
               variant="default"
-              className="ms-auto rounded-md"
-              aria-label={agentBusy ? t("stopGeneration") : t("send")}
-              title={agentBusy ? t("stopGeneration") : t("send")}
-              // Stop is never held: the one thing that must stay pressable
-              // while everything else is busy is the way out of it.
-              disabled={
-                agentBusy
-                  ? false
-                  : loading ||
-                    !sendable ||
-                    (mode === "agent" && !runtimeEnabled)
+              className={cn(
+                "rounded-md",
+                !(agentBusy && supportsSteering) && "ms-auto"
+              )}
+              aria-label={
+                agentBusy && !supportsSteering ? t("stopGeneration") : t("send")
               }
-              onClick={agentBusy ? () => void cancelAgent() : undefined}
+              title={
+                agentBusy && !supportsSteering ? t("stopGeneration") : t("send")
+              }
+              disabled={
+                agentBusy && !supportsSteering
+                  ? false
+                  : agentBusy && supportsSteering
+                    ? steeringInFlight !== null ||
+                      promptIsEmpty(draft) ||
+                      !attachments.empty
+                    : loading ||
+                      !sendable ||
+                      (mode === "agent" && !runtimeEnabled)
+              }
+              onClick={
+                agentBusy && !supportsSteering
+                  ? () => void cancelAgent()
+                  : undefined
+              }
             >
-              {agentBusy ? (
+              {agentBusy && !supportsSteering ? (
                 <Square aria-hidden className="size-3.5 fill-current" />
               ) : (
                 <ArrowUp aria-hidden />

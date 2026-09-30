@@ -146,6 +146,8 @@
     "agentChatMissing": "Ese chat ya no está en este proyecto.",
     "agentModel": "Modelo",
     "agentPrompt": "Pregunta al agente",
+    "agentFollowUp": "Añade un seguimiento…",
+    "agentFollowUpTextOnly": "Mientras el agente trabaja, solo puedes enviar texto. Conserva estos archivos para tu próximo mensaje.",
     "agentTurns": "Historial de la sesión",
     "activitySummary": "{number} llamadas a herramientas, {name} resultados",
     "activityErrors": "{number, plural, one {# paso fallido} other {# pasos fallidos}}",

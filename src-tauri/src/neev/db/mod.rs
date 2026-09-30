@@ -28,10 +28,15 @@ mod org_code_migration;
 mod session_migration;
 #[cfg(test)]
 mod session_tests;
+mod steer_migration;
 
 /// The failure codes a turn may durably record. Re-exported so the run driver
 /// and its tests cannot drift from what the schema actually accepts.
 pub(crate) use session_migration::TURN_ERROR_CODES;
+pub(crate) use steer_migration::{
+    accept_steer_input, get_steer_input, list_steer_inputs, record_steer_input, ReserveResult,
+    StoredSteerInput,
+};
 
 pub(crate) fn statement<C: ConnectionTrait>(db: &C, sql: &str, values: Vec<Value>) -> Statement {
     Statement::from_sql_and_values(db.get_database_backend(), sql, values)
@@ -202,6 +207,10 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         let v18_expected: std::collections::BTreeSet<String> = v17_expected.iter().cloned()
             .chain(library_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
 
+        // Schema19 adds steering input table for mid-run user follow-ups.
+        let v19_expected: std::collections::BTreeSet<String> = v18_expected.iter().cloned()
+            .chain(steer_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
+
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
             for table in migration::tables() {
@@ -234,10 +243,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             mention_migration::upgrade(&tx).await?;
             attachment_archived_migration::add_archived_column(&tx).await?;
             library_migration::upgrade(&tx).await?;
+            steer_migration::upgrade(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![library_migration::SCHEMA_VERSION.into()],
+                vec![steer_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -260,6 +270,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             && names != v16_expected
             && names != v17_expected
             && names != v18_expected
+            && names != v19_expected
         {
             return Err(AuthError::Unavailable);
         }
@@ -450,7 +461,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 mention_migration::validate(&tx).await?;
                 attachment_archived_migration::validate_archived_column(&tx).await?;
             }
-            // Current. Validate in place and preserve every row.
+            // Schema18: validate what exists, then fall through to add steer table.
             library_migration::SCHEMA_VERSION if names == v18_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
@@ -470,6 +481,28 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 mention_migration::validate(&tx).await?;
                 attachment_archived_migration::validate_archived_column(&tx).await?;
                 library_migration::validate(&tx).await?;
+            }
+            // Current. Validate in place and preserve every row.
+            steer_migration::SCHEMA_VERSION if names == v19_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
+                session_migration::validate(&tx).await?;
+                session_migration::validate_node_link(&tx).await?;
+                session_migration::validate_activity(&tx).await?;
+                session_migration::validate_effort(&tx).await?;
+                content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
+                attachment_migration::validate(&tx).await?;
+                attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
+                attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+                attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
+                attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
+                mention_migration::validate(&tx).await?;
+                attachment_archived_migration::validate_archived_column(&tx).await?;
+                library_migration::validate(&tx).await?;
+                steer_migration::validate(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
@@ -508,13 +541,17 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         // is unchanged. Adds the archived column for attachment soft-delete.
         attachment_archived_migration::add_archived_column(&tx).await?;
         // Table-guarded and idempotent: adds library tables if not present.
-        if names != v18_expected {
+        if names != v18_expected && names != v19_expected {
             library_migration::upgrade(&tx).await?;
+        }
+        // Table-guarded and idempotent: adds steer input table if not present.
+        if names != v19_expected {
+            steer_migration::upgrade(&tx).await?;
         }
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![library_migration::SCHEMA_VERSION.into()],
+            vec![steer_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -701,6 +738,29 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
                     )
                     .collect::<std::collections::BTreeSet<String>>()
         }
+        steer_migration::SCHEMA_VERSION => {
+            // Schema 19 adds steering input table.
+            names
+                == attachment_expected
+                    .iter()
+                    .cloned()
+                    .chain(
+                        mention_migration::TABLE_NAMES
+                            .iter()
+                            .map(|name| (*name).to_owned()),
+                    )
+                    .chain(
+                        library_migration::TABLE_NAMES
+                            .iter()
+                            .map(|name| (*name).to_owned()),
+                    )
+                    .chain(
+                        steer_migration::TABLE_NAMES
+                            .iter()
+                            .map(|name| (*name).to_owned()),
+                    )
+                    .collect::<std::collections::BTreeSet<String>>()
+        }
         _ => false,
     };
     if !valid {
@@ -708,32 +768,32 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     }
     if matches!(
         version,
-        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18
+        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
     ) {
         document_format_migration::validate(db).await?;
     }
     if matches!(
         version,
-        7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18
+        7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19
     ) {
         agent_status_migration::validate(db).await?;
     }
-    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
+    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19) {
         gateway_migration::validate(db).await?;
     }
-    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
+    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19) {
         org_code_migration::validate(db).await?;
     }
-    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
+    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19) {
         image_blob_migration::validate(db).await?;
     }
-    if matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18) {
+    if matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19) {
         session_migration::validate(db).await?;
     }
-    if matches!(version, 12 | 13 | 14 | 15 | 16 | 17 | 18) {
+    if matches!(version, 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19) {
         session_migration::validate_node_link(db).await?;
     }
-    if matches!(version, 13 | 14 | 15 | 16 | 17 | 18) {
+    if matches!(version, 13 | 14 | 15 | 16 | 17 | 18 | 19) {
         session_migration::validate_activity(db).await?;
     }
     if matches!(
@@ -743,6 +803,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             | mention_migration::SCHEMA_VERSION
             | attachment_archived_migration::SCHEMA_VERSION
             | library_migration::SCHEMA_VERSION
+            | steer_migration::SCHEMA_VERSION
     ) {
         session_migration::validate_effort(db).await?;
         // 13 only. A schema-12 snapshot still has the historical 1000 bound and
@@ -756,6 +817,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             | mention_migration::SCHEMA_VERSION
             | attachment_archived_migration::SCHEMA_VERSION
             | library_migration::SCHEMA_VERSION
+            | steer_migration::SCHEMA_VERSION
     ) {
         attachment_migration::validate(db).await?;
     }
@@ -764,16 +826,26 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         mention_migration::SCHEMA_VERSION
             | attachment_archived_migration::SCHEMA_VERSION
             | library_migration::SCHEMA_VERSION
+            | steer_migration::SCHEMA_VERSION
     ) {
         mention_migration::validate(db).await?;
     }
-    if version == attachment_archived_migration::SCHEMA_VERSION
-        || version == library_migration::SCHEMA_VERSION
-    {
+    if matches!(
+        version,
+        attachment_archived_migration::SCHEMA_VERSION
+            | library_migration::SCHEMA_VERSION
+            | steer_migration::SCHEMA_VERSION
+    ) {
         attachment_archived_migration::validate_archived_column(db).await?;
     }
-    if version == library_migration::SCHEMA_VERSION {
+    if matches!(
+        version,
+        library_migration::SCHEMA_VERSION | steer_migration::SCHEMA_VERSION
+    ) {
         library_migration::validate(db).await?;
+    }
+    if version == steer_migration::SCHEMA_VERSION {
+        steer_migration::validate(db).await?;
     }
     Ok(version)
 }

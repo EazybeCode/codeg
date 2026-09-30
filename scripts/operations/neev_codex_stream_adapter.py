@@ -26,9 +26,11 @@ that produced nothing must say why.
 import argparse
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
+import threading
 
 # App-server command completions repeat the full output, even after chunked
 # deltas. Allow large HTML results on input, then bound the displayed preview.
@@ -49,6 +51,11 @@ HANDSHAKE_TIMEOUT_SECS = 60
 SANDBOX_MODE = "danger-full-access"
 APPROVAL_POLICY = "never"
 
+# Bounded stdin relay for steering. The runtime sends JSON records with
+# {requestId, text} to add follow-up input to the active turn.
+STEER_MAX_LINE_BYTES = 64 * 1024
+STEER_MAX_TEXT_BYTES = 8 * 1024
+
 
 def _parse(argv):
     parser = argparse.ArgumentParser(prog="neev_codex_stream_adapter", add_help=True)
@@ -67,6 +74,11 @@ def _parse(argv):
         "--developer-instructions", default=None, dest="developer_instructions"
     )
     parser.add_argument("--image", action="append", default=[], dest="image")
+    # Enable mid-run steering: read JSON {requestId, text} from stdin and relay
+    # as turn/steer. When enabled, stdin is the steering channel, not DEVNULL.
+    parser.add_argument(
+        "--enable-steering", action="store_true", default=False, dest="enable_steering"
+    )
     parser.add_argument("prompt", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     prompt = list(args.prompt)
@@ -197,6 +209,24 @@ class Emitter:
 
     def turn_failed(self, reason):
         self._write({"type": "turn.failed", "reason": reason})
+
+    def steer_accepted(self, request_id, turn_id):
+        """Acknowledge a steering input was accepted by the provider."""
+        self._write({
+            "type": "neev.steer",
+            "requestId": request_id,
+            "accepted": True,
+            "turnId": turn_id,
+        })
+
+    def steer_rejected(self, request_id, reason):
+        """Report a steering input was rejected."""
+        self._write({
+            "type": "neev.steer",
+            "requestId": request_id,
+            "accepted": False,
+            "reason": reason,
+        })
 
 
 def translate(method, params, emit):
@@ -350,6 +380,106 @@ class HandshakeTimeout(Exception):
     """The provider did not get as far as starting the turn."""
 
 
+class TurnState:
+    """Thread-safe state for an active turn, shared with the steering reader."""
+
+    def __init__(self, emit):
+        self._lock = threading.Lock()
+        self._emit = emit
+        self._thread_id = None
+        self._turn_id = None
+        self._finished = False
+        self._next_steer_id = 100  # Request IDs for turn/steer, starting above handshake IDs
+
+    def set_thread_id(self, thread_id):
+        with self._lock:
+            self._thread_id = thread_id
+
+    def set_turn_id(self, turn_id):
+        with self._lock:
+            self._turn_id = turn_id
+
+    def mark_finished(self):
+        with self._lock:
+            self._finished = True
+
+    def is_active(self):
+        with self._lock:
+            return self._thread_id is not None and self._turn_id is not None and not self._finished
+
+    def get_steer_params(self, text):
+        """Get parameters for turn/steer, or None if not steerable."""
+        with self._lock:
+            if self._finished or not self._thread_id or not self._turn_id:
+                return None, None
+            request_id = self._next_steer_id
+            self._next_steer_id += 1
+            return request_id, {
+                "threadId": self._thread_id,
+                "expectedTurnId": self._turn_id,
+                "input": [{"type": "text", "text": text}],
+            }
+
+    @property
+    def turn_id(self):
+        with self._lock:
+            return self._turn_id
+
+
+def _parse_steer_input(line):
+    """Parse one steering input line. Returns (request_id, text) or raises."""
+    if len(line) > STEER_MAX_LINE_BYTES:
+        raise ValueError("oversized")
+    record = json.loads(line)
+    if not isinstance(record, dict):
+        raise ValueError("not a record")
+    request_id = record.get("requestId")
+    text = record.get("text")
+    if not isinstance(request_id, str) or not request_id:
+        raise ValueError("missing requestId")
+    if not isinstance(text, str):
+        raise ValueError("missing text")
+    if len(text.encode("utf-8")) > STEER_MAX_TEXT_BYTES:
+        raise ValueError("text too large")
+    return request_id, text
+
+
+def _steer_reader(steer_input, provider_stdin, turn_state, emit, pending_steers):
+    """Background thread: reads steering commands from steer_input, sends turn/steer.
+
+    `pending_steers` is a dict {internal_request_id: external_request_id} tracking
+    outstanding turn/steer requests so the main loop can correlate responses.
+    """
+    try:
+        for line in steer_input:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                request_id, text = _parse_steer_input(line)
+            except (ValueError, json.JSONDecodeError) as error:
+                # Invalid input is reported and dropped, not fatal.
+                emit.steer_rejected("unknown", str(error)[:100])
+                continue
+
+            internal_id, params = turn_state.get_steer_params(text)
+            if params is None:
+                emit.steer_rejected(request_id, "turn not active")
+                continue
+
+            # Track this steer request for response correlation
+            pending_steers[internal_id] = request_id
+
+            try:
+                _request(provider_stdin, internal_id, "turn/steer", params)
+            except (BrokenPipeError, OSError):
+                pending_steers.pop(internal_id, None)
+                emit.steer_rejected(request_id, "provider closed")
+                break
+    except (OSError, ValueError):
+        pass  # Input closed or invalid; the main loop handles the turn outcome
+
+
 def _start_handshake_deadline(seconds=None):
     seconds = HANDSHAKE_TIMEOUT_SECS if seconds is None else seconds
 
@@ -364,9 +494,19 @@ def _clear_handshake_deadline():
     signal.alarm(0)
 
 
-def drive(child, args, emit, cwd):
-    """Run the turn. Returns a process exit code."""
+def drive(child, args, emit, cwd, steer_input=None):
+    """Run the turn. Returns a process exit code.
+
+    If `steer_input` is provided (a file-like object), steering commands are read
+    from it and relayed to the provider as `turn/steer` requests. Steering is only
+    available after the turn has started.
+    """
     stdin, stdout = child.stdin, child.stdout
+    # Turn state shared with the steering reader thread
+    turn_state = TurnState(emit)
+    pending_steers = {}  # {internal_request_id: external_request_id}
+    steer_thread = None
+
     # The app-server answers `initialize` before it accepts a method, so the
     # handshake is a conversation, not a queue. There is no protocol-version
     # field in the reply (the schema has none), so a well-formed result is the
@@ -378,6 +518,7 @@ def drive(child, args, emit, cwd):
     while True:
         line = _read_line(stdout)
         if line is None:
+            turn_state.mark_finished()
             emit.turn_failed("provider closed the stream")
             return 4
         try:
@@ -393,24 +534,42 @@ def drive(child, args, emit, cwd):
                 continue
             done = translate(message["method"], message.get("params") or {}, emit)
             if done is not None:
+                turn_state.mark_finished()
                 return done
             continue
         if "id" not in message:
             continue
+        msg_id = message["id"]
         if "error" in message:
             error = message["error"] or {}
+            # Check if this is a steer response
+            external_id = pending_steers.pop(msg_id, None)
+            if external_id is not None:
+                emit.steer_rejected(external_id, str(error.get("message") or "rejected")[:100])
+                continue
+            turn_state.mark_finished()
             emit.turn_failed(str(error.get("message") or "provider refused")[:200])
             return 4
         result = message.get("result") or {}
-        if message["id"] == 1 and not handshaken:
+
+        # Check if this is a turn/steer response
+        external_id = pending_steers.pop(msg_id, None)
+        if external_id is not None:
+            # turn/steer succeeded — report the acknowledgment
+            steer_turn_id = result.get("turnId") or turn_state.turn_id
+            emit.steer_accepted(external_id, steer_turn_id)
+            continue
+
+        if msg_id == 1 and not handshaken:
             handshaken = True
             _notify(stdin, "initialized", {})
             _request(stdin, 2, "thread/start", thread_params(args, cwd))
-        elif message["id"] == 2 and thread_id is None:
+        elif msg_id == 2 and thread_id is None:
             thread_id = (result.get("thread") or {}).get("id")
             if not thread_id:
                 emit.turn_failed("provider started no thread")
                 return 4
+            turn_state.set_thread_id(thread_id)
             # The thread reports back what it actually took. A run whose model
             # or tier quietly became something else is not the run the reader
             # asked for, so it does not start.
@@ -426,17 +585,44 @@ def drive(child, args, emit, cwd):
             # The turn itself is not on a clock: it may legitimately run for
             # minutes, and the launcher's own limits bound it.
             _clear_handshake_deadline()
-        # A `turn/start` reply carries the turn, whose items then arrive as
-        # notifications; there is nothing to do with it here.
+        elif msg_id == 3:
+            # turn/start response — capture the turn ID and start steering reader
+            turn_id = (result.get("turn") or {}).get("id")
+            if turn_id:
+                turn_state.set_turn_id(turn_id)
+                # Start the steering reader thread now that the turn is active
+                if steer_input is not None and steer_thread is None:
+                    steer_thread = threading.Thread(
+                        target=_steer_reader,
+                        args=(steer_input, stdin, turn_state, emit, pending_steers),
+                        daemon=True,
+                    )
+                    steer_thread.start()
+        # Other responses: turn/steer results are handled above
 
 
-def main(argv=None):
+def main(argv=None, steer_input=None):
+    """Run one Codex turn through app-server.
+
+    `steer_input` is for testing; production uses stdin when --enable-steering.
+    """
     args = _parse(sys.argv[1:] if argv is None else argv)
     cwd = args.cwd or os.getcwd()
     emit = Emitter(sys.stdout)
     if not args.prompt:
         emit.turn_failed("empty prompt")
         return 2
+
+    # Determine steering input source
+    if steer_input is not None:
+        # Test injection
+        effective_steer = steer_input
+    elif args.enable_steering:
+        # Production: use our stdin for steering commands
+        effective_steer = sys.stdin
+    else:
+        effective_steer = None
+
     try:
         child = subprocess.Popen(
             codex_argv(args),
@@ -456,7 +642,7 @@ def main(argv=None):
         emit.turn_failed("provider did not start")
         return 3
     try:
-        return drive(child, args, emit, cwd)
+        return drive(child, args, emit, cwd, steer_input=effective_steer)
     except HandshakeTimeout:
         emit.turn_failed("provider did not start the turn")
         return 4

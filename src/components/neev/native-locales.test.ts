@@ -53,6 +53,11 @@ it.each([
           revision: "1",
           level: 2,
           time: "just now",
+          received: 1,
+          total: 2,
+          page: 1,
+          minutes: 1,
+          seconds: 5,
         })
       ).toBeTruthy()
     }

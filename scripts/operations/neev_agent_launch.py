@@ -65,6 +65,12 @@ def _parse(argv):
     # Chromium needs more than 64 threads even without the provider process.
     # Keep a finite shared budget for the provider and one local HTML preview.
     parser.add_argument("--processes", type=int, default=256)
+    # Enable mid-run steering: relay JSON {requestId, text} from launcher stdin
+    # to the adapter, which sends turn/steer to the provider. Only effective
+    # with --codex-stream=app-server; exec mode ignores this.
+    parser.add_argument(
+        "--enable-steering", action="store_true", default=False, dest="enable_steering"
+    )
     # Everything after `--` is the provider argv.
     parser.add_argument("provider_argv", nargs=argparse.REMAINDER)
     return parser.parse_args(argv)
@@ -161,10 +167,11 @@ def externally_sandboxed_argv(provider, provider_argv):
     return head + ["--json"] + options + ["--", prompt]
 
 
-# The in-sandbox streaming adapter, beside this launcher in the same root-owned
+# The in-sandbox streaming adapters, beside this launcher in the same root-owned
 # 0555 directory. `-I` matches the ns prelude: no user site-packages, no
 # inherited PYTHONPATH.
 ADAPTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neev_codex_stream_adapter.py")
+CLAUDE_ADAPTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neev_claude_stream_adapter.py")
 
 
 # The `-c key=value` overrides `provider_argv` builds for `codex exec`, and what
@@ -252,15 +259,20 @@ def _config_argument(value):
     raise sandbox.SandboxError("invalid")
 
 
-def app_server_argv(provider, provider_argv, adapter=ADAPTER, python=sandbox.PYTHON):
+def app_server_argv(provider, provider_argv, adapter=ADAPTER, python=sandbox.PYTHON,
+                    enable_steering=False):
     """Pure: rewrite a `codex exec --json` launch into the streaming adapter's.
 
     `exec` emits nothing until an item is finished, so a reply appears only once
     the turn is over. The adapter drives `codex app-server`, which streams the
     message as it is written, and it runs HERE — as the sandboxed provider
     process — so it owns the app-server's stdin inside the isolation boundary
-    instead of asking for a pipe through it. The launcher's own stdin stays
-    DEVNULL for every paid turn, exactly as before.
+    instead of asking for a pipe through it.
+
+    When `enable_steering` is True, the adapter reads JSON {requestId, text}
+    from stdin and relays them as `turn/steer` requests to add follow-up input
+    to the active turn. The launcher must then pass stdin to the sandbox rather
+    than DEVNULL.
 
     Only the canonical shape `provider_argv` builds is accepted. Anything else
     raises rather than being rewritten on a guess or quietly run as `exec`: an
@@ -280,6 +292,8 @@ def app_server_argv(provider, provider_argv, adapter=ADAPTER, python=sandbox.PYT
         raise sandbox.SandboxError("invalid")
     binary, prompt, options = argv[0], argv[3], argv[4:]
     mapped = ["--codex", binary]
+    if enable_steering:
+        mapped.append("--enable-steering")
     index = 0
     while index < len(options):
         option = options[index]
@@ -299,6 +313,56 @@ def app_server_argv(provider, provider_argv, adapter=ADAPTER, python=sandbox.PYT
             index += 1
             continue
         raise sandbox.SandboxError("invalid")
+    return [python, "-I", adapter] + mapped + ["--", prompt]
+
+
+def claude_stream_argv(provider, provider_argv, adapter=CLAUDE_ADAPTER, python=sandbox.PYTHON,
+                       enable_steering=False):
+    """Pure: rewrite a `claude -p` launch into the streaming adapter's.
+
+    Unlike Codex (app-server JSON-RPC), Claude uses stream-json with queued user
+    messages and interrupt-and-continue for steering. The adapter handles:
+    - `--input-format stream-json` for follow-up messages
+    - `--replay-user-messages` for delivery acknowledgment
+    - Interrupt control protocol for mid-run steering
+
+    Only the canonical shape `claude -p <prompt> ...` is accepted.
+    All launcher flags are preserved and passed to the adapter.
+    """
+    argv = list(provider_argv)
+    if provider != "claude":
+        return argv
+    # Canonical shape: claude -p <prompt> [options...]
+    if len(argv) < 3 or argv[1] != "-p":
+        return argv
+    binary, prompt, options = argv[0], argv[2], argv[3:]
+    mapped = ["--claude", binary]
+    if enable_steering:
+        mapped.append("--enable-steering")
+    # Walk options to extract model, effort, system prompt, settings, and flags
+    walked = _walk_options(options, _CLAUDE_VALUE_OPTIONS, _CLAUDE_FLAG_OPTIONS)
+    if walked is None:
+        # Unknown option, fall back to direct execution
+        return argv
+    for option, at in walked:
+        if at is None:
+            # Flag option - preserve it (--verbose, --include-partial-messages, etc.)
+            if option == "--verbose":
+                mapped.append("--verbose")
+            elif option == "--include-partial-messages":
+                mapped.append("--include-partial-messages")
+            # --output-format and --json are replaced by adapter's stream-json
+            continue
+        value = options[at]
+        if option == "--model":
+            mapped += ["--model", value]
+        elif option == "--effort":
+            mapped += ["--effort", value]
+        elif option == _CLAUDE_SYSTEM_PROMPT:
+            mapped += ["--append-system-prompt", value]
+        elif option == "--settings":
+            mapped += ["--settings", value]
+        # --output-format is replaced by adapter's stream-json
     return [python, "-I", adapter] + mapped + ["--", prompt]
 
 
@@ -476,8 +540,15 @@ def build_spec(args, style=None):
         provider_argv,
         load_response_style() if style is None else style,
     )
-    if args.codex_stream == "app-server":
-        provider_argv = app_server_argv(args.provider, provider_argv)
+    enable_steering = getattr(args, "enable_steering", False)
+    if args.provider == "claude" and enable_steering:
+        # Claude with steering uses stream-json + interrupt-and-continue
+        provider_argv = claude_stream_argv(args.provider, provider_argv,
+                                           enable_steering=True)
+    elif args.codex_stream == "app-server":
+        # Codex with app-server mode (optionally with steering via turn/steer)
+        provider_argv = app_server_argv(args.provider, provider_argv,
+                                        enable_steering=enable_steering)
     else:
         provider_argv = externally_sandboxed_argv(args.provider, provider_argv)
     egress = (
@@ -675,11 +746,20 @@ def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as):
             args.gid,
             home_as=home_as,
         ) as delivery:
+            # Determine stdin mode: metadata probe uses bounded relay,
+            # steering uses unbounded relay, otherwise DEVNULL.
+            is_probe = is_metadata_probe(args.provider, spec)
+            enable_steering = (
+                getattr(args, "enable_steering", False)
+                and args.codex_stream == "app-server"
+                and not is_probe
+            )
             rc = _run_child(
                 spec,
                 child_env(delivery, proxy_env),
                 bind_source=delivery.mount,
-                relay_stdin=is_metadata_probe(args.provider, spec),
+                relay_stdin=is_probe,
+                relay_steering=enable_steering,
             )
     except credentials.CredentialError as error:
         # Honest, non-sensitive reason ("busy" = another run for this user+provider
@@ -975,12 +1055,53 @@ def _relay_stdin(destination, source, limit=_STDIN_RELAY_MAX_BYTES):
     return written
 
 
-def _run_child(spec, env, bind_source=None, relay_stdin=False):
+# Bounded line relay for steering: each JSON line must fit, and there's a total cap.
+_STEER_MAX_LINE_BYTES = 64 * 1024
+_STEER_MAX_TOTAL_BYTES = 1024 * 1024  # 1 MiB total steering input per run
+
+
+def _relay_steering(destination, source, max_line=_STEER_MAX_LINE_BYTES,
+                    max_total=_STEER_MAX_TOTAL_BYTES):
+    """Relay steering JSON lines from `source` to `destination` until EOF or child exits.
+
+    Unlike `_relay_stdin` (bounded byte count then close), this:
+    - Reads line-by-line (steering protocol is JSON lines)
+    - Stays open for the run duration (steering may come at any time)
+    - Bounds per-line and total bytes for safety
+    - Closes destination only when source EOF or total exceeded
+    """
+    total = 0
+    try:
+        for line in source:
+            if len(line) > max_line:
+                # Oversized line is dropped, not fatal
+                continue
+            total += len(line)
+            if total > max_total:
+                break
+            destination.write(line)
+            destination.flush()
+    except (BrokenPipeError, ValueError, OSError):
+        pass  # child exited; the main loop handles the outcome
+    finally:
+        try:
+            destination.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+
+def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=False):
     """Launch the provider in the sandbox, forward its stream, and always tear the
-    sandbox down. Runs while the credential volume is lent to this run's uid."""
+    sandbox down. Runs while the credential volume is lent to this run's uid.
+
+    `relay_stdin`: bounded relay for metadata probes (64KB cap then close).
+    `relay_steering`: line-based relay for steering (stays open for the run).
+    """
+    # Open stdin pipe if either relay mode is requested
+    needs_stdin = relay_stdin or relay_steering
     try:
         handle = sandbox.launch(
-            spec, env=env, bind_source=bind_source, stdin_pipe=relay_stdin
+            spec, env=env, bind_source=bind_source, stdin_pipe=needs_stdin
         )
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: launch failed: {error.category}", file=sys.stderr)
@@ -994,6 +1115,13 @@ def _run_child(spec, env, bind_source=None, relay_stdin=False):
         threading.Thread(
             target=_relay_stdin,
             args=(handle.stdin, sys.stdin.buffer),
+            daemon=True,
+        ).start()
+    elif relay_steering and handle.stdin is not None:
+        # Steering relay: read JSON lines from launcher stdin, relay to adapter
+        threading.Thread(
+            target=_relay_steering,
+            args=(handle.stdin, sys.stdin),
             daemon=True,
         ).start()
 

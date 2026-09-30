@@ -795,3 +795,26 @@ async fn an_unsafe_model_is_refused_before_anything_else() {
         );
     }
 }
+
+
+#[tokio::test]
+async fn steering_history_survives_into_the_next_provider_prompt() {
+    let h = Harness::new().await;
+    let session = h.session().await;
+    let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "start", None).await.unwrap();
+    let accepted = uuid::Uuid::new_v4().to_string();
+    let pending = uuid::Uuid::new_v4().to_string();
+    db::record_steer_input(&h.database, h.org, &session.id, turn.sequence,
+        &accepted, "Use blue", NOW).await.unwrap();
+    db::accept_steer_input(&h.database, h.org, &session.id, turn.sequence,
+        &accepted, 2).await.unwrap();
+    db::record_steer_input(&h.database, h.org, &session.id, turn.sequence,
+        &pending, "Never acknowledged", NOW).await.unwrap();
+    finish(&h.database, &turn.run_id, "A😀B", None,
+        TurnStatus::Completed, None, NOW + 1).await.unwrap();
+    let history = recent_turns(&h.state, &h.owner, &session.id).await.unwrap();
+    assert_eq!(conversation_prompt(&history, "continue"),
+        "User: start\n\nAssistant: A😀\n\nUser: Use blue\n\nAssistant: B\n\nUser: continue");
+    let stored = turns(&h.state, &h.owner, &session.id, None).await.unwrap();
+    assert_eq!(stored.items[0].response, "A😀B");
+}

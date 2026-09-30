@@ -21,6 +21,7 @@ import {
   typeInComposer,
 } from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
+import messages from "@/i18n/messages/en.json"
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
@@ -560,6 +561,26 @@ function sseBody(...frames: string[]) {
     status: 200,
     headers: { "Content-Type": "text/event-stream" },
   })
+}
+
+/** A stream the test feeds frame by frame. */
+function liveStream() {
+  const encoder = new TextEncoder()
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c
+    },
+  })
+  return {
+    response: new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    }),
+    push: (frame: unknown) =>
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`)),
+    close: () => controller.close(),
+  }
 }
 
 async function typeAsk() {
@@ -2226,4 +2247,186 @@ it("opens connection dialog without invoking or losing the draft when disconnect
   expect(
     composerText(screen.getByRole("textbox", { name: "Message", hidden: true }))
   ).toBe("help")
+})
+
+/*
+ * Shared composer follow-up steering tests.
+ *
+ * In team chat agent mode, the shared composer supports mid-run follow-ups
+ * (steering) when the run reports supportsSteering: true. These tests verify
+ * the follow-up send and retry behavior.
+ */
+it("sends a follow-up to the running invocation and clears composer on acceptance", async () => {
+  const stream = liveStream()
+  const steers: { text: string; requestId: string }[] = []
+  let sseConnected = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () =>
+      json({
+        ...resource,
+        contentRevision: steers.length ? "2" : resource.contentRevision,
+      }),
+    [`GET ${path}`]: () =>
+      json({
+        items: steers.length
+          ? [
+              askMessage,
+              {
+                ...askMessage,
+                id: "88888888-8888-4888-8888-888888888888",
+                sequence: "2",
+                body: "Focus on edge cases",
+              },
+            ]
+          : [],
+        nextAfter: null,
+      }),
+    [`GET ${path}?after=1`]: () =>
+      json({
+        items: steers.length
+          ? [
+              {
+                ...askMessage,
+                id: "88888888-8888-4888-8888-888888888888",
+                sequence: "2",
+                body: "Focus on edge cases",
+              },
+            ]
+          : [],
+        nextAfter: null,
+      }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () => {
+      sseConnected = true
+      return stream.response
+    },
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: (init) => {
+      const body = JSON.parse(init.body as string)
+      steers.push({ text: body.text, requestId: body.requestId })
+      return json({ accepted: true, runId: RUN_ID, requestId: body.requestId })
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // Wait for the SSE connection to be established
+  await waitFor(() => expect(sseConnected).toBe(true))
+  // Started with steering support
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: runningTurn.id,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working on it..." })
+  })
+  expect(await screen.findByText("Working on it...")).toBeVisible()
+  // The follow-up placeholder should appear (visually rendered as text, not an attribute)
+  expect(
+    await screen.findByText(messages.NativeContent.agentFollowUp)
+  ).toBeInTheDocument()
+  const followUpComposer = screen.getByRole("textbox", { name: "Message" })
+  // Type and send a follow-up
+  await typeInComposer(followUpComposer, "Focus on edge cases")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(steers).toHaveLength(1))
+  expect(steers[0].text).toBe("Focus on edge cases")
+  // Simulate the SSE input event acknowledging the follow-up
+  act(() => {
+    stream.push({
+      type: "input",
+      runId: RUN_ID,
+      requestId: steers[0].requestId,
+      text: "Focus on edge cases",
+      createdAt: Date.now(),
+      responseOffset: 17,
+    })
+  })
+  // Composer should be cleared after acceptance
+  await waitFor(() => expect(composerText(followUpComposer)).toBe(""))
+  await waitFor(() =>
+    expect(screen.getAllByText("Focus on edge cases")).toHaveLength(1)
+  )
+  act(() => stream.close())
+})
+
+it("retries a follow-up with the same requestId after network failure", async () => {
+  const stream = liveStream()
+  let steerCalls = 0
+  const receivedIds: string[] = []
+  let sseConnected = false
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      json({ message: askMessage, turn: runningTurn, runId: RUN_ID }, 201),
+    [RUN_EVENTS]: () => {
+      sseConnected = true
+      return stream.response
+    },
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: (init) => {
+      steerCalls++
+      const body = JSON.parse(init.body as string)
+      receivedIds.push(body.requestId)
+      // First call fails with network error
+      if (steerCalls === 1) {
+        return json({ code: "unavailable" }, 503)
+      }
+      // Second call succeeds
+      return json({ accepted: true, runId: RUN_ID, requestId: body.requestId })
+    },
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await typeAsk()
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // Wait for the SSE connection to be established
+  await waitFor(() => expect(sseConnected).toBe(true))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: runningTurn.id,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  // The follow-up placeholder should appear (visually rendered as text, not an attribute)
+  expect(
+    await screen.findByText(messages.NativeContent.agentFollowUp)
+  ).toBeInTheDocument()
+  const followUpComposer = screen.getByRole("textbox", { name: "Message" })
+  await typeInComposer(followUpComposer, "Check imports")
+  // First attempt fails
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(steerCalls).toBe(1))
+  // The rejection must be handled — error shown, steeringInFlight cleared —
+  // before retrying; a press any earlier is swallowed by the in-flight guard.
+  expect(
+    await screen.findByText(
+      "This service is temporarily unavailable. Please try again."
+    )
+  ).toBeVisible()
+  // Text should be preserved after failure
+  expect(composerText(followUpComposer)).toBe("Check imports")
+  const sendButton = screen.getByRole("button", { name: "Send" })
+  await waitFor(() => expect(sendButton).not.toBeDisabled())
+  // Retry with Send button click
+  await user.click(sendButton)
+  await waitFor(() => expect(steerCalls).toBe(2))
+  // The same requestId should be used for the retry
+  expect(receivedIds[0]).toBe(receivedIds[1])
+  act(() => stream.close())
 })

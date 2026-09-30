@@ -146,6 +146,8 @@
     "agentChatMissing": "해당 채팅은 이 프로젝트에 없습니다.",
     "agentModel": "모델",
     "agentPrompt": "에이전트에게 질문",
+    "agentFollowUp": "추가 요청 입력…",
+    "agentFollowUpTextOnly": "에이전트가 실행 중일 때는 텍스트만 보낼 수 있습니다. 파일은 다음 메시지를 위해 보관하세요.",
     "agentTurns": "세션 기록",
     "activitySummary": "도구 호출 {number}건, 결과 {name}건",
     "activityErrors": "{number, plural, other {#개 단계 실패}}",

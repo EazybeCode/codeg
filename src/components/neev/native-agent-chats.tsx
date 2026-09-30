@@ -74,6 +74,7 @@ import {
   loadAgentConnections,
   loadAgentSession,
   startAgentTurn,
+  steerAgentRun,
   updateAgentSession,
   updateAgentSessionSettings,
   NEEV_DEFAULT_MODEL,
@@ -84,6 +85,7 @@ import {
   type NeevAgentSession,
   type NeevAgentSettings,
   type NeevAgentTurn,
+  type NeevRunInput,
   type NeevRunPhase,
   type UpdateNeevAgentSessionInput,
 } from "@/lib/neev-agent-sessions-client"
@@ -1272,6 +1274,9 @@ function OutputBlock({
  * whose `items` sit at the segment's leading boundary, which is why the rows
  * are drawn before the prose in each one.
  *
+ * User follow-up inputs (steering) are interleaved at their `responseOffset`
+ * positions, rendered as right-aligned bubbles to match the original prompt.
+ *
  * Nothing is synthesised. A run that recorded no tools renders exactly the
  * markdown it always did; a segment exists only because an offset put it there.
  *
@@ -1283,12 +1288,15 @@ function OutputBlock({
 export function TranscriptBody({
   text,
   items,
+  inputs = [],
   streaming = false,
 }: {
   /** The reply so far, or the whole stored reply. */
   text: string
   /** The turn's activity, already merged with anything arriving live. */
   items: readonly NeevActivityItem[]
+  /** Follow-up inputs sent via steering, sorted by responseOffset. */
+  inputs?: readonly NeevRunInput[]
   /** Whether `text` is still arriving. */
   streaming?: boolean
 }) {
@@ -1299,6 +1307,17 @@ export function TranscriptBody({
     (last, segment, index) => (segment.text.trim() ? index : last),
     -1
   )
+  // `responseOffset` counts Unicode scalar values, like activity offsets, so
+  // the text is cut as scalars too — never with UTF-16 `slice`.
+  const textLength = [...text].length
+  // An offset past the text so far (the reply has not caught up yet) sits at
+  // the end until it does.
+  const pendingInputs = [...inputs]
+    .map((input) => ({
+      input,
+      at: Math.max(0, Math.min(input.responseOffset, textLength)),
+    }))
+    .sort((left, right) => left.at - right.at)
   /*
    * Only the segments that will actually draw something.
    *
@@ -1316,10 +1335,54 @@ export function TranscriptBody({
    * shift when an earlier segment appears or disappears, so an expanded row
    * stays expanded when its result lands.
    */
-  const drawn = segments
-    .map((segment, index) => ({
+  // Each input goes to the first segment whose text reaches its offset, and
+  // that segment's text is cut there: the reply written before the follow-up,
+  // the follow-up, then the reply written after it. An input exactly on an
+  // activity boundary closes the earlier segment, ahead of the next rows.
+  type Part =
+    | { kind: "text"; start: number; text: string }
+    | { kind: "input"; input: NeevRunInput }
+  const laid: {
+    index: number
+    parts: Part[]
+    lastText: number
+    key: number | "head"
+    rows: NeevActivityItem[]
+  }[] = []
+  let cursor = 0
+  for (const [index, segment] of segments.entries()) {
+    const scalars = [...segment.text]
+    const startOffset = cursor
+    cursor += scalars.length
+    const parts: Part[] = []
+    let from = 0
+    while (pendingInputs.length > 0 && pendingInputs[0].at <= cursor) {
+      const { input, at } = pendingInputs.shift()!
+      const to = at - startOffset
+      if (to > from)
+        parts.push({
+          kind: "text",
+          start: from,
+          text: scalars.slice(from, to).join(""),
+        })
+      from = Math.max(from, to)
+      parts.push({ kind: "input", input })
+    }
+    if (from < scalars.length)
+      parts.push({
+        kind: "text",
+        start: from,
+        text: scalars.slice(from).join(""),
+      })
+    const lastText = parts.reduce(
+      (last, part, at) =>
+        part.kind === "text" && part.text.trim() ? at : last,
+      -1
+    )
+    laid.push({
       index,
-      text: segment.text,
+      parts,
+      lastText,
       // The item that opens this segment, drawn or not. Only the FIRST segment
       // can have none — every later one is created by crossing an item's
       // offset — so this is a unique, stable key even as segments come and go.
@@ -1327,8 +1390,21 @@ export function TranscriptBody({
       rows: segment.items.filter(
         (item) => !(item.kind === "tool_result" && absorbed.has(item.seq))
       ),
-    }))
-    .filter((segment) => segment.rows.length > 0 || segment.text.trim())
+    })
+  }
+  const drawn = laid.filter(
+    (segment) =>
+      segment.rows.length > 0 ||
+      segment.lastText >= 0 ||
+      segment.parts.some((part) => part.kind === "input")
+  )
+  const bubble = (input: NeevRunInput) => (
+    <div key={input.requestId} data-agent-input className="flex justify-end">
+      <div className="max-w-[85%] rounded-2xl border border-chat-user-foreground/10 bg-chat-user-surface px-3.5 py-2 text-sm text-chat-user-foreground">
+        {input.text}
+      </div>
+    </div>
+  )
   return (
     <div className="space-y-2">
       {drawn.map((segment) => (
@@ -1348,28 +1424,39 @@ export function TranscriptBody({
               ))}
             </ul>
           )}
-          {segment.text.trim() && (
-            <div
-              data-agent-prose={
-                streaming || segment.index !== finalTextIndex
-                  ? "progress"
-                  : "final"
-              }
-              className={cn(
-                "font-normal",
-                streaming || segment.index !== finalTextIndex
-                  ? "text-muted-foreground"
-                  : "text-foreground"
-              )}
-            >
-              <NativeMarkdown
-                markdown={segment.text}
-                streaming={streaming && segment.index === segments.length - 1}
-              />
-            </div>
-          )}
+          {segment.parts.map((part, at) => {
+            if (part.kind === "input") return bubble(part.input)
+            if (!part.text.trim()) return null
+            // Only the closing prose of the closing segment is the answer;
+            // anything a follow-up came after is progress it redirected.
+            const progress =
+              streaming ||
+              segment.index !== finalTextIndex ||
+              at !== segment.lastText
+            return (
+              <div
+                key={`text:${part.start}`}
+                data-agent-prose={progress ? "progress" : "final"}
+                className={cn(
+                  "font-normal",
+                  progress ? "text-muted-foreground" : "text-foreground"
+                )}
+              >
+                <NativeMarkdown
+                  markdown={part.text}
+                  streaming={
+                    streaming &&
+                    segment.index === segments.length - 1 &&
+                    at === segment.parts.length - 1
+                  }
+                />
+              </div>
+            )
+          })}
         </div>
       ))}
+      {/* No text at all yet: follow-ups still show, in order. */}
+      {pendingInputs.map(({ input }) => bubble(input))}
     </div>
   )
 }
@@ -1421,6 +1508,14 @@ function AgentSessionView({
     // replays the stored prefix before streaming live, so the same item
     // arrives twice and appending would show every tool call twice.
     [liveActivity, setLiveActivity] = useState<NeevActivityItem[]>([]),
+    // User inputs sent into the running turn via steering. Upserted by
+    // `requestId` so a reattach never shows duplicates.
+    [liveInputs, setLiveInputs] = useState<NeevRunInput[]>([]),
+    // Whether the current run supports steering (provider acknowledged).
+    [supportsSteering, setSupportsSteering] = useState(false),
+    // A steering request in flight: the requestId, so the same id is retried
+    // if the first attempt fails. Cleared on success or when the run ends.
+    [steeringInFlight, setSteeringInFlight] = useState<string | null>(null),
     // Bumped to ask for a fresh attachment to the same run — an explicit
     // reattach, never a re-run.
     [attachNonce, setAttachNonce] = useState(0)
@@ -1453,6 +1548,13 @@ function AgentSessionView({
     disabled: session.archived,
   })
   const draftRef = useRef("")
+  // The requestId for the steering request to retry on failure. Kept across
+  // failed sends so the same id is used, preventing duplicates.
+  const steeringRetryId = useRef<{
+    id: string
+    text: string
+    runId: string
+  } | null>(null)
   // Read by the navigation guard, which is installed once and must not close
   // over an old tray.
   const stagedRef = useRef(false)
@@ -1488,6 +1590,7 @@ function AgentSessionView({
   // handler without making it depend on the rendered value.
   const liveRef = useRef("")
   const liveActivityRef = useRef<NeevActivityItem[]>([])
+  const liveInputsRef = useRef<NeevRunInput[]>([])
   // A queued navigation held back by an unsent prompt.
   const [pending, setPending] = useState<(() => void) | null>(null)
 
@@ -1541,6 +1644,9 @@ function AgentSessionView({
         if (running) {
           liveRef.current = ""
           setLiveText("")
+          liveInputsRef.current = running.inputs
+          setLiveInputs(running.inputs)
+          setSupportsSteering(running.supportsSteering)
           setActiveRun(running.runId)
         }
       } catch (cause) {
@@ -1573,6 +1679,22 @@ function AgentSessionView({
           return next
         })
       },
+      onInput: (input) => {
+        if (controller.signal.aborted) return
+        // Upsert by requestId: a reattach replays persisted inputs.
+        setLiveInputs((old) => {
+          if (old.some((item) => item.requestId === input.requestId)) return old
+          const next = [...old, input].sort(
+            (left, right) => left.responseOffset - right.responseOffset
+          )
+          liveInputsRef.current = next
+          return next
+        })
+        // Clear pending steering request when our input is acknowledged.
+        setSteeringInFlight((pending) =>
+          pending === input.requestId ? null : pending
+        )
+      },
       onEvent: (event) => {
         if (controller.signal.aborted) return
         // A replay restarts the buffer: the server resends everything it stored.
@@ -1581,10 +1703,17 @@ function AgentSessionView({
           setLiveText("")
           liveActivityRef.current = []
           setLiveActivity([])
+          liveInputsRef.current = []
+          setLiveInputs([])
+          // Set supportsSteering from the SSE event on both initial and reconnect.
+          setSupportsSteering(event.supportsSteering)
         } else if (event.type === "chunk") {
           liveRef.current += event.text
           setLiveText(liveRef.current)
         } else {
+          // Run ended: clear steering state and merge inputs into stored turn.
+          setSteeringInFlight(null)
+          setSupportsSteering(false)
           setTurns((old) =>
             (old ?? []).map((turn) =>
               turn.runId === activeRun
@@ -1594,12 +1723,15 @@ function AgentSessionView({
                     errorCode: event.errorCode,
                     // The stream replays exactly what the server stored, so the
                     // accumulated text is the durable response — and the same
-                    // is true of the trace beside it.
+                    // is true of the trace and inputs beside it.
                     response: liveRef.current || turn.response,
                     activity: mergeActivity(
                       turn.activity,
                       liveActivityRef.current
                     ),
+                    inputs: liveInputsRef.current.length
+                      ? liveInputsRef.current
+                      : turn.inputs,
                   }
                 : turn
             )
@@ -1620,7 +1752,7 @@ function AgentSessionView({
     const element = history.current
     if (element && followHistory.current)
       element.scrollTop = element.scrollHeight
-  }, [turns, liveText, liveActivity])
+  }, [turns, liveText, liveActivity, liveInputs])
 
   const runtimeEnabled = connections?.runtimeEnabled ?? false
   const connection = connections?.connections.find(
@@ -1766,6 +1898,66 @@ function AgentSessionView({
     }
   }
 
+  /**
+   * Send a follow-up input into the active run via steering.
+   *
+   * The request is idempotent on requestId: on failure we keep the same id
+   * so a retry cannot duplicate. Text is retained in the composer until
+   * the server acknowledges receipt via the SSE input event.
+   */
+  async function steer() {
+    if (!activeRun || !auth.session || !supportsSteering) return
+    // Capture the draft at the start of the attempt for later clearing.
+    const sentDraft = draft
+    const { prompt } = composeWirePrompt(
+      sentDraft,
+      new Map(attachments.items.map((item) => [item.id, item.name]))
+    )
+    if (!prompt || steeringInFlight) return
+    // Attachments are not supported mid-run; refuse honestly.
+    if (!attachments.empty) return
+    // Reuse the same requestId on retry so duplicates cannot happen.
+    // The retry ref persists the id across failed attempts.
+    const previous = steeringRetryId.current
+    const requestId =
+      previous?.text === prompt && previous.runId === activeRun
+        ? previous.id
+        : crypto.randomUUID()
+    steeringRetryId.current = { id: requestId, text: prompt, runId: activeRun }
+    setSteeringInFlight(requestId)
+    setError(null)
+    try {
+      await steerAgentRun(
+        activeRun,
+        prompt,
+        requestId,
+        auth.session.csrf,
+        auth.signal
+      )
+      // Success: clear only the captured draft if the composer still holds it.
+      // If the user has edited while waiting, preserve their new text.
+      steeringRetryId.current = null
+      setSteeringInFlight((pending) => (pending === requestId ? null : pending))
+      if (draftRef.current === promptText(sentDraft)) {
+        setDraft([])
+        draftRef.current = ""
+      }
+      // steeringInFlight is cleared by the SSE input event when it matches.
+    } catch (cause) {
+      // On conflict (finished/unsupported), the run ended while we were
+      // typing. Keep text for a new turn. Clear retry id since a new turn
+      // needs a new id. For network errors, keep text and requestId in the
+      // ref so Enter retries with the same id.
+      if (cause instanceof NativeClientError && cause.kind === "conflict") {
+        // Run finished; steering no longer available. User can start new turn.
+        setSupportsSteering(false)
+        steeringRetryId.current = null
+      }
+      setSteeringInFlight(null)
+      fail(cause)
+    }
+  }
+
   async function mutate(input: { title: string } | { archived: boolean }) {
     if (!auth.session) return
     try {
@@ -1885,6 +2077,8 @@ function AgentSessionView({
             const items = live
               ? mergeActivity(turn.activity, liveActivity)
               : turn.activity
+            // Follow-up inputs for this turn: live during the run, stored after.
+            const inputs = live ? liveInputs : turn.inputs
             const generatedAttachments = turn.attachments.filter(
               (file) =>
                 turn.response.includes(`/api/neev/attachments/${file.key}`) &&
@@ -1924,6 +2118,7 @@ function AgentSessionView({
                     <TranscriptBody
                       text={live ? liveText : turn.response}
                       items={items}
+                      inputs={inputs}
                       streaming={live}
                     />
                   </div>
@@ -1959,7 +2154,11 @@ function AgentSessionView({
       <form
         onSubmit={(event) => {
           event.preventDefault()
-          void send()
+          // When a run is active and supports steering, Enter sends into
+          // the same run. When running without steering, Enter does nothing
+          // (text is kept for the next turn). Otherwise it starts a new turn.
+          if (running && supportsSteering) void steer()
+          else if (!running) void send()
         }}
         className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-4 pb-3 pt-2 sm:px-8 sm:pb-5 sm:pt-3"
       >
@@ -1990,12 +2189,27 @@ function AgentSessionView({
               setDraft(next)
             }}
             tray={attachments}
-            label={t("agentPrompt")}
-            placeholder={t("agentPrompt")}
-            onSubmit={() => void send()}
-            busy={sending || running || attachments.uploading}
-            readOnly={sending || running || session.archived || !ready}
-            attachDisabled={session.archived || !ready}
+            label={
+              running && supportsSteering
+                ? t("agentFollowUp")
+                : t("agentPrompt")
+            }
+            placeholder={
+              running && supportsSteering
+                ? t("agentFollowUp")
+                : t("agentPrompt")
+            }
+            onSubmit={() => {
+              if (running && supportsSteering) void steer()
+              else if (!running) void send()
+            }}
+            busy={sending || steeringInFlight !== null || attachments.uploading}
+            // Typing is always allowed during a run (for the next turn, or for
+            // steering when supported). Entering submits when not running or
+            // when steering is supported.
+            readOnly={sending || session.archived || !ready}
+            // Attachments are not supported mid-run.
+            attachDisabled={session.archived || !ready || running}
             maxChars={NEEV_MAX_PROMPT_CHARS}
             className="min-h-14"
           />
@@ -2004,6 +2218,11 @@ function AgentSessionView({
           {attachments.uploading && (
             <p role="status" className="px-1 text-xs text-muted-foreground">
               {t("attachmentsPending")}
+            </p>
+          )}
+          {running && !attachments.empty && (
+            <p role="status" className="text-xs text-muted-foreground">
+              {t("agentFollowUpTextOnly")}
             </p>
           )}
           <NativeError error={error} />
@@ -2021,7 +2240,7 @@ function AgentSessionView({
               className="size-3.5 shrink-0 text-muted-foreground"
             />
             <AttachmentButton
-              disabled={sending || running || session.archived || !ready}
+              disabled={sending || session.archived || !ready}
               remaining={remainingAttachments(attachments)}
               onFiles={(files) => void composer.current?.addFiles(files)}
             />
@@ -2104,33 +2323,53 @@ function AgentSessionView({
                 {t("agentReconnect")}
               </Button>
             )}
-            {/* ONE control, one place. Send was disabled for the whole run
-                anyway, so a second button appeared beside a dead one and the
-                row shifted under the pointer at the exact moment someone
-                wanted to stop. While the run is up this IS Stop: same corner,
-                same size, a different job — and `type` changes with it so
-                Stop can never submit the form. */}
+            {/* When steering is supported, show Stop + Send side by side.
+                Stop remains always available; Send submits the follow-up. */}
+            {running && supportsSteering && (
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="ms-auto rounded-md"
+                aria-label={t("stopGeneration")}
+                title={t("stopGeneration")}
+                onClick={() => void cancel()}
+              >
+                <Square aria-hidden className="size-3.5 fill-current" />
+              </Button>
+            )}
+            {/* ONE control when not steering, or the Send beside Stop when
+                steering. The Send button becomes type="submit" for steering
+                so Enter and click both work. */}
             <Button
-              type={running ? "button" : "submit"}
+              type={running && !supportsSteering ? "button" : "submit"}
               size="icon"
               variant="default"
-              className="ms-auto rounded-md"
-              aria-label={running ? t("stopGeneration") : t("send")}
-              title={running ? t("stopGeneration") : t("send")}
-              // Stop is never held: the one thing that must stay pressable
-              // while everything else is busy is the way out of it.
+              className={cn(
+                "rounded-md",
+                !(running && supportsSteering) && "ms-auto"
+              )}
+              aria-label={
+                running && !supportsSteering ? t("stopGeneration") : t("send")
+              }
+              title={
+                running && !supportsSteering ? t("stopGeneration") : t("send")
+              }
               disabled={
-                running
+                running && !supportsSteering
                   ? false
                   : sending ||
+                    steeringInFlight !== null ||
                     session.archived ||
                     !ready ||
                     attachments.uploading ||
                     (promptIsEmpty(draft) && attachments.empty)
               }
-              onClick={running ? () => void cancel() : undefined}
+              onClick={
+                running && !supportsSteering ? () => void cancel() : undefined
+              }
             >
-              {running ? (
+              {running && !supportsSteering ? (
                 <Square aria-hidden className="size-3.5 fill-current" />
               ) : (
                 <ArrowUp aria-hidden />

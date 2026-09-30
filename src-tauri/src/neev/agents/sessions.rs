@@ -1220,6 +1220,26 @@ pub(crate) async fn recent_turns(
         .map(turn_row)
         .collect::<Result<Vec<_>, _>>()?;
     items.reverse();
+    // Context-only copies: keep accepted follow-ups in subsequent prompts.
+    // Stored turn responses remain untouched for rendering and export.
+    for turn in &mut items {
+        let inputs = db::list_steer_inputs(&tx, actor.org_id, session_id, turn.sequence).await?;
+        if !inputs.is_empty() {
+            let chars: Vec<char> = turn.response.chars().collect();
+            let mut response = String::new();
+            let mut offset = 0;
+            for input in inputs {
+                let cut = (input.response_offset.unwrap_or(0).max(0) as usize).min(chars.len()).max(offset);
+                response.extend(chars[offset..cut].iter());
+                response.push_str("\n\nUser: ");
+                response.push_str(&input.text);
+                response.push_str("\n\nAssistant: ");
+                offset = cut;
+            }
+            response.extend(chars[offset..].iter());
+            turn.response = response;
+        }
+    }
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(items)

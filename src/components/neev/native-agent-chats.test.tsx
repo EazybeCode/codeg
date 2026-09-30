@@ -946,6 +946,33 @@ it("draws prose and tool rows in the order the offsets record", () => {
   ])
 })
 
+it("cuts the reply at each follow-up's scalar offset, between tool rows", () => {
+  // Offsets count Unicode scalars: each emoji is ONE, where UTF-16 slicing
+  // would count two and cut the reply a character early — here, through 🎉.
+  const input = (requestId: string, text: string, responseOffset: number) => ({
+    requestId,
+    text,
+    createdAt: 1_700_000_000,
+    responseOffset,
+  })
+  const { container } = renderBody({
+    text: "🙂 Look. 🎉 Then ran. Done.",
+    items: [bashCall(1, 19, "ls -a"), bashResult(2, 19, 1, "a b")],
+    inputs: [input("b", "And finish up", 25), input("a", "Try again", 9)],
+  })
+  const order = [
+    ...container.querySelectorAll("p, li, [data-agent-input]"),
+  ].map((node) => node.textContent?.trim())
+  expect(order).toEqual([
+    "🙂 Look. 🎉",
+    "Try again",
+    "Then ran.",
+    "Bashls -a",
+    "Done.",
+    "And finish up",
+  ])
+})
+
 it("folds each result into its call, so one invocation is one row", () => {
   renderBody({
     text: "done",
@@ -1243,4 +1270,517 @@ it("keeps progress prose muted and the completed final answer normal", () => {
   expect(
     container.querySelector('[data-agent-prose="final"]')
   ).toHaveTextContent("Final answer.")
+})
+
+it("keeps the next draft editable during an agent run and preserves it when the run ends", async () => {
+  const stream = liveStream()
+  const starts: unknown[] = []
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [runningTurn], nextAfter: null }),
+    [EVENTS]: () => stream.response,
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: (init) => {
+      starts.push(init)
+      return json({ turn: runningTurn, runId: RUN_ID }, 201)
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const box = await screen.findByRole("textbox", {
+    name: messages.NativeContent.agentPrompt,
+  })
+  await waitFor(() => expect(composerEditable(box)).toBe(true))
+  await typeInComposer(box, "Also check the error handling")
+  expect(composerText(box)).toBe("Also check the error handling")
+  expect(screen.getByRole("button", { name: "Attach files" })).toBeEnabled()
+  await act(async () => {
+    stream.push({ type: "started", runId: RUN_ID, turnId: TURN_ID })
+    stream.push({ type: "chunk", text: "The parser reads tokens." })
+    stream.push({ type: "finished", status: "completed", errorCode: null })
+    stream.close()
+  })
+  expect(await screen.findByText("The parser reads tokens.")).toBeVisible()
+  expect(composerText(box)).toBe("Also check the error handling")
+  expect(starts).toHaveLength(0)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Live steering: follow-up inputs during an active run
+// ─────────────────────────────────────────────────────────────────────────────
+
+it("receives supportsSteering flag from SSE started event", async () => {
+  const stream = liveStream()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  await typeInComposer(
+    await screen.findByRole("textbox", { name: "Ask the agent" }),
+    "Summarise the parser"
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // The SSE started event now includes supportsSteering
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  act(() => stream.close())
+})
+
+it("displays follow-up input events from the SSE stream in the transcript", async () => {
+  const stream = liveStream()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  await typeInComposer(
+    await screen.findByRole("textbox", { name: "Ask the agent" }),
+    "Summarise the parser"
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Analyzing the parser..." })
+  })
+  expect(await screen.findByText("Analyzing the parser...")).toBeVisible()
+  // A steering input arrives mid-run
+  act(() => {
+    stream.push({
+      type: "input",
+      runId: RUN_ID,
+      requestId: "44444444-4444-4444-8444-444444444444",
+      text: "Focus on error handling",
+      createdAt: 1_700_000_001,
+      // Delivered once "Analyzing the parser..." (23 scalars) was written.
+      responseOffset: 23,
+    })
+    stream.push({ type: "chunk", text: " Now checking error handling." })
+  })
+  // The follow-up sits BETWEEN the reply written before it and after it.
+  const followUp = await screen.findByText("Focus on error handling")
+  expect(followUp).toBeVisible()
+  const before = screen.getByText("Analyzing the parser...")
+  const after = screen.getByText("Now checking error handling.")
+  expect(after).toBeVisible()
+  expect(before.compareDocumentPosition(followUp)).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+  expect(followUp.compareDocumentPosition(after)).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+  act(() => stream.close())
+})
+
+it("includes steering inputs in turn history when reloading", async () => {
+  // A turn with inputs recorded — reattaching shows them in history
+  const turnWithInputs = {
+    ...runningTurn,
+    status: "completed",
+    response: "Done analyzing.",
+    completedAt: 1_700_000_010,
+    // inputs field contains accepted follow-ups
+    inputs: [
+      {
+        requestId: "55555555-5555-5555-8555-555555555555",
+        text: "Also check imports",
+        createdAt: 1_700_000_002,
+        responseOffset: 5,
+      },
+    ],
+  }
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [turnWithInputs], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  // The completed turn is shown with its input where it was delivered: after
+  // "Done " (5 scalars), before the rest of the reply.
+  const before = await screen.findByText("Done")
+  const followUp = screen.getByText("Also check imports")
+  const after = screen.getByText("analyzing.")
+  expect(followUp).toBeVisible()
+  expect(before.compareDocumentPosition(followUp)).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+  expect(followUp.compareDocumentPosition(after)).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+})
+
+it("shows 'Add a follow-up…' placeholder while running with steering support", async () => {
+  const stream = liveStream()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Summarise the parser")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // With supportsSteering: true in the started event, placeholder changes
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  // The composer should show the follow-up placeholder
+  expect(
+    screen.getByRole("textbox", { name: messages.NativeContent.agentFollowUp })
+  ).toBeInTheDocument()
+  act(() => stream.close())
+})
+
+it("shows normal placeholder when steering is not supported", async () => {
+  const stream = liveStream()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Summarise the parser")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // With supportsSteering: false (or not set), placeholder stays normal
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: false,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  // While running without steering, Stop button appears and composer is for next turn
+  expect(
+    screen.getByRole("button", { name: "Stop generation" })
+  ).toBeInTheDocument()
+  act(() => stream.close())
+})
+
+it("sends follow-up to the same run and clears composer on acceptance", async () => {
+  const stream = liveStream()
+  const steers: { text: string; requestId: string }[] = []
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: (init) => {
+      const body = JSON.parse(init.body as string)
+      steers.push({ text: body.text, requestId: body.requestId })
+      return json({ accepted: true, runId: RUN_ID, requestId: body.requestId })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Summarise the parser")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  // Type a follow-up
+  const followUpComposer = await screen.findByRole("textbox", {
+    name: messages.NativeContent.agentFollowUp,
+  })
+  await typeInComposer(followUpComposer, "Focus on error handling")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(steers).toHaveLength(1))
+  expect(steers[0].text).toBe("Focus on error handling")
+  // Simulate the SSE input event acknowledging the follow-up
+  act(() => {
+    stream.push({
+      type: "input",
+      runId: RUN_ID,
+      requestId: steers[0].requestId,
+      text: "Focus on error handling",
+      createdAt: Date.now(),
+      responseOffset: 10,
+    })
+  })
+  // Composer should be cleared after acceptance
+  await waitFor(() => expect(composerText(followUpComposer)).toBe(""))
+  act(() => stream.close())
+})
+
+it("retains requestId on network failure for identical retry", async () => {
+  const stream = liveStream()
+  let steerCalls = 0
+  const receivedIds: string[] = []
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: (init) => {
+      steerCalls++
+      const body = JSON.parse(init.body as string)
+      receivedIds.push(body.requestId)
+      // First call fails with network error
+      if (steerCalls === 1) {
+        return json({ code: "unavailable" }, 503)
+      }
+      // Second call succeeds
+      return json({ accepted: true, runId: RUN_ID, requestId: body.requestId })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Start")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  const followUpComposer = await screen.findByRole("textbox", {
+    name: messages.NativeContent.agentFollowUp,
+  })
+  await typeInComposer(followUpComposer, "Follow up")
+  // First attempt - fails
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(steerCalls).toBe(1))
+  // Error shown
+  expect(await screen.findByRole("alert")).toBeVisible()
+  // Text is retained in composer
+  expect(composerText(followUpComposer)).toBe("Follow up")
+  // Retry - should use the same requestId
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(steerCalls).toBe(2))
+  // Both calls should have the same requestId (no duplicate risk)
+  expect(receivedIds[0]).toBe(receivedIds[1])
+  act(() => stream.close())
+})
+
+it("clears requestId on conflict (run finished) for new turn", async () => {
+  const stream = liveStream()
+  let steerCalls = 0
+  const receivedIds: string[] = []
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: (init) => {
+      steerCalls++
+      const body = JSON.parse(init.body as string)
+      receivedIds.push(body.requestId)
+      // Run finished while we were typing
+      return json({ code: "conflict" }, 409)
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Start")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  const followUpComposer = await screen.findByRole("textbox", {
+    name: messages.NativeContent.agentFollowUp,
+  })
+  await typeInComposer(followUpComposer, "Follow up")
+  // Attempt steering - gets conflict (run finished)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(steerCalls).toBe(1))
+  // Text is retained for a new turn (not cleared)
+  expect(composerText(followUpComposer)).toBe("Follow up")
+  // Steering should no longer be available (Stop button should be gone or Send changes)
+  // The run is finished, so the normal prompt should return
+  act(() => {
+    stream.push({ type: "finished", status: "completed", errorCode: null })
+    stream.close()
+  })
+})
+
+it("preserves user edits made during steering request", async () => {
+  const stream = liveStream()
+  let resolveSteer: (() => void) | null = null
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+    [EVENTS]: () => stream.response,
+    [`POST /api/neev/agent/runs/${RUN_ID}/steer`]: async (init) => {
+      const body = JSON.parse(init.body as string)
+      // Delay the response to simulate network latency
+      await new Promise<void>((resolve) => {
+        resolveSteer = resolve
+      })
+      return json({ accepted: true, runId: RUN_ID, requestId: body.requestId })
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const composer = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await typeInComposer(composer, "Start")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  act(() => {
+    stream.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  const followUpComposer = await screen.findByRole("textbox", {
+    name: messages.NativeContent.agentFollowUp,
+  })
+  await typeInComposer(followUpComposer, "Original")
+  // Start sending
+  const sendPromise = user.click(screen.getByRole("button", { name: "Send" }))
+  // Wait a bit for the request to start
+  await waitFor(() => expect(resolveSteer).not.toBeNull())
+  // User edits the composer while request is in flight
+  await typeInComposer(followUpComposer, " edited")
+  // Now resolve the steer request
+  act(() => resolveSteer!())
+  await sendPromise
+  // The edited text should be preserved, not cleared
+  expect(composerText(followUpComposer)).toBe("Original edited")
+  act(() => stream.close())
+})
+
+it("updates supportsSteering on reconnect from SSE started event", async () => {
+  // First connection: no steering. The component auto-reconnects when the
+  // stream closes, so the second stream picks up immediately.
+  let connectionCount = 0
+  const stream1 = liveStream()
+  const stream2 = liveStream()
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [runningTurn], nextAfter: null }),
+    [EVENTS]: () => {
+      connectionCount++
+      if (connectionCount === 1) return stream1.response
+      return stream2.response
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  // First started event: no steering
+  act(() => {
+    stream1.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: false,
+    })
+    stream1.push({ type: "chunk", text: "Working..." })
+  })
+  expect(await screen.findByText("Working...")).toBeVisible()
+  // Stop button shown (no steering - no follow-up input available)
+  expect(
+    screen.getByRole("button", { name: "Stop generation" })
+  ).toBeInTheDocument()
+  expect(
+    screen.queryByRole("textbox", {
+      name: messages.NativeContent.agentFollowUp,
+    })
+  ).toBeNull()
+  // Close stream1 - component auto-reconnects and gets stream2
+  act(() => stream1.close())
+  // Second connection: now with steering. Push events after giving the
+  // auto-reconnect a moment to fire the new SSE request.
+  await waitFor(() => expect(connectionCount).toBe(2))
+  act(() => {
+    stream2.push({
+      type: "started",
+      runId: RUN_ID,
+      turnId: TURN_ID,
+      supportsSteering: true,
+    })
+    stream2.push({ type: "chunk", text: "Still working..." })
+  })
+  expect(await screen.findByText("Still working...")).toBeVisible()
+  // Now steering should be available - follow-up placeholder should show
+  expect(
+    screen.getByRole("textbox", { name: messages.NativeContent.agentFollowUp })
+  ).toBeInTheDocument()
+  act(() => stream2.close())
 })
