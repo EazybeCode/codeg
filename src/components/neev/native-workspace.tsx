@@ -914,6 +914,15 @@ function NativeWorkspaceTree({
                                     aria-hidden
                                     className="size-3.5 shrink-0"
                                   />
+                                ) : isRunning("chat", resource.id) ? (
+                                  <span
+                                    className="shrink-0"
+                                    role="img"
+                                    aria-label={c("activityWorking")}
+                                    title={c("activityWorking")}
+                                  >
+                                    <AgentRunIndicator className="size-3.5 text-primary" />
+                                  </span>
                                 ) : (
                                   <MessagesSquare
                                     aria-hidden
@@ -930,17 +939,6 @@ function NativeWorkspaceTree({
                                 >
                                   {resource.title}
                                 </span>
-                                {resource.kind === "chat" &&
-                                  isRunning("chat", resource.id) && (
-                                    <span
-                                      className="ms-auto shrink-0"
-                                      role="img"
-                                      aria-label={c("activityWorking")}
-                                      title={c("activityWorking")}
-                                    >
-                                      <AgentRunIndicator className="size-3 text-muted-foreground" />
-                                    </span>
-                                  )}
                                 {/* Says where it is, so a struck-through row is
                                     not left to be guessed at. */}
                                 {resource.archived && (
@@ -1159,10 +1157,21 @@ function NativeWorkspaceTree({
                                 }
                                 className="flex min-h-8 w-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-start text-sm focus-visible:ring-2 focus-visible:ring-ring"
                               >
-                                <Bot
-                                  aria-hidden
-                                  className="size-3.5 shrink-0"
-                                />
+                                {isRunning("agent", item.id) ? (
+                                  <span
+                                    className="shrink-0"
+                                    role="img"
+                                    aria-label={c("activityWorking")}
+                                    title={c("activityWorking")}
+                                  >
+                                    <AgentRunIndicator className="size-3.5 text-primary" />
+                                  </span>
+                                ) : (
+                                  <Bot
+                                    aria-hidden
+                                    className="size-3.5 shrink-0"
+                                  />
+                                )}
                                 <span
                                   className={cn(
                                     "truncate",
@@ -1172,16 +1181,6 @@ function NativeWorkspaceTree({
                                 >
                                   {item.title}
                                 </span>
-                                {isRunning("agent", item.id) && (
-                                  <span
-                                    className="ms-auto shrink-0"
-                                    role="img"
-                                    aria-label={c("activityWorking")}
-                                    title={c("activityWorking")}
-                                  >
-                                    <AgentRunIndicator className="size-3 text-muted-foreground" />
-                                  </span>
-                                )}
                                 <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
                                   {item.archived ? c("inTrash") : item.provider}
                                 </span>

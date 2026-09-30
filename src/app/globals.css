@@ -1006,7 +1006,7 @@
   }
 }
 
-/* Neev uses neutral surfaces; purple is reserved for primary controls and focus.
+/* Warm ivory canvas with neutral selections; purple marks controls and focus.
    Match the workspace from :root so portalled menus share its palette. */
 :root:has([data-neev-theme="brand"]) {
   /* Brand ramp — light */
@@ -1018,9 +1018,9 @@
   --neev-on-plum: oklch(0.99 0 0);
   --neev-coral: oklch(0.64 0.16 32);
   --neev-coral-tint: oklch(0.95 0.03 40);
-  --neev-surface: oklch(1 0 0);
-  --neev-surface-raised: oklch(1 0 0);
-  --neev-surface-sunken: oklch(0.985 0 0);
+  --neev-surface: oklch(0.985 0.008 85);
+  --neev-surface-raised: oklch(0.998 0.003 85);
+  --neev-surface-sunken: oklch(0.968 0.012 82);
   --neev-ink: oklch(0.23 0 0);
   --neev-ink-muted: oklch(0.52 0 0);
   --neev-muted: oklch(0.96 0 0);
