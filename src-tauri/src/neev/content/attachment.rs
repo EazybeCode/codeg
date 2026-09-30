@@ -265,7 +265,7 @@ pub(crate) async fn load(
     let tx = db::begin(&state.database).await?;
     let row = db::one(
         &tx,
-        "SELECT chat_id,session_id,file_name,archived FROM neev_attachments WHERE org_id=$1 AND key=$2",
+        "SELECT chat_id,session_id,file_name,archived,sha256,byte_length FROM neev_attachments WHERE org_id=$1 AND key=$2",
         vec![actor.org_id.into(), key.to_owned().into()],
     )
     .await?
@@ -274,6 +274,8 @@ pub(crate) async fn load(
     let session_id: Option<String> = row.try_get("", "session_id").map_err(database_error)?;
     let file_name: String = row.try_get("", "file_name").map_err(database_error)?;
     let archived: bool = row.try_get("", "archived").map_err(database_error)?;
+    let sha256: String = row.try_get("", "sha256").map_err(database_error)?;
+    let byte_length: i64 = row.try_get("", "byte_length").map_err(database_error)?;
     // Archived attachments are not served: uniform NotFound keeps the existence
     // of a soft-deleted file unobservable to the reader.
     if archived {
@@ -290,7 +292,11 @@ pub(crate) async fn load(
     };
     authorize(&tx, actor, owner, false).await?;
     tx.commit().await.map_err(database_error)?;
-    let bytes = state.blobs.read_attachment(actor.org_id, key).await?;
+    // Checked against the row; an evicted original is restored on demand.
+    let bytes = state
+        .blobs
+        .read_attachment(actor.org_id, key, byte_length, &sha256)
+        .await?;
     let content_type = sniff_attachment(&bytes).ok_or(ContentError::Storage)?;
     Ok((bytes, content_type, file_name))
 }

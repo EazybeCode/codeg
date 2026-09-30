@@ -212,10 +212,22 @@ const CODEX_MODELS: &[Model] = &[Model {
     efforts: None,
 }];
 
+/// Cursor, Gemini CLI and OpenCode over ACP: the provider's own default only.
+/// No model flag is sent on the ACP path (OpenCode is pinned by the adapter to
+/// the signed-in `openai/` upstream), and there is no speed control.
+const ACP_MODELS: &[Model] = &[Model {
+    id: "default",
+    label: "Default",
+    default: true,
+    supports_speed: false,
+    efforts: None,
+}];
+
 pub(crate) fn models(provider: &str) -> &'static [Model] {
     match provider {
         "claude" => CLAUDE_MODELS,
         "codex" => CODEX_MODELS,
+        _ if super::acp_providers::is_acp(provider) => ACP_MODELS,
         _ => &[],
     }
 }
@@ -267,7 +279,7 @@ fn label(provider: &str) -> &'static str {
     match provider {
         "claude" => "Claude Code",
         "codex" => "Codex",
-        _ => "Agent",
+        _ => super::acp_providers::label(provider).unwrap_or("Agent"),
     }
 }
 
@@ -306,9 +318,13 @@ pub(crate) fn provider_capabilities(provider: &'static str) -> ProviderCapabilit
         // default, and a default we invented would be a silent opinion about
         // someone's token spend.
         default_effort: None,
-        supports_speed: true,
+        // No ACP provider has a speed control on this path.
+        supports_speed: !super::acp_providers::is_acp(provider),
         speed_unavailable_reason: Some(match provider {
             "claude" => "Fast mode runs on Opus. Choose Opus to enable it.",
+            _ if super::acp_providers::is_acp(provider) => {
+                "Fast mode is not available for this provider."
+            }
             _ => "Fast mode is not available for this model.",
         }),
         discovery_unavailable_reason: None,
@@ -444,6 +460,9 @@ pub(crate) async fn validated_for(
     if !crate::neev::agents::execution::safe_model(model) {
         return Err(());
     }
+    if super::acp_providers::is_acp(provider) && model != "default" {
+        return Err(());
+    }
     let requested = effort.filter(|value| !value.is_empty());
     // The catalogue is consulted only when something is actually being claimed
     // against it. An ask that names no level and no fast mode asserts nothing
@@ -480,12 +499,15 @@ pub(crate) struct Capabilities {
 }
 
 pub(crate) fn catalogue() -> Capabilities {
-    Capabilities {
-        providers: vec![
-            provider_capabilities("claude"),
-            provider_capabilities("codex"),
-        ],
+    let mut providers = vec![
+        provider_capabilities("claude"),
+        provider_capabilities("codex"),
+    ];
+    // An ACP provider is listed only once the operator gates it on.
+    for provider in super::acp_providers::enabled() {
+        providers.push(provider_capabilities(provider));
     }
+    Capabilities { providers }
 }
 
 /// The catalogue as THIS caller should see it, with their own account's models.
@@ -493,12 +515,15 @@ pub(crate) async fn catalogue_for(
     state: &crate::neev::startup::ServerState,
     actor: &crate::neev::types::OrgContext,
 ) -> Capabilities {
-    Capabilities {
-        providers: vec![
-            provider_for(state, actor, "claude").await,
-            provider_for(state, actor, "codex").await,
-        ],
+    let mut providers = vec![
+        provider_for(state, actor, "claude").await,
+        provider_for(state, actor, "codex").await,
+    ];
+    for provider in super::acp_providers::enabled() {
+        // Static: an ACP provider has no catalogue to discover.
+        providers.push(provider_capabilities(provider));
     }
+    Capabilities { providers }
 }
 
 /// Accept an effort for this provider, or refuse it.
@@ -556,6 +581,9 @@ pub(crate) fn validated_settings(
     fast: bool,
 ) -> Result<(Option<Effort>, bool), ()> {
     if !crate::neev::agents::execution::safe_model(model) {
+        return Err(());
+    }
+    if super::acp_providers::is_acp(provider) && model != "default" {
         return Err(());
     }
     let level = validated_effort_for(provider, model, effort)?;

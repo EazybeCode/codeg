@@ -146,7 +146,7 @@ async fn assert_v2_upgrades(db: &DatabaseConnection) {
     assert_eq!(initialize(db).await, Ok(()));
     assert_eq!(
         schema_version(db).await,
-        mention_migration::SCHEMA_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     assert_eq!(node_name(db, original_node_id).await, "Marketing");
     assert!(insert_cross_org_resource(db).await.is_err());
@@ -174,7 +174,7 @@ async fn fresh_database_initializes_at_version_eleven() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         schema_version(&db).await,
-        mention_migration::SCHEMA_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     assert!(table_exists(&db, "neev_resources").await);
     assert!(table_exists(&db, "neev_content_leases").await);
@@ -379,11 +379,11 @@ async fn v3_forward_hardening(db: &DatabaseConnection, invalid: bool) {
         assert_eq!(initialize(db).await, Ok(()));
         assert_eq!(
             schema_version(db).await,
-            mention_migration::SCHEMA_VERSION
+            CURRENT_SCHEMA_VERSION
         );
         assert_eq!(
             validate_content_snapshot(db).await,
-            Ok(mention_migration::SCHEMA_VERSION)
+            Ok(CURRENT_SCHEMA_VERSION)
         );
         assert_eq!(node_name(db, NODE_ID).await, "Marketing");
         assert_eq!(

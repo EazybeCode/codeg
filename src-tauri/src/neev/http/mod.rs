@@ -281,6 +281,11 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             "/api/neev/agent/runs/{run_id}/steer",
             post(agent_sessions::steer_run),
         )
+        // Re-run a failed turn's own stored ask; posts nothing new to a chat.
+        .route(
+            "/api/neev/agent/runs/{run_id}/retry",
+            post(agent_sessions::retry_run),
+        )
         // Explicit team invocation (§5.3): posts the ask, then publishes an
         // agent-authored reply into the same chat when the run completes.
         .route(

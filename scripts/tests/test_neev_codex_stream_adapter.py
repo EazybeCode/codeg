@@ -51,6 +51,14 @@ if MODE == "silent":
     time.sleep(30)
     sys.exit(0)
 
+if MODE == "dies":
+    # Dies before the protocol can say anything, explaining itself on stderr
+    # only — the shape of a provider with a broken sign-in or config.
+    sys.stderr.write("WARN proceeding, even though we could not create PATH aliases\\n")
+    sys.stderr.write("Error: Not logged in. Run codex login.\\n")
+    sys.stderr.flush()
+    sys.exit(1)
+
 asked = {}
 for line in sys.stdin:
     line = line.strip()
@@ -117,7 +125,19 @@ for line in sys.stdin:
                                          "command": "ls -la", "aggregatedOutput": "a\\nb",
                                          "exitCode": 0, "status": "completed"}})
         note("item/completed", {"item": {"type": "agentMessage", "id": "m1", "text": "Looking."}})
-        if MODE == "failed":
+        if MODE == "structured":
+            note("turn/completed", {"threadId": "t1", "turn": {
+                "id": "u1", "status": "failed",
+                "error": {"message": "You've hit your usage limit.",
+                          "codexErrorInfo": "usageLimitExceeded",
+                          "additionalDetails": "Try again at 3:05 PM."}}})
+        elif MODE == "notified":
+            note("error", {"threadId": "t1", "turnId": "u1", "willRetry": False,
+                           "error": {"message": "unexpected status 401 Unauthorized",
+                                     "codexErrorInfo": {"httpConnectionFailed":
+                                                        {"httpStatusCode": 401}}}})
+            note("turn/completed", {"threadId": "t1", "turn": {"id": "u1", "status": "failed"}})
+        elif MODE == "failed":
             note("turn/completed", {"threadId": "t1", "turn": {
                 "id": "u1", "status": "failed",
                 "error": {"message": "usage limit reached"}}})
@@ -409,7 +429,7 @@ class EndToEndTests(unittest.TestCase):
         # half-read and not accumulated, and one is enough to distrust the rest.
         code, lines = self.run_adapter("oversized")
         self.assertEqual(code, 4)
-        self.assertEqual(lines[-1], {"type": "turn.failed", "reason": "oversized provider message"})
+        self.assertEqual(lines[-1], {"type": "turn.failed", "reason": "oversized provider message", "code": "oversized"})
         self.assertTrue(all(len(json.dumps(line)) < adapter.MAX_LINE_BYTES for line in lines))
 
     def test_the_provider_stays_in_the_process_group_that_cancels_the_turn(self):
@@ -485,6 +505,58 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(process.stdout)["reason"], "provider did not start the turn"
             )
+
+
+class ProviderErrorTests(unittest.TestCase):
+    """A failure carries the provider's own words and, when it gave one, its kind."""
+
+    def run_adapter(self, mode):
+        return EndToEndTests.run_adapter(self, mode)
+
+    def test_codex_structured_error_info_is_passed_on_as_a_hint(self):
+        code, lines = self.run_adapter("structured")
+        self.assertEqual(code, 4)
+        self.assertEqual(lines[-1], {
+            "type": "turn.failed",
+            "reason": "You've hit your usage limit. — Try again at 3:05 PM.",
+            "code": "usageLimitExceeded",
+        })
+
+    def test_an_error_notification_explains_a_failure_that_carries_none(self):
+        code, lines = self.run_adapter("notified")
+        self.assertEqual(code, 4)
+        self.assertEqual(lines[-1], {
+            "type": "turn.failed",
+            "reason": "unexpected status 401 Unauthorized",
+            "code": "httpConnectionFailed",
+        })
+
+    def test_a_provider_that_dies_early_is_explained_by_its_own_stderr(self):
+        # Previously stderr went to /dev/null and this read "provider closed the
+        # stream" — true, and useless to the person who needs to sign in.
+        code, lines = self.run_adapter("dies")
+        self.assertEqual(code, 4)
+        self.assertEqual(lines[-1], {
+            "type": "turn.failed",
+            "reason": "provider exited: Error: Not logged in. Run codex login.",
+        })
+
+    def test_error_hint_reads_both_shapes_of_codex_error_info(self):
+        self.assertEqual(adapter.error_hint({"codexErrorInfo": "unauthorized"}), "unauthorized")
+        self.assertEqual(adapter.error_hint(
+            {"codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}}}),
+            "responseStreamDisconnected")
+        self.assertIsNone(adapter.error_hint({"codexErrorInfo": {"a": 1, "b": 2}}))
+        self.assertIsNone(adapter.error_hint(None))
+
+    def test_a_reason_is_bounded_before_it_leaves(self):
+        written = []
+        emit = adapter.Emitter(type("W", (), {
+            "write": lambda _s, text: written.append(text), "flush": lambda _s: None})())
+        emit.turn_failed("x" * 5000, "c" * 100)
+        payload = json.loads(written[0])
+        self.assertEqual(len(payload["reason"]), adapter.MAX_REASON_CHARS)
+        self.assertEqual(len(payload["code"]), 64)
 
 
 class SteeringTests(unittest.TestCase):

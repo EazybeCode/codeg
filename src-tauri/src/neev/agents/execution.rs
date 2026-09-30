@@ -390,13 +390,19 @@ impl CodexStream {
 pub(crate) struct ProviderBinaries {
     pub(crate) claude: Option<String>,
     pub(crate) codex: Option<String>,
+    /// ACP providers. Each must be the image-pinned path the launcher
+    /// allowlists (`neev_agent_launch.ACP_AGENT_PINS`); any other path is
+    /// refused by the launcher before a process exists.
+    pub(crate) cursor: Option<String>,
+    pub(crate) gemini: Option<String>,
+    pub(crate) opencode: Option<String>,
 }
 
 impl ProviderBinaries {
     pub(crate) fn claude(binary: impl Into<String>) -> Self {
         Self {
             claude: Some(binary.into()),
-            codex: None,
+            ..Self::default()
         }
     }
 
@@ -404,9 +410,21 @@ impl ProviderBinaries {
         match provider {
             "claude" => self.claude.as_deref(),
             "codex" => self.codex.as_deref(),
+            "cursor" => self.cursor.as_deref(),
+            "gemini" => self.gemini.as_deref(),
+            "opencode" => self.opencode.as_deref(),
             _ => None,
         }
     }
+}
+
+/// Refuse what the ACP path cannot honour, so a choice is never silently
+/// dropped: ACP runs take the provider's default model and no effort or speed
+/// control exists for them (`acp_providers`).
+fn acp_request_supported(request: &RunRequest) -> bool {
+    request.model == "default"
+        && request.effort.as_deref().is_none_or(str::is_empty)
+        && !request.fast
 }
 
 /// Streamed lifecycle of a run, mapped from ACP session updates by a real adapter.
@@ -445,6 +463,24 @@ fn provider_argv(
     fast: bool,
     images: &[String],
 ) -> Vec<String> {
+    if super::acp_providers::is_acp(provider) {
+        // ACP has no system-prompt parameter: the briefing goes in front of the
+        // prompt inside a delimiter, as for Codex. The launcher rewrites this
+        // canonical shape into the adapter's argv (`acp_stream_argv`); the
+        // marker is never passed to a provider. No model, effort, speed or
+        // image flag exists on this path (refused earlier, in `resolve`).
+        let prompt = match briefing.filter(|text| !text.is_empty()) {
+            Some(briefing) => {
+                format!("<workspace-context>\n{briefing}\n</workspace-context>\n\n{prompt}")
+            }
+            None => prompt.to_owned(),
+        };
+        return vec![
+            super::acp_providers::LAUNCH_MARKER.to_owned(),
+            "--".to_owned(),
+            prompt,
+        ];
+    }
     let mut argv: Vec<String> = match provider {
         "codex" => vec![
             "exec".into(),
@@ -1229,6 +1265,9 @@ impl SandboxedProviderCliRuntime {
         if request.model != "default" && !safe_model(&request.model) {
             return Err(ExecutionError::Unauthorized);
         }
+        if super::acp_providers::is_acp(&request.provider) && !acp_request_supported(request) {
+            return Err(ExecutionError::Unsupported);
+        }
         Ok((binary.to_owned(), handle.to_owned()))
     }
 
@@ -1445,7 +1484,11 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
     async fn discover_models(&self, request: DiscoveryRequest) -> Result<String, ExecutionError> {
         // The same refusals as a run, in the same order, before any resource is
         // taken: an unknown provider or a caller with no credential of their own
-        // never reaches a process.
+        // never reaches a process. ACP providers have no catalogue probe: their
+        // model is the provider default (`acp_providers`).
+        if super::acp_providers::is_acp(&request.provider) {
+            return Err(ExecutionError::Unsupported);
+        }
         let binary = self
             .binaries
             .resolve(&request.provider)
@@ -2083,6 +2126,106 @@ mod tests {
         assert!(argv.contains(&"stream-json".to_string()));
     }
 
+    fn acp_runtime() -> SandboxedProviderCliRuntime {
+        SandboxedProviderCliRuntime::new(
+            "python3",
+            "/opt/neev/scripts/operations/neev_agent_launch.py",
+            ProviderBinaries {
+                claude: Some("/usr/local/bin/claude".into()),
+                cursor: Some("/usr/local/bin/agent".into()),
+                gemini: Some("/usr/local/bin/gemini".into()),
+                opencode: Some("/usr/local/bin/opencode".into()),
+                ..ProviderBinaries::default()
+            },
+            "/data/agents",
+            vec![],
+            None,
+            // Even with the app-server transport (which turns steering on for
+            // Codex), an ACP run is never offered steering.
+            CodexStream::AppServer,
+        )
+    }
+
+    #[test]
+    fn an_acp_turn_is_the_canonical_launcher_shape_and_nothing_more() {
+        let runtime = acp_runtime();
+        let lane = Lane {
+            slot: "a",
+            uid: 61000,
+        };
+        for (provider, binary) in [
+            ("cursor", "/usr/local/bin/agent"),
+            ("gemini", "/usr/local/bin/gemini"),
+            ("opencode", "/usr/local/bin/opencode"),
+        ] {
+            let mut run = request("--help me");
+            run.provider = provider.into();
+            run.briefing = Some("Workspace notes".into());
+            let (resolved, _) = runtime.resolve(&run).expect("resolves");
+            assert_eq!(resolved, binary);
+            let argv = runtime
+                .launch_argv(&run, lane, Path::new("/data/agents/run-x"), binary, HANDLE)
+                .unwrap();
+            let sep = argv.iter().position(|a| a == "--").unwrap();
+            assert_eq!(argv[sep + 1], binary);
+            assert_eq!(argv[sep + 2], "--neev-acp");
+            assert_eq!(argv[sep + 3], "--");
+            assert!(argv[sep + 4].starts_with("<workspace-context>\nWorkspace notes"));
+            assert!(argv[sep + 4].ends_with("--help me"));
+            assert_eq!(argv.len(), sep + 5, "{provider}: no provider flags at all");
+            assert!(!argv.contains(&"--enable-steering".to_string()));
+            assert_eq!(
+                argv[argv.iter().position(|a| a == "--provider").unwrap() + 1],
+                provider
+            );
+        }
+    }
+
+    #[test]
+    fn choices_the_acp_path_cannot_honour_are_refused_not_dropped() {
+        let runtime = acp_runtime();
+        let mut model = request("hi");
+        model.provider = "gemini".into();
+        model.model = "gemini-2.5-pro".into();
+        let mut effort = request("hi");
+        effort.provider = "cursor".into();
+        effort.effort = Some("high".into());
+        let mut fast = request("hi");
+        fast.provider = "opencode".into();
+        fast.fast = true;
+        for run in [model, effort, fast] {
+            assert_eq!(
+                runtime.resolve(&run).err(),
+                Some(ExecutionError::Unsupported)
+            );
+        }
+        // An unbound ACP provider is refused like any other.
+        let mut unbound = request("hi");
+        unbound.provider = "gemini".into();
+        assert_eq!(
+            sandboxed().resolve(&unbound).err(),
+            Some(ExecutionError::Unsupported)
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_providers_have_no_catalogue_probe() {
+        let runtime = acp_runtime();
+        for provider in ["cursor", "gemini", "opencode"] {
+            let result = runtime
+                .discover_models(DiscoveryRequest {
+                    user_id: 7,
+                    org_id: 3,
+                    provider: provider.into(),
+                    credential_handle: Some(HANDLE.into()),
+                })
+                .await;
+            assert_eq!(result.err(), Some(ExecutionError::Unsupported));
+        }
+        // No lane was spent.
+        assert!(runtime.slots.acquire().is_some());
+    }
+
     #[test]
     fn each_provider_is_invoked_in_its_own_dialect() {
         // Claude Code is headless via `-p` with a streaming output format.
@@ -2514,7 +2657,10 @@ mod tests {
             .position(|a| a == "--codex-stream")
             .expect("transport is a launcher argument");
         assert_eq!(enabled[position + 1], "app-server");
-        assert_eq!(enabled[sep + 1..], argv[sep + 1..]);
+        // Launcher arguments may differ (app-server also enables steering), so
+        // compare what follows each argv's OWN separator: the provider's part.
+        let enabled_sep = enabled.iter().position(|a| a == "--").expect("separator");
+        assert_eq!(enabled[enabled_sep + 1..], argv[sep + 1..]);
     }
 
     #[test]
@@ -2580,6 +2726,7 @@ mod tests {
             ProviderBinaries {
                 claude: Some("/usr/local/bin/claude".into()),
                 codex: Some("/usr/local/bin/codex".into()),
+                ..ProviderBinaries::default()
             },
             "/w",
             vec![],
@@ -2903,6 +3050,7 @@ mod tests {
             ProviderBinaries {
                 claude: None,
                 codex: Some("/usr/local/bin/codex".into()),
+                ..ProviderBinaries::default()
             },
             &workspace,
             Vec::new(),

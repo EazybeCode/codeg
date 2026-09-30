@@ -175,7 +175,7 @@ async fn fresh_install_creates_attachment_storage_at_version_fifteen() {
     let db = h::database().await;
     assert_eq!(
         schema_version(&db).await,
-        attachment_archived_migration::SCHEMA_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     assert_eq!(count(&db, "neev_attachments").await, 0);
     assert_eq!(count(&db, "neev_attachment_refs").await, 0);
@@ -202,7 +202,7 @@ async fn reopening_a_migrated_database_succeeds() {
     );
     assert_eq!(
         schema_version(&db).await,
-        attachment_archived_migration::SCHEMA_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     // And again, because a restart is not a one-off event.
     assert_eq!(initialize(&db).await, Ok(()));
@@ -420,7 +420,7 @@ async fn the_migration_removes_the_old_ceiling_and_keeps_every_row() {
     assert_eq!(count(&db, "neev_attachment_refs").await, refs_before);
     assert_eq!(
         schema_version(&db).await,
-        attachment_archived_migration::SCHEMA_VERSION,
+        CURRENT_SCHEMA_VERSION,
         "initialization advances to the current schema"
     );
     // The rows are still reachable by key, not merely counted.
@@ -479,6 +479,7 @@ async fn schema_sixteen_upgrade_preserves_attachment_refs_and_archive_on_reopen(
         vec![],
     )
     .await;
+    super::tests::drop_tables_after_seventeen(&db).await;
     execute(
         &db,
         "UPDATE neev_schema_version SET version=16 WHERE id=1",
@@ -486,7 +487,7 @@ async fn schema_sixteen_upgrade_preserves_attachment_refs_and_archive_on_reopen(
     )
     .await;
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(schema_version(&db).await, 17);
+    assert_eq!(schema_version(&db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(count(&db, "neev_attachment_refs").await, 2);
     execute(
         &db,

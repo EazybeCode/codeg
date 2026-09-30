@@ -269,7 +269,7 @@ pub(crate) async fn publish_agent_reply_with_attachments(
     if body.is_empty() || body.len() > 32768 {
         return Err(ContentError::Invalid);
     }
-    if !matches!(agent_label, "claude" | "codex") {
+    if crate::neev::agents::types::Provider::parse(agent_label).is_none() {
         return Err(ContentError::Invalid);
     }
     // The turn is the identity of this reply. Recording a receipt against it

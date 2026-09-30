@@ -1953,3 +1953,69 @@ it("updates supportsSteering on reconnect from SSE started event", async () => {
   ).toBeInTheDocument()
   act(() => stream2.close())
 })
+
+it("shows a stored provider failure after reload and retries the same ask", async () => {
+  const RETRY_RUN = "fedcba9876543210fedcba9876543210"
+  const failedTurn = {
+    ...runningTurn,
+    status: "failed",
+    errorCode: "provider",
+    completedAt: 1_700_000_002,
+    activity: [
+      {
+        seq: 1,
+        offset: 0,
+        id: "error",
+        kind: "status",
+        state: "error",
+        detail: "request timed out after 30s",
+        category: "timeout",
+      },
+    ],
+  }
+  let retried: unknown = null
+  let started = 0
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [failedTurn], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () => {
+      started++
+      return json({ code: "unexpected" }, 500)
+    },
+    [`POST /api/neev/agent/runs/${RUN_ID}/retry`]: (init) => {
+      retried = JSON.parse(init.body as string)
+      return json(
+        {
+          turn: {
+            ...runningTurn,
+            id: "77777777-7777-4777-8777-777777777777",
+            sequence: "2",
+            runId: RETRY_RUN,
+          },
+          runId: RETRY_RUN,
+        },
+        201
+      )
+    },
+    [`GET /api/neev/agent/runs/${RETRY_RUN}/events`]: () =>
+      new Response(
+        'data: {"type":"chunk","text":"Second time lucky"}\n\ndata: {"type":"finished","status":"completed","errorCode":null}\n\n',
+        { status: 200, headers: { "Content-Type": "text/event-stream" } }
+      ),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const card = await screen.findByRole("alert")
+  expect(card).toHaveTextContent("The provider took too long to respond.")
+  expect(card).toHaveTextContent("request timed out after 30s")
+  await user.click(within(card).getByRole("button", { name: "Retry" }))
+  await waitFor(() =>
+    expect(retried).toEqual({
+      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    })
+  )
+  expect(started).toBe(0)
+  expect(await screen.findByText("Second time lucky")).toBeVisible()
+})

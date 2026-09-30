@@ -109,11 +109,9 @@ pub(super) async fn run(
     // The invoker's OWN per-user credential for the requested provider (§5.4);
     // an unknown provider resolves to `None`, which the sandboxed runtime
     // refuses rather than launching under a host identity.
-    let credential_handle = match payload.provider.as_str() {
-        "claude" => Some(crate::neev::agents::types::Provider::Claude),
-        "codex" => Some(crate::neev::agents::types::Provider::Codex),
-        _ => None,
-    };
+    // An ACP provider that is not gated on resolves to `None` like an unknown one.
+    let credential_handle =
+        crate::neev::agents::types::Provider::parse_offered(payload.provider.as_str());
     let credential_handle = match credential_handle {
         Some(provider) => crate::neev::agents::intents::credential(&state, &context, provider)
             .await

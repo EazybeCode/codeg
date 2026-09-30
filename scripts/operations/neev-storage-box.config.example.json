@@ -1,0 +1,28 @@
+{
+  "host": "uNNNNNN-subN.your-storagebox.de",
+  "user": "uNNNNNN-subN",
+  "identity_file": "/etc/neev-storage-box/id_ed25519",
+  "known_hosts_file": "/etc/neev-storage-box/known_hosts",
+  "remote_root": "neev-originals",
+  "local_root": "/ABSOLUTE/PATH/TO/neev/data/documents",
+  "state_dir": "/var/lib/neev-storage-box",
+  "broker": {
+    "socket": "/run/neev-originals/broker.sock",
+    "client_uid": 65532,
+    "socket_gid": 65532,
+    "fetch_timeout_seconds": 600,
+    "max_parallel": 4,
+    "queue_timeout_seconds": 60
+  },
+  "eviction": {
+    "kinds": [
+      "att",
+      "img"
+    ],
+    "min_idle_seconds": 1209600,
+    "max_local_bytes": 10737418240,
+    "min_free_bytes": 8589934592,
+    "max_evictions_per_run": 500,
+    "max_verify_age_seconds": 93600
+  }
+}

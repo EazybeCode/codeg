@@ -5,6 +5,7 @@ these prove the CLI maps to a correct, validated SandboxSpec + egress policy."""
 import io
 import json
 import os
+import subprocess
 import sys
 import time
 import unittest
@@ -695,6 +696,93 @@ class RelayWiringTests(unittest.TestCase):
         self.assertEqual(written, [])
 
 
+class SteeringRelaySubprocessTests(unittest.TestCase):
+    """The steering relay, against a REAL child process and REAL OS pipes.
+
+    The bug: `_run_child` handed the relay the TEXT `sys.stdin` while the
+    sandbox's `Popen` stdin is BINARY, so the first steer raised `TypeError`,
+    the relay thread died and its `finally` closed the adapter's stdin. Every
+    follow-up in production was then silently lost. A fake sink that accepts
+    both `str` and `bytes` cannot see that; a real pipe can.
+    """
+
+    ECHO = [sys.executable, "-c",
+            "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]
+
+    def _launcher_stdin(self, payload):
+        # A real text stdin with a real `.buffer`, exactly like the launcher's.
+        read_fd, write_fd = os.pipe()
+        with os.fdopen(write_fd, "wb") as writer:
+            writer.write(payload)
+        return io.TextIOWrapper(os.fdopen(read_fd, "rb"))
+
+    def test_steer_lines_cross_a_binary_pipe_and_oversized_lines_are_dropped(self):
+        child = subprocess.Popen(self.ECHO, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        first = b'{"requestId":"a","text":"keep going"}\n'
+        huge = b'{"requestId":"b","text":"' + b"x" * 300 + b'"}\n'
+        last = b'{"requestId":"c","text":"\xc3\xa9t\xc3\xa9"}\n'
+        stdin = self._launcher_stdin(first + huge + last)  # held: GC would close it
+        launch._relay_steering(child.stdin, stdin.buffer, max_line=128)
+        # The relay closed the child's stdin at EOF, which is what ends the echo.
+        out = child.stdout.read()
+        child.stdout.close()
+        self.assertEqual(child.wait(timeout=10), 0)
+        self.assertEqual(out, first + last)
+
+    def test_run_child_relays_launcher_stdin_to_the_real_sandbox_pipe(self):
+        steer = b'{"requestId":"r1","text":"also check the tests"}\n'
+
+        class Handle:
+            def __init__(self, process):
+                self._process = process
+                self.stdin = process.stdin
+                self.stdout = process.stdout
+                self.pid = process.pid
+
+            def wait(self):
+                return self._process.wait(timeout=10)
+
+            def teardown(self):
+                if self._process.poll() is None:
+                    self._process.kill()
+                    self._process.wait()
+
+        def real_launch(spec, env=None, bind_source=None, stdin_pipe=False):
+            self.assertTrue(stdin_pipe, "steering must be launched with a pipe")
+            # Binary pipes, as `sandbox.launch` opens them.
+            return Handle(subprocess.Popen(
+                self.ECHO, stdin=subprocess.PIPE, stdout=subprocess.PIPE))
+
+        forwarded = io.BytesIO()
+        saved = (launch.sandbox.launch, launch.signal.signal, sys.stdin, sys.stdout)
+        launch.sandbox.launch = real_launch
+        launch.signal.signal = lambda *_a: None  # not the main thread under unittest
+        sys.stdin = self._launcher_stdin(steer)
+        sys.stdout = type("Out", (), {"buffer": forwarded})()
+        try:
+            spec = launch.build_spec(launch._parse([
+                "--tenant", "org:3/user:7", "--slot", "a",
+                "--workdir", "/var/lib/neev-native/agents/run-steer-abc",
+                "--uid", "61000", "--gid", "61000",
+                "--provider", "codex", "--credential-handle", "h",
+                "--", "/usr/local/bin/codex", "app-server",
+            ]))
+            rc = launch._run_child(spec, {}, relay_steering=True)
+        finally:
+            launch.sandbox.launch, launch.signal.signal, sys.stdin, sys.stdout = saved
+        self.assertEqual(rc, 0)
+        # The child echoed what the relay wrote: the steer arrived intact.
+        self.assertEqual(forwarded.getvalue(), steer)
+
+    def test_a_text_source_is_refused_loudly_not_half_relayed(self):
+        written = []
+        sink = type("Sink", (), {"write": lambda _s, chunk: written.append(chunk),
+                                  "flush": lambda _s: None, "close": lambda _s: None})()
+        with self.assertRaises(TypeError):
+            launch._relay_steering(sink, io.StringIO('{"requestId":"a","text":"t"}\n'))
+        self.assertEqual(written, [])
+
+
 class PromptArgvBoundaryTests(unittest.TestCase):
     """A prompt is the user's words, never an option.
 
@@ -1210,6 +1298,79 @@ class AppServerTransportTests(unittest.TestCase):
         parsed, spec = self.spec_for("codex", ["exec", "--json", "hi"])
         self.assertFalse(launch.is_metadata_probe(parsed.provider, spec))
         self.assertNotIn("app-server", spec.provider_argv)
+
+
+class AcpTransportTests(unittest.TestCase):
+    """Cursor / Gemini / OpenCode turns run the ACP adapter as the sandboxed
+    provider, started ONLY from the image-pinned binary paths."""
+
+    def spec_for(self, provider, tail, binary=None, steering=False, style=""):
+        argv = [
+            "--tenant", "org:3/user:7", "--slot", "a",
+            "--workdir", "/var/lib/neev-native/agents/run-x",
+            "--uid", "61000", "--gid", "61000",
+            "--provider", provider, "--credential-handle", "handle-1",
+            "--codex-stream", "app-server",
+        ]
+        if steering:
+            argv.append("--enable-steering")
+        binary = binary or launch.ACP_AGENT_PINS[provider][0]
+        return launch.build_spec(launch._parse(argv + ["--", binary, *tail]), style=style)
+
+    def test_each_provider_runs_the_adapter_with_its_pins(self):
+        for provider in ("cursor", "gemini", "opencode"):
+            with self.subTest(provider=provider):
+                spec = self.spec_for(provider, ["--neev-acp", "--", "hello"], style="Be brief.")
+                argv = list(spec.provider_argv)
+                pin = launch.ACP_AGENT_PINS[provider][0]
+                self.assertEqual(argv[:3], [sandbox.PYTHON, "-I", launch.ACP_ADAPTER])
+                self.assertEqual(argv[3:7], ["--provider", provider, "--agent", pin])
+                self.assertIn("--allowed-agent", argv)
+                self.assertEqual(argv[argv.index("--context") + 1], "Be brief.")
+                self.assertEqual(argv[-2:], ["--", "hello"])
+                self.assertNotIn("--enable-steering", argv)
+                self.assertNotIn("--permission-policy", argv)
+
+    def test_a_prompt_shaped_like_a_flag_stays_the_prompt(self):
+        spec = self.spec_for("gemini", ["--neev-acp", "--", "--probe"])
+        argv = list(spec.provider_argv)
+        self.assertEqual(argv[-2:], ["--", "--probe"])
+        self.assertEqual(argv.count("--probe"), 1)
+
+    def test_no_style_means_no_context_block(self):
+        spec = self.spec_for("opencode", ["--neev-acp", "--", "hi"], style="")
+        self.assertNotIn("--context", list(spec.provider_argv))
+
+    def test_unpinned_binaries_and_non_canonical_shapes_are_refused(self):
+        refused = [
+            ("cursor", ["--neev-acp", "--", "hi"], "/tmp/agent"),
+            ("cursor", ["--neev-acp", "--", "hi"], "/usr/local/bin/gemini"),
+            ("gemini", ["--acp"], None),
+            ("gemini", ["--neev-acp", "hi"], None),
+            ("gemini", ["--neev-acp", "--", ""], None),
+            ("opencode", ["--neev-acp", "--", "hi", "extra"], None),
+            ("opencode", ["-p", "hi"], None),
+        ]
+        for provider, tail, binary in refused:
+            with self.subTest(provider=provider, tail=tail, binary=binary):
+                with self.assertRaises(sandbox.SandboxError):
+                    self.spec_for(provider, tail, binary=binary)
+
+    def test_steering_is_refused_for_acp(self):
+        with self.assertRaises(sandbox.SandboxError):
+            self.spec_for("cursor", ["--neev-acp", "--", "hi"], steering=True)
+
+    def test_the_probe_argv_is_fixed(self):
+        argv = launch.acp_probe_argv("gemini")
+        self.assertEqual(argv[-1], "--probe")
+        self.assertIn("/usr/local/bin/gemini", argv)
+        with self.assertRaises(sandbox.SandboxError):
+            launch.acp_probe_argv("claude")
+
+    def test_the_acp_adapter_ships_beside_the_launcher(self):
+        self.assertTrue(os.path.isfile(launch.ACP_ADAPTER))
+        self.assertEqual(os.path.dirname(launch.ACP_ADAPTER),
+                         os.path.dirname(os.path.abspath(launch.__file__)))
 
 
 class ExportSecurityTests(unittest.TestCase):

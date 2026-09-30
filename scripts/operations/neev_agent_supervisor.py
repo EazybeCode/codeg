@@ -90,6 +90,23 @@ class Challenge:
     user_code: Optional[str] = None
 
 
+# How each provider's OFFICIAL sign-in completes, which fixes the challenge shape the
+# user sees and whether SUBMIT_CODE is legal:
+#   device             — show a user code for a fixed verification URL; the CLI polls
+#                        (Codex app-server; OpenCode `auth login` ChatGPT headless).
+#   authorization_code — open a URL, paste the resulting code back to the CLI's stdin
+#                        (Claude `auth login`; Gemini NO_BROWSER sign-in).
+#   browser            — open a URL and approve; the CLI polls, nothing is pasted
+#                        (Cursor `agent login` with NO_OPEN_BROWSER).
+LOGIN_FLOWS = {
+    dto.Provider.CODEX: "device",
+    dto.Provider.CLAUDE: "authorization_code",
+    dto.Provider.CURSOR: "browser",
+    dto.Provider.GEMINI: "authorization_code",
+    dto.Provider.OPENCODE: "device",
+}
+
+
 @dataclass(frozen=True)
 class DriverState:
     """A driver's current view. `phase` is one of: starting, awaiting_user,
@@ -402,7 +419,8 @@ class Supervisor:
         deadline = expires_at
         if challenge.expires_at and 0 < challenge.expires_at < deadline:
             deadline = challenge.expires_at
-        if provider is dto.Provider.CODEX:
+        flow = LOGIN_FLOWS.get(provider)
+        if flow == "device":
             if challenge.user_code is None:
                 raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
             return dto.DeviceChallenge(
@@ -410,9 +428,13 @@ class Supervisor:
                 dto.UserCode(challenge.user_code),
                 dto.UnixSec(deadline),
             )
-        return dto.AuthorizationCodeChallenge(
-            challenge.verification_url, dto.UnixSec(deadline)
-        )
+        if flow == "browser":
+            return dto.BrowserChallenge(challenge.verification_url, dto.UnixSec(deadline))
+        if flow == "authorization_code":
+            return dto.AuthorizationCodeChallenge(
+                challenge.verification_url, dto.UnixSec(deadline)
+            )
+        raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
 
     def _advance(self, attempt: _Attempt) -> str:
         """Poll the driver, fold expiry, and return the current phase."""
@@ -531,8 +553,9 @@ class Supervisor:
 
     def _submit_code(self, request: dto.Request):
         attempt = self._lookup(request.body.binding)
-        if attempt.provider is not dto.Provider.CLAUDE:
-            # Codex device logins never submit a code.
+        if LOGIN_FLOWS.get(attempt.provider) != "authorization_code":
+            # Device (Codex, OpenCode) and browser-poll (Cursor) logins never
+            # submit a code.
             raise Reject(dto.ErrorCode.CONFLICT)
         phase = self._advance(attempt)
         if phase == "awaiting_user":

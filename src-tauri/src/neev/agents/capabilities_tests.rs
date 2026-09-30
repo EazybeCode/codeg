@@ -235,3 +235,26 @@ async fn cancelling_a_probe_does_not_release_its_slot_until_teardown_finishes() 
         "the slot is reusable once, and only once, teardown has finished"
     );
 }
+
+#[test]
+fn acp_providers_claim_nothing_they_cannot_do() {
+    for provider in ["cursor", "gemini", "opencode"] {
+        let caps = provider_capabilities(provider);
+        assert_ne!(caps.label, "Agent");
+        assert!(caps.efforts.is_empty(), "{provider}: no effort control");
+        assert!(!caps.supports_speed, "{provider}: no speed control");
+        assert_eq!(caps.models.len(), 1);
+        assert_eq!(caps.models[0].id, "default");
+        assert!(!caps.models[0].supports_speed);
+        assert!(validated_settings(provider, "default", None, false).is_ok());
+        assert!(validated_settings(provider, "gpt-5", None, false).is_err());
+        assert!(validated_settings(provider, "default", Some("high"), false).is_err());
+        assert!(validated_settings(provider, "default", None, true).is_err());
+    }
+}
+
+#[test]
+fn acp_providers_are_not_advertised_until_gated_on() {
+    let listed: Vec<&str> = catalogue().providers.iter().map(|p| p.provider).collect();
+    assert_eq!(listed, vec!["claude", "codex"]);
+}

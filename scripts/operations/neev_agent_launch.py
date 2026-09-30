@@ -172,6 +172,22 @@ def externally_sandboxed_argv(provider, provider_argv):
 # inherited PYTHONPATH.
 ADAPTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neev_codex_stream_adapter.py")
 CLAUDE_ADAPTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neev_claude_stream_adapter.py")
+ACP_ADAPTER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "neev_acp_stream_adapter.py")
+
+# The ONLY executables an ACP run may start, per provider: the image-pinned paths
+# (see the pinned-image requirements in the providers report). Fixed here, never
+# taken from the runtime's argv or the environment — the runtime's binary must be
+# EXACTLY one of these, and the adapter re-checks the realpath against them.
+ACP_AGENT_PINS = {
+    "cursor": ("/usr/local/bin/agent",),
+    "gemini": ("/usr/local/bin/gemini",),
+    "opencode": ("/usr/local/bin/opencode",),
+}
+# The canonical ACP turn the Rust runtime builds: `<binary> --neev-acp -- <prompt>`.
+# `--neev-acp` is a marker for THIS launcher, never passed to a provider: an older
+# launcher (or a misrouted argv) refuses the provider at argparse instead of
+# running the binary with a prompt it would misread.
+ACP_MARKER = "--neev-acp"
 
 
 # The `-c key=value` overrides `provider_argv` builds for `codex exec`, and what
@@ -366,6 +382,47 @@ def claude_stream_argv(provider, provider_argv, adapter=CLAUDE_ADAPTER, python=s
     return [python, "-I", adapter] + mapped + ["--", prompt]
 
 
+def acp_stream_argv(provider, provider_argv, style="", adapter=ACP_ADAPTER,
+                    python=sandbox.PYTHON, pins=None):
+    """Pure: rewrite the canonical ACP turn into the in-sandbox adapter's argv.
+
+    Only `[<pinned binary>, "--neev-acp", "--", <prompt>]` is accepted; anything
+    else raises (a provider binary must never be run with an argv it would parse
+    on its own). The adapter is given the pinned paths as its allowlist, the
+    default fail-closed permission policy (no product grant exists for ACP runs),
+    and never `--enable-steering` (ACP v1 has no mid-turn input). The response
+    style travels as `--context`, because ACP has no system-prompt parameter.
+    """
+    pins = ACP_AGENT_PINS if pins is None else pins
+    allowed = pins.get(provider)
+    argv = list(provider_argv)
+    if not allowed:
+        raise sandbox.SandboxError("invalid")
+    if len(argv) != 4 or argv[1] != ACP_MARKER or argv[2] != "--":
+        raise sandbox.SandboxError("invalid")
+    binary, prompt = argv[0], argv[3]
+    if binary not in allowed or not prompt:
+        raise sandbox.SandboxError("invalid")
+    mapped = [python, "-I", adapter, "--provider", provider, "--agent", binary]
+    for path in allowed:
+        mapped += ["--allowed-agent", path]
+    if style:
+        mapped += ["--context", style]
+    return mapped + ["--", prompt]
+
+
+def acp_probe_argv(provider, adapter=ACP_ADAPTER, python=sandbox.PYTHON, pins=None):
+    """Pure: the fixed account-probe argv for one ACP provider (supervisor lane)."""
+    pins = ACP_AGENT_PINS if pins is None else pins
+    allowed = pins.get(provider)
+    if not allowed:
+        raise sandbox.SandboxError("invalid")
+    argv = [python, "-I", adapter, "--provider", provider, "--agent", allowed[0]]
+    for path in allowed:
+        argv += ["--allowed-agent", path]
+    return argv + ["--probe"]
+
+
 # The shared response-style policy, beside this launcher in the same root-owned
 # 0555 directory and nowhere else — never from the run workdir, which the model
 # itself can write. It is our text, not the reader's and not the workspace's.
@@ -535,13 +592,16 @@ def build_spec(args, style=None):
         provider_argv = provider_argv[1:]
     if not provider_argv:
         raise sandbox.SandboxError("invalid")
-    provider_argv = response_style_argv(
-        args.provider,
-        provider_argv,
-        load_response_style() if style is None else style,
-    )
+    style = load_response_style() if style is None else style
     enable_steering = getattr(args, "enable_steering", False)
-    if args.provider == "claude" and enable_steering:
+    if args.provider not in credentials.ACP_PROVIDERS:
+        provider_argv = response_style_argv(args.provider, provider_argv, style)
+    if args.provider in credentials.ACP_PROVIDERS:
+        # ACP runs have no steering; a runtime asking for it is misconfigured.
+        if enable_steering:
+            raise sandbox.SandboxError("invalid")
+        provider_argv = acp_stream_argv(args.provider, provider_argv, style)
+    elif args.provider == "claude" and enable_steering:
         # Claude with steering uses stream-json + interrupt-and-continue
         provider_argv = claude_stream_argv(args.provider, provider_argv,
                                            enable_steering=True)
@@ -1069,12 +1129,27 @@ def _relay_steering(destination, source, max_line=_STEER_MAX_LINE_BYTES,
     - Stays open for the run duration (steering may come at any time)
     - Bounds per-line and total bytes for safety
     - Closes destination only when source EOF or total exceeded
+
+    BYTES in, bytes out. `destination` is the sandbox's binary `Popen` pipe, so
+    `source` must be binary too (`sys.stdin.buffer`, never the text `sys.stdin`):
+    writing a `str` there raised `TypeError`, which killed this thread on the
+    first steer and — through the `finally` — closed the adapter's stdin, so
+    every follow-up after that went unanswered. Lines are read with a bound, so
+    one runaway line cannot grow the launcher either.
     """
     total = 0
     try:
-        for line in source:
+        while True:
+            line = source.readline(max_line + 1)
+            if not line:
+                break
+            if not isinstance(line, bytes):
+                raise TypeError("steering relay source must be binary")
             if len(line) > max_line:
-                # Oversized line is dropped, not fatal
+                # Oversized line is dropped, not fatal — including the rest of
+                # it that the bounded read left behind.
+                while line and not line.endswith(b"\n"):
+                    line = source.readline(max_line + 1)
                 continue
             total += len(line)
             if total > max_total:
@@ -1118,10 +1193,11 @@ def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=Fa
             daemon=True,
         ).start()
     elif relay_steering and handle.stdin is not None:
-        # Steering relay: read JSON lines from launcher stdin, relay to adapter
+        # Steering relay: read JSON lines from launcher stdin, relay to adapter.
+        # `.buffer`: the sandbox pipe is binary (see `_relay_steering`).
         threading.Thread(
             target=_relay_steering,
-            args=(handle.stdin, sys.stdin),
+            args=(handle.stdin, sys.stdin.buffer),
             daemon=True,
         ).start()
 

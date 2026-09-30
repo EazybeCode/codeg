@@ -1,0 +1,33 @@
+[Unit]
+Description=Neev originals broker (root-side Storage Box read-through for the app)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/neev-storage-box/neev_originals_broker.py --config /etc/neev-storage-box/config.json serve
+Restart=on-failure
+RestartSec=5
+# Keep the directory across restarts: the app container bind-mounts it, and a
+# recreated directory would leave the container holding a stale inode.
+RuntimeDirectory=neev-originals
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Replace the placeholder with the host path of the volume behind
+# /data/documents (the same value as local_root). The unit refuses to start
+# until this is done.
+# State dir: the broker is the only writer of tombstones.json (forget) and
+# reads verified.json; the document root receives hydrated originals.
+ReadWritePaths=/run/neev-originals /var/lib/neev-storage-box @NEEV_DOCUMENT_ROOT_HOST_PATH@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

@@ -66,6 +66,13 @@ path = "src/bin/neev-content-verify.rs"
 required-features = []
 
 [[bin]]
+# Guarded operator rollback of schema 20 (provider enum) to 19; refuses when any
+# row names an ACP provider. See neev/db/provider_enum_migration.rs.
+name = "neev-schema-downgrade"
+path = "src/bin/neev_schema_downgrade.rs"
+required-features = []
+
+[[bin]]
 # Fixed-command privileged launch helper (Linux; installed with file caps). Only
 # component that runs privileged; the web server execs it to launch a sandboxed
 # agent without itself holding any capabilities.

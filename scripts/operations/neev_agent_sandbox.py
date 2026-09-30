@@ -306,9 +306,45 @@ def _secure_own_workdir(workdir, run_uid, run_gid):  # pragma: no cover - Linux 
         os.close(fd)
 
 
+# Width of the login terminal. Wide enough that no CLI decides to wrap a long
+# authorize URL for display (the kernel never inserts line breaks; a TUI might).
+PTY_COLUMNS = 1000
+PTY_ROWS = 50
+
+
+def open_login_pty(columns=PTY_COLUMNS, rows=PTY_ROWS):
+    """A pseudo-terminal pair for a login CLI that requires an interactive TTY.
+
+    Gemini CLI's documented NO_BROWSER sign-in only runs when stdin is a TTY
+    (`isInteractive()`; over a pipe it refuses with "Manual authorization is
+    required but the current session is non-interactive"). Returns
+    `(master_fd, slave_fd)`, both close-on-exec except that the caller hands the
+    slave to exactly one child as stdin/stdout. Echo is disabled so a pasted
+    authorization code is never reflected back into the output we parse."""
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    master, slave = pty.openpty()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+        attrs = termios.tcgetattr(slave)
+        attrs[3] &= ~(termios.ECHO | termios.ECHONL)
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        os.set_inheritable(master, False)
+    except Exception:
+        os.close(master)
+        os.close(slave)
+        raise
+    return master, slave
+
+
 class SandboxHandle:
-    def __init__(self, process, egress_plan=None, egress_runner=None):
+    def __init__(self, process, egress_plan=None, egress_runner=None, tty=None):
         self._process = process
+        # (reader, writer) over the PTY master when launched with pty_stdio=True.
+        self._tty = tty
         # When the tenant runs under a provider-allowlist, launch() wired a named
         # egress netns; teardown must reverse it so the wiring is scoped to the run.
         self._egress_plan = egress_plan
@@ -320,13 +356,18 @@ class SandboxHandle:
 
     @property
     def stdout(self):
-        """The agent's piped stdout (provider stream-json), for forwarding."""
+        """The agent's piped stdout (provider stream-json), for forwarding; the PTY
+        master when launched with pty_stdio=True."""
+        if self._tty is not None:
+            return self._tty[0]
         return self._process.stdout
 
     @property
     def stdin(self):
         """The agent's piped stdin, when launched with stdin_pipe=True (login flows
-        that drive the provider's stdio); None otherwise."""
+        that drive the provider's stdio) or pty_stdio=True; None otherwise."""
+        if self._tty is not None:
+            return self._tty[1]
         return self._process.stdin
 
     @property
@@ -354,6 +395,13 @@ class SandboxHandle:
                 self._process.wait(timeout=5)
             except Exception:
                 pass
+            if self._tty is not None:
+                for stream in self._tty:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+                self._tty = None
             if self._egress_plan is not None and self._egress_runner is not None:
                 import neev_agent_egress as _egress
 
@@ -389,7 +437,8 @@ def _create_bind_mountpoint(workdir, run_uid, run_gid):  # pragma: no cover - Li
     return target
 
 
-def launch(spec, env=None, bind_source=None, stdin_pipe=False, stderr_pipe=False):  # pragma: no cover - Linux production path
+def launch(spec, env=None, bind_source=None, stdin_pipe=False, stderr_pipe=False,
+           pty_stdio=False):  # pragma: no cover - Linux production path
     """Launch the agent inside the sandbox. Linux only.
 
     `stdin_pipe=True` opens a pipe to the provider's stdin (login flows that drive the
@@ -410,7 +459,13 @@ def launch(spec, env=None, bind_source=None, stdin_pipe=False, stderr_pipe=False
 
     `bind_source`, when given, is the physical credential-volume mount to bind onto
     the lane-traversable `home_path(workdir)` inside the sandbox's private mount
-    namespace (so the 0700 secret store is never exposed)."""
+    namespace (so the 0700 secret store is never exposed).
+
+    `pty_stdio=True` gives the provider a pseudo-terminal as stdin AND stdout (for a
+    login CLI that refuses to run its official flow without a TTY — see
+    `open_login_pty`). Mutually exclusive with `stdin_pipe`."""
+    if pty_stdio and stdin_pipe:
+        raise SandboxError("invalid")
     if platform.system() != "Linux":
         raise SandboxError("unsupported")
     if env is not None and not (
@@ -447,20 +502,32 @@ def launch(spec, env=None, bind_source=None, stdin_pipe=False, stderr_pipe=False
         join_netns = egress_plan.netns
 
     argv = build_launch_argv(spec, join_netns=join_netns, bind_source=bind_source)
+    master = slave = None
     try:
+        if pty_stdio:
+            master, slave = open_login_pty()
         process = subprocess.Popen(
             argv,
             cwd=spec.workdir,
-            stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
+            stdin=slave if pty_stdio else (subprocess.PIPE if stdin_pipe else subprocess.DEVNULL),
+            stdout=slave if pty_stdio else subprocess.PIPE,
             stderr=subprocess.PIPE if stderr_pipe else subprocess.DEVNULL,
             start_new_session=True,
             close_fds=True,
             env=env,
         )
     except OSError as error:
+        for fd in (master, slave):
+            if fd is not None:
+                os.close(fd)
         # Don't leak the egress wiring if the process failed to spawn.
         if egress_plan is not None:
             egress.teardown(egress_plan, egress_runner)
         raise SandboxError("launch") from error
-    return SandboxHandle(process, egress_plan=egress_plan, egress_runner=egress_runner)
+    tty = None
+    if pty_stdio:
+        os.close(slave)  # only the child holds the terminal side now
+        tty = (os.fdopen(master, "rb", buffering=0),
+               os.fdopen(os.dup(master), "wb", buffering=0))
+    return SandboxHandle(process, egress_plan=egress_plan, egress_runner=egress_runner,
+                         tty=tty)

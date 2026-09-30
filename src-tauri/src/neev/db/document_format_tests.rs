@@ -11,7 +11,7 @@ async fn populated_five_upgrades(database: DatabaseConnection) {
         .unwrap()
         .try_get::<i64>("", "version")
         .unwrap();
-    assert_eq!(exists, mention_migration::SCHEMA_VERSION);
+    assert_eq!(exists, CURRENT_SCHEMA_VERSION);
     super::tests::drop_mention_tables(db).await;
     super::tests::drop_attachment_tables(db).await;
     for table in ["neev_agent_turns", "neev_agent_sessions"] {
@@ -58,7 +58,7 @@ async fn populated_five_upgrades(database: DatabaseConnection) {
     initialize(db).await.unwrap();
     assert_eq!(
         validate_content_snapshot(db).await.unwrap(),
-        mention_migration::SCHEMA_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     let format = one(
         db,

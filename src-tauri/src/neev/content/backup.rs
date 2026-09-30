@@ -309,7 +309,9 @@ pub(super) async fn verify_snapshot_staged(
     image_refs.sort_by(|a, b| (a.org_id, &a.key).cmp(&(b.org_id, &b.key)));
     for blob in &image_refs {
         let bytes = at_stage(
-            store.read_image(blob.org_id, &blob.key).await,
+            store
+                .read_image(blob.org_id, &blob.key, blob.byte_length, &blob.sha256)
+                .await,
             VerificationStage::BlobRead,
         )?;
         verify_side_car(&bytes, blob)?;
@@ -320,7 +322,9 @@ pub(super) async fn verify_snapshot_staged(
     attachment_refs.sort_by(|a, b| (a.org_id, &a.key).cmp(&(b.org_id, &b.key)));
     for blob in &attachment_refs {
         let bytes = at_stage(
-            store.read_attachment(blob.org_id, &blob.key).await,
+            store
+                .read_attachment(blob.org_id, &blob.key, blob.byte_length, &blob.sha256)
+                .await,
             VerificationStage::BlobRead,
         )?;
         verify_side_car(&bytes, blob)?;

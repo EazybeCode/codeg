@@ -32,6 +32,15 @@ pub(crate) const MAX_ACTIVITY_CHARS: usize = 65_536;
 /// because being wrong in this direction costs a few bytes of capacity and
 /// being wrong in the other costs the whole trace.
 const MARKER_RESERVE: usize = 128;
+/// Bytes held back for ONE terminal provider-error step, so a long run that
+/// spent its trace budget and THEN failed still stores why. The step's message
+/// is at most `provider_error::MAX_MESSAGE_CHARS` characters (4 bytes each at
+/// worst) plus its fixed fields, which this covers with room to spare.
+pub(crate) const ERROR_RESERVE: usize = 1_536;
+
+fn is_error_step(kind: &ActivityKind) -> bool {
+    matches!(kind, ActivityKind::Status { state, .. } if state == super::provider_error::STATE_ERROR)
+}
 
 /// What one recorded step was.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +67,11 @@ pub(crate) enum ActivityKind {
         state: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+        /// Only on `state: "error"`: the failure's class (see
+        /// `provider_error::Category`). Optional and defaulted, so a trace
+        /// stored before it existed still reads, and an older reader ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
     },
 }
 
@@ -168,6 +182,11 @@ pub(crate) struct StreamParser {
     /// Codex command ids already announced at `item.started` with a command to
     /// show. Their `item.completed` contributes only the result.
     announced: HashSet<String>,
+    /// The most recent provider-reported error class and text seen BEFORE the
+    /// turn failed (Codex `error` events, Claude's assistant `error` field).
+    /// Used when the terminal failure itself carries less.
+    error_hint: Option<String>,
+    error_message: Option<String>,
 }
 
 impl StreamParser {
@@ -179,6 +198,53 @@ impl StreamParser {
             redact: redact.into_iter().filter(|value| !value.is_empty()).collect(),
             streamed: HashSet::new(),
             announced: HashSet::new(),
+            error_hint: None,
+            error_message: None,
+        }
+    }
+
+    /// The provider's own failure, classified, redacted and bounded.
+    fn provider_error(&mut self, hint: Option<&str>, message: &str) -> StreamItem {
+        let message = if message.trim().is_empty() {
+            self.error_message.take().unwrap_or_default()
+        } else {
+            message.to_owned()
+        };
+        let hint = hint.map(str::to_owned).or_else(|| self.error_hint.take());
+        let category = super::provider_error::classify(hint.as_deref(), &message);
+        let safe = super::provider_error::sanitize(&message, &self.redact);
+        StreamItem::Activity(super::provider_error::draft(category, safe))
+    }
+
+    /// A `turn.failed` envelope, in either dialect: the adapters write
+    /// `reason` (+ optional `code`), `codex exec` writes `error.message`.
+    /// The `result`/`failed` marker is kept for readers that know only it.
+    fn turn_failed(&mut self, value: &serde_json::Value) -> Vec<StreamItem> {
+        let reason = value
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                value
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or_default()
+            .to_owned();
+        let hint = value.get("code").and_then(|v| v.as_str()).map(str::to_owned);
+        vec![
+            self.status("result", "result", Some("failed".to_owned())),
+            self.provider_error(hint.as_deref(), &reason),
+        ]
+    }
+
+    /// Remember an error the provider reported before (or instead of) failing.
+    fn remember_error(&mut self, hint: Option<&str>, message: Option<&str>) {
+        if let Some(hint) = hint.filter(|value| !value.is_empty()) {
+            self.error_hint = Some(hint.chars().take(64).collect());
+        }
+        if let Some(message) = message.filter(|value| !value.trim().is_empty()) {
+            self.error_message = Some(message.chars().take(4_096).collect());
         }
     }
 
@@ -218,6 +284,7 @@ impl StreamParser {
                     let (short, _) = truncate(&scrub(&value, &self.redact), 200);
                     short
                 }),
+                category: None,
             },
         })
     }
@@ -236,7 +303,9 @@ impl StreamParser {
         };
         let mapped = match self.provider.as_str() {
             "claude" => self.claude(&value),
-            "codex" => self.codex(&value),
+            // The ACP adapter (`neev_acp_stream_adapter.py`) writes the Codex
+            // item dialect, so Cursor, Gemini CLI and OpenCode share its mapping.
+            "codex" | "cursor" | "gemini" | "opencode" => self.codex(&value),
             _ => None,
         };
         match mapped {
@@ -395,11 +464,52 @@ impl StreamParser {
                     .get("subtype")
                     .and_then(|v| v.as_str())
                     .map(str::to_owned);
-                Some(vec![self.status("result", "result", subtype)])
+                let failed = value.get("is_error").and_then(|v| v.as_bool()) == Some(true)
+                    || subtype.as_deref().is_some_and(|kind| kind.starts_with("error"));
+                let mut items = vec![self.status("result", "result", subtype)];
+                if failed {
+                    // Claude's own words for why: `result` on an API error
+                    // ("API Error: 401 … OAuth token has expired"), `errors[]`
+                    // on an execution error.
+                    let message = value
+                        .get("result")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            value.get("errors").and_then(|v| v.as_array()).map(|errors| {
+                                errors
+                                    .iter()
+                                    .filter_map(|e| e.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })
+                        })
+                        .unwrap_or_default();
+                    items.push(self.provider_error(None, &message));
+                }
+                Some(items)
             }
             // The assembled assistant message; its text already arrived as
-            // deltas, so recording it again would duplicate the reply.
-            "assistant" => Some(Vec::new()),
+            // deltas, so recording it again would duplicate the reply. An
+            // assistant message that IS an error (`error` set, e.g.
+            // `authentication_failed`) is remembered so the failure can say so.
+            "assistant" => {
+                if let Some(kind) = value.get("error").and_then(|v| v.as_str()) {
+                    let text = value
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                        .and_then(|blocks| {
+                            blocks
+                                .iter()
+                                .find_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        });
+                    self.remember_error(Some(kind), text);
+                }
+                Some(Vec::new())
+            }
+            // The streaming adapter's own failure envelope.
+            "turn.failed" => Some(self.turn_failed(value)),
             // A Claude stream we can read, carrying an event this version does
             // not map — a heartbeat, a new envelope type. Known-and-ignored,
             // NOT unsupported: telling the reader their provider is unsupported
@@ -533,11 +643,15 @@ impl StreamParser {
             }
             "thread.started" | "turn.started" => Some(Vec::new()),
             "turn.completed" => Some(vec![self.status("result", "result", None)]),
-            "turn.failed" => Some(vec![self.status(
-                "result",
-                "result",
-                Some("failed".to_owned()),
-            )]),
+            "turn.failed" => Some(self.turn_failed(value)),
+            // `codex exec` reports errors (including transient reconnects) as
+            // their own envelope before `turn.failed`. Remembered, not shown:
+            // only a failure that ends the turn is the turn's error.
+            "error" => {
+                let message = value.get("message").and_then(|v| v.as_str());
+                self.remember_error(None, message);
+                Some(Vec::new())
+            }
             _ => None,
         }
     }
@@ -581,6 +695,9 @@ pub(crate) struct ActivityLog {
     next_seq: u32,
     chars: usize,
     truncated: bool,
+    /// The one terminal error step has been recorded (it is never capped out,
+    /// and never recorded twice).
+    errored: bool,
 }
 
 impl ActivityLog {
@@ -592,6 +709,7 @@ impl ActivityLog {
             // document rather than its contents.
             chars: 2,
             truncated: false,
+            errored: false,
         }
     }
 
@@ -603,11 +721,13 @@ impl ActivityLog {
         let truncated = items.iter().any(|item| {
             matches!(&item.kind, ActivityKind::Status { state, .. } if state == STATE_TRUNCATED)
         });
+        let errored = items.iter().any(|item| is_error_step(&item.kind));
         Self {
             items,
             next_seq,
             chars,
             truncated,
+            errored,
         }
     }
 
@@ -637,6 +757,9 @@ impl ActivityLog {
     /// reserve is held back on top, so the `truncated` marker is always
     /// affordable at the moment it is needed.
     pub(crate) fn push(&mut self, draft: ActivityDraft, offset: usize) -> Option<ActivityItem> {
+        if is_error_step(&draft.kind) {
+            return self.push_error(draft, offset);
+        }
         if self.truncated {
             return None;
         }
@@ -658,7 +781,10 @@ impl ActivityLog {
                 };
                 let after = serde_json::to_string(&revised).map(|t| t.len()).unwrap_or(0);
                 let grown = after.saturating_sub(before);
-                if self.chars + grown + MARKER_RESERVE > MAX_ACTIVITY_CHARS {
+                // The error reserve is held back here too: a revision grows
+                // a step by up to `MAX_INPUT_CHARS`, and must not spend the
+                // space the terminal error is promised.
+                if self.chars + grown + MARKER_RESERVE + ERROR_RESERVE > MAX_ACTIVITY_CHARS {
                     // Keep the announcement, which is delivered and still true,
                     // and record that the trace stopped growing.
                     return self.mark_truncated(offset);
@@ -679,10 +805,36 @@ impl ActivityLog {
             .map(|text| text.len() + 1)
             .unwrap_or(0);
         if self.items.len() + 1 >= MAX_ITEMS
-            || self.chars + cost + MARKER_RESERVE > MAX_ACTIVITY_CHARS
+            || self.chars + cost + MARKER_RESERVE + ERROR_RESERVE > MAX_ACTIVITY_CHARS
         {
             return self.mark_truncated(offset);
         }
+        self.next_seq += 1;
+        self.chars += cost;
+        self.items.push(item.clone());
+        Some(item)
+    }
+
+    /// The terminal provider error: recorded even after the trace was capped,
+    /// out of the reserve every other step leaves untouched. Past the item cap
+    /// by at most one, which is ours to allow — the stored CHECK is on size.
+    fn push_error(&mut self, draft: ActivityDraft, offset: usize) -> Option<ActivityItem> {
+        if self.errored {
+            return None;
+        }
+        let item = ActivityItem {
+            seq: self.next_seq,
+            offset,
+            id: draft.id,
+            kind: draft.kind,
+        };
+        let cost = serde_json::to_string(&item)
+            .map(|text| text.len() + 1)
+            .unwrap_or(0);
+        // Never refused for size: every other path leaves `ERROR_RESERVE`, and
+        // should the budget still be over, `stored()` trims OTHER items and
+        // keeps this one. Losing the reason is the one outcome not allowed.
+        self.errored = true;
         self.next_seq += 1;
         self.chars += cost;
         self.items.push(item.clone());
@@ -698,6 +850,7 @@ impl ActivityLog {
             kind: ActivityKind::Status {
                 state: STATE_TRUNCATED.to_owned(),
                 detail: None,
+                category: None,
             },
         };
         self.next_seq += 1;
@@ -721,21 +874,40 @@ impl ActivityLog {
         if text.len() <= MAX_ACTIVITY_CHARS {
             return Some(text);
         }
-        let mut kept: Vec<ActivityItem> = self.items.clone();
+        // The terminal error is the one step a trimmed trace must keep: it is
+        // the stored reason the turn failed.
+        let error = self
+            .items
+            .iter()
+            .find(|item| is_error_step(&item.kind))
+            .cloned();
+        let mut kept: Vec<ActivityItem> = self
+            .items
+            .iter()
+            .filter(|item| !is_error_step(&item.kind))
+            .cloned()
+            .collect();
         while !kept.is_empty() {
             kept.pop();
             let mut candidate = kept.clone();
             candidate.push(ActivityItem {
                 // Numbered past everything kept, so a client that already has
                 // the earlier items still upserts this cleanly.
-                seq: kept.last().map(|item| item.seq).unwrap_or(0) + 1,
+                seq: kept
+                    .last()
+                    .map(|item| item.seq)
+                    .unwrap_or(0)
+                    .max(error.as_ref().map(|item| item.seq).unwrap_or(0))
+                    + 1,
                 offset: kept.last().map(|item| item.offset).unwrap_or(0),
                 id: STATE_TRUNCATED.to_owned(),
                 kind: ActivityKind::Status {
                     state: STATE_TRUNCATED.to_owned(),
                     detail: None,
+                    category: None,
                 },
             });
+            candidate.extend(error.clone());
             let text = serialize(&candidate);
             if text.len() <= MAX_ACTIVITY_CHARS {
                 return Some(text);
@@ -743,15 +915,21 @@ impl ActivityLog {
         }
         // Even one item plus a marker does not fit: store the marker alone, so
         // the turn still reports that a trace existed and was cut.
-        let marker = vec![ActivityItem {
+        let mut marker = vec![ActivityItem {
             seq: 1,
             offset: 0,
             id: STATE_TRUNCATED.to_owned(),
             kind: ActivityKind::Status {
                 state: STATE_TRUNCATED.to_owned(),
                 detail: None,
+                category: None,
             },
         }];
+        if let Some(error) = error {
+            // `seq` is the client's dedupe key: the two must never share one.
+            marker[0].seq = error.seq + 1;
+            marker.insert(0, error);
+        }
         Some(serialize(&marker))
     }
 }

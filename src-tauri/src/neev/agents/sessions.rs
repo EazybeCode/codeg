@@ -388,9 +388,10 @@ fn title(value: &str) -> Result<String, ContentError> {
 }
 
 fn provider(value: &str) -> Result<&str, ContentError> {
-    match value {
-        "claude" | "codex" => Ok(value),
-        _ => Err(ContentError::Invalid),
+    // Claude/Codex always; an ACP provider only while it is gated on.
+    match super::types::Provider::parse_offered(value) {
+        Some(_) => Ok(value),
+        None => Err(ContentError::Invalid),
     }
 }
 

@@ -818,7 +818,7 @@ async fn validate_sessions<C: ConnectionTrait>(db: &C, sqlite: bool) -> Result<(
                 || !uuid_like(&id)
                 || owner_id <= 0 || owner_id > i64::from(i32::MAX)
                 || !(1..=200).contains(&title.chars().count())
-                || !matches!(provider.as_str(), "claude" | "codex")
+                || !super::provider_enum_migration::PROVIDERS.contains(&provider.as_str())
                 || !(1..=80).contains(&model.chars().count())
                 || visibility != "private"
                 || !matches!(kind.as_str(), "chat" | "team")
@@ -909,7 +909,7 @@ async fn validate_turns<C: ConnectionTrait>(db: &C, sqlite: bool) -> Result<(), 
                 || error_code
                     .as_deref()
                     .is_some_and(|code| !TURN_ERROR_CODES.contains(&code))
-                || !matches!(provider.as_str(), "claude" | "codex")
+                || !super::provider_enum_migration::PROVIDERS.contains(&provider.as_str())
                 || !(1..=80).contains(&model.chars().count())
                 || !(0..=253_402_300_799).contains(&created_at)
                 || updated_at < created_at

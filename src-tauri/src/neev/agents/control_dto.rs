@@ -14,6 +14,13 @@ const DEVICE_URL: &str = "https://auth.openai.com/codex/device";
 /// Verified against the pinned Claude 2.1.267 binary in an offline probe. The
 /// legacy `claude.ai` origin is deliberately NOT accepted.
 const CLAUDE_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+/// Gemini CLI's NO_BROWSER sign-in (pinned 0.62.0, `oauth2.ts authWithUserCode`)
+/// prints a Google authorize URL and reads the pasted code back — the same
+/// paste-code shape as Claude. Mirrors `neev_supervisor_dto._GOOGLE_AUTHORIZE_URL`.
+const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth?";
+/// Cursor `agent login` prints a cursor.com sign-in URL and polls. Origin-level
+/// only: the exact path is not verified against a pinned binary.
+const CURSOR_BROWSER_URL: &str = "https://cursor.com/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DtoError {
@@ -267,7 +274,15 @@ macro_rules! wire_enum {
 // Both providers Neev can connect. Claude was previously absent here, so a
 // Claude sign-in could not even be *expressed* on the control plane; the run
 // side (`agents/execution.rs`) has always supported both.
-wire_enum!(Provider { Codex => "codex", Claude => "claude" });
+// The ACP providers are expressible on the control plane too; whether the
+// product offers them is decided by the coordinator (`acp_providers` gate).
+wire_enum!(Provider {
+    Codex => "codex",
+    Claude => "claude",
+    Cursor => "cursor",
+    Gemini => "gemini",
+    Opencode => "opencode",
+});
 wire_enum!(Op {
     StartLogin => "start_login",
     ObserveLogin => "observe_login",
@@ -570,9 +585,15 @@ pub(crate) enum LoginChallenge {
         user_code: UserCode,
         expires_at: UnixSec,
     },
-    /// Claude: the user opens `verification_url`, approves, and pastes the
+    /// Claude / Gemini: the user opens `verification_url`, approves, and pastes the
     /// resulting authorization code back — delivered by [`Op::SubmitCode`].
     AuthorizationCode {
+        verification_url: String,
+        expires_at: UnixSec,
+    },
+    /// Cursor: the user opens `verification_url` and approves; the CLI polls.
+    /// Nothing is pasted back and there is no user code.
+    Browser {
         verification_url: String,
         expires_at: UnixSec,
     },
@@ -586,22 +607,34 @@ impl LoginChallenge {
             }
             | Self::AuthorizationCode {
                 verification_url, ..
+            }
+            | Self::Browser {
+                verification_url, ..
             } => verification_url,
         }
     }
 
     pub(crate) fn expires_at(&self) -> &UnixSec {
         match self {
-            Self::Device { expires_at, .. } | Self::AuthorizationCode { expires_at, .. } => {
-                expires_at
-            }
+            Self::Device { expires_at, .. }
+            | Self::AuthorizationCode { expires_at, .. }
+            | Self::Browser { expires_at, .. } => expires_at,
+        }
+    }
+
+    /// The challenge's wire kind, which also says what the user must do.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            Self::Device { .. } => "device",
+            Self::AuthorizationCode { .. } => "authorization_code",
+            Self::Browser { .. } => "browser",
         }
     }
 
     pub(crate) fn user_code(&self) -> Option<&UserCode> {
         match self {
             Self::Device { user_code, .. } => Some(user_code),
-            Self::AuthorizationCode { .. } => None,
+            Self::AuthorizationCode { .. } | Self::Browser { .. } => None,
         }
     }
 
@@ -615,7 +648,13 @@ impl LoginChallenge {
             } => verification_url == DEVICE_URL,
             Self::AuthorizationCode {
                 verification_url, ..
-            } => verification_url.starts_with(CLAUDE_AUTHORIZE_URL),
+            } => {
+                verification_url.starts_with(CLAUDE_AUTHORIZE_URL)
+                    || verification_url.starts_with(GOOGLE_AUTHORIZE_URL)
+            }
+            Self::Browser {
+                verification_url, ..
+            } => verification_url.starts_with(CURSOR_BROWSER_URL),
         };
         if acceptable {
             Ok(())
@@ -1380,7 +1419,7 @@ fn schema_login_snapshot(value: &JsonNode) -> Result<(), DtoError> {
                     challenge,
                     &["kind", "verification_url", "user_code", "expires_at"],
                 ),
-                "authorization_code" => {
+                "authorization_code" | "browser" => {
                     exact_keys(challenge, &["kind", "verification_url", "expires_at"])
                 }
                 _ => Err(DtoError::Invalid),

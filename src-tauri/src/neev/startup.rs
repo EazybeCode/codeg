@@ -68,7 +68,10 @@ impl ServerState {
         config: Config,
         clock: Arc<dyn Clock + Send + Sync>,
     ) -> Result<Self, ContentError> {
-        let blobs = Arc::new(BlobStore::open(&config.document_root)?);
+        let blobs = Arc::new(
+            BlobStore::open(&config.document_root)?
+                .with_originals(super::content::originals::OriginalsBroker::from_env()?),
+        );
         let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
         let mail = config
             .providers
@@ -544,6 +547,39 @@ async fn serve() -> Result<(), ()> {
             }
             binaries.codex = Some(codex);
         }
+        // ACP providers (Cursor, Gemini CLI, OpenCode). Each binary is optional
+        // and must be EXACTLY the image-pinned path the launcher allowlists
+        // (`neev_agent_launch.ACP_AGENT_PINS`); anything else aborts the boot
+        // rather than binding a binary every run would be refused for.
+        for (variable, pinned, slot) in [
+            ("NEEV_AGENT_CURSOR_BINARY", "/usr/local/bin/agent", &mut binaries.cursor),
+            ("NEEV_AGENT_GEMINI_BINARY", "/usr/local/bin/gemini", &mut binaries.gemini),
+            ("NEEV_AGENT_OPENCODE_BINARY", "/usr/local/bin/opencode", &mut binaries.opencode),
+        ] {
+            if let Ok(value) = std::env::var(variable) {
+                if value != pinned || !std::path::Path::new(&value).is_file() {
+                    return Err(());
+                }
+                *slot = Some(value);
+            }
+        }
+        // Which ACP providers the product may OFFER. Empty/unset = none. Strict:
+        // an unknown id, or naming a provider whose binary is not bound, aborts.
+        let gate = super::agents::acp_providers::parse_gate(
+            &std::env::var(super::agents::acp_providers::GATE_ENV).unwrap_or_default(),
+        )?;
+        for provider in &gate {
+            let bound = match *provider {
+                "cursor" => binaries.cursor.is_some(),
+                "gemini" => binaries.gemini.is_some(),
+                "opencode" => binaries.opencode.is_some(),
+                _ => false,
+            };
+            if !bound {
+                return Err(());
+            }
+        }
+        super::agents::acp_providers::configure_gate(gate);
         // Which Codex transport the sandbox runs. Absent means `exec` — the
         // behaviour this deployment already has — and an unrecognised value
         // aborts the boot rather than being read as either choice.

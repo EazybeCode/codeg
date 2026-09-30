@@ -284,7 +284,7 @@ async fn seed_preserved_data(db: &DatabaseConnection, with_content: bool) {
 async fn assert_preserved_data(db: &DatabaseConnection, with_content: bool) {
     assert_eq!(
         schema_version(db).await,
-        mention_migration::SCHEMA_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     assert_eq!(h::count(db, "neev_accounts").await, 1);
     assert_eq!(h::count(db, "neev_organizations").await, 1);
@@ -362,7 +362,7 @@ async fn native_initialization_creates_empty_personal_agent_metadata() {
     assert!(rows.is_empty());
     assert_eq!(
         schema_version(&database).await,
-        mention_migration::SCHEMA_VERSION
+        CURRENT_SCHEMA_VERSION
     );
 }
 
@@ -1879,7 +1879,7 @@ async fn initializer_refuses_mismatched_partial_and_non_table_agent_schemas() {
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(
         schema_version(&db).await,
-        mention_migration::SCHEMA_VERSION
+        CURRENT_SCHEMA_VERSION
     );
     assert!(!relation_exists(&db, "neev_agent_operations", "table").await);
 

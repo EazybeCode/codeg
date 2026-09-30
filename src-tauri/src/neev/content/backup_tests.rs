@@ -304,7 +304,20 @@ async fn reconstruct_postgres_v3(tx: &sea_orm::DatabaseTransaction) {
 }
 
 async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) {
+    if schema_version == db::CURRENT_SCHEMA_VERSION {
+        return;
+    }
+    // Schemas 18 (library) and 19 (steer) are newer than every inventory this
+    // fixture rebuilds; 20 only widened a CHECK, which older markers tolerate.
+    for table in ["neev_steer_inputs", "neev_library_files", "neev_library_items"] {
+        db::execute(database, &format!("DROP TABLE IF EXISTS {table}"), vec![])
+            .await
+            .unwrap();
+    }
     if schema_version == 17 {
+        db::execute(database, "UPDATE neev_schema_version SET version=17", vec![])
+            .await
+            .unwrap();
         return;
     }
     db::execute(
@@ -719,7 +732,7 @@ async fn snapshot_schema_is_exact_and_read_only() {
         .await
         .unwrap();
     let manifest = verify_snapshot(&db, &store).await.unwrap();
-    assert_eq!(manifest.schema_version, 17);
+    assert_eq!(manifest.schema_version, db::CURRENT_SCHEMA_VERSION);
     assert_eq!(manifest.blobs.len(), 0);
     db::execute(&db, "PRAGMA query_only=OFF", vec![])
         .await
@@ -1320,7 +1333,7 @@ async fn attachment_snapshot_contract(database: DatabaseConnection) {
     let baseline = verify_snapshot(&h.state.database, &h.state.blobs)
         .await
         .unwrap();
-    assert_eq!(baseline.schema_version, 17);
+    assert_eq!(baseline.schema_version, db::CURRENT_SCHEMA_VERSION);
 
     let png = attachment_png();
     let notes = b"attachment acceptance notes\n".to_vec();

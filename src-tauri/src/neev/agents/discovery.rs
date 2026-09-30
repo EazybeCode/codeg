@@ -345,9 +345,13 @@ pub(crate) async fn catalogue(
     let handle = match crate::neev::agents::intents::credential(
         state,
         actor,
-        match provider {
-            "codex" => crate::neev::agents::types::Provider::Codex,
-            _ => crate::neev::agents::types::Provider::Claude,
+        match crate::neev::agents::types::Provider::parse(provider) {
+            Some(provider) => provider,
+            None => {
+                return Discovery::unavailable(
+                    "Could not read the model list from the provider. Showing the default.",
+                )
+            }
         },
     )
     .await

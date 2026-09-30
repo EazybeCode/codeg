@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Neev original replication to the Storage Box (install only after the write probe passes)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=300
+Unit=neev-storage-box.service
+
+[Install]
+WantedBy=timers.target

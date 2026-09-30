@@ -22,6 +22,7 @@ import {
   useState,
 } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import {
   ArrowUp,
@@ -73,6 +74,7 @@ import {
   loadAgentCapabilities,
   loadAgentConnections,
   loadAgentSession,
+  retryAgentRun,
   startAgentTurn,
   steerAgentRun,
   updateAgentSession,
@@ -90,6 +92,8 @@ import {
   type UpdateNeevAgentSessionInput,
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls } from "./native-agent-controls"
+import { NativeRunFailure } from "./native-run-failure"
+import { providerName, runFailure } from "@/lib/neev-run-failure"
 import {
   AttachmentButton,
   SentPrompt,
@@ -1502,6 +1506,7 @@ function AgentSessionView({
   // point every Connect control at the first one's description.
   const connectNote = useId()
   const stopHint = useId()
+  const router = useRouter()
   const [turns, setTurns] = useState<NeevAgentTurn[] | null>(null),
     [draft, setDraft] = useState<PromptSegment[]>([]),
     [error, setError] = useState<unknown>(null),
@@ -1557,6 +1562,10 @@ function AgentSessionView({
   const draftRef = useRef("")
   // The requestId for the steering request to retry on failure. Kept across
   // failed sends so the same id is used, preventing duplicates.
+  // Retry of a failed turn: which run is being retried, and the id that makes
+  // a second press after a dropped response resolve to the same new run.
+  const [retryingRun, setRetryingRun] = useState<string | null>(null)
+  const retryRequest = useRef<{ runId: string; id: string } | null>(null)
   const steeringRetryId = useRef<{
     id: string
     text: string
@@ -1897,6 +1906,47 @@ function AgentSessionView({
     }
   }
 
+  /**
+   * Run a failed turn's own ask again: the server re-reads its prompt and file
+   * references, so nothing typed since can change it. The id is kept across a
+   * failed request, so pressing Retry again after a dropped response resolves
+   * to the run the first press started instead of starting a second.
+   */
+  async function retryTurn(turn: NeevAgentTurn) {
+    if (sending || running || retryingRun || !auth.session) return
+    const previous = retryRequest.current
+    const request =
+      previous?.runId === turn.runId
+        ? previous
+        : { runId: turn.runId, id: crypto.randomUUID() }
+    retryRequest.current = request
+    setRetryingRun(turn.runId)
+    setError(null)
+    try {
+      const started = await retryAgentRun(
+        turn.runId,
+        request.id,
+        auth.session.csrf,
+        auth.signal
+      )
+      retryRequest.current = null
+      setTurns((old) =>
+        (old ?? []).some((item) => item.id === started.turn.id)
+          ? old
+          : [...(old ?? []), started.turn]
+      )
+      if (started.turn.status === "running") {
+        liveRef.current = ""
+        setLiveText("")
+        setActiveRun(started.runId)
+      }
+    } catch (cause) {
+      fail(cause)
+    } finally {
+      setRetryingRun(null)
+    }
+  }
+
   async function cancel() {
     if (!activeRun || !auth.session) return
     try {
@@ -2154,11 +2204,14 @@ function AgentSessionView({
                       completed={!live && turn.status === "completed"}
                     />
                   </div>
-                  {turn.status !== "completed" && !live && (
-                    <p className="text-xs text-muted-foreground">
-                      {outcomeLabel(turn)}
-                    </p>
-                  )}
+                  {turn.status === "failed" && !live
+                    ? failedTurn(turn)
+                    : turn.status !== "completed" &&
+                      !live && (
+                        <p className="text-xs text-muted-foreground">
+                          {outcomeLabel(turn)}
+                        </p>
+                      )}
                 </div>
               </li>
             )
@@ -2452,6 +2505,38 @@ function AgentSessionView({
         : t("agentRunLost")
     if (!runtimeEnabled) return t("agentsOff")
     return t(`connectionState_${connection?.state ?? "unavailable"}`)
+  }
+
+  /**
+   * A failed turn, in the provider's own words. Actions only on the NEWEST
+   * turn: retrying an older one would answer a question the conversation has
+   * already moved past.
+   */
+  function failedTurn(turn: NeevAgentTurn) {
+    const failure = runFailure(turn)
+    if (!failure) return null
+    const newest = turns !== null && turns[turns.length - 1]?.id === turn.id
+    const reconnected =
+      connection?.state === "connected" &&
+      connection.checkedAt !== null &&
+      connection.checkedAt >= (turn.completedAt ?? turn.createdAt)
+    return (
+      <NativeRunFailure
+        failure={failure}
+        provider={providerName(turn.provider)}
+        retrying={retryingRun === turn.runId}
+        reconnected={reconnected}
+        onRetry={newest && !running ? () => void retryTurn(turn) : undefined}
+        onReconnect={
+          newest
+            ? () => {
+                if (onRequestSettings) onRequestSettings()
+                else router.push("/settings?section=agents")
+              }
+            : undefined
+        }
+      />
+    )
   }
 
   function outcomeLabel(turn: NeevAgentTurn) {

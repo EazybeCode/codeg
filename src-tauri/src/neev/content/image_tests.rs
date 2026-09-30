@@ -175,7 +175,7 @@ async fn backup_verification_includes_and_checks_document_images() {
     let manifest = super::backup::verify_snapshot(&harness.state.database, &harness.state.blobs)
         .await
         .unwrap();
-    assert_eq!(manifest.schema_version, 17);
+    assert_eq!(manifest.schema_version, crate::neev::db::CURRENT_SCHEMA_VERSION);
     assert!(manifest.blobs.iter().any(|blob| blob.key == stored.key));
 }
 

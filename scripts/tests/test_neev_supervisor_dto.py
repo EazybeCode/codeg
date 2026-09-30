@@ -195,6 +195,42 @@ class SupervisorDtoTests(unittest.TestCase):
                 "https://auth.openai.com/codex/device", self.dto.UnixSec(1)
             ),
         )
+        # Gemini's NO_BROWSER sign-in is a paste-code flow at Google's authorize URL.
+        google = self.dto.AuthorizationCodeChallenge(
+            "https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=x&state=y",
+            self.dto.UnixSec(1),
+        )
+        self.assertIsInstance(google, self.dto.AuthorizationCodeChallenge)
+        # Cursor's browser-poll challenge: cursor.com origin only, round-trips.
+        browser = self.dto.BrowserChallenge(
+            "https://cursor.com/loginDeepControl?challenge=x", self.dto.UnixSec(9)
+        )
+        encoded = self.dto._encode_login_challenge(browser)
+        self.assertEqual(encoded["kind"], "browser")
+        self.assertEqual(self.dto._login_challenge(encoded), browser)
+        for bad_url in (
+            "https://accounts.google.com.evil.example/o/oauth2/v2/auth?x",
+            "https://cursor.com.evil.example/login",
+            "http://cursor.com/login",
+            "https://cursor.com/" + "x" * 1100,
+        ):
+            self.assert_dto_error(
+                "invalid",
+                lambda bad_url=bad_url: self.dto.BrowserChallenge(bad_url, self.dto.UnixSec(1)),
+            )
+        self.assert_dto_error(
+            "invalid",
+            lambda: self.dto.AuthorizationCodeChallenge(
+                "https://cursor.com/loginDeepControl", self.dto.UnixSec(1)
+            ),
+        )
+        self.assert_dto_error(
+            "invalid",
+            lambda: self.dto._login_challenge(
+                {"kind": "browser", "verification_url": "https://cursor.com/x",
+                 "expires_at": 1, "user_code": "A"}
+            ),
+        )
         # The authorization code is a secret: bounded, no whitespace/control, and
         # never reflected in repr/str.
         for bad in ("", "x" * 513, "has space", "tab\tx", "ctrl\x01x"):
@@ -346,15 +382,29 @@ class SupervisorDtoTests(unittest.TestCase):
         self.assertIs(
             claude_start.body.ticket.binding.scope.provider, self.dto.Provider.CLAUDE
         )
-        # An unknown provider is still rejected.
-        self.assert_dto_error(
-            "invalid",
-            lambda: self.dto.decode_request(
+        # The ACP providers are expressible on the control plane too (whether the
+        # product offers them is the coordinator's decision, not the wire's).
+        for name, member in (
+            (b"cursor", self.dto.Provider.CURSOR),
+            (b"gemini", self.dto.Provider.GEMINI),
+            (b"opencode", self.dto.Provider.OPENCODE),
+        ):
+            decoded = self.dto.decode_request(
                 self.requests["start"].replace(
-                    b'"provider":"codex"', b'"provider":"gemini"'
+                    b'"provider":"codex"', b'"provider":"' + name + b'"'
                 )
-            ),
-        )
+            )
+            self.assertIs(decoded.body.ticket.binding.scope.provider, member)
+        # An unknown provider is still rejected.
+        for unknown in (b"grok", b"Gemini", b"cursor-agent", b""):
+            self.assert_dto_error(
+                "invalid",
+                lambda unknown=unknown: self.dto.decode_request(
+                    self.requests["start"].replace(
+                        b'"provider":"codex"', b'"provider":"' + unknown + b'"'
+                    )
+                ),
+            )
         nested_16 = b'{"v":1,"x":"[not depth]","a":' + b"[" * 15 + b"0" + b"]" * 15 + b"}"
         nested_17 = nested_16.replace(b"0", b"[0]", 1)
         self.dto._strict_parse(nested_16, 8192)

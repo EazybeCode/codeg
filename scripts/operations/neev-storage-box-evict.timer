@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Neev local-cache eviction (enable only after read-through is verified live)
+
+[Timer]
+OnCalendar=*-*-* 03:40:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+Unit=neev-storage-box-evict.service
+
+[Install]
+WantedBy=timers.target

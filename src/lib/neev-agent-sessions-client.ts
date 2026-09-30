@@ -155,6 +155,26 @@ export type NeevActivityState =
   | "result"
   | "truncated"
   | "unsupported"
+  /** The provider's own failure: `detail` is its redacted, bounded message. */
+  | "error"
+
+/**
+ * What kind of failure an `error` step records. It decides the one action a
+ * reader is offered: reconnect for the sign-in classes, retry for the ones a
+ * second attempt can fix, neither for the rest.
+ */
+export const NEEV_RUN_ERROR_CATEGORIES = [
+  "auth_expired",
+  "signin_required",
+  "quota",
+  "rate_limit",
+  "network",
+  "timeout",
+  "provider_refusal",
+  "runtime_unavailable",
+  "provider",
+] as const
+export type NeevRunErrorCategory = (typeof NEEV_RUN_ERROR_CATEGORIES)[number]
 
 interface NeevActivityBase {
   /**
@@ -197,6 +217,8 @@ export type NeevActivityItem =
       kind: "status"
       state: NeevActivityState
       detail: string | null
+      /** Only on `state: "error"`, and only from a server that sends it. */
+      category?: NeevRunErrorCategory | null
     })
 
 /**
@@ -800,6 +822,7 @@ const ACTIVITY_STATES: readonly NeevActivityState[] = [
   "result",
   "truncated",
   "unsupported",
+  "error",
 ]
 
 function activityItem(value: unknown): NeevActivityItem | null {
@@ -853,6 +876,17 @@ function activityItem(value: unknown): NeevActivityItem | null {
       kind: "status",
       state: item.state as NeevActivityState,
       detail: typeof item.detail === "string" ? item.detail : null,
+      ...(item.state === "error"
+        ? {
+            // An unknown class reads as the generic one rather than dropping
+            // the provider's message with it.
+            category: (
+              NEEV_RUN_ERROR_CATEGORIES as readonly unknown[]
+            ).includes(item.category)
+              ? (item.category as NeevRunErrorCategory)
+              : "provider",
+          }
+        : {}),
     }
   return null
 }
@@ -1333,6 +1367,34 @@ export async function startAgentTurn(
   )
   if (started.turn.sessionId !== sessionId) invalid()
   return started
+}
+
+/**
+ * Run a failed turn's OWN stored ask again.
+ *
+ * The server re-reads the prompt and attachment references from the failed
+ * turn, so nothing here can change the ask, and in a team chat nothing new is
+ * posted: the original message stays the one canonical copy. `requestId` makes
+ * the retry itself idempotent — resending the same id after a dropped response
+ * resolves to the run it already started. Only a `failed` or `canceled` turn
+ * can be retried (`409` otherwise).
+ */
+export async function retryAgentRun(
+  runIdValue: string,
+  requestId: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevStartedTurn> {
+  assertRunId(runIdValue)
+  assertUuid(requestId)
+  return parseStartedTurn(
+    await contentMutation(
+      `/api/neev/agent/runs/${runIdValue}/retry`,
+      { requestId },
+      csrf,
+      signal
+    )
+  )
 }
 
 export async function cancelAgentRun(

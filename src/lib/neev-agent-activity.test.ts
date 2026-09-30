@@ -1,4 +1,4 @@
-import { expect, it } from "vitest"
+import { describe, expect, it } from "vitest"
 import {
   describeToolInput,
   elapsedDisplay,
@@ -282,4 +282,20 @@ it("formats elapsed time with minutes when >= 60 seconds", () => {
 
   // Negative values clamp to zero
   expect(formatElapsed(-5, true)).toBe("0.0s")
+})
+
+describe("provider error steps", () => {
+  it("are not trace rows: the failure card shows them once", () => {
+    const step = {
+      seq: 1,
+      offset: 0,
+      id: "error",
+      kind: "status",
+      state: "error",
+      detail: "usage limit",
+      category: "quota",
+    } as const
+    expect(isNoise(step)).toBe(true)
+    expect(summariseActivity([step]).unsupported).toBe(false)
+  })
 })

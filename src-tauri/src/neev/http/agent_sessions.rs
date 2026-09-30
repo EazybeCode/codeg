@@ -403,12 +403,10 @@ fn stored_keys(stored: &[StoredAttachment]) -> Vec<String> {
 }
 
 /// The connection-store provider for a stored session provider name.
+/// An ACP provider is only a provider here while `NEEV_AGENT_ACP_PROVIDERS`
+/// offers it; otherwise it is refused exactly like an unknown name.
 fn provider_of(name: &str) -> Option<Provider> {
-    match name {
-        "claude" => Some(Provider::Claude),
-        "codex" => Some(Provider::Codex),
-        _ => None,
-    }
+    Provider::parse_offered(name)
 }
 
 /// A run id is our own dash-less uuid; reject anything else before it reaches a
@@ -2047,9 +2045,10 @@ struct AttemptDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApprovalDto {
-    /// `"device"` (Codex: enter `userCode` at `verificationUrl`) or
-    /// `"authorizationCode"` (Claude: approve at `verificationUrl`, then paste
-    /// the resulting code back through the `/code` route).
+    /// `"device"` (Codex/OpenCode: enter `userCode` at `verificationUrl`),
+    /// `"authorizationCode"` (Claude/Gemini: approve at `verificationUrl`, then
+    /// paste the resulting code back through the `/code` route) or `"browser"`
+    /// (Cursor: approve at `verificationUrl`; nothing to paste).
     kind: &'static str,
     verification_url: String,
     user_code: Option<String>,
@@ -2064,14 +2063,16 @@ struct SubmitCodeInput {
 
 fn approval_dto(challenge: &crate::neev::agents::control_dto::LoginChallenge) -> ApprovalDto {
     let user_code = challenge.user_code().map(|code| code.as_str().to_owned());
+    let (kind, needs_code) = match challenge.kind() {
+        "device" => ("device", false),
+        // Cursor: approve in the browser; the CLI polls, nothing is pasted.
+        "browser" => ("browser", false),
+        _ => ("authorizationCode", true),
+    };
     ApprovalDto {
-        kind: if user_code.is_some() {
-            "device"
-        } else {
-            "authorizationCode"
-        },
+        kind,
         verification_url: challenge.verification_url().to_owned(),
-        needs_code: user_code.is_none(),
+        needs_code,
         user_code,
     }
 }
@@ -2358,10 +2359,7 @@ fn connection_dto(
     runtime_enabled: bool,
 ) -> ConnectionDto {
     ConnectionDto {
-        provider: match view.provider {
-            Provider::Claude => "claude",
-            Provider::Codex => "codex",
-        },
+        provider: view.provider.name(),
         // With no runtime bound, no connection can be exercised: report
         // `disabled` rather than a "Connected" the user cannot use.
         state: if runtime_enabled {
@@ -2429,3 +2427,8 @@ async fn load_library_items(
 #[cfg(test)]
 #[path = "agent_sessions_tests.rs"]
 mod agent_sessions_tests;
+
+// Retrying a failed run lives beside this module and reuses its private helpers.
+#[path = "agent_retry.rs"]
+mod retry;
+pub(super) use retry::retry_run;

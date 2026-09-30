@@ -127,6 +127,54 @@ class ProviderEnvTests(unittest.TestCase):
             credentials._ensure_provider_home(home, "claude")
             self.assertTrue(os.path.isdir(os.path.join(home, ".claude")))
 
+    def test_acp_provider_env_is_fixed_and_bound_under_home(self):
+        self.assertEqual(
+            credentials.provider_env("/vol", "cursor"),
+            {"HOME": "/vol", "XDG_CONFIG_HOME": "/vol/.config", "NO_OPEN_BROWSER": "1"},
+        )
+        self.assertEqual(
+            credentials.provider_env("/vol", "gemini"),
+            {"HOME": "/vol", "NO_BROWSER": "true", "GEMINI_FORCE_FILE_STORAGE": "true"},
+        )
+        opencode = credentials.provider_env("/vol", "opencode")
+        self.assertEqual(opencode["HOME"], "/vol")
+        for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+            self.assertTrue(opencode[key].startswith("/vol/"), key)
+        # No provider env ever names an API key or token variable.
+        for provider in credentials.PROVIDERS:
+            for key in credentials.provider_env("/vol", provider):
+                self.assertNotRegex(key, r"(KEY|TOKEN|SECRET)")
+        with self.assertRaises(credentials.CredentialError):
+            credentials.provider_env("/vol", "grok")
+
+    def test_acp_provider_homes_and_the_gemini_google_seed(self):
+        with tempfile.TemporaryDirectory() as home:
+            credentials._ensure_provider_home(home, "opencode")
+            self.assertTrue(os.path.isdir(os.path.join(home, ".local/share/opencode")))
+            credentials._ensure_provider_home(home, "cursor")
+            self.assertTrue(os.path.isdir(os.path.join(home, ".config/cursor")))
+            credentials._ensure_provider_home(home, "gemini")
+            settings = os.path.join(home, ".gemini", "settings.json")
+            with open(settings, "rb") as handle:
+                self.assertEqual(handle.read(), credentials.GEMINI_SEED_SETTINGS)
+            self.assertEqual(stat.S_IMODE(os.stat(settings).st_mode), 0o600)
+            # Google sign-in only: the seed never selects an API-key method.
+            self.assertIn(b'"oauth-personal"', credentials.GEMINI_SEED_SETTINGS)
+            self.assertNotIn(b"api-key", credentials.GEMINI_SEED_SETTINGS)
+            # A user's own settings are never overwritten.
+            with open(settings, "wb") as handle:
+                handle.write(b'{"mine":true}')
+            credentials._ensure_provider_home(home, "gemini")
+            with open(settings, "rb") as handle:
+                self.assertEqual(handle.read(), b'{"mine":true}')
+
+    def test_a_planted_symlink_config_dir_is_refused(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as other:
+            os.symlink(other, os.path.join(home, ".gemini"))
+            with self.assertRaises(credentials.CredentialError):
+                credentials._ensure_provider_home(home, "gemini")
+            self.assertEqual(os.listdir(other), [])
+
     def test_deliver_creates_provider_home_on_the_physical_mount(self):
         with tempfile.TemporaryDirectory() as tmp:
             mount = os.path.join(tmp, "mount")

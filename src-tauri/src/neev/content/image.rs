@@ -115,17 +115,23 @@ pub(crate) async fn load(
     let tx = db::begin(&state.database).await?;
     let row = db::one(
         &tx,
-        "SELECT document_id FROM neev_image_blobs WHERE org_id=$1 AND key=$2",
+        "SELECT document_id,sha256,byte_length FROM neev_image_blobs WHERE org_id=$1 AND key=$2",
         vec![actor.org_id.into(), key.to_owned().into()],
     )
     .await?
     .ok_or(ContentError::NotFound)?;
     let document_id: String = row.try_get("", "document_id").map_err(database_error)?;
+    let sha256: String = row.try_get("", "sha256").map_err(database_error)?;
+    let byte_length: i64 = row.try_get("", "byte_length").map_err(database_error)?;
     // Re-check the owning document's audience at read time: revoked access or a
     // document turned private denies the image immediately (uniform NotFound).
     access::authorized(&tx, actor, &document_id, false).await?;
     tx.commit().await.map_err(database_error)?;
-    let bytes = state.blobs.read_image(actor.org_id, key).await?;
+    // Checked against the row; an evicted original is restored on demand.
+    let bytes = state
+        .blobs
+        .read_image(actor.org_id, key, byte_length, &sha256)
+        .await?;
     let content_type = sniff_image(&bytes).ok_or(ContentError::Storage)?;
     Ok((bytes, content_type))
 }

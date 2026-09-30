@@ -1,7 +1,8 @@
 # Native content backup and isolated restore
 
-This procedure backs up the native PostgreSQL metadata and immutable document
-blobs. It does not enable a hosted backup schedule, attach a provider account,
+This procedure backs up the native PostgreSQL metadata and the immutable blobs
+it references: document revisions (`.md`), editor images (`.img`) and chat/agent
+attachments (`.att`). It does not enable a hosted backup schedule, attach a provider account,
 retire an archive, or establish hosted recovery readiness. Keep existing archives
 and jobs until a separately reviewed operational recovery exercise succeeds.
 
@@ -12,9 +13,11 @@ owner on the machine holding both the native database connection and document
 root. All paths must be absolute, normalized, and free of symlink components
 (on macOS use `/private/tmp`, not its `/tmp` alias). Source root and organization
 directories must already be owned by this user and mode0700. Final blobs must be
-owned regular mode0600 files, with one hard link, canonical UUID filenames, and
-at most1MiB. The source is trusted to obey the application's immutable-file
-protocol; do not run against directories another process actively replaces.
+owned regular mode0600 files, with one hard link and canonical
+`{uuid}.{md|img|att}` names. Any other entry fails the run. The source is trusted
+to obey the application's immutable-file protocol; do not run against directories
+another process actively replaces. A `pg_restore` matching the `pg_dump` version
+must also be on PATH.
 
 Supply the private connection through `NEEV_BACKUP_DATABASE_URL` in the process
 environment from your existing secret manager. Never put it in a command argument,
@@ -44,21 +47,56 @@ connection's `search_path` alone does **not** limit a dump to that schema.
 
 The output parent must already exist. The script exclusively creates a new0700
 output; existing paths are refused, including interrupted runs. Metadata is dumped
-first into `metadata.dump`, then only finalized blobs are copied into `blobs/`.
-`.tmp` files are excluded; invalid final files fail closed. Copies are hashed and
-synced before a complete marker is atomically published. No source mutation,
-garbage collection, or historical deletion occurs.
+first into `metadata.dump`.
 
-`complete.json` is the completion marker and contains the dump hash and size plus
-copied organization/key/hash/size inventory, with no Markdown, emails, or auth
-secrets. `INCOMPLETE` is created at the start and remains as a warning explaining
-that absence of `complete.json` means failure. On failure, keep the incomplete
-directory for diagnosis and retry with a new output path. Do not accept a backup
-on exit status or an inventory alone if its complete marker is absent.
+The script then reads the blob references **from that dump**, not from the live
+database. `pg_restore --list` finds the schema's `TABLE DATA` entries, and
+`pg_restore --data-only --file=-` emits the rows of `neev_document_revisions`,
+`neev_image_blobs` and `neev_attachments` (whichever the snapshot's schema
+version has). `pg_restore` reads only the local archive and receives no
+connection settings. Each row's org, UUID key, SHA-256 and byte length must be
+well formed. Per-kind bounds match the runtime reads that the restore verifier
+uses: documents up to1MiB and images up to5MiB. Attachments have no fixed cap;
+the exact row length is their bound.
 
-The copy inventory may include orphan or late finalized blobs. It intentionally
-does not query a newer live database to decide snapshot membership. Referenced
-keys are derived only from the restored dump by the native verifier below.
+Every referenced blob is then streamed into `blobs/{org}/{key}.{kind}`. The copy
+never reads past the row's length, and the copied file is re-read from disk. Both
+the source and the copy must match the row's length and hash. The run fails, and
+leaves no complete marker, on any of the following. Each prints a reason code and
+nothing else:
+
+- a mismatch (`size-mismatch`, `hash-mismatch`) or a missing referenced blob
+  (`missing-blob`);
+- a malformed or conflicting row (`snapshot-row`, `snapshot-size`,
+  `snapshot-conflict`);
+- a table listed without data, or an unparseable listing (`snapshot-copy`,
+  `snapshot-list`);
+- `.img`/`.att` bytes on disk while the snapshot lacks their table
+  (`snapshot-tables`).
+
+Blobs are read with `O_NOATIME` (Linux), so a backup never looks like use to the
+Storage Box evictor. If `NEEV_ORIGINALS_BROKER_SOCKET` is set, a referenced blob
+that was evicted from the live root is streamed from the root-side originals
+broker directly into `blobs/`. It is length-bounded, hashed and re-read against
+the row, and it is never republished into the live root. Without the broker, or
+if it refuses (never replicated, deleted and tombstoned, or remote mismatch), the
+run fails with `missing-blob`. See [neev-storage-box.md](neev-storage-box.md).
+
+Well-formed finals that have no snapshot row (uploads committed after the dump)
+are not part of this recovery point. They are counted as `unreferenced_skipped`
+and not copied. If a 24-hour orphan sweep deletes a dumped row's blob during the
+run, the run fails with `missing-blob`; retry into a new output. `.tmp` files are
+excluded. No source mutation, garbage collection, or historical deletion occurs.
+
+`complete.json` is the completion marker. Format `neev-content-copy-v2` contains
+the dump hash and size, the blob tables found, and an org/key/kind/hash/size
+inventory, with no Markdown, emails, file names, or auth secrets. `INCOMPLETE` is
+created at the start and remains as a warning that absence of `complete.json`
+means failure. On failure, keep the incomplete directory for diagnosis and retry
+with a new output path. Do not accept a backup on exit status or an inventory
+alone if its complete marker is absent. Earlier `neev-content-copy-v1` archives
+hold documents only; the old script refused roots containing images or
+attachments.
 
 ## Restore into an isolated destination
 
@@ -78,8 +116,22 @@ keys are derived only from the restored dump by the native verifier below.
    `--dbname` contains only the isolated database name and is required to perform
    an import; without it, pg_restore defaults to emitting SQL instead.
    Do not start the application or call its database initializer/migrator.
-4. Copy `blobs/` into a fresh owned0700 document root with owned0700 organization
-   directories and mode0600 single-link regular files. Avoid `cp -l` hard links.
+4. Rebuild a fresh document root, running as the user that will own it (the
+   application user):
+
+   ```sh
+   node scripts/neev-content-backup.mjs restore-blobs \
+     --backup /absolute/backups/that-directory \
+     --target /absolute/new-document-root
+   ```
+
+   This refuses a missing/unknown `complete.json`, a dump whose hash or size
+   differs, and an existing target. It creates0700 org directories and0600
+   single-link files, and re-hashes every v1/v2 manifest blob while copying. A
+   `.restore-incomplete` marker stays in the target until every file and
+   directory is synced. The backup and Storage Box tools refuse a root that still
+   has the marker; discard such a target. Do not use `cp -l` or copy `blobs/` by
+   hand.
 5. Build the named native binary without desktop features:
 
    ```sh

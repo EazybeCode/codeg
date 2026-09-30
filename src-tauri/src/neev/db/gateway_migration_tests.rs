@@ -321,7 +321,7 @@ async fn sqlite_gateway8_fresh_inventory_and_seed() {
     initialize(&database).await.unwrap();
     assert_eq!(
         validate_content_snapshot(&database).await,
-        Ok(mention_migration::SCHEMA_VERSION)
+        Ok(CURRENT_SCHEMA_VERSION)
     );
     let row = one(
         &database,
@@ -356,7 +356,7 @@ async fn postgres_gateway8_fresh_inventory_and_seed() {
     eprintln!("gateway8 fresh owned schema: {schema}");
     assert_eq!(
         validate_content_snapshot(&db).await,
-        Ok(mention_migration::SCHEMA_VERSION)
+        Ok(CURRENT_SCHEMA_VERSION)
     );
     let row = one(
         &db,
@@ -906,7 +906,7 @@ async fn sqlite_gateway8_populated_seven_upgrade_preserves_rows() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         validate_content_snapshot(&db).await,
-        Ok(mention_migration::SCHEMA_VERSION)
+        Ok(CURRENT_SCHEMA_VERSION)
     );
     let after = one(&db, "SELECT r.blob_key,r.sha256,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE r.document_id=$1", vec![doc.into()]).await.unwrap().unwrap();
     assert_eq!(
@@ -945,7 +945,7 @@ async fn sqlite_gateway8_reinitialize_preserves_history() {
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(
         validate_content_snapshot(&db).await,
-        Ok(mention_migration::SCHEMA_VERSION)
+        Ok(CURRENT_SCHEMA_VERSION)
     );
     assert_eq!(
         snapshot_gateway8_rows(&db).await,
@@ -1190,7 +1190,7 @@ async fn postgres_gateway8_populated_seven_upgrade_preserves_rows() {
         assert_eq!(initialize(&db).await, Ok(()));
         assert_eq!(
             validate_content_snapshot(&db).await,
-            Ok(mention_migration::SCHEMA_VERSION)
+            Ok(CURRENT_SCHEMA_VERSION)
         );
         // Content revision/format preserved unchanged.
         let after = one(&db, "SELECT r.blob_key,r.sha256,f.format FROM neev_document_revisions r JOIN neev_document_formats f ON f.org_id=r.org_id AND f.document_id=r.document_id AND f.revision=r.revision WHERE r.document_id=$1", vec![doc.into()]).await.unwrap().unwrap();
@@ -1237,7 +1237,7 @@ async fn postgres_gateway8_reinitialize_preserves_history() {
         assert_eq!(initialize(&db).await, Ok(()));
         assert_eq!(
             validate_content_snapshot(&db).await,
-            Ok(mention_migration::SCHEMA_VERSION)
+            Ok(CURRENT_SCHEMA_VERSION)
         );
         assert_eq!(snapshot_gateway8_rows(&db).await, before);
     })

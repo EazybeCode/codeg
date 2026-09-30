@@ -40,6 +40,15 @@ _CODEX_LOGIN_ARGV = ("codex", "app-server")
 _CODEX_PROBE_ARGV = ("codex", "app-server")
 _CLAUDE_LOGIN_ARGV = ("claude", "auth", "login")
 _CLAUDE_PROBE_ARGV = ("claude", "auth", "status", "--json")
+# ACP providers: each CLI's OWN documented sign-in command, from the image-pinned
+# absolute path (neev_agent_launch.ACP_AGENT_PINS). The account probe is the ACP
+# adapter's `--probe` (initialize + session/new, no prompt).
+_CURSOR_LOGIN_ARGV = ("/usr/local/bin/agent", "login")
+_GEMINI_LOGIN_ARGV = ("/usr/local/bin/gemini",)  # interactive; NO_BROWSER on a PTY
+_OPENCODE_LOGIN_ARGV = (
+    "/usr/local/bin/opencode", "auth", "login",
+    "--provider", "openai", "--method", "ChatGPT Pro/Plus (headless)",
+)
 
 _RUN_DIR_RE = re.compile(r"run-[A-Za-z0-9._-]{1,64}\Z")
 _KEY_BASENAME = "control.key"  # the transport loads the key by this fixed name
@@ -144,7 +153,7 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
     agent run uses."""
 
     def __init__(self, config, volumes, provider, store_scope, handle, argv, *,
-                 cleanup=None, quarantine_dir=None):
+                 cleanup=None, quarantine_dir=None, pty=False):
         self._config = config
         self._volumes = volumes
         self._provider = provider
@@ -153,6 +162,7 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
         self._argv = argv
         self._cleanup = cleanup  # injectable for tests; default is the launcher's
         self._quarantine_dir = quarantine_dir  # None -> slot_proxy default
+        self._pty = pty  # the login CLI needs a terminal (Gemini NO_BROWSER flow)
         self._workdir = None
         self._proxy_cm = None
         self._delivery_cm = None
@@ -184,10 +194,10 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
             )
             delivery = self._delivery_cm.__enter__()
             spec = _login_spec(self._config, tenant, self._argv, self._workdir)
-            env = _login_env(self._config, self._provider, home, proxy_env)
+            env = _login_env(self._config, self._provider, home, proxy_env, pty=self._pty)
             self._sandbox = sandbox.launch(
                 spec, env=env, bind_source=delivery.mount,
-                stdin_pipe=True, stderr_pipe=True,
+                stdin_pipe=not self._pty, stderr_pipe=True, pty_stdio=self._pty,
             )
             os.set_blocking(self._sandbox.stdout.fileno(), False)
             if self._sandbox.stderr is not None:
@@ -312,10 +322,13 @@ def _login_spec(config, tenant, argv_tuple, workdir):
     )
 
 
-def _login_env(config, provider, home, proxy_env):
+def _login_env(config, provider, home, proxy_env, pty=False):
     import neev_agent_credentials as credentials
 
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin"}
+    if pty:
+        # A terminal the TUI can drive; fixed, never inherited.
+        env["TERM"] = "xterm-256color"
     env.update(proxy_env)  # authoritative slot-proxy env from the live slot_proxy CM
     env.update(credentials.provider_env(home, provider.value))
     return env
@@ -364,6 +377,60 @@ def _credential_present(config, handle, provider):
     return present
 
 
+def _json_record_present(config, handle, relative, valid):
+    """True only when `mount/<relative>` parses (bounded) to a record `valid` accepts.
+
+    Shape only: `valid` checks that the fields a working sign-in writes are present
+    and non-empty; no token value is ever returned, logged or compared. Reads at the
+    euid-0 daemon's own store mount path, like `_credential_present`."""
+    path = os.path.join(config.store_root, handle, "mount", *relative)
+
+    def present():
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            return False
+        try:
+            with os.fdopen(fd, "rb") as fp:
+                raw = fp.read(_MAX_CREDS_BYTES + 1)
+        except OSError:
+            return False
+        if not raw or len(raw) > _MAX_CREDS_BYTES:
+            return False
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            return False
+        try:
+            return bool(valid(data))
+        except Exception:
+            return False
+
+    return present
+
+
+def _nonempty(value):
+    return isinstance(value, str) and bool(value)
+
+
+def _gemini_record(data):
+    # google-auth-library Credentials as cached by Gemini CLI (oauth2.ts
+    # cacheCredentials): a refresh token is what makes it a lasting sign-in.
+    return isinstance(data, dict) and _nonempty(data.get("refresh_token"))
+
+
+def _opencode_record(data):
+    # opencode providers.ts `put(provider, {type:"oauth", refresh, access, ...})`
+    # for the `openai` provider (plugin/openai/codex.ts).
+    entry = data.get("openai") if isinstance(data, dict) else None
+    return (isinstance(entry, dict) and entry.get("type") == "oauth"
+            and _nonempty(entry.get("refresh")) and _nonempty(entry.get("access")))
+
+
+_GEMINI_CREDS = (".gemini", "oauth_creds.json")
+_OPENCODE_CREDS = (".local", "share", "opencode", "auth.json")
+
+
 # --------------------------------------------------------------------------- #
 # Driver / probe factories
 # --------------------------------------------------------------------------- #
@@ -380,33 +447,69 @@ def make_factories(config: Config, volumes, *, channel_factory=None, quarantine_
     reports UNAVAILABLE rather than reusing a slot that may still hold a live lane-uid
     child. The marker is cleared only by the privileged restart purge or an operator."""
 
-    def build(provider, store_scope, handle, argv):
+    def build(provider, store_scope, handle, argv, pty=False):
         import neev_slot_proxy as slot_proxy
 
         if slot_proxy.is_quarantined(config.slot, directory=quarantine_dir):
             raise ChannelError("slot_quarantined")
         if channel_factory is not None:
+            if pty:
+                return channel_factory(provider, store_scope, handle, argv, pty=True)
             return channel_factory(provider, store_scope, handle, argv)
         return LoginChannel(
             config, volumes, provider, store_scope, handle, argv,
-            quarantine_dir=quarantine_dir,
+            quarantine_dir=quarantine_dir, pty=pty,
         )
 
     def driver_for(provider, store_scope, handle):
         if provider is dto.Provider.CODEX:
             channel = build(provider, store_scope, handle, _CODEX_LOGIN_ARGV)
             return drivers.CodexLoginDriver(channel)
-        channel = build(provider, store_scope, handle, _CLAUDE_LOGIN_ARGV)
-        return drivers.ClaudeLoginDriver(
-            channel, _credential_present(config, handle, provider)
-        )
+        if provider is dto.Provider.CLAUDE:
+            channel = build(provider, store_scope, handle, _CLAUDE_LOGIN_ARGV)
+            return drivers.ClaudeLoginDriver(
+                channel, _credential_present(config, handle, provider)
+            )
+        if provider is dto.Provider.OPENCODE:
+            channel = build(provider, store_scope, handle, _OPENCODE_LOGIN_ARGV)
+            return drivers.OpenCodeLoginDriver(
+                channel, _json_record_present(config, handle, _OPENCODE_CREDS,
+                                              _opencode_record)
+            )
+        if provider is dto.Provider.GEMINI:
+            channel = build(provider, store_scope, handle, _GEMINI_LOGIN_ARGV, pty=True)
+            return drivers.GeminiLoginDriver(
+                channel, _json_record_present(config, handle, _GEMINI_CREDS,
+                                              _gemini_record)
+            )
+        if provider is dto.Provider.CURSOR:
+            channel = build(provider, store_scope, handle, _CURSOR_LOGIN_ARGV)
+            return drivers.CursorLoginDriver(channel)
+        raise ChannelError("provider")
 
     def probe_for(provider, store_scope, handle):
         if provider is dto.Provider.CODEX:
             channel = build(provider, store_scope, handle, _CODEX_PROBE_ARGV)
             return drivers.CodexAccountProbe(channel)
-        channel = build(provider, store_scope, handle, _CLAUDE_PROBE_ARGV)
-        return drivers.ClaudeAccountProbe(channel)
+        if provider is dto.Provider.CLAUDE:
+            channel = build(provider, store_scope, handle, _CLAUDE_PROBE_ARGV)
+            return drivers.ClaudeAccountProbe(channel)
+        import neev_agent_launch as launch
+
+        argv = tuple(launch.acp_probe_argv(provider.value))
+        if provider is dto.Provider.OPENCODE:
+            return drivers.AcpAccountProbe(
+                build(provider, store_scope, handle, argv), "ChatGPT",
+                _json_record_present(config, handle, _OPENCODE_CREDS, _opencode_record),
+            )
+        if provider is dto.Provider.GEMINI:
+            return drivers.AcpAccountProbe(
+                build(provider, store_scope, handle, argv), "Google",
+                _json_record_present(config, handle, _GEMINI_CREDS, _gemini_record),
+            )
+        if provider is dto.Provider.CURSOR:
+            return drivers.AcpAccountProbe(build(provider, store_scope, handle, argv), "Cursor")
+        raise ChannelError("provider")
 
     return driver_for, probe_for
 

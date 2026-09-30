@@ -202,6 +202,7 @@ fn revisions_are_budgeted_so_announcements_cannot_smuggle_past_the_cap() {
         ActivityKind::Status {
             state: STATE_TRUNCATED.into(),
             detail: None,
+            category: None,
         },
         "and the trace says it stopped growing"
     );
@@ -292,6 +293,7 @@ fn only_the_model_escapes_the_init_line() {
         ActivityKind::Status {
             state: "model".into(),
             detail: Some("claude-opus-5".into()),
+            category: None,
         },
         "the init line names the model and nothing else: cwd, tool list and \
          credential source stay on the server"
@@ -374,6 +376,7 @@ fn an_unreadable_codex_stream_is_reported_once_not_per_line() {
         ActivityKind::Status {
             state: STATE_UNSUPPORTED.into(),
             detail: Some("codex".into()),
+            category: None,
         }
     );
 }
@@ -611,6 +614,7 @@ fn offsets_count_unicode_scalars_not_utf16_units() {
                 kind: ActivityKind::Status {
                     state: "stop".into(),
                     detail: None,
+                    category: None,
                 },
             },
             offset,
@@ -630,6 +634,7 @@ fn the_log_numbers_items_monotonically_and_caps_by_count() {
                 kind: ActivityKind::Status {
                     state: "stop".into(),
                     detail: None,
+                    category: None,
                 },
             },
             index,
@@ -646,6 +651,7 @@ fn the_log_numbers_items_monotonically_and_caps_by_count() {
         ActivityKind::Status {
             state: STATE_TRUNCATED.into(),
             detail: None,
+            category: None,
         },
         "a trace that stopped early must say it stopped early"
     );
@@ -661,6 +667,7 @@ fn a_resumed_log_never_reissues_a_seq_the_client_already_has() {
                 kind: ActivityKind::Status {
                     state: "stop".into(),
                     detail: None,
+                    category: None,
                 },
             },
             index,
@@ -676,6 +683,7 @@ fn a_resumed_log_never_reissues_a_seq_the_client_already_has() {
                 kind: ActivityKind::Status {
                     state: "stop".into(),
                     detail: None,
+                    category: None,
                 },
             },
             9,
@@ -752,6 +760,7 @@ fn a_trace_that_fills_its_budget_still_stores_and_still_says_it_was_cut() {
         ActivityKind::Status {
             state: STATE_TRUNCATED.into(),
             detail: None,
+            category: None,
         },
         "the marker survives to the stored form, so a reload still reports the cut"
     );
@@ -775,6 +784,7 @@ fn a_multibyte_trace_respects_the_byte_cap_not_a_character_count() {
         ActivityKind::Status {
             state: STATE_TRUNCATED.into(),
             detail: None,
+            category: None,
         }
     );
     // And what came back is intact rather than cut through a code point.
@@ -826,4 +836,42 @@ fn two_codex_messages_in_one_turn_are_whole_messages_not_fragments() {
         !items.iter().any(|item| matches!(item, StreamItem::Text(_))),
         "a completed message was classified as a fragment"
     );
+}
+
+#[test]
+fn acp_providers_are_read_with_the_codex_mapping_the_adapter_writes() {
+    // Exactly what `neev_acp_stream_adapter.py` emits for a streamed message, a
+    // tool that ran, and a completed turn.
+    let lines = [
+        r#"{"type":"item.delta","item":{"type":"agent_message","id":"msg_1","delta":"Hel"}}"#,
+        r#"{"type":"item.delta","item":{"type":"agent_message","id":"msg_1","delta":"lo"}}"#,
+        r#"{"type":"item.completed","item":{"type":"agent_message","id":"msg_1","text":"Hello"}}"#,
+        r#"{"type":"item.started","item":{"type":"command_execution","id":"call_1","command":"Read file"}}"#,
+        r#"{"type":"item.completed","item":{"type":"command_execution","id":"call_1","command":"Read file","aggregated_output":"ok","exit_code":0}}"#,
+        r#"{"type":"turn.completed"}"#,
+    ];
+    for provider in ["cursor", "gemini", "opencode"] {
+        let mut parser = StreamParser::new(provider, Vec::new());
+        let items = drain(&mut parser, &lines);
+        assert_eq!(text_of(&items), "Hello", "{provider}: the reply, exactly once");
+        let drafts = activity(&items);
+        assert!(
+            !drafts.iter().any(|draft| matches!(
+                &draft.kind,
+                ActivityKind::Status { state, .. } if state == "unsupported"
+            )),
+            "{provider}: must not be reported as an unsupported trace"
+        );
+        assert!(drafts.iter().any(|draft| matches!(
+            &draft.kind,
+            ActivityKind::ToolResult { call_id, is_error: false, .. } if call_id == "call_1"
+        )));
+    }
+    // A failed turn keeps the adapter's fixed reason out of the trace text.
+    let mut parser = StreamParser::new("gemini", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[r#"{"type":"turn.failed","reason":"provider sign-in required"}"#],
+    );
+    assert_eq!(text_of(&items), "");
 }

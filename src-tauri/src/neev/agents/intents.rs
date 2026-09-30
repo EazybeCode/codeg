@@ -13,8 +13,9 @@ pub(crate) async fn list(
 ) -> Result<Vec<ConnectionView>, AgentError> {
     let tx = store::authorized_transaction(state, actor).await?;
     let stored = store::lock_connections(&tx, actor).await?;
-    let mut result = Vec::with_capacity(2);
-    for provider in [Provider::Claude, Provider::Codex] {
+    let mut result = Vec::with_capacity(Provider::ALL.len());
+    // Only offered providers are listed: an ACP provider appears once gated on.
+    for provider in Provider::ALL.into_iter().filter(|provider| provider.offered()) {
         result.push(
             stored
                 .iter()

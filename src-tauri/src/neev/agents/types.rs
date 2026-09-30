@@ -4,6 +4,58 @@
 pub(crate) enum Provider {
     Claude,
     Codex,
+    /// ACP providers (`acp_providers`). Offered only when gated on.
+    Cursor,
+    Gemini,
+    OpenCode,
+}
+
+impl Provider {
+    /// Every provider, in display order.
+    pub(crate) const ALL: [Provider; 5] = [
+        Provider::Claude,
+        Provider::Codex,
+        Provider::Cursor,
+        Provider::Gemini,
+        Provider::OpenCode,
+    ];
+
+    /// The provider for a stored/wire name, if this build knows it.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
+            "gemini" => Some(Self::Gemini),
+            "opencode" => Some(Self::OpenCode),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Cursor => "cursor",
+            Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
+        }
+    }
+
+    /// Whether the product may offer this provider right now: Claude and Codex
+    /// always; an ACP provider only when `NEEV_AGENT_ACP_PROVIDERS` names it.
+    pub(crate) fn offered(self) -> bool {
+        match self {
+            Self::Claude | Self::Codex => true,
+            _ => super::acp_providers::hosted_enabled(self.name()),
+        }
+    }
+
+    /// The offered provider for a request-supplied name. An ACP provider that
+    /// is not gated on is `None` — the same answer as an unknown name.
+    pub(crate) fn parse_offered(value: &str) -> Option<Self> {
+        Self::parse(value).filter(|provider| provider.offered())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

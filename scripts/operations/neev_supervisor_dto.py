@@ -25,6 +25,16 @@ _DEVICE_URL = "https://auth.openai.com/codex/device"
 # accepted. A Claude authorize URL must START WITH this origin+path (it carries a
 # query), matching control_dto.rs's `starts_with(CLAUDE_AUTHORIZE_URL)`.
 _CLAUDE_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
+# Gemini CLI's documented NO_BROWSER sign-in prints a Google authorize URL and
+# reads the resulting code back ("Enter the authorization code:"), the same
+# paste-code shape as Claude. Observed on the pinned 0.62.0 binary; the redirect
+# is https://codeassist.google.com/authcode (source: core/code_assist/oauth2.ts).
+_GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth?"
+_AUTHORIZATION_CODE_URLS = (_CLAUDE_AUTHORIZE_URL, _GOOGLE_AUTHORIZE_URL)
+# Cursor's `agent login` prints a cursor.com sign-in URL and then POLLS: the user
+# approves in their browser and pastes nothing back. Origin-level prefix only —
+# the exact path is NOT verified against a pinned binary (no vendor checksum).
+_BROWSER_URLS = ("https://cursor.com/",)
 _MAX_URL_BYTES = 1024
 _MAX_CODE_BYTES = 512
 
@@ -170,6 +180,11 @@ class AuthorizationCode(_SafeRepr):
 class Provider(Enum):
     CODEX = "codex"
     CLAUDE = "claude"
+    # ACP providers (neev_acp_stream_adapter). Expressible on the control plane;
+    # whether the product offers them is decided by the coordinator, not here.
+    CURSOR = "cursor"
+    GEMINI = "gemini"
+    OPENCODE = "opencode"
 
 
 class Op(Enum):
@@ -446,7 +461,8 @@ class LoginProgress(LoginSnapshot):
 
 @dataclass(frozen=True, repr=False)
 class DeviceChallenge(_SafeRepr):
-    """Codex: the user enters `user_code` at the fixed device verification URL."""
+    """Codex (and OpenCode's ChatGPT headless login, which uses the SAME OpenAI
+    device URL): the user enters `user_code` at the fixed verification URL."""
 
     verification_url: str
     user_code: UserCode
@@ -461,8 +477,8 @@ class DeviceChallenge(_SafeRepr):
 
 @dataclass(frozen=True, repr=False)
 class AuthorizationCodeChallenge(_SafeRepr):
-    """Claude: the user opens `verification_url`, approves, and pastes the resulting
-    authorization code back (delivered by SUBMIT_CODE). No user_code exists."""
+    """Claude / Gemini: the user opens `verification_url`, approves, and pastes the
+    resulting authorization code back (delivered by SUBMIT_CODE). No user_code."""
 
     verification_url: str
     expires_at: UnixSec
@@ -471,13 +487,31 @@ class AuthorizationCodeChallenge(_SafeRepr):
         if (
             type(self.verification_url) is not str
             or len(self.verification_url) > _MAX_URL_BYTES
-            or not self.verification_url.startswith(_CLAUDE_AUTHORIZE_URL)
+            or not self.verification_url.startswith(_AUTHORIZATION_CODE_URLS)
         ):
             raise DtoError("invalid")
         _exact(self.expires_at, UnixSec)
 
 
-_CHALLENGES = (DeviceChallenge, AuthorizationCodeChallenge)
+@dataclass(frozen=True, repr=False)
+class BrowserChallenge(_SafeRepr):
+    """Cursor: the user opens `verification_url` and approves; the CLI polls for the
+    result itself. Nothing is pasted back and there is no user_code."""
+
+    verification_url: str
+    expires_at: UnixSec
+
+    def __post_init__(self):
+        if (
+            type(self.verification_url) is not str
+            or len(self.verification_url) > _MAX_URL_BYTES
+            or not self.verification_url.startswith(_BROWSER_URLS)
+        ):
+            raise DtoError("invalid")
+        _exact(self.expires_at, UnixSec)
+
+
+_CHALLENGES = (DeviceChallenge, AuthorizationCodeChallenge, BrowserChallenge)
 
 
 @dataclass(frozen=True, repr=False)
@@ -1335,6 +1369,9 @@ def _login_challenge(value):
         return AuthorizationCodeChallenge(
             value["verification_url"], UnixSec(value["expires_at"])
         )
+    if kind == "browser":
+        _keys(value, ("kind", "verification_url", "expires_at"))
+        return BrowserChallenge(value["verification_url"], UnixSec(value["expires_at"]))
     raise DtoError("invalid")
 
 
@@ -1517,6 +1554,12 @@ def _encode_login_challenge(challenge):
             "kind": "device",
             "verification_url": challenge.verification_url,
             "user_code": challenge.user_code.value,
+            "expires_at": challenge.expires_at.value,
+        }
+    if type(challenge) is BrowserChallenge:
+        return {
+            "kind": "browser",
+            "verification_url": challenge.verification_url,
             "expires_at": challenge.expires_at.value,
         }
     return {

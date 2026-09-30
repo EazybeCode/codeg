@@ -52,7 +52,7 @@ async fn fresh_schema_is_version_eleven_with_separate_branding_revision() {
         .unwrap()
         .try_get::<i64>("", "version")
         .unwrap();
-    assert_eq!(version, mention_migration::SCHEMA_VERSION);
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
     let user = h::native_account(&db, "schema-owner", "schema@example.test").await;
     let row = db
@@ -123,7 +123,19 @@ async fn postgres_schema_reinitialization_and_foreign_keys() {
 ///
 /// Separate from the attachment tables because the two versions are separate —
 /// a fixture that wants to BE schema 15 drops this and keeps those.
+/// Remove what schemas 18 (library) and 19 (steer) added, so a fixture that
+/// rebuilds an OLDER inventory really has that inventory. Steer first (it
+/// references turns), then library files before items.
+pub(super) async fn drop_tables_after_seventeen(db: &DatabaseConnection) {
+    for table in ["neev_steer_inputs", "neev_library_files", "neev_library_items"] {
+        execute(db, &format!("DROP TABLE IF EXISTS {table}"), vec![])
+            .await
+            .unwrap();
+    }
+}
+
 pub(super) async fn drop_mention_tables(db: &DatabaseConnection) {
+    drop_tables_after_seventeen(db).await;
     execute(db, "DROP TABLE neev_message_mentions", vec![])
         .await
         .unwrap();

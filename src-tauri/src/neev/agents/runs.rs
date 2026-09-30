@@ -493,6 +493,10 @@ async fn drive(
     // `None` until the run reaches a terminal state; a stream that simply ends
     // without one is an interruption, not a success.
     let mut settled: Option<(TurnStatus, Option<&'static str>)> = None;
+    // The class of the provider's own failure, if it reported one. Tracked here
+    // rather than read back from the trace, so a trace that hit its cap still
+    // settles the turn with the right code.
+    let mut failure: Option<super::provider_error::Category> = None;
     while let Some(event) = handle.next().await {
         // Read before the match, which moves the text out of the event.
         let whole = matches!(event, RunEvent::Message(_));
@@ -500,6 +504,9 @@ async fn drive(
             // The runtime's own id is internal; the durable identity is ours.
             RunEvent::Started(_) => {}
             RunEvent::Activity(draft) => {
+                if let Some(category) = super::provider_error::category_of(&draft.kind) {
+                    failure = Some(category);
+                }
                 // Refused only when a cap is spent, in which case the log has
                 // already recorded that it truncated.
                 if let Some(item) = live.record_activity(draft) {
@@ -558,6 +565,7 @@ async fn drive(
     let (mut status, mut error_code) = settled.unwrap_or((TurnStatus::Failed, Some("interrupted")));
     // The buffer is capped on append, so it is always storable as-is.
     let mut response = live.snapshot().0;
+    (status, error_code) = settle_provider_failure(&live, status, error_code, failure, &response);
 
     // Persist generated outputs from the spool BEFORE publication or settlement.
     // Only on successful completion - a failed run's outputs are not trusted.
@@ -653,6 +661,43 @@ async fn drive(
         error_code: reported_code.map(str::to_owned),
     });
     lock(&state.agent_runs).remove(&run_id);
+}
+
+/// Reconcile how the stream ended with what the provider said about it.
+///
+/// - A provider failure it CLASSIFIED settles with that class's code, so an
+///   expired sign-in is stored as `unauthorized` rather than `provider`.
+/// - A provider failure with no reason at all still gets an error step, saying
+///   exactly that — never an invented cause.
+/// - A provider that reported an error but exited cleanly with no reply did not
+///   answer, and is not recorded as having completed.
+fn settle_provider_failure(
+    live: &LiveRun,
+    status: TurnStatus,
+    error_code: Option<&'static str>,
+    failure: Option<super::provider_error::Category>,
+    response: &str,
+) -> (TurnStatus, Option<&'static str>) {
+    use super::provider_error::{draft, Category};
+    match (status, error_code, failure) {
+        (TurnStatus::Failed, Some("provider"), Some(category)) => {
+            (status, Some(category.turn_error_code()))
+        }
+        (TurnStatus::Failed, Some("provider"), None) => {
+            let step = draft(
+                Category::Provider,
+                "The provider stopped without a reply and did not report why.".to_owned(),
+            );
+            if let Some(item) = live.record_activity(step) {
+                let _ = live.events.send(RunSignal::Activity(item));
+            }
+            (status, error_code)
+        }
+        (TurnStatus::Completed, _, Some(category)) if response.trim().is_empty() => {
+            (TurnStatus::Failed, Some(category.turn_error_code()))
+        }
+        _ => (status, error_code),
+    }
 }
 
 /// The largest reply that fits in a team message (`neev_messages.byte_length`).

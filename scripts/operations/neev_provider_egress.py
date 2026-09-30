@@ -58,6 +58,9 @@ _DIAG_KNOWN_HOSTS = frozenset((
     "api.anthropic.com", "claude.com", "claude.ai", "console.anthropic.com",
     "platform.claude.com", "statsig.anthropic.com", "auth.openai.com",
     "chatgpt.com", "api.openai.com",
+    # ACP providers (neev_provider_endpoints; unprobed).
+    "api2.cursor.sh", "api5.cursor.sh", "prod.authentication.cursor.sh",
+    "oauth2.googleapis.com", "www.googleapis.com", "cloudcode-pa.googleapis.com",
 ))
 _HOSTNAME_RE = re.compile(rb"^[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*$")
 _HTTP_VERSIONS = {b"HTTP/1.1": "http11", b"HTTP/1.0": "http10", b"HTTP/2": "http2"}

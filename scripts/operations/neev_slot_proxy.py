@@ -108,7 +108,7 @@ PROXY_PORT = 3128
 PROXY_UID = 62000
 PROXY_GID = 62000
 
-VALID_PROVIDERS = frozenset(("claude", "codex"))
+VALID_PROVIDERS = frozenset(("claude", "codex", "cursor", "gemini", "opencode"))
 VALID_PURPOSES = frozenset(("login", "run"))
 
 # Bounded waits. Ready is short because the child only has to bind a socket;

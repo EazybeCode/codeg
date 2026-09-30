@@ -1,3 +1,4 @@
+pub(crate) mod acp_providers;
 pub(crate) mod activity;
 pub(crate) mod briefing;
 pub(crate) mod capabilities;
@@ -11,6 +12,7 @@ pub(crate) mod execution;
 pub(crate) mod generated;
 pub(crate) mod intents;
 pub(crate) mod library_runtime;
+pub(crate) mod provider_error;
 pub(crate) mod recovery;
 pub(crate) mod runs;
 pub(crate) mod sessions;

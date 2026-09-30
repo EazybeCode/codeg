@@ -247,7 +247,7 @@ class ScopeTests(unittest.TestCase):
     """Nothing is spawned for a scope the egress policy would not serve."""
 
     def test_the_supported_matrix_validates(self):
-        for provider in ("claude", "codex"):
+        for provider in ("claude", "codex", "cursor", "gemini", "opencode"):
             for purpose in ("login", "run"):
                 for slot in ("a", "b"):
                     with self.subTest(p=provider, u=purpose, s=slot):
@@ -255,7 +255,7 @@ class ScopeTests(unittest.TestCase):
 
     def test_unknown_scopes_are_refused_before_any_process_exists(self):
         cases = [
-            ("gemini", "login", "a"),
+            ("grok", "login", "a"),
             ("claude", "browse", "a"),
             ("claude", "login", "c"),
             ("Claude", "login", "a"),
@@ -766,7 +766,7 @@ class ChildCliTests(unittest.TestCase):
         for argv in (
             [],
             ["--serve"],
-            ["--serve", "--provider", "gemini", "--purpose", "login", "--host", "x"],
+            ["--serve", "--provider", "grok", "--purpose", "login", "--host", "x"],
             ["--serve", "--provider", "claude", "--purpose", "browse", "--host", "x"],
             ["--serve", "--provider", "claude", "--purpose", "login"],
             ["--probe"],

@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import uuid as uuid_module
+from collections import deque
 
 # Line bounds matching Codex adapter
 MAX_LINE_BYTES = 64 * 1024 * 1024
@@ -144,9 +145,64 @@ class Emitter:
             "reason": reason,
         })
 
-    def turn_failed(self, reason):
-        """Emit turn failed in native envelope."""
-        self._write({"type": "turn.failed", "reason": reason})
+    def turn_failed(self, reason, code=None):
+        """Emit turn failed in native envelope.
+
+        `reason` is bounded here and redacted by the runtime before it is stored
+        or shown; `code` is one of our own structured hints, omitted when we
+        have none so the runtime classifies the words instead.
+        """
+        payload = {"type": "turn.failed", "reason": str(reason)[:MAX_REASON_CHARS]}
+        if code:
+            payload["code"] = str(code)[:64]
+        self._write(payload)
+
+
+# Bound on a forwarded failure reason; the runtime redacts and cuts again.
+MAX_REASON_CHARS = 1000
+
+
+class StderrTail:
+    """Drain Claude's stderr on a thread, keeping only its last few lines.
+
+    The launcher's stderr is /dev/null in production, so a Claude that died
+    before it could write a `result` left no reason at all. The tail becomes that
+    reason. (A copy of the Codex adapter's: both run under `python -I`, which
+    keeps a sibling module off `sys.path`.)
+    """
+
+    def __init__(self, stream, lines=8, width=500):
+        self._lines = deque(maxlen=lines)
+        self._width = width
+        self._lock = threading.Lock()
+        self._thread = None
+        if stream is not None:
+            self._thread = threading.Thread(target=self._drain, args=(stream,), daemon=True)
+            self._thread.start()
+
+    def _drain(self, stream):
+        try:
+            for line in stream:
+                text = line.strip()
+                if text:
+                    with self._lock:
+                        self._lines.append(text[: self._width])
+        except (OSError, ValueError):
+            pass
+
+    def last(self, wait=0.5):
+        if self._thread is not None:
+            self._thread.join(wait)
+        with self._lock:
+            return self._lines[-1] if self._lines else None
+
+
+def _exited(stderr_tail, fallback, code):
+    """(reason, code) for a Claude that went away: its own last words if any."""
+    tail = stderr_tail.last() if stderr_tail is not None else None
+    if tail:
+        return f"provider exited: {tail}", None
+    return fallback, code
 
 
 class SteerState:
@@ -505,7 +561,7 @@ def _clear_handshake_deadline():
     signal.alarm(0)
 
 
-def drive(child, args, emit, steer_input=None):
+def drive(child, args, emit, steer_input=None, stderr_tail=None):
     """Run Claude with stream-json, handling steering via interrupt."""
     stdin, stdout = child.stdin, child.stdout
     state = SteerState(emit)
@@ -536,9 +592,10 @@ def drive(child, args, emit, steer_input=None):
             if line is None:
                 state.mark_finished()
                 if not state.is_session_started():
-                    emit.turn_failed("provider closed before session started")
+                    emit.turn_failed(*_exited(
+                        stderr_tail, "provider closed before session started", "closed"))
                 else:
-                    emit.turn_failed("provider closed the stream")
+                    emit.turn_failed(*_exited(stderr_tail, "provider closed the stream", "closed"))
                 return 4
 
             try:
@@ -564,15 +621,17 @@ def drive(child, args, emit, steer_input=None):
 
     except HandshakeTimeout:
         state.mark_finished()
-        emit.turn_failed("provider did not start the session")
+        tail = stderr_tail.last(wait=0) if stderr_tail is not None else None
+        emit.turn_failed(
+            "provider did not start the session" + (f": {tail}" if tail else ""), "timeout")
         return 4
     except ValueError as e:
         state.mark_finished()
-        emit.turn_failed(f"oversized provider message: {e}")
+        emit.turn_failed(f"oversized provider message: {e}", "oversized")
         return 4
     except OSError:
         state.mark_finished()
-        emit.turn_failed("provider stream ended")
+        emit.turn_failed(*_exited(stderr_tail, "provider stream ended", "closed"))
         return 4
 
 
@@ -599,17 +658,22 @@ def main(argv=None, steer_input=None):
             claude_argv(args),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
+            # Captured as a bounded tail (see `StderrTail`), never forwarded.
+            stderr=subprocess.PIPE,
             cwd=cwd,
             text=True,
         )
     except OSError:
-        emit.turn_failed("provider did not start")
+        emit.turn_failed("provider did not start", "not_started")
         return 3
 
+    stderr_tail = StderrTail(child.stderr)
     try:
-        return drive(child, args, emit, steer_input=effective_steer)
+        return drive(child, args, emit, steer_input=effective_steer, stderr_tail=stderr_tail)
     finally:
         _clear_handshake_deadline()
+        # stderr stays open until the child is reaped: its drain thread holds
+        # the reader, and closing under it would block.
         for pipe in (child.stdin, child.stdout):
             try:
                 pipe.close()

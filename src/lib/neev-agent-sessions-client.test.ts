@@ -27,6 +27,7 @@ import {
   parseRunEvent,
   sliceByScalars,
   parseStartedTurn,
+  retryAgentRun,
   startAgentTurn,
   updateAgentSession,
   updateAgentSessionSettings,
@@ -1803,5 +1804,75 @@ describe("run configuration", () => {
       { ...session, effort: null, fast: "true" },
     ])
       expect(() => parseAgentSession(bad)).toThrow(NativeClientError)
+  })
+})
+
+describe("provider failures and retry", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it("reads an error step with its class, and an unknown class as generic", () => {
+    const items = parseActivity([
+      {
+        seq: 1,
+        offset: 0,
+        id: "error",
+        kind: "status",
+        state: "error",
+        detail: "usage limit",
+        category: "quota",
+      },
+      {
+        seq: 2,
+        offset: 0,
+        id: "error2",
+        kind: "status",
+        state: "error",
+        detail: "odd",
+        category: "from_the_future",
+      },
+      {
+        seq: 3,
+        offset: 0,
+        id: "result",
+        kind: "status",
+        state: "result",
+        detail: "failed",
+      },
+    ])
+    expect(items[0]).toMatchObject({
+      state: "error",
+      detail: "usage limit",
+      category: "quota",
+    })
+    expect(items[1]).toMatchObject({ state: "error", category: "provider" })
+    // Non-error steps carry no class at all.
+    expect(items[2]).not.toHaveProperty("category")
+  })
+
+  it("retries a run by id with only the request id in the body", async () => {
+    const REQUEST = "323e4567-e89b-42d3-a456-426614174009"
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(json({ turn, runId: RUN_ID }, 201))
+    vi.stubGlobal("fetch", fetcher)
+    const started = await retryAgentRun(RUN_ID, REQUEST, "csrf")
+    expect(started.runId).toBe(RUN_ID)
+    const [url, init] = fetcher.mock.calls[0]
+    expect(url).toBe(`/api/neev/agent/runs/${RUN_ID}/retry`)
+    expect(init.method).toBe("POST")
+    // The ask itself never travels: the server re-reads it from storage.
+    expect(JSON.parse(init.body)).toEqual({ requestId: REQUEST })
+  })
+
+  it("refuses a malformed run or request id before any request", async () => {
+    const fetcher = vi.fn()
+    vi.stubGlobal("fetch", fetcher)
+    await expect(
+      retryAgentRun("../turns", "323e4567-e89b-42d3-a456-426614174009", "csrf")
+    ).rejects.toBeInstanceOf(NativeClientError)
+    await expect(
+      retryAgentRun(RUN_ID, "not-a-uuid", "csrf")
+    ).rejects.toBeInstanceOf(NativeClientError)
+    expect(fetcher).not.toHaveBeenCalled()
   })
 })

@@ -20,6 +20,9 @@ pub(crate) mod mentions;
 #[cfg(test)]
 mod message_tests;
 pub(crate) mod messages;
+pub(crate) mod originals;
+#[cfg(all(test, unix))]
+mod originals_tests;
 pub(crate) mod realtime;
 #[cfg(test)]
 mod resource_tests;

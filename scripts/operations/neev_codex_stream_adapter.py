@@ -31,6 +31,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections import deque
 
 # App-server command completions repeat the full output, even after chunked
 # deltas. Allow large HTML results on input, then bound the displayed preview.
@@ -50,6 +51,88 @@ HANDSHAKE_TIMEOUT_SECS = 60
 # thread parameters. Approvals go with it because nobody can answer a prompt.
 SANDBOX_MODE = "danger-full-access"
 APPROVAL_POLICY = "never"
+
+# How much of a provider's failure text is forwarded. The runtime redacts and
+# cuts it again; this bound only keeps one pathological message from being huge.
+MAX_REASON_CHARS = 1000
+# The provider's stderr is kept as a short tail, only to explain a failure that
+# happened before the protocol could (a config error, a missing sign-in).
+STDERR_TAIL_LINES = 8
+STDERR_LINE_CHARS = 500
+
+
+def error_hint(error):
+    """Pure: the kind of a v2 `TurnError.codexErrorInfo`, or None.
+
+    It is either a plain string (`"usageLimitExceeded"`, `"unauthorized"`) or a
+    one-key object carrying details (`{"httpConnectionFailed": {...}}`).
+    """
+    info = (error or {}).get("codexErrorInfo")
+    if isinstance(info, str):
+        return info
+    if isinstance(info, dict) and len(info) == 1:
+        return next(iter(info))
+    return None
+
+
+def error_text(error, fallback):
+    """Pure: the provider's message for a TurnError, with its details."""
+    error = error or {}
+    message = error.get("message") or fallback
+    details = error.get("additionalDetails")
+    if isinstance(details, str) and details.strip() and details not in message:
+        message = f"{message} — {details}"
+    return str(message)
+
+
+class StderrTail:
+    """Drain the provider's stderr on a thread, keeping only the last lines.
+
+    Draining matters on its own: a provider that fills an unread stderr pipe
+    blocks. Kept lines are bounded in count and length, and are used for ONE
+    thing — saying why a provider that died before the protocol could explain
+    itself did so.
+    """
+
+    def __init__(self, stream):
+        self._lines = deque(maxlen=STDERR_TAIL_LINES)
+        self._lock = threading.Lock()
+        self._thread = None
+        if stream is not None:
+            self._thread = threading.Thread(target=self._drain, args=(stream,), daemon=True)
+            self._thread.start()
+
+    def _drain(self, stream):
+        try:
+            for line in stream:
+                text = line.strip()
+                if text:
+                    with self._lock:
+                        self._lines.append(text[:STDERR_LINE_CHARS])
+        except (OSError, ValueError):
+            pass
+
+    def last(self, wait=0.5):
+        """The last meaningful line, after giving the drain a moment to finish."""
+        if self._thread is not None:
+            self._thread.join(wait)
+        with self._lock:
+            for line in reversed(self._lines):
+                # Log-framework noise ("WARN ..." about PATH aliases) is not a reason.
+                if "could not create PATH aliases" in line:
+                    continue
+                return line
+        return None
+
+
+def _exited(stderr_tail, fallback, code):
+    """(reason, code) for a provider that went away: its own last words if any."""
+    tail = stderr_tail.last() if stderr_tail is not None else None
+    if tail:
+        # No hint: the words say more than "closed" does (e.g. "not logged in").
+        return f"provider exited: {tail}", None
+    return fallback, code
+
 
 # Bounded stdin relay for steering. The runtime sends JSON records with
 # {requestId, text} to add follow-up input to the active turn.
@@ -207,8 +290,20 @@ class Emitter:
     def turn_completed(self):
         self._write({"type": "turn.completed"})
 
-    def turn_failed(self, reason):
-        self._write({"type": "turn.failed", "reason": reason})
+    def turn_failed(self, reason, code=None):
+        """The turn is over and did not succeed.
+
+        `reason` is the provider's OWN words where it gave any (bounded here; the
+        runtime redacts and bounds again before anything is stored or shown).
+        `code` is a structured hint — Codex's `codexErrorInfo` kind, or one of
+        ours (`closed`, `timeout`, `not_started`, `oversized`,
+        `settings_mismatch`) — and is omitted when we have none rather than
+        guessed, so the runtime classifies the text instead.
+        """
+        payload = {"type": "turn.failed", "reason": str(reason)[:MAX_REASON_CHARS]}
+        if code:
+            payload["code"] = str(code)[:64]
+        self._write(payload)
 
     def steer_accepted(self, request_id, turn_id):
         """Acknowledge a steering input was accepted by the provider."""
@@ -229,7 +324,7 @@ class Emitter:
         })
 
 
-def translate(method, params, emit):
+def translate(method, params, emit, memory=None):
     """One app-server notification -> zero or more of our envelopes.
 
     Names and fields are the version-matched schema's
@@ -259,6 +354,12 @@ def translate(method, params, emit):
                 item.get("exitCode"),
             )
         return None
+    if method == "error":
+        # An error notification (possibly a retry in progress). Remembered, so a
+        # failed turn that carries no error of its own can still say why.
+        if memory is not None and isinstance(params.get("error"), dict):
+            memory["error"] = params["error"]
+        return None
     if method == "turn/completed":
         turn = params.get("turn") or {}
         status = turn.get("status")
@@ -268,8 +369,8 @@ def translate(method, params, emit):
         # `interrupted` and `failed` both mean the reply is not finished. The
         # EXIT CODE is what settles the turn upstream, so a partial reply must
         # never leave here as a success.
-        error = (turn.get("error") or {}).get("message") or status or "failed"
-        emit.turn_failed(str(error)[:200])
+        error = turn.get("error") or (memory or {}).get("error") or {}
+        emit.turn_failed(error_text(error, status or "failed"), error_hint(error))
         return 4
     return None
 
@@ -494,7 +595,7 @@ def _clear_handshake_deadline():
     signal.alarm(0)
 
 
-def drive(child, args, emit, cwd, steer_input=None):
+def drive(child, args, emit, cwd, steer_input=None, stderr_tail=None):
     """Run the turn. Returns a process exit code.
 
     If `steer_input` is provided (a file-like object), steering commands are read
@@ -506,6 +607,7 @@ def drive(child, args, emit, cwd, steer_input=None):
     turn_state = TurnState(emit)
     pending_steers = {}  # {internal_request_id: external_request_id}
     steer_thread = None
+    memory = {}
 
     # The app-server answers `initialize` before it accepts a method, so the
     # handshake is a conversation, not a queue. There is no protocol-version
@@ -519,7 +621,7 @@ def drive(child, args, emit, cwd, steer_input=None):
         line = _read_line(stdout)
         if line is None:
             turn_state.mark_finished()
-            emit.turn_failed("provider closed the stream")
+            emit.turn_failed(*_exited(stderr_tail, "provider closed the stream", "closed"))
             return 4
         try:
             message = json.loads(line)
@@ -532,7 +634,7 @@ def drive(child, args, emit, cwd, steer_input=None):
                 # A request FROM the server. Refused, never ignored.
                 _refuse(stdin, message["id"], message["method"])
                 continue
-            done = translate(message["method"], message.get("params") or {}, emit)
+            done = translate(message["method"], message.get("params") or {}, emit, memory)
             if done is not None:
                 turn_state.mark_finished()
                 return done
@@ -548,7 +650,9 @@ def drive(child, args, emit, cwd, steer_input=None):
                 emit.steer_rejected(external_id, str(error.get("message") or "rejected")[:100])
                 continue
             turn_state.mark_finished()
-            emit.turn_failed(str(error.get("message") or "provider refused")[:200])
+            # The provider's own words, unclassified here: a refusal of
+            # `thread/start` may be a sign-in problem as easily as a bad value.
+            emit.turn_failed(str(error.get("message") or "provider refused"))
             return 4
         result = message.get("result") or {}
 
@@ -579,7 +683,7 @@ def drive(child, args, emit, cwd, steer_input=None):
                 reported_settings(result),
             )
             if wrong:
-                emit.turn_failed("provider ignored: " + ", ".join(wrong))
+                emit.turn_failed("provider ignored: " + ", ".join(wrong), "settings_mismatch")
                 return 4
             _request(stdin, 3, "turn/start", start_params(args, thread_id, cwd))
             # The turn itself is not on a clock: it may legitimately run for
@@ -628,10 +732,12 @@ def main(argv=None, steer_input=None):
             codex_argv(args),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            # Inherited, NOT discarded: our stdout is the turn and must carry
-            # nothing else, but whatever the provider says about why it could
-            # not start belongs wherever the launcher's stderr goes (/dev/null
-            # in production, the terminal under the diagnostics).
+            # Captured as a bounded tail, never forwarded on stdout (which is
+            # the turn and must carry nothing else). The launcher's stderr is
+            # /dev/null in production, so inheriting it threw away the only
+            # explanation of a provider that died before the protocol could
+            # report anything; the tail becomes that failure's reason instead.
+            stderr=subprocess.PIPE,
             cwd=cwd,
             text=True,
             # No `start_new_session`: staying in the launcher's process group is
@@ -639,22 +745,30 @@ def main(argv=None, steer_input=None):
             # together.
         )
     except OSError:
-        emit.turn_failed("provider did not start")
+        emit.turn_failed("provider did not start", "not_started")
         return 3
+    stderr_tail = StderrTail(child.stderr)
     try:
-        return drive(child, args, emit, cwd, steer_input=effective_steer)
+        return drive(child, args, emit, cwd, steer_input=effective_steer,
+                     stderr_tail=stderr_tail)
     except HandshakeTimeout:
-        emit.turn_failed("provider did not start the turn")
+        tail = stderr_tail.last(wait=0)
+        emit.turn_failed(
+            "provider did not start the turn" + (f": {tail}" if tail else ""), "timeout"
+        )
         return 4
     except ValueError:
         # One oversized message is enough to distrust the rest of the answer.
-        emit.turn_failed("oversized provider message")
+        emit.turn_failed("oversized provider message", "oversized")
         return 4
     except OSError:
-        emit.turn_failed("provider stream ended")
+        emit.turn_failed(*_exited(stderr_tail, "provider stream ended", "closed"))
         return 4
     finally:
         _clear_handshake_deadline()
+        # stderr is NOT closed here: its drain thread holds the reader, and
+        # closing under it blocks until the provider exits. It ends at EOF once
+        # the provider is reaped below.
         for pipe in (child.stdin, child.stdout):
             try:
                 pipe.close()

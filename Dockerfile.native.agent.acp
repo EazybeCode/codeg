@@ -1,0 +1,95 @@
+# OPTIONAL layer: the ACP provider CLIs (Cursor, Gemini CLI, OpenCode) on top of the
+# agent image. NOT part of the default release build and enables nothing by
+# itself: a provider is offered only when the server sets
+# NEEV_AGENT_<P>_BINARY to the pinned path below AND names it in
+# NEEV_AGENT_ACP_PROVIDERS, which must not happen before a real per-user
+# sign-in -> run -> stream -> cancel smoke passes (providers-report.md).
+#
+#   docker build -f Dockerfile.native.agent.acp -t neev-native-agent-acp:<tag> \
+#     --build-arg AGENT_IMAGE=neev-native-agent:<tag> .
+#
+# Every artifact is pinned by sha256 (ADD --checksum fails the build on drift):
+#   * OpenCode v1.18.33 — GitHub release asset digest (sha256) for
+#     opencode-linux-x64.tar.gz; re-hashed locally 2026-09-30 and matched.
+#   * Gemini CLI 0.62.0 — npm registry integrity
+#     sha512-A1rw0Tf2sHLpGncfYdaq5WaJIufKAP8il4BmHD5Yw4ewmB/Wo0vRQb2bEvx7OqyaPFPZCh0hVhcMKsICZyIBww==
+#     (verified by `npm pack`); the sha256 below is of that verified tarball.
+#     Its only dependencies are optional (keytar, node-pty) and are NOT
+#     installed: without keytar credentials stay in files under the per-user
+#     HOME (GEMINI_FORCE_FILE_STORAGE is also set by the launcher).
+#
+#   * Cursor 2026.09.28-64d2043 — the official HTTPS artifact the vendor's own
+#     installer (https://cursor.com/install, read 2026-09-30) downloads:
+#     downloads.cursor.com/lab/2026.09.28-64d2043/linux/x64/agent-cli-package.tar.gz
+#     cursor.com publishes no checksum; the sha256 below is of that artifact as
+#     downloaded and hashed 2026-09-30 (182618248 bytes), pinned so any change
+#     fails the build. Layout mirrors the installer: dist-package/cursor-agent,
+#     linked as `agent` (the name the docs and the adapter use).
+
+ARG AGENT_IMAGE=neev-native-agent:latest
+FROM ${AGENT_IMAGE}
+
+USER 0:0
+
+ADD --checksum=sha256:e546123213ae47909a4268692aa4b94950d011afe9cac9938753a2194f1c16d5 \
+    https://github.com/anomalyco/opencode/releases/download/v1.18.33/opencode-linux-x64.tar.gz \
+    /tmp/neev-opencode.tar.gz
+RUN install -d -o 0 -g 0 -m 0755 /opt/neev/opencode \
+    && tar -xzf /tmp/neev-opencode.tar.gz -C /opt/neev/opencode opencode \
+    && rm /tmp/neev-opencode.tar.gz \
+    && chmod 0555 /opt/neev/opencode/opencode \
+    && ln -s /opt/neev/opencode/opencode /usr/local/bin/opencode \
+    && /usr/local/bin/opencode --version
+
+ADD --checksum=sha256:6e4cd936a4866b8a77c50ff51a564460d715772fabc477a01aa0f0455d9559f0 \
+    https://downloads.cursor.com/lab/2026.09.28-64d2043/linux/x64/agent-cli-package.tar.gz \
+    /tmp/neev-cursor-agent.tar.gz
+RUN install -d -o 0 -g 0 -m 0755 /opt/neev/cursor-agent \
+    && tar -xzf /tmp/neev-cursor-agent.tar.gz --strip-components=1 -C /opt/neev/cursor-agent \
+    && rm /tmp/neev-cursor-agent.tar.gz \
+    && chown -R 0:0 /opt/neev/cursor-agent \
+    && chmod -R a-w /opt/neev/cursor-agent \
+    && ln -s /opt/neev/cursor-agent/cursor-agent /usr/local/bin/agent \
+    && /usr/local/bin/agent --version
+
+ADD --checksum=sha256:2276032b1c33d2b828b1cf197e52f48e74b0a395326763ff01a80d97d0fbc0c3 \
+    https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.62.0.tgz \
+    /tmp/neev-gemini.tgz
+RUN install -d -o 0 -g 0 -m 0755 /opt/neev/gemini \
+    && tar -xzf /tmp/neev-gemini.tgz --strip-components=1 -C /opt/neev/gemini \
+    && rm /tmp/neev-gemini.tgz \
+    && chown -R 0:0 /opt/neev/gemini \
+    && chmod -R a-w /opt/neev/gemini \
+    && ln -s /opt/neev/gemini/bundle/gemini.js /usr/local/bin/gemini \
+    && /usr/local/bin/gemini --version
+
+# The in-sandbox ACP pieces, beside the launcher (same 0555 root-owned dir),
+# plus every operations module the ACP providers changed, so the layer is
+# internally consistent with the source it was built from even on an older base
+# image (whose copies predate the ACP providers).
+COPY --chown=0:0 scripts/operations/neev_acp_stream_adapter.py \
+     scripts/operations/neev_acp_login_protocol.py \
+     scripts/operations/neev_acp_provider_acceptance.py \
+     scripts/operations/neev_claude_stream_adapter.py \
+     scripts/operations/neev_agent_credentials.py \
+     scripts/operations/neev_credential_store.py \
+     scripts/operations/neev_provider_endpoints.py \
+     scripts/operations/neev_provider_egress.py \
+     scripts/operations/neev_slot_proxy.py \
+     scripts/operations/neev_agent_sandbox.py \
+     scripts/operations/neev_agent_launch.py \
+     scripts/operations/neev_agent_login_drivers.py \
+     scripts/operations/neev_agent_supervisor.py \
+     scripts/operations/neev_agent_supervisor_main.py \
+     scripts/operations/neev_supervisor_dto.py \
+     /opt/neev/scripts/operations/
+RUN chmod 0555 /opt/neev/scripts/operations/*.py \
+    # Re-assert the base image's escalation invariants after adding files.
+    && test -z "$(getcap -r / 2>/dev/null | grep -v '^/usr/local/bin/neev-agent-caplaunch ')" \
+    && test -z "$(find / -xdev -perm /6000 -type f 2>/dev/null)"
+
+ENV NEEV_AGENT_CURSOR_BINARY=/usr/local/bin/agent \
+    NEEV_AGENT_GEMINI_BINARY=/usr/local/bin/gemini \
+    NEEV_AGENT_OPENCODE_BINARY=/usr/local/bin/opencode
+
+USER 65532:65532

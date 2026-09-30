@@ -192,7 +192,12 @@ function oneLine(value: string): string {
 export function isNoise(item: NeevActivityItem): boolean {
   return (
     item.kind === "status" &&
-    (item.state === "model" || item.state === "stop" || item.state === "result")
+    (item.state === "model" ||
+      item.state === "stop" ||
+      item.state === "result" ||
+      // The provider's failure is the turn's OUTCOME, shown once by the
+      // failure card with its actions — not a second time as a trace row.
+      item.state === "error")
   )
 }
 

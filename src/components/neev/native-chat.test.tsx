@@ -2583,3 +2583,154 @@ it("retries a follow-up with the same requestId after network failure", async ()
   expect(receivedIds[0]).toBe(receivedIds[1])
   act(() => stream.close())
 })
+
+// ── Provider failures: the provider's own words, and the action that helps ──
+//
+// The live incident: a Codex team invocation failed inside the provider, the
+// chat said "This service is temporarily unavailable", and after a reload the
+// failure vanished — only the ask remained, with nothing saying it had failed
+// or offering to run it again.
+
+const RETRY_RUN_ID = "fedcba9876543210fedcba9876543210"
+const failedTurn = (
+  category: string,
+  detail: string,
+  errorCode = "provider"
+) => ({
+  ...runningTurn,
+  status: "failed",
+  errorCode,
+  completedAt: 1_700_000_003,
+  activity: [
+    {
+      seq: 1,
+      offset: 0,
+      id: "result",
+      kind: "status",
+      state: "result",
+      detail: "failed",
+    },
+    {
+      seq: 2,
+      offset: 0,
+      id: "error",
+      kind: "status",
+      state: "error",
+      detail,
+      category,
+    },
+  ],
+})
+
+it("keeps a failed invocation's real reason and Retry visible after a reload", async () => {
+  let retried: unknown = null
+  let invoked = 0
+  const mock = mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [askMessage], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [TEAM_SESSION("claude")]: () => json(teamSession),
+    [TURNS]: () =>
+      json({
+        items: [
+          failedTurn(
+            "network",
+            "stream disconnected before completion: error sending request"
+          ),
+        ],
+        nextAfter: null,
+      }),
+    [`${TURNS}?after=1`]: () => json({ items: [], nextAfter: null }),
+    [AGENT_PATH]: () => {
+      invoked++
+      return json({ code: "unexpected" }, 500)
+    },
+    [`POST /api/neev/agent/runs/${RUN_ID}/retry`]: (init) => {
+      retried = JSON.parse(init.body as string)
+      return json(
+        {
+          turn: {
+            ...runningTurn,
+            id: "77777777-7777-4777-8777-777777777777",
+            sequence: "2",
+            runId: RETRY_RUN_ID,
+          },
+          runId: RETRY_RUN_ID,
+        },
+        201
+      )
+    },
+    [`GET /api/neev/agent/runs/${RETRY_RUN_ID}/events`]: () =>
+      sseBody(
+        `{"type":"started","runId":"${RETRY_RUN_ID}","turnId":"77777777-7777-4777-8777-777777777777"}`,
+        '{"type":"chunk","text":"done now"}',
+        '{"type":"finished","status":"completed","errorCode":null}'
+      ),
+  })
+  const user = userEvent.setup()
+  // A REOPEN, not a fresh send: nothing in memory knows this run failed.
+  mount()
+  await ready()
+  const card = await screen.findByRole("alert")
+  expect(card).toHaveTextContent(messages.NativeContent.runError_network)
+  // The provider's own words, not a generic sentence.
+  expect(card).toHaveTextContent(
+    "stream disconnected before completion: error sending request"
+  )
+  expect(
+    screen.queryByText(
+      "This service is temporarily unavailable. Please try again."
+    )
+  ).toBeNull()
+  await user.click(within(card).getByRole("button", { name: "Retry" }))
+  await waitFor(() =>
+    expect(retried).toEqual({
+      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    })
+  )
+  // The retry re-ran the stored ask; it did not post the ask again.
+  expect(invoked).toBe(0)
+  const thread = within(await screen.findByRole("list", { name: "Messages" }))
+  expect(thread.getAllByText("help")).toHaveLength(1)
+  expect(mock.unknown).toEqual([])
+})
+
+it("offers Reconnect, not Retry, when the provider sign-in expired", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [askMessage], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    // Connected BEFORE the failure: the credential that failed is this one.
+    "GET /api/neev/agent/connections": () =>
+      json({
+        runtimeEnabled: true,
+        connections: [
+          connectionRow("claude", "connected"),
+          connectionRow("codex", "connected"),
+        ],
+      }),
+    [TEAM_SESSION("claude")]: () => json(teamSession),
+    [TURNS]: () =>
+      json({
+        items: [
+          failedTurn(
+            "auth_expired",
+            "API Error: 401 OAuth token has expired.",
+            "unauthorized"
+          ),
+        ],
+        nextAfter: null,
+      }),
+  })
+  mount()
+  await ready()
+  const card = await screen.findByRole("alert")
+  expect(card).toHaveTextContent(messages.NativeContent.runError_auth_expired)
+  expect(card).toHaveTextContent("API Error: 401 OAuth token has expired.")
+  expect(within(card).getByRole("button", { name: "Reconnect" })).toBeVisible()
+  expect(within(card).queryByRole("button", { name: "Retry" })).toBeNull()
+})

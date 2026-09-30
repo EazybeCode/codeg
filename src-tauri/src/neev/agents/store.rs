@@ -89,18 +89,11 @@ pub(super) fn error_code(value: &str) -> bool {
 }
 
 pub(crate) fn provider_name(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "claude",
-        Provider::Codex => "codex",
-    }
+    provider.name()
 }
 
 fn decode_provider(value: &str) -> Result<Provider, AgentError> {
-    match value {
-        "claude" => Ok(Provider::Claude),
-        "codex" => Ok(Provider::Codex),
-        _ => Err(AgentError::Unavailable),
-    }
+    Provider::parse(value).ok_or(AgentError::Unavailable)
 }
 
 fn decode_state(value: &str) -> Result<ConnectionState, AgentError> {

@@ -1,0 +1,21 @@
+[Unit]
+Description=Evict idle Storage-Box-verified Neev originals under local disk pressure
+Wants=network-online.target neev-originals-broker.service
+After=network-online.target neev-originals-broker.service
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/neev-storage-box/neev_storage_box.py --config /etc/neev-storage-box/config.json evict
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Same placeholder as the broker unit: the document root host path.
+ReadWritePaths=/var/lib/neev-storage-box @NEEV_DOCUMENT_ROOT_HOST_PATH@
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M

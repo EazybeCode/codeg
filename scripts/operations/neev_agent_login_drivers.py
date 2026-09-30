@@ -11,6 +11,11 @@ process's stdio):
     account/read).
   * Claude — the browser + paste-code flow via `neev_claude_login_protocol`
     (print authorize URL -> read pasted authorization code from stdin).
+  * OpenCode — `opencode auth login` ChatGPT headless device flow (user code at the
+    OpenAI device URL; the CLI polls), via `neev_acp_login_protocol`.
+  * Gemini — `gemini` NO_BROWSER paste-code sign-in on a PTY (the CLI refuses the
+    flow on a pipe), via `neev_acp_login_protocol`.
+  * Cursor — `agent login` with NO_OPEN_BROWSER (open URL; the CLI polls, exits).
 
 `Channel` is the ONLY seam that spawns a process, so the protocol-driving state
 machines are exercised with an in-memory fake here and the real sandbox in
@@ -48,6 +53,8 @@ _MAX_STDERR_BYTES = 65536
 _KNOWN_HOSTS = (
     "api.anthropic.com", "claude.com", "claude.ai", "console.anthropic.com",
     "platform.claude.com", "auth.openai.com", "chatgpt.com", "api.openai.com",
+    "api2.cursor.sh", "prod.authentication.cursor.sh", "oauth2.googleapis.com",
+    "www.googleapis.com", "cloudcode-pa.googleapis.com",
 )
 _STATUS_RE = re.compile(r"(?:http|status|code|response)[^0-9]{0,12}([1-5][0-9]{2})", re.I)
 _EGRESS_MARKERS = (
@@ -443,3 +450,237 @@ class ClaudeAccountProbe(sup.AccountProbe):
             return "disconnected"
         finally:
             self._channel.terminate()
+
+
+# --------------------------------------------------------------------------- #
+# ACP providers: official CLI sign-in commands (neev_acp_login_protocol)
+# --------------------------------------------------------------------------- #
+
+
+def _acp_proto():
+    """Imported on first ACP use only, so the Claude/Codex supervisor keeps working
+    in an image that does not ship the ACP modules (Dockerfile.native.agent.acp)."""
+    import neev_acp_login_protocol
+
+    return neev_acp_login_protocol
+
+
+class _CliLoginDriver(sup.LoginDriver):
+    """Shared state machine for a sign-in CLI whose output is parsed by an
+    `neev_acp_login_protocol` parser. Subclasses decide what completes it."""
+
+    provider = "acp"
+
+    def __init__(self, channel: Channel, protocol, credential_present=None):
+        self._channel = channel
+        self._protocol = protocol
+        self._credential_present = credential_present
+        self._state = "starting"
+        self._challenge = None
+        self._failure = None
+        self._succeeded = False
+        self._account_label = None
+
+    def start(self) -> None:
+        self._channel.start()
+
+    def poll(self) -> sup.DriverState:
+        self._pump()
+        return sup.DriverState(
+            self._state, challenge=self._challenge,
+            account_label=self._account_label, failure=self._failure,
+        )
+
+    def _fail(self, failure: str) -> None:
+        self._state, self._failure = "failed", failure
+
+    def _pump(self) -> None:
+        if self._state in ("prepared", "failed"):
+            return
+        chunk = self._channel.read()
+        if chunk:
+            try:
+                for event in self._protocol.receive(chunk):
+                    self._handle(event)
+            except _acp_proto().ProtocolError:
+                self._fail("provider_unavailable")
+                return
+        if self._state in ("prepared", "failed"):
+            return
+        self._check_progress(self._channel.returncode())
+
+    def _handle(self, event) -> None:
+        if event.kind == "challenge":
+            self._challenge = sup.Challenge(
+                event.verification_url, 0, user_code=event.user_code
+            )
+            self._state = "awaiting_user"
+        elif event.kind == "succeeded":
+            self._succeeded = True
+        elif event.kind == "failed":
+            self._fail("reauth_required" if self._challenge else "provider_unavailable")
+
+    def _check_progress(self, returncode) -> None:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+    def submit_code(self, code: str) -> None:
+        raise RuntimeError("this sign-in accepts no pasted code")
+
+    def cancel(self) -> None:
+        self._channel.terminate()
+
+    def logout(self) -> str:
+        self._channel.terminate()
+        return "not_needed"
+
+    def release(self) -> None:
+        self._channel.terminate()
+
+
+class OpenCodeLoginDriver(_CliLoginDriver):
+    """`opencode auth login --provider openai --method "ChatGPT Pro/Plus (headless)"`.
+
+    Prepared ONLY when all three hold: the CLI printed "Login successful", it
+    exited 0, and the volume holds an `openai` oauth record in auth.json (shape
+    checked by the daemon, never values). Any one alone is not a sign-in."""
+
+    def __init__(self, channel: Channel, credential_present):
+        super().__init__(channel, _acp_proto().OpenCodeLoginProtocol(), credential_present)
+
+    def _check_progress(self, returncode) -> None:
+        if returncode is None:
+            return
+        if returncode == 0 and self._succeeded and self._credential_present():
+            self._account_label = "ChatGPT"
+            self._state = "prepared"
+        else:
+            self._fail("reauth_required" if self._challenge else "provider_unavailable")
+
+
+class CursorLoginDriver(_CliLoginDriver):
+    """`agent login` with NO_OPEN_BROWSER=1. The CLI's own exit status is the only
+    completion signal the docs give (no documented credential file), so prepared
+    requires a printed cursor.com challenge AND exit 0. UNVERIFIED on a pinned
+    binary — the provider stays gated until a real sign-in smoke passes."""
+
+    def __init__(self, channel: Channel):
+        super().__init__(channel, _acp_proto().CursorLoginProtocol())
+
+    def _check_progress(self, returncode) -> None:
+        if returncode is None:
+            return
+        if returncode == 0 and self._challenge is not None:
+            self._account_label = "Cursor"
+            self._state = "prepared"
+        else:
+            self._fail("reauth_required" if self._challenge else "provider_unavailable")
+
+
+class GeminiLoginDriver(_CliLoginDriver):
+    """Interactive `gemini` with NO_BROWSER=true on a PTY channel.
+
+    The CLI prints a Google authorize URL and reads the code the user pastes back.
+    After the paste the CLI does NOT exit (it continues into its chat UI), so
+    completion is the cached credential record (`~/.gemini/oauth_creds.json` with a
+    refresh token, shape-checked by the daemon) — never the mere absence of an
+    error. A process exit before that record exists is a failure."""
+
+    def __init__(self, channel: Channel, credential_present):
+        super().__init__(channel, _acp_proto().GeminiLoginProtocol(), credential_present)
+        self._awaiting_code = False
+        self._submitted = False
+
+    def _handle(self, event) -> None:
+        if event.kind == "awaiting_code":
+            self._awaiting_code = True
+            return
+        if event.kind == "challenge":
+            # Shown to the user only once the CLI is actually reading a code.
+            self._challenge = sup.Challenge(event.verification_url, 0)
+            return
+        super()._handle(event)
+
+    def _check_progress(self, returncode) -> None:
+        if self._challenge is not None and self._awaiting_code and self._state == "starting":
+            self._state = "awaiting_user"
+        if self._submitted and self._credential_present():
+            self._account_label = "Google"
+            self._state = "prepared"
+            return
+        if returncode is not None:
+            self._fail("reauth_required" if self._submitted else "provider_unavailable")
+
+    def submit_code(self, code: str) -> None:
+        if not self._awaiting_code or self._submitted:
+            raise RuntimeError("gemini is not reading a code")
+        self._channel.write(_acp_proto().submit_code_bytes(code))
+        self._submitted = True
+        self._state = "verifying"
+
+
+class AcpAccountProbe(sup.AccountProbe):
+    """Run `neev_acp_stream_adapter.py --probe` against the volume: ACP initialize +
+    session/new, no prompt, no tokens. The adapter prints exactly one
+    `{"type":"neev.account","status":...}` line; `supported` -> ("supported", label),
+    `disconnected` -> "disconnected", anything else (unavailable, no answer, bad
+    JSON, timeout) RAISES so check_connection reports UNAVAILABLE — never a guess.
+
+    `credential_present`, when given, is a daemon-side shape check that must ALSO
+    hold for `supported` (defence in depth for a CLI that would otherwise answer
+    on an anonymous default)."""
+
+    def __init__(self, channel: Channel, label: str, credential_present=None, *,
+                 now=time.monotonic):
+        self._channel = channel
+        self._label = label
+        self._credential_present = credential_present
+        self._now = now
+
+    def probe(self):
+        if self._credential_present is not None and not self._credential_present():
+            return "disconnected"
+        self._channel.start()
+        try:
+            buffer = bytearray()
+            deadline = self._now() + _PROBE_DEADLINE_SECONDS + 30.0
+            while self._now() < deadline:
+                chunk = self._channel.read()
+                if chunk:
+                    buffer.extend(chunk)
+                    if len(buffer) > _MAX_STATUS_BYTES:
+                        raise RuntimeError("acp probe output too large")
+                    status = _account_status(buffer)
+                    if status is not None:
+                        return self._status(status)
+                    continue
+                if self._channel.returncode() is not None:
+                    status = _account_status(buffer)
+                    if status is None:
+                        raise RuntimeError("acp probe exited without an answer")
+                    return self._status(status)
+                time.sleep(_PROBE_POLL_SECONDS)
+            raise RuntimeError("acp probe timed out")
+        finally:
+            self._channel.terminate()
+
+    def _status(self, value):
+        if value == "supported":
+            return ("supported", self._label)
+        if value == "disconnected":
+            return "disconnected"
+        raise RuntimeError("acp probe could not decide")
+
+
+def _account_status(buffer):
+    """The probe's verdict from complete lines, or None if not printed yet."""
+    for line in bytes(buffer).split(b"\n")[:-1]:
+        try:
+            record = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("type") == "neev.account":
+            status = record.get("status")
+            if status in ("supported", "disconnected"):
+                return status
+            raise RuntimeError("acp probe could not decide")
+    return None

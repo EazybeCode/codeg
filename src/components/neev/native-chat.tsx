@@ -60,6 +60,7 @@ import {
   loadAgentConnections,
   loadAgentSession,
   loadTeamAgentSession,
+  retryAgentRun,
   steerAgentRun,
   updateAgentSessionSettings,
   NEEV_AGENT_PROVIDERS,
@@ -74,6 +75,8 @@ import {
   type NeevRunInput,
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls, reconcileAgentSettings } from "./native-agent-controls"
+import { NativeRunFailure } from "./native-run-failure"
+import { providerName, runFailure } from "@/lib/neev-run-failure"
 import {
   AttachmentButton,
   SentPrompt,
@@ -468,6 +471,10 @@ function Chat({
   const providerChosen = useRef(false)
   const checkingConnection = useRef(false)
   const [connectOpen, setConnectOpen] = useState(false)
+  // Retry of the newest failed run: in flight, and the id that makes pressing
+  // it again after a dropped response resolve to the same new run.
+  const [retrying, setRetrying] = useState(false)
+  const retryRequest = useRef<{ runId: string; id: string } | null>(null)
   const refreshConnections = useCallback(async () => {
     const value = await loadAgentConnections(auth.signal)
     if (!auth.signal?.aborted) setConnections(value)
@@ -1165,8 +1172,9 @@ function Chat({
             // Run ended: clear steering state.
             setSteeringInFlight(null)
             setSupportsSteering(false)
-            if (!answered && event.status !== "canceled")
-              setError(new NativeClientError("unavailable"))
+            // A failure is NOT reported here as "service unavailable": the
+            // turn is re-read below, and the failure card says what the
+            // provider actually said, from the stored record.
           }
         },
       })
@@ -1190,6 +1198,59 @@ function Chat({
     // ever retire its partial text: clear it here, beside the error saying
     // why. One that ANSWERED is left to `previewStored`.
     if (!answered && current()) clearPreview()
+  }
+  /**
+   * Run the newest failed turn's own ask again. The server re-reads the prompt
+   * and files from storage and posts nothing new to the thread, so the ask the
+   * team already sees stays the only copy of it.
+   */
+  async function retryRun(turn: NeevAgentTurn) {
+    if (!auth.session || agentBusy || retrying || !scope.isCurrent()) return
+    const previous = retryRequest.current
+    const request =
+      previous?.runId === turn.runId
+        ? previous
+        : { runId: turn.runId, id: crypto.randomUUID() }
+    retryRequest.current = request
+    setRetrying(true)
+    setError(null)
+    try {
+      const started = await retryAgentRun(
+        turn.runId,
+        request.id,
+        auth.session.csrf,
+        auth.signal
+      )
+      if (!scope.isCurrent()) return
+      retryRequest.current = null
+      if (started.turn.status !== "running") {
+        // Refused before it ran: the new turn carries the reason.
+        keepTurn(started.turn)
+        await loadTraces()
+        return
+      }
+      resumed.current.add(started.runId)
+      setRetrying(false)
+      await follow(
+        started.runId,
+        Date.now(),
+        started.turn.activity,
+        started.turn.provider
+      )
+    } catch (cause) {
+      if (scope.isCurrent()) fail(cause)
+    } finally {
+      if (scope.isCurrent()) setRetrying(false)
+    }
+  }
+  /** Upsert one settled turn into the replayed set, by id. */
+  function keepTurn(turn: NeevAgentTurn) {
+    const next = [
+      ...turnsRef.current.filter((item) => item.id !== turn.id),
+      turn,
+    ]
+    turnsRef.current = next
+    setTurns(next)
   }
   function clearPreview() {
     setAgentText("")
@@ -1329,10 +1390,12 @@ function Chat({
       void nameFromFirstMessage(promptText(written), staged)
       if (invocation.turn.status !== "running") {
         // Refused before it ever ran; the ask stays visible and the reason is
-        // named rather than left as a fake pending state.
+        // named — from the settled turn, by the failure card — rather than left
+        // as a fake pending state or a generic "unavailable".
         setAgentBusy(false)
-        setError(new NativeClientError("unavailable"))
+        keepTurn(invocation.turn)
         await refresh()
+        await loadTraces()
         return
       }
       resumed.current.add(invocation.runId)
@@ -1668,6 +1731,31 @@ function Chat({
   const stopping =
     agentBusy &&
     (steeringInFlight !== null || !(steerable && !promptIsEmpty(draft)))
+  // The newest invocation this reader owns in this chat, across providers. Its
+  // failure — live or found on reopen — is shown with the provider's own words
+  // and the action that helps; an older failure is history, not a prompt.
+  const newestTurn = turns.reduce<NeevAgentTurn | null>(
+    (newest, turn) =>
+      !newest ||
+      turn.createdAt > newest.createdAt ||
+      (turn.createdAt === newest.createdAt &&
+        turn.sessionId === newest.sessionId &&
+        BigInt(turn.sequence) > BigInt(newest.sequence))
+        ? turn
+        : newest,
+    null
+  )
+  const failure = newestTurn && !agentBusy ? runFailure(newestTurn) : null
+  function reconnectedSince(turn: NeevAgentTurn) {
+    const row = connections?.connections.find(
+      (entry) => entry.provider === turn.provider
+    )
+    return (
+      row?.state === "connected" &&
+      row.checkedAt !== null &&
+      row.checkedAt >= (turn.completedAt ?? turn.createdAt)
+    )
+  }
   return (
     <section className="flex min-h-0 flex-1 flex-col" aria-label={latest.title}>
       {/* ONE row, title and standing included. It was a title stacked over a
@@ -2092,6 +2180,24 @@ function Chat({
             <p role="status" className="text-xs text-muted-foreground">
               {t("agentFollowUpTextOnly")}
             </p>
+          )}
+          {failure && newestTurn && (
+            <NativeRunFailure
+              failure={failure}
+              provider={providerName(newestTurn.provider)}
+              retrying={retrying}
+              reconnected={reconnectedSince(newestTurn)}
+              onRetry={() => void retryRun(newestTurn)}
+              onReconnect={() => {
+                if (
+                  NEEV_AGENT_PROVIDERS.includes(
+                    newestTurn.provider as NeevAgentProvider
+                  )
+                )
+                  setAgentProvider(newestTurn.provider as NeevAgentProvider)
+                setConnectOpen(true)
+              }}
+            />
           )}
           <NativeError error={error} />
           {(latest.authRevision !== pinned.current ||

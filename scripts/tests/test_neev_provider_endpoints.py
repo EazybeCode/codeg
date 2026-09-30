@@ -86,6 +86,37 @@ class EndpointTableTests(unittest.TestCase):
         self.assertEqual(endpoints.unconfirmed("codex", "login"), ())
         self.assertTrue(endpoints.unconfirmed("codex", "run"))
 
+    def test_acp_providers_are_exact_and_entirely_unconfirmed(self):
+        # Nothing for the ACP providers has been probed on a pinned image, so
+        # EVERY entry must say so — a reader of `unconfirmed()` sees the whole list.
+        for provider in ("cursor", "gemini", "opencode"):
+            for purpose in ("login", "run"):
+                with self.subTest(p=provider, u=purpose):
+                    eps = endpoints.endpoints(provider, purpose)
+                    self.assertEqual(endpoints.unconfirmed(provider, purpose), eps)
+        self.assertEqual(
+            endpoints.hosts("gemini", "login"),
+            {"oauth2.googleapis.com", "www.googleapis.com", "cloudcode-pa.googleapis.com"},
+        )
+        self.assertEqual(endpoints.hosts("opencode", "login"), {"auth.openai.com"})
+        self.assertEqual(
+            endpoints.hosts("opencode", "run"), {"chatgpt.com", "auth.openai.com"}
+        )
+        self.assertIn("api2.cursor.sh", endpoints.hosts("cursor", "login"))
+        # The user's browser opens the sign-in pages; the sandboxed CLI never does.
+        for provider, host in (
+            ("gemini", "accounts.google.com"),
+            ("cursor", "authenticator.cursor.sh"),
+            ("cursor", "accounts.x.ai"),
+            # OpenCode's other upstreams stay unreachable: only ChatGPT is offered.
+            ("opencode", "opencode.ai"),
+            ("opencode", "models.dev"),
+            ("opencode", "api.openai.com"),
+        ):
+            for purpose in ("login", "run"):
+                with self.subTest(p=provider, h=host, u=purpose):
+                    self.assertNotIn(host, endpoints.hosts(provider, purpose))
+
     def test_endpoint_rejects_malformed_host_or_port(self):
         for host, port in (
             ("no-dot", 443),

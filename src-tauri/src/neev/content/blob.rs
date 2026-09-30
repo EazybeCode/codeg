@@ -47,6 +47,7 @@ mod unix {
     use super::{
         BlobInfo, ContentError, ATTACHMENT_STORAGE_CEILING, MAX_DOCUMENT_BYTES, MAX_IMAGE_BYTES,
     };
+    use crate::neev::content::originals::{BlobKind, OriginalsBroker};
 
     #[cfg(test)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +64,8 @@ mod unix {
 
     pub(crate) struct BlobStore {
         root: File,
+        /// Read-through for evicted originals; `None` keeps a miss `NotFound`.
+        originals: Option<OriginalsBroker>,
         #[cfg(test)]
         failure: Option<FailurePoint>,
         #[cfg(test)]
@@ -93,11 +96,17 @@ mod unix {
             verify_directory(&current)?;
             Ok(Self {
                 root: current,
+                originals: None,
                 #[cfg(test)]
                 failure: None,
                 #[cfg(test)]
                 root_sync_probe: None,
             })
+        }
+
+        pub(crate) fn with_originals(mut self, originals: Option<OriginalsBroker>) -> Self {
+            self.originals = originals;
+            self
         }
 
         #[cfg(test)]
@@ -194,9 +203,63 @@ mod unix {
             {
                 return Err(ContentError::Invalid);
             }
+            self.read_original(
+                org_id,
+                key,
+                BlobKind::Document,
+                expected_size,
+                expected_sha256,
+            )
+            .await
+        }
+
+        /// Open a final blob, asking the broker to restore it on a local miss.
+        ///
+        /// Callers pass the length and digest from the database row that proved
+        /// the blob exists, so after a successful hydrate anything but a readable
+        /// final is a storage fault (503), never `NotFound`.
+        async fn open_original(
+            &self,
+            org_id: i32,
+            key: &str,
+            kind: BlobKind,
+            expected_size: i64,
+            expected_sha256: &str,
+        ) -> Result<File, ContentError> {
+            match self.open_final(org_id, key, kind) {
+                Err(ContentError::NotFound) => {}
+                other => return other,
+            }
+            let Some(originals) = &self.originals else {
+                return Err(ContentError::NotFound);
+            };
+            originals
+                .hydrate(org_id, key, kind, expected_size, expected_sha256)
+                .await?;
+            self.open_final(org_id, key, kind)
+                .map_err(|_| ContentError::Storage)
+        }
+
+        fn open_final(&self, org_id: i32, key: &str, kind: BlobKind) -> Result<File, ContentError> {
             let directory = self.open_org_directory(org_id, false)?;
-            let final_name = c_string(&format!("{key}.md"))?;
-            let mut file = open_file_at(directory.as_raw_fd(), &final_name)?;
+            let final_name = c_string(&format!("{key}.{}", kind.extension()))?;
+            open_file_at(directory.as_raw_fd(), &final_name)
+        }
+
+        /// Every read is checked against the row: owner, 0600, one link, exact
+        /// length, then SHA-256. A successful read marks the blob as used so the
+        /// evictor keeps recently read files local.
+        async fn read_original(
+            &self,
+            org_id: i32,
+            key: &str,
+            kind: BlobKind,
+            expected_size: i64,
+            expected_sha256: &str,
+        ) -> Result<Vec<u8>, ContentError> {
+            let mut file = self
+                .open_original(org_id, key, kind, expected_size, expected_sha256)
+                .await?;
             verify_file(&file, expected_size)?;
             let mut bytes = Vec::with_capacity(expected_size as usize);
             (&mut file)
@@ -208,6 +271,7 @@ mod unix {
             {
                 return Err(ContentError::Storage);
             }
+            mark_used(&file);
             Ok(bytes)
         }
 
@@ -290,35 +354,32 @@ mod unix {
             })
         }
 
-        /// Read a stored attachment for the tenant. A missing blob is `NotFound`.
+        /// Read a stored attachment, checked against its row's length and digest.
+        /// A missing blob is `NotFound` unless read-through restores it.
         ///
         /// Bounded by `ATTACHMENT_STORAGE_CEILING`, the tenant budget rather than a
-        /// size rule: a blob over it was never admissible, so finding one means the
-        /// file no longer matches what was stored — `Storage`, like a corrupt blob.
+        /// size rule: a row over it was never admissible.
         pub(crate) async fn read_attachment(
             &self,
             org_id: i32,
             key: &str,
+            expected_size: i64,
+            expected_sha256: &str,
         ) -> Result<Vec<u8>, ContentError> {
             validate_location(org_id, key)?;
-            let directory = self.open_org_directory(org_id, false)?;
-            let final_name = c_string(&format!("{key}.att"))?;
-            let mut file = open_file_at(directory.as_raw_fd(), &final_name).map_err(|error| {
-                if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
-                    ContentError::NotFound
-                } else {
-                    error
-                }
-            })?;
-            let mut bytes = Vec::new();
-            (&mut file)
-                .take(ATTACHMENT_STORAGE_CEILING as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| ContentError::Storage)?;
-            if bytes.is_empty() || bytes.len() > ATTACHMENT_STORAGE_CEILING {
-                return Err(ContentError::Storage);
+            if !(1..=ATTACHMENT_STORAGE_CEILING as i64).contains(&expected_size)
+                || !valid_sha256(expected_sha256)
+            {
+                return Err(ContentError::Invalid);
             }
-            Ok(bytes)
+            self.read_original(
+                org_id,
+                key,
+                BlobKind::Attachment,
+                expected_size,
+                expected_sha256,
+            )
+            .await
         }
 
         /// Delete a stored attachment. A blob that is already gone is not an
@@ -329,6 +390,12 @@ mod unix {
             key: &str,
         ) -> Result<(), ContentError> {
             validate_location(org_id, key)?;
+            // Tombstone first, so a read-through racing this deletion cannot
+            // republish the blob after its row is gone. A broker outage must not
+            // block reclaiming the local copy; hydration is down with it.
+            if let Some(originals) = &self.originals {
+                let _ = originals.forget(org_id, key, BlobKind::Attachment).await;
+            }
             let directory = match self.open_org_directory(org_id, false) {
                 Ok(directory) => directory,
                 Err(_) => return Ok(()),
@@ -342,32 +409,23 @@ mod unix {
             Ok(())
         }
 
-        /// Read a stored image blob for the tenant. Ownership is the 0700 org
-        /// directory; a missing blob is `NotFound`. Bounded by `MAX_IMAGE_BYTES`.
+        /// Read a stored image blob, checked against its row's length and digest.
+        /// A missing blob is `NotFound` unless read-through restores it.
         pub(crate) async fn read_image(
             &self,
             org_id: i32,
             key: &str,
+            expected_size: i64,
+            expected_sha256: &str,
         ) -> Result<Vec<u8>, ContentError> {
             validate_location(org_id, key)?;
-            let directory = self.open_org_directory(org_id, false)?;
-            let final_name = c_string(&format!("{key}.img"))?;
-            let mut file = open_file_at(directory.as_raw_fd(), &final_name).map_err(|error| {
-                if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
-                    ContentError::NotFound
-                } else {
-                    error
-                }
-            })?;
-            let mut bytes = Vec::new();
-            (&mut file)
-                .take(MAX_IMAGE_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| ContentError::Storage)?;
-            if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
-                return Err(ContentError::Storage);
+            if !(1..=MAX_IMAGE_BYTES as i64).contains(&expected_size)
+                || !valid_sha256(expected_sha256)
+            {
+                return Err(ContentError::Invalid);
             }
-            Ok(bytes)
+            self.read_original(org_id, key, BlobKind::Image, expected_size, expected_sha256)
+                .await
         }
 
         #[cfg(test)]
@@ -506,6 +564,32 @@ mod unix {
         Ok(())
     }
 
+    /// Record a read as the file's access time, at most hourly, so the evictor's
+    /// idle test does not depend on the mount's atime policy. Best effort.
+    fn mark_used(file: &File) {
+        const REFRESH_SECONDS: libc::time_t = 60 * 60;
+        let Ok(metadata) = metadata(file) else {
+            return;
+        };
+        let now = unsafe { libc::time(std::ptr::null_mut()) };
+        if metadata.st_atime > now - REFRESH_SECONDS {
+            return;
+        }
+        let times = [
+            libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_NOW,
+            },
+            libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT,
+            },
+        ];
+        unsafe {
+            libc::futimens(file.as_raw_fd(), times.as_ptr());
+        }
+    }
+
     fn verify_file(file: &File, expected_size: i64) -> Result<(), ContentError> {
         let metadata = metadata(file)?;
         if metadata.st_mode & libc::S_IFMT != libc::S_IFREG
@@ -627,10 +711,19 @@ impl BlobStore {
         Err(ContentError::Storage)
     }
 
+    pub(crate) fn with_originals(
+        self,
+        _originals: Option<crate::neev::content::originals::OriginalsBroker>,
+    ) -> Self {
+        self
+    }
+
     pub(crate) async fn read_image(
         &self,
         _org_id: i32,
         _key: &str,
+        _expected_size: i64,
+        _expected_sha256: &str,
     ) -> Result<Vec<u8>, ContentError> {
         Err(ContentError::Storage)
     }
@@ -648,6 +741,8 @@ impl BlobStore {
         &self,
         _org_id: i32,
         _key: &str,
+        _expected_size: i64,
+        _expected_sha256: &str,
     ) -> Result<Vec<u8>, ContentError> {
         Err(ContentError::Storage)
     }

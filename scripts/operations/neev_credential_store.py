@@ -32,6 +32,11 @@ _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
+# Providers a credential scope may name. Mirrors neev_agent_credentials.PROVIDERS
+# (the ACP providers get their own per-user volume exactly like Claude/Codex).
+SCOPE_PROVIDERS = ("claude", "codex", "cursor", "gemini", "opencode")
+
+
 @dataclass(frozen=True)
 class Scope:
     org_id: int
@@ -237,7 +242,7 @@ class CredentialStore:
         for value in (scope.org_id, scope.user_id):
             if type(value) is not int or not 1 <= value <= 2147483647:
                 raise StoreError("invalid")
-        if type(scope.provider) is not str or scope.provider not in ("claude", "codex"):
+        if type(scope.provider) is not str or scope.provider not in SCOPE_PROVIDERS:
             raise StoreError("invalid")
 
     @staticmethod

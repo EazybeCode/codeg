@@ -39,6 +39,12 @@ import time
 
 MODE = os.environ.get("FAKE_MODE", "ok")
 
+if MODE == "dies":
+    # Exits before any stream-json, explaining itself on stderr only.
+    sys.stderr.write("Invalid API key \u00b7 Please run /login\\n")
+    sys.stderr.flush()
+    sys.exit(1)
+
 def send(payload):
     sys.stdout.write(json.dumps(payload) + "\\n")
     sys.stdout.flush()
@@ -677,6 +683,14 @@ class EndToEndTests(unittest.TestCase):
                     except json.JSONDecodeError:
                         pass
             return process.returncode, lines
+
+    def test_a_claude_that_dies_early_is_explained_by_its_own_stderr(self):
+        code, lines = self.run_adapter("dies")
+        self.assertEqual(code, 4)
+        self.assertEqual(lines[-1], {
+            "type": "turn.failed",
+            "reason": "provider exited: Invalid API key \u00b7 Please run /login",
+        })
 
     def test_turn_streams_and_completes(self):
         code, lines = self.run_adapter("ok")

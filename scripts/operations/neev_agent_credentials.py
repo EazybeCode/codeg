@@ -26,9 +26,11 @@ Ownership model (why owner-uid vs lane-uid works end-to-end):
 
 Isolation invariants preserved: the scope is server-authoritative (from `--tenant`
 + `--provider`); the volume key is derived from that scope + handle, so a handle for
-another user/provider cannot unlock this scope. Both providers resolve config only
-under HOME (Claude `$HOME/.claude`, Codex `$HOME/.codex`), so neither can escape to
-a host login, and the provider env is a strict secret-free allowlist (see
+another user/provider cannot unlock this scope. Every provider resolves config only
+under HOME (Claude `$HOME/.claude`, Codex `$HOME/.codex`, Cursor `$HOME/.cursor` and
+`$XDG_CONFIG_HOME/cursor`, Gemini `$HOME/.gemini`, OpenCode `$XDG_DATA_HOME/opencode`
++ `$XDG_CONFIG_HOME/opencode`, all XDG roots pinned inside HOME), so none can escape
+to a host login, and the provider env is a strict secret-free allowlist (see
 `neev_agent_launch.child_env`).
 """
 
@@ -46,7 +48,10 @@ from typing import Callable, Dict, Iterator, Tuple
 
 from neev_credential_store import Scope, StoreError
 
-PROVIDERS: Tuple[str, ...] = ("claude", "codex")
+PROVIDERS: Tuple[str, ...] = ("claude", "codex", "cursor", "gemini", "opencode")
+# The ACP providers (run through neev_acp_stream_adapter). Separate so callers can
+# tell a Claude/Codex-native provider from one driven over ACP.
+ACP_PROVIDERS: Tuple[str, ...] = ("cursor", "gemini", "opencode")
 # Canonical at-rest owner of every credential volume (matches
 # neev_credential_volumes._secure_filesystem_root). A run temporarily borrows
 # ownership under the run lock and restores this on exit.
@@ -100,19 +105,83 @@ def scope_of(tenant: str, provider: str) -> Scope:
     return Scope(org_id, user_id, provider)
 
 
-_PROVIDER_CONFIG_SUBDIR = {"claude": ".claude", "codex": ".codex"}
+# Directories each provider's config/credentials live in, relative to HOME. Created
+# (0700) before the lend so the provider never has to create them itself.
+_PROVIDER_CONFIG_SUBDIRS = {
+    "claude": (".claude",),
+    "codex": (".codex",),
+    # `~/.cursor/cli-config.json`, or `$XDG_CONFIG_HOME/cursor/` (cursor.com/docs/
+    # cli/reference/configuration). XDG_CONFIG_HOME is pinned to HOME/.config below.
+    "cursor": (".cursor", ".config", ".config/cursor"),
+    # `~/.gemini/settings.json`, `~/.gemini/oauth_creds.json`.
+    "gemini": (".gemini",),
+    # `~/.local/share/opencode/auth.json` (opencode.ai/docs/cli), config under
+    # `$XDG_CONFIG_HOME/opencode`.
+    "opencode": (".local", ".local/share", ".local/share/opencode", ".config",
+                 ".config/opencode", ".local/state", ".cache"),
+}
 
 
 def provider_env(home: str, provider: str) -> Dict[str, str]:
-    """The environment binding the provider's config strictly to the sandbox HOME."""
+    """The environment binding the provider's config strictly to the sandbox HOME.
+
+    Values are FIXED per provider; nothing is taken from the caller's environment.
+    Browser suppression is the official headless switch for each CLI (Cursor
+    `NO_OPEN_BROWSER`, Gemini `NO_BROWSER`); without it the CLI tries to launch a
+    browser that does not exist in the sandbox. `GEMINI_FORCE_FILE_STORAGE` keeps
+    Gemini's OAuth record in a file under HOME (keychainService.ts) rather than an OS
+    keyring that would live outside the per-user volume."""
     if provider not in PROVIDERS:
         raise CredentialError("provider")
     env = {"HOME": home}
     if provider == "claude":
         env["CLAUDE_CONFIG_DIR"] = os.path.join(home, ".claude")
-    else:
+    elif provider == "codex":
         env["CODEX_HOME"] = os.path.join(home, ".codex")
+    elif provider == "cursor":
+        env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
+        env["NO_OPEN_BROWSER"] = "1"
+    elif provider == "gemini":
+        env["NO_BROWSER"] = "true"
+        env["GEMINI_FORCE_FILE_STORAGE"] = "true"
+    else:  # opencode
+        env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
+        env["XDG_DATA_HOME"] = os.path.join(home, ".local", "share")
+        env["XDG_STATE_HOME"] = os.path.join(home, ".local", "state")
+        env["XDG_CACHE_HOME"] = os.path.join(home, ".cache")
     return env
+
+
+# Gemini picks its auth method from `security.auth.selectedType` in settings.json;
+# with none set, ACP `session/new` falls back to the API-key method and fails
+# (observed on pinned 0.62.0: -32000 "Gemini API key is missing"). Neev offers ONLY
+# the Google sign-in, so a fresh volume is seeded with it — never an API key.
+# Usage statistics are off: that traffic has no allowlisted egress anyway.
+GEMINI_SEED_SETTINGS = (
+    b'{"security":{"auth":{"selectedType":"oauth-personal"}},'
+    b'"privacy":{"usageStatisticsEnabled":false}}\n'
+)
+
+
+def _seed_file(path: str, content: bytes) -> None:
+    """Create `path` with `content` only if it does not exist. Never follows a
+    symlink and never overwrites: an existing file is the user's own setting."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                     | os.O_CLOEXEC, 0o600)
+    except FileExistsError:
+        return
+    except OSError as error:
+        raise CredentialError("credentials") from error
+    try:
+        view = memoryview(content)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+    except OSError as error:
+        raise CredentialError("credentials") from error
+    finally:
+        os.close(fd)
 
 
 def _ensure_provider_home(home: str, provider: str) -> None:
@@ -124,15 +193,19 @@ def _ensure_provider_home(home: str, provider: str) -> None:
     challenge without this. Claude tolerates a missing dir, but we create both for
     consistency. Made under the held run lock as the (root) owner; the subsequent lend
     chown makes it writable by the provider's lane uid."""
-    subdir = _PROVIDER_CONFIG_SUBDIR.get(provider)
-    if subdir is None:
-        return
-    try:
-        os.mkdir(os.path.join(home, subdir), 0o700)
-    except FileExistsError:
-        pass
-    except OSError as error:
-        raise CredentialError("credentials") from error
+    for subdir in _PROVIDER_CONFIG_SUBDIRS.get(provider, ()):
+        path = os.path.join(home, subdir)
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            # Must be a REAL directory: a symlink planted in the volume would
+            # otherwise redirect the provider's config (and the seed below).
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise CredentialError("shape") from None
+        except OSError as error:
+            raise CredentialError("credentials") from error
+    if provider == "gemini":
+        _seed_file(os.path.join(home, ".gemini", "settings.json"), GEMINI_SEED_SETTINGS)
 
 
 # The ONLY codes a release diagnostic may name — every one is a fixed literal from

@@ -262,6 +262,9 @@ fn wire_provider(provider: Provider) -> WireProvider {
     match provider {
         Provider::Claude => WireProvider::Claude,
         Provider::Codex => WireProvider::Codex,
+        Provider::Cursor => WireProvider::Cursor,
+        Provider::Gemini => WireProvider::Gemini,
+        Provider::OpenCode => WireProvider::Opencode,
     }
 }
 
@@ -650,6 +653,9 @@ fn default_account_label(provider: Provider) -> String {
     match provider {
         Provider::Claude => "Claude".to_owned(),
         Provider::Codex => "Codex".to_owned(),
+        Provider::Cursor => "Cursor".to_owned(),
+        Provider::Gemini => "Gemini CLI".to_owned(),
+        Provider::OpenCode => "OpenCode".to_owned(),
     }
 }
 

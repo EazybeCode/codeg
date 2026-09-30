@@ -33,6 +33,24 @@ Provenance (why each host is on the list):
         hit api.openai.com; both may refresh tokens via auth.openai.com. Doc-derived
         pending a runtime probe.
 
+  * ("cursor", "login"|"run")  NONE probed (confirmed=False). Source:
+        cursor.com/docs/enterprise/network-configuration (2026-09-30):
+        api2.cursor.sh "most API requests" (the CLI's login poll + account calls),
+        prod.authentication.cursor.sh "production token issuer" (token refresh),
+        api5.cursor.sh + agent{,n}{,.us,.global}.api5.cursor.sh agent requests.
+        The browser-side sign-in pages (authenticator.cursor.sh, accounts.x.ai)
+        are opened by the USER's browser, never by the sandboxed CLI.
+  * ("gemini", "login"|"run")  NONE probed. Source: gemini-cli v0.62.0
+        core/code_assist/oauth2.ts + server.ts: oauth2.googleapis.com (code
+        exchange, refresh, tokeninfo), www.googleapis.com (userinfo after
+        sign-in), cloudcode-pa.googleapis.com (Code Assist API: setup + generate).
+        accounts.google.com is the USER's browser only.
+  * ("opencode", "login"|"run")  NONE probed. Source: opencode v1.18.33
+        plugin/openai/codex.ts: auth.openai.com (device user code, token poll,
+        token exchange/refresh); chatgpt.com/backend-api/codex/responses (runs).
+        Only the ChatGPT headless login is offered; other opencode upstreams
+        (Zen/opencode.ai, models.dev) are deliberately NOT reachable.
+
 `confirmed=False` entries are DELIBERATELY included so egress can be wired and
 end-to-end tested, but callers/reports must not claim runtime egress is proven until
 an isolated probe on the pinned image confirms each one (`unconfirmed()` lists them).
@@ -44,7 +62,7 @@ from dataclasses import dataclass
 import re
 
 
-PROVIDERS = ("claude", "codex")
+PROVIDERS = ("claude", "codex", "cursor", "gemini", "opencode")
 PURPOSES = ("login", "run")
 
 # A public DNS FQDN: lowercase, dot-separated labels, at least two labels, <=253
@@ -112,6 +130,41 @@ _ENDPOINTS = {
     ("codex", "run"): (
         Endpoint("chatgpt.com", 443, False),
         Endpoint("api.openai.com", 443, False),
+        Endpoint("auth.openai.com", 443, False),
+    ),
+    # ACP providers: doc/source-derived, unprobed (see the module docstring). The
+    # login purpose also carries the account probe (ACP session/new), which needs
+    # the same API host the CLI uses to validate a session.
+    ("cursor", "login"): (
+        Endpoint("api2.cursor.sh", 443, False),
+        Endpoint("prod.authentication.cursor.sh", 443, False),
+    ),
+    ("cursor", "run"): (
+        Endpoint("api2.cursor.sh", 443, False),
+        Endpoint("api5.cursor.sh", 443, False),
+        Endpoint("agent.api5.cursor.sh", 443, False),
+        Endpoint("agentn.api5.cursor.sh", 443, False),
+        Endpoint("agent.us.api5.cursor.sh", 443, False),
+        Endpoint("agentn.us.api5.cursor.sh", 443, False),
+        Endpoint("agent.global.api5.cursor.sh", 443, False),
+        Endpoint("agentn.global.api5.cursor.sh", 443, False),
+        Endpoint("prod.authentication.cursor.sh", 443, False),
+    ),
+    ("gemini", "login"): (
+        Endpoint("oauth2.googleapis.com", 443, False),
+        Endpoint("www.googleapis.com", 443, False),
+        Endpoint("cloudcode-pa.googleapis.com", 443, False),
+    ),
+    ("gemini", "run"): (
+        Endpoint("cloudcode-pa.googleapis.com", 443, False),
+        Endpoint("oauth2.googleapis.com", 443, False),
+        Endpoint("www.googleapis.com", 443, False),
+    ),
+    ("opencode", "login"): (
+        Endpoint("auth.openai.com", 443, False),
+    ),
+    ("opencode", "run"): (
+        Endpoint("chatgpt.com", 443, False),
         Endpoint("auth.openai.com", 443, False),
     ),
 }

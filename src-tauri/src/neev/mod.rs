@@ -30,6 +30,59 @@ pub fn run_content_verifier() -> std::process::ExitCode {
     content::backup::run_content_verifier()
 }
 
+/// `neev-schema-downgrade --from 20 --to 19 --confirm`: the guarded rollback of
+/// the provider-enum widening (see `db::provider_enum_migration::downgrade`).
+/// Reads `DATABASE_URL` (never printed). Exit codes: 0 downgraded; 2 usage;
+/// 3 not at schema 20 (nothing changed); 4 rows name an ACP provider (nothing
+/// changed — keep schema 20); 1 database error (rolled back).
+pub fn run_provider_schema_downgrade() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args != ["--from", "20", "--to", "19", "--confirm"] {
+        eprintln!("usage: neev-schema-downgrade --from 20 --to 19 --confirm");
+        return std::process::ExitCode::from(2);
+    }
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        eprintln!("neev-schema-downgrade: DATABASE_URL is not set");
+        return std::process::ExitCode::from(2);
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return std::process::ExitCode::from(1);
+    };
+    runtime.block_on(async move {
+        let mut options = sea_orm::ConnectOptions::new(url);
+        options.max_connections(1).sqlx_logging(false);
+        let Ok(database) = sea_orm::Database::connect(options).await else {
+            eprintln!("neev-schema-downgrade: cannot connect");
+            return std::process::ExitCode::from(1);
+        };
+        use db::provider_enum_migration::Downgrade;
+        match db::downgrade_provider_enum(&database).await {
+            Ok(Downgrade::Done) => {
+                println!("downgraded schema 20 -> 19; every row preserved");
+                std::process::ExitCode::SUCCESS
+            }
+            Ok(Downgrade::NotAtTwenty(version)) => {
+                println!("refused: schema is {version}, not 20; nothing changed");
+                std::process::ExitCode::from(3)
+            }
+            Ok(Downgrade::AcpRowsExist { table, rows }) => {
+                println!(
+                    "refused: {rows} row(s) in {table} name an ACP provider; \
+                     nothing changed — keep schema 20 (never delete or restore over them)"
+                );
+                std::process::ExitCode::from(4)
+            }
+            Err(_) => {
+                eprintln!("neev-schema-downgrade: database error; rolled back");
+                std::process::ExitCode::from(1)
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod contract_tests {
     use super::{

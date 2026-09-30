@@ -1827,3 +1827,338 @@ async fn list_archived_session_attachments_requires_ownership() {
     .await
     .assert_status_not_found();
 }
+
+// ── Retrying a failed run ────────────────────────────────────────────────────
+
+/// Mark a settled run as a provider failure, as a real failed provider would
+/// have left it (the fake runtime has no way to fail on its own).
+async fn fail_run(database: &sea_orm::DatabaseConnection, run_id: &str) {
+    let done = crate::neev::db::execute(
+        database,
+        "UPDATE neev_agent_turns SET status='failed',error_code='provider',completed_at=updated_at WHERE run_id=$1",
+        vec![run_id.into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(done.rows_affected(), 1);
+}
+
+async fn settle(client: &Client, run_id: &str) -> Vec<Value> {
+    sse_events(
+        &client
+            .get(&format!("/api/neev/agent/runs/{run_id}/events"))
+            .await
+            .text(),
+    )
+}
+
+#[tokio::test]
+async fn retrying_a_failed_team_run_reruns_the_stored_ask_without_reposting_it() {
+    let (state, client, database, _org) = fixture(fake(&["Standup ", "notes."])).await;
+    let actor = owner_context(&database, "owner@example.test").await;
+    let (chat_id, revision) = make_chat(&state, &actor).await;
+    let first = client
+        .post(&format!("/api/neev/chats/{chat_id}/agent"))
+        .json(&serde_json::json!({
+            "prompt": "summarise the standup",
+            "provider": "claude",
+            "model": "default",
+            "requestId": uuid::Uuid::new_v4().to_string(),
+            "expectedAuthRevision": revision,
+        }))
+        .await
+        .json::<Value>();
+    let failed_run = first["runId"].as_str().unwrap().to_owned();
+    settle(&client, &failed_run).await;
+    fail_run(&database, &failed_run).await;
+
+    let retry_id = uuid::Uuid::new_v4().to_string();
+    let response = client
+        .post(&format!("/api/neev/agent/runs/{failed_run}/retry"))
+        .json(&serde_json::json!({ "requestId": retry_id }))
+        .await;
+    response.assert_status(axum::http::StatusCode::CREATED);
+    let retried = response.json::<Value>();
+    let new_run = retried["runId"].as_str().unwrap().to_owned();
+    assert_ne!(new_run, failed_run, "a retry is a new run");
+    // The stored ask, not anything the request could have said.
+    assert_eq!(retried["turn"]["prompt"], "summarise the standup");
+    assert_eq!(settle(&client, &new_run).await.last().unwrap()["status"], "completed");
+
+    // The same retry again (a double click, a dropped response) is the same run.
+    let again = client
+        .post(&format!("/api/neev/agent/runs/{failed_run}/retry"))
+        .json(&serde_json::json!({ "requestId": retry_id }))
+        .await
+        .json::<Value>();
+    assert_eq!(again["runId"], new_run);
+
+    let items = client
+        .get(&format!("/api/neev/chats/{chat_id}/messages"))
+        .await
+        .json::<Value>()["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let asks = items.iter().filter(|m| m["authorKind"] == "human").count();
+    let replies = items.iter().filter(|m| m["authorKind"] == "agent").count();
+    assert_eq!(asks, 1, "the ask is never posted twice: {items:?}");
+    // The original run's reply (published before it was marked failed) and the
+    // retry's — one each, not one per request.
+    assert_eq!(replies, 2, "{items:?}");
+}
+
+#[tokio::test]
+async fn retrying_a_failed_private_turn_reuses_its_prompt_and_only_failed_turns_retry() {
+    let (_state, client, database, _org) = fixture(fake(&["Plan ", "ready."])).await;
+    let session = client.create_session().await;
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let started = client.start_turn(&session_id, "draft the launch plan").await;
+    let run_id = started["runId"].as_str().unwrap().to_owned();
+    settle(&client, &run_id).await;
+
+    // A completed turn has nothing to retry.
+    client
+        .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await
+        .assert_status(axum::http::StatusCode::CONFLICT);
+
+    fail_run(&database, &run_id).await;
+    let retried = client
+        .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await
+        .json::<Value>();
+    assert_eq!(retried["turn"]["prompt"], "draft the launch plan");
+    let new_run = retried["runId"].as_str().unwrap().to_owned();
+    assert_eq!(settle(&client, &new_run).await.last().unwrap()["status"], "completed");
+    let turns = client
+        .get(&format!("/api/neev/agent/sessions/{session_id}/turns"))
+        .await
+        .json::<Value>()["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0]["status"], "failed");
+    assert_eq!(turns[1]["status"], "completed");
+    assert_eq!(turns[1]["response"], "Plan ready.");
+}
+
+#[tokio::test]
+async fn a_retry_needs_a_well_formed_run_and_request_id() {
+    let (_state, client, _database, _org) = fixture(fake(&["x"])).await;
+    client
+        .post("/api/neev/agent/runs/not-a-run/retry")
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await
+        .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    client
+        .post("/api/neev/agent/runs/0123456789abcdef0123456789abcdef/retry")
+        .json(&serde_json::json!({ "requestId": "nope" }))
+        .await
+        .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    // A well-formed run this caller does not own (or that does not exist).
+    client
+        .post("/api/neev/agent/runs/0123456789abcdef0123456789abcdef/retry")
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_failed_team_retry_can_be_retried_but_a_stale_retry_of_the_original_cannot() {
+    let (state, client, database, _org) = fixture(fake(&["Standup ", "notes."])).await;
+    let actor = owner_context(&database, "owner@example.test").await;
+    let (chat_id, revision) = make_chat(&state, &actor).await;
+    let first = client
+        .post(&format!("/api/neev/chats/{chat_id}/agent"))
+        .json(&serde_json::json!({
+            "prompt": "summarise the standup",
+            "provider": "claude",
+            "model": "default",
+            "requestId": uuid::Uuid::new_v4().to_string(),
+            "expectedAuthRevision": revision,
+        }))
+        .await
+        .json::<Value>();
+    let original = first["runId"].as_str().unwrap().to_owned();
+    settle(&client, &original).await;
+    fail_run(&database, &original).await;
+
+    // Retry 1 — and it fails too (rate limited again, say).
+    let one = client
+        .post(&format!("/api/neev/agent/runs/{original}/retry"))
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await;
+    one.assert_status(axum::http::StatusCode::CREATED);
+    let one_run = one.json::<Value>()["runId"].as_str().unwrap().to_owned();
+    settle(&client, &one_run).await;
+    fail_run(&database, &one_run).await;
+
+    // Retrying the RETRY works: it still knows which message it answers.
+    let two = client
+        .post(&format!("/api/neev/agent/runs/{one_run}/retry"))
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await;
+    two.assert_status(axum::http::StatusCode::CREATED);
+    let two = two.json::<Value>();
+    assert_eq!(two["turn"]["prompt"], "summarise the standup");
+    let two_run = two["runId"].as_str().unwrap().to_owned();
+    assert_eq!(settle(&client, &two_run).await.last().unwrap()["status"], "completed");
+
+    // A stale tab retrying the ORIGINAL with a fresh request id: that run was
+    // already retried, so nothing runs and nothing is republished.
+    client
+        .post(&format!("/api/neev/agent/runs/{original}/retry"))
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await
+        .assert_status(axum::http::StatusCode::CONFLICT);
+
+    let items = client
+        .get(&format!("/api/neev/chats/{chat_id}/messages"))
+        .await
+        .json::<Value>()["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(items.iter().filter(|m| m["authorKind"] == "human").count(), 1);
+    // Original (published before it was marked failed), retry 1 (likewise) and
+    // retry 2 — exactly one per run that ran, none from the refused stale retry.
+    assert_eq!(items.iter().filter(|m| m["authorKind"] == "agent").count(), 3);
+}
+
+#[tokio::test]
+async fn a_replayed_retry_returns_its_turn_even_after_the_source_changed() {
+    let (_state, client, database, _org) = fixture(fake(&["Plan ", "ready."])).await;
+    let session = client.create_session().await;
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let started = client.start_turn(&session_id, "draft the launch plan").await;
+    let run_id = started["runId"].as_str().unwrap().to_owned();
+    settle(&client, &run_id).await;
+    fail_run(&database, &run_id).await;
+    let request = uuid::Uuid::new_v4().to_string();
+    let first = client
+        .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+        .json(&serde_json::json!({ "requestId": request }))
+        .await
+        .json::<Value>();
+    let new_run = first["runId"].as_str().unwrap().to_owned();
+    settle(&client, &new_run).await;
+    // The source is no longer the latest failure (its retry completed) and
+    // could not be retried afresh — but the SAME request still replays.
+    let again = client
+        .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+        .json(&serde_json::json!({ "requestId": request }))
+        .await;
+    again.assert_status(axum::http::StatusCode::CREATED);
+    let again = again.json::<Value>();
+    assert_eq!(again["runId"], new_run);
+    assert_eq!(again["turn"]["status"], "completed");
+}
+
+#[tokio::test]
+async fn a_private_retry_carries_the_follow_ups_the_failed_attempt_accepted() {
+    let (_state, client, database, org) = fixture(fake(&["ok"])).await;
+    let session = client.create_session().await;
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let started = client.start_turn(&session_id, "draft the launch plan").await;
+    let run_id = started["runId"].as_str().unwrap().to_owned();
+    let sequence: i64 = started["turn"]["sequence"].as_str().unwrap().parse().unwrap();
+    settle(&client, &run_id).await;
+    // One follow-up accepted into that run, one never accepted.
+    for (id, text, accepted) in [
+        ("11111111-1111-4111-8111-111111111111", "also cover pricing", true),
+        ("22222222-2222-4222-8222-222222222222", "never delivered", false),
+    ] {
+        crate::neev::db::record_steer_input(&database, org, &session_id, sequence, id, text, NOW)
+            .await
+            .unwrap();
+        if accepted {
+            crate::neev::db::accept_steer_input(&database, org, &session_id, sequence, id, 0)
+                .await
+                .unwrap();
+        }
+    }
+    fail_run(&database, &run_id).await;
+    let retried = client
+        .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await
+        .json::<Value>();
+    let prompt = retried["turn"]["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("draft the launch plan"), "{prompt}");
+    assert!(prompt.contains("also cover pricing"), "{prompt}");
+    assert!(!prompt.contains("never delivered"), "{prompt}");
+}
+
+#[tokio::test]
+async fn a_retry_that_cannot_be_linked_is_settled_not_left_running() {
+    let (_state, client, database, _org) = fixture(fake(&["Plan ", "ready."])).await;
+    let session = client.create_session().await;
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let started = client.start_turn(&session_id, "draft the launch plan").await;
+    let run_id = started["runId"].as_str().unwrap().to_owned();
+    settle(&client, &run_id).await;
+    fail_run(&database, &run_id).await;
+    // A storage failure that is NOT a conflict, at exactly the step after the
+    // retry turn was created and before it launches.
+    crate::neev::db::execute(
+        &database,
+        "CREATE TRIGGER fail_retry_link BEFORE INSERT ON neev_requests WHEN NEW.action='agent.run.retry' BEGIN SELECT RAISE(ABORT,'injected'); END",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let response = client
+        .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await;
+    assert!(!response.status_code().is_success(), "{}", response.status_code());
+    let turns = client
+        .get(&format!("/api/neev/agent/sessions/{session_id}/turns"))
+        .await
+        .json::<Value>()["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(
+        turns.iter().all(|turn| turn["status"] != "running"),
+        "no turn may be left running and never launched: {turns:?}"
+    );
+    // And the session is not wedged: the next ask is accepted.
+    crate::neev::db::execute(&database, "DROP TRIGGER fail_retry_link", vec![])
+        .await
+        .unwrap();
+    client.start_turn(&session_id, "try again later").await;
+}
+
+#[tokio::test]
+async fn a_retry_refuses_rather_than_silently_dropping_follow_ups_it_cannot_read() {
+    let (_state, client, database, _org) = fixture(fake(&["ok"])).await;
+    let session = client.create_session().await;
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let started = client.start_turn(&session_id, "draft the launch plan").await;
+    let run_id = started["runId"].as_str().unwrap().to_owned();
+    settle(&client, &run_id).await;
+    fail_run(&database, &run_id).await;
+    // The follow-ups cannot be read at all.
+    crate::neev::db::execute(&database, "ALTER TABLE neev_steer_inputs RENAME TO neev_steer_inputs_gone", vec![])
+        .await
+        .unwrap();
+    let response = client
+        .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+        .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+        .await;
+    assert!(response.status_code().is_server_error(), "{}", response.status_code());
+    // Refused BEFORE any turn exists: nothing ran without them.
+    let turns = client
+        .get(&format!("/api/neev/agent/sessions/{session_id}/turns"))
+        .await
+        .json::<Value>()["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(turns.len(), 1, "{turns:?}");
+}

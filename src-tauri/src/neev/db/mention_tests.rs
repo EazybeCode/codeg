@@ -41,6 +41,7 @@ async fn count(db: &DatabaseConnection, table: &str) -> i64 {
 /// fixture would be a guess about what is deployed, and the thing under test is
 /// precisely whether the migrator recognises the REAL inventory.
 async fn downgrade_to_fifteen(db: &DatabaseConnection) {
+    super::tests::drop_tables_after_seventeen(db).await;
     execute(db, "DROP TABLE neev_message_mentions", vec![])
         .await
         .unwrap();
@@ -54,12 +55,12 @@ async fn downgrade_to_fifteen(db: &DatabaseConnection) {
 }
 
 async fn fresh_install_is_sixteen(db: DatabaseConnection) {
-    assert_eq!(schema_version(&db).await, mention_migration::SCHEMA_VERSION);
+    assert_eq!(schema_version(&db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(count(&db, "neev_message_mentions").await, 0);
     // A fresh install validates as what it says it is.
     assert_eq!(
         validate_content_snapshot(&db).await,
-        Ok(mention_migration::SCHEMA_VERSION)
+        Ok(CURRENT_SCHEMA_VERSION)
     );
 }
 
@@ -77,19 +78,19 @@ async fn a_real_fifteen_upgrades_and_reopens(db: DatabaseConnection) {
         Ok(()),
         "a real schema-15 database must migrate to 16"
     );
-    assert_eq!(schema_version(&db).await, mention_migration::SCHEMA_VERSION);
+    assert_eq!(schema_version(&db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(count(&db, "neev_message_mentions").await, 0);
 
     // And open again. Twice: the schema-15 failure was invisible to every test
     // that opened a database only once.
     assert_eq!(initialize(&db).await, Ok(()));
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(schema_version(&db).await, mention_migration::SCHEMA_VERSION);
+    assert_eq!(schema_version(&db).await, CURRENT_SCHEMA_VERSION);
     // Nothing was reset on the way through.
     assert_eq!(count(&db, "neev_accounts").await, accounts);
     assert_eq!(
         validate_content_snapshot(&db).await,
-        Ok(mention_migration::SCHEMA_VERSION)
+        Ok(CURRENT_SCHEMA_VERSION)
     );
 }
 
@@ -100,7 +101,7 @@ async fn a_lying_marker_is_refused(db: DatabaseConnection) {
         .await
         .unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
-    assert_eq!(schema_version(&db).await, mention_migration::SCHEMA_VERSION);
+    assert_eq!(schema_version(&db).await, CURRENT_SCHEMA_VERSION);
 }
 
 #[tokio::test]
