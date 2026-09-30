@@ -1,8 +1,8 @@
-name: WorkOS upstream monitor
+name: Neev upstream monitor
 
 on:
   schedule:
-    - cron: '17 */6 * * *'
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -14,17 +14,17 @@ concurrency:
 
 jobs:
   discover:
-    if: github.repository == 'EazybeCode/Workos'
+    if: github.repository == 'EazybeCode/neev'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Check trusted downstream branch
         env:
           ACTUAL_REF: ${{ github.ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          test "$DEFAULT_BRANCH" = 'workos/team-workspace'
-          test "$ACTUAL_REF" = 'refs/heads/workos/team-workspace'
+          test "$DEFAULT_BRANCH" = 'multitenancy'
+          test "$ACTUAL_REF" = 'refs/heads/multitenancy'
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
@@ -32,15 +32,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
-      - name: Verify trusted discovery code
-        run: node --test scripts/upstream/discover.test.mjs
-      - name: Inspect public upstream without checkout or execution
+      - name: Verify trusted discovery and policy code
+        run: node --test scripts/upstream/discover.test.mjs scripts/upstream/policy.test.mjs scripts/upstream/updater.test.mjs
+      - name: Inspect public upstream without checkout or execution (report only; never merges or deploys)
         shell: bash
         run: |
           set -euo pipefail
           test "$(git ls-remote --symref https://github.com/xintaofei/codeg.git HEAD | head -n 1)" = $'ref: refs/heads/main\tHEAD'
           git -c core.hooksPath=/dev/null fetch --no-tags https://github.com/xintaofei/codeg.git refs/heads/main
-          incorporated="$(node -e 'const p=require("./.github/workos-upstream.json"); if(p.repository!=="xintaofei/codeg"||p.branch!=="main"||p.mode!=="discovery-only") process.exit(1); process.stdout.write(p.incorporated)')"
+          incorporated="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; import { validateManifest } from "./scripts/upstream/policy.mjs"; process.stdout.write(validateManifest(JSON.parse(readFileSync(".github/workos-upstream.json", "utf8"))).incorporated)')"
           observed="$(git rev-parse FETCH_HEAD)"
           downstream="$(git rev-parse HEAD)"
           node scripts/upstream/discover.mjs "$incorporated" "$observed" "$downstream"

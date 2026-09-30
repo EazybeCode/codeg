@@ -1,7 +1,27 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { makeGit } from './git.mjs';
+import { pendingCommits, walkCommits } from './evaluate.mjs';
+
+const MAX_REPORTED_COMMITS = 1000;
+
+/** Read-only NON-CORE eligibility preview. No trial merge: conflicts surface only in the updater. */
+export function eligibilityPreview({ cwd, incorporated, observed, downstream }) {
+  const hardened = makeGit(cwd, tmpdir());
+  const range = pendingCommits(hardened, { baselineUpstream: incorporated, observed, release: downstream });
+  const commits = walkCommits(hardened, range.pending, () => ({ ok: true, decision: 'eligible' }));
+  return {
+    alreadyPresent: range.alreadyPresent.length,
+    eligible: commits.filter((c) => c.decision === 'eligible').length,
+    skipped: commits.filter((c) => c.decision === 'skipped').length,
+    commits: commits.slice(0, MAX_REPORTED_COMMITS).map(({ sha, subject, decision, reasons }) => ({
+      sha, subject, decision, reasons: reasons.slice(0, 5),
+    })),
+  };
+}
 
 function git(cwd, args) {
   return execFileSync('git', ['--no-replace-objects', ...args], {
@@ -50,10 +70,11 @@ export function discover({ cwd, incorporated, observed, downstream }) {
   return {
     ...report, status: commitCount === 0 ? 'current' : 'updates_available',
     risk: commitCount === 0 ? 'none' : 'human_review_required', commitCount, changedPaths,
+    eligibility: commitCount === 0 ? null : eligibilityPreview({ cwd, incorporated, observed, downstream }),
   };
 }
 
-function escapeMarkdown(value) {
+export function escapeMarkdown(value) {
   return value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, ' ')
     .replace(/[&<>]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[char])
     .replace(/[\\`*_{}[\]()#+.!|~-]/g, '\\$&');
@@ -72,6 +93,11 @@ export function renderSummary(report) {
   if (report.reason) lines.push('', escapeMarkdown(report.reason));
   if (report.commitCount !== null) {
     lines.push(`- Pending commits: ${report.commitCount}`, `- Changed paths: ${report.changedPaths.length}`);
+  }
+  if (report.eligibility) {
+    const e = report.eligibility;
+    lines.push(`- NON-CORE policy preview: ${e.eligible} eligible, ${e.skipped} skipped, ${e.alreadyPresent} already present`,
+      '  (eligible commits still need a clean trial merge, tests and build on the server updater)');
   }
   if (report.changedPaths.length) {
     lines.push('', '### Changed paths (first 100; complete list in JSON artifact)', '');

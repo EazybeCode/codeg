@@ -2,5 +2,18 @@
   "repository": "xintaofei/codeg",
   "branch": "main",
   "incorporated": "ccc420c28b0c445a9ae11539b1210d505aae5712",
-  "mode": "discovery-only"
+  "mode": "noncore-auto",
+  "noncorePolicy": {
+    "version": 1,
+    "allowlist": [
+      "src/components/ui/*.tsx",
+      "docs/readme/README.*.md",
+      "docs/chat-channels/*.md",
+      "docs/url-scheme.md",
+      "docs/images/*.png",
+      "docs/images/*.jpg",
+      "docs/images/*.gif"
+    ],
+    "allowlistSha256": "3e11a7bd76d76178469487866b824d82d57db84f74c301451194ab622ef9177b"
+  }
 }

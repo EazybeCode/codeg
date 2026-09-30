@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "mode": "dry-run",
+  "repoPath": "/var/lib/neev-upstream/repo.git",
+  "stateDir": "/var/lib/neev-upstream/state",
+  "reportsDir": "/var/lib/neev-upstream/reports",
+  "worktreesDir": "/var/lib/neev-upstream/worktrees",
+  "upstream": { "url": "https://github.com/xintaofei/codeg.git", "branch": "main" },
+  "policy": { "allowlistSha256": "3e11a7bd76d76178469487866b824d82d57db84f74c301451194ab622ef9177b" },
+  "limits": { "maxRangeCommits": 300, "reportRetention": 30, "maxLogBytes": 262144, "hookTimeoutSeconds": 3600 },
+  "committer": { "name": "Neev upstream updater", "email": "upstream-updater@neev.invalid" },
+  "hookEnv": { "PATH": "/usr/local/bin:/usr/bin:/bin" },
+  "hooks": {
+    "currentRelease": { "argv": ["/usr/local/libexec/neev-upstream/current-release"], "timeoutSeconds": 30 },
+    "validate": [
+      { "name": "install", "argv": ["/usr/local/libexec/neev-upstream/install-deps"], "timeoutSeconds": 1800 },
+      { "name": "lint", "argv": ["/usr/local/libexec/neev-upstream/lint"], "timeoutSeconds": 1200 },
+      { "name": "frontend-tests", "argv": ["/usr/local/libexec/neev-upstream/frontend-tests"], "timeoutSeconds": 2400 }
+    ],
+    "build": [
+      { "name": "static-export", "argv": ["/usr/local/libexec/neev-upstream/build"], "timeoutSeconds": 2400 }
+    ],
+    "activeRunsGate": { "argv": ["/usr/local/libexec/neev-upstream/active-runs-gate"], "timeoutSeconds": 60 },
+    "deploy": { "argv": ["/usr/local/libexec/neev-upstream/deploy"], "timeoutSeconds": 3600 },
+    "healthCheck": { "argv": ["/usr/local/libexec/neev-upstream/health-check"], "timeoutSeconds": 600 },
+    "rollback": { "argv": ["/usr/local/libexec/neev-upstream/rollback"], "timeoutSeconds": 3600 }
+  }
+}
