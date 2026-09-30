@@ -87,7 +87,7 @@ async fn with_no_supervisor_every_effect_is_refused_and_nothing_is_remembered() 
     let (state, actor) = state_with(Supervisor::Unavailable).await;
     assert!(!state.supervisor.is_available());
     assert_eq!(
-        start_login(&state, &actor, &ticket_for(&actor)).await,
+        start_login(&state, &actor, &ticket_for(&actor), None).await,
         Err(SupervisorError::Unavailable)
     );
     // Crucially: no login session is recorded, so nothing later can mistake
@@ -102,7 +102,7 @@ async fn starting_a_login_sends_the_servers_own_binding_and_remembers_it() {
     )])))
     .await;
     let ticket = ticket_for(&actor);
-    start_login(&state, &actor, &ticket).await.unwrap();
+    start_login(&state, &actor, &ticket, None).await.unwrap();
 
     let Supervisor::Scripted(scripted) = state.supervisor.as_ref() else {
         panic!("scripted supervisor expected");
@@ -134,7 +134,7 @@ async fn a_remembered_login_is_scoped_to_its_own_user() {
     )])))
     .await;
     let ticket = ticket_for(&actor);
-    start_login(&state, &actor, &ticket).await.unwrap();
+    start_login(&state, &actor, &ticket, None).await.unwrap();
     // Knowing the attempt id is not authority: another account gets nothing.
     assert!(find_login(
         &state.agent_logins,
@@ -158,7 +158,7 @@ async fn observing_surfaces_the_claude_authorize_url_and_no_invented_user_code()
     ])))
     .await;
     let ticket = ticket_for(&actor);
-    start_login(&state, &actor, &ticket).await.unwrap();
+    start_login(&state, &actor, &ticket, None).await.unwrap();
     let session = find_login(&state.agent_logins, &ticket.attempt_id, actor.org_id, actor.identity.user_id).unwrap();
 
     let snapshot = observe_login(&state, &session).await.unwrap();
@@ -190,7 +190,7 @@ async fn a_submitted_code_travels_bound_to_its_own_login() {
     ])))
     .await;
     let ticket = ticket_for(&actor);
-    start_login(&state, &actor, &ticket).await.unwrap();
+    start_login(&state, &actor, &ticket, None).await.unwrap();
     let session = find_login(&state.agent_logins, &ticket.attempt_id, actor.org_id, actor.identity.user_id).unwrap();
 
     let snapshot = submit_code(
@@ -223,7 +223,7 @@ async fn a_refused_start_leaves_no_addressable_login() {
     .await;
     let ticket = ticket_for(&actor);
     assert_eq!(
-        start_login(&state, &actor, &ticket).await,
+        start_login(&state, &actor, &ticket, None).await,
         Err(SupervisorError::Unavailable)
     );
     assert!(find_login(&state.agent_logins, &ticket.attempt_id, actor.org_id, actor.identity.user_id).is_none());
@@ -239,7 +239,7 @@ async fn an_answer_for_the_wrong_operation_is_refused_rather_than_coerced() {
     ])))
     .await;
     let ticket = ticket_for(&actor);
-    start_login(&state, &actor, &ticket).await.unwrap();
+    start_login(&state, &actor, &ticket, None).await.unwrap();
     let session = find_login(&state.agent_logins, &ticket.attempt_id, actor.org_id, actor.identity.user_id).unwrap();
     assert!(matches!(
         observe_login(&state, &session).await,
@@ -275,6 +275,7 @@ async fn the_live_login_registry_is_bounded() {
         approval: None,
         actor: actor.clone(),
         code_attempts: 0,
+        callback_key: None,
     };
     for index in 0..(MAX_LIVE_LOGINS + 50) {
         remember_login(&registry, format!("attempt-{index}"), session(index as i64));
@@ -550,7 +551,7 @@ async fn a_prepared_login_publishes_the_credential_through_the_real_completion_g
     ])))
     .await;
     let ticket = real_connect(&state, &actor).await;
-    start_login(&state, &actor, &ticket).await.unwrap();
+    start_login(&state, &actor, &ticket, None).await.unwrap();
     let session = find_login(
         &state.agent_logins,
         &ticket.attempt_id,
@@ -603,7 +604,7 @@ async fn a_login_without_the_operations_lease_still_cannot_publish_a_credential(
     ])))
     .await;
     let ticket = real_connect(&state, &actor).await;
-    start_login(&state, &actor, &ticket).await.unwrap();
+    start_login(&state, &actor, &ticket, None).await.unwrap();
     let mut session = find_login(
         &state.agent_logins,
         &ticket.attempt_id,
@@ -624,5 +625,77 @@ async fn a_login_without_the_operations_lease_still_cannot_publish_a_credential(
             .await
             .unwrap(),
         None
+    );
+}
+
+#[tokio::test]
+async fn a_relayed_callback_travels_bound_and_a_rejection_is_not_success() {
+    let mut rejected = response(
+        dto::Op::DeliverCallback,
+        dto::ResultBody::DeliverCallback(dto::LoginSnapshot::Verifying {
+            expires_at: dto::UnixSec::new(NOW + 600).unwrap(),
+            poll_after_ms: dto::RetryMs::new(500).unwrap(),
+        }),
+    );
+    rejected.outcome = dto::Outcome::Error;
+    rejected.body = None;
+    rejected.error = Some(dto::AppError {
+        code: dto::ErrorCode::Rejected,
+        retry_after_ms: None,
+    });
+    let (state, actor) = state_with(Supervisor::Scripted(ScriptedSupervisor::new(vec![
+        Ok(started()),
+        Ok(rejected),
+        Ok(response(
+            dto::Op::DeliverCallback,
+            dto::ResultBody::DeliverCallback(dto::LoginSnapshot::Verifying {
+                expires_at: dto::UnixSec::new(NOW + 600).unwrap(),
+                poll_after_ms: dto::RetryMs::new(500).unwrap(),
+            }),
+        )),
+    ])))
+    .await;
+    let ticket = ticket_for(&actor);
+    start_login(&state, &actor, &ticket, Some(dto::LoginMethod::Browser))
+        .await
+        .unwrap();
+    let session = find_login(
+        &state.agent_logins,
+        &ticket.attempt_id,
+        actor.org_id,
+        actor.identity.user_id,
+    )
+    .unwrap();
+    let query = || dto::CallbackQuery::new("code=c&state=s".into()).unwrap();
+    // A mismatch the supervisor refused is an input error, never "connected".
+    assert!(matches!(
+        deliver_callback(&state, &session, query()).await,
+        Err(SupervisorError::Rejected)
+    ));
+    assert!(matches!(
+        AgentError::from(SupervisorError::Rejected),
+        AgentError::InvalidInput
+    ));
+    let snapshot = deliver_callback(&state, &session, query()).await.unwrap();
+    assert!(matches!(snapshot, dto::LoginSnapshot::Verifying { .. }));
+
+    let Supervisor::Scripted(scripted) = state.supervisor.as_ref() else {
+        panic!("scripted supervisor expected");
+    };
+    let sent = scripted.requests();
+    // The start asked for direct sign-in explicitly.
+    match &sent[0].body {
+        dto::RequestBody::StartLogin(body) => {
+            assert!(body.method == Some(dto::LoginMethod::Browser))
+        }
+        _ => panic!("first request is not a start"),
+    }
+    let deliver = sent.last().unwrap();
+    assert!(matches!(deliver.op(), dto::Op::DeliverCallback));
+    let binding = deliver.login_binding().expect("deliver carries its binding");
+    assert_eq!(binding.attempt_id.as_str(), ticket.attempt_id);
+    assert_eq!(
+        binding.scope.user_id.get(),
+        i64::from(actor.identity.user_id)
     );
 }

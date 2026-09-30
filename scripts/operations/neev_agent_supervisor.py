@@ -88,6 +88,13 @@ class Challenge:
     verification_url: str
     expires_at: int
     user_code: Optional[str] = None
+    # Direct sign-in (direct-signin-contract.md): the CLI's loopback listener
+    # and, for Claude, the same login's paste-code URL. `kind` overrides the
+    # provider's default flow when set.
+    kind: Optional[str] = None
+    callback_port: Optional[int] = None
+    callback_path: Optional[str] = None
+    fallback_url: Optional[str] = None
 
 
 # How each provider's OFFICIAL sign-in completes, which fixes the challenge shape the
@@ -132,6 +139,13 @@ class LoginDriver(abc.ABC):
 
     @abc.abstractmethod
     def submit_code(self, code: str) -> None: ...
+
+    def deliver_callback(self, query: str) -> str:
+        """Direct sign-in: relay the provider redirect's query to the CLI's own
+        loopback listener. Returns "delivered" | "rejected" | "unavailable";
+        raises nothing for a bad query (that is "rejected", and the CLI is never
+        touched). Drivers without a browser flow reject everything."""
+        return "rejected"
 
     @abc.abstractmethod
     def cancel(self) -> None: ...
@@ -419,6 +433,11 @@ class Supervisor:
         deadline = expires_at
         if challenge.expires_at and 0 < challenge.expires_at < deadline:
             deadline = challenge.expires_at
+        if challenge.kind == "browser_callback":
+            return dto.BrowserCallbackChallenge(
+                challenge.verification_url, challenge.callback_port,
+                challenge.callback_path, challenge.fallback_url, dto.UnixSec(deadline),
+            )
         flow = LOGIN_FLOWS.get(provider)
         if flow == "device":
             if challenge.user_code is None:
@@ -533,7 +552,14 @@ class Supervisor:
         # From here the volume EXISTS; any failure building/starting the driver must
         # tear it down durably (revoke), never leak a half-provisioned volume.
         try:
-            driver = self._driver_for(binding.scope.provider, store_scope, handle)
+            method = getattr(request.body, "method", None)
+            if method is None:
+                # Legacy coordinator: exactly today's flows.
+                driver = self._driver_for(binding.scope.provider, store_scope, handle)
+            else:
+                driver = self._driver_for(
+                    binding.scope.provider, store_scope, handle, method=method
+                )
             driver.start()
         except Exception as error:
             _report_start_failure(binding.scope.provider, "driver_start", error)
@@ -565,6 +591,27 @@ class Supervisor:
                 raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
             phase = self._advance(attempt)
         return self._snapshot(attempt, phase)
+
+    def _deliver_callback(self, request: dto.Request):
+        """Direct sign-in: bind the relayed callback to THIS attempt (the driver
+        checks state/shape/single use before the CLI sees anything), deliver it,
+        and answer with the attempt's snapshot. A refused callback is REJECTED
+        and leaves the attempt alive for a retry or the fallback."""
+        attempt = self._lookup(request.body.binding)
+        phase = self._advance(attempt)
+        state = getattr(attempt, "_last", None)
+        challenge = state.challenge if state is not None else None
+        if phase != "awaiting_user" or challenge is None or challenge.kind != "browser_callback":
+            raise Reject(dto.ErrorCode.CONFLICT)
+        try:
+            result = attempt.driver.deliver_callback(request.body.query.value)
+        except Exception:
+            raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
+        if result == "rejected":
+            raise Reject(dto.ErrorCode.REJECTED)
+        if result != "delivered":
+            raise Reject(dto.ErrorCode.UNAVAILABLE, _DEFAULT_POLL_MS)
+        return self._snapshot(attempt, self._advance(attempt))
 
     def _settle_login(self, request: dto.Request):
         witness = request.body.witness
@@ -810,6 +857,7 @@ class Supervisor:
         dto.Op.START_LOGIN: _start_login,
         dto.Op.OBSERVE_LOGIN: _observe_login,
         dto.Op.SUBMIT_CODE: _submit_code,
+        dto.Op.DELIVER_CALLBACK: _deliver_callback,
         dto.Op.SETTLE_LOGIN: _settle_login,
         dto.Op.CHECK_CONNECTION: _check_connection,
         dto.Op.CLEANUP_CONNECTION: _cleanup_connection,

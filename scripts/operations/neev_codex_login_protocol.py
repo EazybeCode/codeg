@@ -97,6 +97,45 @@ class LoginChallenge:
 
 
 @dataclass(frozen=True)
+class BrowserLoginChallenge:
+    """The `chatgpt` (browser) login: the CLI's OWN authorize URL, whose
+    redirect is its loopback listener. `state` is kept by the supervisor to bind
+    a relayed callback to this login; never displayed or persisted."""
+
+    login_id: str = field(repr=False)
+    verification_url: str = field(repr=False)
+    callback_port: int
+    callback_path: str
+    state: str = field(repr=False)
+
+
+# Measured on codex-cli 0.155.1 (direct-signin-contract.md §1).
+BROWSER_AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize?"
+BROWSER_REDIRECT_URI = "http://localhost:1455/auth/callback"
+_STATE_RE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
+MAX_AUTH_URL_CHARS = 1024
+
+
+def parse_browser_auth_url(url: Any) -> Tuple[int, str, str]:
+    """Pure: (port, path, state) from Codex's authorize URL, or ProtocolError.
+    The redirect must be EXACTLY the pinned loopback listener."""
+    from urllib.parse import parse_qs, urlsplit
+
+    if (type(url) is not str or len(url) > MAX_AUTH_URL_CHARS
+            or not url.startswith(BROWSER_AUTHORIZE_URL)
+            or any(ord(ch) < 0x21 or ord(ch) >= 0x7F for ch in url)):
+        raise ProtocolError("invalid")
+    query = parse_qs(urlsplit(url).query, keep_blank_values=True, strict_parsing=False)
+    redirect = query.get("redirect_uri", [])
+    state = query.get("state", [])
+    if redirect != [BROWSER_REDIRECT_URI] or len(state) != 1 or not _STATE_RE.match(state[0]):
+        raise ProtocolError("invalid")
+    if query.get("response_type") != ["code"] or query.get("code_challenge_method") != ["S256"]:
+        raise ProtocolError("invalid")
+    return 1455, "/auth/callback", state[0]
+
+
+@dataclass(frozen=True)
 class Event:
     """Typed result from processing one current input chunk."""
 
@@ -168,7 +207,10 @@ def _valid_user_code(value: Any) -> bool:
 class CodexLoginProtocol:
     """A single bounded app-server protocol session."""
 
-    def __init__(self) -> None:
+    def __init__(self, method: str = "device") -> None:
+        if method not in ("device", "browser"):
+            raise ProtocolError("invalid")
+        self._method = method
         self._state = "new"
         self._next_id = 1
         self._pending: Optional[Tuple[int, str]] = None
@@ -211,7 +253,8 @@ class CodexLoginProtocol:
         if self._login_id is not None or self._account_check_required:
             raise ProtocolError("conflict")
         return self._begin_request(
-            "account/login/start", {"type": "chatgptDeviceCode"}
+            "account/login/start",
+            {"type": "chatgpt" if self._method == "browser" else "chatgptDeviceCode"},
         )
 
     def cancel_login(self) -> bytes:
@@ -355,7 +398,10 @@ class CodexLoginProtocol:
             self._account_check_required = False
             return Event("account", account=account)
         if method == "account/login/start":
-            login = self._validate_device(result)
+            if self._method == "browser":
+                login = self._validate_browser(result)
+            else:
+                login = self._validate_device(result)
             self._login_id = login.login_id
             return Event("login_started", login=login)
         if method == "account/login/cancel":
@@ -483,6 +529,22 @@ class CodexLoginProtocol:
         if requires_auth and plan in _SUPPORTED_PLANS:
             return AccountProjection("supported", plan=plan, email=email)
         return AccountProjection("unsupported")
+
+    def _validate_browser(self, result: Any) -> BrowserLoginChallenge:
+        if type(result) is not dict or frozenset(result) != frozenset(
+            ("type", "loginId", "authUrl")
+        ):
+            self._fatal("invalid")
+        if result["type"] != "chatgpt" or not _valid_login_id(result["loginId"]):
+            self._fatal("invalid")
+        try:
+            port, path, state = parse_browser_auth_url(result["authUrl"])
+        except ProtocolError:
+            self._fatal("invalid")
+        return BrowserLoginChallenge(
+            login_id=result["loginId"], verification_url=result["authUrl"],
+            callback_port=port, callback_path=path, state=state,
+        )
 
     def _validate_device(self, result: Any) -> LoginChallenge:
         if type(result) is not dict or frozenset(result) != frozenset(

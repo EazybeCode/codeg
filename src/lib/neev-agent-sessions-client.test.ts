@@ -349,7 +349,7 @@ describe("agent session requests", () => {
         {
           title: "New",
           // Only the providers the runtime can dispatch may be offered.
-          provider: "gemini" as "claude",
+          provider: "copilot" as "claude",
           model: "default",
           requestId: SESSION_ID,
         },
@@ -540,7 +540,7 @@ describe("team invocation", () => {
       expectedAuthRevision: "2",
     }
     for (const bad of [
-      { ...valid, provider: "gemini" as "claude" },
+      { ...valid, provider: "copilot" as "claude" },
       // A model that could be read as a flag is refused by the runtime too.
       { ...valid, model: "--dangerous" },
       { ...valid, model: "" },
@@ -634,7 +634,7 @@ describe("team invocation", () => {
       loadTeamAgentSession("not-a-uuid", "claude")
     ).rejects.toBeInstanceOf(NativeClientError)
     await expect(
-      loadTeamAgentSession(CHAT_ID, "gemini" as "claude")
+      loadTeamAgentSession(CHAT_ID, "copilot" as "claude")
     ).rejects.toBeInstanceOf(NativeClientError)
     expect(fetcher).not.toHaveBeenCalled()
   })
@@ -897,7 +897,7 @@ describe("sign-in approval", () => {
       ["claude", RUN_ID, ""],
       ["claude", RUN_ID, "x".repeat(513)],
       ["claude", "../cancel", "ac_abc"],
-      ["gemini", RUN_ID, "ac_abc"],
+      ["copilot", RUN_ID, "ac_abc"],
     ] as const)
       await expect(
         submitConnectCode(provider, attempt, code, "csrf")
@@ -1511,7 +1511,7 @@ describe("run configuration", () => {
         ],
       },
       { providers: [claude, claude] },
-      { providers: [{ ...claude, provider: "gemini" }] },
+      { providers: [{ ...claude, provider: "copilot" }] },
       { providers: [codex], extra: 1 },
     ])
       expect(() => parseAgentCapabilities(bad)).toThrow(NativeClientError)

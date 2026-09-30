@@ -2010,6 +2010,10 @@ struct ConnectInput {
     /// mutation: replaying it returns the SAME attempt instead of starting a
     /// second sign-in.
     request_key: String,
+    /// `"browser"` (direct sign-in) or `"device"` (Codex code). Absent keeps
+    /// the pre-direct-sign-in flow, so an older client is unaffected.
+    #[serde(default)]
+    method: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2049,10 +2053,44 @@ struct ApprovalDto {
     /// `"authorizationCode"` (Claude/Gemini: approve at `verificationUrl`, then
     /// paste the resulting code back through the `/code` route) or `"browser"`
     /// (Cursor: approve at `verificationUrl`; nothing to paste).
+    ///
+    /// `"browserCallback"` (Claude/Codex direct sign-in): open
+    /// `verificationUrl`; the provider returns the browser to
+    /// `http://localhost:{callbackPort}{callbackPath}`, relayed through the
+    /// `/callback` route (extension, or the pasted address). `fallbackUrl`
+    /// (Claude) is the same login's paste-code URL, still served by `/code`.
     kind: &'static str,
     verification_url: String,
     user_code: Option<String>,
     needs_code: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callback_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callback_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CallbackInput {
+    /// Idempotency key for THIS delivery (direct-signin-ui-contract-v2 §3):
+    /// the same key replays the same outcome; another key after a delivery
+    /// is 409 and the client re-reads the attempt.
+    request_key: String,
+    /// The provider redirect's query string, or the whole pasted
+    /// `http://localhost:<port><path>?…` address. Never stored or logged.
+    query: String,
+}
+
+/// Bounded body for `/callback`: key + query (≤1024) + JSON framing.
+const CALLBACK_BODY_LIMIT: usize = 8 * 1024;
+
+fn valid_callback_key(value: &str) -> bool {
+    (8..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 #[derive(Deserialize)]
@@ -2067,12 +2105,18 @@ fn approval_dto(challenge: &crate::neev::agents::control_dto::LoginChallenge) ->
         "device" => ("device", false),
         // Cursor: approve in the browser; the CLI polls, nothing is pasted.
         "browser" => ("browser", false),
+        // Direct sign-in: nothing to paste unless the fallback is used.
+        "browser_callback" => ("browserCallback", false),
         _ => ("authorizationCode", true),
     };
+    let callback = challenge.callback();
     ApprovalDto {
         kind,
         verification_url: challenge.verification_url().to_owned(),
         needs_code,
+        callback_port: callback.map(|(port, _, _)| port),
+        callback_path: callback.map(|(_, path, _)| path.to_owned()),
+        fallback_url: callback.and_then(|(_, _, fallback)| fallback.map(str::to_owned)),
         user_code,
     }
 }
@@ -2138,6 +2182,20 @@ pub(super) async fn connect(
     let _permit = catalog::permit(&state)?;
     let (input, actor) =
         catalog::organization_mutation::<ConnectInput>(&state, request, SESSION_BODY_LIMIT).await?;
+    let method = match input.method.as_deref() {
+        None => None,
+        Some("browser") => Some(crate::neev::agents::control_dto::LoginMethod::Browser),
+        // The device code is Codex's only; anything else is a client error.
+        Some("device") if provider == Provider::Codex => {
+            Some(crate::neev::agents::control_dto::LoginMethod::Device)
+        }
+        Some(_) => return Err(ApiError::Invalid),
+    };
+    if method == Some(crate::neev::agents::control_dto::LoginMethod::Browser)
+        && !matches!(provider, Provider::Codex | Provider::Claude)
+    {
+        return Err(ApiError::Invalid);
+    }
     let outcome = intents::begin(&state, &actor, provider, &input.request_key)
         .await
         .map_err(super::agent_error)?;
@@ -2147,7 +2205,7 @@ pub(super) async fn connect(
             // actual provider sign-in. If it refuses, the attempt is cancelled
             // rather than left pending for ten minutes over a login that was
             // never started.
-            if let Err(error) = supervisor::start_login(&state, &actor, &ticket).await {
+            if let Err(error) = supervisor::start_login(&state, &actor, &ticket, method).await {
                 let _ = intents::cancel(
                     &state,
                     &actor,
@@ -2291,6 +2349,107 @@ pub(super) async fn submit_attempt_code(
     });
     *response.status_mut() = StatusCode::ACCEPTED;
     Ok(response)
+}
+
+/// `POST /api/neev/agent/connections/{provider}/attempts/{attemptId}/callback`
+/// — direct sign-in: relay the provider redirect the user's browser received
+/// (via the Neev extension, or the pasted `http://localhost…` address) to THIS
+/// login's CLI loopback listener (direct-signin-contract.md).
+///
+/// Bound here to the caller's own pending attempt; the supervisor binds it to
+/// the attempt's state and delivers it at most once. The query is forwarded,
+/// never stored or logged. Shares the per-attempt budget with `/code`.
+pub(super) async fn submit_attempt_callback(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let (provider, attempt_id) = safe_path(path)?;
+    let provider = path_provider(&provider)?;
+    if !matches!(provider, Provider::Codex | Provider::Claude) {
+        return Err(ApiError::NotFound);
+    }
+    let _permit = catalog::permit(&state)?;
+    // Session + CSRF + origin, like every mutation. The body is never echoed.
+    let (input, actor) =
+        catalog::organization_mutation::<CallbackInput>(&state, request, CALLBACK_BODY_LIMIT)
+            .await?;
+    if !valid_callback_key(&input.request_key) {
+        return Err(ApiError::Invalid);
+    }
+    let query = crate::neev::agents::control_dto::CallbackQuery::new(input.query)
+        .map_err(|_| ApiError::Invalid)?;
+    // The attempt must be the caller's own, for THIS provider (404 otherwise,
+    // without revealing whether it exists).
+    let attempt = intents::attempt(&state, &actor, provider, &attempt_id)
+        .await
+        .map_err(super::agent_error)?;
+    let reservation = supervisor::reserve_callback(
+        &state.agent_logins,
+        &attempt_id,
+        actor.org_id,
+        actor.identity.user_id,
+        provider,
+        &input.request_key,
+    );
+    let attempt_dto = |approval: Option<ApprovalDto>| {
+        let mut response = private_json(AttemptDto {
+            state: attempt.state.clone(),
+            expires_at: attempt.expires_at,
+            approval,
+        });
+        *response.status_mut() = StatusCode::ACCEPTED;
+        response
+    };
+    match reservation {
+        supervisor::CallbackReservation::Missing => return Err(ApiError::NotFound),
+        // Same key: the delivery already happened (or is happening). Nothing
+        // is sent to the CLI again.
+        supervisor::CallbackReservation::Replay => return Ok(attempt_dto(None)),
+        // Another key already delivered: the client re-reads the attempt.
+        supervisor::CallbackReservation::Conflict => return Err(ApiError::Conflict),
+        supervisor::CallbackReservation::Fresh => {}
+    }
+    let release = || {
+        supervisor::release_callback(&state.agent_logins, &attempt_id, &input.request_key)
+    };
+    if attempt.state != "pending" {
+        release();
+        return Err(ApiError::Conflict);
+    }
+    let session = match supervisor::find_login(
+        &state.agent_logins,
+        &attempt_id,
+        actor.org_id,
+        actor.identity.user_id,
+    ) {
+        Some(session) => session,
+        None => {
+            release();
+            return Err(ApiError::NotFound);
+        }
+    };
+    if supervisor::charge_code_attempt(&state.agent_logins, &attempt_id).is_err() {
+        release();
+        return Err(ApiError::Limited);
+    }
+    match supervisor::deliver_callback(&state, &session, query).await {
+        Ok(snapshot) => {
+            let approval = match &snapshot {
+                crate::neev::agents::control_dto::LoginSnapshot::AwaitingUser {
+                    challenge, ..
+                } => Some(approval_dto(challenge)),
+                _ => None,
+            };
+            Ok(attempt_dto(approval))
+        }
+        Err(error) => {
+            // Refused (400), not reachable (503), or not awaiting (409): the
+            // gate is not spent, so the user may retry or use the fallback.
+            release();
+            Err(super::agent_error(error.into()))
+        }
+    }
 }
 
 /// `POST /api/neev/agent/connections/{provider}/cancel` — abandon an in-flight

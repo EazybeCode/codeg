@@ -230,6 +230,32 @@ def check_pin(provider: str, run=subprocess.run) -> Check:
                  "pinned version" if ok else "version mismatch", evidence)
 
 
+def check_launcher(provider: str) -> Check:
+    """The shipped launcher maps the Rust runtime's canonical ACP argv to the
+    adapter with the image pins, no steering and no permission grant (pure; the
+    sandbox itself needs the cap helper and is not started here)."""
+    import neev_agent_launch as launch
+
+    pin = PINS[provider]["path"]
+    try:
+        spec = launch.build_spec(launch._parse([
+            "--tenant", "org:1/user:1", "--slot", "a",
+            "--workdir", "/data/agents/run-acceptance", "--uid", "61000", "--gid", "61000",
+            "--provider", provider, "--credential-handle", "0" * 32,
+            "--", pin, "--neev-acp", "--", "hello",
+        ]), style="")
+    except Exception as error:  # noqa: BLE001 - reported, not raised
+        return Check(provider, "launcher", False, f"launcher refused: {type(error).__name__}")
+    argv = list(spec.provider_argv)
+    ok = (argv[1:3] == ["-I", launch.ACP_ADAPTER] and argv[-2:] == ["--", "hello"]
+          and argv[argv.index("--agent") + 1] == pin
+          and "--enable-steering" not in argv and "--permission-policy" not in argv
+          and os.path.isfile(launch.ACP_ADAPTER))
+    return Check(provider, "launcher", ok,
+                 "canonical argv -> adapter with image pins" if ok else "unexpected argv",
+                 {"argv_head": argv[:7]})
+
+
 def check_describe(provider: str, run=subprocess.run) -> Check:
     result = run([PYTHON, "-I", ADAPTER, "--provider", provider, "--describe"],
                  capture_output=True, timeout=30)
@@ -316,6 +342,102 @@ def check_login_challenge(provider: str) -> Check:
                  challenge)
 
 
+def summarize_handshake(init_result, session_reply) -> dict:
+    """Pure: the capability facts worth recording, and nothing else — no error
+    messages (they can carry paths), no session ids, no model display names."""
+    result = init_result if isinstance(init_result, dict) else {}
+    caps = result.get("agentCapabilities") if isinstance(result.get("agentCapabilities"), dict) else {}
+    facts = {
+        "protocolVersion": result.get("protocolVersion"),
+        "agentCapabilities": caps,
+        "authMethods": sorted(m.get("id") for m in result.get("authMethods") or []
+                              if isinstance(m, dict) and isinstance(m.get("id"), str)),
+        "agentInfo": {k: v for k, v in (result.get("agentInfo") or {}).items()
+                      if k in ("name", "version")},
+    }
+    reply = session_reply if isinstance(session_reply, dict) else {}
+    if isinstance(reply.get("error"), dict):
+        facts["sessionNew"] = {"error": reply["error"].get("code")}
+    elif isinstance(reply.get("result"), dict):
+        options = reply["result"].get("configOptions") or []
+        facts["sessionNew"] = {
+            "ok": True,
+            "configOptions": [
+                {"id": o.get("id"), "category": o.get("category"),
+                 "currentValuePrefix": str(o.get("currentValue", "")).split("/")[0]}
+                for o in options if isinstance(o, dict)],
+            "modes": bool(reply["result"].get("modes")),
+        }
+    else:
+        facts["sessionNew"] = {"noAnswer": True}
+    return facts
+
+
+def check_protocol(provider: str, timeout: float = 60.0) -> Check:
+    """Raw ACP v1 initialize + session/new against the pinned binary in an EMPTY
+    HOME, recording what the real agent advertises (no prompt, no sign-in)."""
+    import neev_acp_stream_adapter as adapter
+    import neev_agent_credentials as credentials
+
+    path = PINS[provider]["path"]
+    with tempfile.TemporaryDirectory() as home:
+        if provider == "gemini":
+            # UNSEEDED on purpose. With Neev's Google sign-in seed and no
+            # credential, the pinned Gemini prints its sign-in prompt BEFORE it
+            # answers `initialize` (observed): capabilities are only readable
+            # without the seed. The seeded behaviour is what the `acp` check covers.
+            os.makedirs(os.path.join(home, ".gemini"), mode=0o700)
+        else:
+            credentials._ensure_provider_home(home, provider)
+        process = subprocess.Popen(
+            adapter.agent_argv(provider, path), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=headless_env(home, provider), cwd=home, start_new_session=True)
+        replies = {}
+        try:
+            def send(payload):
+                process.stdin.write((json.dumps(payload) + "\n").encode())
+                process.stdin.flush()
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": adapter.initialize_params()})
+            buffer = b""
+            deadline = time.monotonic() + timeout
+            fd = process.stdout.fileno()
+            while time.monotonic() < deadline and 2 not in replies:
+                ready, _, _ = select.select([fd], [], [], 0.2)
+                if not ready:
+                    if process.poll() is not None:
+                        break
+                    continue
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        # A provider asking for an interactive sign-in instead.
+                        if adapter.is_signin_prompt(provider, line.decode("utf-8", "replace")):
+                            replies[2] = {"signin_prompt": True}
+                        continue
+                    if isinstance(message, dict) and message.get("id") in (1, 2):
+                        replies[message["id"]] = message
+                        if message["id"] == 1:
+                            send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                                  "params": adapter.session_new_params(home)})
+        finally:
+            _stop(process)
+    init = replies.get(1, {}).get("result")
+    facts = summarize_handshake(init, replies.get(2))
+    if replies.get(2, {}).get("signin_prompt"):
+        facts["sessionNew"] = {"signinPromptOnStdout": True}
+    ok = facts["protocolVersion"] == 1
+    return Check(provider, "protocol", ok,
+                 "real ACP v1 capabilities recorded" if ok else "no ACP v1 initialize", facts)
+
+
 def _proxy(environ=None):
     value = (environ or os.environ).get("HTTPS_PROXY") or (environ or os.environ).get(
         "https_proxy")
@@ -363,9 +485,11 @@ def run_checks(providers, network: bool) -> List[Check]:
         pin = check_pin(provider)
         checks.append(pin)
         checks.append(check_describe(provider))
+        checks.append(check_launcher(provider))
         if not pin.ok:
             continue
         if network:
+            checks.append(check_protocol(provider))
             checks.append(check_egress(provider))
             checks.append(check_acp_probe(provider))
             checks.append(check_login_challenge(provider))

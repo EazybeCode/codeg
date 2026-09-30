@@ -40,9 +40,32 @@ export interface NeevRunInput {
   responseOffset: number
 }
 
-/** Providers the server will accept for a session (`agents/sessions.rs`). */
-export const NEEV_AGENT_PROVIDERS = ["claude", "codex"] as const
+/**
+ * Every provider id this build can parse (`agents/types.rs` `Provider::ALL`).
+ *
+ * Knowing an id is NOT offering it. Cursor, Gemini CLI and OpenCode run over
+ * ACP and the server offers them only when the operator gates them on
+ * (`NEEV_AGENT_ACP_PROVIDERS`); an ungated one is refused exactly like an
+ * unknown name. What is actually offered is what the server lists — the
+ * connections and the capabilities catalogue — never this constant.
+ */
+export const NEEV_AGENT_PROVIDERS = [
+  "claude",
+  "codex",
+  "cursor",
+  "gemini",
+  "opencode",
+] as const
 export type NeevAgentProvider = (typeof NEEV_AGENT_PROVIDERS)[number]
+
+/**
+ * The providers the server offers unconditionally (`Provider::offered`). The
+ * only ones a client may ask about before the server has said what it offers.
+ */
+export const NEEV_CORE_AGENT_PROVIDERS: readonly NeevAgentProvider[] = [
+  "claude",
+  "codex",
+]
 
 /**
  * `"default"` is the provider's own default: the runtime expresses it by passing
@@ -1670,11 +1693,19 @@ export type NeevConnectOutcome =
  *
  * `device` (Codex): show the code, the user approves in their own browser and
  * the supervisor polls — Neev needs nothing further.
- * `authorization_code` (Claude): the user approves in their own browser and
- * pastes the code they are given back into Neev.
+ * OpenCode uses the same device flow (it signs in through OpenAI's).
+ * `authorization_code` (Claude, Gemini CLI): the user approves in their own
+ * browser and pastes the code they are given back into Neev.
+ * `browser` (Cursor): the user approves in their own browser and the CLI
+ * notices by itself — there is no code to show and none to paste.
+ * `browser_callback` (Claude, Codex — the primary sign-in): the vendor CLI's
+ * OWN browser login. The provider sends the browser back to the CLI's loopback
+ * listener (`http://localhost:<callbackPort><callbackPath>?…`), which the Neev
+ * extension turns into a visit to `/agents/signin`, or which the user pastes
+ * back. Claude also carries `fallbackUrl`, today's paste-a-code page.
  *
- * These are the INTERNAL names. The server sends `authorizationCode`; see
- * `approvalKind` for the mapping.
+ * These are the INTERNAL names. The server sends `authorizationCode` and
+ * `browserCallback`; see `approvalKind` for the mapping.
  */
 export type NeevApproval =
   | { kind: "device"; verificationUrl: string; userCode: string }
@@ -1683,6 +1714,17 @@ export type NeevApproval =
       verificationUrl: string
       needsCode: boolean
     }
+  | { kind: "browser"; verificationUrl: string }
+  | {
+      kind: "browser_callback"
+      verificationUrl: string
+      callbackPort: number
+      callbackPath: string
+      fallbackUrl: string | null
+    }
+
+/** How a sign-in is started. Absent on the wire means the server's default. */
+export type NeevConnectMethod = "browser" | "device"
 
 export interface NeevConnectAttempt {
   state: NeevAttemptState
@@ -1704,10 +1746,79 @@ export const NEEV_MAX_AUTH_CODE_CHARS = 512
  * link we actively tell the user to open and approve on. Accepting any https
  * host would mean a buggy or compromised supervisor could aim that instruction
  * at a phishing page. Keep in sync with the server-side allowlist.
+ *
+ * The ACP hosts mirror `control_dto.rs`: OpenCode's ChatGPT sign-in is OpenAI's
+ * own device page, Gemini CLI's is Google's OAuth authorize endpoint, and
+ * Cursor's is `https://cursor.com/`. Each provider is held to its OWN host, so
+ * a Google URL on a Cursor attempt is refused even though both are allowed
+ * server-side.
  */
 const APPROVAL_ORIGINS: Record<NeevAgentProvider, readonly string[]> = {
   claude: ["claude.com"],
   codex: ["auth.openai.com"],
+  cursor: ["cursor.com"],
+  gemini: ["accounts.google.com"],
+  opencode: ["auth.openai.com"],
+}
+
+/**
+ * The approval kinds each provider's sign-in can really produce
+ * (`LOGIN_FLOWS` in the supervisor). A kind outside this — a device code on a
+ * Cursor attempt, say — is a supervisor that disagrees with itself, and acting
+ * on it would give the user instructions that cannot complete.
+ */
+const APPROVAL_KINDS: Record<
+  NeevAgentProvider,
+  readonly NeevApproval["kind"][]
+> = {
+  // Browser callback is the primary; the paste code and the device code stay
+  // as the fallbacks (and are all an older server produces).
+  claude: ["browser_callback", "authorization_code"],
+  codex: ["browser_callback", "device"],
+  cursor: ["browser"],
+  gemini: ["authorization_code"],
+  opencode: ["device"],
+}
+
+/**
+ * The exact authorize endpoints a browser-callback sign-in may point at
+ * (`control_dto.rs`), and the loopback path each CLI listens on. Pinned per
+ * provider: the port is the CLI's own and varies, the path does not.
+ */
+const CALLBACK_AUTHORIZE: Partial<Record<NeevAgentProvider, string>> = {
+  claude: "https://claude.com/cai/oauth/authorize?",
+  codex: "https://auth.openai.com/oauth/authorize?",
+}
+export const NEEV_CALLBACK_PATHS: Partial<Record<NeevAgentProvider, string>> = {
+  claude: "/callback",
+  codex: "/auth/callback",
+}
+/**
+ * The server's bound on a delivered callback query, in bytes
+ * (`control_dto.rs` `MAX_STRING_BYTES`, Python `MAX_QUERY_BYTES`). Checked here
+ * too, so an over-long paste is refused as "not this address" before sending
+ * rather than coming back as a mismatch.
+ */
+export const NEEV_MAX_CALLBACK_QUERY_BYTES = 1024
+/** The only keys a provider's loopback redirect carries. */
+const CALLBACK_KEYS = new Set([
+  "code",
+  "state",
+  "scope",
+  "error",
+  "error_description",
+])
+
+function callbackAuthorizeUrl(
+  value: unknown,
+  provider: NeevAgentProvider
+): string {
+  const prefix = CALLBACK_AUTHORIZE[provider]
+  const raw = text(value)
+  if (!prefix || !raw.startsWith(prefix) || raw.length > 8192) return invalid()
+  // Still parsed: a prefix match alone would pass a string no browser opens.
+  verificationUrl(raw, provider)
+  return raw
 }
 
 /**
@@ -1745,8 +1856,11 @@ function verificationUrl(value: unknown, provider: NeevAgentProvider): string {
  * The snake_case spelling is still accepted. It costs one line, and rejecting a
  * payload over its spelling is precisely what caused this.
  */
-function approvalKind(value: unknown): "device" | "authorization_code" | null {
+function approvalKind(value: unknown): NeevApproval["kind"] | null {
   if (value === "device") return "device"
+  if (value === "browser") return "browser"
+  if (value === "browserCallback" || value === "browser_callback")
+    return "browser_callback"
   if (value === "authorizationCode" || value === "authorization_code")
     return "authorization_code"
   return null
@@ -1756,15 +1870,56 @@ export function parseApproval(
   value: unknown,
   provider: NeevAgentProvider
 ): NeevApproval {
+  const callback = approvalKind(record(value).kind) === "browser_callback"
   const object = exact(value, [
     "kind",
     "verificationUrl",
     "userCode",
     "needsCode",
+    ...(callback ? ["callbackPort", "callbackPath"] : []),
+    // Omitted rather than null when there is none (`skip_serializing_if`).
+    ...(callback && record(value).fallbackUrl !== undefined
+      ? ["fallbackUrl"]
+      : []),
   ])
   const kind = approvalKind(object.kind)
-  const url = verificationUrl(object.verificationUrl, provider)
+  if (kind === null || !APPROVAL_KINDS[provider].includes(kind))
+    return invalid()
   if (typeof object.needsCode !== "boolean") return invalid()
+  if (kind === "browser_callback") {
+    const port = object.callbackPort
+    if (
+      typeof port !== "number" ||
+      !Number.isInteger(port) ||
+      port < 1024 ||
+      port > 65535 ||
+      object.callbackPath !== NEEV_CALLBACK_PATHS[provider] ||
+      object.userCode !== null ||
+      object.needsCode
+    )
+      return invalid()
+    // Only Claude has a paste-code page to fall back to.
+    const fallbackUrl =
+      object.fallbackUrl === null || object.fallbackUrl === undefined
+        ? null
+        : provider === "claude"
+          ? callbackAuthorizeUrl(object.fallbackUrl, provider)
+          : invalid()
+    return {
+      kind,
+      verificationUrl: callbackAuthorizeUrl(object.verificationUrl, provider),
+      callbackPort: port,
+      callbackPath: object.callbackPath as string,
+      fallbackUrl,
+    }
+  }
+  const url = verificationUrl(object.verificationUrl, provider)
+  if (kind === "browser") {
+    // Approve-and-wait: nothing to type and nothing to paste, so a payload
+    // claiming either is not one this flow could have produced.
+    if (object.userCode !== null || object.needsCode) return invalid()
+    return { kind: "browser", verificationUrl: url }
+  }
   if (kind === "device") {
     // A device flow is only actionable with a code to type; and it never asks
     // for one back, so a `needsCode` device payload is self-contradictory.
@@ -1950,18 +2105,192 @@ export async function startProviderConnect(
   provider: string,
   requestKey: string,
   csrf: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  method?: NeevConnectMethod
 ): Promise<NeevConnectOutcome> {
   assertProvider(provider)
   assertRequestKey(requestKey)
+  // Direct (browser) sign-in is Claude's and Codex's; the device code is
+  // Codex's alone. The server reads an ABSENT method as the legacy flow, so the
+  // browser sign-in has to be asked for by name.
+  if (
+    (method === "browser" && provider !== "claude" && provider !== "codex") ||
+    (method === "device" && provider !== "codex")
+  )
+    invalidRequest()
   return parseConnectOutcome(
     await contentMutation(
       `/api/neev/agent/connections/${provider}/connect`,
-      { requestKey },
+      method ? { requestKey, method } : { requestKey },
       csrf,
       signal
     )
   )
+}
+
+/**
+ * The query a provider's loopback redirect carried, checked and re-encoded.
+ *
+ * Only the keys a redirect can carry, each once, with a code or an error. This
+ * is a courtesy that turns a wrongly copied address into a clear message
+ * before it is sent; the server re-checks all of it, and the `state` binding
+ * is checked ONLY there — the browser never learns the expected value.
+ */
+export function callbackQuery(params: URLSearchParams): string | null {
+  const seen = new Set<string>()
+  for (const [key, value] of params) {
+    if (!CALLBACK_KEYS.has(key) || seen.has(key)) return null
+    if (value.length === 0 || /\p{Cc}/u.test(value)) return null
+    seen.add(key)
+  }
+  if (!seen.has("state") || (!seen.has("code") && !seen.has("error")))
+    return null
+  const query = params.toString()
+  return new TextEncoder().encode(query).length <= NEEV_MAX_CALLBACK_QUERY_BYTES
+    ? query
+    : null
+}
+
+/**
+ * The query from an address the user pasted out of the tab that could not
+ * connect. Only the loopback address THIS attempt is waiting on is accepted —
+ * `localhost` or `127.0.0.1`, its own port and path — so a pasted address from
+ * another sign-in, or anywhere else, is refused here rather than sent.
+ */
+export function callbackQueryFromAddress(
+  pasted: string,
+  approval: Extract<NeevApproval, { kind: "browser_callback" }>
+): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(pasted.trim())
+  } catch {
+    return null
+  }
+  if (
+    parsed.protocol !== "http:" ||
+    (parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") ||
+    parsed.port !== String(approval.callbackPort) ||
+    parsed.pathname !== approval.callbackPath ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.hash !== ""
+  )
+    return null
+  return callbackQuery(parsed.searchParams)
+}
+
+/**
+ * What the extension put in `/agents/signin`'s fragment: the attempt it armed
+ * for, its provider, and the provider's redirect query appended verbatim.
+ */
+export function parseSigninFragment(hash: string): {
+  provider: NeevAgentProvider
+  attemptId: string
+  query: string
+} | null {
+  const params = new URLSearchParams(hash.replace(/^#/, ""))
+  const attemptId = params.getAll("attempt")
+  const provider = params.getAll("provider")
+  if (
+    attemptId.length !== 1 ||
+    !RUN_ID.test(attemptId[0]) ||
+    provider.length !== 1 ||
+    NEEV_CALLBACK_PATHS[provider[0] as NeevAgentProvider] === undefined
+  )
+    return null
+  params.delete("attempt")
+  params.delete("provider")
+  const query = callbackQuery(params)
+  return query === null
+    ? null
+    : {
+        provider: provider[0] as NeevAgentProvider,
+        attemptId: attemptId[0],
+        query,
+      }
+}
+
+/**
+ * Hand the provider's redirect to the attempt waiting for it. The server binds
+ * it to this caller's own attempt and checks `state` before the CLI ever sees
+ * it; nothing here keeps a copy.
+ *
+ * 422 means the server refused the query itself (`callback_rejected` — a
+ * mismatched state or a malformed query) and the attempt is still alive.
+ */
+export async function submitConnectCallback(
+  provider: string,
+  attemptId: string,
+  requestKey: string,
+  query: string,
+  csrf: string,
+  signal?: AbortSignal
+): Promise<NeevConnectAttempt> {
+  assertProvider(provider)
+  assertRequestKey(requestKey)
+  if (
+    !RUN_ID.test(attemptId) ||
+    NEEV_CALLBACK_PATHS[provider] === undefined ||
+    query.length === 0 ||
+    new TextEncoder().encode(query).length > NEEV_MAX_CALLBACK_QUERY_BYTES
+  )
+    invalidRequest()
+  return parseConnectAttempt(
+    await contentMutation(
+      `/api/neev/agent/connections/${provider}/attempts/${attemptId}/callback`,
+      { requestKey, query },
+      csrf,
+      signal
+    ),
+    provider
+  )
+}
+
+/**
+ * What a failed `/callback` means, per `direct-signin-ui-contract-v2.md` §3.
+ *
+ *  - `rejected` (400, and the earlier 422): the query does not match this
+ *    attempt. The attempt is still alive; paste again or start again.
+ *  - `conflict` (409): no longer taking a callback, or already delivered under
+ *    another key. NOT an error to show — re-read the attempt and settle.
+ *  - `gone` (404): not this user's attempt, or unknown.
+ *  - `limited` (429): the attempt's budget is spent; start again.
+ *  - `unavailable` (503, a timeout, no answer): the gate was NOT consumed;
+ *    retry with the SAME request key.
+ *
+ * A request refused before it was sent (client-side validation) has no status
+ * and is `invalid`, never mistaken for the server's 400.
+ */
+export type NeevCallbackFailure =
+  | "rejected"
+  | "conflict"
+  | "gone"
+  | "limited"
+  | "unavailable"
+  | "invalid"
+  | "other"
+
+export function callbackFailure(error: unknown): NeevCallbackFailure {
+  if (error instanceof NativeContentNotFoundError) return "gone"
+  if (!(error instanceof NativeClientError)) return "other"
+  if (error.status === 400 || error.status === 422) return "rejected"
+  if (error.status === 409) return "conflict"
+  if (error.status === 404) return "gone"
+  if (error.status === 429) return "limited"
+  if (error.kind === "invalid_request" && error.status === undefined)
+    return "invalid"
+  if (
+    error.status === 503 ||
+    (error.kind === "unavailable" && error.status === undefined)
+  )
+    return "unavailable"
+  return "other"
+}
+
+/** Whether an error is the server refusing a delivered callback. */
+export function isCallbackRejected(error: unknown): boolean {
+  return callbackFailure(error) === "rejected"
 }
 
 /** Poll a sign-in. Side-effect free, and visible only to its own session. */

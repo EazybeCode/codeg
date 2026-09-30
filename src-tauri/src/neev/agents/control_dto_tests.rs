@@ -144,9 +144,11 @@ fn literal_fixture_covers_every_request_response_and_error() {
     assert!(fixture.format == "neev-control-dto-v1");
     assert!(fixture.synthetic);
     // +1 request (`submit_code`) and +1 response (the Claude
-    // authorization-code challenge) over the original six-operation vector.
-    assert!(fixture.requests.len() == 7);
-    assert!(fixture.responses.len() == 42);
+    // authorization-code challenge) over the original six-operation vector,
+    // then direct sign-in: +2 requests (`start_browser`, `deliver_callback`)
+    // and +5 responses, all encoded by the PYTHON supervisor.
+    assert!(fixture.requests.len() == 9);
+    assert!(fixture.responses.len() == 47);
     let requests: Vec<(String, dto::Request)> = fixture
         .requests
         .iter()
@@ -826,5 +828,52 @@ fn a_submitted_authorization_code_round_trips_and_is_bounded() {
             dto::AuthorizationCode::new(bad.clone()).is_err(),
             "accepted {bad:?}"
         );
+    }
+}
+
+#[test]
+fn direct_sign_in_messages_encoded_by_the_supervisor_decode_here() {
+    // start_login with method=browser; a legacy start carries no method.
+    let start = dto::decode_request(&request_bytes("start_browser")).unwrap();
+    match &start.body {
+        dto::RequestBody::StartLogin(body) => {
+            assert!(body.method == Some(dto::LoginMethod::Browser))
+        }
+        _ => panic!("start_browser decoded to another op"),
+    }
+    match &dto::decode_request(&request_bytes("start")).unwrap().body {
+        dto::RequestBody::StartLogin(body) => assert!(body.method.is_none()),
+        _ => panic!("start decoded to another op"),
+    }
+    let deliver = dto::decode_request(&request_bytes("deliver_callback")).unwrap();
+    assert!(matches!(deliver.op(), dto::Op::DeliverCallback));
+    assert!(deliver.login_binding().is_some());
+    assert!(dto::decode_request(&dto::encode_request(&deliver).unwrap()).unwrap() == deliver);
+
+    for (name, port, path, fallback) in [
+        ("observe_awaiting_user_codex_browser", 1455, "/auth/callback", false),
+        ("observe_awaiting_user_claude_browser", 33127, "/callback", true),
+    ] {
+        let response = dto::decode_response(&response_bytes(name)).unwrap();
+        match response.login_snapshot() {
+            Some(dto::LoginSnapshot::AwaitingUser { challenge, .. }) => {
+                assert!(challenge.kind() == "browser_callback");
+                let (got_port, got_path, got_fallback) = challenge.callback().unwrap();
+                assert!(got_port == port && got_path == path);
+                assert!(got_fallback.is_some() == fallback);
+                assert!(challenge.user_code().is_none());
+            }
+            _ => panic!("{name} is not an awaiting-user snapshot"),
+        }
+    }
+    let rejected = dto::decode_response(&response_bytes("deliver_rejected")).unwrap();
+    assert!(rejected.error.as_ref().unwrap().code == dto::ErrorCode::Rejected);
+}
+
+#[test]
+fn callback_query_is_bounded_printable_ascii() {
+    assert!(dto::CallbackQuery::new("code=a&state=b".into()).is_ok());
+    for bad in [String::new(), "a b".into(), "x".repeat(1025), "caf\u{e9}".into(), "a\nb".into()] {
+        assert!(dto::CallbackQuery::new(bad).is_err());
     }
 }

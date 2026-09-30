@@ -104,7 +104,11 @@ it("waits for the sign-in it started instead of claiming it connected", async ()
   expect(
     screen.getByRole("button", { name: "Cancel claude sign-in" })
   ).toBeEnabled()
-  expect(bodies[0]).toEqual({ requestKey: expect.any(String) })
+  // Claude signs in through the CLI's own browser login, asked for by name.
+  expect(bodies[0]).toEqual({
+    requestKey: expect.any(String),
+    method: "browser",
+  })
   // Only the server flipping the connection makes it read Connected.
   expect(await screen.findByText("Connected")).toBeVisible()
   expect(polls).toBeGreaterThanOrEqual(3)

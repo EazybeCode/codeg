@@ -64,6 +64,7 @@ import {
   steerAgentRun,
   updateAgentSessionSettings,
   NEEV_AGENT_PROVIDERS,
+  NEEV_CORE_AGENT_PROVIDERS,
   NEEV_DEFAULT_MODEL,
   type NeevActivityItem,
   type NeevAgentCapabilities,
@@ -520,6 +521,14 @@ function Chat({
     if (storageKey) writePreference(storageKey, { mode: next, provider })
   }
   const runtimeEnabled = auth.capabilities?.runtimeEnabled ?? false
+  // The providers the server offers, as it lists them. Until it has said, only
+  // the ones it always offers may be asked about.
+  const offered: readonly NeevAgentProvider[] = connections
+    ? connections.connections.map((row) => row.provider)
+    : NEEV_CORE_AGENT_PROVIDERS
+  const offeredKey = offered.join(",")
+  const offeredRef = useRef(offered)
+  offeredRef.current = offered
   // With no runtime bound, agent mode can only ever refuse; a chat nobody has
   // put in that mode ON PURPOSE opens where it can actually be used. A chosen
   // mode is never overridden — silently turning Agent into Team would make the
@@ -847,11 +856,13 @@ function Chat({
     if (!runtimeEnabled || !auth.session) return
     const owner = auth.session.user.id
     try {
-      // One lookup per provider, concurrently: a holder the reader does not own
-      // is discarded here as well as server-side.
+      // One lookup per OFFERED provider, concurrently: a holder the reader does
+      // not own is discarded here as well as server-side. An ACP provider the
+      // operator has not gated on is refused like an unknown name, so asking
+      // about one would fail the whole replay.
       const sessions = (
         await Promise.all(
-          NEEV_AGENT_PROVIDERS.map((provider) =>
+          offeredRef.current.map((provider) =>
             loadTeamAgentSession(resource.id, provider, scope.signal)
           )
         )
@@ -917,8 +928,11 @@ function Chat({
   useEffect(() => {
     if (loading) return
     void loadTraces()
+    // `offeredKey`: an ACP provider the server lists once connections load has
+    // holders of its own to replay. The read is incremental, so the re-run
+    // costs only the new provider's lookups.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, loading, runtimeEnabled])
+  }, [scope, loading, runtimeEnabled, offeredKey])
   /**
    * With nothing stored, read the conversation itself.
    *
@@ -963,6 +977,13 @@ function Chat({
     )
     if (connected) {
       setAgentProvider(connected.provider)
+      setDesired(null)
+    } else if (
+      // A remembered ACP provider the server no longer offers: point back at
+      // one it always does rather than at a provider every request refuses.
+      !connections.connections.some((row) => row.provider === agentProvider)
+    ) {
+      setAgentProvider(NEEV_CORE_AGENT_PROVIDERS[0])
       setDesired(null)
     }
   }, [connections, agentProvider, agentBusy])
@@ -2427,8 +2448,7 @@ function Chat({
       >
         <DialogContent className="max-h-[85dvh] overflow-y-auto">
           <DialogTitle>
-            {t("connectProvider")} ·{" "}
-            {agentProvider === "claude" ? "Claude" : "Codex"}
+            {t("connectProvider")} · {t(`${agentProvider}Label`)}
           </DialogTitle>
           <DialogDescription>
             {t("providerNotConnected", { name: agentProvider })}

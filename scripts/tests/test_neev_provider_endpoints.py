@@ -112,6 +112,8 @@ class EndpointTableTests(unittest.TestCase):
             ("opencode", "opencode.ai"),
             ("opencode", "models.dev"),
             ("opencode", "api.openai.com"),
+            # No DNS record (resolved from the pinned image).
+            ("cursor", "api5.cursor.sh"),
         ):
             for purpose in ("login", "run"):
                 with self.subTest(p=provider, h=host, u=purpose):

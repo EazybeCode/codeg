@@ -153,7 +153,7 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
     agent run uses."""
 
     def __init__(self, config, volumes, provider, store_scope, handle, argv, *,
-                 cleanup=None, quarantine_dir=None, pty=False):
+                 cleanup=None, quarantine_dir=None, pty=False, direct=False):
         self._config = config
         self._volumes = volumes
         self._provider = provider
@@ -163,6 +163,8 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
         self._cleanup = cleanup  # injectable for tests; default is the launcher's
         self._quarantine_dir = quarantine_dir  # None -> slot_proxy default
         self._pty = pty  # the login CLI needs a terminal (Gemini NO_BROWSER flow)
+        # Direct sign-in for Claude: `$BROWSER` records the loopback URL.
+        self._direct = direct
         self._workdir = None
         self._proxy_cm = None
         self._delivery_cm = None
@@ -194,7 +196,9 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
             )
             delivery = self._delivery_cm.__enter__()
             spec = _login_spec(self._config, tenant, self._argv, self._workdir)
-            env = _login_env(self._config, self._provider, home, proxy_env, pty=self._pty)
+            env = _login_env(self._config, self._provider, home, proxy_env, pty=self._pty,
+                             browser_capture=(_capture_path(self._workdir)
+                                              if self._direct else None))
             self._sandbox = sandbox.launch(
                 spec, env=env, bind_source=delivery.mount,
                 stdin_pipe=not self._pty, stderr_pipe=True, pty_stdio=self._pty,
@@ -249,6 +253,28 @@ class LoginChannel(drivers.Channel):  # pragma: no cover - Linux lifecycle path
             return self._sandbox.wait(timeout=0)
         except Exception:
             return None
+
+    def read_browser_capture(self):
+        if not self._direct or self._workdir is None:
+            return None
+        return _read_capture(_capture_path(self._workdir))
+
+    def deliver_loopback(self, target, query):
+        """ONE GET to the CLI's 127.0.0.1 listener, inside THIS login's sandbox
+        netns, as the lane uid (neev_login_callback.serve_argv)."""
+        import neev_login_callback as callback
+
+        netns = getattr(self._sandbox, "netns", None) if self._sandbox is not None else None
+        # Raises CallbackRejected("owner") unless this channel still holds its
+        # slot (the proxy context owns the slot's exclusive lock), its CLI child
+        # is alive, and the netns is that slot's.
+        callback.assert_delivery_owner(
+            netns or "", self._config.slot,
+            holds_slot=self._proxy_cm is not None,
+            child_alive=self._sandbox is not None and self.returncode() is None,
+        )
+        argv = callback.serve_argv(netns, self._config.lane_uid, self._config.lane_gid)
+        return callback.deliver(target, query, argv)
 
     def terminate(self):
         self._unwind()
@@ -322,10 +348,47 @@ def _login_spec(config, tenant, argv_tuple, workdir):
     )
 
 
-def _login_env(config, provider, home, proxy_env, pty=False):
+_CAPTURE_NAME = ".neev-browser-url"
+_CAPTURE_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "neev_browser_capture.py")
+_MAX_CAPTURE_BYTES = 2048
+
+
+def _capture_path(workdir):
+    return os.path.join(workdir, _CAPTURE_NAME)
+
+
+def _read_capture(path):
+    """The single URL neev_browser_capture wrote, or None. Bounded, never follows
+    a symlink, never logged."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        raw = os.read(fd, _MAX_CAPTURE_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if not raw or len(raw) > _MAX_CAPTURE_BYTES:
+        return None
+    try:
+        line = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    return line if line and "\n" not in line else None
+
+
+def _login_env(config, provider, home, proxy_env, pty=False, browser_capture=None):
     import neev_agent_credentials as credentials
 
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin"}
+    if browser_capture:
+        # Claude hands its loopback-redirect URL only to $BROWSER; this fixed,
+        # root-owned helper records it (and opens nothing).
+        env["BROWSER"] = _CAPTURE_HELPER
+        env["NEEV_BROWSER_CAPTURE"] = browser_capture
     if pty:
         # A terminal the TUI can drive; fixed, never inherited.
         env["TERM"] = "xterm-256color"
@@ -427,6 +490,14 @@ def _opencode_record(data):
             and _nonempty(entry.get("refresh")) and _nonempty(entry.get("access")))
 
 
+def _cursor_record(data):
+    # Pinned agent 2026.09.28-64d2043 file store (`setAuthentication`):
+    # {accessToken, refreshToken, apiKey?} at $XDG_CONFIG_HOME/cursor/auth.json.
+    return (isinstance(data, dict) and _nonempty(data.get("accessToken"))
+            and _nonempty(data.get("refreshToken")))
+
+
+_CURSOR_CREDS = (".config", "cursor", "auth.json")
 _GEMINI_CREDS = (".gemini", "oauth_creds.json")
 _OPENCODE_CREDS = (".local", "share", "opencode", "auth.json")
 
@@ -447,28 +518,39 @@ def make_factories(config: Config, volumes, *, channel_factory=None, quarantine_
     reports UNAVAILABLE rather than reusing a slot that may still hold a live lane-uid
     child. The marker is cleared only by the privileged restart purge or an operator."""
 
-    def build(provider, store_scope, handle, argv, pty=False):
+    def build(provider, store_scope, handle, argv, pty=False, direct=False):
         import neev_slot_proxy as slot_proxy
 
         if slot_proxy.is_quarantined(config.slot, directory=quarantine_dir):
             raise ChannelError("slot_quarantined")
         if channel_factory is not None:
+            extra = {}
             if pty:
-                return channel_factory(provider, store_scope, handle, argv, pty=True)
-            return channel_factory(provider, store_scope, handle, argv)
+                extra["pty"] = True
+            if direct:
+                extra["direct"] = True
+            return channel_factory(provider, store_scope, handle, argv, **extra)
         return LoginChannel(
             config, volumes, provider, store_scope, handle, argv,
-            quarantine_dir=quarantine_dir, pty=pty,
+            quarantine_dir=quarantine_dir, pty=pty, direct=direct,
         )
 
-    def driver_for(provider, store_scope, handle):
+    def driver_for(provider, store_scope, handle, method=None):
+        # method None = the deployed coordinator's flows, unchanged. "browser" =
+        # direct sign-in (direct-signin-contract.md); "device" = Codex code.
+        if method not in (None, "browser", "device"):
+            raise ChannelError("method")
         if provider is dto.Provider.CODEX:
             channel = build(provider, store_scope, handle, _CODEX_LOGIN_ARGV)
-            return drivers.CodexLoginDriver(channel)
+            return drivers.CodexLoginDriver(
+                channel, "browser" if method == "browser" else "device"
+            )
         if provider is dto.Provider.CLAUDE:
-            channel = build(provider, store_scope, handle, _CLAUDE_LOGIN_ARGV)
+            direct = method == "browser"
+            channel = build(provider, store_scope, handle, _CLAUDE_LOGIN_ARGV,
+                            direct=direct)
             return drivers.ClaudeLoginDriver(
-                channel, _credential_present(config, handle, provider)
+                channel, _credential_present(config, handle, provider), direct=direct
             )
         if provider is dto.Provider.OPENCODE:
             channel = build(provider, store_scope, handle, _OPENCODE_LOGIN_ARGV)
@@ -484,7 +566,9 @@ def make_factories(config: Config, volumes, *, channel_factory=None, quarantine_
             )
         if provider is dto.Provider.CURSOR:
             channel = build(provider, store_scope, handle, _CURSOR_LOGIN_ARGV)
-            return drivers.CursorLoginDriver(channel)
+            return drivers.CursorLoginDriver(
+                channel, _json_record_present(config, handle, _CURSOR_CREDS, _cursor_record)
+            )
         raise ChannelError("provider")
 
     def probe_for(provider, store_scope, handle):
@@ -508,7 +592,10 @@ def make_factories(config: Config, volumes, *, channel_factory=None, quarantine_
                 _json_record_present(config, handle, _GEMINI_CREDS, _gemini_record),
             )
         if provider is dto.Provider.CURSOR:
-            return drivers.AcpAccountProbe(build(provider, store_scope, handle, argv), "Cursor")
+            return drivers.AcpAccountProbe(
+                build(provider, store_scope, handle, argv), "Cursor",
+                _json_record_present(config, handle, _CURSOR_CREDS, _cursor_record),
+            )
         raise ChannelError("provider")
 
     return driver_for, probe_for

@@ -355,6 +355,12 @@ class SandboxHandle:
         return self._process.pid
 
     @property
+    def netns(self):
+        """The named egress netns this sandbox joined (provider_allowlist), or
+        None. The login's loopback listener lives there."""
+        return getattr(self._egress_plan, "netns", None) if self._egress_plan else None
+
+    @property
     def stdout(self):
         """The agent's piped stdout (provider stream-json), for forwarding; the PTY
         master when launched with pty_stdio=True."""

@@ -167,3 +167,38 @@ class FakeBinaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HandshakeSummaryTests(unittest.TestCase):
+    def test_only_capability_facts_are_kept(self):
+        init = {"protocolVersion": 1, "agentCapabilities": {"loadSession": True},
+                "authMethods": [{"id": "cursor_login", "description": "Run agent login"}],
+                "agentInfo": {"name": "x", "version": "1", "title": "X"}}
+        facts = acceptance.summarize_handshake(
+            init, {"error": {"code": -32000, "message": "see /home/secret/path"}})
+        self.assertEqual(facts["authMethods"], ["cursor_login"])
+        self.assertEqual(facts["sessionNew"], {"error": -32000})
+        self.assertNotIn("/home/secret", json.dumps(facts))
+        facts = acceptance.summarize_handshake(init, {"result": {"sessionId": "ses_SECRET",
+            "configOptions": [{"id": "model", "category": "model",
+                               "currentValue": "opencode/big-pickle"}]}})
+        self.assertEqual(facts["sessionNew"]["configOptions"][0]["currentValuePrefix"], "opencode")
+        self.assertNotIn("ses_SECRET", json.dumps(facts))
+
+    def test_protocol_check_against_a_fake_agent(self):
+        tmp = tempfile.mkdtemp()
+        agent = write_script(tmp, "agent", FAKE_ACP, mode="signin")
+        pins = json.loads(json.dumps(acceptance.PINS))
+        pins["cursor"]["path"] = agent
+        with mock.patch.object(acceptance, "PINS", pins):
+            check = acceptance.check_protocol("cursor", timeout=20)
+        self.assertTrue(check.ok, check)
+        self.assertEqual(check.evidence["sessionNew"], {"error": -32000})
+
+
+class LauncherCheckTests(unittest.TestCase):
+    def test_the_shipped_launcher_maps_each_provider(self):
+        for provider in ("cursor", "gemini", "opencode"):
+            with self.subTest(provider=provider):
+                check = acceptance.check_launcher(provider)
+                self.assertTrue(check.ok, check)

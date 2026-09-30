@@ -312,6 +312,10 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             post(agent_sessions::submit_attempt_code),
         )
         .route(
+            "/api/neev/agent/connections/{provider}/attempts/{attempt_id}/callback",
+            post(agent_sessions::submit_attempt_callback),
+        )
+        .route(
             "/api/neev/agent/connections/{provider}/cancel",
             post(agent_sessions::cancel_connect),
         )
@@ -332,6 +336,9 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/onboarding", get(static_files::page))
         .route("/workspace", get(static_files::page))
         .route("/settings", get(static_files::page))
+        // Direct sign-in return page: the extension redirects the provider's
+        // loopback callback here, with the query in the fragment.
+        .route("/agents/signin", get(static_files::page))
         .route("/auth/email/confirm", get(static_files::page))
         .route("/auth/invite", get(static_files::page))
         .route("/neev-auth/confirm.js", get(static_files::asset))

@@ -136,6 +136,8 @@ COPY --chown=0:0 scripts/operations/neev_agent_launch.py \
      scripts/operations/neev_supervisor_wire.py \
      scripts/operations/neev_supervisor_deployment.py \
      scripts/operations/neev_slot_proxy.py \
+     scripts/operations/neev_login_callback.py \
+     scripts/operations/neev_browser_capture.py \
      /opt/neev/scripts/operations/
 RUN chmod 0555 /opt/neev/scripts/operations/*.py
 # The shared response-style policy the launcher carries into each paid turn.

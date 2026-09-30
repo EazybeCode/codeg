@@ -96,7 +96,8 @@ FOLLOW_UP_UNSUPPORTED = "follow-up not supported by provider"
 # `model_prefix`: the model id prefix of the upstream Neev signs the user into.
 PROVIDERS = {
     "cursor": {"args": ("acp",), "binaries": ("agent", "cursor-agent"),
-               "env": {"NO_OPEN_BROWSER": "1"}, "signin_markers": (),
+               "env": {"NO_OPEN_BROWSER": "1", "AGENT_CLI_CREDENTIAL_STORE": "file"},
+               "signin_markers": (),
                "model_prefix": None},
     "gemini": {"args": ("--acp",), "binaries": ("gemini",),
                "env": {"NO_BROWSER": "true", "GEMINI_FORCE_FILE_STORAGE": "true"},
@@ -682,6 +683,29 @@ def drive(child, args, emit, cwd, stop, now=time.monotonic):
             return fail("provider closed the stream")
 
 
+def shutdown_child(child, grace=CANCEL_GRACE_SECS):
+    """Stop and reap the agent WITHOUT closing its stdout first.
+
+    The reader thread is blocked in `child.stdout.readline()`, and closing a
+    buffered reader another thread is reading waits for that read to return.
+    Gemini and OpenCode exit on stdin EOF, so the read ends; Cursor's `agent acp`
+    (node) does not, and the adapter hung until killed from outside — observed
+    on the pinned image as a probe that printed its verdict and never exited.
+    So: EOF on stdin, then terminate/kill and reap; stdout is left to the daemon
+    reader (it sees EOF once the child is gone) and to process exit."""
+    try:
+        child.stdin.close()
+    except (OSError, ValueError):
+        pass
+    if child.poll() is None:
+        child.terminate()
+    try:
+        child.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+
+
 def main(argv=None, steer_input=None, environ=None):
     args = _parse(sys.argv[1:] if argv is None else argv)
     if args.describe:
@@ -737,17 +761,7 @@ def main(argv=None, steer_input=None, environ=None):
         try:
             return drive(child, args, emit, cwd, stop)
         finally:
-            for pipe in (child.stdin, child.stdout):
-                try:
-                    pipe.close()
-                except (OSError, ValueError):
-                    pass
-            child.terminate()
-            try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+            shutdown_child(child)
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)

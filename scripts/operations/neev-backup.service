@@ -1,0 +1,23 @@
+[Unit]
+Description=Encrypted off-server backup of native Neev (DB snapshot + originals) to a separate Restic repository
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# Runs as root (the systemd default). Do NOT add User=root: combined with
+# NoNewPrivileges and RestrictAddressFamilies it makes systemd deny the
+# setresuid() that drops the content backup to the blob-store uid (verified).
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/neev-backup/neev_backup.py --config /etc/neev-backup/config.json backup
+TimeoutStartSec=7200
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=50%
+MemoryMax=1G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/neev-backup /var/cache/neev-backup /var/lib/neev-content-backups
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

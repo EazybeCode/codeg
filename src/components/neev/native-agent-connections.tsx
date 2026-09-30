@@ -30,6 +30,8 @@ import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { BrowserLink } from "@/components/ui/browser-link"
 import {
+  callbackFailure,
+  callbackQueryFromAddress,
   cancelProviderConnect,
   disconnectProvider,
   isValidRequestKey,
@@ -38,6 +40,7 @@ import {
   newRequestKey,
   startProviderConnect,
   testProviderConnection,
+  submitConnectCallback,
   submitConnectCode,
   NEEV_MAX_AUTH_CODE_CHARS,
   NEEV_AGENT_PROVIDERS,
@@ -46,7 +49,15 @@ import {
   type NeevAgentConnections,
   type NeevAgentProvider,
   type NeevAttemptState,
+  type NeevConnectMethod,
 } from "@/lib/neev-agent-sessions-client"
+import {
+  armSigninExtension,
+  disarmSigninExtension,
+  discoverSigninExtension,
+  type SigninChannel,
+} from "@/lib/neev-signin-extension"
+import { openUrl } from "@/lib/platform"
 import { NativeClientError } from "@/lib/neev-client"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeError } from "./native-boundary"
@@ -195,6 +206,17 @@ export function NativeAgentConnectionsPanel({
   const [tested, setTested] = useState<NeevAgentConnection | null>(null)
   const [code, setCode] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  // Why the last pasted callback did not go through, when the attempt is
+  // still alive (contract v2 §3). Said beside the paste box, never thrown.
+  const [callbackIssue, setCallbackIssue] = useState<CallbackIssue | null>(null)
+  // A delivery the server could not take right now (503): the SAME query under
+  // the SAME request key, so "Try again" replays it rather than delivering a
+  // second time. In memory only, and dropped with the attempt.
+  const retryCallback = useRef<{ query: string; key: string } | null>(null)
+  // The pasted address carried the provider's `error=`: the user declined on
+  // the provider's page, so a failed attempt is said as a cancellation.
+  const declined = useRef(false)
+  const [cancelledByUser, setCancelledByUser] = useState(false)
   // Polling gave up, but the sign-in did NOT fail: the server was never heard
   // from. The attempt stays, so Cancel stays, and "Refresh status" resumes.
   const [stalled, setStalled] = useState(false)
@@ -267,6 +289,11 @@ export function NativeAgentConnectionsPanel({
       setOutcome(state)
       setApproval(null)
       setCode("")
+      setCallbackIssue(null)
+      retryCallback.current = null
+      setCancelledByUser(state === "failed" && declined.current)
+      declined.current = false
+      disarmSigninExtension(attempt.attemptId)
       remember(null)
       // Whatever happened, the connection row is the truth now.
       refresh()
@@ -337,6 +364,7 @@ export function NativeAgentConnectionsPanel({
     setBusy(provider)
     setError(null)
     setOutcome(null)
+    setCancelledByUser(false)
     setApproval(null)
     setCode("")
     try {
@@ -378,7 +406,10 @@ export function NativeAgentConnectionsPanel({
   }
 
   /** Start a sign-in. The caller owns `busy` and the error reporting. */
-  async function beginSignIn(provider: NeevAgentProvider) {
+  async function beginSignIn(
+    provider: NeevAgentProvider,
+    method?: NeevConnectMethod
+  ) {
     if (!auth.session) return
     // One key per in-flight sign-in: a retry after a lost response replays the
     // SAME attempt instead of starting a second one.
@@ -388,7 +419,11 @@ export function NativeAgentConnectionsPanel({
       provider,
       connectKey,
       auth.session.csrf,
-      auth.signal
+      auth.signal,
+      // Claude and Codex sign in through the CLI's own browser login first;
+      // the server reads an absent method as the legacy flow.
+      method ??
+        (provider === "claude" || provider === "codex" ? "browser" : undefined)
     )
     if (started.outcome === "pending")
       remember({
@@ -420,6 +455,7 @@ export function NativeAgentConnectionsPanel({
     setBusy(provider)
     setError(null)
     setOutcome(null)
+    setCancelledByUser(false)
     setApproval(null)
     setCode("")
     try {
@@ -453,7 +489,10 @@ export function NativeAgentConnectionsPanel({
    * Poll until the server says the credential is gone. Bounded: the teardown is
    * queued work, and this holds the row busy while it runs.
    */
-  async function waitForSignedOut(provider: NeevAgentProvider) {
+  async function waitForSignedOut(
+    provider: NeevAgentProvider,
+    passing: readonly string[] = ["disconnecting"]
+  ) {
     for (let round = 0; round < TEARDOWN_ROUNDS; round += 1) {
       const wiring = await loadAgentConnections(auth.signal)
       // Keep the row honest while we wait rather than freezing the old state.
@@ -462,7 +501,7 @@ export function NativeAgentConnectionsPanel({
         (candidate) => candidate.provider === provider
       )
       if (!row || row.state === "not_signed_in") return true
-      if (row.state !== "disconnecting") return false
+      if (!passing.includes(row.state)) return false
       await new Promise((resolve) => setTimeout(resolve, pollMs))
     }
     return false
@@ -481,9 +520,12 @@ export function NativeAgentConnectionsPanel({
         auth.signal
       )
       pendingKeys.current.delete(attempt.provider)
+      disarmSigninExtension(attempt.attemptId)
       remember(null)
       setApproval(null)
       setCode("")
+      setCallbackIssue(null)
+      retryCallback.current = null
       setOutcome("canceled")
       refresh()
     } catch (cause) {
@@ -527,6 +569,104 @@ export function NativeAgentConnectionsPanel({
       auth.handleAuthorityError(cause)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  /**
+   * Hand over the provider's loopback redirect the user pasted. The server
+   * answers with the attempt, exactly like a pasted code: still pending (the
+   * CLI is finishing) or settled. Only the poll — never this — says Connected.
+   */
+  async function submitCallback(query: string, replay = false) {
+    if (!attempt || !approval || submitting || !auth.session) return
+    // One key per delivery; a retry after "unavailable" reuses it so the server
+    // treats it as the same delivery (contract v2 §3).
+    const key =
+      replay && retryCallback.current?.query === query
+        ? retryCallback.current.key
+        : newRequestKey()
+    retryCallback.current = null
+    declined.current = new URLSearchParams(query).has("error")
+    setSubmitting(true)
+    setError(null)
+    setCallbackIssue(null)
+    try {
+      const result = await submitConnectCallback(
+        attempt.provider,
+        attempt.attemptId,
+        key,
+        query,
+        auth.session.csrf,
+        auth.signal
+      )
+      if (result.state !== "pending") {
+        setOutcome(result.state)
+        setCancelledByUser(result.state === "failed" && declined.current)
+        setApproval(null)
+        disarmSigninExtension(attempt.attemptId)
+        remember(null)
+        refresh()
+        return
+      }
+      setApproval(result.approval)
+    } catch (cause) {
+      const failure = callbackFailure(cause)
+      // 409: this attempt is no longer taking a callback — most often because
+      // the extension's relay already delivered one. Not an error to show:
+      // re-read the attempt, and the poll settles what actually happened.
+      if (failure === "conflict") refresh()
+      else if (failure === "unavailable") {
+        retryCallback.current = { query, key }
+        setCallbackIssue("unavailable")
+      } else if (
+        failure === "rejected" ||
+        failure === "gone" ||
+        failure === "limited"
+      )
+        setCallbackIssue(failure)
+      else {
+        setError(cause)
+        auth.handleAuthorityError(cause)
+      }
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  /**
+   * Codex's fallback: give up the browser sign-in and start a device-code one.
+   * Cancel first — the supervisor's login slot is shared, so a second sign-in
+   * over a live one would strand it — then wait for the row to clear.
+   */
+  async function switchToDevice() {
+    if (!attempt || busy || !auth.session) return
+    const provider = attempt.provider
+    setBusy(provider)
+    setError(null)
+    setCallbackIssue(null)
+    retryCallback.current = null
+    try {
+      await cancelProviderConnect(
+        provider,
+        attempt.attemptId,
+        attempt.cancelKey,
+        auth.session.csrf,
+        auth.signal
+      )
+      disarmSigninExtension(attempt.attemptId)
+      pendingKeys.current.delete(provider)
+      remember(null)
+      setApproval(null)
+      setCode("")
+      if (await waitForSignedOut(provider, ["connecting", "disconnecting"]))
+        await beginSignIn(provider, "device")
+      else refresh()
+    } catch (cause) {
+      setError(cause)
+      auth.handleAuthorityError(cause)
+      refresh()
+    } finally {
+      setBusy(null)
     }
   }
 
@@ -603,7 +743,9 @@ export function NativeAgentConnectionsPanel({
       <NativeError error={error} />
       {outcome !== null && outcome !== "completed" && (
         <p role="status" className="text-sm text-muted-foreground">
-          {t(`attemptState_${outcome}`)}
+          {cancelledByUser
+            ? t("signinCancelled")
+            : t(`attemptState_${outcome}`)}
         </p>
       )}
       {state === null || state === undefined ? (
@@ -674,12 +816,47 @@ export function NativeAgentConnectionsPanel({
                       </span>
                     ) : null}
                   </div>
+                  {/* The device-code prerequisite, beside the button that may
+                      need it — but not over a browser sign-in, which does not. */}
                   {connection.provider === "codex" &&
                     connection.state !== "connected" &&
                     connection.state !== "disabled" &&
-                    connection.state !== "unavailable" && <CodexSetupHelp />}
+                    connection.state !== "unavailable" &&
+                    !(
+                      attempt?.provider === "codex" &&
+                      approval?.kind === "browser_callback"
+                    ) && <CodexSetupHelp />}
                   {attempt?.provider === connection.provider &&
-                    approval !== null && (
+                    approval?.kind === "browser_callback" && (
+                      <CallbackApprovalPrompt
+                        approval={approval}
+                        attempt={attempt}
+                        issue={callbackIssue}
+                        onRetry={
+                          retryCallback.current
+                            ? () =>
+                                void submitCallback(
+                                  retryCallback.current!.query,
+                                  true
+                                )
+                            : undefined
+                        }
+                        submitting={submitting}
+                        busy={busy !== null}
+                        onCallback={(query) => void submitCallback(query)}
+                        onDevice={
+                          attempt.provider === "codex"
+                            ? () => void switchToDevice()
+                            : undefined
+                        }
+                        code={code}
+                        onCode={setCode}
+                        onSubmitCode={() => void submitCode()}
+                      />
+                    )}
+                  {attempt?.provider === connection.provider &&
+                    approval !== null &&
+                    approval.kind !== "browser_callback" && (
                       <ApprovalPrompt
                         approval={approval}
                         code={code}
@@ -715,9 +892,7 @@ export function NativeAgentConnectionsPanel({
 
   /** Friendly name: the rows and accessible names used the raw key. */
   function label(provider: NeevAgentProvider) {
-    if (provider === "claude") return t("claudeLabel")
-    if (provider === "codex") return t("codexLabel")
-    return provider
+    return t(`${provider}Label`)
   }
   function actionsFor(connection: NeevAgentConnection) {
     const provider = connection.provider
@@ -844,8 +1019,7 @@ function ApprovalPrompt({
   onCode: (value: string) => void
   onSubmit: () => void
 }) {
-  const t = useTranslations("NativeContent"),
-    n = useTranslations("Native")
+  const t = useTranslations("NativeContent")
   // The outcome is explicit, and it is tagged with the code it was for: a
   // clipboard promise that settles after the attempt has produced a FRESH code
   // must not report "Copied" against that new one.
@@ -858,7 +1032,13 @@ function ApprovalPrompt({
   return (
     <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
       <p className="text-xs text-muted-foreground">
-        {t(approval.kind === "device" ? "signInDeviceHint" : "signInCodeHint")}
+        {t(
+          approval.kind === "device"
+            ? "signInDeviceHint"
+            : approval.kind === "browser"
+              ? "signInBrowserHint"
+              : "signInCodeHint"
+        )}
       </p>
       {/* The user approves in their OWN browser; Neev never drives the
           provider's sign-in page. `BrowserLink` is the only link form that
@@ -925,38 +1105,313 @@ function ApprovalPrompt({
           </p>
         </div>
       ) : (
+        // A browser approval has nothing to paste: the CLI notices the approval
+        // itself, and the poll above reports it.
+        approval.kind === "authorization_code" &&
         approval.needsCode && (
-          <form
-            className="flex flex-wrap items-end gap-2"
-            onSubmit={(event) => {
-              event.preventDefault()
-              onSubmit()
-            }}
-          >
-            <label className="min-w-0 flex-1 space-y-1">
-              <span className="block text-xs font-medium">
-                {t("pasteCodeLabel")}
-              </span>
-              <input
-                value={code}
-                autoComplete="off"
-                spellCheck={false}
-                maxLength={NEEV_MAX_AUTH_CODE_CHARS}
-                disabled={submitting}
-                onChange={(event) => onCode(event.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 font-mono text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              />
-            </label>
-            <Button
-              type="submit"
-              size="sm"
-              disabled={submitting || !code.trim()}
-            >
-              {submitting ? n("working") : t("submitCode")}
-            </Button>
-          </form>
+          <PasteCodeForm
+            code={code}
+            submitting={submitting}
+            onCode={onCode}
+            onSubmit={onSubmit}
+          />
         )
       )}
+    </div>
+  )
+}
+
+/** Today's paste-a-code form (Claude, Gemini CLI), shared by both prompts. */
+function PasteCodeForm({
+  code,
+  submitting,
+  onCode,
+  onSubmit,
+}: {
+  code: string
+  submitting: boolean
+  onCode: (value: string) => void
+  onSubmit: () => void
+}) {
+  const t = useTranslations("NativeContent"),
+    n = useTranslations("Native")
+  return (
+    <form
+      className="flex flex-wrap items-end gap-2"
+      onSubmit={(event) => {
+        event.preventDefault()
+        onSubmit()
+      }}
+    >
+      <label className="min-w-0 flex-1 space-y-1">
+        <span className="block text-xs font-medium">{t("pasteCodeLabel")}</span>
+        <input
+          value={code}
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={NEEV_MAX_AUTH_CODE_CHARS}
+          disabled={submitting}
+          onChange={(event) => onCode(event.target.value)}
+          className="w-full rounded-md border bg-background px-3 py-2 font-mono text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        />
+      </label>
+      <Button type="submit" size="sm" disabled={submitting || !code.trim()}>
+        {submitting ? n("working") : t("submitCode")}
+      </Button>
+    </form>
+  )
+}
+
+/**
+ * The primary Claude/Codex sign-in: the CLI's own browser login.
+ *
+ * One button does the whole thing. With the Neev extension answering, it is
+ * armed for exactly this attempt's loopback address and the provider's page
+ * opens; the browser comes back through `/agents/signin` and the poll says
+ * Connected. Without the extension the provider's redirect lands on a tab that
+ * cannot connect, so the paste box for that address is shown up front. With it,
+ * every fallback waits behind one disclosure rather than crowding the prompt.
+ */
+type CallbackIssue = "rejected" | "gone" | "limited" | "unavailable"
+
+const CALLBACK_ISSUE_KEYS = {
+  rejected: "callbackRejected",
+  gone: "signinReturnNotAvailable",
+  limited: "callbackLimited",
+  unavailable: "callbackUnavailable",
+} as const
+
+function CallbackApprovalPrompt({
+  approval,
+  attempt,
+  issue,
+  onRetry,
+  submitting,
+  busy,
+  onCallback,
+  onDevice,
+  code,
+  onCode,
+  onSubmitCode,
+}: {
+  approval: Extract<NeevApproval, { kind: "browser_callback" }>
+  attempt: Attempt
+  issue: CallbackIssue | null
+  /** Replay the last delivery under its own key (after "unavailable"). */
+  onRetry?: () => void
+  submitting: boolean
+  busy: boolean
+  onCallback: (query: string) => void
+  /** Codex only: restart as a device-code sign-in. */
+  onDevice?: () => void
+  code: string
+  onCode: (value: string) => void
+  onSubmitCode: () => void
+}) {
+  const t = useTranslations("NativeContent"),
+    n = useTranslations("Native")
+  // Which way the extension answered — the page bridge (any extension id) or
+  // the legacy id — or that nothing did.
+  const [extension, setExtension] = useState<
+    "checking" | SigninChannel | "absent"
+  >("checking")
+  // The extension armed the relay but did not open the page (or could not be
+  // asked), and our own `window.open` ran after an await, where a popup
+  // blocker may have eaten it: offer the page as a plain link too.
+  const [openYourself, setOpenYourself] = useState(false)
+  // The pasted address lives only in this field, and only until it is sent.
+  const [address, setAddress] = useState("")
+  const [badAddress, setBadAddress] = useState(false)
+  const [codeInstead, setCodeInstead] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    void discoverSigninExtension().then((channel) => {
+      if (live) setExtension(channel ?? "absent")
+    })
+    return () => {
+      live = false
+    }
+  }, [])
+
+  async function continueInBrowser() {
+    if (extension === "checking") return
+    // No extension: open the page right here, inside the click, where no
+    // popup blocker objects. The paste box is already in front.
+    if (extension === "absent") {
+      void openUrl(approval.verificationUrl)
+      return
+    }
+    // The extension opens the page itself (`open: true`, `chrome.tabs.create`),
+    // which the popup blocker does not see — the click's gesture would not
+    // survive the await below.
+    const result = await armSigninExtension(extension, {
+      attemptId: attempt.attemptId,
+      provider: attempt.provider,
+      verificationUrl: approval.verificationUrl,
+      // The API's unix seconds, verbatim: the unit `expiresAtSec` takes.
+      expiresAtSec: attempt.expiresAt,
+      open: true,
+    })
+    // Not armed means the browser will not come back on its own: say so and
+    // put the paste box in front rather than leave a silent dead end.
+    if (!result.armed) setExtension("absent")
+    if (!result.opened) {
+      void openUrl(approval.verificationUrl)
+      setOpenYourself(true)
+    }
+  }
+
+  function sendAddress() {
+    const query = callbackQueryFromAddress(address, approval)
+    // Cleared either way: nothing pasted is kept around or shown back.
+    setAddress("")
+    if (query === null) {
+      setBadAddress(true)
+      return
+    }
+    setBadAddress(false)
+    onCallback(query)
+  }
+
+  const pasteAddress = (
+    <form
+      className="flex flex-wrap items-end gap-2"
+      onSubmit={(event) => {
+        event.preventDefault()
+        sendAddress()
+      }}
+    >
+      <label className="min-w-0 flex-1 space-y-1">
+        <span className="block text-xs font-medium">
+          {t("pasteCallbackLabel")}
+        </span>
+        <input
+          value={address}
+          autoComplete="off"
+          spellCheck={false}
+          maxLength={8192}
+          disabled={submitting}
+          onChange={(event) => {
+            setAddress(event.target.value)
+            setBadAddress(false)
+          }}
+          className="w-full rounded-md border bg-background px-3 py-2 font-mono text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        />
+      </label>
+      <Button type="submit" size="sm" disabled={submitting || !address.trim()}>
+        {submitting ? n("working") : t("submitCallback")}
+      </Button>
+    </form>
+  )
+
+  const alternatives = (
+    <>
+      {approval.fallbackUrl !== null &&
+        (codeInstead ? (
+          <div className="space-y-2">
+            <BrowserLink
+              href={approval.fallbackUrl}
+              className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {t("openCodePage")}
+            </BrowserLink>
+            <PasteCodeForm
+              code={code}
+              submitting={submitting}
+              onCode={onCode}
+              onSubmit={onSubmitCode}
+            />
+          </div>
+        ) : (
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="h-auto px-0 text-xs"
+            onClick={() => setCodeInstead(true)}
+          >
+            {t("pasteCodeInstead")}
+          </Button>
+        ))}
+      {onDevice && (
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          className="h-auto px-0 text-xs"
+          disabled={busy}
+          onClick={onDevice}
+        >
+          {t("useDeviceCodeInstead")}
+        </Button>
+      )}
+    </>
+  )
+
+  return (
+    <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
+      <p className="text-xs text-muted-foreground">
+        {t("signInBrowserCallbackHint")}
+      </p>
+      <Button
+        type="button"
+        size="sm"
+        disabled={extension === "checking" || busy}
+        onClick={() => void continueInBrowser()}
+      >
+        {t("continueInBrowser")}
+      </Button>
+      {openYourself && (
+        <BrowserLink
+          href={approval.verificationUrl}
+          className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {t("openSignInPage")}
+        </BrowserLink>
+      )}
+      {issue && (
+        <div className="flex flex-wrap items-center gap-2">
+          <p role="alert" className="text-xs text-destructive">
+            {t(CALLBACK_ISSUE_KEYS[issue])}
+          </p>
+          {issue === "unavailable" && onRetry && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={submitting}
+              onClick={onRetry}
+            >
+              {t("callbackRetry")}
+            </Button>
+          )}
+        </div>
+      )}
+      {badAddress && (
+        <p role="alert" className="text-xs text-destructive">
+          {t("callbackAddressInvalid")}
+        </p>
+      )}
+      {extension === "absent" && (
+        <p className="text-xs text-muted-foreground">
+          {t("signInExtensionMissing")}
+        </p>
+      )}
+      {/* One element in every state, so a check that settles while someone is
+          typing does not remount the field under them. Closed while the
+          browser can come back by itself; opened when it cannot. */}
+      <details className="text-xs" open={extension === "absent"}>
+        <summary className="cursor-pointer text-muted-foreground">
+          {t("signInFallbackSummary")}
+        </summary>
+        <div className="mt-2 space-y-2">
+          <p className="text-muted-foreground">{t("pasteCallbackHint")}</p>
+          {pasteAddress}
+          <div className="flex flex-wrap gap-x-4">{alternatives}</div>
+        </div>
+      </details>
     </div>
   )
 }

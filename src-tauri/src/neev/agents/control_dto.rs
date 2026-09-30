@@ -18,6 +18,11 @@ const CLAUDE_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 /// prints a Google authorize URL and reads the pasted code back — the same
 /// paste-code shape as Claude. Mirrors `neev_supervisor_dto._GOOGLE_AUTHORIZE_URL`.
 const GOOGLE_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth?";
+/// Direct sign-in (direct-signin-contract.md): the pinned CLIs' OWN authorize
+/// URLs whose redirect is their loopback listener, and the only listener paths.
+const CODEX_BROWSER_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize?";
+const CLAUDE_BROWSER_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize?";
+const CALLBACK_PATHS: [&str; 2] = ["/auth/callback", "/callback"];
 /// Cursor `agent login` prints a cursor.com sign-in URL and polls. Origin-level
 /// only: the exact path is not verified against a pinned binary.
 const CURSOR_BROWSER_URL: &str = "https://cursor.com/";
@@ -293,6 +298,9 @@ wire_enum!(Op {
     // Delivers the authorization code a Claude-style login asks the user to
     // paste back. Codex device logins never use it.
     SubmitCode => "submit_code",
+    // Direct sign-in: relays the provider redirect's query to the CLI's own
+    // loopback listener (direct-signin-contract.md).
+    DeliverCallback => "deliver_callback",
 });
 wire_enum!(Outcome { Ok => "ok", Error => "error" });
 wire_enum!(ErrorCode {
@@ -302,6 +310,8 @@ wire_enum!(ErrorCode {
     Expired => "expired",
     Busy => "busy",
     Unavailable => "unavailable",
+    // A relayed callback did not match its attempt; the CLI was not touched.
+    Rejected => "rejected",
 });
 wire_enum!(Disposition { Accepted => "accepted", Replayed => "replayed" });
 wire_enum!(LoginFailure {
@@ -443,6 +453,44 @@ impl CleanupTicketDto {
 #[serde(deny_unknown_fields)]
 pub(crate) struct StartLoginBody {
     pub(crate) ticket: LoginTicketDto,
+    /// `None` (absent on the wire) = the pre-direct-sign-in flows, which an
+    /// older supervisor also understands. `browser` = direct sign-in; `device`
+    /// = Codex's device code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) method: Option<LoginMethod>,
+}
+
+wire_enum!(LoginMethod { Browser => "browser", Device => "device" });
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeliverCallbackBody {
+    pub(crate) binding: LoginBinding,
+    pub(crate) query: CallbackQuery,
+}
+
+/// The provider redirect's query (it carries the authorization code). Shape
+/// only here — the supervisor binds it to the attempt's state. No
+/// `Debug`/`Display`, like [`AuthorizationCode`].
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CallbackQuery(String);
+
+impl CallbackQuery {
+    pub(crate) fn new(value: String) -> Result<Self, DtoError> {
+        if (1..=MAX_STRING_BYTES).contains(&value.len())
+            && value.bytes().all(|byte| (0x21..0x7f).contains(&byte))
+        {
+            Ok(Self(value))
+        } else {
+            Err(DtoError::Invalid)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CallbackQuery {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -505,6 +553,7 @@ pub(crate) enum RequestBody {
     CleanupConnection(CleanupConnectionBody),
     ReconcilePage(ReconcilePageRequest),
     SubmitCode(SubmitCodeBody),
+    DeliverCallback(DeliverCallbackBody),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -525,6 +574,7 @@ impl Request {
             RequestBody::CleanupConnection(_) => Op::CleanupConnection,
             RequestBody::ReconcilePage(_) => Op::ReconcilePage,
             RequestBody::SubmitCode(_) => Op::SubmitCode,
+            RequestBody::DeliverCallback(_) => Op::DeliverCallback,
         }
     }
 
@@ -539,6 +589,7 @@ impl Request {
         match &self.body {
             RequestBody::ObserveLogin(body) => Some(&body.binding),
             RequestBody::SubmitCode(body) => Some(&body.binding),
+            RequestBody::DeliverCallback(body) => Some(&body.binding),
             _ => None,
         }
     }
@@ -597,6 +648,17 @@ pub(crate) enum LoginChallenge {
         verification_url: String,
         expires_at: UnixSec,
     },
+    /// Claude / Codex direct sign-in: open `verification_url` (the CLI's own
+    /// authorize URL); the provider redirects the browser to the CLI's loopback
+    /// `callback_port`/`callback_path`, relayed by [`Op::DeliverCallback`].
+    /// `fallback_url` (Claude) is the same login's paste-code URL.
+    BrowserCallback {
+        verification_url: String,
+        callback_port: u16,
+        callback_path: String,
+        fallback_url: Option<String>,
+        expires_at: UnixSec,
+    },
 }
 
 impl LoginChallenge {
@@ -610,6 +672,9 @@ impl LoginChallenge {
             }
             | Self::Browser {
                 verification_url, ..
+            }
+            | Self::BrowserCallback {
+                verification_url, ..
             } => verification_url,
         }
     }
@@ -618,7 +683,8 @@ impl LoginChallenge {
         match self {
             Self::Device { expires_at, .. }
             | Self::AuthorizationCode { expires_at, .. }
-            | Self::Browser { expires_at, .. } => expires_at,
+            | Self::Browser { expires_at, .. }
+            | Self::BrowserCallback { expires_at, .. } => expires_at,
         }
     }
 
@@ -628,13 +694,30 @@ impl LoginChallenge {
             Self::Device { .. } => "device",
             Self::AuthorizationCode { .. } => "authorization_code",
             Self::Browser { .. } => "browser",
+            Self::BrowserCallback { .. } => "browser_callback",
+        }
+    }
+
+    /// The CLI loopback listener a direct sign-in returns to, and (Claude) the
+    /// paste-code fallback URL. `None` for every other challenge.
+    pub(crate) fn callback(&self) -> Option<(u16, &str, Option<&str>)> {
+        match self {
+            Self::BrowserCallback {
+                callback_port,
+                callback_path,
+                fallback_url,
+                ..
+            } => Some((*callback_port, callback_path.as_str(), fallback_url.as_deref())),
+            _ => None,
         }
     }
 
     pub(crate) fn user_code(&self) -> Option<&UserCode> {
         match self {
             Self::Device { user_code, .. } => Some(user_code),
-            Self::AuthorizationCode { .. } | Self::Browser { .. } => None,
+            Self::AuthorizationCode { .. }
+            | Self::Browser { .. }
+            | Self::BrowserCallback { .. } => None,
         }
     }
 
@@ -655,6 +738,23 @@ impl LoginChallenge {
             Self::Browser {
                 verification_url, ..
             } => verification_url.starts_with(CURSOR_BROWSER_URL),
+            Self::BrowserCallback {
+                verification_url,
+                callback_port,
+                callback_path,
+                fallback_url,
+                ..
+            } => {
+                let pinned = |url: &str| {
+                    url.len() <= MAX_STRING_BYTES
+                        && (url.starts_with(CODEX_BROWSER_AUTHORIZE_URL)
+                            || url.starts_with(CLAUDE_BROWSER_AUTHORIZE_URL))
+                };
+                pinned(verification_url)
+                    && fallback_url.as_deref().is_none_or(pinned)
+                    && *callback_port >= 1024
+                    && CALLBACK_PATHS.contains(&callback_path.as_str())
+            }
         };
         if acceptable {
             Ok(())
@@ -916,6 +1016,8 @@ pub(crate) enum ResultBody {
     /// Submitting a code advances the same login state machine, so it answers
     /// with the same snapshot `observe_login` would return.
     SubmitCode(LoginSnapshot),
+    /// A delivered callback advances the same login state machine too.
+    DeliverCallback(LoginSnapshot),
 }
 
 impl ResultBody {
@@ -927,6 +1029,7 @@ impl ResultBody {
             Self::CheckConnection(_) => Op::CheckConnection,
             Self::CleanupConnection(_) => Op::CleanupConnection,
             Self::SubmitCode(_) => Op::SubmitCode,
+            Self::DeliverCallback(_) => Op::DeliverCallback,
             Self::ReconcilePage(_) => Op::ReconcilePage,
         }
     }
@@ -991,6 +1094,7 @@ impl Response {
             ResultBody::CleanupConnection(result) => result.tag(),
             ResultBody::ReconcilePage(_) => "page",
             ResultBody::SubmitCode(result) => result.tag(),
+            ResultBody::DeliverCallback(result) => result.tag(),
         }
     }
 
@@ -1365,7 +1469,11 @@ fn schema_request(tree: &JsonNode) -> Result<Op, DtoError> {
     let body = field(root, "body")?.object()?;
     match op {
         Op::StartLogin => {
-            exact_keys(body, &["ticket"])?;
+            if body.iter().any(|(key, _)| key == "method") {
+                exact_keys(body, &["ticket", "method"])?;
+            } else {
+                exact_keys(body, &["ticket"])?;
+            }
             schema_login_ticket(field(body, "ticket")?)?;
         }
         Op::ObserveLogin => {
@@ -1396,6 +1504,10 @@ fn schema_request(tree: &JsonNode) -> Result<Op, DtoError> {
             exact_keys(body, &["binding", "code"])?;
             schema_login_binding(field(body, "binding")?)?;
         }
+        Op::DeliverCallback => {
+            exact_keys(body, &["binding", "query"])?;
+            schema_login_binding(field(body, "binding")?)?;
+        }
     }
     Ok(op)
 }
@@ -1422,6 +1534,17 @@ fn schema_login_snapshot(value: &JsonNode) -> Result<(), DtoError> {
                 "authorization_code" | "browser" => {
                     exact_keys(challenge, &["kind", "verification_url", "expires_at"])
                 }
+                "browser_callback" => exact_keys(
+                    challenge,
+                    &[
+                        "kind",
+                        "verification_url",
+                        "callback_port",
+                        "callback_path",
+                        "fallback_url",
+                        "expires_at",
+                    ],
+                ),
                 _ => Err(DtoError::Invalid),
             }
         }
@@ -1467,7 +1590,7 @@ fn schema_success(op: Op, value: &JsonNode) -> Result<(), DtoError> {
     let object = value.object()?;
     match op {
         Op::StartLogin => exact_keys(object, &["disposition", "poll_after_ms"]),
-        Op::ObserveLogin | Op::SubmitCode => schema_login_snapshot(value),
+        Op::ObserveLogin | Op::SubmitCode | Op::DeliverCallback => schema_login_snapshot(value),
         Op::SettleLogin => exact_keys(object, &["state", "receipt_id", "storage_handle"]),
         Op::CheckConnection => match field(object, "state")?.string()? {
             "queued" | "checking" => exact_keys(object, &["state", "check_id", "poll_after_ms"]),
@@ -1584,6 +1707,7 @@ pub(crate) fn decode_request(raw: &[u8]) -> Result<Request, DtoError> {
         Op::CleanupConnection => decode_body!(CleanupConnectionBody, CleanupConnection),
         Op::ReconcilePage => decode_body!(ReconcilePageRequest, ReconcilePage),
         Op::SubmitCode => decode_body!(SubmitCodeBody, SubmitCode),
+        Op::DeliverCallback => decode_body!(DeliverCallbackBody, DeliverCallback),
     };
     match &request.body {
         RequestBody::CleanupConnection(body) => body.ticket.validate()?,
@@ -1618,6 +1742,7 @@ pub(crate) fn encode_request(request: &Request) -> Result<Vec<u8>, DtoError> {
         RequestBody::CleanupConnection(body) => encode_body!(body),
         RequestBody::ReconcilePage(body) => encode_body!(body),
         RequestBody::SubmitCode(body) => encode_body!(body),
+        RequestBody::DeliverCallback(body) => encode_body!(body),
     };
     decode_request(&encoded)?;
     Ok(encoded)
@@ -1719,11 +1844,12 @@ pub(crate) fn decode_response(raw: &[u8]) -> Result<Response, DtoError> {
         Op::CleanupConnection => decode_result!(CleanupResult, CleanupConnection),
         Op::ReconcilePage => decode_result!(ReconcilePage, ReconcilePage),
         Op::SubmitCode => decode_result!(LoginSnapshot, SubmitCode),
+        Op::DeliverCallback => decode_result!(LoginSnapshot, DeliverCallback),
     };
     match response.body.as_ref() {
-        Some(ResultBody::ObserveLogin(snapshot)) | Some(ResultBody::SubmitCode(snapshot)) => {
-            snapshot.validate()?
-        }
+        Some(ResultBody::ObserveLogin(snapshot))
+        | Some(ResultBody::SubmitCode(snapshot))
+        | Some(ResultBody::DeliverCallback(snapshot)) => snapshot.validate()?,
         Some(ResultBody::ReconcilePage(page)) => page.validate()?,
         _ => {}
     }
@@ -1757,6 +1883,7 @@ pub(crate) fn encode_response(response: &Response) -> Result<Vec<u8>, DtoError> 
         (Some(ResultBody::CleanupConnection(body)), None, Outcome::Ok) => encode_result!(body),
         (Some(ResultBody::ReconcilePage(body)), None, Outcome::Ok) => encode_result!(body),
         (Some(ResultBody::SubmitCode(body)), None, Outcome::Ok) => encode_result!(body),
+        (Some(ResultBody::DeliverCallback(body)), None, Outcome::Ok) => encode_result!(body),
         (None, Some(error), Outcome::Error) => encode_json(
             &ErrorEnvelopeRef {
                 v: 1,
@@ -1815,6 +1942,7 @@ pub(crate) fn validate_response(
         // Submitting a code answers with the same login snapshot an observe
         // would; it correlates by op and binding, with nothing extra to pair.
         | (RequestBody::SubmitCode(_), Some(ResultBody::SubmitCode(_)))
+        | (RequestBody::DeliverCallback(_), Some(ResultBody::DeliverCallback(_)))
         | (RequestBody::CleanupConnection(_), Some(ResultBody::CleanupConnection(_))) => {}
         _ => return Err(DtoError::Correlation),
     }

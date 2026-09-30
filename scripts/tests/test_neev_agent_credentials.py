@@ -130,7 +130,8 @@ class ProviderEnvTests(unittest.TestCase):
     def test_acp_provider_env_is_fixed_and_bound_under_home(self):
         self.assertEqual(
             credentials.provider_env("/vol", "cursor"),
-            {"HOME": "/vol", "XDG_CONFIG_HOME": "/vol/.config", "NO_OPEN_BROWSER": "1"},
+            {"HOME": "/vol", "XDG_CONFIG_HOME": "/vol/.config", "NO_OPEN_BROWSER": "1",
+             "AGENT_CLI_CREDENTIAL_STORE": "file"},
         )
         self.assertEqual(
             credentials.provider_env("/vol", "gemini"),

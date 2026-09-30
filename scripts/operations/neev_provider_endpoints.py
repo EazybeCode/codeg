@@ -141,7 +141,9 @@ _ENDPOINTS = {
     ),
     ("cursor", "run"): (
         Endpoint("api2.cursor.sh", 443, False),
-        Endpoint("api5.cursor.sh", 443, False),
+        # The docs also list bare `api5.cursor.sh`; it has NO DNS record
+        # (resolved from the pinned image, 2026-09-30), agent traffic uses the
+        # agent*.api5 names below, so it is not allowlisted.
         Endpoint("agent.api5.cursor.sh", 443, False),
         Endpoint("agentn.api5.cursor.sh", 443, False),
         Endpoint("agent.us.api5.cursor.sh", 443, False),

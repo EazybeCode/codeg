@@ -153,16 +153,19 @@ class DriverTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             early.submit_code("c")  # not reading a code yet
 
-    def test_cursor_prepared_only_after_challenge_and_exit_zero(self):
-        channel = FakeChannel([CURSOR_OUT])
-        driver = drivers.CursorLoginDriver(channel)
-        driver.start()
-        self.assertEqual(driver.poll().phase, "awaiting_user")
-        channel._rc = 0
-        self.assertEqual(driver.poll().phase, "prepared")
+    def test_cursor_prepared_only_with_challenge_exit_zero_and_record(self):
+        for present, rc, expected in ((True, 0, "prepared"), (False, 0, "failed"),
+                                      (True, 1, "failed")):
+            with self.subTest(present=present, rc=rc):
+                channel = FakeChannel([CURSOR_OUT])
+                driver = drivers.CursorLoginDriver(channel, lambda p=present: p)
+                driver.start()
+                self.assertEqual(driver.poll().phase, "awaiting_user")
+                channel._rc = rc
+                self.assertEqual(driver.poll().phase, expected)
         silent = FakeChannel()
         silent._rc = 0
-        quiet = drivers.CursorLoginDriver(silent)
+        quiet = drivers.CursorLoginDriver(silent, lambda: True)
         quiet.start()
         self.assertEqual(quiet.poll().failure, "provider_unavailable")
 
@@ -264,6 +267,16 @@ class CredentialRecordTests(unittest.TestCase):
                     {"openai": {"type": "oauth", "refresh": "", "access": "a"}}):
             with self.subTest(bad=bad):
                 self.assertFalse(self.present(rel, json.dumps(bad), main._opencode_record))
+
+    def test_cursor_record(self):
+        rel = main._CURSOR_CREDS
+        self.assertEqual(rel, (".config", "cursor", "auth.json"))
+        good = {"accessToken": "a", "refreshToken": "r", "apiKey": None}
+        self.assertTrue(self.present(rel, json.dumps(good), main._cursor_record))
+        for bad in ({}, {"accessToken": "a"}, {"accessToken": "", "refreshToken": "r"},
+                    {"apiKey": "k"}):
+            with self.subTest(bad=bad):
+                self.assertFalse(self.present(rel, json.dumps(bad), main._cursor_record))
 
     def test_symlinked_record_is_not_followed(self):
         with tempfile.TemporaryDirectory() as tmp:

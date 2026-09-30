@@ -117,6 +117,15 @@ class Channel(abc.ABC):
         classify a login failure into safe categories — never logged raw."""
         return b""
 
+    def read_browser_capture(self) -> Optional[str]:
+        """The URL the CLI handed to `$BROWSER` (neev_browser_capture), if any."""
+        return None
+
+    def deliver_loopback(self, target, query: str) -> int:
+        """ONE GET to the CLI's loopback listener inside this channel's sandbox
+        netns; the listener's HTTP status, or 0 when unreachable."""
+        return 0
+
 
 class SandboxChannel(Channel):  # pragma: no cover - Linux subprocess path
     """A Channel backed by a sandboxed provider process (`neev_agent_sandbox.launch`
@@ -193,15 +202,61 @@ class SandboxChannel(Channel):  # pragma: no cover - Linux subprocess path
             self._handle.teardown()
 
 
+def _callback_diag(provider: str, reason: str) -> None:
+    """A FIXED-vocabulary line (provider + CallbackRejected reason) so a provider
+    adding a redirect parameter (e.g. RFC 9207 `iss` -> reason=key) is visible
+    at once. Never includes any part of the query, code or state."""
+    try:
+        sys.stderr.write("NEEV-CALLBACK-DIAG provider=%s reason=%s\n" % (provider, reason))
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _deliver(driver, query: str) -> str:
+    """Shared direct-sign-in delivery: gate (state/shape/single use) FIRST, then
+    one loopback GET in the sandbox. A refused query never reaches the CLI."""
+    import neev_login_callback as callback
+
+    gate = driver._gate
+    if gate is None or driver._state != "awaiting_user":
+        return "rejected"
+    try:
+        canonical = gate.check(query)
+    except callback.CallbackRejected as refused:
+        _callback_diag(gate.target.provider, refused.reason)
+        return "rejected"
+    try:
+        status = driver._channel.deliver_loopback(gate.target, canonical)
+    except callback.CallbackRejected as refused:
+        _callback_diag(gate.target.provider, refused.reason)
+        return "unavailable"  # not this login's sandbox any more (I5)
+    if status:
+        # The listener answered: the code reached the CLI (or was refused by
+        # it). Either way this callback is spent.
+        gate.commit()
+    result = callback.outcome(status)
+    if result == "delivered":
+        driver._state = "verifying"
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # Codex device-flow driver
 # --------------------------------------------------------------------------- #
 
 
 class CodexLoginDriver(sup.LoginDriver):
-    def __init__(self, channel: Channel):
+    """`method="browser"` (direct sign-in, the default for new attempts) runs the
+    app-server `chatgpt` login: the CLI's own authorize URL whose redirect is its
+    127.0.0.1:1455 listener, fed by deliver_callback. `method="device"` is the
+    device-code fallback, unchanged."""
+
+    def __init__(self, channel: Channel, method: str = "device"):
         self._channel = channel
-        self._protocol = codex_proto.CodexLoginProtocol()
+        self._method = method
+        self._gate = None
+        self._protocol = codex_proto.CodexLoginProtocol(method)
         self._state = "starting"
         self._challenge = None
         self._account_label = None
@@ -238,6 +293,19 @@ class CodexLoginDriver(sup.LoginDriver):
             self._channel.write(event.outbound)
         if event.kind == "initialized":
             self._channel.write(self._protocol.start_login())
+        elif event.kind == "login_started" and isinstance(
+            event.login, codex_proto.BrowserLoginChallenge
+        ):
+            import neev_login_callback as callback
+
+            login = event.login
+            self._gate = callback.CallbackGate(callback.CallbackTarget(
+                "codex", login.callback_port, login.callback_path, login.state))
+            self._challenge = sup.Challenge(
+                login.verification_url, 0, kind="browser_callback",
+                callback_port=login.callback_port, callback_path=login.callback_path,
+            )
+            self._state = "awaiting_user"
         elif event.kind == "login_started":
             self._challenge = sup.Challenge(
                 event.login.verification_url, 0, user_code=event.login.user_code
@@ -254,6 +322,9 @@ class CodexLoginDriver(sup.LoginDriver):
                 self._state, self._failure = "failed", "unsupported_account"
         elif event.kind == "login_failed":
             self._state, self._failure = "failed", "reauth_required"
+
+    def deliver_callback(self, query: str) -> str:
+        return _deliver(self, query)
 
     def submit_code(self, code: str) -> None:
         raise RuntimeError("codex device login accepts no pasted code")
@@ -283,14 +354,19 @@ class CodexLoginDriver(sup.LoginDriver):
 
 
 class ClaudeLoginDriver(sup.LoginDriver):
-    def __init__(self, channel: Channel, credential_present):
+    def __init__(self, channel: Channel, credential_present, direct: bool = False):
         self._channel = channel
+        # Direct sign-in only when the coordinator asked for it (method=browser):
+        # the deployed coordinator cannot decode a browser_callback challenge.
+        self._direct = direct
         self._protocol = claude_proto.ClaudeLoginProtocol()
         self._credential_present = credential_present
         self._state = "starting"
         self._challenge = None
         self._failure = None
         self._submitted = False
+        self._printed_url = None
+        self._gate = None
 
     def start(self) -> None:
         self._channel.start()
@@ -311,6 +387,7 @@ class ClaudeLoginDriver(sup.LoginDriver):
                 self._state, self._failure = "failed", "provider_unavailable"
                 self._emit_failure_diagnostic(None)
                 return
+        self._upgrade_to_direct()
         returncode = self._channel.returncode()
         if self._state not in ("prepared", "failed") and returncode is not None:
             # The CLI exited: success iff a code was submitted, the CLI exited CLEANLY
@@ -343,14 +420,54 @@ class ClaudeLoginDriver(sup.LoginDriver):
         except Exception:
             pass  # diagnostics must never break the login state machine
 
+    def _upgrade_to_direct(self) -> None:
+        """Offer direct sign-in once the SAME login's loopback URL (handed to
+        `$BROWSER`, recorded by neev_browser_capture) is known. Only a URL whose
+        state matches the printed paste URL's is accepted — same login, same
+        PKCE (measured on 2.1.267). The paste URL stays as the fallback."""
+        if (not self._direct or self._gate is not None or self._printed_url is None
+                or self._submitted):
+            return
+        captured = self._channel.read_browser_capture()
+        if not captured:
+            return
+        import neev_login_callback as callback
+        from urllib.parse import parse_qsl, urlsplit
+
+        try:
+            target = callback.target_from_authorize_url("claude", captured)
+            printed_state = dict(parse_qsl(urlsplit(self._printed_url).query)).get("state", "")
+        except (callback.CallbackRejected, ValueError):
+            return
+        if not printed_state or printed_state != target.state:
+            return
+        self._gate = callback.CallbackGate(target)
+        self._challenge = sup.Challenge(
+            captured, 0, kind="browser_callback", callback_port=target.port,
+            callback_path=target.path, fallback_url=self._printed_url,
+        )
+
+    def deliver_callback(self, query: str) -> str:
+        if self._submitted:
+            return "rejected"  # the paste fallback already answered this login
+        result = _deliver(self, query)
+        if result == "delivered":
+            # Completion is judged exactly as for a pasted code: exit 0 AND the
+            # credential record (see _pump).
+            self._submitted = True
+        return result
+
     def _handle(self, event) -> None:
         if event.kind == "login_url":
+            self._printed_url = event.login.verification_url
             self._challenge = sup.Challenge(event.login.verification_url, 0, user_code=None)
             self._state = "awaiting_user"
         elif event.kind == "awaiting_code":
             self._state = "awaiting_user"
 
     def submit_code(self, code: str) -> None:
+        if self._gate is not None and self._gate.used:
+            raise RuntimeError("the browser callback already answered this login")
         self._channel.write(self._protocol.submit_code(code))
         self._submitted = True
         self._state = "verifying"
@@ -558,18 +675,19 @@ class OpenCodeLoginDriver(_CliLoginDriver):
 
 
 class CursorLoginDriver(_CliLoginDriver):
-    """`agent login` with NO_OPEN_BROWSER=1. The CLI's own exit status is the only
-    completion signal the docs give (no documented credential file), so prepared
-    requires a printed cursor.com challenge AND exit 0. UNVERIFIED on a pinned
-    binary — the provider stays gated until a real sign-in smoke passes."""
+    """`agent login` with NO_OPEN_BROWSER=1 and the file credential store. The
+    pinned CLI prints https://cursor.com/loginDeepControl?... over a plain pipe
+    (observed in the pinned image) and polls. Prepared requires the printed
+    challenge, exit 0, AND the auth.json record (shape-checked by the daemon) —
+    completion itself still needs a real sign-in to observe."""
 
-    def __init__(self, channel: Channel):
-        super().__init__(channel, _acp_proto().CursorLoginProtocol())
+    def __init__(self, channel: Channel, credential_present):
+        super().__init__(channel, _acp_proto().CursorLoginProtocol(), credential_present)
 
     def _check_progress(self, returncode) -> None:
         if returncode is None:
             return
-        if returncode == 0 and self._challenge is not None:
+        if returncode == 0 and self._challenge is not None and self._credential_present():
             self._account_label = "Cursor"
             self._state = "prepared"
         else:

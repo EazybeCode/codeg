@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted off-server Neev backup (after the 04:30 WorkOS window)
+
+[Timer]
+OnCalendar=*-*-* 05:10:00 UTC
+Persistent=true
+RandomizedDelaySec=900
+Unit=neev-backup.service
+
+[Install]
+WantedBy=timers.target

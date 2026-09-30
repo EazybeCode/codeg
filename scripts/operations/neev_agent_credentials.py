@@ -141,6 +141,11 @@ def provider_env(home: str, provider: str) -> Dict[str, str]:
     elif provider == "cursor":
         env["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
         env["NO_OPEN_BROWSER"] = "1"
+        # The pinned CLI (2026.09.28-64d2043, src/utils/credential-store.ts)
+        # reads AGENT_CLI_CREDENTIAL_STORE: "file" keeps the sign-in in
+        # $XDG_CONFIG_HOME/cursor/auth.json (0600) inside this per-user volume,
+        # never an OS keyring outside it.
+        env["AGENT_CLI_CREDENTIAL_STORE"] = "file"
     elif provider == "gemini":
         env["NO_BROWSER"] = "true"
         env["GEMINI_FORCE_FILE_STORAGE"] = "true"

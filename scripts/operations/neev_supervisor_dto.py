@@ -36,6 +36,17 @@ _AUTHORIZATION_CODE_URLS = (_CLAUDE_AUTHORIZE_URL, _GOOGLE_AUTHORIZE_URL)
 # the exact path is NOT verified against a pinned binary (no vendor checksum).
 _BROWSER_URLS = ("https://cursor.com/",)
 _MAX_URL_BYTES = 1024
+# Direct (browser) sign-in: the vendor CLI's OWN authorize URL whose redirect is
+# its loopback listener (direct-signin-contract.md). Pinned per provider.
+_CODEX_BROWSER_AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize?"
+_CLAUDE_BROWSER_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize?"
+_BROWSER_CALLBACK_URLS = (_CODEX_BROWSER_AUTHORIZE_URL, _CLAUDE_BROWSER_AUTHORIZE_URL)
+# The only loopback callback paths the pinned CLIs listen on (measured:
+# codex-cli 0.155.1 /auth/callback on :1455; claude 2.1.267 /callback on a
+# random port). Anything else is refused, never forwarded.
+CALLBACK_PATHS = ("/auth/callback", "/callback")
+_MAX_CALLBACK_QUERY_BYTES = 1024  # the strict parser caps every string at 1024
+_MAX_BROWSER_URL_BYTES = 1024
 _MAX_CODE_BYTES = 512
 
 
@@ -197,6 +208,9 @@ class Op(Enum):
     # Delivers the authorization code a Claude-style login asks the user to paste
     # back. Codex device logins never use it. (Seventh op; supersedes the freeze.)
     SUBMIT_CODE = "submit_code"
+    # Delivers the provider's redirect query (code/state) captured from the
+    # user's browser to the CLI's own loopback listener (direct sign-in).
+    DELIVER_CALLBACK = "deliver_callback"
 
 
 class Outcome(Enum):
@@ -211,6 +225,9 @@ class ErrorCode(Enum):
     EXPIRED = "expired"
     BUSY = "busy"
     UNAVAILABLE = "unavailable"
+    # A delivered callback did not match this attempt (state/shape). The attempt
+    # is left alive and the CLI is never touched.
+    REJECTED = "rejected"
 
 
 class WitnessKind(Enum):
@@ -511,7 +528,60 @@ class BrowserChallenge(_SafeRepr):
         _exact(self.expires_at, UnixSec)
 
 
-_CHALLENGES = (DeviceChallenge, AuthorizationCodeChallenge, BrowserChallenge)
+@dataclass(frozen=True, repr=False)
+class BrowserCallbackChallenge(_SafeRepr):
+    """Claude / Codex direct sign-in: open `verification_url`; the provider
+    redirects the browser to the CLI's loopback `callback_port`/`callback_path`,
+    which Neev relays with DELIVER_CALLBACK. `fallback_url` (Claude) is the same
+    login's paste-code URL, still accepted through SUBMIT_CODE."""
+
+    verification_url: str
+    callback_port: int
+    callback_path: str
+    fallback_url: object
+    expires_at: UnixSec
+
+    def __post_init__(self):
+        for url in (self.verification_url,) + (
+            (self.fallback_url,) if self.fallback_url is not None else ()
+        ):
+            if (
+                type(url) is not str
+                or len(url) > _MAX_BROWSER_URL_BYTES
+                or not url.startswith(_BROWSER_CALLBACK_URLS)
+                or any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in url)
+            ):
+                raise DtoError("invalid")
+        if (
+            type(self.callback_port) is not int
+            or isinstance(self.callback_port, bool)
+            or not 1024 <= self.callback_port <= 65535
+        ):
+            raise DtoError("invalid")
+        if self.callback_path not in CALLBACK_PATHS:
+            raise DtoError("invalid")
+        _exact(self.expires_at, UnixSec)
+
+
+@dataclass(frozen=True, repr=False)
+class CallbackQuery(_SafeRepr):
+    """The raw query string of the provider's loopback redirect. A short-lived
+    secret (it carries the authorization code): never logged or reflected.
+    Shape only here; the supervisor parses and binds it to the attempt."""
+
+    value: str
+
+    def __post_init__(self):
+        if (
+            type(self.value) is not str
+            or not 1 <= len(self.value.encode("utf-8", "surrogatepass")) <= _MAX_CALLBACK_QUERY_BYTES
+            or any(ord(ch) < 0x21 or ord(ch) >= 0x7F for ch in self.value)
+        ):
+            raise DtoError("invalid")
+
+
+_CHALLENGES = (DeviceChallenge, AuthorizationCodeChallenge, BrowserChallenge,
+               BrowserCallbackChallenge)
 
 
 @dataclass(frozen=True, repr=False)
@@ -606,12 +676,23 @@ class UnsupportedAccount(AccountStatus):
     pass
 
 
+LOGIN_METHODS = ("browser", "device")
+
+
 @dataclass(frozen=True, repr=False)
 class StartLoginRequest(_SafeRepr):
     ticket: LoginTicketDto
+    # None (ABSENT on the wire) = today's behaviour: Codex device code, Claude
+    # paste-code — what the currently deployed coordinator expects, since it
+    # cannot decode a browser_callback challenge. "browser" = direct sign-in;
+    # "device" = Codex device code, chosen explicitly. Carried beside the
+    # ticket, not inside it, so ticket replay comparison is unchanged.
+    method: object = None
 
     def __post_init__(self):
         _exact(self.ticket, LoginTicketDto)
+        if self.method is not None and self.method not in LOGIN_METHODS:
+            raise DtoError("invalid")
 
 
 @dataclass(frozen=True, repr=False)
@@ -659,6 +740,16 @@ class SubmitCodeRequest(_SafeRepr):
 
 
 @dataclass(frozen=True, repr=False)
+class DeliverCallbackRequest(_SafeRepr):
+    binding: LoginBinding
+    query: CallbackQuery
+
+    def __post_init__(self):
+        _exact(self.binding, LoginBinding)
+        _exact(self.query, CallbackQuery)
+
+
+@dataclass(frozen=True, repr=False)
 class ReconcilePageRequest(_SafeRepr):
     snapshot_revision: object
     after_entry_id: object
@@ -682,6 +773,7 @@ _REQUEST_OPS = {
     CleanupConnectionRequest: Op.CLEANUP_CONNECTION,
     ReconcilePageRequest: Op.RECONCILE_PAGE,
     SubmitCodeRequest: Op.SUBMIT_CODE,
+    DeliverCallbackRequest: Op.DELIVER_CALLBACK,
 }
 
 
@@ -879,7 +971,7 @@ class AppError(_SafeRepr):
 # advances the same login state machine), matching control_dto.rs's
 # `Op::ObserveLogin | Op::SubmitCode => schema_login_snapshot`. Every other body
 # type answers exactly one op.
-_LOGIN_SNAPSHOT_OPS = frozenset((Op.OBSERVE_LOGIN, Op.SUBMIT_CODE))
+_LOGIN_SNAPSHOT_OPS = frozenset((Op.OBSERVE_LOGIN, Op.SUBMIT_CODE, Op.DELIVER_CALLBACK))
 _SUCCESS_OPS = {
     StartLoginResult: frozenset((Op.START_LOGIN,)),
     LoginProgress: _LOGIN_SNAPSHOT_OPS,
@@ -1170,6 +1262,9 @@ def _cleanup_ticket(value):
 
 def _request_body(op, value):
     if op is Op.START_LOGIN:
+        if type(value) is dict and "method" in value:
+            _keys(value, ("ticket", "method"))
+            return StartLoginRequest(_login_ticket(value["ticket"]), value["method"])
         _keys(value, ("ticket",))
         return StartLoginRequest(_login_ticket(value["ticket"]))
     if op is Op.OBSERVE_LOGIN:
@@ -1184,6 +1279,11 @@ def _request_body(op, value):
     if op is Op.CLEANUP_CONNECTION:
         _keys(value, ("ticket",))
         return CleanupConnectionRequest(_cleanup_ticket(value["ticket"]))
+    if op is Op.DELIVER_CALLBACK:
+        _keys(value, ("binding", "query"))
+        return DeliverCallbackRequest(
+            _login_binding(value["binding"]), CallbackQuery(value["query"])
+        )
     if op is Op.SUBMIT_CODE:
         _keys(value, ("binding", "code"))
         return SubmitCodeRequest(
@@ -1241,13 +1341,16 @@ def _encode_connection_binding(value):
 def _encode_request_body(body):
     if type(body) is StartLoginRequest:
         ticket = body.ticket
-        return {
+        encoded = {
             "ticket": {
                 "binding": _encode_login_binding(ticket.binding),
                 "lease_owner": ticket.lease_owner.value,
                 "expires_at": ticket.expires_at.value,
             }
         }
+        if body.method is not None:
+            encoded["method"] = body.method
+        return encoded
     if type(body) is ObserveLoginRequest:
         return {"binding": _encode_login_binding(body.binding)}
     if type(body) is SettleLoginRequest:
@@ -1288,6 +1391,11 @@ def _encode_request_body(body):
                 "lease_owner": ticket.lease_owner.value,
                 "lease_expires_at": ticket.lease_expires_at.value,
             }
+        }
+    if type(body) is DeliverCallbackRequest:
+        return {
+            "binding": _encode_login_binding(body.binding),
+            "query": body.query.value,
         }
     if type(body) is SubmitCodeRequest:
         return {
@@ -1369,6 +1477,13 @@ def _login_challenge(value):
         return AuthorizationCodeChallenge(
             value["verification_url"], UnixSec(value["expires_at"])
         )
+    if kind == "browser_callback":
+        _keys(value, ("kind", "verification_url", "callback_port", "callback_path",
+                      "fallback_url", "expires_at"))
+        return BrowserCallbackChallenge(
+            value["verification_url"], value["callback_port"], value["callback_path"],
+            value["fallback_url"], UnixSec(value["expires_at"]),
+        )
     if kind == "browser":
         _keys(value, ("kind", "verification_url", "expires_at"))
         return BrowserChallenge(value["verification_url"], UnixSec(value["expires_at"]))
@@ -1449,7 +1564,7 @@ def _success_body(op, value):
             _enum(Disposition, value["disposition"]),
             RetryMs(value["poll_after_ms"]),
         )
-    if op in (Op.OBSERVE_LOGIN, Op.SUBMIT_CODE):
+    if op in (Op.OBSERVE_LOGIN, Op.SUBMIT_CODE, Op.DELIVER_CALLBACK):
         return _login_snapshot(value)
     if op is Op.SETTLE_LOGIN:
         _keys(value, ("state", "receipt_id", "storage_handle"))
@@ -1554,6 +1669,15 @@ def _encode_login_challenge(challenge):
             "kind": "device",
             "verification_url": challenge.verification_url,
             "user_code": challenge.user_code.value,
+            "expires_at": challenge.expires_at.value,
+        }
+    if type(challenge) is BrowserCallbackChallenge:
+        return {
+            "kind": "browser_callback",
+            "verification_url": challenge.verification_url,
+            "callback_port": challenge.callback_port,
+            "callback_path": challenge.callback_path,
+            "fallback_url": challenge.fallback_url,
             "expires_at": challenge.expires_at.value,
         }
     if type(challenge) is BrowserChallenge:

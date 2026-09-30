@@ -44,12 +44,20 @@ pub(crate) enum SupervisorError {
     Invalid,
     /// The login this effect names is not known to the supervisor.
     NotFound,
+    /// A relayed direct-sign-in callback did not match its attempt (state or
+    /// shape). The attempt is still alive; the CLI was never touched.
+    Rejected,
+    /// The attempt is not in a state that accepts this (e.g. not awaiting a
+    /// browser callback, or already answered).
+    Conflict,
 }
 
 impl From<SupervisorError> for AgentError {
     fn from(value: SupervisorError) -> Self {
         match value {
             SupervisorError::NotFound => Self::NotFound,
+            SupervisorError::Rejected => Self::InvalidInput,
+            SupervisorError::Conflict => Self::Conflict,
             SupervisorError::Invalid | SupervisorError::Unavailable => Self::Unavailable,
         }
     }
@@ -202,6 +210,61 @@ pub(crate) struct LoginSession {
     /// Bounded so a pasted-code field cannot be used to grind against the
     /// provider.
     pub(crate) code_attempts: u8,
+    /// Direct sign-in: the `requestKey` of the ONE browser callback delivered
+    /// (or being delivered) for this attempt. The same key replays; any other
+    /// key is a conflict the client resolves by re-reading the attempt.
+    pub(crate) callback_key: Option<String>,
+}
+
+/// What `reserve_callback` decided for one `/callback` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CallbackReservation {
+    /// No callback yet: this key now holds the attempt's single delivery.
+    Fresh,
+    /// This exact key already delivered (or is delivering): replay, send nothing.
+    Replay,
+    /// A different key holds it: 409, the client re-reads the attempt.
+    Conflict,
+    /// Not this caller's live login.
+    Missing,
+}
+
+/// Reserve the attempt's single callback delivery for `key`, atomically, scoped
+/// to the caller's own `(org, user)` and provider (review B2).
+pub(crate) fn reserve_callback(
+    registry: &LoginRegistry,
+    attempt_id: &str,
+    org_id: i32,
+    user_id: i32,
+    provider: Provider,
+    key: &str,
+) -> CallbackReservation {
+    let mut guard = lock(registry);
+    let Some(session) = guard.get_mut(attempt_id) else {
+        return CallbackReservation::Missing;
+    };
+    if session.org_id != org_id || session.user_id != user_id || session.provider != provider {
+        return CallbackReservation::Missing;
+    }
+    match session.callback_key.as_deref() {
+        Some(held) if held == key => CallbackReservation::Replay,
+        Some(_) => CallbackReservation::Conflict,
+        None => {
+            session.callback_key = Some(key.to_owned());
+            CallbackReservation::Fresh
+        }
+    }
+}
+
+/// Give the reservation back after a delivery that did not reach the CLI or
+/// was refused, so the user can retry (same or new key) or use the fallback.
+pub(crate) fn release_callback(registry: &LoginRegistry, attempt_id: &str, key: &str) {
+    let mut guard = lock(registry);
+    if let Some(session) = guard.get_mut(attempt_id) {
+        if session.callback_key.as_deref() == Some(key) {
+            session.callback_key = None;
+        }
+    }
 }
 
 /// Authorization codes accepted per attempt before it must be restarted.
@@ -315,9 +378,9 @@ fn request_of(body: RequestBody) -> Result<Request, SupervisorError> {
 
 fn snapshot_of(response: super::control_dto::Response) -> Result<LoginSnapshot, SupervisorError> {
     match response.body {
-        Some(ResultBody::ObserveLogin(snapshot)) | Some(ResultBody::SubmitCode(snapshot)) => {
-            Ok(snapshot)
-        }
+        Some(ResultBody::ObserveLogin(snapshot))
+        | Some(ResultBody::SubmitCode(snapshot))
+        | Some(ResultBody::DeliverCallback(snapshot)) => Ok(snapshot),
         _ => Err(SupervisorError::Invalid),
     }
 }
@@ -332,9 +395,11 @@ pub(crate) async fn start_login(
     state: &ServerState,
     actor: &crate::neev::types::OrgContext,
     ticket: &LoginTicket,
+    method: Option<super::control_dto::LoginMethod>,
 ) -> Result<(), SupervisorError> {
     let binding = binding_of(ticket)?;
     let request = request_of(RequestBody::StartLogin(StartLoginBody {
+        method,
         ticket: LoginTicketDto {
             binding: binding.clone(),
             lease_owner: id(&ticket.lease_owner)?,
@@ -358,6 +423,7 @@ pub(crate) async fn start_login(
             approval: None,
             actor: actor.clone(),
             code_attempts: 0,
+            callback_key: None,
         },
     );
     Ok(())
@@ -472,6 +538,35 @@ pub(crate) async fn submit_code(
         code,
     }))?;
     let snapshot = snapshot_of(state.supervisor.exchange(request).await?)?;
+    record_challenge(state, session, &snapshot);
+    Ok(snapshot)
+}
+
+/// Relay the provider redirect's query from the user's browser to THIS login's
+/// CLI loopback listener (direct-signin-contract.md). The supervisor binds it
+/// to the attempt's state and delivers it once; a mismatch is `Rejected` and
+/// leaves the attempt alive for a retry or the fallback.
+pub(crate) async fn deliver_callback(
+    state: &ServerState,
+    session: &LoginSession,
+    query: super::control_dto::CallbackQuery,
+) -> Result<LoginSnapshot, SupervisorError> {
+    let request = request_of(RequestBody::DeliverCallback(
+        super::control_dto::DeliverCallbackBody {
+            binding: session.binding.clone(),
+            query,
+        },
+    ))?;
+    let response = state.supervisor.exchange(request).await?;
+    if let Some(error) = response.error.as_ref() {
+        return Err(match error.code {
+            super::control_dto::ErrorCode::Rejected => SupervisorError::Rejected,
+            super::control_dto::ErrorCode::Conflict => SupervisorError::Conflict,
+            super::control_dto::ErrorCode::NotFound => SupervisorError::NotFound,
+            _ => SupervisorError::Unavailable,
+        });
+    }
+    let snapshot = snapshot_of(response)?;
     record_challenge(state, session, &snapshot);
     Ok(snapshot)
 }

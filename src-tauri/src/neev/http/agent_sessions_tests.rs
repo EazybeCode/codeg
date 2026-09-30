@@ -2162,3 +2162,184 @@ async fn a_retry_refuses_rather_than_silently_dropping_follow_ups_it_cannot_read
         .clone();
     assert_eq!(turns.len(), 1, "{turns:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Direct sign-in `/callback` (direct-signin-review.md B2/I4): ownership, CSRF,
+// idempotent replay, conflict and release, against the real routes with a
+// scripted supervisor that records every exchange.
+// ---------------------------------------------------------------------------
+
+mod direct_signin {
+    use super::*;
+    use crate::neev::agents::control_dto as dto;
+    use crate::neev::agents::supervisor::{ScriptedSupervisor, Supervisor, SupervisorError};
+
+    const STATE: &str = "Qx7bW2mZ0kP9sR4tV1yU8nA3cF6hJ5dL2gE0iO7uK4w";
+
+    fn response(op: dto::Op, body: Option<dto::ResultBody>, error: Option<dto::ErrorCode>) -> dto::Response {
+        dto::Response {
+            coordinator: dto::Coordinator::new(
+                dto::Counter::new("1".into()).unwrap(),
+                dto::Id::new("1".repeat(32)).unwrap(),
+            ),
+            supervisor_boot_id: dto::Id::new("3".repeat(32)).unwrap(),
+            sequence: dto::Counter::new("1".into()).unwrap(),
+            request_id: dto::Id::new("5".repeat(32)).unwrap(),
+            operation: op,
+            outcome: if error.is_some() { dto::Outcome::Error } else { dto::Outcome::Ok },
+            body,
+            error: error.map(|code| dto::AppError { code, retry_after_ms: None }),
+        }
+    }
+
+    fn started() -> Result<dto::Response, SupervisorError> {
+        Ok(response(
+            dto::Op::StartLogin,
+            Some(dto::ResultBody::StartLogin(dto::StartLoginResult {
+                disposition: dto::Disposition::Accepted,
+                poll_after_ms: dto::RetryMs::new(500).unwrap(),
+            })),
+            None,
+        ))
+    }
+
+    fn delivered() -> Result<dto::Response, SupervisorError> {
+        Ok(response(
+            dto::Op::DeliverCallback,
+            Some(dto::ResultBody::DeliverCallback(dto::LoginSnapshot::Verifying {
+                expires_at: dto::UnixSec::new(NOW + 600).unwrap(),
+                poll_after_ms: dto::RetryMs::new(500).unwrap(),
+            })),
+            None,
+        ))
+    }
+
+    fn rejected() -> Result<dto::Response, SupervisorError> {
+        Ok(response(dto::Op::DeliverCallback, None, Some(dto::ErrorCode::Rejected)))
+    }
+
+    async fn scripted(
+        answers: Vec<Result<dto::Response, SupervisorError>>,
+    ) -> (Arc<ServerState>, Client, sea_orm::DatabaseConnection, i32) {
+        let database = h::database().await;
+        let user = h::native_account(&database, "owner", "owner@example.test").await;
+        let (org, _) = h::organization(&database, user, "admin").await;
+        let mut server_state = ServerState::new(
+            database.clone(),
+            h::preview_config(),
+            Arc::new(h::TestClock::new(NOW)),
+        )
+        .unwrap();
+        server_state.set_agent_runtime(fake(&["x"]));
+        server_state.supervisor = Arc::new(Supervisor::Scripted(ScriptedSupervisor::new(answers)));
+        let state = Arc::new(server_state);
+        let client = sign_in(&state, &database, user).await;
+        (state, client, database, org)
+    }
+
+    /// The ops the supervisor was asked for, by wire name (the wire enums
+    /// deliberately have no `Debug`).
+    fn exchanges(state: &ServerState) -> Vec<&'static str> {
+        let Supervisor::Scripted(scripted) = state.supervisor.as_ref() else {
+            panic!("scripted supervisor expected");
+        };
+        scripted.requests().iter().map(|request| request.op().as_str()).collect()
+    }
+
+    async fn connect(client: &Client) -> String {
+        let started = client
+            .post("/api/neev/agent/connections/codex/connect")
+            .json(&serde_json::json!({ "requestKey": "direct-connect", "method": "browser" }))
+            .await;
+        started.assert_status(axum::http::StatusCode::ACCEPTED);
+        started.json::<Value>()["attemptId"].as_str().unwrap().to_owned()
+    }
+
+    fn body(key: &str) -> Value {
+        serde_json::json!({ "requestKey": key, "query": format!("code=ac_1&state={STATE}") })
+    }
+
+    #[tokio::test]
+    async fn the_owner_delivers_once_and_a_replay_sends_nothing() {
+        let (state, client, _db, _org) = scripted(vec![started(), delivered()]).await;
+        let attempt = connect(&client).await;
+        let url = format!("/api/neev/agent/connections/codex/attempts/{attempt}/callback");
+        client.post(&url).json(&body("key-aaaa-1")).await.assert_status(axum::http::StatusCode::ACCEPTED);
+        // Same key (network retry, or the page reloaded): same answer, and the
+        // supervisor is NOT asked again.
+        client.post(&url).json(&body("key-aaaa-1")).await.assert_status(axum::http::StatusCode::ACCEPTED);
+        // Another key (extension + paste race): 409, client re-reads.
+        client.post(&url).json(&body("key-bbbb-2")).await.assert_status(axum::http::StatusCode::CONFLICT);
+        assert_eq!(exchanges(&state), vec!["start_login", "deliver_callback"]);
+        // The start asked for direct sign-in explicitly.
+        let Supervisor::Scripted(scripted) = state.supervisor.as_ref() else { unreachable!() };
+        match &scripted.requests()[0].body {
+            dto::RequestBody::StartLogin(start) => {
+                assert!(start.method == Some(dto::LoginMethod::Browser))
+            }
+            _ => panic!("first exchange is not a start"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_callback_is_400_and_releases_the_attempt_for_a_retry() {
+        let (state, client, _db, _org) = scripted(vec![started(), rejected(), delivered()]).await;
+        let attempt = connect(&client).await;
+        let url = format!("/api/neev/agent/connections/codex/attempts/{attempt}/callback");
+        client.post(&url).json(&body("key-aaaa-1")).await.assert_status_bad_request();
+        // Not burned: the same key (or a paste) can try again.
+        client.post(&url).json(&body("key-aaaa-1")).await.assert_status(axum::http::StatusCode::ACCEPTED);
+        assert_eq!(
+            exchanges(&state),
+            vec!["start_login", "deliver_callback", "deliver_callback"]
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_on_the_right_provider_with_csrf_reaches_the_supervisor() {
+        let (state, client, database, org) = scripted(vec![started()]).await;
+        let attempt = connect(&client).await;
+        let url = format!("/api/neev/agent/connections/codex/attempts/{attempt}/callback");
+        // Another member of the same org.
+        let peer_user = h::native_account(&database, "peer", "peer@example.test").await;
+        h::add_membership(&database, org, peer_user, "member").await;
+        let peer = sign_in(&state, &database, peer_user).await;
+        peer.post(&url).json(&body("key-peer-01")).await.assert_status_not_found();
+        // The owner, but through the other provider's path.
+        client
+            .post(&format!("/api/neev/agent/connections/claude/attempts/{attempt}/callback"))
+            .json(&body("key-aaaa-1"))
+            .await
+            .assert_status_not_found();
+        // No CSRF header.
+        let no_csrf = client
+            .server
+            .post(&url)
+            .add_header(header::ORIGIN, ORIGIN)
+            .add_header(header::COOKIE, client.cookies.clone())
+            .json(&body("key-aaaa-1"))
+            .await;
+        assert!(no_csrf.status_code().is_client_error());
+        // A foreign origin.
+        let foreign = client
+            .server
+            .post(&url)
+            .add_header(header::ORIGIN, "https://evil.example")
+            .add_header(header::COOKIE, client.cookies.clone())
+            .add_header("x-neev-csrf", client.csrf.clone())
+            .json(&body("key-aaaa-1"))
+            .await;
+        assert!(foreign.status_code().is_client_error());
+        // Malformed key, oversized body, non-ASCII query.
+        client.post(&url).json(&body("short")).await.assert_status_bad_request();
+        let huge = serde_json::json!({ "requestKey": "key-aaaa-1", "query": "x".repeat(9000) });
+        assert!(client.post(&url).json(&huge).await.status_code().is_client_error());
+        client
+            .post(&url)
+            .json(&serde_json::json!({ "requestKey": "key-aaaa-1", "query": "code=\u{e9}" }))
+            .await
+            .assert_status_bad_request();
+        // None of it reached the supervisor.
+        assert_eq!(exchanges(&state), vec!["start_login"]);
+    }
+}

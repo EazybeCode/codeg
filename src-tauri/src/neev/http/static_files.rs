@@ -91,6 +91,7 @@ pub(super) async fn page(
         "/onboarding" => ("onboarding.html", false),
         "/workspace" => ("workspace.html", false),
         "/settings" => ("settings.html", false),
+        "/agents/signin" => ("agents/signin.html", false),
         "/auth/email/confirm" => ("neev-auth/confirm.html", true),
         "/auth/invite" => ("neev-auth/invite.html", true),
         _ => return Err(ApiError::NotFound),
@@ -222,6 +223,23 @@ fn navigation_payload(file: &str) -> bool {
     ) {
         return true;
     }
+    // The one nested exported page (`/agents/signin`): its flight payload and
+    // its own segment files, by exact name. Nothing else under `agents/`.
+    if file == "agents/signin.txt" {
+        return true;
+    }
+    if let Some(segment) = file.strip_prefix("agents/signin/") {
+        return matches!(
+            segment,
+            "__next._tree.txt"
+                | "__next._head.txt"
+                | "__next._full.txt"
+                | "__next._index.txt"
+                | "__next.agents.txt"
+                | "__next.agents.signin.txt"
+                | "__next.agents.signin.__PAGE__.txt"
+        );
+    }
     let (page, segment) = file.split_once('/').unwrap_or(("", file));
     if !matches!(page, "" | "login" | "onboarding" | "workspace" | "settings") {
         return false;
@@ -259,5 +277,46 @@ mod attachment_preview_asset_tests {
         );
         assert!(super::exported_asset("/uploads/file.mjs").is_none());
         assert!(super::exported_asset("/_next/static/../secret.mjs").is_none());
+    }
+}
+
+#[cfg(test)]
+mod signin_page_asset_tests {
+    const FLIGHT: &str = "text/x-component; charset=utf-8";
+
+    #[test]
+    fn only_the_signin_pages_own_flight_files_are_served() {
+        for path in [
+            "/agents/signin.txt",
+            "/agents/signin/__next._tree.txt",
+            "/agents/signin/__next._head.txt",
+            "/agents/signin/__next._full.txt",
+            "/agents/signin/__next._index.txt",
+            "/agents/signin/__next.agents.txt",
+            "/agents/signin/__next.agents.signin.txt",
+            "/agents/signin/__next.agents.signin.__PAGE__.txt",
+        ] {
+            assert_eq!(
+                super::exported_asset(path),
+                Some((&path[1..], FLIGHT)),
+                "{path}"
+            );
+        }
+        for path in [
+            // The page itself is served only by `page`, with the app CSP.
+            "/agents/signin.html",
+            "/agents/signin",
+            "/agents.txt",
+            "/agents/other.txt",
+            "/agents/signin/other.txt",
+            "/agents/signin/__next.agents.other.__PAGE__.txt",
+            "/agents/signin/nested/__next._tree.txt",
+            "/agents/signin/../signin.txt",
+            "/agents/signin/./__next._tree.txt",
+            "/agents//signin.txt",
+            "/agents/signin/%2e%2e/secret.txt",
+        ] {
+            assert!(super::exported_asset(path).is_none(), "{path}");
+        }
     }
 }

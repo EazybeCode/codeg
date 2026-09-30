@@ -1,0 +1,20 @@
+{
+  "repository": "sftp:workos-storage:neev-backups",
+  "password_file": "/etc/workos-backup/repository-password",
+  "ssh_config": "/etc/workos-backup/ssh_config",
+  "ssh_host": "workos-storage",
+  "forbidden_repositories": ["sftp:workos-storage:workos-restic"],
+  "cache_dir": "/var/cache/neev-backup",
+  "state_dir": "/var/lib/neev-backup",
+  "staging_dir": "/var/lib/neev-content-backups",
+  "runner": "/opt/neev-content-backup/neev-content-backup-run.sh",
+  "node": "/opt/neev-content-backup/node/bin/node",
+  "backup_script": "/opt/neev-content-backup/neev-content-backup.mjs",
+  "app_container": "neev-native-https-20260913-neev-1",
+  "source": "/var/lib/neev-native/documents",
+  "broker_socket": "/run/neev-originals/broker.sock",
+  "host": "neev-native",
+  "min_free_bytes": 5368709120,
+  "keep_local_verified": 1,
+  "keep": {"daily": 7, "weekly": 4, "monthly": 3}
+}

@@ -8,6 +8,7 @@
 
 import { Controller } from "./lib/controller.js"
 import { makePanelSlot } from "./lib/connection.js"
+import { ALARM_PREFIX, SIGNIN_ORIGIN, SigninRelay } from "./lib/signin.js"
 
 const panel = makePanelSlot()
 
@@ -123,3 +124,78 @@ if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
     .setPanelBehavior({ openPanelOnActionClick: true })
     .catch(() => {})
 }
+
+// Direct sign-in relay (lib/signin.js, direct-signin-ui-contract-v2.md).
+//
+// Two ways in, the same checks: the app.neev.so page bridge (content script,
+// any extension id) and the legacy `externally_connectable` channel. The
+// origin always comes from Chrome's `sender`, never from the message.
+const REGISTRY_KEY = "neevSigninRules"
+const signin = new SigninRelay({
+  now: () => Date.now(),
+  async loadRegistry() {
+    const stored = await chrome.storage.session.get(REGISTRY_KEY)
+    return Array.isArray(stored[REGISTRY_KEY]) ? stored[REGISTRY_KEY] : []
+  },
+  async saveRegistry(entries) {
+    await chrome.storage.session.set({ [REGISTRY_KEY]: entries })
+  },
+  async updateRules({ add, remove }) {
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: remove,
+      addRules: add,
+    })
+  },
+  async schedule(attemptId, whenMs) {
+    chrome.alarms.create(ALARM_PREFIX + attemptId, { when: whenMs })
+  },
+  async unschedule(attemptId) {
+    await chrome.alarms.clear(ALARM_PREFIX + attemptId)
+  },
+  async openTab(url) {
+    const tab = await chrome.tabs.create({ url, active: true })
+    return !!tab
+  },
+})
+
+function senderOrigin(sender) {
+  if (sender && typeof sender.origin === "string") return sender.origin
+  try {
+    return sender && sender.url ? new URL(sender.url).origin : ""
+  } catch {
+    return ""
+  }
+}
+
+function answer(promise, reply) {
+  promise.then(reply, () => reply({ ok: false, error: "internal" }))
+  return true
+}
+
+// Page bridge: only our own content script, only from a tab on SIGNIN_ORIGIN.
+chrome.runtime.onMessage.addListener((envelope, sender, reply) => {
+  if (!envelope || envelope.neevSigninBridge !== true) return false
+  if (sender.id !== chrome.runtime.id || !sender.tab) return false
+  const context = {
+    origin: senderOrigin(sender),
+    fromTab: true,
+    bridge: true,
+  }
+  if (context.origin !== SIGNIN_ORIGIN) return false
+  return answer(signin.handle(envelope.message, context), reply)
+})
+
+// Legacy: chrome.runtime.sendMessage(<extension id>, …) from app.neev.so.
+chrome.runtime.onMessageExternal.addListener((message, sender, reply) => {
+  const context = { origin: senderOrigin(sender), fromTab: !!sender.tab, bridge: false }
+  return answer(signin.handle(message, context), reply)
+})
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith(ALARM_PREFIX)) {
+    signin.disarm(alarm.name.slice(ALARM_PREFIX.length)).catch(() => {})
+  }
+})
+
+// A restarted worker reconciles: expired attempts lose their rules.
+signin.prune().catch(() => {})

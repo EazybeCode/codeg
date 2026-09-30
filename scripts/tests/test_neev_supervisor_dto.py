@@ -101,6 +101,7 @@ class SupervisorDtoTests(unittest.TestCase):
                 "cleanup_connection",
                 "reconcile_page",
                 "submit_code",
+                "deliver_callback",
             },
         )
         required_names = {

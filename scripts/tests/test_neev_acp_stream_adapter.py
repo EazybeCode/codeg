@@ -468,3 +468,54 @@ class AcpProviderBehaviourTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+STUBBORN_AGENT = r'''#!{python}
+# Cursor-shaped: answers the handshake, refuses the session (-32000), then does
+# NOT exit on stdin EOF, and leaves a grandchild holding stdout open.
+import json, subprocess, sys, time
+subprocess.Popen(["sleep", "60"], stdout=sys.stdout, stderr=subprocess.DEVNULL)  # holds the pipe
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("method") == "initialize":
+        out = {{"jsonrpc": "2.0", "id": msg["id"], "result": {{"protocolVersion": 1,
+               "agentCapabilities": {{}}, "authMethods": [{{"id": "cursor_login"}}]}}}}
+    elif msg.get("method") == "session/new":
+        out = {{"jsonrpc": "2.0", "id": msg["id"], "error": {{"code": -32000,
+               "message": "Authentication required"}}}}
+    else:
+        continue
+    sys.stdout.write(json.dumps(out) + "\n"); sys.stdout.flush()
+time.sleep(60)
+'''
+
+
+class ShutdownTests(unittest.TestCase):
+    def test_a_probe_exits_even_when_the_agent_and_a_grandchild_keep_stdout(self):
+        tmp = tempfile.mkdtemp()
+        agent = os.path.join(tmp, "agent")
+        with open(agent, "w") as handle:
+            handle.write(STUBBORN_AGENT.format(python=sys.executable))
+        os.chmod(agent, stat.S_IRWXU)
+        home = os.path.join(tmp, "home")
+        os.mkdir(home)
+        started = time.monotonic()
+        out_path = os.path.join(tmp, "out")
+        with open(out_path, "w") as out, open(os.devnull, "w") as err:
+            proc = subprocess.Popen(
+                [sys.executable, ADAPTER, "--provider", "cursor", "--agent", agent,
+                 "--allowed-agent", agent, "--cwd", tmp, "--probe"],
+                stdout=out, stderr=err, env={"PATH": "/usr/bin:/bin", "HOME": home})
+            try:
+                code = proc.wait(timeout=40)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self.fail("adapter never exited")
+        elapsed = time.monotonic() - started
+        with open(out_path) as handle:
+            self.assertEqual(handle.read().strip(),
+                             '{"type": "neev.account", "status": "disconnected"}')
+        self.assertEqual(code, 0)
+        # Observed on the pinned image before the fix: verdict printed, then a
+        # hang until killed from outside.
+        self.assertLess(elapsed, adapter.CANCEL_GRACE_SECS + 8)

@@ -717,6 +717,110 @@ async fn native_static_export_assets_navigation_and_exact_inline_hashes() {
     assert_eq!(fragment.header("content-security-policy"), "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'");
 }
 
+/// Direct sign-in: the extension redirects the provider's loopback callback to
+/// `/agents/signin#…`. The exported page must be served (it was a 404), with
+/// the same exact-hash app CSP as every other exported page, and only its own
+/// flight files beside it.
+#[tokio::test]
+async fn direct_signin_return_page_is_served_with_the_app_csp() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(directory.path().join("agents/signin")).unwrap();
+    let html = "<html><script src=\"/_next/static/chunks/app.js\"></script><script> window.fixture = 1;\n</script></html>";
+    for (path, bytes) in [
+        ("agents/signin.html", html),
+        ("agents/signin.txt", "signin-flight"),
+        ("agents/signin/__next._tree.txt", "signin-tree"),
+        (
+            "agents/signin/__next.agents.signin.__PAGE__.txt",
+            "signin-segment",
+        ),
+        ("agents/other.html", "not-exported-route"),
+        ("agents/signin/secret.txt", "not-a-segment"),
+    ] {
+        std::fs::write(directory.path().join(path), bytes).unwrap();
+    }
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "outside-root").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        outside.path().join("secret.txt"),
+        directory.path().join("agents/signin/__next._full.txt"),
+    )
+    .unwrap();
+    let mut config = h::preview_config();
+    config.static_root = directory.path().to_owned();
+    let state = std::sync::Arc::new(
+        crate::neev::startup::ServerState::new(
+            h::database().await,
+            config,
+            std::sync::Arc::new(h::TestClock::new(1000)),
+        )
+        .unwrap(),
+    );
+    let server = axum_test::TestServer::new(crate::neev::http::router(state)).unwrap();
+
+    let page = server.get("/agents/signin").await;
+    page.assert_status_ok();
+    assert_eq!(
+        page.header(header::CONTENT_TYPE),
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(page.header("x-content-type-options"), "nosniff");
+    assert_eq!(page.header(header::CACHE_CONTROL), "no-store");
+    assert_eq!(page.header("referrer-policy"), "no-referrer");
+    let csp = page
+        .header("content-security-policy")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    // Same exact-hash policy as `/login`: the one inline script, nothing looser.
+    assert!(csp.contains("'sha256-tOhhWU95qU4WAXDN1Rc8acgSz5+gwkrZbXdkR/yHwlQ='"));
+    assert_eq!(csp.matches("sha256-").count(), 1);
+    assert!(csp.starts_with("default-src 'none'; script-src 'self' "));
+    assert!(!csp.contains("unsafe-eval"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    assert!(csp.contains("base-uri 'none'"));
+
+    for path in [
+        "/agents/signin.txt",
+        "/agents/signin/__next._tree.txt",
+        "/agents/signin/__next.agents.signin.__PAGE__.txt",
+    ] {
+        let asset = server.get(path).await;
+        asset.assert_status_ok();
+        assert_eq!(
+            asset.header(header::CONTENT_TYPE),
+            "text/x-component; charset=utf-8",
+            "{path}"
+        );
+        assert_eq!(asset.header(header::CACHE_CONTROL), "no-store", "{path}");
+    }
+
+    for path in [
+        // Only the exact page path; its `.html` is never served raw.
+        "/agents/signin.html",
+        "/agents/signin/",
+        "/agents",
+        "/agents/other",
+        "/agents/other.html",
+        // Only the page's own flight files.
+        "/agents/signin/secret.txt",
+        // A symlink out of the export root is refused.
+        "/agents/signin/__next._full.txt",
+        // Traversal stays blocked (encoded: a literal `..` is resolved by the
+        // client before it is sent).
+        "/agents/signin/%2e%2e/%2e%2e/secret.txt",
+        "/agents/%2e%2e/login.html",
+    ] {
+        server.get(path).await.assert_status_not_found();
+    }
+    // A method other than GET does not reach the page.
+    server
+        .post("/agents/signin")
+        .await
+        .assert_status(axum::http::StatusCode::METHOD_NOT_ALLOWED);
+}
+
 #[tokio::test]
 async fn logout_requires_origin_json_and_three_way_csrf_then_clears_state() {
     let (server, database, _) = h::http_fixture().await;
