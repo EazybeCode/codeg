@@ -24,11 +24,20 @@
 //    server's `checked_at` to 18:38:13Z and 18:38:30Z. Note the check writes no
 //    operation row, so an absent operation is not evidence it did not run.)
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
+import { RefreshCw } from "lucide-react"
+import { AgentIcon } from "@/components/agent-icon"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 import { BrowserLink } from "@/components/ui/browser-link"
 import {
   callbackFailure,
@@ -51,6 +60,7 @@ import {
   type NeevAgentConnections,
   type NeevAgentProvider,
   type NeevAttemptState,
+  type NeevConnectionState,
   type NeevConnectMethod,
 } from "@/lib/neev-agent-sessions-client"
 import {
@@ -61,6 +71,8 @@ import {
 } from "@/lib/neev-signin-extension"
 import { openUrl } from "@/lib/platform"
 import { NativeClientError } from "@/lib/neev-client"
+import type { AgentType } from "@/lib/types"
+import { cn } from "@/lib/utils"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeError } from "./native-boundary"
 
@@ -141,33 +153,29 @@ function CodexSetupHelp() {
   const link =
     "inline-block rounded text-xs underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
   return (
-    <div className="space-y-1.5 rounded-lg border bg-muted/30 px-3 py-2">
-      <p className="text-xs text-muted-foreground">{t("codexSetupHint")}</p>
-      {/* BrowserLink is the only link form that opens outside the webview. */}
-      <BrowserLink
-        href="https://chatgpt.com/#settings/Security"
-        className={link}
-      >
-        {t("codexSetupOpen")}
-      </BrowserLink>
-      <details>
-        <summary className="cursor-pointer text-xs font-medium">
-          {t("codexSetupTitle")}
-        </summary>
-        <div className="mt-2 space-y-2">
-          <p className="text-xs text-muted-foreground">{t("codexSetupBody")}</p>
-          <p className="text-xs text-muted-foreground">
-            {t("codexSetupAdmin")}
-          </p>
-          <BrowserLink
-            href="https://learn.chatgpt.com/docs/auth#login-on-headless-devices"
-            className={link}
-          >
-            {t("codexSetupDocs")}
-          </BrowserLink>
-        </div>
-      </details>
-    </div>
+    // One line until asked: the hint is the summary, the how-to behind it.
+    <details className="group mt-2 text-xs sm:ms-11">
+      <summary className="cursor-pointer text-muted-foreground marker:text-muted-foreground">
+        {t("codexSetupHint")}
+      </summary>
+      <div className="mt-2 space-y-2 rounded-lg bg-muted/60 p-3">
+        {/* BrowserLink is the only link form that opens outside the webview. */}
+        <BrowserLink
+          href="https://chatgpt.com/#settings/Security"
+          className={link}
+        >
+          {t("codexSetupOpen")}
+        </BrowserLink>
+        <p className="text-muted-foreground">{t("codexSetupBody")}</p>
+        <p className="text-muted-foreground">{t("codexSetupAdmin")}</p>
+        <BrowserLink
+          href="https://learn.chatgpt.com/docs/auth#login-on-headless-devices"
+          className={link}
+        >
+          {t("codexSetupDocs")}
+        </BrowserLink>
+      </div>
+    </details>
   )
 }
 
@@ -226,6 +234,7 @@ export function NativeAgentConnectionsPanel({
   // its own key, so a reload never loses the ability to replay rather than
   // start a second sign-in.
   const pendingKeys = useRef(new Map<NeevAgentProvider, string>())
+  const headingId = useId()
 
   const user = auth.session?.user.id
   const org = auth.session?.organization?.id
@@ -732,117 +741,154 @@ export function NativeAgentConnectionsPanel({
   }
 
   const state = owned ? loaded : connections
+  const rows =
+    state?.connections.filter(
+      (connection) => !providerFilter || connection.provider === providerFilter
+    ) ?? []
   return (
-    <section className="space-y-3 rounded-xl border p-5">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-sm font-medium">
-          {heading ?? t("agentConnections")}
-        </h2>
-        <Button variant="outline" size="sm" onClick={refresh}>
-          {t("refreshConnections")}
+    <section
+      aria-labelledby={headingId}
+      className="overflow-hidden rounded-xl border bg-card text-card-foreground"
+    >
+      <div className="flex items-start justify-between gap-3 px-4 pt-4 pb-3">
+        <div className="min-w-0 space-y-0.5">
+          <h2 id={headingId} className="text-sm font-medium">
+            {heading ?? t("agentConnections")}
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            {t("connectionsPrivacy")}
+          </p>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="shrink-0 text-muted-foreground"
+          aria-label={t("refreshConnections")}
+          title={t("refreshConnections")}
+          onClick={refresh}
+        >
+          <RefreshCw aria-hidden className="size-4" />
         </Button>
       </div>
-      <NativeError error={error} />
-      {outcome !== null && outcome !== "completed" && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {cancelledByUser
-            ? t("signinCancelled")
-            : t(`attemptState_${outcome}`)}
-        </p>
-      )}
-      {state === null || state === undefined ? (
-        <p role="status">{n("loading")}</p>
-      ) : (
-        <>
-          {!state.runtimeEnabled && (
+      {(error !== null ||
+        (outcome !== null && outcome !== "completed") ||
+        state === null ||
+        state === undefined ||
+        !state.runtimeEnabled) && (
+        <div className="space-y-2 px-4 pb-3">
+          <NativeError error={error} />
+          {outcome !== null && outcome !== "completed" && (
             <p role="status" className="text-sm text-muted-foreground">
-              {t("agentsOff")}
+              {cancelledByUser
+                ? t("signinCancelled")
+                : t(`attemptState_${outcome}`)}
             </p>
           )}
-          <ul className="space-y-3">
-            {state.connections
-              .filter(
-                (connection) =>
-                  !providerFilter || connection.provider === providerFilter
-              )
-              .map((connection) => (
-                <li key={connection.provider} className="space-y-2">
-                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
-                    <span className="font-medium">
-                      {label(connection.provider)}
-                    </span>
-                    {/* Only rows the server lists reach here, so this marks an
-                        offered provider — never advertises one. */}
-                    {!NEEV_CORE_AGENT_PROVIDERS.includes(
-                      connection.provider
-                    ) && (
-                      <Badge
-                        variant="secondary"
-                        className="self-center"
-                        title={t("providerBetaHint")}
-                      >
-                        {t("providerBeta")}
-                      </Badge>
-                    )}
-                    <span className="text-muted-foreground">
-                      {attempt?.provider === connection.provider
-                        ? t("awaitingSignIn")
-                        : testing === connection.provider
-                          ? t("testingConnection")
-                          : t(
-                              `connectionState_${
-                                tested?.provider === connection.provider
-                                  ? tested.state
-                                  : connection.state
-                              }`
-                            )}
-                    </span>
-                    {connection.accountLabel && (
-                      <span className="min-w-0 truncate text-xs text-muted-foreground">
-                        {connection.accountLabel}
+          {state === null || state === undefined ? (
+            <p role="status" className="text-sm text-muted-foreground">
+              {n("loading")}
+            </p>
+          ) : (
+            !state.runtimeEnabled && (
+              <p role="status" className="text-sm text-muted-foreground">
+                {t("agentsOff")}
+              </p>
+            )
+          )}
+        </div>
+      )}
+      {rows.length > 0 && (
+        <ul className="divide-y border-t">
+          {rows.map((connection) => {
+            const provider = connection.provider
+            const signingIn = attempt?.provider === provider
+            const shown =
+              tested?.provider === provider ? tested.state : connection.state
+            return (
+              <li key={provider} className="px-4 py-3">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <ProviderMark provider={provider} />
+                  <div className="min-w-0 flex-1 basis-40">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium">
+                        {label(provider)}
                       </span>
-                    )}
-                    {/* A check that finds nothing wrong leaves every other word on
-                      this row identical, so without the time it reads as a
-                      button that does nothing. The server's own `checkedAt` is
-                      what moves; `role="status"` announces it. */}
-                    {checkedAt(connection) !== null && (
-                      <span
-                        role="status"
-                        className="text-xs text-muted-foreground"
-                      >
-                        {n("connectionCheckedAt", {
-                          time: new Date(
-                            checkedAt(connection)! * 1000
-                          ).toLocaleTimeString(),
-                        })}
-                      </span>
-                    )}
-                    {attempt?.provider === connection.provider ? (
-                      <span className="text-xs text-muted-foreground">
-                        {t("signInExpires")}{" "}
-                        <time
-                          dateTime={new Date(
-                            attempt.expiresAt * 1000
-                          ).toISOString()}
+                      {/* Only rows the server lists reach here, so this marks an
+                          offered provider — never advertises one. */}
+                      {!NEEV_CORE_AGENT_PROVIDERS.includes(provider) && (
+                        <Badge
+                          variant="secondary"
+                          className="h-4 px-1.5 text-[10px]"
+                          title={t("providerBetaHint")}
                         >
-                          {new Date(attempt.expiresAt * 1000).toLocaleString()}
-                        </time>
+                          {t("providerBeta")}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                      <span
+                        className={cn(
+                          "inline-flex items-center gap-1.5",
+                          !signingIn &&
+                            testing !== provider &&
+                            STATUS_TONE[shown]
+                        )}
+                      >
+                        <span
+                          aria-hidden
+                          className="size-1.5 shrink-0 rounded-full bg-current"
+                        />
+                        {signingIn
+                          ? t("awaitingSignIn")
+                          : testing === provider
+                            ? t("testingConnection")
+                            : t(`connectionState_${shown}`)}
                       </span>
-                    ) : null}
+                      {connection.accountLabel && (
+                        <span className="min-w-0 truncate">
+                          {connection.accountLabel}
+                        </span>
+                      )}
+                      {/* A check that finds nothing wrong leaves every other
+                          word on this row identical, so without the time it
+                          reads as a button that does nothing. The server's own
+                          `checkedAt` is what moves; `role="status"` announces
+                          it. */}
+                      {checkedAt(connection) !== null && (
+                        <span role="status">
+                          {n("connectionCheckedAt", {
+                            time: new Date(
+                              checkedAt(connection)! * 1000
+                            ).toLocaleTimeString(),
+                          })}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  {/* The device-code prerequisite, beside the button that may
-                      need it — but not over a browser sign-in, which does not. */}
-                  {connection.provider === "codex" &&
-                    connection.state !== "connected" &&
-                    connection.state !== "disabled" &&
-                    connection.state !== "unavailable" &&
-                    !(
-                      attempt?.provider === "codex" &&
-                      approval?.kind === "browser_callback"
-                    ) && <CodexSetupHelp />}
-                  {attempt?.provider === connection.provider &&
-                    approval?.kind === "browser_callback" && (
+                  <div className="ms-auto flex shrink-0 items-center gap-1.5">
+                    {actionsFor(connection)}
+                  </div>
+                </div>
+                {/* The device-code prerequisite, beside the button that may
+                    need it — but not over a browser sign-in, which does not. */}
+                {provider === "codex" &&
+                  connection.state !== "connected" &&
+                  connection.state !== "disabled" &&
+                  connection.state !== "unavailable" &&
+                  !(signingIn && approval?.kind === "browser_callback") && (
+                    <CodexSetupHelp />
+                  )}
+                {signingIn && (
+                  // Progressive: only the row being signed in to opens up, and
+                  // only with what the next step needs.
+                  <div
+                    role="group"
+                    aria-label={t("signInPanelNamed", {
+                      name: label(provider),
+                    })}
+                    className="mt-3 space-y-3 rounded-lg bg-muted/60 p-3 sm:ms-11"
+                  >
+                    {approval?.kind === "browser_callback" && (
                       <CallbackApprovalPrompt
                         approval={approval}
                         attempt={attempt}
@@ -869,38 +915,64 @@ export function NativeAgentConnectionsPanel({
                         onSubmitCode={() => void submitCode()}
                       />
                     )}
-                  {attempt?.provider === connection.provider &&
-                    approval !== null &&
-                    approval.kind !== "browser_callback" && (
-                      <ApprovalPrompt
-                        approval={approval}
-                        code={code}
-                        submitting={submitting}
-                        onCode={setCode}
-                        onSubmit={() => void submitCode()}
-                      />
+                    {approval !== null &&
+                      approval.kind !== "browser_callback" && (
+                        <ApprovalPrompt
+                          approval={approval}
+                          code={code}
+                          submitting={submitting}
+                          onCode={setCode}
+                          onSubmit={() => void submitCode()}
+                        />
+                      )}
+                    {approval === null && (
+                      <p className="text-xs text-muted-foreground">
+                        {t("signInPreparing")}
+                      </p>
                     )}
-                  <div className="flex flex-wrap gap-2">
-                    {actionsFor(connection)}
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-2 text-xs text-muted-foreground">
+                      <span>
+                        {t("signInExpires")}{" "}
+                        <time
+                          dateTime={new Date(
+                            attempt.expiresAt * 1000
+                          ).toISOString()}
+                        >
+                          {new Date(attempt.expiresAt * 1000).toLocaleString()}
+                        </time>
+                      </span>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={busy === provider}
+                        aria-label={t("cancelSignInNamed", { name: provider })}
+                        onClick={() => void cancel()}
+                      >
+                        {t("cancelSignIn")}
+                      </Button>
+                    </div>
                   </div>
-                </li>
-              ))}
-          </ul>
-        </>
+                )}
+              </li>
+            )
+          })}
+        </ul>
       )}
       {showSettingsLink && (
-        <Link
-          href="/settings"
-          onClick={(event) => {
-            if (onRequestSettings) {
-              event.preventDefault()
-              onRequestSettings()
-            }
-          }}
-          className="inline-block rounded text-xs underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {n("personalAgents")}
-        </Link>
+        <div className="border-t px-4 py-3">
+          <Link
+            href="/settings"
+            onClick={(event) => {
+              if (onRequestSettings) {
+                event.preventDefault()
+                onRequestSettings()
+              }
+            }}
+            className="inline-block rounded text-xs underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {n("personalAgents")}
+          </Link>
+        </div>
       )}
     </section>
   )
@@ -924,23 +996,24 @@ export function NativeAgentConnectionsPanel({
         | "connectProvider"
         | "reconnectProvider"
         | "disconnectProvider"
-        | "cancelSignIn"
         | "testConnection" // The accessible name keeps the provider key the tests and
     ) =>
       // existing semantics use; only the visible row name is friendlier.
       t(`${key}Named`, { name: provider })
-    if (attempt?.provider === provider)
-      return (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={working}
-          aria-label={named("cancelSignIn")}
-          onClick={() => void cancel()}
-        >
-          {t("cancelSignIn")}
-        </Button>
-      )
+    // The sign-in panel under the row carries its own Cancel.
+    if (attempt?.provider === provider) return null
+    const disconnectButton = (
+      <Button
+        size="sm"
+        variant="ghost"
+        className="text-muted-foreground hover:text-destructive"
+        disabled={working}
+        aria-label={named("disconnectProvider")}
+        onClick={() => void disconnect(provider)}
+      >
+        {t("disconnectProvider")}
+      </Button>
+    )
     // A sign-in the server still holds but this browser knows nothing about:
     // started elsewhere, or stranded here by a page that lost its attempt. With
     // no attempt id there is nothing to cancel, so the row would otherwise be
@@ -948,18 +1021,7 @@ export function NativeAgentConnectionsPanel({
     // accepts `connecting` and cancels the pending attempt with it. Nothing
     // else is offered: there is no connection yet to test, and starting a
     // second sign-in over a live one is not a recovery.
-    if (connection.state === "connecting")
-      return (
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={working}
-          aria-label={named("disconnectProvider")}
-          onClick={() => void disconnect(provider)}
-        >
-          {t("disconnectProvider")}
-        </Button>
-      )
+    if (connection.state === "connecting") return disconnectButton
     // No runtime, or a state the server is already moving through: nothing here
     // could be acted on, so nothing is offered.
     if (
@@ -1000,20 +1062,47 @@ export function NativeAgentConnectionsPanel({
             {t(reconnecting ? "reconnectProvider" : "connectProvider")}
           </Button>
         )}
-        {connection.state !== "not_signed_in" && (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={working}
-            aria-label={named("disconnectProvider")}
-            onClick={() => void disconnect(provider)}
-          >
-            {t("disconnectProvider")}
-          </Button>
-        )}
+        {connection.state !== "not_signed_in" && disconnectButton}
       </>
     )
   }
+}
+
+/** How each settled state reads: green only for a working connection. */
+const STATUS_TONE: Partial<Record<NeevConnectionState, string>> = {
+  connected: "text-emerald-700 dark:text-emerald-400",
+  reconnect_required: "text-amber-700 dark:text-amber-400",
+  unavailable: "text-amber-700 dark:text-amber-400",
+}
+
+/** The existing agent marks, by connection provider. */
+const PROVIDER_MARK: Record<NeevAgentProvider, AgentType> = {
+  claude: "claude_code",
+  codex: "codex",
+  cursor: "cursor",
+  gemini: "gemini",
+  opencode: "open_code",
+}
+
+/**
+ * A provider's mark, 32px, decorative. The marks carry an SVG `<title>` naming
+ * the agent; beside the visible name that is a duplicate — read twice by a
+ * screen reader and shown again as a tooltip — so it is dropped.
+ */
+function ProviderMark({ provider }: { provider: NeevAgentProvider }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  useLayoutEffect(() => {
+    ref.current?.querySelectorAll("title").forEach((node) => node.remove())
+  }, [provider])
+  return (
+    <span
+      ref={ref}
+      aria-hidden
+      className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-background"
+    >
+      <AgentIcon agentType={PROVIDER_MARK[provider]} className="size-5" />
+    </span>
+  )
 }
 
 /**
@@ -1045,7 +1134,7 @@ function ApprovalPrompt({
   const userCode = approval.kind === "device" ? approval.userCode : null
   const copyStatus = copy && copy.code === userCode ? copy.status : null
   return (
-    <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
+    <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
         {t(
           approval.kind === "device"
@@ -1061,7 +1150,7 @@ function ApprovalPrompt({
       {approval.kind !== "device" && (
         <BrowserLink
           href={approval.verificationUrl}
-          className="inline-block rounded text-sm underline underline-offset-4 focus-visible:ring-2 focus-visible:ring-ring"
+          className={buttonVariants({ size: "sm" })}
         >
           {t("openSignInPage")}
         </BrowserLink>
@@ -1365,7 +1454,7 @@ function CallbackApprovalPrompt({
   )
 
   return (
-    <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
+    <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
         {t("signInBrowserCallbackHint")}
       </p>
