@@ -168,12 +168,21 @@ const CHROME_STYLE_ID = "neev-frame-chrome"
 /**
  * The editor's own options button, inside the frame.
  *
- * Built from upstream's theming class names, which it publishes as hooks for
- * exactly this kind of host styling, rather than from a label (translated) or
- * a position (shifts with the options a document has). The card holds at most
- * this and the comments toggle, and only this one is a drop button.
+ * Taken from the markup the deployed editor actually renders, not from a
+ * reading of its source. `DocToolBox` uses the shared UI kit's `DropdownMenu`
+ * (`@gouvfr-lasuite/ui-components`), which wraps the button in
+ * `div.c__dropdown-menu-trigger` and anchors its popover to that wrapper. The
+ * repo's own `--docs--drop-button` is a different component this card never
+ * uses — the first version keyed on it, matched nothing in the live artifact,
+ * hid nothing and left Neev's item disabled.
+ *
+ * Scoped to the floating card, which holds this menu and at most the comments
+ * toggle. The toggle is a plain button, never inside a dropdown trigger, so it
+ * is out of reach of both the hiding rule and the lookup.
  */
-const ENGINE_OPTIONS_TRIGGER = ".--docs--card-floating-bar .--docs--drop-button"
+const ENGINE_OPTIONS_MENU =
+  ".--docs--card-floating-bar .c__dropdown-menu-trigger"
+const ENGINE_OPTIONS_TRIGGER = `${ENGINE_OPTIONS_MENU} > button`
 
 /**
  * One "…" for the document, not two.
@@ -204,10 +213,10 @@ function adoptFrameChrome(element: HTMLIFrameElement | null): void {
     style.id = CHROME_STYLE_ID
     style.textContent =
       `.--docs--doc-header{padding-top:12px}` +
-      `${ENGINE_OPTIONS_TRIGGER}{visibility:hidden;position:absolute;top:0;right:0}` +
+      `${ENGINE_OPTIONS_MENU}{visibility:hidden;position:absolute;top:0;right:0}` +
       // The card around it would otherwise stay on screen as an empty box
       // whenever the comments toggle is not there to fill it.
-      `.--docs--card-floating-bar:not(:has(button:not(.--docs--drop-button):not(.--docs--drop-button *))){visibility:hidden}`
+      `.--docs--card-floating-bar:not(:has(button:not(.c__dropdown-menu-trigger > button))){visibility:hidden}`
     doc.head?.appendChild(style)
   } catch {
     // Unreadable means not ours to style; the editor keeps its own button.
@@ -275,6 +284,11 @@ function Frame({
   const [engineOptions, setEngineOptions] = useState(false)
   /** Set while an item hands focus to the editor, so the menu does not take it back. */
   const handingOff = useRef(false)
+  /** Neev's "…" button, where focus goes back to when the editor's menu is escaped. */
+  const menuButton = useRef<HTMLButtonElement>(null)
+  /** Detaches the Escape watcher left on the frame by the last hand-off. */
+  const stopWatchingEscape = useRef<(() => void) | null>(null)
+  useEffect(() => () => stopWatchingEscape.current?.(), [])
   // Bumping this remounts the frame, which is what "try again" has to do: an
   // iframe will not re-request a src it already holds.
   const [attempt, setAttempt] = useState(0)
@@ -512,7 +526,48 @@ function Frame({
       if (!trigger) return
       frame.current?.contentWindow?.focus()
       trigger.click()
+      watchEscape(trigger)
     }, 0)
+  }
+
+  /**
+   * Escaping the editor's menu puts focus back on Neev's "…".
+   *
+   * The editor returns focus to the button that opened its menu, and that
+   * button is the hidden one — a hidden element cannot take focus, so a
+   * keyboard user was left on the frame's body with no idea where they were.
+   * Only an Escape that closes THIS menu counts: its list is labelled by the
+   * trigger wrapper's id, so an Escape anywhere else in the editor later on is
+   * left alone and only detaches the watcher.
+   */
+  function watchEscape(trigger: HTMLElement) {
+    stopWatchingEscape.current?.()
+    const doc = trigger.ownerDocument
+    const anchorId = trigger.parentElement?.id
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return
+      const ours = Array.from(
+        doc.querySelectorAll(".c__dropdown-menu__list")
+      ).some(
+        (list) =>
+          !!anchorId && list.getAttribute("aria-labelledby") === anchorId
+      )
+      stop()
+      if (!ours) return
+      // After the editor's own close and its focus attempt, which waits a frame.
+      requestAnimationFrame(() =>
+        setTimeout(() => {
+          window.focus()
+          menuButton.current?.focus()
+        }, 0)
+      )
+    }
+    const stop = () => {
+      doc.removeEventListener("keydown", onKey, true)
+      stopWatchingEscape.current = null
+    }
+    doc.addEventListener("keydown", onKey, true)
+    stopWatchingEscape.current = stop
   }
 
   const showMenu = actions?.isCreator || state === "ready"
@@ -577,6 +632,7 @@ function Frame({
         >
           <DropdownMenuTrigger asChild>
             <Button
+              ref={menuButton}
               variant="ghost"
               size="sm"
               className="h-7 px-2"

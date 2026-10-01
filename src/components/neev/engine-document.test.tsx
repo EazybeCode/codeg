@@ -895,20 +895,61 @@ it("renders the frame unchanged when its document cannot be read", async () => {
 // ---------------------------------------------------------------------------
 
 /**
- * A stand-in for the editor's page, with the options button the embed build
- * draws. Same-origin in the app, so the component reads and drives it directly.
+ * The editor's floating card exactly as the deployed artifact renders it.
+ *
+ * Copied from the live DOM root inspected in a browser (2026-10-01): the
+ * shared UI kit's `DropdownMenu` wraps the options button in
+ * `div.c__dropdown-menu-trigger`, inside `--docs--card-floating-bar`, with the
+ * comments toggle as a plain sibling button when the document has threads. The
+ * first version of this fixture used a selector read from the wrong component,
+ * and the tests passed while the live page matched nothing; this one is the
+ * markup, not an assumption about it.
+ *
+ * The behaviour is the shipped component's, minimally: the button's click
+ * opens a popover whose list is labelled by the wrapper's id and takes focus;
+ * Escape closes it and sends focus back to the (hidden) button that opened it.
+ *
+ * The wrapper's id is React's `useId` in the real page (`:r5:`-style). It is
+ * colon-free here only because jsdom's selector engine mis-scopes `:has()` on an
+ * element whose id has colons; browsers do not, and nothing here keys on it.
  */
-function engineDocumentWith({ trigger = true } = {}) {
+const LIVE_CARD = (comments: boolean) =>
+  `<div class="sc-a1 --docs--floating-bar"><div class="sc-b2">` +
+  `<div class="sc-5b83f41b-0 dsPGPg --docs--card --docs--card-floating-bar">` +
+  (comments
+    ? `<button class="c__button c__button--neutral c__button--neutral--tertiary c__button--small c__button--icon-only" aria-label="Open comments">c</button>`
+    : "") +
+  `<div class="c__dropdown-menu-trigger" id="react-aria-r5">` +
+  `<button class="c__button c__button--neutral c__button--neutral--tertiary c__button--small c__button--icon-only" aria-label="Open the document options: QA autosave check">…</button>` +
+  `</div></div></div></div>`
+
+function engineDocumentWith({ trigger = true, comments = false } = {}) {
   const inner = document.implementation.createHTMLDocument("engine")
   inner.body.innerHTML = trigger
-    ? `<div class="--docs--floating-bar"><div class="--docs--card-floating-bar">` +
-      `<button class="--docs--drop-button" aria-haspopup="menu"><button>…</button></button>` +
-      `</div></div>`
-    : `<div class="--docs--floating-bar"></div>`
+    ? LIVE_CARD(comments)
+    : `<div class="sc-a1 --docs--floating-bar"></div>`
   const click = vi.fn()
-  inner
-    .querySelector<HTMLElement>(".--docs--drop-button")
-    ?.addEventListener("click", click)
+  const options = inner.querySelector<HTMLElement>(
+    '[aria-label^="Open the document options"]'
+  )
+  options?.addEventListener("click", () => {
+    click()
+    const popover = inner.createElement("div")
+    popover.className = "react-aria-Popover"
+    popover.innerHTML =
+      `<div class="c__dropdown-menu"><div class="c__dropdown-menu__list" role="menu" aria-labelledby="react-aria-r5">` +
+      `<div role="menuitem" tabindex="-1">Download</div><div role="menuitem" tabindex="-1">Print</div>` +
+      `</div></div>`
+    inner.body.appendChild(popover)
+    popover.querySelector<HTMLElement>("[role=menuitem]")?.focus()
+  })
+  inner.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return
+    const open = inner.querySelector(".react-aria-Popover")
+    if (!open) return
+    open.remove()
+    options?.focus()
+  })
   return { inner, click }
 }
 
@@ -972,7 +1013,7 @@ it("hides the editor's own button, and only that", async () => {
   await loadFrameWith(inner)
   const style = inner.getElementById("neev-frame-chrome")
   expect(style?.textContent).toContain(
-    ".--docs--card-floating-bar .--docs--drop-button{visibility:hidden"
+    ".--docs--card-floating-bar .c__dropdown-menu-trigger{visibility:hidden"
   )
   // The title gets a little room back now that no band sits above the frame.
   expect(style?.textContent).toContain(".--docs--doc-header{padding-top:12px}")
@@ -1046,4 +1087,145 @@ it("draws no controls at all for a tab that is not in front", async () => {
   )
   await screen.findByTitle("Design document")
   expect(screen.queryByRole("img", { name: "Private" })).not.toBeInTheDocument()
+})
+
+/**
+ * The live markup in the frame's REAL document, so the injected rules go
+ * through jsdom's cascade rather than being compared as strings.
+ */
+async function loadLiveCard({ comments = false } = {}) {
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  const inner = frame.contentDocument
+  const view = frame.contentWindow
+  if (!inner || !view) throw new Error("jsdom gave the frame no document")
+  // The frame has not loaded anything in jsdom, so give it the page shape.
+  if (!inner.documentElement) inner.appendChild(inner.createElement("html"))
+  inner.documentElement.innerHTML = `<head></head><body>${LIVE_CARD(comments)}</body>`
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+  const visibility = (selector: string) => {
+    const element = inner.querySelector(selector)
+    if (!element) throw new Error(`missing ${selector}`)
+    return view.getComputedStyle(element).visibility
+  }
+  return { frame, inner, visibility }
+}
+
+it("hides the editor's options button as the live page renders it", async () => {
+  const user = userEvent.setup()
+  await openEngineDocument(user)
+  const { visibility } = await loadLiveCard()
+  expect(visibility(".c__dropdown-menu-trigger")).toBe("hidden")
+  expect(visibility('[aria-label^="Open the document options"]')).toBe("hidden")
+  // With no comments toggle the card has nothing left to show; no empty box.
+  expect(visibility(".--docs--card-floating-bar")).toBe("hidden")
+})
+
+/**
+ * The comments toggle shares the card. Hiding the card, or every button in
+ * it, would take away the only way to the comments panel.
+ */
+it("leaves the comments toggle on screen", async () => {
+  const user = userEvent.setup()
+  await openEngineDocument(user)
+  const { visibility } = await loadLiveCard({ comments: true })
+  expect(visibility('[aria-label="Open comments"]')).toBe("visible")
+  expect(visibility(".--docs--card-floating-bar")).toBe("visible")
+  expect(visibility(".c__dropdown-menu-trigger")).toBe("hidden")
+})
+
+it("opens the options menu, never the comments toggle", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  await openEngineDocument(user)
+  const { inner } = engineDocumentWith({ comments: true })
+  const comments = vi.fn()
+  inner
+    .querySelector('[aria-label="Open comments"]')
+    ?.addEventListener("click", comments)
+  await loadFrameWith(inner)
+  await openContentMenu()
+  await act(async () => {
+    fireEvent.click(
+      await screen.findByRole("menuitem", {
+        name: "Download, print & history…",
+      })
+    )
+  })
+  await act(async () => {
+    vi.advanceTimersByTime(1)
+  })
+  expect(inner.querySelector('[role="menu"]')).not.toBeNull()
+  expect(comments).not.toHaveBeenCalled()
+})
+
+/**
+ * The editor sends focus back to the button that opened its menu, which is the
+ * hidden one. A keyboard user escaping the menu lands on Neev's "…" instead.
+ */
+it("returns focus to the document menu when the editor's menu is escaped", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  await openEngineDocument(user)
+  const { inner } = engineDocumentWith()
+  await loadFrameWith(inner)
+  await openContentMenu()
+  await act(async () => {
+    fireEvent.click(
+      await screen.findByRole("menuitem", {
+        name: "Download, print & history…",
+      })
+    )
+  })
+  await act(async () => {
+    vi.advanceTimersByTime(1)
+  })
+  expect(inner.querySelector('[role="menu"]')).not.toBeNull()
+
+  await act(async () => {
+    inner.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+    )
+    vi.advanceTimersByTime(50)
+  })
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Content actions" })
+    ).toHaveFocus()
+  )
+})
+
+it("leaves an unrelated Escape in the editor alone", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  await openEngineDocument(user)
+  const { inner } = engineDocumentWith()
+  await loadFrameWith(inner)
+  await openContentMenu()
+  await act(async () => {
+    fireEvent.click(
+      await screen.findByRole("menuitem", {
+        name: "Download, print & history…",
+      })
+    )
+  })
+  await act(async () => {
+    vi.advanceTimersByTime(1)
+  })
+  // The menu was closed some other way — an item chosen — before any Escape.
+  inner.querySelector(".react-aria-Popover")?.remove()
+  const outside = document.createElement("button")
+  document.body.appendChild(outside)
+  outside.focus()
+  await act(async () => {
+    inner.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true })
+    )
+    vi.advanceTimersByTime(50)
+  })
+  expect(outside).toHaveFocus()
+  outside.remove()
 })

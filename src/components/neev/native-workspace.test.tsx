@@ -2005,3 +2005,327 @@ it("gives team and agent chats the same files toggle", async () => {
   expect(open).toHaveClass("[@media(hover:hover)]:opacity-100")
   expect(await within(tree).findByText("No generated files")).toBeVisible()
 })
+
+// ---------------------------------------------------------------------------
+// Engine documents browsed away from are kept, hidden, for a quick way back.
+// ---------------------------------------------------------------------------
+
+const A_ID = "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1"
+const B_ID = "b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2"
+const C_ID = "c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3"
+const engineDoc = (id: string, title: string) => ({
+  ...DOC,
+  id,
+  title,
+  engine: "lasuite" as const,
+})
+const DOC_A = engineDoc(A_ID, "Alpha doc")
+const DOC_B = engineDoc(B_ID, "Beta doc")
+const DOC_C = engineDoc(C_ID, "Gamma doc")
+
+/**
+ * A project holding engine documents. Each resource read goes through
+ * `read`, so a test can count it, hold it or refuse it.
+ */
+function keptWorkspace(
+  read: (id: string) => Response | Promise<Response> = (id) =>
+    json([DOC_A, DOC_B, DOC_C].find((doc) => doc.id === id))
+) {
+  localStorage.setItem("neev.ws.section", "docs")
+  const reads: string[] = []
+  const routes: Record<string, () => Response | Promise<Response>> = {
+    "GET /api/neev/nodes": () => json({ nodes: [NODE], nextAfter: null }),
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/nodes/4/documents": () =>
+      json({ items: [DOC_A, DOC_B, DOC_C], nextAfter: null }),
+    "GET /api/neev/nodes/4/chats": () => json({ items: [], nextAfter: null }),
+  }
+  for (const id of [A_ID, B_ID, C_ID])
+    routes[`GET /api/neev/resources/${id}`] = () => {
+      reads.push(id)
+      return read(id)
+    }
+  const mock = mockNativeSession(
+    undefined,
+    routes as Parameters<typeof mockNativeSession>[1]
+  )
+  mountWorkspace()
+  return { reads, mock }
+}
+
+const frameOf = (id: string) =>
+  document.querySelector<HTMLIFrameElement>(
+    `iframe[src="/document-engine/docs/${id}/"]`
+  )
+const shown = (element: Element | null) =>
+  !!element && element.isConnected && !element.closest("[hidden]")
+
+async function toFolder(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(
+    (await screen.findAllByRole("button", { name: "Roadmap" }))[0]
+  )
+}
+async function toDoc(user: ReturnType<typeof userEvent.setup>, title: string) {
+  await user.click(
+    await within(
+      screen.getByRole("navigation", { name: "Projects" })
+    ).findByRole("button", { name: title })
+  )
+}
+async function frameShown(id: string) {
+  return waitFor(() => {
+    const frame = frameOf(id)
+    expect(shown(frame)).toBe(true)
+    return frame as HTMLIFrameElement
+  })
+}
+
+/**
+ * Watches one element for ever being shown, and for ever being taken out of
+ * the DOM. Attribute history rather than a final state, so a panel that is
+ * shown and hidden again between two assertions is still caught.
+ */
+function watch(element: Element) {
+  const seen = { shown: false, removed: false }
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      if (
+        record.type === "attributes" &&
+        record.oldValue !== null &&
+        record.target instanceof Element &&
+        record.target.contains(element) &&
+        !record.target.hasAttribute("hidden")
+      )
+        seen.shown = true
+      if (record.type === "childList")
+        for (const node of record.removedNodes)
+          if (node === element || node.contains(element)) seen.removed = true
+    }
+  })
+  observer.observe(document.body, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ["hidden"],
+    attributeOldValue: true,
+  })
+  return { seen, stop: () => observer.disconnect() }
+}
+
+it("brings a kept document back with the very same frame, after checking access first", async () => {
+  let release: (() => void) | undefined
+  let hold = false
+  const { reads } = keptWorkspace((id) => {
+    const answer = json([DOC_A, DOC_B, DOC_C].find((doc) => doc.id === id))
+    if (!hold) return answer
+    return new Promise<Response>((resolve) => {
+      release = () => resolve(answer)
+    })
+  })
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  const frame = await frameShown(A_ID)
+  const watched = watch(frame)
+
+  // Back to the folder: the document is kept, out of sight and out of the strip.
+  await toFolder(user)
+  await waitFor(() => expect(shown(frameOf(A_ID))).toBe(false))
+  expect(frameOf(A_ID)).toBe(frame)
+  expect(
+    screen.getAllByRole("tab").map((tab) => tab.textContent ?? "")
+  ).not.toContain("Alpha doc")
+  watched.seen.shown = false
+
+  // Coming back reads the resource BEFORE anything is revealed.
+  hold = true
+  const before = reads.length
+  await toDoc(user, "Alpha doc")
+  await waitFor(() => expect(reads.length).toBe(before + 1))
+  await act(async () => {
+    await Promise.resolve()
+  })
+  expect(shown(frame)).toBe(false)
+  expect(watched.seen.shown).toBe(false)
+
+  await act(async () => {
+    release?.()
+  })
+  await waitFor(() => expect(shown(frame)).toBe(true))
+  // Not a lookalike: the same element, never taken out of the document.
+  expect(frameOf(A_ID)).toBe(frame)
+  expect(watched.seen.removed).toBe(false)
+  watched.stop()
+})
+
+it("never shows a kept document again once access is gone", async () => {
+  let refuse = false
+  keptWorkspace((id) =>
+    refuse
+      ? json({ code: "not_found" }, 404)
+      : json([DOC_A, DOC_B, DOC_C].find((doc) => doc.id === id))
+  )
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  const frame = await frameShown(A_ID)
+  await toFolder(user)
+  await waitFor(() => expect(shown(frame)).toBe(false))
+
+  const watched = watch(frame)
+  refuse = true
+  await toDoc(user, "Alpha doc")
+  // The kept frame is let go without ever being visible again. Whatever opens
+  // instead is a fresh mount that authorizes for itself.
+  await waitFor(() => expect(frame.isConnected).toBe(false))
+  expect(watched.seen.shown).toBe(false)
+  watched.stop()
+})
+
+it("abandons a reveal whose strip moved while the check was out", async () => {
+  let release: (() => void) | undefined
+  let hold = false
+  keptWorkspace((id) => {
+    const answer = json([DOC_A, DOC_B, DOC_C].find((doc) => doc.id === id))
+    if (!(hold && id === A_ID)) return answer
+    return new Promise<Response>((resolve) => {
+      release = () => resolve(answer)
+    })
+  })
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  const frame = await frameShown(A_ID)
+  await toFolder(user)
+  await waitFor(() => expect(shown(frame)).toBe(false))
+
+  hold = true
+  const watched = watch(frame)
+  await toDoc(user, "Alpha doc")
+  // The reader moves on before the answer is in.
+  await toDoc(user, "Beta doc")
+  await frameShown(B_ID)
+  await act(async () => {
+    release?.()
+  })
+  await act(async () => {
+    await Promise.resolve()
+  })
+  expect(shown(frame)).toBe(false)
+  expect(watched.seen.shown).toBe(false)
+  expect(shown(frameOf(B_ID))).toBe(true)
+  watched.stop()
+})
+
+it("keeps only the last two documents", async () => {
+  keptWorkspace()
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  const alpha = await frameShown(A_ID)
+  await toDoc(user, "Beta doc")
+  const beta = await frameShown(B_ID)
+  await toDoc(user, "Gamma doc")
+  const gamma = await frameShown(C_ID)
+  await toFolder(user)
+  await waitFor(() => expect(alpha.isConnected).toBe(false))
+  expect(beta.isConnected).toBe(true)
+  expect(gamma.isConnected).toBe(true)
+  expect(shown(beta) || shown(gamma)).toBe(false)
+})
+
+it("lets a document go after ten minutes unseen, and opens it afresh", async () => {
+  const { reads } = keptWorkspace()
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  const frame = await frameShown(A_ID)
+  await toFolder(user)
+  await waitFor(() => expect(shown(frame)).toBe(false))
+
+  const now = Date.now()
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now + 11 * 60 * 1000)
+  const before = reads.length
+  await toDoc(user, "Alpha doc")
+  const fresh = await frameShown(A_ID)
+  expect(fresh).not.toBe(frame)
+  expect(frame.isConnected).toBe(false)
+  // Expired means the ordinary open, not a reveal's check.
+  expect(reads.length).toBe(before)
+  clock.mockRestore()
+})
+
+it("does not keep a document that was closed on purpose", async () => {
+  keptWorkspace()
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  const frame = await frameShown(A_ID)
+  await user.click(screen.getByRole("button", { name: "Close Alpha doc" }))
+  await waitFor(() => expect(frame.isConnected).toBe(false))
+})
+
+it("never writes a kept document into the saved tabs", async () => {
+  keptWorkspace()
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  await frameShown(A_ID)
+  await toFolder(user)
+  await waitFor(() => expect(shown(frameOf(A_ID))).toBe(false))
+  expect(frameOf(A_ID)).not.toBeNull()
+  const saved = localStorage.getItem("neev.ws.tabs.1:3") ?? ""
+  expect(saved).toContain("project")
+  expect(saved).not.toContain(A_ID)
+})
+
+it("lets a kept document go when the session is lost on the check", async () => {
+  let refuse = false
+  keptWorkspace((id) =>
+    refuse
+      ? json({ code: "unauthorized" }, 401)
+      : json([DOC_A, DOC_B, DOC_C].find((doc) => doc.id === id))
+  )
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  const frame = await frameShown(A_ID)
+  await toFolder(user)
+  await waitFor(() => expect(shown(frame)).toBe(false))
+  const watched = watch(frame)
+  refuse = true
+  await toDoc(user, "Alpha doc")
+  await waitFor(() => expect(frame.isConnected).toBe(false))
+  expect(watched.seen.shown).toBe(false)
+  watched.stop()
+})
+
+/**
+ * Bringing one kept document back must not move the OTHER one.
+ *
+ * Kept panels are not in the strip, so in strip order they would be reshuffled
+ * by every reveal — and a browser reloads an iframe that is moved in the DOM.
+ * jsdom does not reload, so this watches for the move itself.
+ */
+it("never moves another kept frame when one is brought back", async () => {
+  keptWorkspace()
+  const user = userEvent.setup()
+  await toFolder(user)
+  await toDoc(user, "Alpha doc")
+  const alpha = await frameShown(A_ID)
+  await toDoc(user, "Beta doc")
+  const beta = await frameShown(B_ID)
+  await toFolder(user)
+  await waitFor(() => expect(shown(beta)).toBe(false))
+
+  const watchedBeta = watch(beta)
+  const watchedAlpha = watch(alpha)
+  await toDoc(user, "Alpha doc")
+  await waitFor(() => expect(shown(alpha)).toBe(true))
+  expect(frameOf(A_ID)).toBe(alpha)
+  expect(frameOf(B_ID)).toBe(beta)
+  expect(watchedAlpha.seen.removed).toBe(false)
+  expect(watchedBeta.seen.removed).toBe(false)
+  watchedAlpha.stop()
+  watchedBeta.stop()
+})

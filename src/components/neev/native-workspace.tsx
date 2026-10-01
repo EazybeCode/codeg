@@ -92,6 +92,12 @@ import { NativeMentionsIndicator } from "./native-mentions"
 import { NativeTabPanel } from "./native-suspended-surface"
 import { DocumentChromeSlot } from "./document-chrome-slot"
 import {
+  keepWarm,
+  warmExpired,
+  warmUsable,
+  type WarmEntry,
+} from "@/lib/neev-warm-panels"
+import {
   listAgentSessions,
   setAgentSessionNode,
   updateAgentSession,
@@ -1387,19 +1393,105 @@ function WorkspaceContent() {
    */
   const [visited, setVisited] = useState<ReadonlySet<string>>(new Set())
   const activeTabRef = useRef(-1)
-  const commitTabs = useCallback((next: WorkspaceTab[], active: number) => {
-    tabsRef.current = next
-    activeTabRef.current = active
-    setTabs(next)
-    setActiveTab(active)
-    const front = next[active]
-    if (front) setVisited((old) => new Set([...old, tabKey(front)]))
+  const guards = useRef(new Map<string, ContentNavigationGuard>())
+  /**
+   * Engine documents browsed away from, kept mounted and out of sight — see
+   * `neev-warm-panels`. Mirrored in a ref for handlers that act after an
+   * await, the same way `tabsRef` is.
+   */
+  const [warm, setWarmState] = useState<WarmEntry<WorkspaceTab>[]>([])
+  const warmRef = useRef<WarmEntry<WorkspaceTab>[]>([])
+  const setWarm = useCallback((next: WarmEntry<WorkspaceTab>[]) => {
+    warmRef.current = next
+    setWarmState(next)
   }, [])
+  /**
+   * A per-tab remount counter, part of each panel's React key.
+   *
+   * Bumped whenever a kept panel is let go. Letting one go and opening the same
+   * document again can land in one render batch, and with an unchanged key
+   * React would keep the old instance — content back on screen without the
+   * access check a reveal performs. A new key makes that a fresh mount, which
+   * is exactly what opening it would have been without the cache.
+   */
+  const generation = useRef(new Map<string, number>())
+  /** Which resources are engine documents, learned from their own reads. */
+  const engines = useRef(new Map<string, string>())
+  /**
+   * The order panels were first mounted in, which is the order they render in.
+   *
+   * Not the strip's order. A keyed child that changes position is moved with
+   * `insertBefore`, and moving an iframe reloads it — which would quietly undo
+   * keeping it. Only the front panel is displayed, so the visual order of the
+   * rest is irrelevant; what matters is that nothing already mounted moves.
+   * New panels take the next number and so always go last.
+   */
+  const mountOrder = useRef(new Map<string, number>())
+  const mountCount = useRef(0)
+  const letGo = useCallback(
+    (keys: readonly string[]) => {
+      const gone = new Set(
+        keys.filter((key) => warmRef.current.some((item) => item.key === key))
+      )
+      if (gone.size === 0) return
+      for (const key of gone) {
+        // Its panel is about to unmount (or remount), so its guard goes too.
+        guards.current.delete(key)
+        generation.current.set(key, (generation.current.get(key) ?? 0) + 1)
+      }
+      setWarm(warmRef.current.filter((item) => !gone.has(item.key)))
+    },
+    [setWarm]
+  )
+  const commitTabs = useCallback(
+    (next: WorkspaceTab[], active: number) => {
+      // Anything entering the strip by any route but a checked reveal (which
+      // takes itself out of the kept set first) is let go, and so mounts fresh.
+      const live = new Set(next.map(tabKey))
+      letGo(
+        warmRef.current
+          .filter((item) => live.has(item.key))
+          .map((item) => item.key)
+      )
+      tabsRef.current = next
+      activeTabRef.current = active
+      setTabs(next)
+      setActiveTab(active)
+      const front = next[active]
+      if (front) setVisited((old) => new Set([...old, tabKey(front)]))
+    },
+    [letGo]
+  )
   const { theme, setTheme } = useTheme()
   // Restoration is attempted once per mount, like the resource pointer.
   const agentRestored = useRef(false)
   const user = auth.session?.user.id
   const orgId = auth.session?.organization?.id
+  const orgIdRef = useRef(orgId)
+  orgIdRef.current = orgId
+  // For a reveal's failed check, which answers after an await.
+  const authorityRef = useRef(auth.handleAuthorityError)
+  authorityRef.current = auth.handleAuthorityError
+  /**
+   * Where a reveal's fresh read goes: the strip's name and the list row the
+   * panel reads. Set below, once the lists it writes to exist.
+   */
+  const revealed = useRef<(resource: NativeResource, nodeId: number) => void>(
+    () => {}
+  )
+  /** A scope change lets every kept panel go; none may outlive its scope. */
+  useEffect(() => {
+    letGo(warmExpired(warmRef.current, auth.scopeKey, Date.now()))
+  }, [auth.scopeKey, letGo])
+  /** And so does time: nothing sits unseen for longer than the TTL. */
+  useEffect(() => {
+    if (warm.length === 0) return
+    const timer = setInterval(
+      () => letGo(warmExpired(warmRef.current, scopeRef.current, Date.now())),
+      60_000
+    )
+    return () => clearInterval(timer)
+  }, [warm.length, letGo])
   /**
    * One guard per open tab, not one for the workspace.
    *
@@ -1421,7 +1513,6 @@ function WorkspaceContent() {
    * things, and still ask.
    */
   const keepAll = (action: () => void) => action()
-  const guards = useRef(new Map<string, ContentNavigationGuard>())
   const registerGuardFor = useCallback(
     (key: string) => (guard: ContentNavigationGuard) => {
       guards.current.set(key, guard)
@@ -1510,11 +1601,13 @@ function WorkspaceContent() {
   /** Close a tab by identity, for a panel reporting its own subject gone. */
   const dropTab = useCallback(
     (key: string) => {
+      // A kept panel can report its subject gone too; it goes, unseen.
+      letGo([key])
       const next = closeTabByKey(tabsRef.current, key, activeTabRef.current)
       commitTabs(next.tabs, next.active)
       guards.current.delete(key)
     },
-    [commitTabs]
+    [commitTabs, letGo]
   )
   /** A draft that became a real chat keeps its place in the strip. */
   const replaceTab = useCallback(
@@ -1546,6 +1639,11 @@ function WorkspaceContent() {
       const activeIndex = activeTabRef.current
       const front = open[activeIndex]
       const alreadyOpen = open.some((item) => sameWorkspaceTab(item, tab))
+      const scope = scopeRef.current
+      const key = tabKey(tab)
+      const kept = alreadyOpen
+        ? undefined
+        : warmRef.current.find((item) => item.key === key)
       const go = () => {
         const next = openWorkspaceTabInPlace(open, tab, activeIndex)
         setTabLimit(false)
@@ -1568,8 +1666,99 @@ function WorkspaceContent() {
         !sameWorkspaceTab(front, tab) &&
         front.kind !== "empty" &&
         !alreadyOpen
-      if (!replacing) {
+      /*
+       * The front panel leaving. An engine document is kept — mounted, hidden,
+       * out of the strip — so coming back to it is not another editor boot.
+       * Anything else goes, and its guard with it.
+       */
+      const leave = () => {
+        if (!replacing || !front) return
+        const frontKey = tabKey(front)
+        if (
+          scope === null ||
+          front.kind !== "resource" ||
+          engines.current.get(front.resourceId) !== "lasuite"
+        ) {
+          guards.current.delete(frontKey)
+          return
+        }
+        const next = keepWarm(warmRef.current, {
+          key: frontKey,
+          tab: front,
+          scope,
+          hiddenAt: Date.now(),
+        })
+        setWarm(next.list)
+        for (const gone of next.evicted) {
+          guards.current.delete(gone)
+          generation.current.set(gone, (generation.current.get(gone) ?? 0) + 1)
+        }
+      }
+      const proceed = () => {
+        leave()
         go()
+      }
+      /*
+       * Bringing a kept document back.
+       *
+       * Its frame already holds the content, so the read the panel would have
+       * made on a fresh open is made HERE, before anything is shown: a reader
+       * who has lost access in the meantime must not see the page again, not
+       * even for a frame. Until the answer is in, the panel stays hidden and
+       * the front tab stays where it is.
+       *
+       * Any doubt — an error, a stale entry, an answer for a strip or scope
+       * that has moved — lets it go, and the open continues the ordinary way:
+       * a fresh mount that reads and authorizes for itself, exactly as it would
+       * have without any of this.
+       */
+      const reveal = async () => {
+        const subject = tab.kind === "resource" ? tab.resourceId : undefined
+        const owner = orgIdRef.current
+        if (
+          !kept ||
+          subject === undefined ||
+          owner === undefined ||
+          !warmUsable(kept, scope, Date.now())
+        ) {
+          letGo([key])
+          proceed()
+          return
+        }
+        let checked: NativeResource
+        try {
+          checked = await loadNativeResource(owner, subject)
+        } catch (cause) {
+          if (scopeRef.current !== scope) return
+          letGo([key])
+          // A lost session or membership is reported here: the fresh panel
+          // below may render from the list without reading anything itself.
+          authorityRef.current(cause)
+          if (tabsRef.current !== open || activeTabRef.current !== activeIndex)
+            return
+          // The fresh panel repeats the read and reports gone, forbidden or a
+          // lost session through the paths it always has.
+          proceed()
+          return
+        }
+        if (scopeRef.current !== scope) return
+        // Same rule as the guard below: a strip that moved meanwhile abandons
+        // the navigation rather than acting on the list as it was.
+        if (tabsRef.current !== open || activeTabRef.current !== activeIndex)
+          return
+        if (!warmRef.current.some((item) => item.key === key)) {
+          proceed()
+          return
+        }
+        revealed.current(checked, tab.kind === "resource" ? tab.nodeId : -1)
+        // Out of the kept set WITHOUT a new generation: the same instance, and
+        // its frame, comes back to the front.
+        setWarm(warmRef.current.filter((item) => item.key !== key))
+        proceed()
+      }
+      if (!replacing) {
+        if (kept) void reveal()
+        else go()
         return
       }
       guardTab(tabKey(front), () => {
@@ -1591,13 +1780,14 @@ function WorkspaceContent() {
         if (tabsRef.current !== open || activeTabRef.current !== activeIndex)
           return
         // Here and only here does a panel actually go away, so here and only
-        // here does its guard. On every other path the tab stays mounted, and
-        // dropping a live guard would let the next replacement through unasked.
-        guards.current.delete(tabKey(front))
-        go()
+        // here does its guard (in `leave`, unless it is kept). On every other
+        // path the tab stays mounted, and dropping a live guard would let the
+        // next replacement through unasked.
+        if (kept) void reveal()
+        else proceed()
       })
     },
-    [commitTabs, guardTab]
+    [commitTabs, guardTab, letGo, setWarm]
   )
 
   /**
@@ -1879,6 +2069,7 @@ function WorkspaceContent() {
    */
   const [openedTitles, setOpenedTitles] = useState<Record<string, string>>({})
   const noteResource = useCallback((resource: NativeResource) => {
+    engines.current.set(resource.id, resource.engine ?? "native")
     setOpenedKinds((old) =>
       old[resource.id] === resource.kind
         ? old
@@ -1890,6 +2081,26 @@ function WorkspaceContent() {
         : { ...old, [resource.id]: resource.title }
     )
   }, [])
+  // A checked reveal's answer, written where an edit's would be: the strip's
+  // name, and the list row the panel prefers when it is newer.
+  useEffect(() => {
+    revealed.current = (resource, nodeId) => {
+      noteResource(resource)
+      setItemsByNode((old) => {
+        const list = old[nodeId]
+        if (!list) return old
+        return {
+          ...old,
+          [nodeId]: {
+            ...list,
+            items: list.items.map((item) =>
+              item.id === resource.id ? resource : item
+            ),
+          },
+        }
+      })
+    }
+  }, [noteResource])
   /** What a resource tab points at, when anything yet knows. */
   const tabResourceKind = useCallback(
     (tab: WorkspaceTab): NativeResourceKind | undefined => {
@@ -2897,6 +3108,33 @@ function WorkspaceContent() {
       </div>
     </div>
   )
+  // The strip's tabs, plus the kept panels of this scope that are not in it.
+  const frontKey = tabs[activeTab] ? tabKey(tabs[activeTab]) : null
+  const inStrip = new Set(tabs.map(tabKey))
+  const panels = [
+    ...tabs,
+    ...warm
+      .filter((item) => item.scope === auth.scopeKey && !inStrip.has(item.key))
+      .map((item) => item.tab),
+  ].map((tab) => {
+    const id = tabKey(tab)
+    return {
+      tab,
+      key: `${id}#${generation.current.get(id) ?? 0}`,
+      front: id === frontKey,
+    }
+  })
+  for (const panel of panels)
+    if (!mountOrder.current.has(panel.key))
+      mountOrder.current.set(panel.key, ++mountCount.current)
+  const rendered = new Set(panels.map((panel) => panel.key))
+  for (const key of [...mountOrder.current.keys()])
+    if (!rendered.has(key)) mountOrder.current.delete(key)
+  panels.sort(
+    (left, right) =>
+      (mountOrder.current.get(left.key) ?? 0) -
+      (mountOrder.current.get(right.key) ?? 0)
+  )
   return (
     // The one marker the Neev brand theme keys off. globals.css matches it
     // with `:root:has([data-neev-theme="brand"])`, so portalled menus and
@@ -3060,7 +3298,7 @@ function WorkspaceContent() {
             </div>
           )}
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {tabs.length === 0 ? (
+            {tabs.length === 0 && (
               <WorkspaceStart
                 nodes={nodes}
                 onOpen={(node) => selectNode(node)}
@@ -3068,191 +3306,184 @@ function WorkspaceContent() {
                   keepAll(() => openEditor({ kind: "project", parentId: null }))
                 }
               />
-            ) : (
-              tabs.map((tab, index) => (
-                // Every open tab stays MOUNTED. Switching hides a panel rather
-                // than destroying it, so a half-written document or an unsent
-                // message is still there when the reader comes back — without
-                // being asked to discard anything on the way.
-                <NativeTabPanel
-                  key={tabKey(tab)}
-                  hidden={index !== activeTab}
-                  className={cn(
-                    "min-h-0 min-w-0 flex-1 flex-col",
-                    index === activeTab ? "flex" : "hidden"
-                  )}
-                >
-                  <DocumentChromeSlot.Provider
-                    value={index === activeTab ? chromeSlot : null}
-                  >
-                    {visited.has(tabKey(tab)) &&
-                      (tab.kind === "empty" ? (
-                        /*
-                         * A tab asked for and not yet filled. It says so rather
-                         * than showing an empty panel, because a blank region
-                         * with no explanation reads as something that failed to
-                         * load.
-                         */
-                        <div
-                          role="status"
-                          className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 p-10 text-center"
-                        >
-                          <p className="text-sm font-medium">{t("emptyTab")}</p>
-                          <p className="text-sm text-muted-foreground">
-                            {t("emptyTabHint")}
-                          </p>
-                        </div>
-                      ) : tab.kind === "project" ? (
-                        creation && creation.nodeId === tab.nodeId ? (
-                          <NativeContent
-                            node={nodeById(tab.nodeId) ?? nodes[0]}
-                            chromeless
-                            creation={creation}
-                            onCreationCancelled={() => setCreation(undefined)}
-                            onRequestNavigationGuard={registerGuardFor(
-                              tabKey(tab)
-                            )}
-                            onOpened={(resource) => {
-                              setCreation(undefined)
-                              setExpanded(
-                                (old) => new Set([...old, resource.nodeId])
-                              )
-                              void loadItems(resource.nodeId)
-                              openResource(
-                                nodeById(resource.nodeId) ?? nodes[0],
-                                resource
-                              )
-                            }}
-                          />
-                        ) : (
-                          <ProjectPanel
-                            node={nodeById(tab.nodeId)}
-                            items={itemsByNode[tab.nodeId]?.items ?? []}
-                            loading={itemsByNode[tab.nodeId]?.loading ?? false}
-                            sessions={agentSessions.filter(
-                              (item) => item.nodeId === tab.nodeId
-                            )}
-                            onOpenResource={(resource) => {
-                              const node = nodeById(tab.nodeId)
-                              if (node) openResource(node, resource)
-                            }}
-                            onOpenSession={(session) => {
-                              const node = nodeById(tab.nodeId)
-                              if (node) openAgentSession(node, session)
-                            }}
-                            onCreate={(kind) => {
-                              const node = nodeById(tab.nodeId)
-                              if (!node) return
-                              if (kind === "folder")
-                                keepAll(() =>
-                                  openEditor({
-                                    kind: "folder",
-                                    parentId: node.id,
-                                  })
-                                )
-                              else void createContent(node, kind)
-                            }}
-                          />
-                        )
-                      ) : tab.kind === "resource" ? (
-                        <ResourcePanel
-                          orgId={org.id}
-                          resourceId={tab.resourceId}
-                          fresh={tab.fresh === true}
-                          onResolved={noteResource}
-                          onChanged={(next) => {
-                            /*
-                             * Record the new name FIRST, and unconditionally.
-                             *
-                             * The list update below is a no-op when no list for
-                             * this node is loaded — which is exactly the restored
-                             * tab's situation — so on its own it leaves the tab
-                             * strip and breadcrumb showing the name captured when
-                             * the panel first resolved. A rename inside the frame
-                             * then updates the document and nothing else, which is
-                             * the bug this closes.
-                             */
-                            noteResource(next)
-                            setItemsByNode((old) => {
-                              const list = old[tab.nodeId]
-                              if (!list) return old
-                              return {
-                                ...old,
-                                [tab.nodeId]: {
-                                  ...list,
-                                  items: list.items.map((item) =>
-                                    item.id === next.id ? next : item
-                                  ),
-                                },
-                              }
-                            })
-                          }}
-                          node={nodeById(tab.nodeId)}
-                          cached={(itemsByNode[tab.nodeId]?.items ?? []).find(
-                            (item) => item.id === tab.resourceId
-                          )}
-                          registerGuard={registerGuardFor(tabKey(tab))}
-                          onGone={() => dropTab(tabKey(tab))}
-                        />
-                      ) : (
-                        <NativeAgentChats
-                          nodeId={
-                            tab.kind === "agent"
-                              ? (agentSessions.find(
-                                  (item) => item.id === tab.sessionId
-                                )?.nodeId ?? null)
-                              : tab.nodeId
-                          }
-                          nodeName={
-                            nodeById(
-                              tab.kind === "agent"
-                                ? (agentSessions.find(
-                                    (item) => item.id === tab.sessionId
-                                  )?.nodeId ?? -1)
-                                : (tab.nodeId ?? -1)
-                            )?.name
-                          }
-                          sessionId={
-                            tab.kind === "agent" ? tab.sessionId : null
-                          }
-                          draftProvider={
-                            tab.kind === "draft"
-                              ? (tab.provider as NeevAgentProvider)
-                              : null
-                          }
-                          onSessionCreated={(session) => {
-                            setAgentSessions((old) => [
-                              session,
-                              ...old.filter((item) => item.id !== session.id),
-                            ])
-                            // The draft became a real chat: its tab becomes that
-                            // chat rather than leaving both open.
-                            replaceTab(tabKey(tab), {
-                              kind: "agent",
-                              sessionId: session.id,
-                            })
-                            if (user !== undefined && orgId !== undefined)
-                              setOpenAgentSession(user, orgId, session.id)
-                          }}
-                          onDraftCancelled={() => dropTab(tabKey(tab))}
-                          onClosed={() => dropTab(tabKey(tab))}
+            )}
+            {panels.map(({ tab, key, front }) => (
+              // Every open tab stays MOUNTED. Switching hides a panel rather
+              // than destroying it, so a half-written document or an unsent
+              // message is still there when the reader comes back — without
+              // being asked to discard anything on the way.
+              <NativeTabPanel
+                key={key}
+                hidden={!front}
+                className={cn(
+                  "min-h-0 min-w-0 flex-1 flex-col",
+                  front ? "flex" : "hidden"
+                )}
+              >
+                <DocumentChromeSlot.Provider value={front ? chromeSlot : null}>
+                  {visited.has(tabKey(tab)) &&
+                    (tab.kind === "empty" ? (
+                      /*
+                       * A tab asked for and not yet filled. It says so rather
+                       * than showing an empty panel, because a blank region
+                       * with no explanation reads as something that failed to
+                       * load.
+                       */
+                      <div
+                        role="status"
+                        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 p-10 text-center"
+                      >
+                        <p className="text-sm font-medium">{t("emptyTab")}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {t("emptyTabHint")}
+                        </p>
+                      </div>
+                    ) : tab.kind === "project" ? (
+                      creation && creation.nodeId === tab.nodeId ? (
+                        <NativeContent
+                          node={nodeById(tab.nodeId) ?? nodes[0]}
+                          chromeless
+                          creation={creation}
+                          onCreationCancelled={() => setCreation(undefined)}
                           onRequestNavigationGuard={registerGuardFor(
                             tabKey(tab)
                           )}
-                          onRequestSettings={() =>
-                            // Straight to the AI connections, not to Settings'
-                            // front page: a Connect button that leaves the user
-                            // hunting is not one.
-                            guardAll(() =>
-                              router.push("/settings?section=agents")
+                          onOpened={(resource) => {
+                            setCreation(undefined)
+                            setExpanded(
+                              (old) => new Set([...old, resource.nodeId])
                             )
-                          }
+                            void loadItems(resource.nodeId)
+                            openResource(
+                              nodeById(resource.nodeId) ?? nodes[0],
+                              resource
+                            )
+                          }}
                         />
-                      ))}
-                  </DocumentChromeSlot.Provider>
-                </NativeTabPanel>
-              ))
-            )}
+                      ) : (
+                        <ProjectPanel
+                          node={nodeById(tab.nodeId)}
+                          items={itemsByNode[tab.nodeId]?.items ?? []}
+                          loading={itemsByNode[tab.nodeId]?.loading ?? false}
+                          sessions={agentSessions.filter(
+                            (item) => item.nodeId === tab.nodeId
+                          )}
+                          onOpenResource={(resource) => {
+                            const node = nodeById(tab.nodeId)
+                            if (node) openResource(node, resource)
+                          }}
+                          onOpenSession={(session) => {
+                            const node = nodeById(tab.nodeId)
+                            if (node) openAgentSession(node, session)
+                          }}
+                          onCreate={(kind) => {
+                            const node = nodeById(tab.nodeId)
+                            if (!node) return
+                            if (kind === "folder")
+                              keepAll(() =>
+                                openEditor({
+                                  kind: "folder",
+                                  parentId: node.id,
+                                })
+                              )
+                            else void createContent(node, kind)
+                          }}
+                        />
+                      )
+                    ) : tab.kind === "resource" ? (
+                      <ResourcePanel
+                        orgId={org.id}
+                        resourceId={tab.resourceId}
+                        fresh={tab.fresh === true}
+                        onResolved={noteResource}
+                        onChanged={(next) => {
+                          /*
+                           * Record the new name FIRST, and unconditionally.
+                           *
+                           * The list update below is a no-op when no list for
+                           * this node is loaded — which is exactly the restored
+                           * tab's situation — so on its own it leaves the tab
+                           * strip and breadcrumb showing the name captured when
+                           * the panel first resolved. A rename inside the frame
+                           * then updates the document and nothing else, which is
+                           * the bug this closes.
+                           */
+                          noteResource(next)
+                          setItemsByNode((old) => {
+                            const list = old[tab.nodeId]
+                            if (!list) return old
+                            return {
+                              ...old,
+                              [tab.nodeId]: {
+                                ...list,
+                                items: list.items.map((item) =>
+                                  item.id === next.id ? next : item
+                                ),
+                              },
+                            }
+                          })
+                        }}
+                        node={nodeById(tab.nodeId)}
+                        cached={(itemsByNode[tab.nodeId]?.items ?? []).find(
+                          (item) => item.id === tab.resourceId
+                        )}
+                        registerGuard={registerGuardFor(tabKey(tab))}
+                        onGone={() => dropTab(tabKey(tab))}
+                      />
+                    ) : (
+                      <NativeAgentChats
+                        nodeId={
+                          tab.kind === "agent"
+                            ? (agentSessions.find(
+                                (item) => item.id === tab.sessionId
+                              )?.nodeId ?? null)
+                            : tab.nodeId
+                        }
+                        nodeName={
+                          nodeById(
+                            tab.kind === "agent"
+                              ? (agentSessions.find(
+                                  (item) => item.id === tab.sessionId
+                                )?.nodeId ?? -1)
+                              : (tab.nodeId ?? -1)
+                          )?.name
+                        }
+                        sessionId={tab.kind === "agent" ? tab.sessionId : null}
+                        draftProvider={
+                          tab.kind === "draft"
+                            ? (tab.provider as NeevAgentProvider)
+                            : null
+                        }
+                        onSessionCreated={(session) => {
+                          setAgentSessions((old) => [
+                            session,
+                            ...old.filter((item) => item.id !== session.id),
+                          ])
+                          // The draft became a real chat: its tab becomes that
+                          // chat rather than leaving both open.
+                          replaceTab(tabKey(tab), {
+                            kind: "agent",
+                            sessionId: session.id,
+                          })
+                          if (user !== undefined && orgId !== undefined)
+                            setOpenAgentSession(user, orgId, session.id)
+                        }}
+                        onDraftCancelled={() => dropTab(tabKey(tab))}
+                        onClosed={() => dropTab(tabKey(tab))}
+                        onRequestNavigationGuard={registerGuardFor(tabKey(tab))}
+                        onRequestSettings={() =>
+                          // Straight to the AI connections, not to Settings'
+                          // front page: a Connect button that leaves the user
+                          // hunting is not one.
+                          guardAll(() =>
+                            router.push("/settings?section=agents")
+                          )
+                        }
+                      />
+                    ))}
+                </DocumentChromeSlot.Provider>
+              </NativeTabPanel>
+            ))}
           </div>
         </main>
       </div>
