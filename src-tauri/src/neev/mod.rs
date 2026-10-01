@@ -37,10 +37,16 @@ pub fn run_content_verifier() -> std::process::ExitCode {
 /// changed — keep schema 20); 1 database error (rolled back).
 pub fn run_provider_schema_downgrade() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args != ["--from", "20", "--to", "19", "--confirm"] {
-        eprintln!("usage: neev-schema-downgrade --from 20 --to 19 --confirm");
-        return std::process::ExitCode::from(2);
-    }
+    let step = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["--from", "21", "--to", "20", "--confirm"] => 21,
+        ["--from", "20", "--to", "19", "--confirm"] => 20,
+        _ => {
+            eprintln!(
+                "usage: neev-schema-downgrade --from 21 --to 20 --confirm\n       neev-schema-downgrade --from 20 --to 19 --confirm"
+            );
+            return std::process::ExitCode::from(2);
+        }
+    };
     let Ok(url) = std::env::var("DATABASE_URL") else {
         eprintln!("neev-schema-downgrade: DATABASE_URL is not set");
         return std::process::ExitCode::from(2);
@@ -58,6 +64,9 @@ pub fn run_provider_schema_downgrade() -> std::process::ExitCode {
             eprintln!("neev-schema-downgrade: cannot connect");
             return std::process::ExitCode::from(1);
         };
+        if step == 21 {
+            return sharing_downgrade_exit(db::downgrade_node_sharing(&database).await);
+        }
         use db::provider_enum_migration::Downgrade;
         match db::downgrade_provider_enum(&database).await {
             Ok(Downgrade::Done) => {
@@ -81,6 +90,35 @@ pub fn run_provider_schema_downgrade() -> std::process::ExitCode {
             }
         }
     })
+}
+
+/// Exit codes mirror the 20 -> 19 step: 0 done, 3 wrong marker, 4 user data
+/// present (refused; nothing changed), 1 database error (rolled back).
+fn sharing_downgrade_exit(
+    result: Result<db::node_sharing_migration::Downgrade, error::AuthError>,
+) -> std::process::ExitCode {
+    use db::node_sharing_migration::Downgrade;
+    match result {
+        Ok(Downgrade::Done) => {
+            println!("downgraded schema 21 -> 20; no folder default existed, every row preserved");
+            std::process::ExitCode::SUCCESS
+        }
+        Ok(Downgrade::NotAtTwentyOne(version)) => {
+            println!("refused: schema is {version}, not 21; nothing changed");
+            std::process::ExitCode::from(3)
+        }
+        Ok(Downgrade::DefaultsExist { rows }) => {
+            println!(
+                "refused: {rows} folder sharing default(s) are configured; nothing changed — \
+                 keep schema 21 and repair forward (never delete them or restore over them)"
+            );
+            std::process::ExitCode::from(4)
+        }
+        Err(_) => {
+            eprintln!("neev-schema-downgrade: database error; rolled back");
+            std::process::ExitCode::from(1)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -88,14 +88,27 @@ pub(crate) async fn initialize_usage(
     Ok(())
 }
 
-/// Create a resource on the native engine — the behaviour every existing caller
-/// already has.
+/// Create a resource on the native engine with the folder default audience —
+/// the behaviour every existing caller already has.
 pub(crate) async fn create(
     state: &ServerState,
     actor: &OrgContext,
     input: ResourceInput,
 ) -> Result<Resource, ContentError> {
-    create_on(state, actor, input, false).await
+    create_on(state, actor, input, None, false).await
+}
+
+/// `create` with the creator's explicit audience. `None` resolves the folder
+/// default (`content::sharing`); `Some` wins over it, which is how a private
+/// exception inside a shared folder is created. Refused for bound documents:
+/// those always take their chat's audience.
+pub(crate) async fn create_with_visibility(
+    state: &ServerState,
+    actor: &OrgContext,
+    input: ResourceInput,
+    visibility: Option<Visibility>,
+) -> Result<Resource, ContentError> {
+    create_on(state, actor, input, visibility, false).await
 }
 
 /// Create a document backed by the La Suite engine.
@@ -115,16 +128,28 @@ pub(crate) async fn create_engine_document(
     actor: &OrgContext,
     input: ResourceInput,
 ) -> Result<Resource, ContentError> {
+    create_engine_document_with_visibility(state, actor, input, None).await
+}
+
+/// `create_engine_document` with the creator's explicit audience (see
+/// `create_with_visibility`).
+pub(crate) async fn create_engine_document_with_visibility(
+    state: &ServerState,
+    actor: &OrgContext,
+    input: ResourceInput,
+    visibility: Option<Visibility>,
+) -> Result<Resource, ContentError> {
     if input.kind != ResourceKind::Document {
         return Err(ContentError::Invalid);
     }
-    create_on(state, actor, input, true).await
+    create_on(state, actor, input, visibility, true).await
 }
 
 async fn create_on(
     state: &ServerState,
     actor: &OrgContext,
     input: ResourceInput,
+    explicit: Option<Visibility>,
     engine: bool,
 ) -> Result<Resource, ContentError> {
     let title = title(&input.title)?;
@@ -133,19 +158,37 @@ async fn create_on(
     if input.kind == ResourceKind::Chat && input.origin_chat_id.is_some() {
         return Err(ContentError::Invalid);
     }
-    let hash = org::digest_parts(&[
+    if input.origin_chat_id.is_some() && explicit.is_some() {
+        return Err(ContentError::Invalid);
+    }
+    let org_id = actor.org_id.to_string();
+    let node_id = input.node_id.to_string();
+    let mut parts = vec![
         "content.resource.create",
-        &actor.org_id.to_string(),
-        &input.node_id.to_string(),
+        org_id.as_str(),
+        node_id.as_str(),
         access::kind_name(input.kind),
-        &title,
+        title.as_str(),
         input.origin_chat_id.as_deref().unwrap_or(""),
         // The engine is part of the request identity. Without it, retrying a
         // native create with a request id already used for an engine create
         // would silently return the other kind of document rather than the
         // conflict it is.
         if engine { "engine.lasuite" } else { "native" },
-    ]);
+    ];
+    // An explicit audience is part of the request identity too, appended so an
+    // omitted one keeps the schema-20 hash: a retry that predates folder
+    // defaults still replays, and the same request id with a different explicit
+    // audience is a conflict rather than a silently different resource. The
+    // RESOLVED default is deliberately not hashed — a retry after the folder
+    // default changed returns the original resource with its original audience.
+    if let Some(visibility) = explicit {
+        parts.push(match visibility {
+            Visibility::Private => "visibility.private",
+            Visibility::Organization => "visibility.organization",
+        });
+    }
+    let hash = org::digest_parts(&parts);
     let tx = begin(state, actor).await?;
     node(&tx, actor.org_id, input.node_id).await?;
     // A retry still needs current access, but does not consume quota a second time.
@@ -162,8 +205,10 @@ async fn create_on(
             return Err(ContentError::NotFound);
         }
         source.visibility
+    } else if let Some(visibility) = explicit {
+        visibility
     } else {
-        Visibility::Private
+        super::sharing::resolve(&tx, actor.org_id, input.node_id).await?
     };
     initialize_usage(&tx, actor.org_id).await?;
     let counter = match input.kind {

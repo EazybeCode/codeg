@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::neev::{
     auth::session,
     content::{
-        attachment, documents, image, mentions, messages, resources, rich,
+        attachment, documents, image, mentions, messages, resources, rich, sharing,
         types::{
             ContentError, DocumentFormat, Message, Page, Resource, ResourceInput, ResourceKind,
             ResourcePatch, Revision, RichSaveInput, SaveInput, Visibility,
@@ -63,6 +63,36 @@ struct CreateInput {
     request_id: String,
     #[serde(default, deserialize_with = "present_optional")]
     origin_chat_id: Option<Option<String>>,
+    /// The creator's explicit audience. Omitted (or null) inherits the folder
+    /// default; a value wins over it — the private exception in a shared folder.
+    #[serde(default)]
+    visibility: Option<VisibilityInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharingPatchInput {
+    expected_revision: String,
+    default_visibility: DefaultVisibilityInput,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DefaultVisibilityInput {
+    Inherit,
+    Private,
+    Organization,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeSharingDto {
+    node_id: i32,
+    revision: String,
+    default_visibility: &'static str,
+    effective_visibility: &'static str,
+    inherited_from: Option<i32>,
+    can_manage: bool,
 }
 
 #[derive(Deserialize)]
@@ -335,6 +365,11 @@ async fn create_resource(
     if let Some(origin) = &origin_chat_id {
         canonical_uuid(origin)?;
     }
+    // A bound document always takes its chat's audience.
+    if origin_chat_id.is_some() && input.visibility.is_some() {
+        return Err(ApiError::Invalid);
+    }
+    let visibility = input.visibility.map(Visibility::from);
     // New documents go to the engine only when it is configured *and* creation
     // is enabled. A chat is never engine-backed, and a document attached to a
     // chat keeps the native path so its content stays with its conversation.
@@ -354,9 +389,10 @@ async fn create_resource(
         request_id: input.request_id,
     };
     let resource = if on_engine {
-        resources::create_engine_document(state, &actor, resource_input).await?
+        resources::create_engine_document_with_visibility(state, &actor, resource_input, visibility)
+            .await?
     } else {
-        resources::create(state, &actor, resource_input).await?
+        resources::create_with_visibility(state, &actor, resource_input, visibility).await?
     };
     if on_engine {
         // Outside the native transaction, which is closed by now: the migrator
@@ -382,6 +418,60 @@ async fn create_resource(
     let mut response = private_json(resource_dto(resource, engine_backed)?);
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)
+}
+
+fn node_sharing_dto(value: sharing::NodeSharing) -> NodeSharingDto {
+    NodeSharingDto {
+        node_id: value.node_id,
+        revision: value.revision.to_string(),
+        default_visibility: match value.default_visibility {
+            sharing::DefaultVisibility::Inherit => "inherit",
+            sharing::DefaultVisibility::Private => "private",
+            sharing::DefaultVisibility::Organization => "organization",
+        },
+        effective_visibility: match value.effective_visibility {
+            Visibility::Private => "private",
+            Visibility::Organization => "organization",
+        },
+        inherited_from: value.inherited_from,
+        can_manage: value.can_manage,
+    }
+}
+
+/// GET /api/neev/nodes/{id}/sharing — any current org member.
+pub(super) async fn get_node_sharing(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<i32>, PathRejection>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let node_id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    positive_id(node_id)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let result = sharing::get(&state, &actor, node_id).await?;
+    Ok(private_json(node_sharing_dto(result)))
+}
+
+/// PATCH /api/neev/nodes/{id}/sharing — the node's creator or an org admin.
+pub(super) async fn update_node_sharing(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<i32>, PathRejection>,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let node_id = safe_path(path)?;
+    let _permit = catalog::permit(&state)?;
+    positive_id(node_id)?;
+    let (input, actor) =
+        catalog::organization_mutation::<SharingPatchInput>(&state, request, SMALL_BODY_LIMIT)
+            .await?;
+    let revision = catalog::canonical_revision(&input.expected_revision)?;
+    let requested = match input.default_visibility {
+        DefaultVisibilityInput::Inherit => sharing::DefaultVisibility::Inherit,
+        DefaultVisibilityInput::Private => sharing::DefaultVisibility::Private,
+        DefaultVisibilityInput::Organization => sharing::DefaultVisibility::Organization,
+    };
+    let result = sharing::set(&state, &actor, node_id, revision, requested).await?;
+    Ok(private_json(node_sharing_dto(result)))
 }
 
 pub(super) async fn get_resource(

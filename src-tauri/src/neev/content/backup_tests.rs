@@ -307,9 +307,15 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
     if schema_version == db::CURRENT_SCHEMA_VERSION {
         return;
     }
-    // Schemas 18 (library) and 19 (steer) are newer than every inventory this
-    // fixture rebuilds; 20 only widened a CHECK, which older markers tolerate.
-    for table in ["neev_steer_inputs", "neev_library_files", "neev_library_items"] {
+    // Schemas 18 (library), 19 (steer) and 21 (folder sharing defaults) are
+    // newer than every inventory this fixture rebuilds; 20 only widened a
+    // CHECK, which older markers tolerate.
+    for table in [
+        "neev_node_sharing_defaults",
+        "neev_steer_inputs",
+        "neev_library_files",
+        "neev_library_items",
+    ] {
         db::execute(database, &format!("DROP TABLE IF EXISTS {table}"), vec![])
             .await
             .unwrap();

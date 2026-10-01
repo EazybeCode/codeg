@@ -95,6 +95,7 @@ async fn mixed_history(database: sea_orm::DatabaseConnection) {
         // messages, so both come off before the tables they name.
         // Newer layers first: steer (18/19) references turns, library files
         // reference items.
+        "neev_node_sharing_defaults",
         "neev_steer_inputs",
         "neev_library_files",
         "neev_library_items",

@@ -18,6 +18,16 @@ async fn version(db: &DatabaseConnection) -> i64 {
         .unwrap()
 }
 
+/// A fresh install is schema 21; the 20 -> 19 step starts from 20, so take the
+/// (table-only, empty) schema-21 layer off first.
+async fn at_twenty(db: &DatabaseConnection) {
+    assert_eq!(
+        downgrade_node_sharing(db).await,
+        Ok(node_sharing_migration::Downgrade::Done)
+    );
+    assert_eq!(version(db).await, provider_enum_migration::SCHEMA_VERSION);
+}
+
 async fn seed(db: &DatabaseConnection) -> (i32, i32) {
     let user = h::native_account(db, "provider-owner", "provider@example.test").await;
     let (org, _) = h::organization(db, user, "admin").await;
@@ -68,6 +78,7 @@ async fn session_and_turn(db: &DatabaseConnection, org: i32, user: i32, provider
 /// Put a current database back into the exact schema-19 provider shape: the
 /// narrow CHECK text schema 5/11 baked, and marker 19.
 async fn narrow_back_to_nineteen(db: &DatabaseConnection) {
+    at_twenty(db).await;
     match db.get_database_backend() {
         DbBackend::Sqlite => {
             let version: i64 = one(db, "PRAGMA schema_version", vec![])
@@ -121,7 +132,7 @@ async fn narrow_back_to_nineteen(db: &DatabaseConnection) {
 }
 
 async fn fresh_admits_acp_and_nothing_else(db: &DatabaseConnection) {
-    assert_eq!(version(db).await, provider_enum_migration::SCHEMA_VERSION);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(provider_enum_migration::validate(db).await, Ok(()));
     let (org, user) = seed(db).await;
     for (byte, provider) in [('a', "claude"), ('b', "codex"), ('c', "cursor"), ('d', "gemini"), ('e', "opencode")] {
@@ -143,7 +154,7 @@ async fn nineteen_upgrades_in_place(db: &DatabaseConnection) {
     assert!(connection(db, org, user, 'b', "gemini").await.is_err());
 
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, provider_enum_migration::SCHEMA_VERSION);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(provider_enum_migration::validate(db).await, Ok(()));
     // Every row survived, FKs intact.
     assert_eq!(h::count(db, "neev_agent_connections").await, 1);
@@ -151,9 +162,9 @@ async fn nineteen_upgrades_in_place(db: &DatabaseConnection) {
     assert_eq!(h::count(db, "neev_agent_turns").await, 1);
     connection(db, org, user, 'b', "gemini").await.unwrap();
     assert!(connection(db, org, user, 'c', "grok").await.is_err());
-    // Restart at 20 validates in place and changes nothing.
+    // Restart at the current schema validates in place and changes nothing.
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, provider_enum_migration::SCHEMA_VERSION);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(h::count(db, "neev_agent_connections").await, 2);
 }
 
@@ -236,6 +247,7 @@ async fn postgres_nineteen_upgrades_to_twenty_preserving_rows() {
 async fn sqlite_a_twenty_snapshot_still_runs_row_validation() {
     // Marker 20 must not skip the per-version validators a 19 snapshot runs.
     let db = h::database().await;
+    at_twenty(&db).await;
     assert_eq!(validate_content_snapshot(&db).await, Ok(provider_enum_migration::SCHEMA_VERSION));
     let (org, user) = seed(&db).await;
     session_and_turn(&db, org, user, "gemini").await.unwrap();
@@ -249,6 +261,7 @@ async fn sqlite_a_twenty_snapshot_still_runs_row_validation() {
 }
 
 async fn downgrade_round_trip(db: &DatabaseConnection) {
+    at_twenty(db).await;
     let (org, user) = seed(db).await;
     connection(db, org, user, 'a', "claude").await.unwrap();
     session_and_turn(db, org, user, "codex").await.unwrap();
@@ -272,12 +285,13 @@ async fn downgrade_round_trip(db: &DatabaseConnection) {
     // The downgraded database passes the whole schema-19 arm (every earlier
     // validator runs there) and re-upgrades in place.
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, provider_enum_migration::SCHEMA_VERSION);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     connection(db, org, user, 'b', "gemini").await.unwrap();
     assert_eq!(h::count(db, "neev_agent_turns").await, 1);
 }
 
 async fn downgrade_refuses_over_acp_rows(db: &DatabaseConnection) {
+    at_twenty(db).await;
     let (org, user) = seed(db).await;
     connection(db, org, user, 'a', "claude").await.unwrap();
     session_and_turn(db, org, user, "opencode").await.unwrap();

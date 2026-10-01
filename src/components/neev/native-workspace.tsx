@@ -36,6 +36,8 @@ import {
   Trash2,
   X,
   Sun,
+  Lock,
+  Users,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
@@ -91,6 +93,8 @@ import { NativeAgentChats } from "./native-agent-chats"
 import { NativeMentionsIndicator } from "./native-mentions"
 import { NativeTabPanel } from "./native-suspended-surface"
 import { DocumentChromeSlot } from "./document-chrome-slot"
+import { FolderShare, useFolderSharing } from "./native-folder-share"
+import { newerRevision, type FolderSharing } from "@/lib/neev-folder-sharing"
 import {
   keepWarm,
   warmExpired,
@@ -429,6 +433,7 @@ function ProjectPanel({
   onOpenResource,
   onOpenSession,
   onCreate,
+  access,
 }: {
   node: NativeNode | undefined
   items: NativeResource[]
@@ -436,16 +441,132 @@ function ProjectPanel({
   sessions: NeevAgentSession[]
   onOpenResource: (resource: NativeResource) => void
   onOpenSession: (session: NeevAgentSession) => void
-  onCreate: (kind: NativeResourceKind | "folder") => void
+  onCreate: CreateHandler
+  access?: ItemAccess
 }) {
   if (!node) return null
   return (
+    <ProjectPage
+      node={node}
+      items={items}
+      loading={loading}
+      sessions={sessions}
+      onOpenResource={onOpenResource}
+      onOpenSession={onOpenSession}
+      onCreate={onCreate}
+      access={access}
+    />
+  )
+}
+
+/** What a create button asks for: a kind, and an explicit audience if chosen. */
+type CreateHandler = (
+  kind: NativeResourceKind | "folder",
+  visibility?: "private"
+) => void
+
+function ProjectPage({
+  node,
+  items,
+  loading,
+  sessions,
+  onOpenResource,
+  onOpenSession,
+  onCreate,
+  access,
+}: {
+  node: NativeNode
+  items: NativeResource[]
+  loading: boolean
+  sessions: NeevAgentSession[]
+  onOpenResource: (resource: NativeResource) => void
+  onOpenSession: (session: NeevAgentSession) => void
+  onCreate: CreateHandler
+  access?: ItemAccess
+}) {
+  const c = useTranslations("NativeContent")
+  const auth = useNativeAuth()
+  // Re-read on focus: another manager may have changed it meanwhile.
+  const folder = useFolderSharing(node.id, { refreshOnFocus: true })
+  const organization = auth.session?.organization?.name ?? ""
+  const effective =
+    folder.status === "ready" ? folder.sharing?.effectiveVisibility : undefined
+  /** Why a create was held back: new items became shared, or could not be checked. */
+  const [held, setHeld] = useState<"shared" | "unchecked" | null>(null)
+  /**
+   * Read the setting again right before an item is created with the folder's
+   * default, and stop if new items have become SHARED since the page said
+   * otherwise: the reader decided on what they were shown. The page now shows
+   * the new state and the private choice; the next click is theirs to make.
+   * A read that fails after the page said "private" holds too: that promise
+   * can no longer be checked, and the item might be created shared. The page
+   * then offers the private choice (the setting is now unknown) and the next
+   * click is the reader's. A setting that was never readable (an older
+   * server) does not block — the private choice was on screen all along.
+   */
+  const checkAudience = useCallback(async () => {
+    setHeld(null)
+    const shown = effective
+    const fresh = await folder.refresh()
+    if (!fresh && shown === "private") {
+      setHeld("unchecked")
+      return false
+    }
+    if (
+      fresh &&
+      fresh.effectiveVisibility === "organization" &&
+      shown !== "organization"
+    ) {
+      setHeld("shared")
+      return false
+    }
+    return true
+  }, [effective, folder])
+  return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14">
-        <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
-          {node.name}
-        </h1>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <h1 className="min-w-0 break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+            {node.name}
+          </h1>
+          {/* New items' default, and optionally my existing items: see FolderShare. */}
+          {access && (
+            <div className="pt-3">
+              <FolderShare
+                node={node}
+                folder={folder}
+                nodeName={access.nodeName}
+                onShared={access.onFolderShared}
+                onSharingChanged={access.onFolderSharingChanged}
+              />
+            </div>
+          )}
+        </div>
+        {/* Only what the server said. Nothing is claimed while it is unknown. */}
+        {effective && (
+          <p className="mt-2 flex items-center gap-1.5 text-sm text-muted-foreground">
+            {effective === "organization" ? (
+              <Users aria-hidden className="size-3.5" />
+            ) : (
+              <Lock aria-hidden className="size-3.5" />
+            )}
+            {effective === "organization"
+              ? c("folderNewItemsShared", { organization })
+              : c("folderNewItemsPrivate")}
+          </p>
+        )}
+        {held && (
+          <p role="alert" className="mt-2 text-sm font-medium">
+            {held === "shared"
+              ? c("folderNewItemsNowShared", { organization })
+              : c("folderNewItemsUnchecked")}
+          </p>
+        )}
         <ProjectContents
+          // Offered unless new items are KNOWN to be private: shared, still
+          // loading, or unreadable all leave the reader the private choice.
+          privateOffered={effective !== "private"}
+          checkAudience={checkAudience}
           node={node}
           items={items}
           loading={loading}
@@ -453,6 +574,7 @@ function ProjectPanel({
           onOpenResource={onOpenResource}
           onOpenSession={onOpenSession}
           onCreate={onCreate}
+          access={access}
         />
       </div>
     </div>
@@ -505,6 +627,37 @@ function WorkspaceStart({
   )
 }
 
+/**
+ * Who may read one item in a folder, and the way to change it from the list.
+ *
+ * Exactly the rule the open document and chat already apply, so the list is a
+ * second place to reach the same action rather than a second policy:
+ *
+ * - only the item's CREATOR is offered it. The server refuses anyone else —
+ *   an organization admin included — so offering it would be a control that
+ *   can only fail, and implying admins can share someone's private work.
+ * - an item made from a chat (a generated file) has no control of its own. It
+ *   follows its chat's audience, and the server refuses to change it directly.
+ * - sharing asks first, with the same full-history wording as everywhere
+ *   else; making private is the explicit button, described by the existing
+ *   warning that copies already downloaded cannot be recalled.
+ *
+ * This is per ITEM. Sharing a folder is a different question — what happens
+ * to things created in it later — and is not decided here.
+ */
+type ItemAccess = {
+  userId: number | undefined
+  busy: boolean
+  error: unknown
+  onShare: (resource: NativeResource) => void
+  onMakePrivate: (resource: NativeResource) => void
+  /** Rows a folder share confirmed, for every list on screen. */
+  onFolderShared: (resources: NativeResource[]) => void
+  /** A saved new-items default; it moves the folder's revision. */
+  onFolderSharingChanged: (sharing: FolderSharing) => void
+  nodeName: (id: number) => string | undefined
+}
+
 function ProjectContents({
   node,
   items,
@@ -513,6 +666,9 @@ function ProjectContents({
   onOpenResource,
   onOpenSession,
   onCreate,
+  access,
+  privateOffered = false,
+  checkAudience,
 }: {
   node: NativeNode
   items: NativeResource[]
@@ -520,10 +676,25 @@ function ProjectContents({
   sessions: NeevAgentSession[]
   onOpenResource: (resource: NativeResource) => void
   onOpenSession: (session: NeevAgentSession) => void
-  onCreate: (kind: NativeResourceKind | "folder") => void
+  onCreate: CreateHandler
+  access?: ItemAccess
+  /** New items here are not known to be private: a private exception is offered. */
+  privateOffered?: boolean
+  /** Re-checks the folder's audience before a default create; false = hold. */
+  checkAudience?: () => Promise<boolean>
 }) {
   const t = useTranslations("Native"),
     c = useTranslations("NativeContent")
+  /**
+   * A private exception, chosen BEFORE anything is created or written.
+   *
+   * In a folder whose new items are shared, "New document" makes a shared
+   * document straight away; making it private afterwards would leave a window
+   * in which it was visible. This sends the audience with the creation itself,
+   * so it is private from its first moment. One creation, then it resets.
+   */
+  const [privately, setPrivately] = useState(false)
+  const exception = privateOffered && privately
   const empty = !loading && items.length === 0 && sessions.length === 0
   const row =
     "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-2 text-start text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
@@ -541,13 +712,40 @@ function ProjectContents({
             key={kind}
             variant="outline"
             size="sm"
-            onClick={() => onCreate(kind)}
+            onClick={async () => {
+              if (kind === "folder") return onCreate(kind)
+              // Explicitly private: nothing about the folder can change that.
+              if (exception) {
+                setPrivately(false)
+                return onCreate(kind, "private")
+              }
+              if (checkAudience && !(await checkAudience())) return
+              onCreate(kind)
+            }}
           >
             <Icon aria-hidden className="size-4" />
             {label}
           </Button>
         ))}
       </div>
+      {privateOffered && (
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={privately}
+            onChange={(event) => setPrivately(event.target.checked)}
+            aria-describedby={`create-private-hint-${node.id}`}
+          />
+          <Lock aria-hidden className="size-3.5 text-muted-foreground" />
+          {c("createPrivately")}
+          <span
+            id={`create-private-hint-${node.id}`}
+            className="text-muted-foreground"
+          >
+            {c("createPrivatelyHint")}
+          </span>
+        </label>
+      )}
       {loading && (
         <p role="status" className="text-sm text-muted-foreground">
           {t("loadingItems")}
@@ -558,26 +756,86 @@ function ProjectContents({
           {t("sectionEmpty")}
         </p>
       )}
+      {access && <NativeError error={access.error} />}
       {(items.length > 0 || sessions.length > 0) && (
         <ul aria-label={node.name} className="space-y-0.5">
-          {items.map((resource) => (
-            <li key={resource.id}>
-              <button className={row} onClick={() => onOpenResource(resource)}>
-                {resource.kind === "document" ? (
-                  <FileText
-                    aria-hidden
-                    className="size-4 shrink-0 text-muted-foreground"
-                  />
-                ) : (
-                  <MessagesSquare
-                    aria-hidden
-                    className="size-4 shrink-0 text-muted-foreground"
-                  />
+          {items.map((resource) => {
+            const mine =
+              !!access &&
+              access.userId !== undefined &&
+              resource.creatorId === access.userId &&
+              !resource.originChatId
+            const shared = resource.visibility === "organization"
+            // Sharing something in the trash is not a thing anyone is trying
+            // to do; taking a shared one back out of view still is.
+            const control = mine && (shared || !resource.archived)
+            const warning = `neev-private-warning-${resource.id}`
+            return (
+              <li key={resource.id} className="flex min-w-0 items-center gap-1">
+                <button
+                  className={cn(row, "min-w-0 flex-1")}
+                  onClick={() => onOpenResource(resource)}
+                >
+                  {resource.kind === "document" ? (
+                    <FileText
+                      aria-hidden
+                      className="size-4 shrink-0 text-muted-foreground"
+                    />
+                  ) : (
+                    <MessagesSquare
+                      aria-hidden
+                      className="size-4 shrink-0 text-muted-foreground"
+                    />
+                  )}
+                  <span className="truncate">{resource.title}</span>
+                </button>
+                {shared && !control && (
+                  <span
+                    role="img"
+                    aria-label={c("sharedWithOrganization")}
+                    title={c("sharedWithOrganization")}
+                    className="shrink-0 px-2 text-muted-foreground"
+                  >
+                    <Users aria-hidden className="size-3.5" />
+                  </span>
                 )}
-                <span className="truncate">{resource.title}</span>
-              </button>
-            </li>
-          ))}
+                {control && access && (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 shrink-0 px-2 text-muted-foreground"
+                      disabled={access.busy}
+                      aria-label={c(shared ? "makeItemPrivate" : "shareItem", {
+                        name: resource.title,
+                      })}
+                      title={c(shared ? "makePrivate" : "share")}
+                      aria-describedby={shared ? warning : undefined}
+                      onClick={() =>
+                        shared
+                          ? access.onMakePrivate(resource)
+                          : access.onShare(resource)
+                      }
+                    >
+                      {shared ? (
+                        <Lock aria-hidden className="size-3.5" />
+                      ) : (
+                        <Users aria-hidden className="size-3.5" />
+                      )}
+                      <span className="hidden sm:inline">
+                        {c(shared ? "makePrivate" : "shareShort")}
+                      </span>
+                    </Button>
+                    {shared && (
+                      <p id={warning} className="sr-only">
+                        {c("makePrivateWarning")}
+                      </p>
+                    )}
+                  </>
+                )}
+              </li>
+            )
+          })}
           {sessions.map((session) => (
             <li key={session.id}>
               <button className={row} onClick={() => onOpenSession(session)}>
@@ -2155,7 +2413,11 @@ function WorkspaceContent() {
    * twice — replays the SAME creation rather than making a second one.
    */
   const createContent = useCallback(
-    async (node: NativeNode, kind: NativeResourceKind) => {
+    async (
+      node: NativeNode,
+      kind: NativeResourceKind,
+      visibility?: "private"
+    ) => {
       if (!auth.session || creating.current) return
       creating.current = true
       setCreateError(null)
@@ -2163,7 +2425,9 @@ function WorkspaceContent() {
       // whose response was lost has very likely committed; retrying with a new
       // id would make a second document, so the retry replays the same one and
       // the server returns the row it already made.
-      const attempt = `${node.id}:${kind}`
+      // The audience is part of the attempt: the server refuses the same id
+      // replayed with a different explicit visibility.
+      const attempt = `${node.id}:${kind}:${visibility ?? "default"}`
       const requestId =
         pendingCreate.current.get(attempt) ?? crypto.randomUUID()
       pendingCreate.current.set(attempt, requestId)
@@ -2180,6 +2444,8 @@ function WorkspaceContent() {
           {
             title: c(kind === "document" ? "untitledDocument" : "untitledChat"),
             requestId,
+            // Omitted unless chosen: the folder's default then applies.
+            ...(visibility ? { visibility } : {}),
           },
           auth.session.csrf,
           auth.signal
@@ -2362,6 +2628,88 @@ function WorkspaceContent() {
     },
     [auth, applyResource, guardAll, mutationBusy]
   )
+  /**
+   * Share one item with the organization, or take it back, from a folder list.
+   *
+   * The same PATCH the open item's own header sends, carrying the rest of the
+   * row back unchanged, so the server's rules are the only rules: creator only
+   * (admins included in the refusal), and nothing made from a chat. Guarded
+   * like trashing, because the change reaches any tab holding the item open.
+   */
+  const [shareTarget, setShareTarget] = useState<NativeResource | null>(null)
+  const [accessError, setAccessError] = useState<unknown>(null)
+  const setVisibility = useCallback(
+    (resource: NativeResource, visibility: NativeResource["visibility"]) => {
+      if (!auth.session || mutationBusy) return
+      guardAll(() => {
+        void (async () => {
+          setMutationBusy(true)
+          setAccessError(null)
+          try {
+            applyResource(
+              await updateNativeResource(
+                resource.orgId,
+                resource.id,
+                {
+                  nodeId: resource.nodeId,
+                  title: resource.title,
+                  visibility,
+                  archived: resource.archived,
+                  expectedAuthRevision: resource.authRevision,
+                },
+                auth.session!.csrf,
+                auth.signal
+              )
+            )
+            setShareTarget(null)
+            // A chat's generated files have no audience of their own: the
+            // server answers them with the chat's. Re-read the lists on screen
+            // so they stop showing the audience from before.
+            if (resource.kind === "chat")
+              for (const id of Object.keys(itemsByNode))
+                void loadItems(Number(id))
+          } catch (cause) {
+            setAccessError(cause)
+            auth.handleError(cause)
+          } finally {
+            setMutationBusy(false)
+          }
+        })()
+      })
+    },
+    [auth, applyResource, guardAll, mutationBusy, itemsByNode, loadItems]
+  )
+  const itemAccess = {
+    userId: auth.session?.user.id,
+    busy: mutationBusy,
+    error: shareTarget ? null : accessError,
+    onShare: (resource: NativeResource) => {
+      setAccessError(null)
+      setShareTarget(resource)
+    },
+    onMakePrivate: (resource: NativeResource) =>
+      setVisibility(resource, "private"),
+    onFolderShared: (resources: NativeResource[]) => {
+      for (const resource of resources) applyResource(resource)
+      // Shared chats change what their generated files report, and a
+      // subfolder's list may be loaded too: re-read what is on screen.
+      for (const id of Object.keys(itemsByNode)) void loadItems(Number(id))
+    },
+    onFolderSharingChanged: (sharing: FolderSharing) =>
+      // The node's revision moved with it: a rename or move sent with the old
+      // one would be refused as a conflict.
+      setNodes((old) =>
+        old.map((item) =>
+          item.id === sharing.nodeId
+            ? {
+                ...item,
+                revision: newerRevision(item.revision, sharing.revision),
+              }
+            : item
+        )
+      ),
+    nodeName: (id: number) => nodeById(id)?.name,
+  }
   const trashSession = useCallback(
     (session: NeevAgentSession) => {
       if (!auth.session || mutationBusy) return
@@ -3362,6 +3710,7 @@ function WorkspaceContent() {
                         />
                       ) : (
                         <ProjectPanel
+                          access={itemAccess}
                           node={nodeById(tab.nodeId)}
                           items={itemsByNode[tab.nodeId]?.items ?? []}
                           loading={itemsByNode[tab.nodeId]?.loading ?? false}
@@ -3376,7 +3725,7 @@ function WorkspaceContent() {
                             const node = nodeById(tab.nodeId)
                             if (node) openAgentSession(node, session)
                           }}
-                          onCreate={(kind) => {
+                          onCreate={(kind, visibility) => {
                             const node = nodeById(tab.nodeId)
                             if (!node) return
                             if (kind === "folder")
@@ -3386,7 +3735,7 @@ function WorkspaceContent() {
                                   parentId: node.id,
                                 })
                               )
-                            else void createContent(node, kind)
+                            else void createContent(node, kind, visibility)
                           }}
                         />
                       )
@@ -3574,6 +3923,44 @@ function WorkspaceContent() {
               </Button>
             </div>
           </form>
+        </DialogContent>
+      </Dialog>
+      {/* Sharing one item from a folder list: the same question, in the same
+          words, as sharing it from its own header. */}
+      <Dialog
+        open={shareTarget !== null}
+        onOpenChange={(value) => {
+          if (!value && !mutationBusy) setShareTarget(null)
+        }}
+      >
+        <DialogContent>
+          <DialogTitle>{c("shareTitle")}</DialogTitle>
+          <DialogDescription>
+            {c("shareDescription", {
+              organization: auth.session?.organization?.name ?? "",
+            })}
+          </DialogDescription>
+          <p className="truncate text-sm font-medium">{shareTarget?.title}</p>
+          <NativeError error={accessError} />
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="ghost"
+              type="button"
+              disabled={mutationBusy}
+              onClick={() => setShareTarget(null)}
+            >
+              {t("cancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={mutationBusy || !shareTarget}
+              onClick={() => {
+                if (shareTarget) setVisibility(shareTarget, "organization")
+              }}
+            >
+              {mutationBusy ? t("working") : c("confirmShare")}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
       {/* Renaming, for the sidebar. One field, because a name is the only

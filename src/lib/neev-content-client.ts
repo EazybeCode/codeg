@@ -114,6 +114,12 @@ export interface CreateNativeResourceInput {
   title: string
   requestId: string
   originChatId?: string | null
+  /**
+   * An explicit audience, overriding the folder's default for new items.
+   * Omitted means the server applies that default (schema 21). Never sent with
+   * `originChatId`: a chat's generated file always follows its chat.
+   */
+  visibility?: NativeVisibility
 }
 
 export interface UpdateNativeResourceInput {
@@ -693,7 +699,14 @@ export async function createNativeResource(
   )
     invalidRequest()
   if (input.originChatId) assertUuid(input.originChatId)
-  const body =
+  const explicit = input.visibility !== undefined
+  if (
+    explicit &&
+    ((input.visibility !== "private" && input.visibility !== "organization") ||
+      Object.prototype.hasOwnProperty.call(input, "originChatId"))
+  )
+    invalidRequest()
+  const body: Record<string, unknown> =
     kind === "document" &&
     Object.prototype.hasOwnProperty.call(input, "originChatId")
       ? {
@@ -702,6 +715,9 @@ export async function createNativeResource(
           originChatId: input.originChatId,
         }
       : { title: input.title, requestId: input.requestId }
+  // Only when chosen: an omitted field is what lets the folder decide, and
+  // keeps the request (and its idempotency hash) exactly what it was before.
+  if (explicit) body.visibility = input.visibility
   const resource = parseResource(
     await contentMutation(
       `/api/neev/nodes/${nodeId}/${kind}s`,

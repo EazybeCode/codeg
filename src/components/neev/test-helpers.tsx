@@ -108,6 +108,18 @@ export function mockNativeSession(
       return json(session ?? { code: "unauthorized" }, session ? 200 : 401)
     // The Settings page always mounts the join-code panel; default to "no code
     // yet" so unrelated Settings tests need not mock it (tests can still override).
+    // Every folder page reads its setting for new items (schema 21). Default
+    // to what an untouched folder answers: nothing set anywhere, so private.
+    const sharing = /^GET \/api\/neev\/nodes\/(\d+)\/sharing$/.exec(key)
+    if (sharing)
+      return json({
+        nodeId: Number(sharing[1]),
+        revision: "1",
+        defaultVisibility: "inherit",
+        effectiveVisibility: "private",
+        inheritedFrom: null,
+        canManage: true,
+      })
     if (key === "GET /api/neev/organization/join-code")
       return json({ code: null, disabled: false })
     // Settings always mounts the per-user agent connection panel; default to

@@ -132,6 +132,10 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/neev/nodes", get(catalog::list).post(catalog::create))
         .route("/api/neev/nodes/{node_id}", patch(catalog::update))
         .route(
+            "/api/neev/nodes/{node_id}/sharing",
+            get(content::get_node_sharing).patch(content::update_node_sharing),
+        )
+        .route(
             "/api/neev/nodes/{node_id}/chats",
             get(content::list_chats).post(content::create_chat),
         )

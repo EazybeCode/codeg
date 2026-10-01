@@ -255,8 +255,11 @@ mod tests {
     async fn assert_upgrade_preserves_organization(db: sea_orm::DatabaseConnection) {
         let user = h::native_account(&db, "library-upgrade", "upgrade@example.test").await;
         let (org, _) = h::organization(&db, user, "admin").await;
-        // Schema 19's steer table is newer than 17: remove it too, or the
-        // inventory matches no known version.
+        // Schema 19's steer table and schema 21's sharing defaults are newer
+        // than 17: remove them too, or the inventory matches no known version.
+        execute(&db, "DROP TABLE neev_node_sharing_defaults", vec![])
+            .await
+            .unwrap();
         execute(&db, "DROP TABLE neev_steer_inputs", vec![])
             .await
             .unwrap();

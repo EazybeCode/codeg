@@ -33,6 +33,9 @@ mod rich_document_tests;
 mod rich_export;
 #[cfg(test)]
 mod rich_tests;
+pub(crate) mod sharing;
+#[cfg(test)]
+mod sharing_tests;
 #[cfg(test)]
 mod test_support;
 pub(crate) mod types;

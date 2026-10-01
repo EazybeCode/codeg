@@ -1676,3 +1676,186 @@ async fn organization_attachment_trash_respects_current_chat_acl_and_restore() {
         .await
         .assert_status_bad_request();
 }
+
+impl Harness {
+    async fn as_member(&self, method: &str, path: &str, body: Value) -> axum_test::TestResponse {
+        let request = match method {
+            "POST" => self.server.post(path),
+            "PATCH" => self.server.patch(path),
+            _ => panic!("unsupported method"),
+        };
+        request
+            .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+            .add_header(header::COOKIE, &self.member_cookies)
+            .add_header("x-neev-csrf", &self.member_csrf)
+            .json(&body)
+            .await
+    }
+
+    async fn sharing(&self, cookies: &str, node: i32) -> axum_test::TestResponse {
+        self.server
+            .get(&format!("/api/neev/nodes/{node}/sharing"))
+            .add_header(header::COOKIE, cookies)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn node_sharing_routes_publish_the_contract_and_enforce_authority() {
+    let h = Harness::new().await;
+    let path = format!("/api/neev/nodes/{}/sharing", h.node);
+    let initial = h.sharing(&h.cookies, h.node).await;
+    initial.assert_status_ok();
+    assert_eq!(initial.header(header::CACHE_CONTROL), "no-store");
+    let initial: Value = initial.json();
+    assert_eq!(
+        initial,
+        json!({"nodeId":h.node,"revision":initial["revision"],"defaultVisibility":"inherit","effectiveVisibility":"private","inheritedFrom":null,"canManage":true})
+    );
+    let revision = initial["revision"].as_str().unwrap().to_owned();
+
+    // A plain member reads it but cannot manage the owner's node.
+    let member: Value = h.sharing(&h.member_cookies, h.node).await.json();
+    assert_eq!(member["canManage"], false);
+    let refused = h
+        .as_member("PATCH", &path, json!({"expectedRevision":revision,"defaultVisibility":"organization"}))
+        .await;
+    refused.assert_status(StatusCode::FORBIDDEN);
+    refused.assert_json(&json!({"code":"forbidden"}));
+
+    // Another tenant learns nothing.
+    let foreign = h
+        .server
+        .get(&path)
+        .add_header(header::COOKIE, &h.foreign_cookies)
+        .await;
+    foreign.assert_status(StatusCode::NOT_FOUND);
+    let foreign_patch = h
+        .server
+        .patch(&path)
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &h.foreign_cookies)
+        .add_header("x-neev-csrf", &h.foreign_csrf)
+        .json(&json!({"expectedRevision":revision,"defaultVisibility":"organization"}))
+        .await;
+    foreign_patch.assert_status(StatusCode::NOT_FOUND);
+
+    // CSRF is required.
+    h.server
+        .patch(&path)
+        .add_header(header::ORIGIN, "http://127.0.0.1:3100")
+        .add_header(header::COOKIE, &h.cookies)
+        .json(&json!({"expectedRevision":revision,"defaultVisibility":"organization"}))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    // Strict bodies.
+    for body in [
+        json!({"expectedRevision":revision,"defaultVisibility":"public"}),
+        json!({"expectedRevision":revision,"defaultVisibility":"Organization"}),
+        json!({"expectedRevision":revision}),
+        json!({"expectedRevision":"01","defaultVisibility":"organization"}),
+        json!({"expectedRevision":revision,"defaultVisibility":"organization","extra":true}),
+    ] {
+        assert_safe_invalid(h.mutation("PATCH", &path, body).await);
+    }
+    h.sharing(&h.cookies, 0).await.assert_status_bad_request();
+
+    // Stale revision conflicts; the current one succeeds and bumps the revision.
+    let stale = h
+        .mutation("PATCH", &path, json!({"expectedRevision":"999","defaultVisibility":"organization"}))
+        .await;
+    stale.assert_status(StatusCode::CONFLICT);
+    let changed = h
+        .mutation("PATCH", &path, json!({"expectedRevision":revision,"defaultVisibility":"organization"}))
+        .await;
+    changed.assert_status_ok();
+    let changed: Value = changed.json();
+    assert_eq!(changed["defaultVisibility"], "organization");
+    assert_eq!(changed["effectiveVisibility"], "organization");
+    assert_ne!(changed["revision"], initial["revision"]);
+    assert_eq!(h.sharing(&h.member_cookies, h.node).await.json::<Value>()["effectiveVisibility"], "organization");
+
+    // A member-created subfolder inherits, names its source, and is theirs to manage.
+    let created = h
+        .as_member(
+            "POST",
+            "/api/neev/nodes",
+            json!({"parentId":h.node,"kind":"folder","name":"Member folder"}),
+        )
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let child = created.json::<Value>()["id"].as_i64().unwrap() as i32;
+    let child_view: Value = h.sharing(&h.member_cookies, child).await.json();
+    assert_eq!(
+        child_view,
+        json!({"nodeId":child,"revision":"1","defaultVisibility":"inherit","effectiveVisibility":"organization","inheritedFrom":h.node,"canManage":true})
+    );
+    let private_child = h
+        .as_member(
+            "PATCH",
+            &format!("/api/neev/nodes/{child}/sharing"),
+            json!({"expectedRevision":"1","defaultVisibility":"private"}),
+        )
+        .await;
+    private_child.assert_status_ok();
+    assert_eq!(private_child.json::<Value>()["inheritedFrom"], Value::Null);
+}
+
+#[tokio::test]
+async fn creation_inherits_the_folder_default_unless_an_audience_is_given() {
+    let h = Harness::new().await;
+    let path = format!("/api/neev/nodes/{}/sharing", h.node);
+    let revision = h.sharing(&h.cookies, h.node).await.json::<Value>()["revision"].clone();
+    h.mutation("PATCH", &path, json!({"expectedRevision":revision,"defaultVisibility":"organization"}))
+        .await
+        .assert_status_ok();
+
+    let inherited = h.create("document", None).await;
+    assert_eq!(inherited["visibility"], "organization");
+    let chat = h.create("chat", None).await;
+    assert_eq!(chat["visibility"], "organization");
+
+    let hr = &h;
+    let create = |kind: &str, extra: Value| {
+        let mut body = json!({"title":"Secret","requestId":uuid::Uuid::new_v4().to_string()});
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        let route = format!("/api/neev/nodes/{}/{kind}s", hr.node);
+        async move { hr.mutation("POST", &route, body).await }
+    };
+    let private = create("document", json!({"visibility":"private"})).await;
+    private.assert_status(StatusCode::CREATED);
+    let private: Value = private.json();
+    assert_eq!(private["visibility"], "private");
+    // The member cannot see the private exception.
+    h.server
+        .get(&format!("/api/neev/resources/{}", private["id"].as_str().unwrap()))
+        .add_header(header::COOKIE, &h.member_cookies)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    let null = create("chat", json!({"visibility":null})).await;
+    null.assert_status(StatusCode::CREATED);
+    assert_eq!(null.json::<Value>()["visibility"], "organization");
+
+    // Attached documents take the chat's audience; an explicit one is refused.
+    assert_safe_invalid(
+        create("document", json!({"visibility":"private","originChatId":chat["id"]})).await,
+    );
+    let attached = create("document", json!({"originChatId":chat["id"]})).await;
+    attached.assert_status(StatusCode::CREATED);
+    assert_eq!(attached.json::<Value>()["visibility"], "organization");
+    assert_safe_invalid(create("chat", json!({"visibility":"public"})).await);
+
+    // Same request id, same body: replay. Different explicit audience: conflict.
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let body = json!({"title":"Once","requestId":request_id,"visibility":"private"});
+    let route = format!("/api/neev/nodes/{}/documents", h.node);
+    let first: Value = h.mutation("POST", &route, body.clone()).await.json();
+    let again = h.mutation("POST", &route, body).await;
+    again.assert_status(StatusCode::CREATED);
+    assert_eq!(again.json::<Value>()["id"], first["id"]);
+    h.mutation("POST", &route, json!({"title":"Once","requestId":request_id}))
+        .await
+        .assert_status(StatusCode::CONFLICT);
+}
