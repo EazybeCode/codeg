@@ -112,6 +112,7 @@
     "moveTitle": "移动到其他文件夹",
     "destination": "目标文件夹",
     "resourceActions": "内容操作",
+    "editorOptions": "下载、打印和历史记录…",
     "rename": "重命名",
     "noSelection": "选择项目或文件夹以打开其中的聊天和文档。",
     "teamChat": "团队聊天",

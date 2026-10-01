@@ -1,18 +1,21 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { useTranslations } from "next-intl"
 import { Lock, MoreHorizontal, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
   loadNativeResource,
   type NativeResource,
 } from "@/lib/neev-content-client"
+import { useDocumentChromeSlot } from "./document-chrome-slot"
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeDropdownMenuContent as DropdownMenuContent } from "./native-suspended-surface"
 import type { ResourceActions } from "./native-document"
@@ -160,6 +163,72 @@ function alignFrameTypography(element: HTMLIFrameElement | null): void {
   }
 }
 
+const CHROME_STYLE_ID = "neev-frame-chrome"
+
+/**
+ * The editor's own options button, inside the frame.
+ *
+ * Built from upstream's theming class names, which it publishes as hooks for
+ * exactly this kind of host styling, rather than from a label (translated) or
+ * a position (shifts with the options a document has). The card holds at most
+ * this and the comments toggle, and only this one is a drop button.
+ */
+const ENGINE_OPTIONS_TRIGGER = ".--docs--card-floating-bar .--docs--drop-button"
+
+/**
+ * One "…" for the document, not two.
+ *
+ * The editor draws its own options button over the top right of the page —
+ * present, download, print, history — and Neev draws one for rename, move and
+ * trash. Two identical buttons a hand's width apart, each holding half the
+ * actions, read as one menu drawn twice. Neev's menu now opens the editor's as
+ * well (see `openEngineOptions`), so the editor's button is hidden here.
+ *
+ * Hidden, not removed, and kept at the top right with its box intact: the
+ * editor still anchors its menu to it, so that menu opens where the reader
+ * expects it rather than at the origin. The hiding rule and the lookup Neev
+ * clicks through are the SAME selector, so they fail together — if a future
+ * editor renames that class, nothing is hidden and its own button is simply
+ * back, rather than download and print going missing.
+ *
+ * The header gets back a little of the room the old band took: with nothing
+ * between the tab strip and the frame any more, the title would otherwise sit
+ * on the strip's border.
+ */
+function adoptFrameChrome(element: HTMLIFrameElement | null): void {
+  try {
+    const doc = element?.contentDocument
+    if (!doc) return
+    const style =
+      doc.getElementById(CHROME_STYLE_ID) ?? doc.createElement("style")
+    style.id = CHROME_STYLE_ID
+    style.textContent =
+      `.--docs--doc-header{padding-top:12px}` +
+      `${ENGINE_OPTIONS_TRIGGER}{visibility:hidden;position:absolute;top:0;right:0}` +
+      // The card around it would otherwise stay on screen as an empty box
+      // whenever the comments toggle is not there to fill it.
+      `.--docs--card-floating-bar:not(:has(button:not(.--docs--drop-button):not(.--docs--drop-button *))){visibility:hidden}`
+    doc.head?.appendChild(style)
+  } catch {
+    // Unreadable means not ours to style; the editor keeps its own button.
+  }
+}
+
+/** The editor's options button, or null when there is none to drive. */
+function engineOptionsTrigger(
+  element: HTMLIFrameElement | null
+): HTMLElement | null {
+  try {
+    return (
+      element?.contentDocument?.querySelector<HTMLElement>(
+        ENGINE_OPTIONS_TRIGGER
+      ) ?? null
+    )
+  } catch {
+    return null
+  }
+}
+
 function failed(element: HTMLIFrameElement | null): boolean {
   if (!element) return false
   try {
@@ -194,7 +263,18 @@ function Frame({
   const auth = useNativeAuth()
   const t = useTranslations("NativeContent")
   const n = useTranslations("Native")
+  const slot = useDocumentChromeSlot()
   const [state, setState] = useState<"loading" | "ready" | "stalled">("loading")
+  /**
+   * Whether the editor's options button was there when the menu last opened.
+   *
+   * Looked up on opening rather than once at load: the editor draws it only
+   * after the document itself has arrived, which is after `load`, and takes it
+   * away for a document in the trash.
+   */
+  const [engineOptions, setEngineOptions] = useState(false)
+  /** Set while an item hands focus to the editor, so the menu does not take it back. */
+  const handingOff = useRef(false)
   // Bumping this remounts the frame, which is what "try again" has to do: an
   // iframe will not re-request a src it already holds.
   const [attempt, setAttempt] = useState(0)
@@ -417,134 +497,191 @@ function Frame({
    */
   const src = `/document-engine/docs/${resource.id}/`
 
+  /**
+   * Open the editor's own options from Neev's menu.
+   *
+   * Deferred a tick so the Neev menu has finished closing first; otherwise its
+   * focus restore lands after this and the editor's menu, which closes when
+   * focus leaves it, shuts again at once. Focus goes into the frame before the
+   * click for the same reason.
+   */
+  function openEngineOptions() {
+    handingOff.current = true
+    setTimeout(() => {
+      const trigger = engineOptionsTrigger(frame.current)
+      if (!trigger) return
+      frame.current?.contentWindow?.focus()
+      trigger.click()
+    }, 0)
+  }
+
+  const showMenu = actions?.isCreator || state === "ready"
+  // Who can read this, and the actions that move or retire it — nothing the
+  // frame already draws.
+  const controls = (
+    <div className="flex shrink-0 items-center gap-1">
+      <span className="flex items-center gap-1 px-1 text-xs text-muted-foreground">
+        <span
+          role="img"
+          aria-label={t(resource.visibility)}
+          title={t(resource.visibility)}
+        >
+          {resource.visibility === "private" ? (
+            <Lock aria-hidden className="size-3.5" />
+          ) : (
+            <Users aria-hidden className="size-3.5" />
+          )}
+        </span>
+        <span className="hidden sm:inline">
+          {t(resource.visibility)}
+          {resource.archived ? ` · ${t("archived")}` : ""}
+        </span>
+      </span>
+      {actions?.isCreator && actions.shareable && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2"
+          disabled={actions.disabled}
+          // Icon-only here, so the accessible name is the only reading of it
+          // there is; the tooltip gives the same sentence to a pointer.
+          aria-label={t(
+            actions.visibility === "private" ? "share" : "makePrivate"
+          )}
+          title={t(actions.visibility === "private" ? "share" : "makePrivate")}
+          onClick={
+            actions.visibility === "private"
+              ? actions.onShare
+              : actions.onMakePrivate
+          }
+        >
+          {actions.visibility === "private" ? (
+            <Users aria-hidden />
+          ) : (
+            <Lock aria-hidden />
+          )}
+        </Button>
+      )}
+      {/*
+        The one menu for this document. Creator-only items stay creator-only,
+        exactly as the native document gates them: archiving and moving are
+        refused server-side for anyone else. The editor's own options are
+        everyone's, which is why the menu is shown to a member once the frame
+        is up even though none of Neev's items are theirs.
+      */}
+      {showMenu && (
+        <DropdownMenu
+          onOpenChange={(open) => {
+            if (open) setEngineOptions(!!engineOptionsTrigger(frame.current))
+          }}
+        >
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2"
+              aria-label={t("resourceActions")}
+              disabled={actions?.disabled}
+            >
+              <MoreHorizontal aria-hidden />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            onCloseAutoFocus={(event) => {
+              if (!handingOff.current) return
+              handingOff.current = false
+              event.preventDefault()
+            }}
+          >
+            {actions?.isCreator && (
+              <>
+                {/*
+                  Rename is here now, and the old reasoning for leaving it out
+                  no longer holds. It was omitted because upstream owns the
+                  title and a second writer for one name is a conflict — but
+                  Neev's PATCH is not a second writer, it is the same one: the
+                  backend projects a native title change into Docs and
+                  reconciles on open. The title inside the frame is still
+                  directly editable, and that remains the quickest way to do
+                  it; this exists because the reader looking for "rename"
+                  looks in a menu, and finding nothing there reads as "you
+                  cannot".
+                */}
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onRename}
+                >
+                  {t("rename")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onMove}
+                >
+                  {t("move")}
+                </DropdownMenuItem>
+                {/*
+                  The delete affordance, named for what it actually does. There
+                  is no hard delete behind it — the API archives, and archiving
+                  is reversible — so calling it "Delete" would promise a
+                  finality the system does not implement, and calling it
+                  "Archive" left readers hunting for a delete that was never
+                  coming. "Move to trash" is both true and the thing they were
+                  looking for, and it is paired with a restore in the same menu
+                  and a trash view in the sidebar.
+                */}
+                <DropdownMenuItem
+                  disabled={actions.disabled}
+                  onSelect={actions.onArchiveToggle}
+                >
+                  {t(actions.archived ? "restoreFromTrash" : "moveToTrash")}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            )}
+            <DropdownMenuItem
+              disabled={!engineOptions}
+              onSelect={openEngineOptions}
+            >
+              {t("editorOptions")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
+    </div>
+  )
+
   return (
     <section
       className="flex min-h-0 min-w-0 flex-1 flex-col"
       aria-label={resource.title}
     >
-      {/* Who can read this, and the actions that move or retire it — nothing
-          the frame already draws, and no Back: the sidebar and tab strip are
-          on screen the whole time, so it only cost height. */}
-      <header className="flex h-8 shrink-0 items-center gap-2 px-6 sm:px-10">
-        {showBack && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2"
-            onClick={onBack}
-          >
-            {t("back")}
-          </Button>
-        )}
-        <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
-          <span
-            role="img"
-            aria-label={t(resource.visibility)}
-            title={t(resource.visibility)}
-          >
-            {resource.visibility === "private" ? (
-              <Lock aria-hidden className="size-3.5" />
-            ) : (
-              <Users aria-hidden className="size-3.5" />
-            )}
-          </span>
-          <span className="hidden sm:inline">
-            {t(resource.visibility)}
-            {resource.archived ? ` · ${t("archived")}` : ""}
-          </span>
-        </span>
-        {actions?.isCreator && actions.shareable && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2"
-            disabled={actions.disabled}
-            // Icon-only here, so the accessible name is the only reading of it
-            // there is; the tooltip gives the same sentence to a pointer.
-            aria-label={t(
-              actions.visibility === "private" ? "share" : "makePrivate"
-            )}
-            title={t(
-              actions.visibility === "private" ? "share" : "makePrivate"
-            )}
-            onClick={
-              actions.visibility === "private"
-                ? actions.onShare
-                : actions.onMakePrivate
-            }
-          >
-            {actions.visibility === "private" ? (
-              <Users aria-hidden />
-            ) : (
-              <Lock aria-hidden />
-            )}
-          </Button>
-        )}
-        {/*
-          Creator-only, exactly as the native document gates them. Archiving and
-          moving are refused server-side for anyone else, so showing them to an
-          organization member would be offering two controls that can only fail.
-          With neither left there is no menu at all rather than an empty one.
-        */}
-        {actions?.isCreator && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2"
-                aria-label={t("resourceActions")}
-                disabled={actions.disabled}
-              >
-                <MoreHorizontal aria-hidden />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {/*
-                Rename is here now, and the old reasoning for leaving it out no
-                longer holds. It was omitted because upstream owns the title and
-                a second writer for one name is a conflict — but Neev's PATCH is
-                not a second writer, it is the same one: the backend projects a
-                native title change into Docs and reconciles on open. The title
-                inside the frame is still directly editable, and that remains
-                the quickest way to do it; this exists because the reader
-                looking for "rename" looks in a menu, and finding nothing there
-                reads as "you cannot".
-              */}
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onRename}
-              >
-                {t("rename")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onMove}
-              >
-                {t("move")}
-              </DropdownMenuItem>
-              {/*
-                The delete affordance, named for what it actually does. There is
-                no hard delete behind it — the API archives, and archiving is
-                reversible — so calling it "Delete" would promise a finality the
-                system does not implement, and calling it "Archive" left readers
-                hunting for a delete that was never coming. "Move to trash" is
-                both true and the thing they were looking for, and it is paired
-                with a restore in the same menu and a trash view in the sidebar.
-              */}
-              <DropdownMenuItem
-                disabled={actions.disabled}
-                onSelect={actions.onArchiveToggle}
-              >
-                {t(actions.archived ? "restoreFromTrash" : "moveToTrash")}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </header>
-
+      {/*
+        In the workspace the controls go up into the row that already holds the
+        breadcrumb, and nothing is drawn here: the band this used to be was the
+        blank strip between the tabs and the title. A tab that is not in front
+        draws them nowhere. Only the standalone folder view, which has no such
+        row, still gets a header of its own — and the Back it needs.
+      */}
+      {slot
+        ? createPortal(controls, slot)
+        : slot === undefined && (
+            <header className="flex h-8 shrink-0 items-center gap-2 px-6 sm:px-10">
+              {showBack && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2"
+                  onClick={onBack}
+                >
+                  {t("back")}
+                </Button>
+              )}
+              <div className="ml-auto">{controls}</div>
+            </header>
+          )}
       {state === "stalled" && (
-        <div className="flex shrink-0 items-center gap-3 px-6 pb-2 sm:px-10">
+        <div className="flex shrink-0 items-center gap-3 px-6 py-2 sm:px-10">
           <p role="alert" className="text-sm text-destructive">
             {t("unavailable")}
           </p>
@@ -600,7 +737,10 @@ function Frame({
           onLoad={() => {
             settled.current = true
             const broken = failed(frame.current)
-            if (!broken) alignFrameTypography(frame.current)
+            if (!broken) {
+              alignFrameTypography(frame.current)
+              adoptFrameChrome(frame.current)
+            }
             setState(broken ? "stalled" : "ready")
           }}
           onError={() => {

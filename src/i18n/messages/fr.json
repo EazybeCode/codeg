@@ -112,6 +112,7 @@
     "moveTitle": "Déplacer vers un autre dossier",
     "destination": "Dossier de destination",
     "resourceActions": "Actions sur le contenu",
+    "editorOptions": "Télécharger, imprimer et historique…",
     "rename": "Renommer",
     "noSelection": "Sélectionnez un projet ou un dossier pour ouvrir ses discussions et documents.",
     "teamChat": "Discussion d’équipe",

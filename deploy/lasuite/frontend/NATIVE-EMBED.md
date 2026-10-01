@@ -66,6 +66,25 @@ Creator-only actions are gated on `isCreator`, exactly as the native document
 gates them. The server refuses archive and move for anyone else, so showing
 them to an organization member would be offering controls that can only fail.
 
+### Where the controls are, and the one menu (2026-10-01)
+
+In the workspace there is no band of controls above the frame any more. The
+visibility label, the share button and the "…" menu are portalled into the
+right side of the breadcrumb row (`document-chrome-slot.tsx`), and only the
+front tab puts anything there. The standalone folder view has no such row and
+keeps its own header, with Back.
+
+There is one "…" for the document. The embed build still draws the editor's own
+options button (present, download, print, history); Neev hides it with injected
+CSS and opens it from its own menu ("Download, print & history…"), which every
+reader gets once the frame is up — creator-only items stay creator-only. The
+button is found by upstream's theming classes,
+`.--docs--card-floating-bar .--docs--drop-button`, and the hiding rule uses the
+same selector, so an upstream rename un-hides the button rather than losing the
+actions. No patch and no rebuild of the frontend artifact. A cleaner long-term
+form is a host-command patch (the frame advertising `download`/`print`/
+`history` in its ready message), which would need a rebuild.
+
 ### Keeping the tab and sidebar honest about the title
 
 A rename happens inside the frame, where Neev cannot see it. When focus comes

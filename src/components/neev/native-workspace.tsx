@@ -90,6 +90,7 @@ import {
 import { NativeAgentChats } from "./native-agent-chats"
 import { NativeMentionsIndicator } from "./native-mentions"
 import { NativeTabPanel } from "./native-suspended-surface"
+import { DocumentChromeSlot } from "./document-chrome-slot"
 import {
   listAgentSessions,
   setAgentSessionNode,
@@ -1364,6 +1365,10 @@ function WorkspaceContent() {
   // below still fetch and authorize their own subject.
   const [tabs, setTabs] = useState<WorkspaceTab[]>([])
   const [activeTab, setActiveTab] = useState(-1)
+  // The right side of the breadcrumb row, which the front tab's document
+  // fills with its controls. State, not a ref: the panels read it while
+  // rendering, and must render again once it exists.
+  const [chromeSlot, setChromeSlot] = useState<HTMLElement | null>(null)
   const [tabLimit, setTabLimit] = useState(false)
   const tabsRestored = useRef(false)
   // The tabs as they stand RIGHT NOW, for handlers that open or close several
@@ -2974,6 +2979,7 @@ function WorkspaceContent() {
                 </span>
               ))}
             </nav>
+            <div ref={setChromeSlot} className="flex shrink-0 items-center" />
           </div>
           {tabLimit && (
             <p
@@ -3076,166 +3082,174 @@ function WorkspaceContent() {
                     index === activeTab ? "flex" : "hidden"
                   )}
                 >
-                  {visited.has(tabKey(tab)) &&
-                    (tab.kind === "empty" ? (
-                      /*
-                       * A tab asked for and not yet filled. It says so rather
-                       * than showing an empty panel, because a blank region
-                       * with no explanation reads as something that failed to
-                       * load.
-                       */
-                      <div
-                        role="status"
-                        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 p-10 text-center"
-                      >
-                        <p className="text-sm font-medium">{t("emptyTab")}</p>
-                        <p className="text-sm text-muted-foreground">
-                          {t("emptyTabHint")}
-                        </p>
-                      </div>
-                    ) : tab.kind === "project" ? (
-                      creation && creation.nodeId === tab.nodeId ? (
-                        <NativeContent
-                          node={nodeById(tab.nodeId) ?? nodes[0]}
-                          chromeless
-                          creation={creation}
-                          onCreationCancelled={() => setCreation(undefined)}
-                          onRequestNavigationGuard={registerGuardFor(
-                            tabKey(tab)
-                          )}
-                          onOpened={(resource) => {
-                            setCreation(undefined)
-                            setExpanded(
-                              (old) => new Set([...old, resource.nodeId])
-                            )
-                            void loadItems(resource.nodeId)
-                            openResource(
-                              nodeById(resource.nodeId) ?? nodes[0],
-                              resource
-                            )
+                  <DocumentChromeSlot.Provider
+                    value={index === activeTab ? chromeSlot : null}
+                  >
+                    {visited.has(tabKey(tab)) &&
+                      (tab.kind === "empty" ? (
+                        /*
+                         * A tab asked for and not yet filled. It says so rather
+                         * than showing an empty panel, because a blank region
+                         * with no explanation reads as something that failed to
+                         * load.
+                         */
+                        <div
+                          role="status"
+                          className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 p-10 text-center"
+                        >
+                          <p className="text-sm font-medium">{t("emptyTab")}</p>
+                          <p className="text-sm text-muted-foreground">
+                            {t("emptyTabHint")}
+                          </p>
+                        </div>
+                      ) : tab.kind === "project" ? (
+                        creation && creation.nodeId === tab.nodeId ? (
+                          <NativeContent
+                            node={nodeById(tab.nodeId) ?? nodes[0]}
+                            chromeless
+                            creation={creation}
+                            onCreationCancelled={() => setCreation(undefined)}
+                            onRequestNavigationGuard={registerGuardFor(
+                              tabKey(tab)
+                            )}
+                            onOpened={(resource) => {
+                              setCreation(undefined)
+                              setExpanded(
+                                (old) => new Set([...old, resource.nodeId])
+                              )
+                              void loadItems(resource.nodeId)
+                              openResource(
+                                nodeById(resource.nodeId) ?? nodes[0],
+                                resource
+                              )
+                            }}
+                          />
+                        ) : (
+                          <ProjectPanel
+                            node={nodeById(tab.nodeId)}
+                            items={itemsByNode[tab.nodeId]?.items ?? []}
+                            loading={itemsByNode[tab.nodeId]?.loading ?? false}
+                            sessions={agentSessions.filter(
+                              (item) => item.nodeId === tab.nodeId
+                            )}
+                            onOpenResource={(resource) => {
+                              const node = nodeById(tab.nodeId)
+                              if (node) openResource(node, resource)
+                            }}
+                            onOpenSession={(session) => {
+                              const node = nodeById(tab.nodeId)
+                              if (node) openAgentSession(node, session)
+                            }}
+                            onCreate={(kind) => {
+                              const node = nodeById(tab.nodeId)
+                              if (!node) return
+                              if (kind === "folder")
+                                keepAll(() =>
+                                  openEditor({
+                                    kind: "folder",
+                                    parentId: node.id,
+                                  })
+                                )
+                              else void createContent(node, kind)
+                            }}
+                          />
+                        )
+                      ) : tab.kind === "resource" ? (
+                        <ResourcePanel
+                          orgId={org.id}
+                          resourceId={tab.resourceId}
+                          fresh={tab.fresh === true}
+                          onResolved={noteResource}
+                          onChanged={(next) => {
+                            /*
+                             * Record the new name FIRST, and unconditionally.
+                             *
+                             * The list update below is a no-op when no list for
+                             * this node is loaded — which is exactly the restored
+                             * tab's situation — so on its own it leaves the tab
+                             * strip and breadcrumb showing the name captured when
+                             * the panel first resolved. A rename inside the frame
+                             * then updates the document and nothing else, which is
+                             * the bug this closes.
+                             */
+                            noteResource(next)
+                            setItemsByNode((old) => {
+                              const list = old[tab.nodeId]
+                              if (!list) return old
+                              return {
+                                ...old,
+                                [tab.nodeId]: {
+                                  ...list,
+                                  items: list.items.map((item) =>
+                                    item.id === next.id ? next : item
+                                  ),
+                                },
+                              }
+                            })
                           }}
+                          node={nodeById(tab.nodeId)}
+                          cached={(itemsByNode[tab.nodeId]?.items ?? []).find(
+                            (item) => item.id === tab.resourceId
+                          )}
+                          registerGuard={registerGuardFor(tabKey(tab))}
+                          onGone={() => dropTab(tabKey(tab))}
                         />
                       ) : (
-                        <ProjectPanel
-                          node={nodeById(tab.nodeId)}
-                          items={itemsByNode[tab.nodeId]?.items ?? []}
-                          loading={itemsByNode[tab.nodeId]?.loading ?? false}
-                          sessions={agentSessions.filter(
-                            (item) => item.nodeId === tab.nodeId
-                          )}
-                          onOpenResource={(resource) => {
-                            const node = nodeById(tab.nodeId)
-                            if (node) openResource(node, resource)
-                          }}
-                          onOpenSession={(session) => {
-                            const node = nodeById(tab.nodeId)
-                            if (node) openAgentSession(node, session)
-                          }}
-                          onCreate={(kind) => {
-                            const node = nodeById(tab.nodeId)
-                            if (!node) return
-                            if (kind === "folder")
-                              keepAll(() =>
-                                openEditor({
-                                  kind: "folder",
-                                  parentId: node.id,
-                                })
-                              )
-                            else void createContent(node, kind)
-                          }}
-                        />
-                      )
-                    ) : tab.kind === "resource" ? (
-                      <ResourcePanel
-                        orgId={org.id}
-                        resourceId={tab.resourceId}
-                        fresh={tab.fresh === true}
-                        onResolved={noteResource}
-                        onChanged={(next) => {
-                          /*
-                           * Record the new name FIRST, and unconditionally.
-                           *
-                           * The list update below is a no-op when no list for
-                           * this node is loaded — which is exactly the restored
-                           * tab's situation — so on its own it leaves the tab
-                           * strip and breadcrumb showing the name captured when
-                           * the panel first resolved. A rename inside the frame
-                           * then updates the document and nothing else, which is
-                           * the bug this closes.
-                           */
-                          noteResource(next)
-                          setItemsByNode((old) => {
-                            const list = old[tab.nodeId]
-                            if (!list) return old
-                            return {
-                              ...old,
-                              [tab.nodeId]: {
-                                ...list,
-                                items: list.items.map((item) =>
-                                  item.id === next.id ? next : item
-                                ),
-                              },
-                            }
-                          })
-                        }}
-                        node={nodeById(tab.nodeId)}
-                        cached={(itemsByNode[tab.nodeId]?.items ?? []).find(
-                          (item) => item.id === tab.resourceId
-                        )}
-                        registerGuard={registerGuardFor(tabKey(tab))}
-                        onGone={() => dropTab(tabKey(tab))}
-                      />
-                    ) : (
-                      <NativeAgentChats
-                        nodeId={
-                          tab.kind === "agent"
-                            ? (agentSessions.find(
-                                (item) => item.id === tab.sessionId
-                              )?.nodeId ?? null)
-                            : tab.nodeId
-                        }
-                        nodeName={
-                          nodeById(
+                        <NativeAgentChats
+                          nodeId={
                             tab.kind === "agent"
                               ? (agentSessions.find(
                                   (item) => item.id === tab.sessionId
-                                )?.nodeId ?? -1)
-                              : (tab.nodeId ?? -1)
-                          )?.name
-                        }
-                        sessionId={tab.kind === "agent" ? tab.sessionId : null}
-                        draftProvider={
-                          tab.kind === "draft"
-                            ? (tab.provider as NeevAgentProvider)
-                            : null
-                        }
-                        onSessionCreated={(session) => {
-                          setAgentSessions((old) => [
-                            session,
-                            ...old.filter((item) => item.id !== session.id),
-                          ])
-                          // The draft became a real chat: its tab becomes that
-                          // chat rather than leaving both open.
-                          replaceTab(tabKey(tab), {
-                            kind: "agent",
-                            sessionId: session.id,
-                          })
-                          if (user !== undefined && orgId !== undefined)
-                            setOpenAgentSession(user, orgId, session.id)
-                        }}
-                        onDraftCancelled={() => dropTab(tabKey(tab))}
-                        onClosed={() => dropTab(tabKey(tab))}
-                        onRequestNavigationGuard={registerGuardFor(tabKey(tab))}
-                        onRequestSettings={() =>
-                          // Straight to the AI connections, not to Settings'
-                          // front page: a Connect button that leaves the user
-                          // hunting is not one.
-                          guardAll(() =>
-                            router.push("/settings?section=agents")
-                          )
-                        }
-                      />
-                    ))}
+                                )?.nodeId ?? null)
+                              : tab.nodeId
+                          }
+                          nodeName={
+                            nodeById(
+                              tab.kind === "agent"
+                                ? (agentSessions.find(
+                                    (item) => item.id === tab.sessionId
+                                  )?.nodeId ?? -1)
+                                : (tab.nodeId ?? -1)
+                            )?.name
+                          }
+                          sessionId={
+                            tab.kind === "agent" ? tab.sessionId : null
+                          }
+                          draftProvider={
+                            tab.kind === "draft"
+                              ? (tab.provider as NeevAgentProvider)
+                              : null
+                          }
+                          onSessionCreated={(session) => {
+                            setAgentSessions((old) => [
+                              session,
+                              ...old.filter((item) => item.id !== session.id),
+                            ])
+                            // The draft became a real chat: its tab becomes that
+                            // chat rather than leaving both open.
+                            replaceTab(tabKey(tab), {
+                              kind: "agent",
+                              sessionId: session.id,
+                            })
+                            if (user !== undefined && orgId !== undefined)
+                              setOpenAgentSession(user, orgId, session.id)
+                          }}
+                          onDraftCancelled={() => dropTab(tabKey(tab))}
+                          onClosed={() => dropTab(tabKey(tab))}
+                          onRequestNavigationGuard={registerGuardFor(
+                            tabKey(tab)
+                          )}
+                          onRequestSettings={() =>
+                            // Straight to the AI connections, not to Settings'
+                            // front page: a Connect button that leaves the user
+                            // hunting is not one.
+                            guardAll(() =>
+                              router.push("/settings?section=agents")
+                            )
+                          }
+                        />
+                      ))}
+                  </DocumentChromeSlot.Provider>
                 </NativeTabPanel>
               ))
             )}

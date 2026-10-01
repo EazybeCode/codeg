@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { EngineDocument } from "./engine-document"
+import { DocumentChromeSlot } from "./document-chrome-slot"
 import { NativeContent } from "./native-content"
 import { NativeBoundary } from "./native-boundary"
 import { json, mockNativeSession, NativeTestRoot } from "./test-helpers"
@@ -887,4 +888,162 @@ it("renders the frame unchanged when its document cannot be read", async () => {
     fireEvent.load(frame)
   })
   expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+})
+
+// ---------------------------------------------------------------------------
+// One row of controls, one menu.
+// ---------------------------------------------------------------------------
+
+/**
+ * A stand-in for the editor's page, with the options button the embed build
+ * draws. Same-origin in the app, so the component reads and drives it directly.
+ */
+function engineDocumentWith({ trigger = true } = {}) {
+  const inner = document.implementation.createHTMLDocument("engine")
+  inner.body.innerHTML = trigger
+    ? `<div class="--docs--floating-bar"><div class="--docs--card-floating-bar">` +
+      `<button class="--docs--drop-button" aria-haspopup="menu"><button>…</button></button>` +
+      `</div></div>`
+    : `<div class="--docs--floating-bar"></div>`
+  const click = vi.fn()
+  inner
+    .querySelector<HTMLElement>(".--docs--drop-button")
+    ?.addEventListener("click", click)
+  return { inner, click }
+}
+
+async function loadFrameWith(inner: Document) {
+  const frame = (await screen.findByTitle(
+    "Design document"
+  )) as HTMLIFrameElement
+  const focus = vi.fn()
+  Object.defineProperty(frame, "contentDocument", {
+    configurable: true,
+    value: inner,
+  })
+  Object.defineProperty(frame, "contentWindow", {
+    configurable: true,
+    value: { focus, postMessage: vi.fn() },
+  })
+  await act(async () => {
+    fireEvent.load(frame)
+  })
+  return { focus }
+}
+
+/**
+ * The editor's own "…" and Neev's sat a hand's width apart, each holding half
+ * of what a reader can do to the document. Neev's is now the one: choosing the
+ * editor's options from it opens the editor's menu, and download, print and
+ * history are exactly as reachable as before.
+ */
+it("opens the editor's own options from the one document menu", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  await openEngineDocument(user)
+  const { inner, click } = engineDocumentWith()
+  const { focus } = await loadFrameWith(inner)
+
+  await openContentMenu()
+  const item = await screen.findByRole("menuitem", {
+    name: "Download, print & history…",
+  })
+  expect(item).not.toHaveAttribute("aria-disabled", "true")
+  await act(async () => {
+    fireEvent.click(item)
+  })
+  await act(async () => {
+    vi.advanceTimersByTime(1)
+  })
+  // Focus goes into the editor first, so its menu is not closed by the focus
+  // Neev's menu would otherwise restore.
+  expect(focus).toHaveBeenCalled()
+  expect(click).toHaveBeenCalledTimes(1)
+})
+
+/**
+ * The editor's button is hidden by the same selector Neev drives, so the two
+ * cannot drift apart: what is hidden is exactly what the menu opens.
+ */
+it("hides the editor's own button, and only that", async () => {
+  const user = userEvent.setup()
+  await openEngineDocument(user)
+  const { inner } = engineDocumentWith()
+  await loadFrameWith(inner)
+  const style = inner.getElementById("neev-frame-chrome")
+  expect(style?.textContent).toContain(
+    ".--docs--card-floating-bar .--docs--drop-button{visibility:hidden"
+  )
+  // The title gets a little room back now that no band sits above the frame.
+  expect(style?.textContent).toContain(".--docs--doc-header{padding-top:12px}")
+  await act(async () => {
+    fireEvent.load(screen.getByTitle("Design document"))
+  })
+  expect(inner.querySelectorAll("style#neev-frame-chrome")).toHaveLength(1)
+})
+
+/**
+ * When the editor draws no options button — still loading the document, or a
+ * document in the trash — the item says so rather than doing nothing.
+ */
+it("offers the editor's options only when there is a button to open", async () => {
+  const user = userEvent.setup()
+  await openEngineDocument(user)
+  const { inner } = engineDocumentWith({ trigger: false })
+  await loadFrameWith(inner)
+  await openContentMenu()
+  expect(
+    await screen.findByRole("menuitem", { name: "Download, print & history…" })
+  ).toHaveAttribute("aria-disabled", "true")
+})
+
+/**
+ * A member has none of Neev's creator actions, but download, print and history
+ * are theirs as much as anyone's — before, they reached them through the
+ * editor's own button, which is now hidden.
+ */
+it("gives an organization member the editor's options and nothing else", async () => {
+  const user = userEvent.setup()
+  await openEngineDocument(user, { ...resource, creatorId: 2 })
+  const { inner } = engineDocumentWith()
+  await loadFrameWith(inner)
+  const menu = await openContentMenu()
+  const items = Array.from(menu.querySelectorAll('[role="menuitem"]')).map(
+    (item) => item.textContent
+  )
+  expect(items).toEqual(["Download, print & history…"])
+})
+
+it("puts the controls in the workspace's top row when it offers one", async () => {
+  mockNativeSession()
+  const slot = document.createElement("div")
+  document.body.appendChild(slot)
+  render(
+    <NativeTestRoot>
+      <DocumentChromeSlot.Provider value={slot}>
+        <EngineDocument resource={resource} onBack={vi.fn()} showBack />
+      </DocumentChromeSlot.Provider>
+    </NativeTestRoot>
+  )
+  const frame = await screen.findByTitle("Design document")
+  expect(slot).toContainElement(screen.getByRole("img", { name: "Private" }))
+  // No band of its own, and no Back: the workspace has both covered.
+  expect(frame.closest("section")?.querySelector("header")).toBeNull()
+  expect(
+    screen.queryByRole("button", { name: "Back to folder" })
+  ).not.toBeInTheDocument()
+  slot.remove()
+})
+
+it("draws no controls at all for a tab that is not in front", async () => {
+  mockNativeSession()
+  render(
+    <NativeTestRoot>
+      <DocumentChromeSlot.Provider value={null}>
+        <EngineDocument resource={resource} onBack={vi.fn()} />
+      </DocumentChromeSlot.Provider>
+    </NativeTestRoot>
+  )
+  await screen.findByTitle("Design document")
+  expect(screen.queryByRole("img", { name: "Private" })).not.toBeInTheDocument()
 })

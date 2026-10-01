@@ -112,6 +112,7 @@
     "moveTitle": "別のフォルダーに移動",
     "destination": "移動先フォルダー",
     "resourceActions": "コンテンツの操作",
+    "editorOptions": "ダウンロード・印刷・履歴…",
     "rename": "名前を変更",
     "noSelection": "プロジェクトまたはフォルダーを選択すると、チャットとドキュメントを開けます。",
     "teamChat": "チームチャット",

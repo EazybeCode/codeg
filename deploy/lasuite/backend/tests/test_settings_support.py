@@ -19,6 +19,7 @@ from neev_bridge.settings_support import (
     UPSTREAM_FORCE_SESSION,
     build_authentication_backends,
     build_middleware,
+    build_redirect_exempt,
     check_wiring,
 )
 
@@ -168,3 +169,58 @@ class WiringCheckTests(SimpleTestCase):
         self.assertIn(
             "remote-user middleware runs before AuthenticationMiddleware", problems
         )
+
+
+# impress/settings.py, Production.SECURE_REDIRECT_EXEMPT at v5.7.0.
+UPSTREAM_REDIRECT_EXEMPT = ["^__lbheartbeat__", "^__heartbeat__"]
+
+DOC = "4c0c8293-f5ed-45aa-b0cb-bceab9038be1"
+
+
+class CollaborationRedirectTests(SimpleTestCase):
+    """y-provider's callbacks over plain HTTP, through Django's real redirect.
+
+    Production redirected them to `https://backend:8000`, which has no TLS, and
+    every collaboration socket was refused. Driven through `SecurityMiddleware`
+    itself rather than by matching the patterns by hand, so what is asserted is
+    the redirect Django actually performs.
+    """
+
+    def status(self, path, forwarded_https=False):
+        from django.http import HttpResponse
+        from django.middleware.security import SecurityMiddleware
+        from django.test import RequestFactory, override_settings
+
+        headers = {"HTTP_X_FORWARDED_PROTO": "https"} if forwarded_https else {}
+        request = RequestFactory().get(path, **headers)
+        with override_settings(
+            SECURE_SSL_REDIRECT=True,
+            SECURE_PROXY_SSL_HEADER=("HTTP_X_FORWARDED_PROTO", "https"),
+            SECURE_REDIRECT_EXEMPT=build_redirect_exempt(UPSTREAM_REDIRECT_EXEMPT),
+        ):
+            middleware = SecurityMiddleware(lambda _: HttpResponse("ok"))
+            return middleware(request).status_code
+
+    def test_the_socket_authorisation_reads_are_answered_not_redirected(self):
+        self.assertEqual(self.status(f"/api/v1.0/documents/{DOC}/"), 200)
+        self.assertEqual(self.status("/api/v1.0/users/me/"), 200)
+
+    def test_everything_else_over_plain_http_is_still_redirected(self):
+        for path in (
+            f"/api/v1.0/documents/{DOC}/content/",
+            f"/api/v1.0/documents/{DOC}/threads/",
+            "/api/v1.0/documents/",
+            "/api/v1.0/documents/not-a-uuid/",
+            "/api/v1.0/users/me/extra/",
+            "/_neev/v1/documents/provision",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.status(path), 301)
+
+    def test_proxied_requests_are_unaffected(self):
+        self.assertEqual(self.status(f"/api/v1.0/documents/{DOC}/content/", True), 200)
+
+    def test_upstream_exemptions_are_kept_and_not_duplicated(self):
+        once = build_redirect_exempt(UPSTREAM_REDIRECT_EXEMPT)
+        self.assertEqual(once[:2], UPSTREAM_REDIRECT_EXEMPT)
+        self.assertEqual(build_redirect_exempt(once), once)

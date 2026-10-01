@@ -36,8 +36,10 @@ from configurations import values
 from impress.settings import Production
 
 from neev_bridge.settings_support import (
+    COLLABORATION_CALLBACKS,
     build_authentication_backends,
     build_middleware,
+    build_redirect_exempt,
     check_wiring,
 )
 
@@ -70,6 +72,11 @@ class NeevProduction(Production):
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
 
+    # y-provider authorises a socket over plain HTTP inside the network; the
+    # redirect upstream applies to it pointed at a port with no TLS and refused
+    # every collaboration connection. See `build_redirect_exempt`.
+    SECURE_REDIRECT_EXEMPT = build_redirect_exempt(Production.SECURE_REDIRECT_EXEMPT)
+
     # Nothing here is meant to be reachable without Neev.
     USE_SWAGGER = False
     SILK_ENABLED = False
@@ -93,6 +100,12 @@ class NeevProduction(Production):
         if getattr(cls, "COLLABORATION_WS_URL", None):
             problems.append(
                 "COLLABORATION_WS_URL must stay unset; the frontend derives it"
+            )
+        if cls.SECURE_SSL_REDIRECT and not set(COLLABORATION_CALLBACKS) <= set(
+            cls.SECURE_REDIRECT_EXEMPT
+        ):
+            problems.append(
+                "y-provider's callbacks must be exempt from the HTTPS redirect"
             )
         if cls.requires_secure_cookies() and not (
             cls.SESSION_COOKIE_SECURE and cls.CSRF_COOKIE_SECURE

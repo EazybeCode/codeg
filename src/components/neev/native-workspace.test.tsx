@@ -1171,6 +1171,40 @@ it("carries a rename to the tab strip on a restored tab", async () => {
   })
 })
 
+/**
+ * The engine document's controls live in the row the breadcrumb already uses.
+ *
+ * They used to be a band of their own between the tab strip and the frame —
+ * the blank strip above every title. Asserted by where they are in the DOM,
+ * not by a class: the row holding the breadcrumb is the one that must hold
+ * them, and the tab panel must hold none of them.
+ */
+it("puts an engine document's controls in the breadcrumb row, not a band above it", async () => {
+  rememberOpen()
+  const engineDoc = { ...DOC, engine: "lasuite" as const }
+  mockNativeSession(undefined, {
+    ...restoringRoutes(() => json(engineDoc)),
+    "GET /api/neev/nodes/4/documents": () =>
+      json({ items: [engineDoc], nextAfter: null }),
+  })
+  mountWorkspace()
+  await screen.findByRole("tab", { name: /Launch plan/ })
+  const visibility = await screen.findByRole("img", { name: "Private" })
+  const row = screen.getByRole("navigation", { name: "Location" }).parentElement
+  expect(row).toContainElement(visibility)
+  expect(row).toContainElement(
+    screen.getByRole("button", { name: "Content actions" })
+  )
+  // The document itself: the section the frame sits in.
+  const panel = document.querySelector("iframe")?.closest("section")
+  expect(panel).toBeTruthy()
+  if (!panel) return
+  expect(panel).not.toContainElement(visibility)
+  expect(panel.querySelector("header")).toBeNull()
+  // Exactly one set: the panel drew none of its own as well.
+  expect(screen.getAllByRole("img", { name: "Private" })).toHaveLength(1)
+})
+
 it("gives a restored tab the icon of what it actually is", async () => {
   // Every resource tab used to draw the document icon, so a team chat in the
   // strip wore a page — while the SAME chat in the sidebar one panel away

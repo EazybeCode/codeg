@@ -112,6 +112,7 @@
     "moveTitle": "Move to another folder",
     "destination": "Destination folder",
     "resourceActions": "Content actions",
+    "editorOptions": "Download, print & history…",
     "rename": "Rename",
     "noSelection": "Select a project or folder to open its chats and documents.",
     "teamChat": "Team chat",

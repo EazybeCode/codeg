@@ -79,6 +79,39 @@ def build_authentication_backends(upstream):
     return backends
 
 
+# The two reads y-provider makes to authorise a collaboration socket, at
+# v5.7.0 (`servers/y-provider/src/api/collaborationBackend.ts`). Matched by
+# Django against the path without its leading slash. The document id is held to
+# the UUID shape y-provider itself requires of a room, and both are anchored at
+# the end, so nothing longer — `content/`, `threads/`, a list — is covered.
+COLLABORATION_CALLBACKS = (
+    r"^api/v1\.0/documents/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}/$",
+    r"^api/v1\.0/users/me/$",
+)
+
+
+def build_redirect_exempt(upstream):
+    """Upstream's HTTPS-redirect exemptions, plus y-provider's two callbacks.
+
+    y-provider calls `COLLABORATION_BACKEND_BASE_URL` (`http://backend:8000`)
+    directly on the internal network, with no `X-Forwarded-Proto`. Upstream's
+    `Production` redirects every such request to `https://backend:8000`, a port
+    that does not speak TLS, so every socket was refused as `Unauthorized`:
+    no live collaboration, and a reconnect about every 35 seconds per open
+    document. The loopback canary never saw it because it turns the redirect
+    off altogether.
+
+    Exempting only these paths keeps the redirect for everything else. Browser
+    traffic reaches Django only through the Neev proxy, which always sends
+    `X-Forwarded-Proto: https`, so for those requests nothing changes; the
+    exemption only matters to a caller already inside the network.
+    """
+    exempt = list(upstream)
+    exempt += [path for path in COLLABORATION_CALLBACKS if path not in exempt]
+    return exempt
+
+
 def check_wiring(middleware, backends):
     """Return a list of human-readable configuration problems (empty is good).
 
