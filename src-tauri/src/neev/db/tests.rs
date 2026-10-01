@@ -123,11 +123,16 @@ async fn postgres_schema_reinitialization_and_foreign_keys() {
 ///
 /// Separate from the attachment tables because the two versions are separate —
 /// a fixture that wants to BE schema 15 drops this and keeps those.
-/// Remove what schemas 18 (library), 19 (steer) and 21 (folder sharing
-/// defaults) added, so a fixture that rebuilds an OLDER inventory really has
+/// Remove what schemas 18 (library), 19 (steer), 21 (folder sharing
+/// defaults) and 22 (org knowledge, child tables first) added, so a fixture that rebuilds an OLDER inventory really has
 /// that inventory. Sharing defaults and steer first (they reference nodes and
 /// turns), then library files before items.
 pub(super) async fn drop_tables_after_seventeen(db: &DatabaseConnection) {
+    for table in super::knowledge_migration::DROP_ORDER {
+        execute(db, &format!("DROP TABLE IF EXISTS {table}"), vec![])
+            .await
+            .unwrap();
+    }
     for table in [
         "neev_node_sharing_defaults",
         "neev_steer_inputs",

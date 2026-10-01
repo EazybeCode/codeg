@@ -664,6 +664,7 @@ pub(super) async fn start_turn(
         context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
         // Shared org library items (skills and MCP configs).
         library_items,
+        min_free_lanes: 1,
     };
     match state.agents.run(run_request).await {
         Ok(handle) => {
@@ -1799,6 +1800,7 @@ pub(super) async fn team_invoke(
         context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
         // Shared org library items (skills and MCP configs).
         library_items,
+        min_free_lanes: 1,
     };
     let turn = match state.agents.run(run_request).await {
         Ok(handle) => {

@@ -2,7 +2,8 @@
 
 This procedure backs up the native PostgreSQL metadata and the immutable blobs
 it references: document revisions (`.md`), editor images (`.img`) and chat/agent
-attachments (`.att`). It does not enable a hosted backup schedule, attach a provider account,
+attachments (`.att`), plus, from schema 22, org knowledge snapshots and page
+revisions from the separate knowledge root (see "Org knowledge" below). It does not enable a hosted backup schedule, attach a provider account,
 retire an archive, or establish hosted recovery readiness. Keep existing archives
 and jobs until a separately reviewed operational recovery exercise succeeds.
 
@@ -88,9 +89,63 @@ and not copied. If a 24-hour orphan sweep deletes a dumped row's blob during the
 run, the run fails with `missing-blob`; retry into a new output. `.tmp` files are
 excluded. No source mutation, garbage collection, or historical deletion occurs.
 
-`complete.json` is the completion marker. Format `neev-content-copy-v2` contains
-the dump hash and size, the blob tables found, and an org/key/kind/hash/size
-inventory, with no Markdown, emails, file names, or auth secrets. `INCOMPLETE` is
+### Org knowledge (schema 22, format v3)
+
+Org knowledge blobs live in their own BlobStore root (`{org_id}/{uuid}.md`,
+production host path `/var/lib/neev-native/knowledge`). They are indexed by
+`neev_knowledge_snapshots` and `neev_knowledge_revisions`, so the dump and the
+blobs are one recovery point and must be backed up and restored together.
+
+```sh
+node scripts/neev-content-backup.mjs \
+  --source /absolute/native-documents \
+  --knowledge-source /absolute/native-knowledge \
+  --output /absolute/backups/new-unique-directory
+```
+
+- The knowledge root follows the same contract as the document root: absolute,
+  normalized, symlink-free, owned by the running user, mode 0700 directories and
+  0600 single-link `{uuid}.md` files. It may not overlap the document root or the
+  output. Anything else in it fails the run (`entry`, `path`,
+  `directory-contract`).
+- Rows are read **from the dump**, exactly like document rows, and bounded by the
+  schema-22 CHECKs: snapshots 0–65,536 bytes, revisions 1–65,536 bytes
+  (`snapshot-size`). `restore-blobs` refuses a v3 manifest entry over 65,536
+  bytes (`manifest`).
+- Each referenced blob is copied, length-bounded and re-hashed, into
+  `blobs-knowledge/{org}/{key}.md`. A blob is accepted only under its own org
+  directory: a file with the right key filed under another org never satisfies
+  the row, and the run fails `missing-blob`.
+- Knowledge is never evicted, so there is no broker fallback: a referenced
+  knowledge blob absent from the root fails the run (`missing-blob`).
+- Files with no row (for example an orphan from a failed commit, swept later) are
+  counted as `knowledge_unreferenced_skipped` and not copied.
+- **Fail closed:** if the dump holds any knowledge row and `--knowledge-source` is
+  not given, the run fails (`knowledge-not-configured`). Knowledge files on disk
+  with a pre-22 dump (no knowledge tables) fail `snapshot-tables`.
+- Without `--knowledge-source` and with no knowledge rows, the manifest records
+  `"knowledge": "not configured"`.
+
+**Release order (required):** install this v3 script, `neev_backup.py` and
+`neev-content-backup-run.sh` together, **before** (or with) the schema-22 image.
+The older v2 script lists only its three tables, so on a schema-22 dump it would
+ignore knowledge rows and still write a "complete" backup without their blobs.
+Set `knowledge_source` before capture is enabled. See
+[neev-knowledge-storage.md](neev-knowledge-storage.md#release-order).
+
+The host job passes the root through `NEEV_BACKUP_KNOWLEDGE_SOURCE`
+(`neev-content-backup-run.sh`), set from `knowledge_source` in
+`/etc/neev-backup/config.json`. When that key is set, `neev_backup.py` refuses an
+output without a knowledge section, re-hashes every knowledge blob before upload,
+and its restore canary restores and re-hashes one knowledge blob from the Restic
+snapshot whenever any exist.
+
+`complete.json` is the completion marker. Format `neev-content-copy-v3` contains
+the dump hash and size, the blob tables found, an org/key/kind/hash/size
+inventory, and a `knowledge` section (`"not configured"`, or the knowledge tables
+found and an org/key/hash/size inventory), with no Markdown, emails, file names,
+host paths or auth secrets. `neev-content-copy-v2` (no knowledge) archives remain
+restorable. `INCOMPLETE` is
 created at the start and remains as a warning that absence of `complete.json`
 means failure. On failure, keep the incomplete directory for diagnosis and retry
 with a new output path. Do not accept a backup on exit status or an inventory
@@ -125,9 +180,24 @@ attachments.
      --target /absolute/new-document-root
    ```
 
+   For a v3 backup whose manifest lists knowledge blobs, also rebuild a fresh
+   knowledge root in the same command; it is refused without one
+   (`knowledge-target`), because the restored rows would point at nothing:
+
+   ```sh
+   node scripts/neev-content-backup.mjs restore-blobs \
+     --backup /absolute/backups/that-directory \
+     --target /absolute/new-document-root \
+     --knowledge-target /absolute/new-knowledge-root
+   ```
+
+   The two roots must be distinct, not nested in each other or in the backup.
+   Both carry `.restore-incomplete` until **every** blob of both is copied and
+   synced; a failure leaves both marked.
+
    This refuses a missing/unknown `complete.json`, a dump whose hash or size
    differs, and an existing target. It creates0700 org directories and0600
-   single-link files, and re-hashes every v1/v2 manifest blob while copying. A
+   single-link files, and re-hashes every v1/v2/v3 manifest blob while copying. A
    `.restore-incomplete` marker stays in the target until every file and
    directory is synced. The backup and Storage Box tools refuse a root that still
    has the marker; discard such a target. Do not use `cp -l` or copy `blobs/` by
@@ -141,8 +211,11 @@ attachments.
    ```
 
 6. Supply `NEEV_VERIFY_DATABASE_URL` and `NEEV_VERIFY_DOCUMENT_ROOT` through the
-   environment. The verifier never falls back to live application variables.
-   Pass the actual database name and restored schema explicitly:
+   environment. For a schema-22 snapshot, also supply `NEEV_VERIFY_KNOWLEDGE_ROOT`,
+   set to the `--knowledge-target` root rebuilt in step 4. It is optional only when
+   the snapshot has no knowledge rows. The verifier never falls back to live
+   application variables. Pass the actual database name and restored schema
+   explicitly:
 
    ```sh
    target/debug/neev-content-verify \
@@ -208,6 +281,42 @@ Markdown history keeps its existing byte validation; JSON-looking Markdown is ne
 guessed to be rich content. Restoring either format appends a new revision with the
 selected revision's exact stored bytes and format metadata. Unsupported or corrupt
 rich envelopes fail verification and restore even when their stored hash matches.
+
+**Schema 22 (org knowledge).** The verifier accepts schema-22 snapshots.
+
+- **Rows it reads:** in the same read-only snapshot transaction, it reads every
+  `neev_knowledge_snapshots` and `neev_knowledge_revisions` row (`UNION ALL`) from
+  the **restored database**.
+- **Checks on each row:**
+  - snapshots must be 0–65,536 bytes and revisions 1–65,536 bytes (the schema-22
+    CHECKs);
+  - duplicate `(org_id, key)` rows must agree on SHA-256 and length;
+  - each blob is read from `NEEV_VERIFY_KNOWLEDGE_ROOT` through the no-follow
+    BlobStore `.md` read, which checks exact length and SHA-256 under the row's own
+    org directory. The store is opened without the originals broker.
+- **Failures:** rows present with no knowledge root fail at
+  `NEEV_VERIFY_STAGE_KNOWLEDGE_ROOT`. A missing or altered knowledge blob fails at
+  the blob-read stage.
+- **Manifest:** the referenced-key manifest carries a separate, sorted `knowledge`
+  list, omitted when empty, so pre-22 manifests hash exactly as before. The summary
+  adds `knowledge_blobs` and `knowledge_bytes`.
+- **Why this check matters:** `restore-blobs` re-hashes only the knowledge entries
+  that `complete.json` lists. The verifier is the check that the restored rows and
+  the restored knowledge root agree, so a manifest with knowledge entries removed
+  is caught here.
+
+**Tested so far:**
+- **End-to-end run:** a real v3 backup and restore on a disposable PostgreSQL
+  16.15 cluster: 3 knowledge rows plus 1 document blob, `neev-content-backup.mjs`,
+  `pg_restore` into `neev_restore_<32hex>`, then `restore-blobs --knowledge-target`.
+- **Verifier outcomes:**
+  - with the root: exit 0, `knowledge_blobs: 3`;
+  - without the root: exit 1 at `NEEV_VERIFY_STAGE_KNOWLEDGE_ROOT`;
+  - a missing or rewritten knowledge blob: exit 1 at the blob read;
+  - after a clean restore: exit 0 with the same manifest hash.
+- **Not yet done:** a run on the production host or against production-sized
+  data. Two pre-existing PostgreSQL verifier tests about attachment bytes still
+  fail at an unrelated step; they are not knowledge checks.
 
 Acceptance is successful only after the complete dump import and verifier both
 succeed against the named isolated destination and fresh root. Record the

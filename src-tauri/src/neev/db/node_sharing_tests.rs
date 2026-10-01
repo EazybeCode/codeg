@@ -72,11 +72,22 @@ async fn catalog(db: &DatabaseConnection) -> Vec<String> {
         .collect()
 }
 
+/// A fresh install is schema 22; these tests are about the 21 layer, so take
+/// the (empty) schema-22 knowledge layer off first.
+async fn at_twenty_one(db: &DatabaseConnection) {
+    assert_eq!(
+        downgrade_knowledge(db).await,
+        Ok(knowledge_migration::Downgrade::Downgraded)
+    );
+    assert_eq!(version(db).await, node_sharing_migration::SCHEMA_VERSION);
+}
+
 async fn set_default(db: &DatabaseConnection, org: i32, node: i32, user: i32, value: &str) -> Result<(), AuthError> {
     execute(db, "INSERT INTO neev_node_sharing_defaults(org_id,node_id,default_visibility,set_by,updated_at) VALUES($1,$2,$3,$4,1000)", vec![org.into(), node.into(), value.into(), user.into()]).await.map(|_| ())
 }
 
 async fn fresh_is_twenty_one_and_constrained(db: &DatabaseConnection) {
+    at_twenty_one(db).await;
     assert_eq!(version(db).await, node_sharing_migration::SCHEMA_VERSION);
     assert_eq!(node_sharing_migration::validate(db).await, Ok(()));
     let (org, user, project, folder) = seed(db).await;
@@ -102,6 +113,7 @@ async fn fresh_is_twenty_one_and_constrained(db: &DatabaseConnection) {
 
 /// 20 -> 21 changes no existing row; restart at 21 is a no-op.
 async fn twenty_upgrades_preserving_rows(db: &DatabaseConnection) {
+    at_twenty_one(db).await;
     seed(db).await;
     assert_eq!(downgrade_node_sharing(db).await, Ok(node_sharing_migration::Downgrade::Done));
     assert_eq!(version(db).await, 20);
@@ -111,14 +123,14 @@ async fn twenty_upgrades_preserving_rows(db: &DatabaseConnection) {
     assert_eq!(before.len(), 4);
 
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, node_sharing_migration::SCHEMA_VERSION);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert!(has_table(db).await);
     assert_eq!(h::count(db, "neev_node_sharing_defaults").await, 0);
     assert_eq!(rows(db).await, before, "the migration rewrote an existing row");
 
     let catalog_once = catalog(db).await;
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, node_sharing_migration::SCHEMA_VERSION);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(rows(db).await, before);
     assert_eq!(catalog(db).await, catalog_once, "restart changed the catalog");
 }
@@ -127,6 +139,7 @@ async fn twenty_upgrades_preserving_rows(db: &DatabaseConnection) {
 /// fresh-21 catalog minus the one table (constraint names included), and the
 /// same on every round trip.
 async fn downgrade_restores_the_exact_catalog(db: &DatabaseConnection) {
+    at_twenty_one(db).await;
     let fresh = catalog(db).await;
     let expected: Vec<String> = fresh
         .iter()
@@ -147,16 +160,19 @@ async fn downgrade_restores_the_exact_catalog(db: &DatabaseConnection) {
     // The downgraded database is a valid schema 20 (the whole 20 arm runs) and
     // re-migrates; a second round trip lands on the same catalog.
     initialize(db).await.unwrap();
+    // Re-migration goes all the way to 22; step back to compare with the 21 catalog.
+    at_twenty_one(db).await;
     assert_eq!(catalog(db).await, fresh);
     assert_eq!(downgrade_node_sharing(db).await, Ok(node_sharing_migration::Downgrade::Done));
     assert_eq!(catalog(db).await, expected);
     assert_eq!(rows(db).await, before);
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, node_sharing_migration::SCHEMA_VERSION);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
 }
 
 /// A configured default is a user choice: the downgrade refuses and changes nothing.
 async fn downgrade_refuses_over_configured_defaults(db: &DatabaseConnection) {
+    at_twenty_one(db).await;
     let (org, user, project, folder) = seed(db).await;
     set_default(db, org, project, user, "organization").await.unwrap();
     set_default(db, org, folder, user, "private").await.unwrap();
@@ -220,6 +236,7 @@ async fn sqlite_partial_or_tampered_schema_twenty_one_is_refused_without_change(
 
     // Marker 21 without the table.
     let db = h::database().await;
+    at_twenty_one(&db).await;
     execute(&db, "DROP TABLE neev_node_sharing_defaults", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(validate_content_snapshot(&db).await, Err(AuthError::Unavailable));
@@ -228,6 +245,7 @@ async fn sqlite_partial_or_tampered_schema_twenty_one_is_refused_without_change(
 
     // Marker 21 with a look-alike table that lost its audience CHECK.
     let db = h::database().await;
+    at_twenty_one(&db).await;
     execute(&db, "DROP TABLE neev_node_sharing_defaults", vec![]).await.unwrap();
     execute(&db, "CREATE TABLE neev_node_sharing_defaults (org_id integer NOT NULL, node_id integer NOT NULL, default_visibility text NOT NULL, set_by integer NOT NULL, updated_at bigint NOT NULL, PRIMARY KEY (org_id, node_id))", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));

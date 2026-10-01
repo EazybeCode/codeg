@@ -21,6 +21,9 @@ const TABLE = {
   md: ["neev_document_revisions", "blob_key"],
   img: ["neev_image_blobs", "key"],
   att: ["neev_attachments", "key"],
+  // Schema 22 knowledge rows: separate BlobStore root, `.md` blobs.
+  ksnap: ["neev_knowledge_snapshots", "blob_key"],
+  krev: ["neev_knowledge_revisions", "blob_key"],
 }
 // A pg_restore stand-in that serves a listing and COPY text shaped exactly
 // like the real tool's output (the real tools are exercised further below).
@@ -174,7 +177,8 @@ test("dump precedes finalized copy and complete manifest without exposing creden
   assert.equal(recorded.args.join(" ").includes("password"), false)
   assert.equal(recorded.env.PROVIDER_SECRET, undefined)
   const manifest = JSON.parse(await fs.readFile(complete(output)))
-  assert.equal(manifest.format, "neev-content-copy-v2")
+  assert.equal(manifest.format, "neev-content-copy-v3")
+  assert.equal(manifest.knowledge, "not configured")
   assert.equal(manifest.dump.sha256, hash("dump"))
   assert.deepEqual(manifest.blobs, [
     { org_id: 7, key, kind: "md", sha256: hash("body"), byte_length: 4 },
@@ -870,5 +874,535 @@ test(
     await fs.utimes(blob, old, old)
     await backup(f.options)
     assert.ok((await fs.stat(blob)).atimeMs < Date.now() - 29 * 86400 * 1000)
+  }
+)
+
+// ---------------------------------------------------------------------------
+// v3: org knowledge blobs (schema 22). The dump is the index: every knowledge
+// row in it must have its bytes in the same backup, and the two restore
+// together. Knowledge is never evicted, so there is no broker fallback.
+// ---------------------------------------------------------------------------
+const snapKey = "a0000000-0000-4000-8000-00000000000a"
+const revKey = "b0000000-0000-4000-8000-00000000000b"
+const strayKey = "c0000000-0000-4000-8000-00000000000c"
+const snapBody = "## Source: chat\nsnapshot text\n"
+const revBody = "# Page\n\nBody [^k-0123456789ab]\n"
+
+async function knowledgeFixture(t, { rows, files } = {}) {
+  const f = await mixedFixture(t)
+  const knowledge = path.join(f.root, "knowledge")
+  await fs.mkdir(knowledge, { mode: 0o700 })
+  const put = async (org, name, bytes) => {
+    await fs.mkdir(path.join(knowledge, String(org)), {
+      mode: 0o700,
+      recursive: true,
+    })
+    await fs.writeFile(path.join(knowledge, String(org), name), bytes, {
+      mode: 0o600,
+    })
+  }
+  for (const [org, name, bytes] of files ?? [
+    [3, `${snapKey}.md`, snapBody],
+    [3, `${revKey}.md`, revBody],
+  ])
+    await put(org, name, bytes)
+  const good = {
+    md: [row(7, key, "body")],
+    img: [row(7, imageKey, imageBytes)],
+    att: [row(12, attachmentKey, attachmentBytes)],
+    ksnap: [row(3, snapKey, snapBody)],
+    krev: [row(3, revKey, revBody)],
+  }
+  await f.setArchive("public", rows ?? good)
+  return {
+    ...f,
+    knowledge,
+    put,
+    good,
+    options: { ...f.options, knowledgeSource: knowledge },
+  }
+}
+
+test("v3 copies knowledge snapshot and revision blobs beside the dump that indexes them", async (t) => {
+  const f = await knowledgeFixture(t)
+  const result = JSON.parse((await backup(f.options)).stdout)
+  assert.equal(result.copied_blobs, 3, "document-root blobs unchanged")
+  assert.equal(result.knowledge_copied_blobs, 2)
+  assert.equal(result.knowledge_unreferenced_skipped, 0)
+  for (const [name, body] of [
+    [snapKey, snapBody],
+    [revKey, revBody],
+  ]) {
+    const copy = path.join(f.output, "blobs-knowledge", "3", `${name}.md`)
+    assert.equal(await fs.readFile(copy, "utf8"), body)
+    assert.equal((await fs.stat(copy)).mode & 0o777, 0o600)
+  }
+  assert.equal(
+    (await fs.stat(path.join(f.output, "blobs-knowledge", "3"))).mode & 0o777,
+    0o700
+  )
+  // Knowledge never lands in the document-root copy, and vice versa.
+  await assert.rejects(fs.stat(path.join(f.output, "blobs", "3")))
+  const encoded = await fs.readFile(complete(f.output), "utf8")
+  const manifest = JSON.parse(encoded)
+  assert.equal(manifest.format, "neev-content-copy-v3")
+  assert.deepEqual(manifest.tables, [
+    "neev_attachments",
+    "neev_document_revisions",
+    "neev_image_blobs",
+  ])
+  assert.deepEqual(manifest.knowledge, {
+    tables: ["neev_knowledge_revisions", "neev_knowledge_snapshots"],
+    blobs: [
+      {
+        org_id: 3,
+        key: snapKey,
+        sha256: hash(snapBody),
+        byte_length: snapBody.length,
+      },
+      {
+        org_id: 3,
+        key: revKey,
+        sha256: hash(revBody),
+        byte_length: revBody.length,
+      },
+    ],
+  })
+  // The manifest names no host path, credential or content.
+  for (const leak of [f.root, f.knowledge, "postgresql", "snapshot text"])
+    assert.equal(encoded.includes(leak), false, leak)
+})
+
+test("a knowledge blob that disagrees with its row fails the whole backup", async (t) => {
+  const variants = {
+    "hash-mismatch": (g) => ({
+      ...g,
+      ksnap: [{ ...g.ksnap[0], sha: hash("other") }],
+    }),
+    "size-mismatch": (g) => ({
+      ...g,
+      krev: [{ ...g.krev[0], size: revBody.length + 1 }],
+    }),
+    "missing-blob": (g) => ({
+      ...g,
+      krev: [...g.krev, row(3, strayKey, "never written")],
+    }),
+    "snapshot-conflict": (g) => ({
+      ...g,
+      krev: [...g.krev, { ...g.krev[0], sha: hash("x") }],
+    }),
+  }
+  let n = 0
+  for (const [code, mutate] of Object.entries(variants)) {
+    const f = await knowledgeFixture(t)
+    await f.setArchive("public", mutate(f.good))
+    const output = path.join(f.root, `refused-${n++}`)
+    await assert.rejects(
+      backup({ ...f.options, output }),
+      new RegExp(`\\(${code}\\)`),
+      code
+    )
+    await assert.rejects(fs.stat(complete(output)), undefined, code)
+  }
+})
+
+test("knowledge rows are bounded exactly like their schema-22 CHECKs", async (t) => {
+  // Authoritative Task 1 DDL: snapshots 0..65536 bytes (an empty capture is
+  // valid), revisions 1..65536. Both boundaries are exercised with real bytes.
+  const atCap = "s".repeat(65536)
+  const overCap = "s".repeat(65537)
+  const f = await knowledgeFixture(t, {
+    files: [
+      [3, `${snapKey}.md`, atCap],
+      [3, `${revKey}.md`, atCap],
+      [3, `${strayKey}.md`, ""],
+    ],
+  })
+  await f.setArchive("public", {
+    ...f.good,
+    ksnap: [row(3, snapKey, atCap), row(3, strayKey, "")],
+    krev: [row(3, revKey, atCap)],
+  })
+  const ok = JSON.parse((await backup(f.options)).stdout)
+  assert.equal(
+    ok.knowledge_copied_blobs,
+    3,
+    "65536-byte snapshot/revision and an empty snapshot"
+  )
+  const bad = {
+    "empty revision": { krev: [{ ...row(3, revKey, atCap), size: 0 }] },
+    "revision over 64 KiB": { krev: [row(3, revKey, overCap)] },
+    "snapshot over 64 KiB": { ksnap: [row(3, snapKey, overCap)] },
+  }
+  let n = 0
+  for (const [name, change] of Object.entries(bad)) {
+    await f.setArchive("public", { ...f.good, ...change })
+    const output = path.join(f.root, `bounded-${n++}`)
+    await assert.rejects(
+      backup({ ...f.options, output }),
+      /\(snapshot-size\)/,
+      name
+    )
+    await assert.rejects(fs.stat(complete(output)), undefined, name)
+  }
+})
+
+test("a v3 manifest knowledge entry over 64 KiB is refused at restore", async (t) => {
+  const f = await knowledgeFixture(t)
+  await backup(f.options)
+  const manifestPath = complete(f.output)
+  const manifest = JSON.parse(await fs.readFile(manifestPath))
+  for (const [n, byte_length] of [65537, 1048576].entries()) {
+    const forged = structuredClone(manifest)
+    forged.knowledge.blobs[0].byte_length = byte_length
+    await fs.unlink(manifestPath)
+    await fs.writeFile(manifestPath, JSON.stringify(forged), { mode: 0o600 })
+    const target = path.join(f.root, `over-${n}`)
+    await assert.rejects(
+      restoreBlobs({
+        backupDirectory: f.output,
+        target,
+        knowledgeTarget: path.join(f.root, `over-k-${n}`),
+      }),
+      /\(manifest\)/,
+      String(byte_length)
+    )
+    await assert.rejects(fs.stat(target))
+  }
+})
+
+test("tenant isolation: a knowledge blob is only accepted under its own org", async (t) => {
+  // Same key and bytes, but filed under org 4 while the row says org 3.
+  const f = await knowledgeFixture(t, {
+    files: [
+      [4, `${snapKey}.md`, snapBody],
+      [3, `${revKey}.md`, revBody],
+    ],
+  })
+  // Even with a broker configured, knowledge is never fetched remotely.
+  await assert.rejects(
+    backup({ ...f.options, brokerSocket: "/nonexistent/broker.sock" }),
+    /\(missing-blob\)/
+  )
+  await assert.rejects(fs.stat(complete(f.output)))
+  // A non-numeric org directory or a foreign file name is refused outright.
+  for (const [dir, name] of [
+    ["03", `${snapKey}.md`],
+    ["3", `${snapKey}.att`],
+    ["3", "notes.txt"],
+  ]) {
+    const g = await knowledgeFixture(t)
+    await fs.mkdir(path.join(g.knowledge, dir), {
+      mode: 0o700,
+      recursive: true,
+    })
+    await fs.writeFile(path.join(g.knowledge, dir, name), "x", { mode: 0o600 })
+    await assert.rejects(backup(g.options), /\(entry\)/, `${dir}/${name}`)
+  }
+})
+
+test("unreferenced knowledge files are counted, verified for shape, and not copied", async (t) => {
+  const f = await knowledgeFixture(t)
+  await f.put(3, `${strayKey}.md`, "orphan from a failed commit")
+  await f.put(3, `${strayKey}.md.tmp`, "temporary")
+  const result = JSON.parse((await backup(f.options)).stdout)
+  assert.equal(result.knowledge_unreferenced_skipped, 1)
+  await assert.rejects(
+    fs.stat(path.join(f.output, "blobs-knowledge", "3", `${strayKey}.md`))
+  )
+})
+
+test("knowledge rows without a configured knowledge source fail closed", async (t) => {
+  // A dump that indexes knowledge blobs is only a backup if the bytes are in it.
+  const f = await knowledgeFixture(t)
+  const output = path.join(f.root, "no-source")
+  await assert.rejects(
+    backup({ ...f.options, knowledgeSource: undefined, output }),
+    /\(knowledge-not-configured\)/
+  )
+  await assert.rejects(fs.stat(complete(output)))
+  // Knowledge tables with zero rows and no source: recorded, not invented.
+  await f.setArchive("public", { ...f.good, ksnap: [], krev: [] })
+  const empty = path.join(f.root, "empty-tables")
+  await backup({ ...f.options, knowledgeSource: undefined, output: empty })
+  assert.equal(
+    JSON.parse(await fs.readFile(complete(empty))).knowledge,
+    "not configured"
+  )
+})
+
+test("knowledge files on disk with a pre-22 dump are not silently skipped", async (t) => {
+  const f = await knowledgeFixture(t)
+  await f.setArchive("public", {
+    md: f.good.md,
+    img: f.good.img,
+    att: f.good.att,
+  })
+  await assert.rejects(backup(f.options), /\(snapshot-tables\)/)
+  // An empty knowledge root with a pre-22 dump is a valid, empty knowledge copy.
+  const g = await knowledgeFixture(t, { files: [] })
+  await g.setArchive("public", {
+    md: g.good.md,
+    img: g.good.img,
+    att: g.good.att,
+  })
+  const manifest = JSON.parse(
+    await (await backup(g.options), fs.readFile(complete(g.output)))
+  )
+  assert.deepEqual(manifest.knowledge, { tables: [], blobs: [] })
+})
+
+test("the knowledge root must be a private directory apart from the document root and output", async (t) => {
+  const f = await knowledgeFixture(t)
+  let n = 0
+  const attempt = (knowledgeSource) =>
+    backup({
+      ...f.options,
+      knowledgeSource,
+      output: path.join(f.root, `path-${n++}`),
+    })
+  await assert.rejects(attempt(f.source), /\(path\)/)
+  await assert.rejects(attempt(path.join(f.source, "7")), /\(path\)/)
+  await assert.rejects(attempt("relative/knowledge"))
+  await fs.chmod(f.knowledge, 0o755)
+  await assert.rejects(attempt(f.knowledge), /\(directory-contract\)/)
+  await fs.chmod(f.knowledge, 0o700)
+  await assert.rejects(
+    backup({ ...f.options, output: path.join(f.knowledge, "inside") }),
+    /\(path\)/
+  )
+})
+
+test("v3 restore rebuilds both roots together and refuses a partial restore", async (t) => {
+  const f = await knowledgeFixture(t)
+  await backup(f.options)
+  const target = path.join(f.root, "restored-documents")
+  const knowledgeTarget = path.join(f.root, "restored-knowledge")
+  // Knowledge rows exist in the dump: restoring only one root is refused
+  // before anything is created.
+  await assert.rejects(
+    restoreBlobs({ backupDirectory: f.output, target }),
+    /\(knowledge-target\)/
+  )
+  await assert.rejects(fs.stat(target))
+  for (const bad of [target, path.join(target, "k"), path.join(f.output, "k")])
+    await assert.rejects(
+      restoreBlobs({ backupDirectory: f.output, target, knowledgeTarget: bad }),
+      /\(path\)/
+    )
+  const result = JSON.parse(
+    (await restoreBlobs({ backupDirectory: f.output, target, knowledgeTarget }))
+      .stdout
+  )
+  assert.equal(result.restored_blobs, 3)
+  assert.equal(result.restored_knowledge_blobs, 2)
+  assert.deepEqual(await fs.readdir(knowledgeTarget), ["3"])
+  assert.deepEqual((await fs.readdir(path.join(knowledgeTarget, "3"))).sort(), [
+    `${snapKey}.md`,
+    `${revKey}.md`,
+  ])
+  assert.equal(
+    await fs.readFile(path.join(knowledgeTarget, "3", `${revKey}.md`), "utf8"),
+    revBody
+  )
+  assert.equal((await fs.stat(knowledgeTarget)).mode & 0o777, 0o700)
+  assert.deepEqual((await fs.readdir(target)).sort(), ["12", "7"])
+  // A tampered knowledge blob leaves BOTH roots marked incomplete.
+  const blob = path.join(f.output, "blobs-knowledge", "3", `${revKey}.md`)
+  await fs.writeFile(blob, revBody.replace("Page", "Pwnd"))
+  const t2 = path.join(f.root, "t2")
+  const k2 = path.join(f.root, "k2")
+  await assert.rejects(
+    restoreBlobs({ backupDirectory: f.output, target: t2, knowledgeTarget: k2 })
+  )
+  for (const root of [t2, k2])
+    assert.equal(
+      (await fs.stat(path.join(root, ".restore-incomplete"))).isFile(),
+      true,
+      root
+    )
+})
+
+test("v2 archives still restore, and need no knowledge target", async (t) => {
+  const f = await mixedFixture(t)
+  await backup(f.options)
+  const manifestPath = complete(f.output)
+  const v3 = JSON.parse(await fs.readFile(manifestPath))
+  const v2 = { ...v3, format: "neev-content-copy-v2" }
+  delete v2.knowledge
+  await fs.unlink(manifestPath)
+  await fs.writeFile(manifestPath, JSON.stringify(v2), { mode: 0o600 })
+  const target = path.join(f.root, "restored-v2")
+  const result = JSON.parse(
+    (await restoreBlobs({ backupDirectory: f.output, target })).stdout
+  )
+  assert.equal(result.restored_blobs, 3)
+  assert.equal(result.restored_knowledge_blobs, 0)
+  // A v3 manifest that claims knowledge without a valid shape is refused.
+  const broken = { ...v3, knowledge: { tables: [], blobs: [{ org_id: 3 }] } }
+  await fs.unlink(manifestPath)
+  await fs.writeFile(manifestPath, JSON.stringify(broken), { mode: 0o600 })
+  await assert.rejects(
+    restoreBlobs({
+      backupDirectory: f.output,
+      target: path.join(f.root, "broken"),
+      knowledgeTarget: path.join(f.root, "broken-k"),
+    }),
+    /\(manifest\)/
+  )
+})
+
+test("CLI: --knowledge-source and restore-blobs --knowledge-target", async (t) => {
+  const f = await knowledgeFixture(t)
+  const cli = (args, env = {}) =>
+    spawnSync(
+      process.execPath,
+      [path.resolve("scripts/neev-content-backup.mjs"), ...args],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: `${f.root}:${process.env.PATH}`,
+          NEEV_BACKUP_DATABASE_URL: "postgresql:///private?host=/test&user=t",
+          ...env,
+        },
+      }
+    )
+  const made = cli([
+    "--source",
+    f.source,
+    "--knowledge-source",
+    f.knowledge,
+    "--output",
+    f.output,
+  ])
+  assert.equal(made.status, 0, made.stderr)
+  assert.equal(JSON.parse(made.stdout).knowledge_copied_blobs, 2)
+  const restored = cli([
+    "restore-blobs",
+    "--backup",
+    f.output,
+    "--target",
+    path.join(f.root, "r"),
+    "--knowledge-target",
+    path.join(f.root, "rk"),
+  ])
+  assert.equal(restored.status, 0, restored.stderr)
+  assert.equal(JSON.parse(restored.stdout).restored_knowledge_blobs, 2)
+  const refused = cli([
+    "--source",
+    f.source,
+    "--output",
+    path.join(f.root, "refused"),
+  ])
+  assert.equal(refused.status, 1)
+  assert.match(refused.stderr, /\(knowledge-not-configured\)/)
+  assert.equal(refused.stderr.includes(f.root), false)
+})
+
+test(
+  "real pg_dump/pg_restore: schema-22 knowledge rows and blobs round trip together",
+  {
+    skip: !pgBin && "PostgreSQL client/server tools not installed",
+    timeout: 120000,
+  },
+  async (t) => {
+    const f = await knowledgeFixture(t)
+    const cluster = path.join(f.root, "cluster")
+    const socket = await fs.mkdtemp(path.join("/tmp", "neevpg-"))
+    t.after(() => fs.rm(socket, { recursive: true, force: true }))
+    const run = (cmd, args) => {
+      const out = spawnSync(cmd, args, { encoding: "utf8" })
+      assert.equal(out.status, 0, `${cmd} failed: ${out.stderr}`)
+      return out.stdout
+    }
+    run("initdb", [
+      "-D",
+      cluster,
+      "-A",
+      "trust",
+      "-U",
+      "neev",
+      "--no-sync",
+      "--no-locale",
+      "-E",
+      "UTF8",
+    ])
+    const port = String(20000 + Math.floor(Math.random() * 20000))
+    run("pg_ctl", [
+      "-D",
+      cluster,
+      "-w",
+      "-l",
+      path.join(f.root, "pg.log"),
+      "-o",
+      `-k ${socket} -p ${port} -c listen_addresses=''`,
+      "start",
+    ])
+    t.after(() =>
+      spawnSync("pg_ctl", ["-D", cluster, "-m", "immediate", "stop"])
+    )
+    const schema = "neev_restore_22"
+    const psql = (sql) =>
+      run("psql", [
+        "-h",
+        socket,
+        "-p",
+        port,
+        "-U",
+        "neev",
+        "-d",
+        "postgres",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-c",
+        sql,
+      ])
+    // Column lists follow the schema-22 DDL (Task 1), so COPY headers are real.
+    psql(
+      [
+        `CREATE SCHEMA ${schema}; SET search_path TO ${schema};`,
+        "CREATE TABLE neev_document_revisions (org_id INTEGER, document_id TEXT, revision INTEGER, blob_key TEXT, sha256 TEXT, byte_length BIGINT);",
+        "CREATE TABLE neev_image_blobs (org_id INTEGER, key TEXT, document_id TEXT, content_type TEXT, byte_length BIGINT, sha256 TEXT, created_by INTEGER, created_at BIGINT);",
+        "CREATE TABLE neev_attachments (org_id INTEGER, key TEXT, chat_id TEXT, session_id TEXT, file_name TEXT, content_type TEXT, byte_length BIGINT, sha256 TEXT, created_by INTEGER, created_at BIGINT, archived BOOLEAN);",
+        "CREATE TABLE neev_knowledge_snapshots (org_id integer NOT NULL, id text NOT NULL, source_id text NOT NULL, source_kind text NOT NULL, engine boolean NOT NULL, segment integer NOT NULL, from_sequence bigint, to_sequence bigint, marker text NOT NULL, blob_key text NOT NULL, sha256 text NOT NULL, byte_length bigint NOT NULL, state text NOT NULL, captured_at bigint NOT NULL);",
+        "CREATE TABLE neev_knowledge_revisions (org_id integer NOT NULL, page_id text NOT NULL, revision integer NOT NULL, blob_key text NOT NULL, sha256 text NOT NULL, byte_length bigint NOT NULL, parent_revision integer, batch_id text NOT NULL, created_at bigint NOT NULL);",
+        `INSERT INTO neev_document_revisions VALUES (7,'doc',1,'${key}','${hash("body")}',4);`,
+        `INSERT INTO neev_image_blobs VALUES (7,'${imageKey}','doc','image/png',${imageBytes.length},'${hash(imageBytes)}',1,1);`,
+        `INSERT INTO neev_attachments VALUES (12,'${attachmentKey}',NULL,'s','f','text/plain',${attachmentBytes.length},'${hash(attachmentBytes)}',1,1,FALSE);`,
+        `INSERT INTO neev_knowledge_snapshots VALUES (3,'s1','chat-1','chat',false,0,1,67,'m','${snapKey}','${hash(snapBody)}',${snapBody.length},'current',1);`,
+        `INSERT INTO neev_knowledge_revisions VALUES (3,'p1',1,'${revKey}','${hash(revBody)}',${revBody.length},NULL,'b1',1);`,
+      ].join("\n")
+    )
+    const databaseUrl = `postgresql:///postgres?host=${socket}&port=${port}&user=neev`
+    // The real tools, not the fixture's stand-ins.
+    const real = {
+      pgDump: "pg_dump",
+      pgRestore: "pg_restore",
+      schema,
+      databaseUrl,
+    }
+    const result = JSON.parse((await backup({ ...f.options, ...real })).stdout)
+    assert.equal(result.knowledge_copied_blobs, 2)
+    const manifest = JSON.parse(await fs.readFile(complete(f.output)))
+    assert.deepEqual(manifest.knowledge.tables, [
+      "neev_knowledge_revisions",
+      "neev_knowledge_snapshots",
+    ])
+    const target = path.join(f.root, "rd")
+    const knowledgeTarget = path.join(f.root, "rk")
+    await restoreBlobs({ backupDirectory: f.output, target, knowledgeTarget })
+    assert.equal(
+      await fs.readFile(
+        path.join(knowledgeTarget, "3", `${snapKey}.md`),
+        "utf8"
+      ),
+      snapBody
+    )
+    // The real dump is the index: a row edited to disagree is caught.
+    psql(`UPDATE ${schema}.neev_knowledge_revisions SET sha256='${hash("x")}'`)
+    await assert.rejects(
+      backup({ ...f.options, ...real, output: path.join(f.root, "x") }),
+      /\(hash-mismatch\)/
+    )
   }
 )

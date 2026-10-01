@@ -904,3 +904,38 @@ fn an_acp_skipped_library_tool_is_a_named_status_not_an_unsupported_trace() {
     )));
     assert_eq!(text_of(&items), "");
 }
+
+#[test]
+fn names_only_keeps_names_and_statuses_and_drops_every_payload() {
+    let mut log = ActivityLog::new();
+    log.push(
+        ActivityDraft {
+            id: "t1".into(),
+            kind: ActivityKind::ToolCall { name: "Read".into(), input: "{\"path\":\"neev-context/k-u01--unit.md\"}".into(), input_truncated: false },
+        },
+        3,
+    );
+    log.push(
+        ActivityDraft {
+            id: "r1".into(),
+            kind: ActivityKind::ToolResult { call_id: "t1".into(), output: "SOURCE TEXT".into(), output_truncated: true, is_error: false },
+        },
+        3,
+    );
+    log.push(
+        ActivityDraft {
+            id: "s1".into(),
+            kind: ActivityKind::Status { state: "error".into(), detail: Some("quoted SOURCE TEXT".into()), category: Some("provider".into()) },
+        },
+        3,
+    );
+    let reduced = log.names_only();
+    let stored = reduced.stored().unwrap();
+    assert!(!stored.contains("SOURCE TEXT") && !stored.contains("k-u01"), "{stored}");
+    let items = reduced.items();
+    assert_eq!(items.len(), 3);
+    assert_eq!(items.iter().map(|i| i.seq).collect::<Vec<_>>(), log.items().iter().map(|i| i.seq).collect::<Vec<_>>());
+    assert!(matches!(&items[0].kind, ActivityKind::ToolCall { name, input, .. } if name == "Read" && input.is_empty()));
+    assert!(matches!(&items[1].kind, ActivityKind::ToolResult { output, output_truncated: true, .. } if output.is_empty()));
+    assert!(matches!(&items[2].kind, ActivityKind::Status { state, detail: None, category: Some(c) } if state == "error" && c == "provider"));
+}

@@ -1,0 +1,10 @@
+{
+  "host": "uNNNNNN.your-storagebox.de",
+  "user": "uNNNNNN",
+  "allow_main_account": true,
+  "identity_file": "/etc/neev-storage-box/id_ed25519",
+  "known_hosts_file": "/etc/neev-storage-box/known_hosts",
+  "remote_root": "neev-knowledge",
+  "local_root": "/var/lib/neev-native/knowledge",
+  "state_dir": "/var/lib/neev-storage-box-knowledge"
+}

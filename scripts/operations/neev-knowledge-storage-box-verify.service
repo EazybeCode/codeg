@@ -1,0 +1,22 @@
+[Unit]
+Description=Re-hash Neev org knowledge on the Storage Box (a failed unit means remote loss or outage: alert on it)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+# Full verify of the knowledge replica (knowledge is never evicted: the server keeps a full copy).
+# For very large sets use `verify --sample N` daily plus a weekly full run.
+ExecStart=/usr/bin/python3 /opt/neev-storage-box/neev_storage_box.py --config /etc/neev-storage-box/knowledge.json verify
+TimeoutStartSec=7200
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/neev-storage-box-knowledge
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M

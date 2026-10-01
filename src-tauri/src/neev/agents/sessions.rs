@@ -503,7 +503,9 @@ pub(crate) async fn create(
     }
     let count: i64 = db::one(
         &tx,
-        "SELECT COUNT(*) AS n FROM neev_agent_sessions WHERE org_id=$1 AND owner_id=$2",
+        // Org-knowledge compile sessions are hidden and system-owned per job;
+        // they never consume the owner's own session allowance (M2).
+        "SELECT COUNT(*) AS n FROM neev_agent_sessions s WHERE org_id=$1 AND owner_id=$2 AND NOT EXISTS (SELECT 1 FROM neev_knowledge_jobs j WHERE j.org_id=s.org_id AND j.session_id=s.id)",
         vec![actor.org_id.into(), actor.identity.user_id.into()],
     )
     .await?
@@ -572,7 +574,9 @@ pub(crate) async fn list(
     // Only saved Agent Chats are listed. A `team` session is an internal holder
     // for one chat's invocations and would be noise in the sidebar.
     let sql = format!(
-        "SELECT {SESSION_COLUMNS} FROM neev_agent_sessions WHERE org_id=$1 AND owner_id=$2 AND kind='chat'{filter} ORDER BY updated_at DESC,id LIMIT {MAX_SESSIONS_PER_OWNER}"
+        // An org-knowledge job's private compile session is not a chat the
+        // admin started, so it is never listed (Amendment 1, E5).
+        "SELECT {SESSION_COLUMNS} FROM neev_agent_sessions s WHERE org_id=$1 AND owner_id=$2 AND kind='chat'{filter} AND NOT EXISTS (SELECT 1 FROM neev_knowledge_jobs j WHERE j.org_id=s.org_id AND j.session_id=s.id) ORDER BY updated_at DESC,id LIMIT {MAX_SESSIONS_PER_OWNER}"
     );
     let rows = tx
         .query_all(db::statement(
@@ -1422,7 +1426,7 @@ pub(crate) fn execution_error_code(
         ExecutionError::Unauthorized => "unauthorized",
         ExecutionError::Isolation => "isolation",
         ExecutionError::Provider => "provider",
-        ExecutionError::Unavailable => "unavailable",
+        ExecutionError::Unavailable | ExecutionError::LanesBusy => "unavailable",
         ExecutionError::Unsupported => "unsupported",
     }
 }

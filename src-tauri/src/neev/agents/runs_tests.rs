@@ -75,6 +75,7 @@ impl Harness {
                 attachments: Vec::new(),
                 context_files: Vec::new(),
                 library_items: Vec::new(),
+                min_free_lanes: 1,
             })
             .await
             .unwrap();
@@ -671,6 +672,7 @@ async fn drive_spooled_output(corrupt: bool) {
             attachments: vec![],
             context_files: vec![],
             library_items: vec![],
+            min_free_lanes: 1,
         })
         .await
         .unwrap();
@@ -732,4 +734,90 @@ async fn runtime_spool_id_is_distinct_from_durable_run_id_and_files_survive() {
 #[tokio::test]
 async fn broken_export_never_reports_completed() {
     drive_spooled_output(true).await;
+}
+
+/// A knowledge run never persists outputs as attachments, never stores the
+/// model's reply, and cleans its spool (Amendment 1, D3/A1). The batch id
+/// does not exist, so the outcome is a failure stored with an allowed code.
+#[tokio::test]
+async fn knowledge_purpose_never_persists_outputs_as_attachments_or_reply_text() {
+    use sha2::{Digest, Sha256};
+    let h = Harness::new().await;
+    let attachments = || async {
+        crate::neev::db::one(&h.state.database, "SELECT COUNT(*) AS c FROM neev_attachments", vec![])
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<i64>("", "c")
+            .unwrap()
+    };
+    let before = attachments().await;
+    let (turn, _) = sessions::begin_turn(&h.state, &h.actor, &h.session.id, "Compile knowledge batch 1.", None)
+        .await
+        .unwrap();
+    let mut handle = FakeRuntime::new(vec!["The private unit says ZEBRA-CONFIDENTIAL-PHRASE.".into()])
+        .run(RunRequest {
+            user_id: h.actor.identity.user_id,
+            org_id: h.actor.org_id,
+            chat_id: h.session.id.clone(),
+            provider: "claude".into(),
+            model: "default".into(),
+            prompt: "Compile knowledge batch 1.".into(),
+            credential_handle: None,
+            briefing: None,
+            effort: None,
+            fast: false,
+            attachments: vec![],
+            context_files: vec![],
+            library_items: vec![],
+            min_free_lanes: 2,
+        })
+        .await
+        .unwrap();
+    let root = tempfile::TempDir::new().unwrap();
+    let spool = root.path().join("spool").join(format!("run-{}", handle.run_id));
+    std::fs::create_dir_all(spool.join("files")).unwrap();
+    let key = uuid::Uuid::new_v4().to_string();
+    let bytes = b"# A\n\nFact.[^u01]\n";
+    std::fs::write(spool.join("files").join(format!("{key}--wiki--a.md")), bytes).unwrap();
+    std::fs::write(
+        spool.join("manifest.json"),
+        serde_json::json!({
+            "run_id": format!("run-{}", handle.run_id), "errors": [],
+            "files": [{"key": key, "name": "wiki--a.md", "byte_length": bytes.len(), "sha256": format!("{:x}", Sha256::digest(bytes))}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    handle.workspace_root = Some(root.path().to_owned());
+    start_with_purpose(
+        h.state.clone(),
+        turn.run_id.clone(),
+        h.actor.clone(),
+        h.session.id.clone(),
+        turn.id,
+        handle,
+        None,
+        RunPurpose::Knowledge {
+            org_id: h.actor.org_id,
+            batch_id: "00000000-0000-4000-8000-000000000000".into(),
+            job_id: "00000000-0000-4000-8000-000000000001".into(),
+        },
+    );
+    let settled = h.settled(&turn.run_id).await;
+    assert_eq!(settled.status, TurnStatus::Failed);
+    assert_eq!(settled.error_code.as_deref(), Some("io"));
+    assert!(settled.response.starts_with("Knowledge batch 0 not accepted ("), "{}", settled.response);
+    assert!(!settled.response.contains("ZEBRA") && !settled.response.contains("Fact."));
+    assert_eq!(attachments().await, before, "knowledge outputs must never become attachments");
+    assert!(!spool.exists(), "the knowledge spool is cleaned after handling");
+}
+
+/// Ordinary runs keep their behaviour: `start` is the Chat purpose.
+#[tokio::test]
+async fn chat_purpose_still_stores_the_reply() {
+    let h = Harness::new().await;
+    let (run_id, _live) = h.run("draft", vec!["kept reply".into()]).await;
+    let turn = h.settled(&run_id).await;
+    assert_eq!((turn.status, turn.response.as_str()), (TurnStatus::Completed, "kept reply"));
 }

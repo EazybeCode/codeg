@@ -20,6 +20,8 @@ pub(crate) enum ConfigError {
     StaticRoot,
     #[error("invalid native document root")]
     DocumentRoot,
+    #[error("invalid knowledge root")]
+    KnowledgeRoot,
     #[error("invalid native provider configuration")]
     Provider,
 }
@@ -101,13 +103,20 @@ pub(crate) struct Config {
     /// engine-backed resource has no native content and falling back to the
     /// native editor would render a blank document.
     pub(crate) engine: Option<EngineConfig>,
+    /// Org knowledge blob root (`NEEV_KNOWLEDGE_ROOT`), separate from the
+    /// document root. `None` disables the feature: routes answer 503 and no
+    /// capture or compile loop runs.
+    pub(crate) knowledge_root: Option<PathBuf>,
     #[cfg(test)]
     pub(crate) _document_root_guard: Option<tempfile::TempDir>,
+    #[cfg(test)]
+    pub(crate) _knowledge_root_guard: Option<tempfile::TempDir>,
 }
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 22] = [
+        const KEYS: [&str; 23] = [
+            "NEEV_KNOWLEDGE_ROOT",
             "NEEV_DOCS_BACKEND_URL",
             "NEEV_DOCS_COLLABORATION_URL",
             "NEEV_DOCS_BRIDGE_KEY",
@@ -232,8 +241,31 @@ impl Config {
         let realtime_enabled = !optional_bool(values.get("NEEV_REALTIME_DISABLED"))
             .map_err(|_| ConfigError::Provider)?;
         let engine = engine(values)?;
+        let knowledge_root = match values.get("NEEV_KNOWLEDGE_ROOT") {
+            None => None,
+            Some(value) => {
+                let root = PathBuf::from(value);
+                // Absolute, an existing real directory, no symlinked component,
+                // and never inside (or containing) the document or static root:
+                // knowledge blobs must not share a tree with anything else.
+                if !root.is_absolute() || !root.is_dir() || has_symlink_component(&root) {
+                    return Err(ConfigError::KnowledgeRoot);
+                }
+                let canonical = root.canonicalize().map_err(|_| ConfigError::KnowledgeRoot)?;
+                for other in [&canonical_documents, &canonical_static] {
+                    if &canonical == other
+                        || canonical.starts_with(other)
+                        || other.starts_with(&canonical)
+                    {
+                        return Err(ConfigError::KnowledgeRoot);
+                    }
+                }
+                Some(root)
+            }
+        };
         Ok(Self {
             engine,
+            knowledge_root,
             origin,
             origin_header,
             google_callback,
@@ -251,6 +283,8 @@ impl Config {
             realtime_enabled,
             #[cfg(test)]
             _document_root_guard: None,
+            #[cfg(test)]
+            _knowledge_root_guard: None,
         })
     }
 }
@@ -787,6 +821,43 @@ mod tests {
         assert_eq!(
             Config::from_values(&invalid).err(),
             Some(ConfigError::Provider)
+        );
+    }
+
+    #[test]
+    fn knowledge_root_is_optional_absolute_and_separate() {
+        assert_eq!(Config::from_values(&values()).unwrap().knowledge_root, None);
+        let knowledge = tempfile::tempdir().unwrap();
+        let canonical = knowledge.path().canonicalize().unwrap();
+        let mut set = values();
+        set.insert("NEEV_KNOWLEDGE_ROOT".into(), canonical.display().to_string());
+        assert_eq!(
+            Config::from_values(&set).unwrap().knowledge_root,
+            Some(canonical.clone())
+        );
+        let mut relative = values();
+        relative.insert("NEEV_KNOWLEDGE_ROOT".into(), "knowledge".into());
+        assert_eq!(
+            Config::from_values(&relative).err(),
+            Some(ConfigError::KnowledgeRoot)
+        );
+        let mut missing = values();
+        missing.insert(
+            "NEEV_KNOWLEDGE_ROOT".into(),
+            canonical.join("absent").display().to_string(),
+        );
+        assert_eq!(
+            Config::from_values(&missing).err(),
+            Some(ConfigError::KnowledgeRoot)
+        );
+        // Inside the document root: knowledge blobs must not share its tree.
+        let mut nested = values();
+        let inside = PathBuf::from(nested.get("NEEV_DOCUMENT_ROOT").unwrap().clone()).join("k");
+        std::fs::create_dir(&inside).unwrap();
+        nested.insert("NEEV_KNOWLEDGE_ROOT".into(), inside.display().to_string());
+        assert_eq!(
+            Config::from_values(&nested).err(),
+            Some(ConfigError::KnowledgeRoot)
         );
     }
 

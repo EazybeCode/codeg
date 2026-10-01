@@ -90,6 +90,12 @@ async fn mixed_history(database: sea_orm::DatabaseConnection) {
     ]);
     crate::neev::db::execute(&h.state.database,"UPDATE neev_requests SET body_hash=$1 WHERE user_id=$2 AND action='content.document.save' AND request_id=$3",vec![historical_hash.into(),h.creator.identity.user_id.into(),markdown_input.request_id.clone().into()]).await.unwrap();
     let historical_charge = h.usage("charged_bytes").await;
+    // Schema 22 (org knowledge) is newest: its tables go first, children first.
+    for table in crate::neev::db::knowledge_migration::DROP_ORDER {
+        crate::neev::db::execute(&h.state.database, &format!("DROP TABLE {table}"), vec![])
+            .await
+            .unwrap();
+    }
     for table in [
         // Mentions point at messages and attachment references at turns and
         // messages, so both come off before the tables they name.

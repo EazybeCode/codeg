@@ -12,6 +12,7 @@
   "backup_script": "/opt/neev-content-backup/neev-content-backup.mjs",
   "app_container": "neev-native-https-20260913-neev-1",
   "source": "/var/lib/neev-native/documents",
+  "knowledge_source": "/var/lib/neev-native/knowledge",
   "broker_socket": "/run/neev-originals/broker.sock",
   "host": "neev-native",
   "min_free_bytes": 5368709120,

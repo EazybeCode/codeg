@@ -820,8 +820,19 @@ pub(super) fn preview_config() -> super::config::Config {
         runtime_enabled: false,
         realtime_enabled: true,
         engine: None,
+        knowledge_root: None,
         _document_root_guard: Some(document_root),
+        _knowledge_root_guard: None,
     }
+}
+
+/// `preview_config` with an owned, isolated knowledge root.
+pub(super) fn knowledge_config() -> super::config::Config {
+    let mut config = preview_config();
+    let root = owned_document_root();
+    config.knowledge_root = Some(root.path().canonicalize().unwrap());
+    config._knowledge_root_guard = Some(root);
+    config
 }
 
 pub(super) async fn http_fixture() -> (axum_test::TestServer, DatabaseConnection, Arc<TestClock>) {

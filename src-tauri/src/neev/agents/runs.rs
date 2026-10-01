@@ -265,6 +265,15 @@ impl LiveRun {
         log.items().to_vec()
     }
 
+    /// The stored trace with every payload removed (knowledge runs).
+    pub(crate) fn activity_names_only_stored(&self) -> Option<String> {
+        let log = match self.activity.lock() {
+            Ok(log) => log,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        log.names_only().stored()
+    }
+
     /// The stored form of the trace, written with the turn's terminal state.
     pub(crate) fn activity_stored(&self) -> Option<String> {
         let log = match self.activity.lock() {
@@ -423,6 +432,21 @@ pub(crate) struct TeamPublication {
     pub(crate) turn_id: String,
 }
 
+/// Why a run exists. `Chat` is every ordinary run and keeps its behaviour
+/// exactly. `Knowledge` is an org-knowledge compile batch: its outputs go to
+/// `knowledge::output`, never to attachments; its streamed text is neither
+/// stored nor broadcast; its activity is reduced to names; and its stored
+/// response is a server-composed status line (Amendment 1, A1/D3/E1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RunPurpose {
+    Chat,
+    Knowledge {
+        org_id: i32,
+        batch_id: String,
+        job_id: String,
+    },
+}
+
 /// Register a run and start its driver. The returned handle is only needed by
 /// callers that want to observe the run synchronously (tests); ordinary request
 /// handlers reattach by run id like any other reader.
@@ -439,8 +463,32 @@ pub(crate) fn start(
     actor: OrgContext,
     session_id: String,
     turn_id: String,
+    handle: RunHandle,
+    publish: Option<TeamPublication>,
+) -> Arc<LiveRun> {
+    start_with_purpose(
+        state,
+        run_id,
+        actor,
+        session_id,
+        turn_id,
+        handle,
+        publish,
+        RunPurpose::Chat,
+    )
+}
+
+/// `start` with an explicit purpose.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_with_purpose(
+    state: Arc<ServerState>,
+    run_id: String,
+    actor: OrgContext,
+    session_id: String,
+    turn_id: String,
     mut handle: RunHandle,
     publish: Option<TeamPublication>,
+    purpose: RunPurpose,
 ) -> Arc<LiveRun> {
     let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
     let workspace_root = handle.workspace_root.take();
@@ -470,6 +518,7 @@ pub(crate) fn start(
         handle,
         publish,
         workspace_root,
+        purpose,
     ));
     live
 }
@@ -487,8 +536,10 @@ async fn drive(
     mut handle: RunHandle,
     publish: Option<TeamPublication>,
     workspace_root: Option<PathBuf>,
+    purpose: RunPurpose,
 ) {
     let database = state.database.clone();
+    let knowledge = matches!(purpose, RunPurpose::Knowledge { .. });
     let mut flushed = 0usize;
     // `None` until the run reaches a terminal state; a stream that simply ends
     // without one is an interruption, not a success.
@@ -503,9 +554,14 @@ async fn drive(
         match event {
             // The runtime's own id is internal; the durable identity is ours.
             RunEvent::Started(_) => {}
-            RunEvent::Activity(draft) => {
+            RunEvent::Activity(mut draft) => {
                 if let Some(category) = super::provider_error::category_of(&draft.kind) {
                     failure = Some(category);
+                }
+                if knowledge {
+                    // Tool traffic of a knowledge batch is source text: keep
+                    // only names and statuses, live and stored.
+                    draft.kind = draft.kind.names_only();
                 }
                 // Refused only when a cap is spent, in which case the log has
                 // already recorded that it truncated.
@@ -514,7 +570,9 @@ async fn drive(
                 }
             }
             RunEvent::Chunk(text) | RunEvent::Message(text) => {
-                if text.is_empty() {
+                // A knowledge batch's reply is never stored or broadcast; the
+                // stored response is the server's status line.
+                if text.is_empty() || knowledge {
                     continue;
                 }
                 // A fragment continues whatever it is part of; a whole message
@@ -576,7 +634,51 @@ async fn drive(
     // For team chats, pass the chat_id so attachments are owned by the chat.
     let mut generated_keys: Vec<String> = Vec::new();
     let chat_id = publish.as_ref().map(|p| p.chat_id.as_str());
-    if status == TurnStatus::Completed {
+    if let RunPurpose::Knowledge { org_id, batch_id, .. } = &purpose {
+        // Spool -> knowledge accept -> spool cleanup. Never attachments.
+        let completed = status == TurnStatus::Completed;
+        let canceled = status == TurnStatus::Canceled;
+        let files = match workspace_root.as_ref() {
+            Some(root) if completed => match generated::read_spool(root, &runtime_id) {
+                Ok(files) => Ok(files),
+                Err(SpoolError::NotFound) => Ok(Vec::new()),
+                Err(_) => Err(()),
+            },
+            _ => Ok(Vec::new()),
+        };
+        let now = state.clock.now_unix();
+        let outcome = crate::neev::knowledge::output::settle_run(
+            &state, *org_id, batch_id, completed, canceled, files, now,
+        )
+        .await;
+        if let Some(root) = workspace_root.as_ref() {
+            generated::cleanup_spool(root, &runtime_id);
+        }
+        let seq: i32 = crate::neev::db::one(
+            &state.database,
+            "SELECT seq FROM neev_knowledge_batches WHERE org_id=$1 AND id=$2",
+            vec![(*org_id).into(), batch_id.clone().into()],
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.try_get::<i32>("", "seq").ok())
+        .unwrap_or(0);
+        response = crate::neev::knowledge::output::status_line(seq, &outcome);
+        live.replace_buffer(&response);
+        match outcome {
+            Ok(crate::neev::knowledge::output::AcceptOutcome::Accepted { .. }) => {}
+            _ if canceled => {}
+            _ => {
+                // The turn CHECK admits only fixed codes; the exact reason is
+                // on the batch and the job, and in the status line.
+                status = TurnStatus::Failed;
+                if error_code.is_none() || completed {
+                    error_code = Some("io");
+                }
+            }
+        }
+    } else if status == TurnStatus::Completed {
         if let Some(ref workspace_root) = workspace_root {
             match persist_generated_outputs(
                 &state,
@@ -614,7 +716,7 @@ async fn drive(
     // the run into an honest failure and posts nothing.
     //
     // Generated keys are passed so attachments can be linked to the assistant message.
-    if let (Some(publication), TurnStatus::Completed) = (&publish, status) {
+    if let (Some(publication), TurnStatus::Completed, false) = (&publish, status, knowledge) {
         match publish_reply_with_attachments(&state, publication, &response, &generated_keys).await
         {
             Ok(()) => {}
@@ -627,7 +729,11 @@ async fn drive(
 
     // Settle the durable row BEFORE leaving the registry, so a reader can never
     // observe a run that is neither live nor final.
-    let trace = live.activity_stored();
+    let trace = if knowledge {
+        live.activity_names_only_stored()
+    } else {
+        live.activity_stored()
+    };
     let stored = persist_terminal(
         &state,
         &database,

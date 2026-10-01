@@ -5,8 +5,11 @@ contain, on a compose network that publishes no ports. They are additionally
 gated by a shared credential compared in constant time. Three independent
 conditions, none of which is "the caller said so".
 
-They are not a second way into a document: they cannot read content, cannot
-grant a privileged role, and cannot touch a document the bridge did not create.
+They are not a second way into a document: they cannot grant a privileged
+role and cannot touch a document the bridge did not create. One reads content —
+`document_markdown`, the last saved text of an engine document in the org the
+caller names, with media redacted — because Neev Knowledge needs it server-side
+and Neev has already authorized the read against its own ACL.
 They exist so that provisioning and ACL projection do not have to be performed
 *as a user* over the browser API — which would mean either impersonating the
 creator or carrying a session and CSRF token for a machine.
@@ -220,6 +223,28 @@ def document_title(request, document_id):
         document_id, payload.get("title"), payload.get("sub")
     )
     return JsonResponse({"title": document.title, "changed": changed})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@_bridge_view
+def document_markdown(request, document_id):
+    """POST /_neev/v1/documents/<id>/markdown — saved text for Neev Knowledge.
+
+    Neev authorizes against its own ACL first; this endpoint is private,
+    credentialled, never in the proxy's allowlist, and bound to the org the
+    caller names. It is the one bridge route that returns document text, so the
+    response is never cached and carries no media URL (see
+    `neev_bridge.markdown`).
+    """
+    payload = _load_body(request)
+    response = JsonResponse(
+        service.document_markdown(
+            document_id, payload.get("org_id"), payload.get("if_none_match")
+        )
+    )
+    response["Cache-Control"] = "private, no-store"
+    return response
 
 
 @csrf_exempt

@@ -51,6 +51,11 @@ urlpatterns = [
         name="neev-bridge-title",
     ),
     path(
+        "_neev/v1/documents/<str:document_id>/markdown",
+        views.document_markdown,
+        name="neev-bridge-markdown",
+    ),
+    path(
         "_neev/v1/sessions/mint",
         views.mint_session,
         name="neev-bridge-mint-session",

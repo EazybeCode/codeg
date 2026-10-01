@@ -21,6 +21,9 @@ mod gateway_migration;
 #[cfg(test)]
 mod gateway_migration_tests;
 mod image_blob_migration;
+pub(crate) mod knowledge_migration;
+#[cfg(test)]
+mod knowledge_migration_tests;
 pub(crate) mod library_migration;
 mod mention_migration;
 mod migration;
@@ -33,7 +36,7 @@ pub(crate) mod provider_enum_migration;
 /// "current" say this rather than naming whichever layer was newest when they
 /// were written (several had drifted to 16/17 while installs moved on).
 #[cfg(test)]
-pub(crate) const CURRENT_SCHEMA_VERSION: i64 = node_sharing_migration::SCHEMA_VERSION;
+pub(crate) const CURRENT_SCHEMA_VERSION: i64 = knowledge_migration::SCHEMA_VERSION;
 #[cfg(test)]
 mod provider_enum_tests;
 mod session_migration;
@@ -226,6 +229,10 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         let v21_expected: std::collections::BTreeSet<String> = v19_expected.iter().cloned()
             .chain(node_sharing_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
 
+        // Schema22 adds the org knowledge tables.
+        let v22_expected: std::collections::BTreeSet<String> = v21_expected.iter().cloned()
+            .chain(knowledge_migration::TABLE_NAMES.iter().map(|name| (*name).to_owned())).collect();
+
         // Empty or an exact known native inventory only; refuse legacy and partial data.
         if names.is_empty() {
             for table in migration::tables() {
@@ -261,10 +268,11 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             steer_migration::upgrade(&tx).await?;
             provider_enum_migration::widen(&tx).await?;
             node_sharing_migration::upgrade(&tx).await?;
+            knowledge_migration::upgrade(&tx).await?;
             execute(
                 &tx,
                 "INSERT INTO neev_schema_version(id,version) VALUES(1,$1)",
-                vec![node_sharing_migration::SCHEMA_VERSION.into()],
+                vec![knowledge_migration::SCHEMA_VERSION.into()],
             )
             .await?;
             return Ok(());
@@ -289,6 +297,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
             && names != v18_expected
             && names != v19_expected
             && names != v21_expected
+            && names != v22_expected
         {
             return Err(AuthError::Unavailable);
         }
@@ -547,7 +556,8 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 steer_migration::validate(&tx).await?;
                 provider_enum_migration::validate(&tx).await?;
             }
-            // Current (schema 21). Validate in place and preserve every row.
+            // Schema21. Validate in place, then fall through to the tail, which adds
+            // the schema-22 knowledge tables.
             node_sharing_migration::SCHEMA_VERSION if names == v21_expected => {
                 document_format_migration::validate(&tx).await?;
                 agent_status_migration::validate(&tx).await?;
@@ -570,21 +580,46 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
                 steer_migration::validate(&tx).await?;
                 provider_enum_migration::validate(&tx).await?;
                 node_sharing_migration::validate(&tx).await?;
+            }
+            // Current (schema 22). Validate in place and preserve every row.
+            knowledge_migration::SCHEMA_VERSION if names == v22_expected => {
+                document_format_migration::validate(&tx).await?;
+                agent_status_migration::validate(&tx).await?;
+                gateway_migration::validate(&tx).await?;
+                org_code_migration::validate(&tx).await?;
+                image_blob_migration::validate(&tx).await?;
+                session_migration::validate(&tx).await?;
+                session_migration::validate_node_link(&tx).await?;
+                session_migration::validate_activity(&tx).await?;
+                session_migration::validate_effort(&tx).await?;
+                content_revision_cap_migration::validate_document_revision_cap(&tx).await?;
+                attachment_migration::validate(&tx).await?;
+                attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
+                attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
+                attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
+                attachment_byte_cap_migration::validate_attachment_byte_cap(&tx).await?;
+                mention_migration::validate(&tx).await?;
+                attachment_archived_migration::validate_archived_column(&tx).await?;
+                library_migration::validate(&tx).await?;
+                steer_migration::validate(&tx).await?;
+                provider_enum_migration::validate(&tx).await?;
+                node_sharing_migration::validate(&tx).await?;
+                knowledge_migration::validate(&tx).await?;
                 return Ok(());
             }
             _ => return Err(AuthError::Unavailable),
         }
-        // Apply missing additive storage in order, then publish schema 21.
-        if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected {
+        // Apply missing additive storage in order, then publish schema 22.
+        if names != v8_expected && names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected && names != v21_expected {
             gateway_migration::upgrade(&tx).await?;
         }
-        if names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected {
+        if names != v9_expected && names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected && names != v21_expected {
             org_code_migration::upgrade(&tx).await?;
         }
-        if names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected {
+        if names != v10_expected && names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected && names != v21_expected {
             image_blob_migration::upgrade(&tx).await?;
         }
-        if names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected {
+        if names != v11_expected && names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected && names != v21_expected {
             session_migration::upgrade(&tx).await?;
         }
         // Both are column-guarded, so every path can apply them unconditionally
@@ -593,7 +628,7 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         session_migration::record_activity(&tx).await?;
         session_migration::record_effort(&tx).await?;
         content_revision_cap_migration::raise_document_revision_cap(&tx).await?;
-        if names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected {
+        if names != v15_expected && names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected && names != v21_expected {
             attachment_migration::upgrade(&tx).await?;
         }
         // Constraint-guarded and idempotent, so every path applies it: a database
@@ -601,18 +636,18 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         attachment_byte_cap_migration::relax_attachment_byte_cap(&tx).await?;
         attachment_position_cap_migration::relax_attachment_position_cap(&tx).await?;
         attachment_position_cap_migration::validate_attachment_position_cap(&tx).await?;
-        if names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected {
+        if names != v16_expected && names != v17_expected && names != v18_expected && names != v19_expected && names != v21_expected {
             mention_migration::upgrade(&tx).await?;
         }
         // Column-guarded and idempotent: a database that already has the column
         // is unchanged. Adds the archived column for attachment soft-delete.
         attachment_archived_migration::add_archived_column(&tx).await?;
         // Table-guarded and idempotent: adds library tables if not present.
-        if names != v18_expected && names != v19_expected {
+        if names != v18_expected && names != v19_expected && names != v21_expected {
             library_migration::upgrade(&tx).await?;
         }
         // Table-guarded and idempotent: adds steer input table if not present.
-        if names != v19_expected {
+        if names != v19_expected && names != v21_expected {
             steer_migration::upgrade(&tx).await?;
         }
         // Constraint-guarded and idempotent: widens the provider enum (schema 20).
@@ -620,10 +655,12 @@ pub(crate) async fn initialize(db: &DatabaseConnection) -> Result<(), AuthError>
         provider_enum_migration::validate(&tx).await?;
         // Table-guarded and idempotent: adds the folder sharing defaults (21).
         node_sharing_migration::upgrade(&tx).await?;
+        // Table-guarded and idempotent: adds the org knowledge tables (22).
+        knowledge_migration::upgrade(&tx).await?;
         execute(
             &tx,
             "UPDATE neev_schema_version SET version=$1 WHERE id=1",
-            vec![node_sharing_migration::SCHEMA_VERSION.into()],
+            vec![knowledge_migration::SCHEMA_VERSION.into()],
         )
         .await?;
         Ok(())
@@ -687,6 +724,36 @@ pub(crate) async fn downgrade_node_sharing(
         Ok(node_sharing_migration::Downgrade::Done) => {
             tx.commit().await.map_err(database_error)?;
             Ok(node_sharing_migration::Downgrade::Done)
+        }
+        Ok(refused) => {
+            tx.rollback().await.map_err(database_error)?;
+            Ok(refused)
+        }
+        Err(error) => {
+            tx.rollback().await.map_err(database_error)?;
+            Err(error)
+        }
+    }
+}
+
+/// Operator rollback 22 -> 21 (see `knowledge_migration::downgrade`). Same
+/// lock and commit discipline as the other guarded downgrades: only a completed
+/// downgrade commits; every refusal rolls back and changes nothing.
+pub(crate) async fn downgrade_knowledge(
+    db: &DatabaseConnection,
+) -> Result<knowledge_migration::Downgrade, AuthError> {
+    let backend = db.get_database_backend();
+    if backend == DbBackend::Sqlite {
+        execute(db, "PRAGMA foreign_keys=ON", vec![]).await?;
+    }
+    let tx = db.begin().await.map_err(database_error)?;
+    if backend == DbBackend::Postgres {
+        one(&tx, "SELECT pg_advisory_xact_lock(1852143222)", vec![]).await?;
+    }
+    match knowledge_migration::downgrade(&tx).await {
+        Ok(knowledge_migration::Downgrade::Downgraded) => {
+            tx.commit().await.map_err(database_error)?;
+            Ok(knowledge_migration::Downgrade::Downgraded)
         }
         Ok(refused) => {
             tx.rollback().await.map_err(database_error)?;
@@ -873,11 +940,17 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         }
         steer_migration::SCHEMA_VERSION
         | provider_enum_migration::SCHEMA_VERSION
-        | node_sharing_migration::SCHEMA_VERSION => {
+        | node_sharing_migration::SCHEMA_VERSION
+        | knowledge_migration::SCHEMA_VERSION => {
             // Schema 19 adds steering input table; 20 only widens a CHECK; 21
-            // adds the folder sharing defaults.
-            let sharing: &[&str] = if version == node_sharing_migration::SCHEMA_VERSION {
+            // adds the folder sharing defaults; 22 the org knowledge tables.
+            let sharing: &[&str] = if version >= node_sharing_migration::SCHEMA_VERSION {
                 node_sharing_migration::TABLE_NAMES
+            } else {
+                &[]
+            };
+            let knowledge: &[&str] = if version == knowledge_migration::SCHEMA_VERSION {
+                knowledge_migration::TABLE_NAMES
             } else {
                 &[]
             };
@@ -901,6 +974,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
                             .map(|name| (*name).to_owned()),
                     )
                     .chain(sharing.iter().map(|name| (*name).to_owned()))
+                    .chain(knowledge.iter().map(|name| (*name).to_owned()))
                     .collect::<std::collections::BTreeSet<String>>()
         }
         _ => false,
@@ -910,32 +984,32 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
     }
     if matches!(
         version,
-        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21
+        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22
     ) {
         document_format_migration::validate(db).await?;
     }
     if matches!(
         version,
-        7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21
+        7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22
     ) {
         agent_status_migration::validate(db).await?;
     }
-    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21) {
+    if matches!(version, 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22) {
         gateway_migration::validate(db).await?;
     }
-    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21) {
+    if matches!(version, 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22) {
         org_code_migration::validate(db).await?;
     }
-    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21) {
+    if matches!(version, 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22) {
         image_blob_migration::validate(db).await?;
     }
-    if matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21) {
+    if matches!(version, 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22) {
         session_migration::validate(db).await?;
     }
-    if matches!(version, 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21) {
+    if matches!(version, 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22) {
         session_migration::validate_node_link(db).await?;
     }
-    if matches!(version, 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21) {
+    if matches!(version, 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22) {
         session_migration::validate_activity(db).await?;
     }
     if matches!(
@@ -948,6 +1022,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             | steer_migration::SCHEMA_VERSION
             | provider_enum_migration::SCHEMA_VERSION
             | node_sharing_migration::SCHEMA_VERSION
+            | knowledge_migration::SCHEMA_VERSION
     ) {
         session_migration::validate_effort(db).await?;
         // 13 only. A schema-12 snapshot still has the historical 1000 bound and
@@ -964,6 +1039,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             | steer_migration::SCHEMA_VERSION
             | provider_enum_migration::SCHEMA_VERSION
             | node_sharing_migration::SCHEMA_VERSION
+            | knowledge_migration::SCHEMA_VERSION
     ) {
         attachment_migration::validate(db).await?;
     }
@@ -975,6 +1051,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             | steer_migration::SCHEMA_VERSION
             | provider_enum_migration::SCHEMA_VERSION
             | node_sharing_migration::SCHEMA_VERSION
+            | knowledge_migration::SCHEMA_VERSION
     ) {
         mention_migration::validate(db).await?;
     }
@@ -985,6 +1062,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
             | steer_migration::SCHEMA_VERSION
             | provider_enum_migration::SCHEMA_VERSION
             | node_sharing_migration::SCHEMA_VERSION
+            | knowledge_migration::SCHEMA_VERSION
     ) {
         attachment_archived_migration::validate_archived_column(db).await?;
     }
@@ -993,6 +1071,7 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         library_migration::SCHEMA_VERSION | steer_migration::SCHEMA_VERSION
             | provider_enum_migration::SCHEMA_VERSION
             | node_sharing_migration::SCHEMA_VERSION
+            | knowledge_migration::SCHEMA_VERSION
     ) {
         library_migration::validate(db).await?;
     }
@@ -1001,17 +1080,26 @@ pub(crate) async fn validate_content_snapshot<C: ConnectionTrait>(
         steer_migration::SCHEMA_VERSION
             | provider_enum_migration::SCHEMA_VERSION
             | node_sharing_migration::SCHEMA_VERSION
+            | knowledge_migration::SCHEMA_VERSION
     ) {
         steer_migration::validate(db).await?;
     }
     if matches!(
         version,
-        provider_enum_migration::SCHEMA_VERSION | node_sharing_migration::SCHEMA_VERSION
+        provider_enum_migration::SCHEMA_VERSION
+            | node_sharing_migration::SCHEMA_VERSION
+            | knowledge_migration::SCHEMA_VERSION
     ) {
         provider_enum_migration::validate(db).await?;
     }
-    if version == node_sharing_migration::SCHEMA_VERSION {
+    if matches!(
+        version,
+        node_sharing_migration::SCHEMA_VERSION | knowledge_migration::SCHEMA_VERSION
+    ) {
         node_sharing_migration::validate(db).await?;
+    }
+    if version == knowledge_migration::SCHEMA_VERSION {
+        knowledge_migration::validate(db).await?;
     }
     Ok(version)
 }

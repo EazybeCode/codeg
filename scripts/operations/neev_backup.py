@@ -3,10 +3,12 @@
 
 Daily pipeline, each step gating the next:
   lock -> free-disk preflight -> complete content backup (neev-content-backup-run.sh)
-  -> local re-verification (every blob hash, full dump read)
+  -> local re-verification (every blob hash, including org-knowledge blobs when
+     `knowledge_source` is configured, full dump read)
   -> restic backup to a SEPARATE repository, tagged neev-pending
-  -> restic check -> restore canary (dump + one blob restored from the snapshot,
-     hashed against the manifest, dump fully read)
+  -> restic check -> restore canary (dump + one blob, and one knowledge blob
+     when any exist, restored from the snapshot, hashed against the manifest,
+     dump fully read)
   -> promote exactly that snapshot to neev-daily
   -> bounded local staging cleanup (only outputs whose snapshot is verified)
   -> retention: forget --host neev-native --tag neev-daily 7/4/3 --prune
@@ -31,12 +33,16 @@ import time
 
 OUTPUT = re.compile(r"^neev-content-\d{8}T\d{6}Z$")
 SNAPSHOT = re.compile(r"^[0-9a-f]{64}$")
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+FORMATS = ("neev-content-copy-v2", "neev-content-copy-v3")
+# Authoritative schema-22 CHECK for both knowledge tables (Task 1 DDL).
+KNOWLEDGE_MAX_BYTES = 65536
 DAY = 86400
 REQUIRED = {"repository", "password_file", "ssh_config", "ssh_host", "cache_dir", "state_dir",
             "staging_dir", "runner", "node", "backup_script", "app_container", "source", "host",
             "min_free_bytes"}
 OPTIONAL = {"broker_socket", "keep_local_verified", "keep", "forbidden_repositories", "restic",
-            "incomplete_max_age_seconds"}
+            "incomplete_max_age_seconds", "knowledge_source"}
 
 
 class BackupError(Exception):
@@ -61,6 +67,10 @@ def load_config(path):
     config.setdefault("restic", "/usr/bin/restic")
     if config["keep_local_verified"] < 1:
         raise BackupError("keep_local_verified must be >= 1")
+    knowledge = config.get("knowledge_source")
+    if knowledge is not None and (not isinstance(knowledge, str) or not os.path.isabs(knowledge)
+                                  or os.path.normpath(knowledge) != knowledge):
+        raise BackupError("knowledge_source must be an absolute normalised path")
     return config
 
 
@@ -117,6 +127,8 @@ def preflight_disk(config):
     """Refuse to start unless the staging filesystem can hold a new backup,
     its restore canary and the configured free-space floor."""
     estimate = tree_bytes(config["source"])
+    if config.get("knowledge_source"):
+        estimate += tree_bytes(config["knowledge_source"])
     latest = newest_complete(config)
     if latest:
         estimate += os.path.getsize(os.path.join(latest, "metadata.dump"))
@@ -150,6 +162,9 @@ def run_content_backup(config, run):
            "NEEV_BACKUP_SOURCE": config["source"], "NEEV_BACKUP_OUTPUT_PARENT": config["staging_dir"],
            "NEEV_BACKUP_NODE": config["node"], "NEEV_BACKUP_SCRIPT": config["backup_script"],
            "NEEV_ORIGINALS_BROKER_SOCKET": config.get("broker_socket", "/nonexistent")}
+    if config.get("knowledge_source"):
+        # Environment only, like every other runner input.
+        env["NEEV_BACKUP_KNOWLEDGE_SOURCE"] = config["knowledge_source"]
     result = _call(run, ["/usr/bin/bash", config["runner"]], env=env, stdout=subprocess.PIPE, text=True)
     lines = [line for line in result.stdout.splitlines() if line.startswith("complete: ")]
     if len(lines) != 1:
@@ -160,10 +175,44 @@ def run_content_backup(config, run):
     return output
 
 
-def verify_local(output, run):
+def knowledge_blobs(manifest):
+    """The v3 knowledge entries, validated; [] for v2 or "not configured"."""
+    if manifest.get("format") != "neev-content-copy-v3":
+        return []
+    section = manifest.get("knowledge")
+    if section == "not configured":
+        return []
+    if not isinstance(section, dict) or not isinstance(section.get("tables"), list) \
+            or not isinstance(section.get("blobs"), list):
+        raise BackupError("unexpected knowledge section in the manifest")
+    seen = set()
+    for blob in section["blobs"]:
+        if not isinstance(blob, dict) or type(blob.get("org_id")) is not int or blob["org_id"] < 1 \
+                or not isinstance(blob.get("key"), str) or not UUID.match(blob["key"]) \
+                or not isinstance(blob.get("sha256"), str) or not SNAPSHOT.match(blob["sha256"]) \
+                or type(blob.get("byte_length")) is not int \
+                or not 0 <= blob["byte_length"] <= KNOWLEDGE_MAX_BYTES:
+            raise BackupError("unexpected knowledge blob entry in the manifest")
+        identity = (blob["org_id"], blob["key"])
+        if identity in seen:
+            raise BackupError("duplicate knowledge blob entry in the manifest")
+        seen.add(identity)
+    return section["blobs"]
+
+
+def knowledge_path(blob):
+    return os.path.join("blobs-knowledge", str(blob["org_id"]), f"{blob['key']}.md")
+
+
+def verify_local(output, run, knowledge_expected=False):
     manifest = json.loads(Path(output, "complete.json").read_text())
-    if manifest.get("format") != "neev-content-copy-v2" or not manifest.get("blobs"):
+    if manifest.get("format") not in FORMATS or not manifest.get("blobs"):
         raise BackupError("unexpected manifest")
+    knowledge = knowledge_blobs(manifest)
+    if knowledge_expected and not isinstance(manifest.get("knowledge"), dict):
+        # The dump may index knowledge rows; an output without the root would
+        # not restore them.
+        raise BackupError("content backup output lacks the configured knowledge root")
     dump = os.path.join(output, "metadata.dump")
     if sha256_file(dump) != manifest["dump"]["sha256"] or os.path.getsize(dump) != manifest["dump"]["byte_length"]:
         raise BackupError("dump does not match manifest")
@@ -171,6 +220,10 @@ def verify_local(output, run):
         path = os.path.join(output, "blobs", str(blob["org_id"]), f"{blob['key']}.{blob['kind']}")
         if sha256_file(path) != blob["sha256"] or os.path.getsize(path) != blob["byte_length"]:
             raise BackupError("a copied blob does not match the manifest")
+    for blob in knowledge:
+        path = os.path.join(output, knowledge_path(blob))
+        if sha256_file(path) != blob["sha256"] or os.path.getsize(path) != blob["byte_length"]:
+            raise BackupError("a copied knowledge blob does not match the manifest")
     # Read the complete archive without a database and without printing it.
     _call(run, ["/usr/bin/pg_restore", "--file=/dev/null", dump], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return manifest
@@ -193,17 +246,23 @@ def upload(config, output, run):
     return ids[0]
 
 
-def restore_canary(config, snapshot, output, manifest, run, blob=None):
-    """Restore the dump and one blob from the snapshot and compare them with
-    the manifest; fully read the restored dump. Removes its scratch copy."""
+def restore_canary(config, snapshot, output, manifest, run, blob=None, knowledge_blob=None):
+    """Restore the dump, one blob and (when any exist) one knowledge blob from
+    the snapshot and compare them with the manifest; fully read the restored
+    dump. Removes its scratch copy."""
     blob = blob or secrets.SystemRandom().choice(manifest["blobs"])
     relative_blob = os.path.join("blobs", str(blob["org_id"]), f"{blob['key']}.{blob['kind']}")
+    knowledge = knowledge_blobs(manifest)
+    if knowledge and knowledge_blob is None:
+        knowledge_blob = secrets.SystemRandom().choice(knowledge)
+    relative_knowledge = knowledge_path(knowledge_blob) if knowledge_blob else None
     scratch = os.path.join(config["staging_dir"], f".canary-{snapshot[:12]}-{secrets.token_hex(4)}")
     os.mkdir(scratch, 0o700)
     try:
         includes = []
-        for relative in ("complete.json", "metadata.dump", relative_blob):
-            includes += ["--include", os.path.join(output, relative)]
+        for relative in ("complete.json", "metadata.dump", relative_blob, relative_knowledge):
+            if relative:
+                includes += ["--include", os.path.join(output, relative)]
         _call(run, restic(config, ["restore", snapshot, "--target", scratch, *includes, "--verify"]),
               stdout=subprocess.DEVNULL)
         restored = scratch + output
@@ -217,9 +276,19 @@ def restore_canary(config, snapshot, output, manifest, run, blob=None):
             raise BackupError("restored dump hash differs")
         if sha256_file(os.path.join(restored, relative_blob)) != blob["sha256"]:
             raise BackupError("restored blob hash differs")
+        if relative_knowledge:
+            restored_knowledge = os.path.join(restored, relative_knowledge)
+            if os.path.getsize(restored_knowledge) != knowledge_blob["byte_length"]:
+                raise BackupError("restored knowledge blob size differs")
+            if sha256_file(restored_knowledge) != knowledge_blob["sha256"]:
+                raise BackupError("restored knowledge blob hash differs")
         _call(run, ["/usr/bin/pg_restore", "--file=/dev/null", os.path.join(restored, "metadata.dump")],
               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return {"blob_kind": blob["kind"], "blob_bytes": blob["byte_length"], "dump_bytes": manifest["dump"]["byte_length"]}
+        result = {"blob_kind": blob["kind"], "blob_bytes": blob["byte_length"],
+                  "dump_bytes": manifest["dump"]["byte_length"]}
+        if knowledge_blob:
+            result["knowledge_bytes"] = knowledge_blob["byte_length"]
+        return result
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -288,9 +357,11 @@ def backup(config, run=subprocess.run, now=None, log=print):
         output = run_content_backup(config, run)
         record["output"] = os.path.basename(output)
         stage("verify-local")
-        manifest = verify_local(output, run)
+        manifest = verify_local(output, run, knowledge_expected=bool(config.get("knowledge_source")))
+        knowledge = knowledge_blobs(manifest)
         record.update(blobs=len(manifest["blobs"]), blob_bytes=sum(b["byte_length"] for b in manifest["blobs"]),
-                      dump_bytes=manifest["dump"]["byte_length"])
+                      dump_bytes=manifest["dump"]["byte_length"], knowledge_blobs=len(knowledge),
+                      knowledge_bytes=sum(b["byte_length"] for b in knowledge))
         stage("upload")
         snapshot = upload(config, output, run)
         record["snapshot"] = snapshot

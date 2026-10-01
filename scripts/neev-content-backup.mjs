@@ -24,6 +24,15 @@ const KINDS = {
 const TABLES = Object.fromEntries(
   Object.entries(KINDS).map(([kind, spec]) => [spec.table, kind])
 )
+// Schema 22 org knowledge: its own BlobStore root (`{org}/{uuid}.md`), never
+// evicted, so there is no broker fallback. Bounds mirror the authoritative
+// Task 1 CHECKs: snapshots 0..65536 bytes, revisions 1..65536 bytes.
+const KNOWLEDGE_MAX = 64 * 1024
+const KNOWLEDGE = {
+  neev_knowledge_snapshots: { key: "blob_key", min: 0, max: KNOWLEDGE_MAX },
+  neev_knowledge_revisions: { key: "blob_key", min: 1, max: KNOWLEDGE_MAX },
+}
+const knowledgeName = new RegExp(`^(${uuid})\\.md$`)
 const REFERENCE_OUTPUT_LIMIT = 512 * MiB
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex")
 // Reason codes carry no paths, URLs or content; they tell an operator which
@@ -289,7 +298,10 @@ export async function snapshotReferences(dumpPath, schema, pgRestore) {
     // An unparseable data entry could hide a blob table: refuse, never skip.
     const entry = /^\d+; \d+ \d+ TABLE DATA (\S+) (\S+)(?: \S*)?$/.exec(line)
     if (!entry) fail("snapshot-list")
-    if (entry[1] === schema && Object.hasOwn(TABLES, entry[2]))
+    if (
+      entry[1] === schema &&
+      (Object.hasOwn(TABLES, entry[2]) || Object.hasOwn(KNOWLEDGE, entry[2]))
+    )
       tables.add(entry[2])
   }
   // Every content schema has revisions; images/attachments follow its version.
@@ -304,6 +316,7 @@ export async function snapshotReferences(dumpPath, schema, pgRestore) {
     dumpPath,
   ])
   const references = new Map()
+  const knowledge = new Map()
   const seen = new Set()
   const lines = data.split("\n")
   for (let index = 0; index < lines.length; index++) {
@@ -320,8 +333,10 @@ export async function snapshotReferences(dumpPath, schema, pgRestore) {
     )
       fail("snapshot-copy")
     seen.add(table)
-    const kind = TABLES[table]
-    const spec = KINDS[kind]
+    const isKnowledge = Object.hasOwn(KNOWLEDGE, table)
+    const kind = isKnowledge ? "md" : TABLES[table]
+    const spec = isKnowledge ? KNOWLEDGE[table] : KINDS[kind]
+    const into = isKnowledge ? knowledge : references
     const columns = header[3].split(", ").map((c) => c.replace(/^"|"$/g, ""))
     const position = (name) => {
       const at = columns.indexOf(name)
@@ -361,18 +376,23 @@ export async function snapshotReferences(dumpPath, schema, pgRestore) {
       )
         fail("snapshot-size")
       const id = `${reference.org_id}/${reference.key}.${kind}`
-      const previous = references.get(id)
+      const previous = into.get(id)
       if (
         previous &&
         (previous.sha256 !== reference.sha256 ||
           previous.byte_length !== reference.byte_length)
       )
         fail("snapshot-conflict")
-      references.set(id, reference)
+      into.set(id, reference)
     }
   }
   if (seen.size !== tables.size) fail("snapshot-copy")
-  return { tables: ordered, references }
+  return {
+    tables: ordered.filter((table) => Object.hasOwn(TABLES, table)),
+    references,
+    knowledgeTables: ordered.filter((table) => Object.hasOwn(KNOWLEDGE, table)),
+    knowledge,
+  }
 }
 
 // Fetch one evicted original from the root-side broker straight into the
@@ -472,6 +492,81 @@ const byBlob = (a, b) =>
   (a.key < b.key ? -1 : a.key > b.key ? 1 : 0) ||
   (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0)
 
+const byKey = (a, b) =>
+  a.org_id - b.org_id || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
+
+// Copy every knowledge blob the dump references into blobs-knowledge/, with
+// the same length-bounded, re-hashed copy as document-root blobs. A blob is
+// accepted only under its own org directory: the row's org_id is part of the
+// identity, so a file filed under another tenant never satisfies it.
+async function copyKnowledge({
+  knowledgeSource,
+  output,
+  knowledgeTables,
+  knowledge,
+  onOperation,
+}) {
+  onOperation("copy-knowledge")
+  const destination = path.join(output, "blobs-knowledge")
+  await fs.mkdir(destination, { mode: 0o700 })
+  const pending = new Map(knowledge)
+  const blobs = []
+  let unreferenced = 0
+  for (const org of (await fs.readdir(knowledgeSource)).sort(
+    (a, b) => Number(a) - Number(b)
+  )) {
+    if (!/^[1-9][0-9]*$/.test(org) || Number(org) > 2147483647) fail("entry")
+    const orgSource = path.join(knowledgeSource, org)
+    await directory(orgSource)
+    const orgDestination = path.join(destination, org)
+    let created = false
+    const names = (await fs.readdir(orgSource)).sort()
+    const temporaries = names.filter((entry) => entry.endsWith(".tmp"))
+    for (const name of names) {
+      if (name.endsWith(".tmp")) continue
+      const match = knowledgeName.exec(name)
+      if (!match) fail("entry")
+      // Knowledge bytes with a dump that has no knowledge tables (pre-22)
+      // would be skipped unseen; the snapshot is not understood.
+      if (!knowledgeTables.length) fail("snapshot-tables")
+      const sourcePath = path.join(orgSource, name)
+      const reference = pending.get(`${org}/${name}`)
+      if (!reference) {
+        const stat = await fs.lstat(sourcePath)
+        const publishing =
+          stat.nlink === 2 &&
+          temporaries.some(
+            (entry) => entry === `${match[1]}.tmp` || entry === `${name}.tmp`
+          )
+        if (!publishing) checkBlobStat(stat)
+        unreferenced++
+        continue
+      }
+      if (!created) {
+        await fs.mkdir(orgDestination, { mode: 0o700 })
+        created = true
+      }
+      await copyVerified(sourcePath, path.join(orgDestination, name), reference)
+      pending.delete(`${org}/${name}`)
+      blobs.push({
+        org_id: reference.org_id,
+        key: reference.key,
+        sha256: reference.sha256,
+        byte_length: reference.byte_length,
+      })
+    }
+    await directory(orgSource)
+    if (created) await syncDirectory(orgDestination)
+  }
+  // Knowledge is never evicted: a referenced blob that is not on disk is lost
+  // (or filed under the wrong org), and the backup must say so.
+  if (pending.size) fail("missing-blob")
+  await directory(knowledgeSource)
+  await syncDirectory(destination)
+  blobs.sort(byKey)
+  return { blobs, unreferenced }
+}
+
 // The executable boundary is injectable for an offline process-level test.
 export async function backup({
   source,
@@ -481,6 +576,7 @@ export async function backup({
   pgDump = "pg_dump",
   pgRestore = "pg_restore",
   brokerSocket,
+  knowledgeSource,
   onOperation = () => {},
 }) {
   if (
@@ -495,6 +591,25 @@ export async function backup({
   await directory(source)
   await directory(path.dirname(output), false)
   if (output === source || output.startsWith(`${source}/`)) fail()
+  if (knowledgeSource !== undefined) {
+    if (
+      typeof knowledgeSource !== "string" ||
+      !path.isAbsolute(knowledgeSource) ||
+      path.resolve(knowledgeSource) !== knowledgeSource
+    )
+      fail("path")
+    // Two roots that overlap would make one blob count twice or a copy land
+    // inside what is being copied.
+    const nested = (a, b) => a === b || a.startsWith(`${b}/`)
+    if (
+      nested(knowledgeSource, source) ||
+      nested(source, knowledgeSource) ||
+      nested(output, knowledgeSource) ||
+      nested(knowledgeSource, output)
+    )
+      fail("path")
+    await directory(knowledgeSource)
+  }
   await fs.mkdir(output, { mode: 0o700 }) // Exclusive, never resume/replace a path.
   await writeFresh(
     path.join(output, "INCOMPLETE"),
@@ -543,11 +658,12 @@ export async function backup({
   }
   const dump = await digestFile(dumpPath)
   onOperation("snapshot-references")
-  const { tables, references } = await snapshotReferences(
-    dumpPath,
-    schema,
-    pgRestore
-  )
+  const { tables, references, knowledgeTables, knowledge } =
+    await snapshotReferences(dumpPath, schema, pgRestore)
+  // The dump is the index of the knowledge blobs: rows without their bytes in
+  // the same backup would restore a database that points at nothing.
+  if (knowledge.size && knowledgeSource === undefined)
+    fail("knowledge-not-configured")
   onOperation("copy-finalized")
   const destination = path.join(output, "blobs")
   await fs.mkdir(destination, { mode: 0o700 })
@@ -642,16 +758,28 @@ export async function backup({
   }
   await directory(source)
   await syncDirectory(destination)
+  const knowledgeResult = knowledgeSource
+    ? await copyKnowledge({
+        knowledgeSource,
+        output,
+        knowledgeTables,
+        knowledge,
+        onOperation,
+      })
+    : null
   // Persist metadata.dump and blobs/ directory entries before completion exists.
   await syncDirectory(output)
   onOperation("manifest")
   blobs.sort(byBlob)
   const manifest = {
-    format: "neev-content-copy-v2",
+    format: "neev-content-copy-v3",
     source_schema: schema,
     dump,
     tables,
     blobs,
+    knowledge: knowledgeResult
+      ? { tables: knowledgeTables, blobs: knowledgeResult.blobs }
+      : "not configured",
   }
   const encoded = `${JSON.stringify(manifest)}\n`
   const pending = path.join(output, "complete.json.tmp")
@@ -666,6 +794,10 @@ export async function backup({
       copied_blobs: blobs.length,
       copied_bytes: blobs.reduce((sum, blob) => sum + blob.byte_length, 0),
       unreferenced_skipped: unreferenced,
+      knowledge_copied_blobs: knowledgeResult?.blobs.length ?? 0,
+      knowledge_copied_bytes:
+        knowledgeResult?.blobs.reduce((sum, b) => sum + b.byte_length, 0) ?? 0,
+      knowledge_unreferenced_skipped: knowledgeResult?.unreferenced ?? 0,
       manifest_sha256: sha256(encoded),
     })}\n`,
   }
@@ -673,11 +805,56 @@ export async function backup({
 
 const RESTORE_MARKER = ".restore-incomplete"
 
+// v3 knowledge entries, validated as strictly as document entries. v1/v2
+// archives predate knowledge and carry none.
+function knowledgeEntriesOf(manifest) {
+  if (manifest.format !== "neev-content-copy-v3") return []
+  const section = manifest.knowledge
+  if (section === "not configured") return []
+  if (
+    !section ||
+    typeof section !== "object" ||
+    !Array.isArray(section.tables) ||
+    !Array.isArray(section.blobs) ||
+    !section.tables.every((table) => Object.hasOwn(KNOWLEDGE, table))
+  )
+    fail("manifest")
+  const seen = new Set()
+  return section.blobs.map((blob) => {
+    const entry = {
+      org_id: blob?.org_id,
+      key: blob?.key,
+      sha256: blob?.sha256,
+      byte_length: blob?.byte_length,
+    }
+    if (
+      !Number.isSafeInteger(entry.org_id) ||
+      entry.org_id < 1 ||
+      entry.org_id > 2147483647 ||
+      typeof entry.key !== "string" ||
+      !exactKey.test(entry.key) ||
+      typeof entry.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(entry.sha256) ||
+      !Number.isSafeInteger(entry.byte_length) ||
+      entry.byte_length < 0 ||
+      entry.byte_length > KNOWLEDGE_MAX ||
+      seen.has(`${entry.org_id}/${entry.key}`)
+    )
+      fail("manifest")
+    seen.add(`${entry.org_id}/${entry.key}`)
+    return entry
+  })
+}
+
 // Rebuild a fresh document root from a completed backup: every manifest blob
 // is re-hashed while it is copied. The marker is a non-numeric root entry, so
 // the backup and Storage Box tools refuse an interrupted restore until it is
 // discarded; it is removed only after every file and directory is synced.
-export async function restoreBlobs({ backupDirectory, target }) {
+export async function restoreBlobs({
+  backupDirectory,
+  target,
+  knowledgeTarget,
+}) {
   if (process.platform === "win32") fail()
   await directory(backupDirectory)
   if (!path.isAbsolute(target) || path.resolve(target) !== target) fail("path")
@@ -692,12 +869,15 @@ export async function restoreBlobs({ backupDirectory, target }) {
     }
   )
   const manifest = JSON.parse(encoded)
-  // v1 archives predate image/attachment blobs and hold only documents.
+  // v1 archives predate image/attachment blobs and hold only documents; v3
+  // adds the knowledge root.
   const kindOf = {
     "neev-content-copy-v1": () => "md",
     "neev-content-copy-v2": (b) => b.kind,
+    "neev-content-copy-v3": (b) => b.kind,
   }[manifest?.format]
   if (!kindOf || !Array.isArray(manifest.blobs)) fail("manifest")
+  const knowledgeEntries = knowledgeEntriesOf(manifest)
   const dump = await digestFile(path.join(backupDirectory, "metadata.dump"))
   if (
     dump.sha256 !== manifest.dump?.sha256 ||
@@ -719,13 +899,34 @@ export async function restoreBlobs({ backupDirectory, target }) {
       fail("manifest")
     return entry
   })
-  await fs.mkdir(target, { mode: 0o700 }) // Exclusive: never restore over a root.
-  await writeFresh(
-    path.join(target, RESTORE_MARKER),
-    "Restore incomplete: discard this directory and restore again.\n"
-  )
-  await syncDirectory(target)
-  await syncDirectory(path.dirname(target))
+  // The database rows and the knowledge blobs restore together or not at all.
+  if (knowledgeEntries.length && knowledgeTarget === undefined)
+    fail("knowledge-target")
+  if (knowledgeTarget !== undefined) {
+    const nested = (a, b) => a === b || a.startsWith(`${b}/`)
+    if (
+      typeof knowledgeTarget !== "string" ||
+      !path.isAbsolute(knowledgeTarget) ||
+      path.resolve(knowledgeTarget) !== knowledgeTarget ||
+      nested(knowledgeTarget, target) ||
+      nested(target, knowledgeTarget) ||
+      nested(knowledgeTarget, backupDirectory) ||
+      nested(backupDirectory, knowledgeTarget)
+    )
+      fail("path")
+    await directory(path.dirname(knowledgeTarget), false)
+  }
+  const roots =
+    knowledgeTarget === undefined ? [target] : [target, knowledgeTarget]
+  for (const root of roots) {
+    await fs.mkdir(root, { mode: 0o700 }) // Exclusive: never restore over a root.
+    await writeFresh(
+      path.join(root, RESTORE_MARKER),
+      "Restore incomplete: discard this directory and restore again.\n"
+    )
+    await syncDirectory(root)
+    await syncDirectory(path.dirname(root))
+  }
   const orgs = new Set()
   let bytes = 0
   for (const entry of entries.sort(byBlob)) {
@@ -746,11 +947,42 @@ export async function restoreBlobs({ backupDirectory, target }) {
   }
   for (const org of orgs) await syncDirectory(path.join(target, org))
   await syncDirectory(target)
-  await fs.unlink(path.join(target, RESTORE_MARKER))
-  await syncDirectory(target)
+  let knowledgeBytes = 0
+  if (knowledgeTarget !== undefined) {
+    const knowledgeOrgs = new Set()
+    for (const entry of knowledgeEntries.sort(byKey)) {
+      const org = String(entry.org_id)
+      const orgTarget = path.join(knowledgeTarget, org)
+      if (!knowledgeOrgs.has(org)) {
+        await directory(path.join(backupDirectory, "blobs-knowledge", org))
+        await fs.mkdir(orgTarget, { mode: 0o700 })
+        knowledgeOrgs.add(org)
+      }
+      const name = `${entry.key}.md`
+      await copyVerified(
+        path.join(backupDirectory, "blobs-knowledge", org, name),
+        path.join(orgTarget, name),
+        entry
+      )
+      knowledgeBytes += entry.byte_length
+    }
+    for (const org of knowledgeOrgs)
+      await syncDirectory(path.join(knowledgeTarget, org))
+    await syncDirectory(knowledgeTarget)
+  }
+  // Markers go only once both roots are complete.
+  for (const root of roots) {
+    await fs.unlink(path.join(root, RESTORE_MARKER))
+    await syncDirectory(root)
+  }
   return {
     exitCode: 0,
-    stdout: `${JSON.stringify({ restored_blobs: entries.length, restored_bytes: bytes })}\n`,
+    stdout: `${JSON.stringify({
+      restored_blobs: entries.length,
+      restored_bytes: bytes,
+      restored_knowledge_blobs: knowledgeEntries.length,
+      restored_knowledge_bytes: knowledgeBytes,
+    })}\n`,
   }
 }
 
@@ -772,17 +1004,28 @@ if (
   try {
     let result
     if (restoring) {
-      const opts = parseFlags(args.slice(1), ["--backup", "--target"])
+      const opts = parseFlags(args.slice(1), [
+        "--backup",
+        "--target",
+        "--knowledge-target",
+      ])
       result = await restoreBlobs({
         backupDirectory: opts["--backup"],
         target: opts["--target"],
+        knowledgeTarget: opts["--knowledge-target"],
       })
     } else {
-      const opts = parseFlags(args, ["--source", "--output", "--schema"])
+      const opts = parseFlags(args, [
+        "--source",
+        "--output",
+        "--schema",
+        "--knowledge-source",
+      ])
       result = await backup({
         source: opts["--source"],
         output: opts["--output"],
         schema: opts["--schema"],
+        knowledgeSource: opts["--knowledge-source"],
         databaseUrl: process.env.NEEV_BACKUP_DATABASE_URL,
         brokerSocket: process.env.NEEV_ORIGINALS_BROKER_SOCKET || undefined,
       })

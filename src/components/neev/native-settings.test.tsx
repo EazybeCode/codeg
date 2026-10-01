@@ -530,6 +530,9 @@ it("walks the sections with the arrow, home and end keys", async () => {
   expect(panelOf(MEMBERS)).toBeVisible()
   await user.keyboard("{ArrowRight}")
   expect(screen.getByRole("tab", { name: "Shared library" })).toHaveFocus()
+  // An admin has the Knowledge section next.
+  await user.keyboard("{ArrowRight}")
+  expect(screen.getByRole("tab", { name: "Knowledge" })).toHaveFocus()
   await user.keyboard("{ArrowRight}")
   expect(screen.getByRole("tab", { name: AGENTS })).toHaveFocus()
   await user.keyboard("{End}")
@@ -631,4 +634,83 @@ it("opens the section a deep link names, and ignores one it does not", async () 
     await screen.findByRole("tab", { name: ORGANIZATION, selected: true })
   ).toBeVisible()
   restore()
+})
+
+const knowledgeRoutes = () => ({
+  "GET /api/neev/knowledge/status": () =>
+    json({
+      captureEnabled: false,
+      eligible: 0,
+      captured: 0,
+      represented: 0,
+      stale: 0,
+      pages: 0,
+      withheldPages: 0,
+      sourceProblems: { tooLarge: 0, engineUnavailable: 0, failed: 0 },
+      coverage: {
+        units: 0,
+        cited: 0,
+        skippedByAgent: 0,
+        uncovered: 0,
+        pending: 0,
+      },
+      captureBlocked: null,
+      bytesUsed: 0,
+      job: null,
+    }),
+  "GET /api/neev/knowledge/settings": () =>
+    json({ captureEnabled: false, revision: 1 }),
+  "GET /api/neev/knowledge/pages": () => json([]),
+  "GET /api/neev/knowledge/log": () => json([]),
+})
+
+it("gives admins a Knowledge section", async () => {
+  const mock = mockNativeSession(orgSession, {
+    ...fixtures(),
+    ...knowledgeRoutes(),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  await openSection(user, "Knowledge")
+  expect(
+    await screen.findByRole("switch", { name: "Capture shared knowledge" })
+  ).toBeVisible()
+  expect(screen.getByRole("link", { name: "Export" })).toBeVisible()
+  expect(mock.unknown).toEqual([])
+})
+
+/**
+ * Knowledge is admin-only. A member has no tab for it, and a deep link to it
+ * lands on Organization without asking the knowledge API for anything.
+ */
+it("shows members no Knowledge section, even through a deep link", async () => {
+  const original = window.location
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: { ...original, search: "?section=knowledge" },
+  })
+  const mock = mockNativeSession({ ...orgSession, role: "member" }, fixtures())
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  expect(
+    await screen.findByRole("tab", { name: ORGANIZATION, selected: true })
+  ).toBeVisible()
+  expect(screen.queryByRole("tab", { name: "Knowledge" })).toBeNull()
+  expect(document.getElementById("neev-settings-knowledge")).toBeNull()
+  expect(
+    mock.fetcher.mock.calls.some(([path]) =>
+      String(path).startsWith("/api/neev/knowledge")
+    )
+  ).toBe(false)
+  Object.defineProperty(window, "location", {
+    configurable: true,
+    value: original,
+  })
 })

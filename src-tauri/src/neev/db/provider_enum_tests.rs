@@ -18,9 +18,13 @@ async fn version(db: &DatabaseConnection) -> i64 {
         .unwrap()
 }
 
-/// A fresh install is schema 21; the 20 -> 19 step starts from 20, so take the
-/// (table-only, empty) schema-21 layer off first.
+/// A fresh install is schema 22; the 20 -> 19 step starts from 20, so take the
+/// (table-only, empty) schema-22 and schema-21 layers off first.
 async fn at_twenty(db: &DatabaseConnection) {
+    assert_eq!(
+        downgrade_knowledge(db).await,
+        Ok(knowledge_migration::Downgrade::Downgraded)
+    );
     assert_eq!(
         downgrade_node_sharing(db).await,
         Ok(node_sharing_migration::Downgrade::Done)

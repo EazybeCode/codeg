@@ -310,6 +310,11 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
     // Schemas 18 (library), 19 (steer) and 21 (folder sharing defaults) are
     // newer than every inventory this fixture rebuilds; 20 only widened a
     // CHECK, which older markers tolerate.
+    for table in crate::neev::db::knowledge_migration::DROP_ORDER {
+        db::execute(database, &format!("DROP TABLE IF EXISTS {table}"), vec![])
+            .await
+            .unwrap();
+    }
     for table in [
         "neev_node_sharing_defaults",
         "neev_steer_inputs",
@@ -1197,6 +1202,7 @@ fn ambient_connection_child() {
         &args,
         url.as_ref(),
         &root,
+        None,
     );
     assert!(
         bounded_child(command).status.success(),

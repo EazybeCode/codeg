@@ -12,6 +12,7 @@ pub(crate) mod engine;
 pub(crate) mod error;
 mod gateway;
 pub(crate) mod http;
+pub(crate) mod knowledge;
 pub(crate) mod library;
 #[cfg(feature = "dev-agent")]
 pub mod dev_agent;
@@ -37,33 +38,52 @@ pub fn run_content_verifier() -> std::process::ExitCode {
 /// changed — keep schema 20); 1 database error (rolled back).
 pub fn run_provider_schema_downgrade() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let step = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["--from", "21", "--to", "20", "--confirm"] => 21,
-        ["--from", "20", "--to", "19", "--confirm"] => 20,
-        _ => {
-            eprintln!(
-                "usage: neev-schema-downgrade --from 21 --to 20 --confirm\n       neev-schema-downgrade --from 20 --to 19 --confirm"
-            );
-            return std::process::ExitCode::from(2);
-        }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    std::process::ExitCode::from(run_schema_downgrade_with(
+        &args,
+        std::env::var("DATABASE_URL").ok(),
+    ))
+}
+
+/// The operator step the arguments name, exactly; anything else is a usage error.
+fn downgrade_step(args: &[&str]) -> Option<i64> {
+    match args {
+        ["--from", "22", "--to", "21", "--confirm"] => Some(22),
+        ["--from", "21", "--to", "20", "--confirm"] => Some(21),
+        ["--from", "20", "--to", "19", "--confirm"] => Some(20),
+        _ => None,
+    }
+}
+
+/// The whole CLI minus process plumbing, so tests can drive it. Returns the
+/// exit code: 0 done, 2 usage, 3 wrong marker, 4 user data present, 1 error.
+fn run_schema_downgrade_with(args: &[&str], url: Option<String>) -> u8 {
+    let Some(step) = downgrade_step(args) else {
+        eprintln!(
+            "usage: neev-schema-downgrade --from 22 --to 21 --confirm\n       neev-schema-downgrade --from 21 --to 20 --confirm\n       neev-schema-downgrade --from 20 --to 19 --confirm"
+        );
+        return 2;
     };
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    let Some(url) = url else {
         eprintln!("neev-schema-downgrade: DATABASE_URL is not set");
-        return std::process::ExitCode::from(2);
+        return 2;
     };
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     else {
-        return std::process::ExitCode::from(1);
+        return 1;
     };
     runtime.block_on(async move {
         let mut options = sea_orm::ConnectOptions::new(url);
         options.max_connections(1).sqlx_logging(false);
         let Ok(database) = sea_orm::Database::connect(options).await else {
             eprintln!("neev-schema-downgrade: cannot connect");
-            return std::process::ExitCode::from(1);
+            return 1;
         };
+        if step == 22 {
+            return knowledge_downgrade_exit(db::downgrade_knowledge(&database).await);
+        }
         if step == 21 {
             return sharing_downgrade_exit(db::downgrade_node_sharing(&database).await);
         }
@@ -71,53 +91,157 @@ pub fn run_provider_schema_downgrade() -> std::process::ExitCode {
         match db::downgrade_provider_enum(&database).await {
             Ok(Downgrade::Done) => {
                 println!("downgraded schema 20 -> 19; every row preserved");
-                std::process::ExitCode::SUCCESS
+                0
             }
             Ok(Downgrade::NotAtTwenty(version)) => {
                 println!("refused: schema is {version}, not 20; nothing changed");
-                std::process::ExitCode::from(3)
+                3
             }
             Ok(Downgrade::AcpRowsExist { table, rows }) => {
                 println!(
                     "refused: {rows} row(s) in {table} name an ACP provider; \
                      nothing changed — keep schema 20 (never delete or restore over them)"
                 );
-                std::process::ExitCode::from(4)
+                4
             }
             Err(_) => {
                 eprintln!("neev-schema-downgrade: database error; rolled back");
-                std::process::ExitCode::from(1)
+                1
             }
         }
     })
+}
+
+/// 22 -> 21 (org knowledge). Same codes as the other steps: 0 done, 3 wrong
+/// marker, 4 knowledge rows exist (refused; nothing changed — keep 22 and
+/// repair forward), 1 database error or unknown shape (rolled back).
+fn knowledge_downgrade_exit(
+    result: Result<db::knowledge_migration::Downgrade, error::AuthError>,
+) -> u8 {
+    use db::knowledge_migration::Downgrade;
+    match result {
+        Ok(Downgrade::Downgraded) => {
+            println!("downgraded schema 22 -> 21; no knowledge data existed, every row preserved");
+            0
+        }
+        Ok(Downgrade::NotAtTwentyTwo(version)) => {
+            println!("refused: schema is {version}, not 22; nothing changed");
+            3
+        }
+        Ok(Downgrade::Refused) => {
+            println!(
+                "refused: org knowledge data exists; nothing changed — keep schema 22 and \
+                 repair forward (never delete it or restore over it)"
+            );
+            4
+        }
+        Err(_) => {
+            eprintln!("neev-schema-downgrade: database error or unknown schema shape; rolled back");
+            1
+        }
+    }
 }
 
 /// Exit codes mirror the 20 -> 19 step: 0 done, 3 wrong marker, 4 user data
 /// present (refused; nothing changed), 1 database error (rolled back).
 fn sharing_downgrade_exit(
     result: Result<db::node_sharing_migration::Downgrade, error::AuthError>,
-) -> std::process::ExitCode {
+) -> u8 {
     use db::node_sharing_migration::Downgrade;
     match result {
         Ok(Downgrade::Done) => {
             println!("downgraded schema 21 -> 20; no folder default existed, every row preserved");
-            std::process::ExitCode::SUCCESS
+            0
         }
         Ok(Downgrade::NotAtTwentyOne(version)) => {
             println!("refused: schema is {version}, not 21; nothing changed");
-            std::process::ExitCode::from(3)
+            3
         }
         Ok(Downgrade::DefaultsExist { rows }) => {
             println!(
                 "refused: {rows} folder sharing default(s) are configured; nothing changed — \
                  keep schema 21 and repair forward (never delete them or restore over them)"
             );
-            std::process::ExitCode::from(4)
+            4
         }
         Err(_) => {
             eprintln!("neev-schema-downgrade: database error; rolled back");
-            std::process::ExitCode::from(1)
+            1
         }
+    }
+}
+
+#[cfg(test)]
+mod downgrade_cli_tests {
+    use super::{db, downgrade_step, run_schema_downgrade_with, test_support as h};
+
+    #[test]
+    fn only_the_exact_operator_steps_are_accepted() {
+        assert_eq!(downgrade_step(&["--from", "22", "--to", "21", "--confirm"]), Some(22));
+        assert_eq!(downgrade_step(&["--from", "21", "--to", "20", "--confirm"]), Some(21));
+        assert_eq!(downgrade_step(&["--from", "20", "--to", "19", "--confirm"]), Some(20));
+        for bad in [
+            &["--from", "22", "--to", "21"][..],
+            &["--from", "22", "--to", "20", "--confirm"][..],
+            &["--to", "21", "--from", "22", "--confirm"][..],
+            &[][..],
+        ] {
+            assert_eq!(downgrade_step(bad), None, "{bad:?}");
+            assert_eq!(run_schema_downgrade_with(bad, Some("sqlite::memory:".into())), 2);
+        }
+        assert_eq!(run_schema_downgrade_with(&["--from", "22", "--to", "21", "--confirm"], None), 2);
+    }
+
+    /// The real CLI path against a real (file) database: 0, then 3 on a rerun;
+    /// 4 while a knowledge row exists, changing nothing.
+    #[test]
+    fn twenty_two_to_twenty_one_runs_through_the_cli() {
+        let step = ["--from", "22", "--to", "21", "--confirm"];
+        let dir = tempfile::tempdir().unwrap();
+        let open = |name: &str| {
+            let url = format!("sqlite://{}?mode=rwc", dir.path().join(name).display());
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let database = runtime.block_on(async {
+                let mut options = sea_orm::ConnectOptions::new(url.clone());
+                options.max_connections(1).sqlx_logging(false);
+                let database = sea_orm::Database::connect(options).await.unwrap();
+                db::initialize(&database).await.unwrap();
+                database
+            });
+            (url, runtime, database)
+        };
+        let version = |runtime: &tokio::runtime::Runtime, database: &sea_orm::DatabaseConnection| -> i64 {
+            runtime.block_on(async {
+                db::one(database, "SELECT version FROM neev_schema_version WHERE id=1", vec![])
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .try_get("", "version")
+                    .unwrap()
+            })
+        };
+
+        let (url, runtime, database) = open("empty.db");
+        runtime.block_on(database.clone().close()).unwrap();
+        assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 0);
+        assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 3);
+        let (_, runtime, database) = open("empty.db");
+        assert_eq!(version(&runtime, &database), 22, "initialize re-migrates the downgraded file");
+
+        let (url, runtime, database) = open("data.db");
+        runtime.block_on(async {
+            let user = h::native_account(&database, "cli-owner", "cli@example.test").await;
+            let (org, _) = h::organization(&database, user, "admin").await;
+            db::execute(&database, "INSERT INTO neev_knowledge_settings(org_id,capture_enabled,capture_blocked,revision,updated_by,updated_at) VALUES($1,false,NULL,1,$2,1)", vec![org.into(), user.into()]).await.unwrap();
+            database.clone().close().await.unwrap();
+        });
+        assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 4);
+        let (_, runtime, database) = open("data.db");
+        assert_eq!(version(&runtime, &database), 22);
+        let rows: i64 = runtime.block_on(async {
+            db::one(&database, "SELECT COUNT(*) AS n FROM neev_knowledge_settings", vec![]).await.unwrap().unwrap().try_get("", "n").unwrap()
+        });
+        assert_eq!(rows, 1);
     }
 }
 

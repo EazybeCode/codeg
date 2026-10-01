@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Neev org knowledge Storage Box verification (a failed unit means remote loss or outage: alert on it)
+
+[Timer]
+OnCalendar=*-*-* 02:40:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+Unit=neev-knowledge-storage-box-verify.service
+
+[Install]
+WantedBy=timers.target

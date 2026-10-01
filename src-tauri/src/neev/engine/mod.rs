@@ -25,3 +25,7 @@ pub(crate) mod upstream;
 
 #[cfg(test)]
 mod binding_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod upstream_markdown_tests;

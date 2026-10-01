@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly (at :30) Neev org knowledge replication to the Storage Box (enable only after preflight --write-probe passes)
+
+[Timer]
+OnCalendar=*:30
+Persistent=true
+RandomizedDelaySec=300
+Unit=neev-knowledge-storage-box.service
+
+[Install]
+WantedBy=timers.target

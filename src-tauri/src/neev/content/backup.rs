@@ -8,8 +8,12 @@ use sea_orm::{
 pub(crate) struct Manifest {
     pub(crate) schema_version: i64,
     pub(crate) blobs: Vec<Reference>,
+    /// Org-knowledge blobs (schema 22+), sorted `(org_id, key)`. Omitted when
+    /// empty, so manifests of snapshots without knowledge hash as before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) knowledge: Vec<Reference>,
 }
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Reference {
     pub(crate) org_id: i32,
     pub(crate) key: String,
@@ -46,6 +50,7 @@ enum VerificationStage {
     RichDecode,
     DatabaseClose,
     ManifestEncoding,
+    KnowledgeRoot,
 }
 
 impl VerificationStage {
@@ -67,6 +72,7 @@ impl VerificationStage {
             Self::RichDecode => "NEEV_VERIFY_STAGE_RICH_DECODE",
             Self::DatabaseClose => "NEEV_VERIFY_STAGE_DATABASE_CLOSE",
             Self::ManifestEncoding => "NEEV_VERIFY_STAGE_MANIFEST_ENCODING",
+            Self::KnowledgeRoot => "NEEV_VERIFY_STAGE_KNOWLEDGE_ROOT",
         }
     }
 }
@@ -157,9 +163,32 @@ pub(crate) async fn verify_snapshot(
         .map_err(VerifierFailure::into_content_error)
 }
 
+/// `verify_snapshot` with the org-knowledge store (opened WITHOUT originals).
+pub(crate) async fn verify_snapshot_with(
+    database: &DatabaseConnection,
+    store: &BlobStore,
+    knowledge: Option<&BlobStore>,
+) -> Result<Manifest, ContentError> {
+    verify_snapshot_staged_with(database, store, knowledge)
+        .await
+        .map_err(VerifierFailure::into_content_error)
+}
+
 pub(super) async fn verify_snapshot_staged(
     database: &DatabaseConnection,
     store: &BlobStore,
+) -> Result<Manifest, VerifierFailure> {
+    verify_snapshot_staged_with(database, store, None).await
+}
+
+/// Snapshot length bounds per knowledge table (schema-22 DDL).
+const KNOWLEDGE_SNAPSHOT_BYTES: std::ops::RangeInclusive<i64> = 0..=65_536;
+const KNOWLEDGE_REVISION_BYTES: std::ops::RangeInclusive<i64> = 1..=65_536;
+
+pub(super) async fn verify_snapshot_staged_with(
+    database: &DatabaseConnection,
+    store: &BlobStore,
+    knowledge: Option<&BlobStore>,
 ) -> Result<Manifest, VerifierFailure> {
     // Never use db::begin (SQLite write intent), initialize, or application startup.
     let tx = if database.get_database_backend() == DbBackend::Postgres {
@@ -286,6 +315,48 @@ pub(super) async fn verify_snapshot_staged(
             }
         }
     }
+    // schema22+: knowledge snapshot and revision blobs, read from the same
+    // REPEATABLE READ view. A duplicate (org, key) must agree on its digest
+    // and length, and every length must be inside its table's bounds.
+    let mut knowledge_refs: Vec<Reference> = Vec::new();
+    if schema_version >= crate::neev::db::knowledge_migration::SCHEMA_VERSION {
+        let rows = at_stage(
+            tx.query_all(db::statement(
+                &tx,
+                "SELECT org_id,blob_key AS key,sha256,byte_length,'snapshot' AS kind FROM neev_knowledge_snapshots UNION ALL SELECT org_id,blob_key AS key,sha256,byte_length,'revision' AS kind FROM neev_knowledge_revisions ORDER BY org_id,key",
+                vec![],
+            ))
+            .await
+            .map_err(|_| ContentError::Storage),
+            VerificationStage::ReferenceQuery,
+        )?;
+        let mut seen: std::collections::BTreeMap<(i32, String), (String, i64)> = std::collections::BTreeMap::new();
+        for row in rows {
+            let reference = side_car_reference(&row)?;
+            let kind = at_stage(
+                row.try_get::<String>("", "kind").map_err(|_| ContentError::Storage),
+                VerificationStage::ReferenceExtraction,
+            )?;
+            let bounds = if kind == "snapshot" { KNOWLEDGE_SNAPSHOT_BYTES } else { KNOWLEDGE_REVISION_BYTES };
+            if !bounds.contains(&reference.byte_length) {
+                return Err(VerifierFailure::new(VerificationStage::ReferenceExtraction, ContentError::Storage));
+            }
+            match seen.get(&(reference.org_id, reference.key.clone())) {
+                Some((sha, length)) if *sha != reference.sha256 || *length != reference.byte_length => {
+                    return Err(VerifierFailure::new(VerificationStage::ReferenceExtraction, ContentError::Storage));
+                }
+                Some(_) => continue,
+                None => {
+                    seen.insert((reference.org_id, reference.key.clone()), (reference.sha256.clone(), reference.byte_length));
+                    knowledge_refs.push(reference);
+                }
+            }
+        }
+        if !knowledge_refs.is_empty() && knowledge.is_none() {
+            // Rows without a root to check them against: never skipped.
+            return Err(VerifierFailure::new(VerificationStage::KnowledgeRoot, ContentError::Invalid));
+        }
+    }
     at_stage(
         tx.rollback().await.map_err(|_| ContentError::Storage),
         VerificationStage::TransactionRollback,
@@ -335,9 +406,22 @@ pub(super) async fn verify_snapshot_staged(
     // change it.
     blobs.extend(image_refs);
     blobs.extend(attachment_refs);
+    knowledge_refs.sort_by(|a, b| (a.org_id, &a.key).cmp(&(b.org_id, &b.key)));
+    if let Some(knowledge) = knowledge {
+        for blob in &knowledge_refs {
+            // The `.md` read checks length and digest itself, org-scoped by path.
+            at_stage(
+                knowledge
+                    .read(blob.org_id, &blob.key, blob.byte_length, &blob.sha256)
+                    .await,
+                VerificationStage::BlobRead,
+            )?;
+        }
+    }
     Ok(Manifest {
         schema_version,
         blobs,
+        knowledge: knowledge_refs,
     })
 }
 
@@ -434,6 +518,7 @@ pub(super) fn isolated_command(
     args: &[String],
     database_url: &std::ffi::OsStr,
     document_root: &std::ffi::OsStr,
+    knowledge_root: Option<&std::ffi::OsStr>,
 ) -> std::process::Command {
     let mut command = std::process::Command::new(executable);
     command
@@ -442,6 +527,9 @@ pub(super) fn isolated_command(
         .env("NEEV_VERIFY_DATABASE_URL", database_url)
         .env("NEEV_VERIFY_DOCUMENT_ROOT", document_root)
         .env("NEEV_VERIFY_ISOLATED", "1");
+    if let Some(root) = knowledge_root {
+        command.env("NEEV_VERIFY_KNOWLEDGE_ROOT", root);
+    }
     command
 }
 
@@ -458,6 +546,7 @@ fn isolated_environment() -> Result<(), ContentError> {
                 Some(
                     "NEEV_VERIFY_DATABASE_URL"
                         | "NEEV_VERIFY_DOCUMENT_ROOT"
+                        | "NEEV_VERIFY_KNOWLEDGE_ROOT"
                         | "NEEV_VERIFY_ISOLATED"
                 )
             )
@@ -666,6 +755,14 @@ async fn run(args: Arguments) -> Result<String, VerifierFailure> {
         ));
     }
     let store = staged_document_root(std::path::Path::new(&document_root))?;
+    // Optional below schema 22; required (by verify) once knowledge rows exist.
+    let knowledge = match std::env::var_os("NEEV_VERIFY_KNOWLEDGE_ROOT") {
+        Some(root) => Some(at_stage(
+            BlobStore::open(std::path::Path::new(&root)),
+            VerificationStage::KnowledgeRoot,
+        )?),
+        None => None,
+    };
     let pool = sea_orm::sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(15))
@@ -679,7 +776,7 @@ async fn run(args: Arguments) -> Result<String, VerifierFailure> {
             verify_destination(&database, &args.database, &args.schema, true).await,
             VerificationStage::Destination,
         )?;
-        verify_snapshot_staged(&database, &store).await
+        verify_snapshot_staged_with(&database, &store, knowledge.as_ref()).await
     }
     .await;
     at_stage(
@@ -695,6 +792,8 @@ async fn run(args: Arguments) -> Result<String, VerifierFailure> {
         "schema_version": manifest.schema_version,
         "referenced_blobs": manifest.blobs.len(),
         "referenced_bytes": manifest.blobs.iter().map(|blob| blob.byte_length as u64).sum::<u64>(),
+        "knowledge_blobs": manifest.knowledge.len(),
+        "knowledge_bytes": manifest.knowledge.iter().map(|blob| blob.byte_length as u64).sum::<u64>(),
         "manifest_sha256": format!("{:x}", Sha256::digest(&encoded)),
     })
     .to_string())
@@ -721,7 +820,8 @@ pub(crate) fn run_content_verifier() -> std::process::ExitCode {
             {
                 use std::os::unix::process::CommandExt;
                 // exec replaces this process: no waiting parent or orphan child.
-                let _ = isolated_command(&executable, &raw_args, &url, &root).exec();
+                let knowledge = std::env::var_os("NEEV_VERIFY_KNOWLEDGE_ROOT");
+                let _ = isolated_command(&executable, &raw_args, &url, &root, knowledge.as_deref()).exec();
             }
             return Err(VerifierFailure::new(
                 VerificationStage::Reexec,

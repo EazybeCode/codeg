@@ -113,6 +113,25 @@ fn failure(status: StatusCode, body: &serde_json::Value) -> EngineError {
     }
 }
 
+/// A bridge markdown answer (plan Task 5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EngineMarkdown {
+    Unchanged { content_sha256: String },
+    Content { content_sha256: String, markdown: String },
+}
+
+/// A typed bridge refusal for markdown extraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MarkdownRefusal {
+    TooLarge,
+    /// 409 `not_an_engine_document`.
+    NotEngine,
+    /// 409 `organization_mismatch`: the document's creator org differs from
+    /// the org asking. An integrity fault, never "engine unavailable".
+    OrgMismatch,
+    Unknown,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum EngineError {
     /// Docs could not be reached or answered with a server error. Always
@@ -345,6 +364,65 @@ impl Upstream {
             Ok(())
         } else {
             Err(failure(status, &body))
+        }
+    }
+
+    /// Markdown of an engine document through the bridge's private
+    /// `POST /_neev/v1/documents/<id>/markdown` (plan Task 4/5 contract).
+    ///
+    /// Outer `Err` is infrastructure (retry later); inner `Err` is a typed
+    /// refusal the caller records as the source's capture state. A converter
+    /// failure is a 503, never an empty success.
+    pub(crate) async fn markdown(
+        &self,
+        resource_id: &str,
+        org_id: i32,
+        if_none_match: Option<&str>,
+    ) -> Result<Result<EngineMarkdown, MarkdownRefusal>, EngineError> {
+        let (status, body) = self
+            .private(
+                reqwest::Method::POST,
+                &format!("_neev/v1/documents/{resource_id}/markdown"),
+                serde_json::json!({ "org_id": org_id, "if_none_match": if_none_match }),
+            )
+            .await?;
+        match status {
+            StatusCode::OK => {
+                let sha = body
+                    .get("content_sha256")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty() && value.len() <= 128)
+                    .ok_or(EngineError::Invalid)?
+                    .to_owned();
+                if body.get("unchanged").and_then(serde_json::Value::as_bool) == Some(true) {
+                    return Ok(Ok(EngineMarkdown::Unchanged {
+                        content_sha256: sha,
+                    }));
+                }
+                let markdown = body
+                    .get("markdown")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or(EngineError::Invalid)?
+                    .to_owned();
+                if markdown.len() > crate::neev::knowledge::types::MAX_ENGINE_MARKDOWN_BYTES {
+                    return Ok(Err(MarkdownRefusal::TooLarge));
+                }
+                Ok(Ok(EngineMarkdown::Content {
+                    content_sha256: sha,
+                    markdown,
+                }))
+            }
+            StatusCode::PAYLOAD_TOO_LARGE => Ok(Err(MarkdownRefusal::TooLarge)),
+            StatusCode::CONFLICT => Ok(Err(
+                if body.get("error").and_then(serde_json::Value::as_str) == Some("organization_mismatch") {
+                    MarkdownRefusal::OrgMismatch
+                } else {
+                    MarkdownRefusal::NotEngine
+                },
+            )),
+            StatusCode::NOT_FOUND => Ok(Err(MarkdownRefusal::Unknown)),
+            status if status.is_server_error() => Err(EngineError::Unavailable),
+            _ => Err(failure(status, &body)),
         }
     }
 

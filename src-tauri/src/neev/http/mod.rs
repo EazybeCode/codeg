@@ -22,6 +22,9 @@ pub(crate) mod cookies;
 mod library;
 mod org;
 mod realtime;
+mod knowledge;
+#[cfg(test)]
+mod knowledge_tests;
 mod static_files;
 #[cfg(test)]
 mod tests;
@@ -172,6 +175,27 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             post(content::upload_document_image),
         )
         .route("/api/neev/images/{key}", get(content::serve_image))
+        .route(
+            "/api/neev/knowledge/settings",
+            get(knowledge::get_settings).put(knowledge::put_settings),
+        )
+        .route("/api/neev/knowledge/status", get(knowledge::get_status))
+        .route("/api/neev/knowledge/sources", get(knowledge::get_sources))
+        .route("/api/neev/knowledge/jobs", post(knowledge::start_job))
+        .route("/api/neev/knowledge/jobs/current", get(knowledge::current_job))
+        .route(
+            "/api/neev/knowledge/jobs/{id}/{action}",
+            post(knowledge::control_job),
+        )
+        .route("/api/neev/knowledge/pages", get(knowledge::get_pages))
+        .route("/api/neev/knowledge/pages/{id}", get(knowledge::get_page))
+        .route("/api/neev/knowledge/index", get(knowledge::get_index))
+        .route("/api/neev/knowledge/log", get(knowledge::get_log))
+        .route("/api/neev/knowledge/export", get(knowledge::get_export))
+        .route(
+            "/api/neev/knowledge/uncovered/reset",
+            post(knowledge::reset_uncovered),
+        )
         .route("/api/neev/mentions", get(content::list_mentions))
         .route("/api/neev/mentions/read", post(content::read_mentions))
         .route(

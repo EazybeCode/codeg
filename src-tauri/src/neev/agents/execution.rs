@@ -26,6 +26,11 @@ pub(crate) enum ExecutionError {
     Isolation,
     Provider,
     Unavailable,
+    /// Not enough isolation lanes are free for this run (`min_free_lanes`).
+    /// Distinct from `Unavailable` (a runtime fault) so a caller that can wait
+    /// for capacity — an org-knowledge batch — never mistakes a broken runtime
+    /// for a busy one. Stored on chat turns exactly as `unavailable` was.
+    LanesBusy,
     /// The requested provider has no binary bound in this deployment. Distinct
     /// from `Provider` (a real launch failure) so the UI can say "this provider
     /// is not available here" instead of implying the run was attempted — and
@@ -84,6 +89,10 @@ pub(crate) struct RunRequest {
     /// honestly. Skills are staged as files the agent can read and reference;
     /// MCP servers are injected into the provider's configuration.
     pub(crate) library_items: Vec<super::library_runtime::LibraryRunItem>,
+    /// Lanes that must be free for this run to start, checked atomically with
+    /// taking one. Ordinary runs use 1; an org-knowledge batch uses 2, so it
+    /// never takes the last lane from interactive chats.
+    pub(crate) min_free_lanes: usize,
 }
 
 /// One file the user attached: its bytes, and enough to name and classify it.
@@ -856,12 +865,101 @@ impl AgentExecutionRuntime for DisabledRuntime {
 #[derive(Debug, Clone)]
 pub(crate) struct FakeRuntime {
     chunks: Vec<String>,
+    /// Test-only scripting: files the fake "agent" writes to its spool,
+    /// computed from the request it received.
+    responder: Option<FakeResponder>,
+    /// Every request this runtime was asked to run, in order.
+    requests: Option<std::sync::Arc<std::sync::Mutex<Vec<RunRequest>>>>,
+    /// Honor `min_free_lanes` against a real pool (a lane is held for the
+    /// life of the run).
+    slots: Option<SlotPool>,
+    /// Never complete on its own: run until cancelled.
+    hang: bool,
+    /// Refuse every run with this error (a runtime fault).
+    fail: Option<ExecutionError>,
+}
+
+/// `(file name, bytes)` outputs for a request.
+pub(crate) type FakeOutputs = Vec<(String, Vec<u8>)>;
+
+#[derive(Clone)]
+pub(crate) struct FakeResponder {
+    root: std::sync::Arc<tempfile::TempDir>,
+    make: std::sync::Arc<dyn Fn(&RunRequest) -> FakeOutputs + Send + Sync>,
+}
+
+impl std::fmt::Debug for FakeResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FakeResponder")
+    }
 }
 
 impl FakeRuntime {
     pub(crate) fn new(chunks: Vec<String>) -> Self {
-        Self { chunks }
+        Self {
+            chunks,
+            responder: None,
+            requests: None,
+            slots: None,
+            hang: false,
+            fail: None,
+        }
     }
+
+    pub(crate) fn failing(mut self, error: ExecutionError) -> Self {
+        self.fail = Some(error);
+        self
+    }
+
+    /// Write `make(request)` as the run's spool outputs before completing.
+    pub(crate) fn with_outputs(
+        mut self,
+        make: impl Fn(&RunRequest) -> FakeOutputs + Send + Sync + 'static,
+    ) -> Self {
+        self.responder = Some(FakeResponder {
+            root: std::sync::Arc::new(tempfile::tempdir().expect("fake spool root")),
+            make: std::sync::Arc::new(make),
+        });
+        self
+    }
+
+    pub(crate) fn recording(mut self, log: std::sync::Arc<std::sync::Mutex<Vec<RunRequest>>>) -> Self {
+        self.requests = Some(log);
+        self
+    }
+
+    pub(crate) fn with_slots(mut self, slots: SlotPool) -> Self {
+        self.slots = Some(slots);
+        self
+    }
+
+    pub(crate) fn hanging(mut self) -> Self {
+        self.hang = true;
+        self
+    }
+}
+
+/// Write a spool exactly as the launcher does: `spool/run-<id>/manifest.json`
+/// plus `files/<key>--<name>`.
+fn write_fake_spool(root: &Path, run_id: &str, outputs: &FakeOutputs) -> std::io::Result<()> {
+    use sha2::{Digest, Sha256};
+    let spool = root.join("spool").join(format!("run-{run_id}"));
+    std::fs::create_dir_all(spool.join("files"))?;
+    let mut entries = Vec::new();
+    for (name, bytes) in outputs {
+        let key = uuid::Uuid::new_v4().to_string();
+        std::fs::write(spool.join("files").join(format!("{key}--{name}")), bytes)?;
+        entries.push(serde_json::json!({
+            "key": key,
+            "name": name,
+            "byte_length": bytes.len(),
+            "sha256": format!("{:x}", Sha256::digest(bytes)),
+        }));
+    }
+    std::fs::write(
+        spool.join("manifest.json"),
+        serde_json::json!({"run_id": format!("run-{run_id}"), "errors": [], "files": entries}).to_string(),
+    )
 }
 
 impl AgentExecutionRuntime for FakeRuntime {
@@ -869,12 +967,45 @@ impl AgentExecutionRuntime for FakeRuntime {
         if request.prompt.trim().is_empty() {
             return Err(ExecutionError::Unauthorized);
         }
-        let run_id = format!("run-{}-{}", request.user_id, request.chat_id);
+        if let Some(log) = &self.requests {
+            if let Ok(mut log) = log.lock() {
+                log.push(request.clone());
+            }
+        }
+        if let Some(error) = &self.fail {
+            return Err(error.clone());
+        }
+        let lane = match &self.slots {
+            Some(slots) => Some((
+                slots.clone(),
+                slots
+                    .acquire_if(request.min_free_lanes)
+                    .ok_or(ExecutionError::LanesBusy)?,
+            )),
+            None => None,
+        };
+        let run_id = if self.responder.is_some() || self.slots.is_some() || self.hang {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            format!("run-{}-{}", request.user_id, request.chat_id)
+        };
+        let workspace_root = match &self.responder {
+            Some(responder) => {
+                let outputs = (responder.make)(&request);
+                write_fake_spool(responder.root.path(), &run_id, &outputs)
+                    .map_err(|_| ExecutionError::Unavailable)?;
+                Some(responder.root.path().to_path_buf())
+            }
+            None => None,
+        };
         let (tx, rx) = mpsc::channel::<RunEvent>(1);
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
         let chunks = self.chunks.clone();
         let started = run_id.clone();
+        let hang = self.hang;
         tokio::spawn(async move {
+            // Held for the life of the run; released when this task ends.
+            let _lane = lane.map(|(slots, lane)| ReleaseOnDrop { slots, lane });
             if tx.send(RunEvent::Started(started)).await.is_err() {
                 return;
             }
@@ -883,6 +1014,9 @@ impl AgentExecutionRuntime for FakeRuntime {
                     if tx.send(RunEvent::Chunk(chunk)).await.is_err() {
                         return;
                     }
+                }
+                if hang {
+                    std::future::pending::<()>().await;
                 }
                 let _ = tx.send(RunEvent::Completed).await;
             };
@@ -898,10 +1032,22 @@ impl AgentExecutionRuntime for FakeRuntime {
             run_id,
             events: rx,
             cancel: Some(cancel_tx),
-            workspace_root: None, // FakeRuntime has no spool
-            steer_tx: None,       // FakeRuntime does not support steering
+            workspace_root, // only a scripted FakeRuntime has a spool
+            steer_tx: None, // FakeRuntime does not support steering
             supports_steering: false,
         })
+    }
+}
+
+/// Returns a fake run's lane when the run ends.
+struct ReleaseOnDrop {
+    slots: SlotPool,
+    lane: Lane,
+}
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.slots.release(self.lane);
     }
 }
 
@@ -1082,7 +1228,7 @@ pub(crate) struct Lane {
 /// isolation model provisions (`neev_login_network_profile` slots a/b). Acquire
 /// returns `None` when both are in use, so a third concurrent run is refused
 /// (`Unavailable`) rather than colliding on a slot's netns/bridge.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct SlotPool {
     free: std::sync::Arc<std::sync::Mutex<Vec<Lane>>>,
 }
@@ -1104,10 +1250,25 @@ impl SlotPool {
     }
 
     fn acquire(&self) -> Option<Lane> {
-        self.free.lock().ok()?.pop()
+        self.acquire_if(1)
     }
 
-    fn release(&self, lane: Lane) {
+    /// Take a lane only if at least `min_free` are free, under ONE lock, so two
+    /// callers can never both see "two free" and leave none.
+    pub(crate) fn acquire_if(&self, min_free: usize) -> Option<Lane> {
+        let mut free = self.free.lock().ok()?;
+        if free.len() >= min_free.max(1) {
+            free.pop()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn free_count(&self) -> usize {
+        self.free.lock().map(|free| free.len()).unwrap_or(0)
+    }
+
+    pub(crate) fn release(&self, lane: Lane) {
         if let Ok(mut free) = self.free.lock() {
             if !free.contains(&lane) {
                 free.push(lane);
@@ -1570,6 +1731,7 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
             context_files: Vec::new(),
             // Discovery is not a run, so no library items apply.
             library_items: Vec::new(),
+            min_free_lanes: 1,
         };
         let mut argv = self.launch_prefix(&probe, lane, &workdir, &binary, &handle)?;
         argv.push("app-server".into());
@@ -1612,7 +1774,10 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
         // a process exists: an unsupported provider or a caller with no
         // credential of their own never consumes an isolation slot.
         let (binary, handle) = self.resolve(&request)?;
-        let lane = self.slots.acquire().ok_or(ExecutionError::Unavailable)?;
+        let lane = self
+            .slots
+            .acquire_if(request.min_free_lanes)
+            .ok_or(ExecutionError::LanesBusy)?;
         let run_id = uuid::Uuid::new_v4().to_string();
         // Ephemeral, unique-per-run workdir; the LaneGuard removes it on teardown
         // so a later run reusing this uid finds nothing to read (cross-run leak
@@ -1972,6 +2137,7 @@ mod tests {
             attachments: Vec::new(),
             context_files: Vec::new(),
             library_items: Vec::new(),
+            min_free_lanes: 1,
         }
     }
 
@@ -3080,6 +3246,7 @@ mod tests {
                 attachments: Vec::new(),
                 context_files: Vec::new(),
                 library_items: Vec::new(),
+                min_free_lanes: 1,
             })
             .await
             .unwrap();
@@ -3279,5 +3446,27 @@ mod tests {
                 HANDLE
             )
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod lane_tests {
+    use super::*;
+
+    #[test]
+    fn acquire_if_takes_a_lane_only_when_enough_are_free() {
+        let pool = SlotPool::new();
+        assert_eq!(pool.free_count(), 2);
+        // A knowledge batch needs two free lanes.
+        let first = pool.acquire_if(2).expect("two free");
+        assert_eq!(pool.free_count(), 1);
+        assert!(pool.acquire_if(2).is_none(), "one free is not enough for a knowledge batch");
+        assert_eq!(pool.free_count(), 1, "a refusal takes nothing");
+        // A chat run still gets the last lane.
+        let second = pool.acquire_if(1).expect("one free");
+        assert!(pool.acquire_if(1).is_none());
+        pool.release(first);
+        pool.release(second);
+        assert_eq!(pool.free_count(), 2);
     }
 }

@@ -22,6 +22,7 @@ import logging
 import time
 import uuid
 
+from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.files.storage import default_storage
 from django.db import IntegrityError, transaction
@@ -33,6 +34,7 @@ from core.enums import DocumentAttachmentStatus
 from core.utils.s3 import get_s3_client
 from core.utils.treebeard import create_tree_node_with_retry
 
+from neev_bridge import markdown as markdown_rules
 from neev_bridge.identity import SERVICE_SUBJECT, Subject, parse_subject
 
 logger = logging.getLogger(__name__)
@@ -386,14 +388,93 @@ def _engine_document_for(document_uuid, service_user, subject):
       every request already; this is the guard that stops a mistake there from
       being a cross-organization grant here.
     """
+    return _engine_document_in_org(document_uuid, service_user, subject.org_id)
+
+
+def _engine_document_in_org(document_uuid, service_user, org_id):
+    """`_engine_document_for`, for a caller that names an org but no subject."""
     document = models.Document.objects.filter(pk=document_uuid).first()
     if document is None:
         raise BridgeError("unknown_document", status=404)
     if not _is_engine_document(document, service_user):
         raise BridgeError("not_an_engine_document", status=409)
-    if document_org_id(document) != subject.org_id:
+    if document_org_id(document) != org_id:
         raise BridgeError("organization_mismatch", status=409)
     return document
+
+
+# Codes the object store uses for "this key was never written". `NoSuchBucket`
+# is deliberately absent: a missing bucket is a broken deployment, not an
+# empty document.
+MISSING_OBJECT_CODES = frozenset({"NoSuchKey", "404", "NotFound"})
+
+
+def _is_missing_object(err):
+    """True only when the stored object does not exist — a never-saved document."""
+    if isinstance(err, FileNotFoundError):
+        return True
+    if isinstance(err, ClientError):
+        return err.response.get("Error", {}).get("Code") in MISSING_OBJECT_CODES
+    return False
+
+
+def _convert_yjs_to_markdown(yjs_bytes):
+    """Upstream's own converter: y-provider's `POST /api/convert/`.
+
+    Imported per call so that an upstream rename is a refused conversion (503)
+    rather than an import error that takes every bridge route down with it.
+    Checked only when a conversion is actually needed: an empty or unchanged
+    document does not depend on y-provider at all.
+    """
+    if not getattr(settings, "Y_PROVIDER_API_BASE_URL", None):
+        # Upstream would build "None" + "convert/" and fail somewhere less clear.
+        raise markdown_rules.ExtractionRefused(
+            "converter_unavailable", 503, "converter_not_configured"
+        )
+
+    from core.services import mime_types
+    from core.services.converter_services import YdocConverter
+
+    return YdocConverter().convert(yjs_bytes, mime_types.YJS, mime_types.MARKDOWN)
+
+
+def document_markdown(document_id, org_id, if_none_match):
+    """The last saved text of an engine document, as markdown, for Neev Knowledge.
+
+    Neev authorizes against its own ACL before calling; this is the second
+    check, and it is narrower than any user's: an engine document, in the org
+    the caller names, nothing else. It reads, it never writes, and it reads only
+    what the editor saved (`PATCH content/`), not unsaved collaborative state.
+    The extraction rules — caps, hash, fail-closed conversion and media
+    redaction — are in `neev_bridge.markdown`.
+    """
+    document_uuid = parse_document_id(document_id)
+    try:
+        org = markdown_rules.require_org_id(org_id)
+        tag = markdown_rules.require_tag(if_none_match)
+    except markdown_rules.ExtractionRefused as err:
+        raise BridgeError(err.code, err.status, err.detail) from err
+
+    service_user = get_service_principal()
+    document = _engine_document_in_org(document_uuid, service_user, org)
+    if document.deleted_at or document.ancestors_deleted_at:
+        # In Docs' trash: not a source, whatever Neev's ACL said.
+        raise BridgeError("unknown_document", status=404)
+
+    try:
+        # Not `document.content`: upstream's property returns None for every
+        # storage error, so an outage would read as an empty document.
+        content = markdown_rules.read_stored_content(
+            document.get_content_response, _is_missing_object
+        )
+        result = markdown_rules.extract(content, tag, _convert_yjs_to_markdown)
+    except markdown_rules.ExtractionRefused as err:
+        raise BridgeError(err.code, err.status, err.detail) from err
+
+    result = {"id": str(document.id), **result}
+    if not result["unchanged"]:
+        result["updated_at"] = document.updated_at.isoformat()
+    return result
 
 
 @transaction.atomic

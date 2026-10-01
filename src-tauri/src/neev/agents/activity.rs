@@ -105,6 +105,33 @@ pub(crate) struct ActivityDraft {
     pub(crate) kind: ActivityKind,
 }
 
+impl ActivityKind {
+    /// The step with every payload removed: tool name, status state and error
+    /// class are kept; tool input, tool output and status detail are emptied
+    /// (the truncation flags are kept). Used for org-knowledge runs, whose
+    /// tool traffic is source text that must not be persisted (Amendment 1, A1).
+    pub(crate) fn names_only(&self) -> Self {
+        match self {
+            Self::ToolCall { name, input_truncated, .. } => Self::ToolCall {
+                name: name.clone(),
+                input: String::new(),
+                input_truncated: *input_truncated,
+            },
+            Self::ToolResult { call_id, output_truncated, is_error, .. } => Self::ToolResult {
+                call_id: call_id.clone(),
+                output: String::new(),
+                output_truncated: *output_truncated,
+                is_error: *is_error,
+            },
+            Self::Status { state, category, .. } => Self::Status {
+                state: state.clone(),
+                detail: None,
+                category: category.clone(),
+            },
+        }
+    }
+}
+
 /// One mapped piece of a provider's stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StreamItem {
@@ -757,6 +784,29 @@ impl ActivityLog {
 
     pub(crate) fn items(&self) -> &[ActivityItem] {
         &self.items
+    }
+
+    /// This log with every item reduced to `ActivityKind::names_only` (kind,
+    /// tool name, status, seq kept; input/output emptied; `truncated` kept).
+    pub(crate) fn names_only(&self) -> ActivityLog {
+        let items: Vec<ActivityItem> = self
+            .items
+            .iter()
+            .map(|item| ActivityItem {
+                seq: item.seq,
+                offset: 0,
+                id: item.id.clone(),
+                kind: item.kind.names_only(),
+            })
+            .collect();
+        let chars = serialize(&items).len();
+        ActivityLog {
+            items,
+            next_seq: self.next_seq,
+            chars,
+            truncated: self.truncated,
+            errored: self.errored,
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {

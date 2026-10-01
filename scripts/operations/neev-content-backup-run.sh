@@ -6,6 +6,11 @@
 # uid. The database URL is read from the running app container at run time and
 # passed only through the environment (never argv, never stored).
 #
+# Org knowledge (schema 22): when NEEV_BACKUP_KNOWLEDGE_SOURCE names the host
+# knowledge root, its referenced blobs are copied into blobs-knowledge/ beside
+# the dump that indexes them (format neev-content-copy-v3). Unset: no flag, and
+# a dump holding knowledge rows then fails closed instead of losing them.
+#
 # Output: $NEEV_BACKUP_OUTPUT_PARENT/neev-content-<UTC>/ with complete.json on
 # success. A directory without complete.json is incomplete and must not be used.
 set -euo pipefail
@@ -18,6 +23,11 @@ NODE=${NEEV_BACKUP_NODE:-/opt/neev-content-backup/node/bin/node}
 SCRIPT=${NEEV_BACKUP_SCRIPT:-/opt/neev-content-backup/neev-content-backup.mjs}
 BROKER=${NEEV_ORIGINALS_BROKER_SOCKET:-/run/neev-originals/broker.sock}
 APP_UID=${NEEV_BACKUP_UID:-65532}
+KNOWLEDGE=${NEEV_BACKUP_KNOWLEDGE_SOURCE:-}
+case "$KNOWLEDGE" in
+  ""|/*) ;;
+  *) echo "knowledge source must be an absolute path" >&2; exit 1 ;;
+esac
 
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 [ -x "$NODE" ] && [ -f "$SCRIPT" ] || { echo "node or backup script missing" >&2; exit 1; }
@@ -33,8 +43,10 @@ cd /
   for name in $(compgen -e); do unset "$name" 2>/dev/null || true; done
   export PATH=/usr/bin:/bin HOME=/nonexistent LANG=C.UTF-8 NEEV_BACKUP_DATABASE_URL="$url"
   [ -n "$broker" ] && export NEEV_ORIGINALS_BROKER_SOCKET="$broker"
+  args=(--source "$SOURCE" --output "$output" --schema "$SCHEMA")
+  [ -n "$KNOWLEDGE" ] && args+=(--knowledge-source "$KNOWLEDGE")
   exec setpriv --reuid="$APP_UID" --regid="$APP_UID" --clear-groups \
-    "$NODE" "$SCRIPT" --source "$SOURCE" --output "$output" --schema "$SCHEMA"
+    "$NODE" "$SCRIPT" "${args[@]}"
 )
 test -f "$output/complete.json"
 echo "complete: $output"

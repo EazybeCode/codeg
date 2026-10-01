@@ -26,6 +26,8 @@ import { NativeSignInMethods } from "./native-login"
 import { NativeAgentConnectionsPanel } from "./native-agent-connections"
 import { NativeLibrary } from "./native-library"
 import { NativeJoinCode } from "./native-join-code"
+import { NativeKnowledge } from "./native-knowledge"
+import { NativeKnowledgePages } from "./native-knowledge-pages"
 
 type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
 
@@ -42,9 +44,12 @@ const SECTIONS = [
   "organization",
   "members",
   "library",
+  "knowledge",
   "agents",
   "profile",
 ] as const
+/** Sections only an organization admin is shown, or can be deep-linked to. */
+const ADMIN_ONLY: readonly Section[] = ["knowledge"]
 type Section = (typeof SECTIONS)[number]
 
 /**
@@ -69,6 +74,7 @@ const SECTION_LABEL = {
   members: "members",
   agents: "personalAgents",
   library: "sharedLibrary",
+  knowledge: "knowledge",
   profile: "yourProfile",
 } as const satisfies Record<Section, string>
 
@@ -94,6 +100,8 @@ function SettingsContent() {
   const [section, setSection] = useState<Section>(
     () => requestedSection() ?? "organization"
   )
+  // Bumped when a knowledge job may have written or withheld pages.
+  const [knowledgeVersion, setKnowledgeVersion] = useState(0)
   const opener = useRef<HTMLElement | null>(null),
     receipt = useRef<{ digest: string; id: string } | null>(null)
   const tabs = useRef(new Map<Section, HTMLButtonElement | null>())
@@ -126,6 +134,13 @@ function SettingsContent() {
     return () => controller.abort()
   }, [handleError, organizationId])
   const admin = auth.session?.role === "admin",
+    // A member never sees an admin-only section, even via `?section=`.
+    visibleSections = SECTIONS.filter(
+      (id) => admin || !ADMIN_ONLY.includes(id)
+    ),
+    current: Section = visibleSections.includes(section)
+      ? section
+      : "organization",
     owner = org?.ownerUserId === auth.session?.user.id,
     emailAvailable = auth.capabilities?.providers.email === true
   async function action(work: () => Promise<void>) {
@@ -259,14 +274,15 @@ function SettingsContent() {
         : event.key === "ArrowLeft" || event.key === "ArrowUp"
           ? -1
           : 0
+    const order = visibleSections
     let next = index
-    if (step !== 0) next = (index + step + SECTIONS.length) % SECTIONS.length
+    if (step !== 0) next = (index + step + order.length) % order.length
     else if (event.key === "Home") next = 0
-    else if (event.key === "End") next = SECTIONS.length - 1
+    else if (event.key === "End") next = order.length - 1
     else return
     event.preventDefault()
-    setSection(SECTIONS[next])
-    tabs.current.get(SECTIONS[next])?.focus()
+    setSection(order[next])
+    tabs.current.get(order[next])?.focus()
   }
   /**
    * Inactive sections are hidden rather than unmounted. The connections panel
@@ -290,7 +306,7 @@ function SettingsContent() {
         role="tabpanel"
         id={`neev-settings-${id}`}
         aria-labelledby={`neev-settings-tab-${id}`}
-        hidden={section !== id}
+        hidden={current !== id}
         className="space-y-5"
       >
         {heading && (
@@ -325,8 +341,8 @@ function SettingsContent() {
           aria-label={t("settings")}
           className="-mx-1 flex shrink-0 gap-1 overflow-x-auto px-1 pb-1 sm:mx-0 sm:w-52 sm:flex-col sm:overflow-x-visible sm:px-0 sm:pb-0"
         >
-          {SECTIONS.map((id, index) => {
-            const active = section === id
+          {visibleSections.map((id, index) => {
+            const active = current === id
             return (
               <button
                 key={id}
@@ -613,9 +629,28 @@ function SettingsContent() {
               <NativeJoinCode />
             </>
           )}
+          {/* Admins only, and mounted only while open: it polls a running job. */}
+          {admin &&
+            panel(
+              "knowledge",
+              current === "knowledge" ? (
+                <>
+                  <NativeKnowledge
+                    key={`k-${organizationId}`}
+                    onPagesChanged={() =>
+                      setKnowledgeVersion((value) => value + 1)
+                    }
+                  />
+                  <NativeKnowledgePages
+                    key={`p-${organizationId}`}
+                    version={knowledgeVersion}
+                  />
+                </>
+              ) : null
+            )}
           {panel(
             "library",
-            section === "library" ? (
+            current === "library" ? (
               <NativeLibrary key={organizationId} />
             ) : null,
             false

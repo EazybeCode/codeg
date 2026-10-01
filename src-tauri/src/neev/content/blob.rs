@@ -409,6 +409,29 @@ mod unix {
             Ok(())
         }
 
+        /// Delete a `.md` blob whose row never committed (org knowledge only:
+        /// native document revisions are immutable history and never deleted).
+        /// Already-gone is success. No originals tombstone: the knowledge store
+        /// is opened without a broker.
+        pub(crate) async fn remove_document(
+            &self,
+            org_id: i32,
+            key: &str,
+        ) -> Result<(), ContentError> {
+            validate_location(org_id, key)?;
+            let directory = match self.open_org_directory(org_id, false) {
+                Ok(directory) => directory,
+                Err(_) => return Ok(()),
+            };
+            let final_name = c_string(&format!("{key}.md"))?;
+            if unsafe { libc::unlinkat(directory.as_raw_fd(), final_name.as_ptr(), 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT)
+            {
+                return Err(ContentError::Storage);
+            }
+            Ok(())
+        }
+
         /// Read a stored image blob, checked against its row's length and digest.
         /// A missing blob is `NotFound` unless read-through restores it.
         pub(crate) async fn read_image(
@@ -748,6 +771,14 @@ impl BlobStore {
     }
 
     pub(crate) async fn remove_attachment(
+        &self,
+        _org_id: i32,
+        _key: &str,
+    ) -> Result<(), ContentError> {
+        Err(ContentError::Storage)
+    }
+
+    pub(crate) async fn remove_document(
         &self,
         _org_id: i32,
         _key: &str,

@@ -60,6 +60,19 @@ pub(crate) struct ServerState {
     /// org and connection generation, so a reconnected credential can never be
     /// served the catalogue read under the previous one.
     pub(crate) agent_catalogues: super::agents::discovery::Cache,
+    /// The org knowledge blob root, opened WITHOUT the originals broker, so a
+    /// local miss is a miss (spec Amendment 1, storage). `None` when
+    /// `NEEV_KNOWLEDGE_ROOT` is unset, which disables the feature.
+    pub(crate) knowledge: Option<Arc<BlobStore>>,
+}
+
+/// Open the knowledge root when configured. Never `with_originals`.
+fn open_knowledge(config: &Config) -> Result<Option<Arc<BlobStore>>, ContentError> {
+    config
+        .knowledge_root
+        .as_ref()
+        .map(|root| BlobStore::open(root).map(Arc::new))
+        .transpose()
 }
 
 impl ServerState {
@@ -104,6 +117,7 @@ impl ServerState {
             .map(|engine| super::engine::proxy::Engine::new(engine, &config.origin))
             .transpose()
             .map_err(|_| ContentError::Storage)?;
+        let knowledge = open_knowledge(&config)?;
         Ok(Self {
             database,
             config,
@@ -117,6 +131,7 @@ impl ServerState {
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
+            knowledge,
             oauth,
             magic,
             mail,
@@ -132,6 +147,7 @@ impl ServerState {
         oauth: oauth::Service,
     ) -> Self {
         let blobs = Arc::new(BlobStore::open(&config.document_root).expect("test document root"));
+        let knowledge = open_knowledge(&config).expect("test knowledge root");
         Self {
             database,
             config,
@@ -145,6 +161,7 @@ impl ServerState {
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
+            knowledge,
             oauth,
             magic: None,
             mail: None,
@@ -160,6 +177,7 @@ impl ServerState {
         magic: magic::Service,
     ) -> Result<Self, ContentError> {
         let blobs = Arc::new(BlobStore::open(&config.document_root)?);
+        let knowledge = open_knowledge(&config)?;
         let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
         Ok(Self {
             database,
@@ -174,6 +192,7 @@ impl ServerState {
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
+            knowledge,
             oauth,
             magic: Some(magic),
             mail: None,
@@ -189,6 +208,7 @@ impl ServerState {
         mail: mail::Service,
     ) -> Result<Self, ContentError> {
         let blobs = Arc::new(BlobStore::open(&config.document_root)?);
+        let knowledge = open_knowledge(&config)?;
         let oauth = oauth::Service::new(database.clone(), &config, clock.clone())?;
         Ok(Self {
             database,
@@ -203,6 +223,7 @@ impl ServerState {
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
+            knowledge,
             oauth,
             magic: None,
             mail: Some(mail),
@@ -463,6 +484,13 @@ async fn serve() -> Result<(), ()> {
     super::agents::sessions::reconcile_interrupted(&database, SystemClock.now_unix())
         .await
         .map_err(|_| ())?;
+    // Knowledge batches that were running belonged to the same dead process:
+    // settle them failed (interrupted) and pause their jobs for an admin to
+    // resume. Runs regardless of NEEV_KNOWLEDGE_ROOT, so a job left by an
+    // earlier configuration is never shown as still running.
+    super::knowledge::jobs::recover_startup(&database, SystemClock.now_unix())
+        .await
+        .map_err(|_| ())?;
     let bind = config.bind;
     let mut state = ServerState::new(database, config, Arc::new(SystemClock)).map_err(|_| ())?;
     // Production agent-runtime enablement: only when the config layer accepted
@@ -659,8 +687,39 @@ async fn serve() -> Result<(), ()> {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(ATTACHMENT_SWEEP_SECS)).await;
             let _ = crate::neev::content::attachment::sweep_orphans(&attachments).await;
+            // Knowledge blobs a failed commit left without a row (best effort).
+            if attachments.knowledge.is_some() {
+                let now = attachments.clock.now_unix();
+                let _ = crate::neev::knowledge::capture::sweep_orphans(&attachments, now).await;
+            }
         }
     });
+    // Org knowledge: bounded capture (no LLM) and the compile job loop. Only
+    // when the knowledge root is configured; neither loop ever runs otherwise.
+    if state.knowledge.is_some() {
+        let capture = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    crate::neev::knowledge::types::CAPTURE_TICK_SECS,
+                ))
+                .await;
+                let now = capture.clock.now_unix();
+                let _ = crate::neev::knowledge::capture::run_tick(&capture, now).await;
+            }
+        });
+        let jobs = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    crate::neev::knowledge::types::JOB_TICK_SECS,
+                ))
+                .await;
+                let now = jobs.clock.now_unix();
+                let _ = crate::neev::knowledge::jobs::run_tick(&jobs, now).await;
+            }
+        });
+    }
     // The supervisor lifecycle must not depend on anyone polling.
     //
     // Without this, a user who approves a sign-in and closes the tab is never

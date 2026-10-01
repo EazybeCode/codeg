@@ -467,6 +467,7 @@ async fn retry_team(
         attachments: run_attachments(resolved),
         context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
         library_items,
+        min_free_lanes: 1,
     };
     let turn = launch(
         &state,
@@ -573,6 +574,7 @@ async fn retry_private(
         attachments: run_attachments(resolved),
         context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
         library_items,
+        min_free_lanes: 1,
     };
     let turn = launch(&state, &actor, &session.id, turn, run_request, None).await?;
     created(turn, attachment_dtos(carried))

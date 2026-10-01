@@ -143,6 +143,7 @@ pub(super) async fn run(
         context_files: Vec::new(),
         // Shared org library items (skills and MCP configs).
         library_items,
+        min_free_lanes: 1,
     };
     let mut handle = match state.agents.run(request).await {
         Ok(handle) => handle,
