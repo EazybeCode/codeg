@@ -1427,14 +1427,14 @@ it("keeps progress prose muted and the completed final answer normal", () => {
   expect(container.querySelector('[data-agent-prose="progress"]')).toHaveClass(
     "text-muted-foreground",
     // A size down from the answer, on the markdown root that sets its own.
-    "[&>div]:text-[13px]"
+    "[&>div]:text-[0.8125rem]"
   )
   expect(container.querySelector('[data-agent-prose="final"]')).toHaveClass(
     "text-foreground",
     "font-normal"
   )
   expect(container.querySelector('[data-agent-prose="final"]')).not.toHaveClass(
-    "[&>div]:text-[13px]"
+    "[&>div]:text-[0.8125rem]"
   )
   expect(
     container.querySelector('[data-agent-prose="final"]')

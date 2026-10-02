@@ -818,7 +818,7 @@ export function NativeAgentConnectionsPanel({
                       {!NEEV_CORE_AGENT_PROVIDERS.includes(provider) && (
                         <Badge
                           variant="secondary"
-                          className="h-4 px-1.5 text-[10px]"
+                          className="h-4 px-1.5 text-3xs"
                           title={t("providerBetaHint")}
                         >
                           {t("providerBeta")}
@@ -1070,9 +1070,9 @@ export function NativeAgentConnectionsPanel({
 
 /** How each settled state reads: green only for a working connection. */
 const STATUS_TONE: Partial<Record<NeevConnectionState, string>> = {
-  connected: "text-emerald-700 dark:text-emerald-400",
-  reconnect_required: "text-amber-700 dark:text-amber-400",
-  unavailable: "text-amber-700 dark:text-amber-400",
+  connected: "text-neev-ok",
+  reconnect_required: "text-neev-warn",
+  unavailable: "text-neev-warn",
 }
 
 /** The existing agent marks, by connection provider. */

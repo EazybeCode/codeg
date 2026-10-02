@@ -157,7 +157,7 @@ function FilePreview({ file: incomingFile }: { file: NeevAttachment }) {
           title={file.fileName}
           srcDoc={html.html}
           sandbox=""
-          className="size-full min-h-96 border bg-white"
+          className="size-full min-h-96 rounded-md border bg-white"
         />
       </div>
     )

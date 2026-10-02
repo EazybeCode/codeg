@@ -762,7 +762,7 @@ function Frame({
             aria-hidden
             className="pointer-events-none absolute inset-0 overflow-hidden bg-background px-6 pt-6 sm:px-10"
           >
-            <div className="mx-auto w-full max-w-[760px] animate-pulse space-y-6">
+            <div className="mx-auto w-full max-w-[760px] space-y-6 motion-safe:animate-pulse">
               <div className="h-8 w-2/5 rounded-md bg-muted" />
               <div className="space-y-3">
                 {/* Keyed by position: two of these widths are the same, and

@@ -1049,11 +1049,11 @@ function Document({
           }
         }}
         onBlur={() => void commitTitle()}
-        className="w-full break-words border-0 bg-transparent p-0 text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em] outline-none placeholder:text-muted-foreground/40 disabled:opacity-70"
+        className="w-full break-words border-0 bg-transparent p-0 text-[2rem] font-bold leading-[1.15] tracking-[-0.02em] outline-none placeholder:text-muted-foreground/40 rounded-md focus-visible:bg-muted/50 focus-visible:ring-4 focus-visible:ring-muted/50 disabled:opacity-70 sm:text-[2.5rem]"
       />
     </>
   ) : (
-    <h1 className="break-words text-[2.5rem] font-bold leading-[1.15] tracking-[-0.02em]">
+    <h1 className="break-words text-[2rem] font-bold leading-[1.15] tracking-[-0.02em] sm:text-[2.5rem]">
       {latest.title}
     </h1>
   )

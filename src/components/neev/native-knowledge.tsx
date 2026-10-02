@@ -378,10 +378,14 @@ export function NativeKnowledge({
   }
 
   const enabled = settings?.captureEnabled ?? false
-  const card = "space-y-3 rounded-xl border p-4"
+  // One surface, divided: capture, status, compile and the job read as parts
+  // of one setting rather than four equal cards.
+  const card = "space-y-3 p-4"
   const muted = "text-sm text-muted-foreground"
+  const select =
+    "h-10 rounded-lg border bg-background px-2 text-base sm:h-8 sm:text-sm"
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <p className={muted}>{t("savedOnly")}</p>
       <NativeError error={error} />
       {notice && (
@@ -389,289 +393,294 @@ export function NativeKnowledge({
           {notice}
         </p>
       )}
-
-      {/* 1. Capture: what is read, and what never is. */}
-      <section className={card} aria-labelledby={switchLabel}>
-        <div className="flex items-center justify-between gap-3">
-          <h3 id={switchLabel} className="text-sm font-medium">
-            {t("captureToggle")}
-          </h3>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enabled}
-            aria-labelledby={switchLabel}
-            disabled={!settings || busy}
-            onClick={toggleCapture}
-            className={cn(
-              "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
-              enabled ? "bg-primary" : "bg-muted-foreground/30"
-            )}
-          >
-            <span
-              aria-hidden
+      <div className="divide-y overflow-hidden rounded-xl border bg-card">
+        {/* 1. Capture: what is read, and what never is. */}
+        <section className={card} aria-labelledby={switchLabel}>
+          <div className="flex items-center justify-between gap-3">
+            <h3 id={switchLabel} className="text-sm font-medium">
+              {t("captureToggle")}
+            </h3>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={enabled}
+              aria-labelledby={switchLabel}
+              disabled={!settings || busy}
+              onClick={toggleCapture}
               className={cn(
-                "inline-block size-4 rounded-full bg-background shadow transition-transform",
-                enabled
-                  ? "translate-x-4 rtl:-translate-x-4"
-                  : "translate-x-0.5 rtl:-translate-x-0.5"
+                "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
+                enabled ? "bg-primary" : "bg-muted-foreground/30"
               )}
-            />
-          </button>
-        </div>
-        <p className={muted}>{t("captureScope")}</p>
-        <p className={muted}>{t("filesByName")}</p>
-        {status?.captureBlocked === "quota_exceeded" && (
-          <p role="alert" className="text-sm font-medium text-destructive">
-            {t("quotaExceeded")}
-          </p>
-        )}
-        {!!status?.sourceProblems.engineUnavailable && (
-          <p className={muted}>
-            {t("engineUnavailable", {
-              number: status.sourceProblems.engineUnavailable,
-            })}
-          </p>
-        )}
-      </section>
+            >
+              <span
+                aria-hidden
+                className={cn(
+                  "inline-block size-4 rounded-full bg-background shadow transition-transform",
+                  enabled
+                    ? "translate-x-4 rtl:-translate-x-4"
+                    : "translate-x-0.5 rtl:-translate-x-0.5"
+                )}
+              />
+            </button>
+          </div>
+          <p className={muted}>{t("captureScope")}</p>
+          <p className={muted}>{t("filesByName")}</p>
+          {status?.captureBlocked === "quota_exceeded" && (
+            <p role="alert" className="text-sm font-medium text-destructive">
+              {t("quotaExceeded")}
+            </p>
+          )}
+          {!!status?.sourceProblems.engineUnavailable && (
+            <p className={muted}>
+              {t("engineUnavailable", {
+                number: status.sourceProblems.engineUnavailable,
+              })}
+            </p>
+          )}
+        </section>
 
-      {/* 2. Status: complete only when it is. */}
-      {status && (
+        {/* 2. Status: complete only when it is. */}
+        {status && (
+          <section className={card}>
+            <h3 className="text-sm font-medium">{t("statusTitle")}</h3>
+            <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {(
+                [
+                  ["statEligible", status.eligible],
+                  ["statCaptured", status.captured],
+                  ["statRepresented", status.represented],
+                  ["statPages", status.pages],
+                ] as const
+              ).map(([label, value]) => (
+                <div key={label} className="rounded-lg bg-muted/40 px-3 py-2">
+                  <dt className="text-xs text-muted-foreground">{t(label)}</dt>
+                  <dd className="text-lg font-semibold tabular-nums">
+                    {value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+            {/* Complete only when nothing at all is outstanding (review I1). */}
+            {status.eligible > 0 &&
+              (knowledgeComplete(status) ? (
+                <p className={muted}>{t("complete")}</p>
+              ) : (
+                <p className="text-sm font-medium">
+                  {status.represented < status.eligible
+                    ? t("incomplete", {
+                        represented: status.represented,
+                        eligible: status.eligible,
+                      })
+                    : t("incompleteOther")}
+                </p>
+              ))}
+            <ul className="space-y-1 text-sm">
+              {status.coverage.uncovered > 0 && (
+                <li>
+                  {t("uncoveredGaps", { number: status.coverage.uncovered })}
+                </li>
+              )}
+              {status.coverage.pending > 0 && (
+                <li>
+                  {t("pendingUnits", { number: status.coverage.pending })}
+                </li>
+              )}
+              {status.withheldPages > 0 && (
+                <li>{t("withheldCount", { number: status.withheldPages })}</li>
+              )}
+              {status.stale > 0 && (
+                <li>{t("staleCount", { number: status.stale })}</li>
+              )}
+              {status.sourceProblems.tooLarge > 0 && (
+                <li>
+                  {t("tooLarge", { number: status.sourceProblems.tooLarge })}
+                </li>
+              )}
+              {status.sourceProblems.failed > 0 && (
+                <li>
+                  {t("captureFailed", { number: status.sourceProblems.failed })}
+                </li>
+              )}
+            </ul>
+            <p className="text-xs text-muted-foreground">
+              {t("storageUsed", { size: formatBytes(status.bytesUsed) })}
+            </p>
+            {/* Gaps can be retried whenever there are some and nothing runs. */}
+            {status.coverage.uncovered > 0 && !active && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={retryUncovered}
+              >
+                {t("retryUncovered")}
+              </Button>
+            )}
+          </section>
+        )}
+
+        {/* 3. Compile: on this admin's own connected agent only. */}
         <section className={card}>
-          <h3 className="text-sm font-medium">{t("statusTitle")}</h3>
-          <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <h3 className="text-sm font-medium">{t("compileTitle")}</h3>
+          <fieldset className="space-y-1" disabled={active || busy}>
+            <legend className="sr-only">{t("modeLabel")}</legend>
             {(
               [
-                ["statEligible", status.eligible],
-                ["statCaptured", status.captured],
-                ["statRepresented", status.represented],
-                ["statPages", status.pages],
+                ["incremental", "modeIncremental", "incrementalHelp"],
+                ["rebuild", "modeRebuild", "rebuildHelp"],
               ] as const
-            ).map(([label, value]) => (
-              <div key={label} className="rounded-lg bg-muted/40 px-3 py-2">
-                <dt className="text-xs text-muted-foreground">{t(label)}</dt>
-                <dd className="text-lg font-semibold tabular-nums">{value}</dd>
-              </div>
+            ).map(([value, label, help]) => (
+              <label key={value} className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="knowledge-mode"
+                  className="mt-1"
+                  checked={mode === value}
+                  onChange={() => setMode(value)}
+                />
+                <span>
+                  <span className="font-medium">{t(label)}</span>
+                  <span className="block text-muted-foreground">{t(help)}</span>
+                </span>
+              </label>
             ))}
-          </dl>
-          {/* Complete only when nothing at all is outstanding (review I1). */}
-          {status.eligible > 0 &&
-            (knowledgeComplete(status) ? (
-              <p className={muted}>{t("complete")}</p>
-            ) : (
-              <p className="text-sm font-medium">
-                {status.represented < status.eligible
-                  ? t("incomplete", {
-                      represented: status.represented,
-                      eligible: status.eligible,
-                    })
-                  : t("incompleteOther")}
-              </p>
-            ))}
-          <ul className="space-y-1 text-sm">
-            {status.coverage.uncovered > 0 && (
-              <li>
-                {t("uncoveredGaps", { number: status.coverage.uncovered })}
-              </li>
-            )}
-            {status.coverage.pending > 0 && (
-              <li>{t("pendingUnits", { number: status.coverage.pending })}</li>
-            )}
-            {status.withheldPages > 0 && (
-              <li>{t("withheldCount", { number: status.withheldPages })}</li>
-            )}
-            {status.stale > 0 && (
-              <li>{t("staleCount", { number: status.stale })}</li>
-            )}
-            {status.sourceProblems.tooLarge > 0 && (
-              <li>
-                {t("tooLarge", { number: status.sourceProblems.tooLarge })}
-              </li>
-            )}
-            {status.sourceProblems.failed > 0 && (
-              <li>
-                {t("captureFailed", { number: status.sourceProblems.failed })}
-              </li>
-            )}
-          </ul>
-          <p className="text-xs text-muted-foreground">
-            {t("storageUsed", { size: formatBytes(status.bytesUsed) })}
-          </p>
-          {/* Gaps can be retried whenever there are some and nothing runs. */}
-          {status.coverage.uncovered > 0 && !active && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={retryUncovered}
-            >
-              {t("retryUncovered")}
-            </Button>
+          </fieldset>
+          {agentsFailed ? (
+            <p role="alert" className="text-sm text-destructive">
+              {t("connectionsFailed")}
+            </p>
+          ) : agents !== null && agents.length === 0 ? (
+            <p className={muted}>{t("noAgent")}</p>
+          ) : (
+            <div className="flex flex-wrap gap-3">
+              <label className="space-y-1 text-sm">
+                <span className="block">{t("agent")}</span>
+                <select
+                  value={provider}
+                  disabled={active || busy || !agents}
+                  onChange={(event) => {
+                    setProvider(event.target.value)
+                    setModel("")
+                  }}
+                  className={select}
+                >
+                  {(agents ?? []).map((id) => (
+                    <option key={id} value={id}>
+                      {catalogs.find((entry) => entry.provider === id)?.label ??
+                        id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1 text-sm">
+                <span className="block">{t("model")}</span>
+                <select
+                  value={chosenModel}
+                  disabled={active || busy || !provider}
+                  onChange={(event) => setModel(event.target.value)}
+                  className={select}
+                >
+                  {models.map((id) => (
+                    <option key={id} value={id}>
+                      {catalogs
+                        .find((entry) => entry.provider === provider)
+                        ?.models.find((entry) => entry.id === id)?.label ?? id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           )}
-        </section>
-      )}
-
-      {/* 3. Compile: on this admin's own connected agent only. */}
-      <section className={card}>
-        <h3 className="text-sm font-medium">{t("compileTitle")}</h3>
-        <fieldset className="space-y-1" disabled={active || busy}>
-          <legend className="sr-only">{t("modeLabel")}</legend>
-          {(
-            [
-              ["incremental", "modeIncremental", "incrementalHelp"],
-              ["rebuild", "modeRebuild", "rebuildHelp"],
-            ] as const
-          ).map(([value, label, help]) => (
-            <label key={value} className="flex items-start gap-2 text-sm">
-              <input
-                type="radio"
-                name="knowledge-mode"
-                className="mt-1"
-                checked={mode === value}
-                onChange={() => setMode(value)}
-              />
-              <span>
-                <span className="font-medium">{t(label)}</span>
-                <span className="block text-muted-foreground">{t(help)}</span>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-        {agentsFailed ? (
-          <p role="alert" className="text-sm text-destructive">
-            {t("connectionsFailed")}
-          </p>
-        ) : agents !== null && agents.length === 0 ? (
-          <p className={muted}>{t("noAgent")}</p>
-        ) : (
-          <div className="flex flex-wrap gap-3">
-            <label className="space-y-1 text-sm">
-              <span className="block">{t("agent")}</span>
-              <select
-                value={provider}
-                disabled={active || busy || !agents}
-                onChange={(event) => {
-                  setProvider(event.target.value)
-                  setModel("")
-                }}
-                className="h-9 rounded-lg border bg-background px-2"
-              >
-                {(agents ?? []).map((id) => (
-                  <option key={id} value={id}>
-                    {catalogs.find((entry) => entry.provider === id)?.label ??
-                      id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1 text-sm">
-              <span className="block">{t("model")}</span>
-              <select
-                value={chosenModel}
-                disabled={active || busy || !provider}
-                onChange={(event) => setModel(event.target.value)}
-                className="h-9 rounded-lg border bg-background px-2"
-              >
-                {models.map((id) => (
-                  <option key={id} value={id}>
-                    {catalogs
-                      .find((entry) => entry.provider === provider)
-                      ?.models.find((entry) => entry.id === id)?.label ?? id}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        )}
-        <p className={muted}>{t("providerCopies")}</p>
-        {status && !active && (
-          <p className="text-sm">
-            {status.coverage.pending > 0
-              ? t("estimate", { number: batchesFor(status.coverage.pending) })
-              : t("nothingPending")}
-          </p>
-        )}
-        <Button
-          size="sm"
-          onClick={start}
-          disabled={busy || active || !provider || agents === null}
-        >
-          {t("start")}
-        </Button>
-      </section>
-
-      {/* 4. The job, as it stands. */}
-      {job && (
-        <section className={card} aria-live="polite">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h3 className="text-sm font-medium">{t("jobTitle")}</h3>
-            <span className="text-sm">{t(`state_${job.state}`)}</span>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {t(job.mode === "rebuild" ? "modeRebuild" : "modeIncremental")} ·{" "}
-            {job.provider} · {job.model}
-          </p>
-          <p className="text-sm">
-            {t("batchesDone", { number: job.batchesDone })}
-          </p>
-          {active && (
+          <p className={muted}>{t("providerCopies")}</p>
+          {status && !active && (
             <p className="text-sm">
-              {t("remaining", { number: batchesFor(job.unitsRemaining) })}
+              {status.coverage.pending > 0
+                ? t("estimate", { number: batchesFor(status.coverage.pending) })
+                : t("nothingPending")}
             </p>
           )}
-          {job.state === "running" && job.waitReason === "slot" && (
-            <p className={muted}>{t("waitingForSlot")}</p>
-          )}
-          {job.state === "paused" && (
-            <p className="text-sm font-medium">
-              {job.pauseReason &&
-              (PAUSE_REASONS as readonly string[]).includes(job.pauseReason)
-                ? t(
-                    `pause_${job.pauseReason as (typeof PAUSE_REASONS)[number]}`
-                  )
-                : t("pause_other")}
+          <Button
+            size="sm"
+            onClick={start}
+            disabled={busy || active || !provider || agents === null}
+          >
+            {t("start")}
+          </Button>
+        </section>
+
+        {/* 4. The job, as it stands. */}
+        {job && (
+          <section className={card} aria-live="polite">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h3 className="text-sm font-medium">{t("jobTitle")}</h3>
+              <span className="text-sm">{t(`state_${job.state}`)}</span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t(job.mode === "rebuild" ? "modeRebuild" : "modeIncremental")} ·{" "}
+              {job.provider} · {job.model}
             </p>
-          )}
-          {job.state === "completed_with_gaps" && (
-            <p className="text-sm font-medium">{t("completedWithGaps")}</p>
-          )}
-          <div className="flex flex-wrap gap-2">
-            {job.state === "running" && (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => control(job, "pause")}
-              >
-                {t("pause")}
-              </Button>
+            <p className="text-sm">
+              {t("batchesDone", { number: job.batchesDone })}
+            </p>
+            {active && (
+              <p className="text-sm">
+                {t("remaining", { number: batchesFor(job.unitsRemaining) })}
+              </p>
+            )}
+            {job.state === "running" && job.waitReason === "slot" && (
+              <p className={muted}>{t("waitingForSlot")}</p>
             )}
             {job.state === "paused" && (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => control(job, "resume")}
-              >
-                {t("resume")}
-              </Button>
+              <p className="text-sm font-medium">
+                {job.pauseReason &&
+                (PAUSE_REASONS as readonly string[]).includes(job.pauseReason)
+                  ? t(
+                      `pause_${job.pauseReason as (typeof PAUSE_REASONS)[number]}`
+                    )
+                  : t("pause_other")}
+              </p>
             )}
-            {active && (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy}
-                onClick={() => control(job, "stop")}
-              >
-                {t("stop")}
-              </Button>
+            {job.state === "completed_with_gaps" && (
+              <p className="text-sm font-medium">{t("completedWithGaps")}</p>
             )}
-            {/* No compile-chat link yet: the job's session is hidden from
+            <div className="flex flex-wrap gap-2">
+              {job.state === "running" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => control(job, "pause")}
+                >
+                  {t("pause")}
+                </Button>
+              )}
+              {job.state === "paused" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => control(job, "resume")}
+                >
+                  {t("resume")}
+                </Button>
+              )}
+              {active && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => control(job, "stop")}
+                >
+                  {t("stop")}
+                </Button>
+              )}
+              {/* No compile-chat link yet: the job's session is hidden from
                 lists (A1), and opening it by id is unconfirmed (review M3).
                 See frontend-contract-notes.md. */}
-          </div>
-        </section>
-      )}
+            </div>
+          </section>
+        )}
+      </div>
     </div>
   )
 }

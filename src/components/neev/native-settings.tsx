@@ -29,6 +29,7 @@ import { NativeJoinCode } from "./native-join-code"
 import { NativeKnowledge } from "./native-knowledge"
 import { NativeKnowledgeAsk } from "./native-knowledge-ask"
 import { NativeKnowledgePages } from "./native-knowledge-pages"
+import { NativeSkeletonRows } from "./native-skeleton"
 
 type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
 
@@ -325,7 +326,12 @@ function SettingsContent() {
     )
   }
   return (
-    <main className="mx-auto w-full max-w-5xl space-y-5 p-5 pb-16 sm:p-8">
+    // The Neev brand palette (warm surface, restrained purple), as in the
+    // workspace; globals.css keys it off this marker, menus included.
+    <main
+      data-neev-theme="brand"
+      className="mx-auto w-full max-w-5xl space-y-5 p-5 pb-16 sm:p-8"
+    >
       <Link
         href="/workspace"
         className="inline-flex max-w-full items-center gap-2 rounded text-sm text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
@@ -366,9 +372,9 @@ function SettingsContent() {
                 onClick={() => setSection(id)}
                 onKeyDown={(event) => onTabKey(event, index)}
                 className={cn(
-                  "whitespace-nowrap rounded-lg px-3 py-2 text-start text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  "relative min-h-10 whitespace-nowrap rounded-md px-3 py-2 text-start text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-8 sm:py-1.5",
                   active
-                    ? "bg-muted font-medium text-foreground"
+                    ? "bg-sidebar-accent font-medium text-foreground sm:before:absolute sm:before:inset-y-1.5 sm:before:start-0 sm:before:w-0.5 sm:before:rounded-full sm:before:bg-primary"
                     : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                 )}
               >
@@ -378,13 +384,16 @@ function SettingsContent() {
           })}
         </div>
         <div className="min-w-0 flex-1 space-y-4">
+          {/* Takes no room when there is nothing to say, but stays in the
+              accessibility tree so what it says next is announced. */}
           <p
             role="status"
             aria-live="polite"
-            className="text-sm text-muted-foreground"
+            className="text-sm text-muted-foreground empty:sr-only"
           >
             {loading ? t("loading") : busy ? t("working") : notice}
           </p>
+          {loading && <NativeSkeletonRows className="rounded-xl border p-4" />}
           <NativeError error={error} />
           {panel(
             "organization",
@@ -426,7 +435,7 @@ function SettingsContent() {
                         value={name}
                         disabled={busy}
                         onChange={(event) => setName(event.target.value)}
-                        className="h-10 w-full rounded-lg border bg-background px-3 text-base md:text-sm"
+                        className="h-10 w-full rounded-lg border bg-background px-3 text-base md:h-8 md:text-sm"
                       />
                     </label>
                     <label className="block space-y-2">
@@ -570,7 +579,7 @@ function SettingsContent() {
                       value={email}
                       disabled={busy || !emailAvailable}
                       onChange={(event) => setEmail(event.target.value)}
-                      className="h-10 w-full min-w-0 rounded-lg border bg-background px-3 text-base md:text-sm"
+                      className="h-10 w-full min-w-0 rounded-lg border bg-background px-3 text-base md:h-8 md:text-sm"
                     />
                   </label>
                   {owner && (
@@ -582,7 +591,7 @@ function SettingsContent() {
                         onChange={(event) =>
                           setInviteRole(event.target.value as NativeRole)
                         }
-                        className="h-10 w-full rounded-lg border bg-background px-3"
+                        className="h-10 w-full rounded-lg border bg-background px-3 md:h-8 md:text-sm"
                       >
                         <option value="member">{t("member")}</option>
                         <option value="admin">{t("admin")}</option>

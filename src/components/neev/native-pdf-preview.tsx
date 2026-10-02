@@ -114,7 +114,7 @@ export function NativePdfPreview({ fileKey }: { fileKey: string }) {
         )}
         <canvas
           ref={canvas}
-          className="mx-auto max-w-full bg-white"
+          className="mx-auto max-w-full rounded-sm bg-white shadow-sm ring-1 ring-border"
           aria-label={t("filePreviewPage", { page })}
         />
       </div>

@@ -149,7 +149,7 @@ function AttachmentChip({ deleteNode, node, selected }: NodeViewProps) {
             type="button"
             size="sm"
             variant="ghost"
-            className="h-5 shrink-0 px-1 text-[11px]"
+            className="h-5 shrink-0 px-1 text-2xs"
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => context?.tray.retry(id)}
           >

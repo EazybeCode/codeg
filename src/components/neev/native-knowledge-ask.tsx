@@ -393,11 +393,12 @@ export function NativeKnowledgeAsk({
   const canAsk =
     !!agents?.length && !!provider && !!csrf && !sending && !running
   const muted = "text-sm text-muted-foreground"
-  const select = "h-8 rounded-lg border bg-background px-2 text-sm"
+  const select =
+    "h-10 rounded-lg border bg-background px-2 text-base sm:h-8 sm:text-sm"
 
   return (
     <section
-      className="space-y-3 rounded-xl border p-4"
+      className="space-y-3 rounded-xl border bg-card p-4"
       aria-labelledby={headingId}
     >
       <div className="flex items-center justify-between gap-3">
@@ -481,7 +482,7 @@ export function NativeKnowledgeAsk({
               void send()
             }
           }}
-          className="block min-h-16 w-full resize-y rounded-lg border bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="block min-h-16 w-full resize-y rounded-lg border bg-background px-3 py-2 text-base sm:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
         <div className="flex flex-wrap items-center justify-end gap-2">
           {!!agents?.length && (

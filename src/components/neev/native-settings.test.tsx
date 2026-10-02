@@ -680,6 +680,9 @@ it("gives admins a Knowledge section", async () => {
     await screen.findByRole("switch", { name: "Capture shared knowledge" })
   ).toBeVisible()
   expect(screen.getByRole("link", { name: "Export" })).toBeVisible()
+  // Settings is a Neev surface: the same warm palette as the workspace, which
+  // menus and dialogs opened from it pick up through this marker.
+  expect(screen.getByRole("main")).toHaveAttribute("data-neev-theme", "brand")
   // The admin-only test panel sits in the section, and asks nothing by itself.
   expect(
     await screen.findByRole("heading", { name: "Test knowledge" })

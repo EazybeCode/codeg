@@ -669,10 +669,7 @@ export function AttachmentFailures({
   return (
     <ul role="alert" className="space-y-0.5 px-1 pb-1.5">
       {failed.map((item) => (
-        <li
-          key={item.id}
-          className="text-[11px] leading-4 text-muted-foreground"
-        >
+        <li key={item.id} className="text-2xs leading-4 text-muted-foreground">
           {item.reason
             ? rejectionMessage(t, item.reason, item.name)
             : t("attachmentFailed")}
@@ -705,14 +702,14 @@ export function AttachmentRejections({
         {rejected.slice(0, SHOWN_REJECTIONS).map((item, index) => (
           <li
             key={`${item.name}-${index}`}
-            className="text-[11px] leading-4 text-muted-foreground"
+            className="text-2xs leading-4 text-muted-foreground"
           >
             {rejectionMessage(t, item.reason, item.name)}
           </li>
         ))}
         {rejected.length > SHOWN_REJECTIONS && (
           // Counted, never silently dropped: the rest are still refusals.
-          <li className="text-[11px] leading-4 text-muted-foreground">
+          <li className="text-2xs leading-4 text-muted-foreground">
             {t("attachmentMoreRejected", {
               number: rejected.length - SHOWN_REJECTIONS,
             })}
@@ -723,7 +720,7 @@ export function AttachmentRejections({
         type="button"
         size="sm"
         variant="ghost"
-        className="h-6 shrink-0 px-1.5 text-[11px]"
+        className="h-6 shrink-0 px-1.5 text-2xs"
         onClick={onDismiss}
       >
         {t("attachmentDismiss")}
@@ -789,7 +786,7 @@ function SentReference({
         name={attachment.fileName}
       />
       <span className="min-w-0 truncate text-xs">{attachment.fileName}</span>
-      <span className="shrink-0 whitespace-nowrap text-[11px] leading-4 text-muted-foreground">
+      <span className="shrink-0 whitespace-nowrap text-2xs leading-4 text-muted-foreground">
         {formatBytes(attachment.byteLength)}
       </span>
     </>

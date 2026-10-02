@@ -96,9 +96,9 @@ it("gives each provider a compact row: mark, name, status, and only its own acti
     .closest("[aria-hidden]")!
   expect(mark).toHaveClass("size-8")
   expect(claude.querySelector("title")).toBeNull()
-  // Connected reads green; the plan/account is secondary text.
+  // Connected reads in the OK tone (green); the plan/account is secondary text.
   const connected = within(claude).getByText("Connected")
-  expect(connected.className).toMatch(/emerald/)
+  expect(connected.className).toMatch(/neev-ok/)
   expect(within(claude).getByText("Max plan")).toBeVisible()
   expect(
     within(claude)
@@ -108,7 +108,7 @@ it("gives each provider a compact row: mark, name, status, and only its own acti
 
   const codex = await rowOf("Codex")
   expect(within(codex).getByText("Not signed in").className).not.toMatch(
-    /emerald/
+    /neev-ok/
   )
   expect(
     within(codex).getByRole("button", { name: "Connect codex" })
@@ -120,7 +120,7 @@ it("gives each provider a compact row: mark, name, status, and only its own acti
   const gemini = await rowOf("Gemini CLI")
   expect(within(gemini).getByText("Beta")).toBeVisible()
   expect(within(gemini).getByText("Reconnect needed").className).toMatch(
-    /amber/
+    /neev-warn/
   )
   expect(
     within(gemini).getByRole("button", { name: "Reconnect gemini" })

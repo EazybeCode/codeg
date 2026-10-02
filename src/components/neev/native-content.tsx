@@ -681,7 +681,7 @@ function Content({
                     disabled={saving}
                     maxLength={100}
                     onChange={(event) => setTitle(event.target.value)}
-                    className="mt-2 w-full border-0 bg-transparent p-0 text-[2.5rem] font-bold leading-[1.2] tracking-tight outline-none placeholder:text-muted-foreground/40"
+                    className="mt-2 w-full border-0 bg-transparent p-0 text-[2rem] font-bold leading-[1.2] tracking-tight outline-none placeholder:text-muted-foreground/40 rounded-md focus-visible:bg-muted/50 focus-visible:ring-4 focus-visible:ring-muted/50 sm:text-[2.5rem]"
                   />
                   <NativeError error={error} />
                   {/*

@@ -251,7 +251,7 @@ function Indicator({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-80 max-w-[92vw]">
-        <p className="px-2 py-1.5 text-[11px] font-medium uppercase leading-4 tracking-wide text-muted-foreground">
+        <p className="px-2 py-1.5 text-2xs font-medium uppercase leading-4 tracking-wide text-muted-foreground">
           {t("mentions")}
         </p>
         {error !== null && (
@@ -299,7 +299,7 @@ function Indicator({
                   </span>
                   <time
                     dateTime={new Date(notice.createdAt * 1000).toISOString()}
-                    className="shrink-0 text-[11px] text-muted-foreground"
+                    className="shrink-0 text-2xs text-muted-foreground"
                   >
                     {new Date(notice.createdAt * 1000).toLocaleDateString()}
                   </time>

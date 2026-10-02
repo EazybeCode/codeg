@@ -92,6 +92,7 @@ import {
 import { NativeAgentChats } from "./native-agent-chats"
 import { NativeMentionsIndicator } from "./native-mentions"
 import { NativeTabPanel } from "./native-suspended-surface"
+import { NativeSkeletonRows } from "./native-skeleton"
 import { DocumentChromeSlot } from "./document-chrome-slot"
 import { FolderShare, useFolderSharing } from "./native-folder-share"
 import { newerRevision, type FolderSharing } from "@/lib/neev-folder-sharing"
@@ -586,17 +587,24 @@ function WorkspaceStart({
   nodes,
   onOpen,
   onCreate,
+  headingRef,
 }: {
   nodes: NativeNode[]
   onOpen: (node: NativeNode) => void
   onCreate: () => void
+  /** Where focus goes when the last tab is closed from the keyboard. */
+  headingRef?: React.Ref<HTMLHeadingElement>
 }) {
   const t = useTranslations("Native")
   const roots = nodes.filter((node) => node.parentId === null)
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-[760px] px-6 pb-24 pt-14">
-        <h1 className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight">
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className="break-words text-[2.5rem] font-bold leading-[1.2] tracking-tight outline-none"
+        >
           {t("projects")}
         </h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">
@@ -746,11 +754,7 @@ function ProjectContents({
           </span>
         </label>
       )}
-      {loading && (
-        <p role="status" className="text-sm text-muted-foreground">
-          {t("loadingItems")}
-        </p>
-      )}
+      {loading && <NativeSkeletonRows label={t("loadingItems")} rows={4} />}
       {empty && (
         <p className="text-sm leading-6 text-muted-foreground">
           {t("sectionEmpty")}
@@ -844,7 +848,7 @@ function ProjectContents({
                   className="size-4 shrink-0 text-muted-foreground"
                 />
                 <span className="truncate">{session.title}</span>
-                <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
+                <span className="shrink-0 text-3xs uppercase leading-4 tracking-wide text-muted-foreground/70">
                   {session.provider}
                 </span>
               </button>
@@ -1222,7 +1226,7 @@ function NativeWorkspaceTree({
                                 {/* Says where it is, so a struck-through row is
                                     not left to be guessed at. */}
                                 {resource.archived && (
-                                  <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
+                                  <span className="shrink-0 text-3xs uppercase leading-4 tracking-wide text-muted-foreground/70">
                                     {c("inTrash")}
                                   </span>
                                 )}
@@ -1366,12 +1370,12 @@ function NativeWorkspaceTree({
                         something was created, which is a background refresh
                         and not a boot. */}
                     {list?.loading && (
-                      <li
-                        role="status"
-                        className="px-2 py-1 text-xs text-muted-foreground"
-                      >
-                        {t("loadingItems")}
-                      </li>
+                      <NativeSkeletonRows
+                        as="li"
+                        label={t("loadingItems")}
+                        rows={2}
+                        className="px-2"
+                      />
                     )}
                     {/* Agent chats are items in the tree, like documents and
                         team chats: the same kind of thing, not a destination. */}
@@ -1457,7 +1461,7 @@ function NativeWorkspaceTree({
                                 >
                                   {item.title}
                                 </span>
-                                <span className="shrink-0 text-[10px] uppercase leading-4 tracking-wide text-muted-foreground/70">
+                                <span className="shrink-0 text-3xs uppercase leading-4 tracking-wide text-muted-foreground/70">
                                   {item.archived ? c("inTrash") : item.provider}
                                 </span>
                               </button>
@@ -2082,6 +2086,58 @@ function WorkspaceContent() {
       })
     },
     [guardTab, commitTabs]
+  )
+
+  /**
+   * The tab strip is one stop in the Tab order: arrows (mirrored in RTL),
+   * Home and End move between tabs and show the one they land on; Delete
+   * closes the focused tab, with the same guard as its close button.
+   */
+  const tabButtons = useRef<(HTMLButtonElement | null)[]>([])
+  /** Tabs open when Delete was pressed; focus follows only a real close. */
+  const refocusTab = useRef<number | null>(null)
+  // The strip (and its New tab button) goes away with the last tab; the start
+  // page's heading that replaces it takes focus instead of the page body.
+  const startHeading = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    const before = refocusTab.current
+    if (before === null) return
+    refocusTab.current = null
+    if (tabs.length >= before) return
+    if (tabs.length === 0) startHeading.current?.focus()
+    else tabButtons.current[activeTab]?.focus()
+  }, [tabs, activeTab])
+  const pickTab = useCallback((index: number) => {
+    activeTabRef.current = index
+    setActiveTab(index)
+    setVisited((old) => new Set([...old, tabKey(tabsRef.current[index])]))
+  }, [])
+  const onTabKey = useCallback(
+    (event: React.KeyboardEvent, index: number) => {
+      const count = tabsRef.current.length
+      if (event.key === "Delete") {
+        event.preventDefault()
+        refocusTab.current = count
+        dismissTab(index)
+        return
+      }
+      const rtl =
+        (event.currentTarget as HTMLElement)
+          .closest("[dir]")
+          ?.getAttribute("dir") === "rtl"
+      const forward = rtl ? "ArrowLeft" : "ArrowRight"
+      const back = rtl ? "ArrowRight" : "ArrowLeft"
+      let next: number
+      if (event.key === forward) next = (index + 1) % count
+      else if (event.key === back) next = (index - 1 + count) % count
+      else if (event.key === "Home") next = 0
+      else if (event.key === "End") next = count - 1
+      else return
+      event.preventDefault()
+      pickTab(next)
+      tabButtons.current[next]?.focus()
+    },
+    [dismissTab, pickTab]
   )
 
   const selectNode = useCallback(
@@ -3218,7 +3274,7 @@ function WorkspaceContent() {
         ) : (
           <span
             aria-hidden
-            className="flex size-5 shrink-0 items-center justify-center rounded bg-sidebar-accent text-[11px] font-semibold leading-none"
+            className="flex size-5 shrink-0 items-center justify-center rounded bg-sidebar-accent text-2xs font-semibold leading-none"
           >
             {org.name.slice(0, 1)}
           </span>
@@ -3283,7 +3339,7 @@ function WorkspaceContent() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t("search")}
-            className="h-7 w-full rounded-md bg-sidebar-accent/60 ps-7 pe-2 text-[13px] leading-5 outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            className="h-7 w-full rounded-md bg-sidebar-accent/60 ps-7 pe-2 text-[0.8125rem] leading-5 outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
           />
         </div>
       </div>
@@ -3292,7 +3348,7 @@ function WorkspaceContent() {
           {/* Every compact label in this shell states its own line height. The
               root's 1.5em is 24px, and inheriting that under an 11px label
               spends a row and a half of sidebar on one word. */}
-          <h2 className="text-[11px] font-medium uppercase leading-4 tracking-wide text-muted-foreground">
+          <h2 className="text-2xs font-medium uppercase leading-4 tracking-wide text-muted-foreground">
             {t("projects")}
           </h2>
           <button
@@ -3370,7 +3426,10 @@ function WorkspaceContent() {
           )}
           {/* The project list, including its "Load more" pages. Inside an
               already-drawn sidebar, so it is not the workspace arriving. */}
-          <p role="status" className="px-2 text-xs text-muted-foreground">
+          <p
+            role="status"
+            className="px-2 text-xs text-muted-foreground empty:sr-only"
+          >
             {loading ? t("loadingItems") : ""}
           </p>
           <NativeError error={error} />
@@ -3404,7 +3463,7 @@ function WorkspaceContent() {
             <button className="flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-start text-sm hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring">
               <span
                 aria-hidden
-                className="flex size-5 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-[11px] font-semibold leading-none"
+                className="flex size-5 shrink-0 items-center justify-center rounded-full bg-sidebar-accent text-2xs font-semibold leading-none"
               >
                 {auth.session.user.displayName.slice(0, 1)}
               </span>
@@ -3540,7 +3599,7 @@ function WorkspaceContent() {
             )}
             <nav
               aria-label={t("breadcrumb")}
-              className="flex min-w-0 flex-1 items-center gap-1 text-[13px] leading-5 text-muted-foreground"
+              className="flex min-w-0 flex-1 items-center gap-1 text-[0.8125rem] leading-5 text-muted-foreground"
             >
               {breadcrumb.map((crumb, index) => (
                 <span
@@ -3593,7 +3652,7 @@ function WorkspaceContent() {
                     <div
                       key={tabKey(tab)}
                       className={cn(
-                        "group/tab relative flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[13px] leading-5",
+                        "group/tab relative flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md ps-2 pe-1 text-[0.8125rem] leading-5",
                         current
                           ? "bg-accent text-foreground after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:rounded-full after:bg-primary"
                           : "text-muted-foreground hover:bg-accent/50"
@@ -3602,13 +3661,12 @@ function WorkspaceContent() {
                       <button
                         role="tab"
                         aria-selected={current}
-                        onClick={() => {
-                          activeTabRef.current = index
-                          setActiveTab(index)
-                          setVisited(
-                            (old) => new Set([...old, tabKey(tabs[index])])
-                          )
+                        tabIndex={current ? 0 : -1}
+                        ref={(node) => {
+                          tabButtons.current[index] = node
                         }}
+                        onClick={() => pickTab(index)}
+                        onKeyDown={(event) => onTabKey(event, index)}
                         className="flex min-w-0 items-center gap-1.5 rounded focus-visible:ring-2 focus-visible:ring-ring"
                       >
                         <TabIcon
@@ -3619,10 +3677,18 @@ function WorkspaceContent() {
                           {tabTitle(tab)}
                         </span>
                       </button>
+                      {/* Only the shown tab's close is a Tab stop; Delete
+                          closes any tab from the keyboard. Always visible
+                          where there is no hover to reveal it. */}
                       <button
                         aria-label={t("closeTab", { name: tabTitle(tab) })}
+                        tabIndex={current ? 0 : -1}
                         onClick={() => dismissTab(index)}
-                        className="flex size-4 shrink-0 items-center justify-center rounded opacity-0 hover:bg-background/70 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring group-hover/tab:opacity-100"
+                        className={cn(
+                          "flex size-4 shrink-0 items-center justify-center rounded hover:bg-background/70 focus-visible:ring-2 focus-visible:ring-ring [@media(pointer:coarse)]:size-6",
+                          "[@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/tab:opacity-100 [@media(hover:hover)]:focus-visible:opacity-100",
+                          current && "[@media(hover:hover)]:opacity-60"
+                        )}
                       >
                         <X aria-hidden className="size-3" />
                       </button>
@@ -3648,6 +3714,7 @@ function WorkspaceContent() {
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             {tabs.length === 0 && (
               <WorkspaceStart
+                headingRef={startHeading}
                 nodes={nodes}
                 onOpen={(node) => selectNode(node)}
                 onCreate={() =>

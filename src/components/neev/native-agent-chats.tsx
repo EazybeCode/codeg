@@ -25,6 +25,11 @@ import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
 import {
+  CHAT_COMPOSER,
+  CHAT_COMPOSER_DROP,
+  CHAT_USER_SURFACE,
+} from "./chat-chrome"
+import {
   ArrowUp,
   Square,
   Bot,
@@ -716,8 +721,9 @@ function NewAgentChat({
             // The in-chat composer's chrome, so the first prompt is typed into
             // the same control it will be edited in. Only the height differs:
             // an empty chat has room, and a taller box invites the first ask.
-            "mx-auto w-full max-w-[832px] rounded-xl border border-border/70 bg-background p-2 shadow-sm focus-within:border-chat-accent/50 focus-within:ring-2 focus-within:ring-chat-accent/20",
-            drop.over && "border-chat-accent ring-2 ring-chat-accent/25"
+            "mx-auto w-full max-w-[832px]",
+            CHAT_COMPOSER,
+            drop.over && CHAT_COMPOSER_DROP
           )}
         >
           <NativeError error={error} />
@@ -1063,7 +1069,7 @@ export function ActivityTimeline({
     : null
 
   return (
-    <div className="my-1.5 flex min-w-0 max-w-full items-center gap-1.5 px-1.5 py-0.5 text-[13px] leading-5 text-muted-foreground">
+    <div className="my-1.5 flex min-w-0 max-w-full items-center gap-1.5 px-1.5 py-0.5 text-[0.8125rem] leading-5 text-muted-foreground">
       {/* The accent, on the one thing that is actually happening. */}
       {running && <AgentRunIndicator className="text-muted-foreground" />}
       {running && startedAt !== null && <ElapsedClock startedAt={startedAt} />}
@@ -1217,7 +1223,7 @@ function ActivityRow({
         className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-start hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
       >
         <ToolIcon name={item.name} />
-        <span className="shrink-0 text-[13px] font-normal leading-5 text-muted-foreground">
+        <span className="shrink-0 text-[0.8125rem] font-normal leading-5 text-muted-foreground">
           {item.name}
         </span>
         {/* The command as it was given, clipped to one line on a quiet pill.
@@ -1408,7 +1414,7 @@ export function TranscriptBody({
   )
   const bubble = (input: NeevRunInput) => (
     <div key={input.requestId} data-agent-input className="flex justify-end">
-      <div className="max-w-[85%] rounded-2xl border border-chat-user-foreground/10 bg-chat-user-surface px-3.5 py-2 text-sm text-chat-user-foreground">
+      <div className={cn("max-w-[85%] text-sm", CHAT_USER_SURFACE)}>
         {input.text}
       </div>
     </div>
@@ -1450,7 +1456,7 @@ export function TranscriptBody({
                   // Progress reads a size down from the answer. Set on the
                   // markdown root itself, which carries its own `text-sm`.
                   progress
-                    ? "text-muted-foreground [&>div]:text-[13px] [&>div]:leading-relaxed"
+                    ? "text-muted-foreground [&>div]:text-[0.8125rem] [&>div]:leading-relaxed"
                     : "text-foreground"
                 )}
               >
@@ -2165,7 +2171,7 @@ function AgentSessionView({
                     here and NOT in team chat, where several people share the
                     thread. Files stay where they were put in the sentence. */}
                 <div className="flex justify-end">
-                  <div className="max-w-[85%] rounded-2xl border border-chat-user-foreground/10 bg-chat-user-surface px-3.5 py-2 text-chat-user-foreground">
+                  <div className={cn("max-w-[85%]", CHAT_USER_SURFACE)}>
                     <SentPrompt
                       body={turn.prompt}
                       attachments={inputAttachments}
@@ -2252,8 +2258,8 @@ function AgentSessionView({
           className={cn(
             // Same geometry and same focus accent as the team-chat composer:
             // one control should not change shape between two chat surfaces.
-            "rounded-xl border border-border/70 bg-background p-2 shadow-sm focus-within:border-chat-accent/50 focus-within:ring-2 focus-within:ring-chat-accent/20",
-            drop.over && "border-chat-accent ring-2 ring-chat-accent/25"
+            CHAT_COMPOSER,
+            drop.over && CHAT_COMPOSER_DROP
           )}
         >
           {drop.over && (

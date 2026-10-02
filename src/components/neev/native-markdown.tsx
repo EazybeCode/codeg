@@ -65,7 +65,7 @@ function ScrollTable({ children }: { children?: React.ReactNode }) {
   // widen the column every other message is read in.
   return (
     <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-[13px] leading-[1.5]">
+      <table className="w-full border-collapse text-[0.8125rem] leading-[1.5]">
         {children}
       </table>
     </div>
@@ -202,7 +202,7 @@ export function NativeMarkdown({
      * a `space-y-4` of its own. Left alone it would set the rhythm of every
      * reply, since our `space-y-3` then has exactly one child to space.
      */
-    <div className="space-y-3 [&>div]:space-y-3 break-words text-sm leading-[1.65] [&_blockquote]:border-s-2 [&_blockquote]:ps-4 [&_blockquote]:text-muted-foreground [&_code]:text-[0.925em] [&_h1]:text-[17px] [&_h1]:font-semibold [&_h1]:leading-snug [&_h2]:text-[15px] [&_h2]:font-semibold [&_h2]:leading-snug [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:leading-snug [&_h4]:text-sm [&_h4]:font-medium [&_h5]:font-medium [&_h6]:font-medium [&_li:has(>input)]:ms-1 [&_li:has(>input)]:list-none [&_li]:ms-5 [&_ol]:list-decimal [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-3 [&_pre]:text-[13px] [&_pre]:leading-[1.5] [&_pre_code]:text-[1em] [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top [&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:text-start [&_th]:font-medium [&_thead]:bg-muted/50 [&_ul]:list-disc">
+    <div className="space-y-3 [&>div]:space-y-3 break-words text-sm leading-[1.65] [&_blockquote]:border-s-2 [&_blockquote]:ps-4 [&_blockquote]:text-muted-foreground [&_code]:text-[0.925em] [&_h1]:text-[1.0625rem] [&_h1]:font-semibold [&_h1]:leading-snug [&_h2]:text-[0.9375rem] [&_h2]:font-semibold [&_h2]:leading-snug [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:leading-snug [&_h4]:text-sm [&_h4]:font-medium [&_h5]:font-medium [&_h6]:font-medium [&_li:has(>input)]:ms-1 [&_li:has(>input)]:list-none [&_li]:ms-5 [&_ol]:list-decimal [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-3 [&_pre]:text-[0.8125rem] [&_pre]:leading-[1.5] [&_pre_code]:text-[1em] [&_td]:border [&_td]:px-2 [&_td]:py-1 [&_td]:align-top [&_th]:border [&_th]:px-2 [&_th]:py-1 [&_th]:text-start [&_th]:font-medium [&_thead]:bg-muted/50 [&_ul]:list-disc">
       <Streamdown
         /*
          * Streamdown for the block splitting and the incomplete-Markdown

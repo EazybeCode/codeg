@@ -989,6 +989,131 @@ it("consumes the blank tab when the thing chosen is already open", async () => {
   expect(mock.unknown).toEqual([])
 })
 
+/**
+ * The open tabs are one stop in the Tab order. Arrows, Home and End move
+ * between them and show the one they land on; Delete closes the focused one
+ * and keeps focus in the strip.
+ */
+it("moves between open tabs with the keyboard and closes one with Delete", async () => {
+  mockNativeSession(undefined, twoChats().routes)
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Alpha" }))
+  await user.click(screen.getByRole("button", { name: "New tab" }))
+  await user.click(within(tree).getByRole("button", { name: "Beta" }))
+  await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(2))
+  const alpha = () => screen.getByRole("tab", { name: /Alpha/ })
+  const beta = () => screen.getByRole("tab", { name: /Beta/ })
+
+  // Only the shown tab is in the Tab order, and so is only its close.
+  expect(beta()).toHaveAttribute("tabindex", "0")
+  expect(alpha()).toHaveAttribute("tabindex", "-1")
+  expect(screen.getByRole("button", { name: /Close Alpha/ })).toHaveAttribute(
+    "tabindex",
+    "-1"
+  )
+
+  beta().focus()
+  await user.keyboard("{ArrowLeft}")
+  expect(alpha()).toHaveFocus()
+  expect(alpha()).toHaveAttribute("aria-selected", "true")
+  await user.keyboard("{ArrowLeft}") // wraps
+  expect(beta()).toHaveFocus()
+  await user.keyboard("{Home}")
+  expect(alpha()).toHaveFocus()
+  await user.keyboard("{End}")
+  expect(beta()).toHaveFocus()
+  expect(beta()).toHaveAttribute("aria-selected", "true")
+
+  await user.keyboard("{Delete}")
+  await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(1))
+  expect(alpha()).toHaveFocus()
+  expect(alpha()).toHaveAttribute("aria-selected", "true")
+})
+
+it("mirrors the tab arrows in a right-to-left layout", async () => {
+  mockNativeSession(undefined, twoChats().routes)
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <div dir="rtl">
+        <NativeWorkspace />
+      </div>
+    </NativeTestRoot>
+  )
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Alpha" }))
+  await user.click(screen.getByRole("button", { name: "New tab" }))
+  await user.click(within(tree).getByRole("button", { name: "Beta" }))
+  // A third tab, so "back" and "forward" land on different tabs.
+  await user.click(screen.getByRole("button", { name: "New tab" }))
+  await waitFor(() => expect(screen.getAllByRole("tab")).toHaveLength(3))
+  const beta = screen.getByRole("tab", { name: /Beta/ })
+  const blank = screen.getByRole("tab", { name: "New tab" })
+
+  // Drawn right to left: Right goes back to Beta, Left goes forward again.
+  blank.focus()
+  await user.keyboard("{ArrowRight}")
+  expect(beta).toHaveFocus()
+  expect(beta).toHaveAttribute("aria-selected", "true")
+  await user.keyboard("{ArrowLeft}")
+  expect(blank).toHaveFocus()
+  expect(blank).toHaveAttribute("aria-selected", "true")
+})
+
+/**
+ * Closing the last tab from the keyboard leaves focus somewhere useful — the
+ * start page that replaces the strip — not on the page body. An unsaved
+ * change still asks first, and keeping it keeps the tab.
+ */
+it("keeps focus on the page when Delete closes the last tab, and still asks about unsaved work", async () => {
+  mockNativeSession(undefined, twoChats().routes)
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeWorkspace />
+    </NativeTestRoot>
+  )
+  await user.click(await screen.findByRole("button", { name: "Expand Space" }))
+  const tree = screen.getByRole("navigation", { name: "Projects" })
+  await user.click(await within(tree).findByRole("button", { name: "Alpha" }))
+  await typeInComposer(
+    await screen.findByRole("textbox", { name: "Message" }),
+    "half a thought"
+  )
+
+  screen.getByRole("tab", { name: /Alpha/ }).focus()
+  await user.keyboard("{Delete}")
+  expect(await screen.findByRole("dialog")).toHaveTextContent(
+    "Discard unsaved changes?"
+  )
+  await user.click(screen.getByRole("button", { name: "Keep editing" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  expect(screen.getAllByRole("tab")).toHaveLength(1)
+  expect(screen.getByRole("textbox", { name: "Message" })).toHaveTextContent(
+    "half a thought"
+  )
+
+  screen.getByRole("tab", { name: /Alpha/ }).focus()
+  await user.keyboard("{Delete}")
+  await user.click(
+    await screen.findByRole("button", { name: "Discard changes" })
+  )
+  await waitFor(() => expect(screen.queryAllByRole("tab")).toHaveLength(0))
+  await waitFor(() =>
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Projects" })
+    ).toHaveFocus()
+  )
+})
+
 it("lists a container's documents and team chats together", async () => {
   const document = { ...resource, kind: "document", title: "Brief" }
   const mock = mockNativeSession(undefined, {

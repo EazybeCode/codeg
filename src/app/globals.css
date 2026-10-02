@@ -1026,6 +1026,10 @@
   --neev-muted: oklch(0.96 0 0);
   --neev-line: oklch(0.91 0 0);
   --neev-tool: oklch(0.53 0 0);
+  /* Status marks: warm, muted, AA on the ivory surface. */
+  --neev-ok: oklch(0.48 0.1 155);
+  --neev-warn: oklch(0.5 0.11 65);
+  --neev-warn-tint: oklch(0.95 0.035 80);
 
   /* Semantic mapping — mode-independent; the ramp above is what flips. */
   --background: var(--neev-surface);
@@ -1078,6 +1082,9 @@
   --neev-muted: oklch(0.265 0 0);
   --neev-line: oklch(1 0 0 / 11%);
   --neev-tool: oklch(0.73 0 0);
+  --neev-ok: oklch(0.78 0.1 155);
+  --neev-warn: oklch(0.8 0.1 75);
+  --neev-warn-tint: oklch(0.32 0.05 70);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1098,6 +1105,9 @@
     --neev-muted: oklch(0.265 0 0);
     --neev-line: oklch(1 0 0 / 11%);
     --neev-tool: oklch(0.73 0 0);
+    --neev-ok: oklch(0.78 0.1 155);
+    --neev-warn: oklch(0.8 0.1 75);
+    --neev-warn-tint: oklch(0.32 0.05 70);
   }
 }
 
@@ -1109,6 +1119,10 @@
   /* Coral, the brand's small-mark accent. Falls back to the muted ink outside
      a Neev workspace, where the ramp is not defined. */
   --color-neev-accent: var(--neev-coral, var(--muted-foreground));
+  /* Status marks; outside a Neev surface they fall back to plain ink. */
+  --color-neev-ok: var(--neev-ok, var(--foreground));
+  --color-neev-warn: var(--neev-warn, var(--foreground));
+  --color-neev-warn-tint: var(--neev-warn-tint, var(--muted));
   --font-sans: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);

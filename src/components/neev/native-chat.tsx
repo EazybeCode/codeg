@@ -23,6 +23,12 @@ import {
   useSyncExternalStore,
 } from "react"
 import { NativeAgentConnectionsPanel } from "./native-agent-connections"
+import {
+  CHAT_COMPOSER,
+  CHAT_COMPOSER_DROP,
+  CHAT_USER_SURFACE,
+} from "./chat-chrome"
+import { NativeSkeletonRows } from "./native-skeleton"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogTitle, DialogDescription } from "@/components/ui/dialog"
@@ -287,7 +293,7 @@ function MessageMeta({
         <span className="font-medium text-foreground">{author}</span>
       )}
       {invoker !== null && (
-        <span className="rounded-full bg-muted px-1.5 text-[11px]">
+        <span className="rounded-full bg-muted px-1.5 text-2xs">
           {t("agentAuthored", { name: invoker })}
         </span>
       )}
@@ -1934,12 +1940,11 @@ function Chat({
         {/* Says what is actually being waited for. The conversation's own
             history, not "your workspace" — the workspace is already here. */}
         {loading && (
-          <li
-            role="status"
-            className="mx-auto w-full max-w-3xl text-sm text-muted-foreground"
-          >
-            {t("loadingConversation")}
-          </li>
+          <NativeSkeletonRows
+            as="li"
+            label={t("loadingConversation")}
+            className="mx-auto w-full max-w-3xl"
+          />
         )}
         {messages.map((message) => (
           <li
@@ -1958,8 +1963,7 @@ function Chat({
             <div
               className={cn(
                 "min-w-0 flex-1 space-y-1",
-                message.authorKind === "human" &&
-                  "rounded-xl border border-chat-user-foreground/10 bg-chat-user-surface px-3 py-2 text-chat-user-foreground"
+                message.authorKind === "human" && CHAT_USER_SURFACE
               )}
             >
               {/* An agent reply names the provider that wrote it and the
@@ -2114,7 +2118,7 @@ function Chat({
           event.preventDefault()
           void cancelAgent()
         }}
-        className="mx-auto w-full max-w-[832px] shrink-0 px-4 pb-3 pt-1 sm:px-8 sm:pb-5"
+        className="mx-auto w-full max-w-[52rem] shrink-0 px-4 pb-3 pt-1 sm:px-8 sm:pb-5"
       >
         <div
           {...drop.handlers}
@@ -2122,8 +2126,8 @@ function Chat({
             // One geometry for both chat surfaces, and a focus accent in the
             // same hue as the agent mark: a soft halo, not an outline, because
             // this box is on screen at all times.
-            "rounded-xl border border-border/70 bg-background p-2 shadow-sm focus-within:border-chat-accent/50 focus-within:ring-2 focus-within:ring-chat-accent/20",
-            drop.over && "border-chat-accent ring-2 ring-chat-accent/25"
+            CHAT_COMPOSER,
+            drop.over && CHAT_COMPOSER_DROP
           )}
         >
           {drop.over && (

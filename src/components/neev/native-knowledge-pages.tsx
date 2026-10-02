@@ -22,6 +22,7 @@ import {
 import { useNativeAuth } from "./native-auth-provider"
 import { NativeError } from "./native-boundary"
 import { NativeMarkdown } from "./native-markdown"
+import { NativeSkeletonRows } from "./native-skeleton"
 import { useOpenInWorkspace } from "./native-knowledge"
 
 function Chip({
@@ -34,9 +35,9 @@ function Chip({
   return (
     <span
       className={cn(
-        "rounded px-1.5 py-0.5 text-[11px] leading-4",
+        "rounded px-1.5 py-0.5 text-2xs leading-4",
         tone === "warn"
-          ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
+          ? "bg-neev-warn-tint text-neev-warn"
           : "bg-muted text-muted-foreground"
       )}
     >
@@ -257,7 +258,7 @@ export function NativeKnowledgePages({
     view.current?.scrollIntoView?.({ block: "start", behavior: "smooth" })
   }, [focusId, focusNonce])
 
-  const card = "space-y-3 rounded-xl border p-4"
+  const card = "space-y-3 rounded-xl border bg-card p-4"
   return (
     <div className="space-y-4">
       <NativeError error={error} />
@@ -292,9 +293,7 @@ export function NativeKnowledgePages({
           </p>
         )}
         {pages === null ? (
-          <p role="status" className="text-sm text-muted-foreground">
-            {t("loading")}
-          </p>
+          <NativeSkeletonRows label={t("loading")} />
         ) : pages.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t("noPages")}</p>
         ) : (
@@ -345,9 +344,7 @@ export function NativeKnowledgePages({
                   {t("choosePage")}
                 </p>
               ) : !shown ? (
-                <p role="status" className="text-sm text-muted-foreground">
-                  {t("loading")}
-                </p>
+                <NativeSkeletonRows label={t("loading")} rows={4} />
               ) : shown.status === "withheld" ? (
                 <p role="status" className="text-sm font-medium">
                   {t("withheldNotice", { number: shown.unreadableSources })}
@@ -359,9 +356,7 @@ export function NativeKnowledgePages({
                   onClick={onPreviewClick}
                 >
                   {shown.stale && (
-                    <p className="text-sm text-amber-700 dark:text-amber-300">
-                      {t("staleNotice")}
-                    </p>
+                    <p className="text-sm text-neev-warn">{t("staleNotice")}</p>
                   )}
                   {shown.lint.length > 0 && (
                     <ul className="flex flex-wrap gap-1">
@@ -378,11 +373,9 @@ export function NativeKnowledgePages({
             </div>
           </div>
         )}
-      </section>
-
-      <section className={card}>
-        {/* Collapsed by default: the section stays compact (review M8). */}
-        <details className="group">
+        {/* The log is part of the pages card, collapsed by default so the
+            section stays compact (review M8). */}
+        <details className="group border-t pt-3">
           <summary className="cursor-pointer text-sm font-medium">
             {t("logTitle")}
           </summary>
