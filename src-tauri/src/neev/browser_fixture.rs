@@ -455,6 +455,7 @@ impl Fixture {
                 agent_logins: crate::neev::agents::supervisor::new_login_registry(),
                 agent_catalogues: crate::neev::agents::discovery::new_cache(),
                 knowledge: None,
+                knowledge_asks: crate::neev::knowledge::ask::AskRegistry::default(),
                 oauth,
                 magic: Some(magic),
                 mail: Some(mail),

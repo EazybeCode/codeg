@@ -680,6 +680,15 @@ it("gives admins a Knowledge section", async () => {
     await screen.findByRole("switch", { name: "Capture shared knowledge" })
   ).toBeVisible()
   expect(screen.getByRole("link", { name: "Export" })).toBeVisible()
+  // The admin-only test panel sits in the section, and asks nothing by itself.
+  expect(
+    await screen.findByRole("heading", { name: "Test knowledge" })
+  ).toBeVisible()
+  expect(
+    mock.fetcher.mock.calls.some(([path]) =>
+      String(path).startsWith("/api/neev/knowledge/ask")
+    )
+  ).toBe(false)
   expect(mock.unknown).toEqual([])
 })
 
@@ -713,4 +722,29 @@ it("shows members no Knowledge section, even through a deep link", async () => {
     configurable: true,
     value: original,
   })
+})
+
+/** Live QA: Refresh in Knowledge must update the status counters too. */
+it("refreshes the knowledge status from the section's Refresh", async () => {
+  let reads = 0
+  const routes = knowledgeRoutes()
+  mockNativeSession(orgSession, {
+    ...fixtures(),
+    ...routes,
+    "GET /api/neev/knowledge/status": () => {
+      reads += 1
+      return routes["GET /api/neev/knowledge/status"]()
+    },
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeSettings />
+    </NativeTestRoot>
+  )
+  await openSection(user, "Knowledge")
+  await screen.findByRole("switch", { name: "Capture shared knowledge" })
+  const before = reads
+  await user.click(screen.getByRole("button", { name: "Refresh" }))
+  await waitFor(() => expect(reads).toBe(before + 1))
 })

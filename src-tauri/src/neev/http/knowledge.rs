@@ -18,7 +18,7 @@ use serde::Deserialize;
 use crate::neev::{
     auth::session,
     content::{resources, types::ContentError},
-    knowledge::{export, jobs, settings, status, store, types::JobMode, types::KnowledgeError},
+    knowledge::{ask, export, jobs, settings, status, store, types::JobMode, types::KnowledgeError},
     startup::ServerState,
     types::{OrgContext, Role},
 };
@@ -39,6 +39,8 @@ fn failure(error: KnowledgeError) -> Response {
         KnowledgeError::Unavailable => coded(StatusCode::SERVICE_UNAVAILABLE, "knowledge_unavailable"),
         KnowledgeError::JobActive => coded(StatusCode::CONFLICT, "job_active"),
         KnowledgeError::CredentialMissing => coded(StatusCode::CONFLICT, "credential_missing"),
+        KnowledgeError::AskBusy => coded(StatusCode::CONFLICT, "ask_busy"),
+        KnowledgeError::AskLimited => coded(StatusCode::TOO_MANY_REQUESTS, "ask_limited"),
         KnowledgeError::Content(ContentError::Quota) => coded(StatusCode::PAYLOAD_TOO_LARGE, "export_too_large"),
         KnowledgeError::Content(error) => ApiError::from(error).into_response(),
         KnowledgeError::Auth(error) => ApiError::from(error).into_response(),
@@ -63,8 +65,12 @@ async fn admin_get(state: &ServerState, headers: &HeaderMap) -> Result<OrgContex
 }
 
 async fn admin_mutation<T: for<'de> Deserialize<'de>>(state: &ServerState, request: Request<Body>) -> Result<(T, OrgContext), Response> {
+    admin_mutation_limited(state, request, SMALL_BODY_LIMIT).await
+}
+
+async fn admin_mutation_limited<T: for<'de> Deserialize<'de>>(state: &ServerState, request: Request<Body>, limit: usize) -> Result<(T, OrgContext), Response> {
     let _permit = catalog::permit(state).map_err(IntoResponse::into_response)?;
-    let (input, actor) = catalog::organization_mutation::<T>(state, request, SMALL_BODY_LIMIT)
+    let (input, actor) = catalog::organization_mutation::<T>(state, request, limit)
         .await
         .map_err(IntoResponse::into_response)?;
     guard(state, &actor)?;
@@ -326,6 +332,60 @@ pub(super) async fn get_export(State(state): State<Arc<ServerState>>, headers: H
             response.headers_mut().insert(header::CONTENT_DISPOSITION, value);
         }
         Ok::<_, Response>(response)
+    };
+    run.await.unwrap_or_else(|response| response)
+}
+
+/// A question plus bounded per-tab history fits well inside this.
+const ASK_BODY_LIMIT: usize = 64 * 1024;
+
+pub(super) async fn start_ask(State(state): State<Arc<ServerState>>, request: Request<Body>) -> Response {
+    let run = async {
+        let (input, actor) = admin_mutation_limited::<ask::AskInput>(&state, request, ASK_BODY_LIMIT).await?;
+        let value = ask::start(&state, &actor, input).await.map_err(failure)?;
+        Ok::<_, Response>(private_json(value))
+    };
+    run.await.unwrap_or_else(|response| response)
+}
+
+pub(super) async fn get_ask(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let run = async {
+        let actor = admin_get(&state, &headers).await?;
+        let Ok(Path(id)) = path else {
+            return Err(ApiError::NotFound.into_response());
+        };
+        if !opaque(&id) {
+            return Err(ApiError::NotFound.into_response());
+        }
+        let value = read_tx!(&state, &actor, |tx| ask::get(&state, &tx, &actor, &id));
+        match value {
+            Some(value) => Ok::<_, Response>(private_json(value)),
+            None => Err(ApiError::NotFound.into_response()),
+        }
+    };
+    run.await.unwrap_or_else(|response| response)
+}
+
+pub(super) async fn stop_ask(
+    State(state): State<Arc<ServerState>>,
+    path: Result<Path<String>, PathRejection>,
+    request: Request<Body>,
+) -> Response {
+    let run = async {
+        let Ok(Path(id)) = path else {
+            return Err(ApiError::NotFound.into_response());
+        };
+        let (_, actor) = admin_mutation::<EmptyInput>(&state, request).await?;
+        if !opaque(&id) {
+            return Err(ApiError::NotFound.into_response());
+        }
+        // Session-rechecked, and a finished ask gets `get`'s revocation re-check.
+        let value = read_tx!(&state, &actor, |tx| ask::stop(&state, &tx, &actor, &id));
+        Ok::<_, Response>(private_json(value))
     };
     run.await.unwrap_or_else(|response| response)
 }

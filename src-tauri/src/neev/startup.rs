@@ -64,6 +64,8 @@ pub(crate) struct ServerState {
     /// local miss is a miss (spec Amendment 1, storage). `None` when
     /// `NEEV_KNOWLEDGE_ROOT` is unset, which disables the feature.
     pub(crate) knowledge: Option<Arc<BlobStore>>,
+    /// Transient admin "test knowledge" asks (in memory only, bounded).
+    pub(crate) knowledge_asks: super::knowledge::ask::AskRegistry,
 }
 
 /// Open the knowledge root when configured. Never `with_originals`.
@@ -132,6 +134,7 @@ impl ServerState {
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
             knowledge,
+            knowledge_asks: super::knowledge::ask::AskRegistry::default(),
             oauth,
             magic,
             mail,
@@ -162,6 +165,7 @@ impl ServerState {
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
             knowledge,
+            knowledge_asks: super::knowledge::ask::AskRegistry::default(),
             oauth,
             magic: None,
             mail: None,
@@ -193,6 +197,7 @@ impl ServerState {
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
             knowledge,
+            knowledge_asks: super::knowledge::ask::AskRegistry::default(),
             oauth,
             magic: Some(magic),
             mail: None,
@@ -224,6 +229,7 @@ impl ServerState {
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
             knowledge,
+            knowledge_asks: super::knowledge::ask::AskRegistry::default(),
             oauth,
             magic: None,
             mail: Some(mail),
@@ -717,6 +723,18 @@ async fn serve() -> Result<(), ()> {
                 .await;
                 let now = jobs.clock.now_unix();
                 let _ = crate::neev::knowledge::jobs::run_tick(&jobs, now).await;
+            }
+        });
+        // Test-knowledge asks: expiry, retention and stale-driver failure
+        // happen on their own, not only when an ask route is called.
+        let asks = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    crate::neev::knowledge::ask::ASK_SWEEP_SECS,
+                ))
+                .await;
+                crate::neev::knowledge::ask::sweep(&asks, asks.clock.now_unix());
             }
         });
     }

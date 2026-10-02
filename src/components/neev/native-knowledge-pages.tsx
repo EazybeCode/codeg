@@ -55,7 +55,16 @@ function Chip({
  */
 export function NativeKnowledgePages({
   version = 0,
+  onRefresh,
+  focus = null,
 }: {
+  /**
+   * Show this page (from a test answer's link). A new nonce shows it again,
+   * re-read, even if it is already the one selected.
+   */
+  focus?: { id: string; nonce: number } | null
+  /** Refresh was pressed: the section's status should be read again too. */
+  onRefresh?: () => void
   /**
    * Bumped when pages may have changed under us — a job wrote or withheld
    * some. The list and the open page are both read again, so a body whose
@@ -238,18 +247,31 @@ export function NativeKnowledgePages({
     }
   }
 
+  const view = useRef<HTMLElement | null>(null)
+  const focusNonce = focus?.nonce
+  const focusId = focus?.id
+  useEffect(() => {
+    if (!focusId) return
+    setSelected(focusId)
+    setPageReload((value) => value + 1)
+    view.current?.scrollIntoView?.({ block: "start", behavior: "smooth" })
+  }, [focusId, focusNonce])
+
   const card = "space-y-3 rounded-xl border p-4"
   return (
     <div className="space-y-4">
       <NativeError error={error} />
-      <section className={card}>
+      <section className={card} ref={view}>
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-sm font-medium">{t("pagesTitle")}</h3>
           <div className="flex items-center gap-3">
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => setReload((value) => value + 1)}
+              onClick={() => {
+                setReload((value) => value + 1)
+                onRefresh?.()
+              }}
             >
               {t("refresh")}
             </Button>

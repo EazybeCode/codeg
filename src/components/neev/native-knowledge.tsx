@@ -39,6 +39,14 @@ import { NativeError } from "./native-boundary"
 
 /** How often a running job's status is re-read. */
 const POLL_MS = 5_000
+/**
+ * How often status is re-read while capture is still catching up.
+ *
+ * Capture runs on a 2-minute server tick with a 2-tick debounce, so nothing
+ * changes faster than this; it only has to stop "Captured 0" from standing
+ * still after capture is switched on.
+ */
+const CAPTURE_POLL_MS = 30_000
 
 /** Pause reasons with their own wording; anything newer reads "Paused". */
 const PAUSE_REASONS = [
@@ -112,9 +120,12 @@ function newerJob(
 
 export function NativeKnowledge({
   onPagesChanged,
+  refreshSignal,
 }: {
   /** The job may have written or withheld pages: re-read them. */
   onPagesChanged?: () => void
+  /** Changes when the reader asks for a refresh elsewhere in the section. */
+  refreshSignal?: number
 } = {}) {
   const t = useTranslations("NativeKnowledge")
   const auth = useNativeAuth()
@@ -153,23 +164,26 @@ export function NativeKnowledge({
   }, [])
   const switchLabel = useId()
 
-  const refresh = useCallback(async () => {
-    const mine = ++ticket.current
-    try {
-      const next = await loadKnowledgeStatus()
-      if (!live.current || mine !== ticket.current) return
-      setStatus((old) => ({
-        ...next,
-        job: newerJob(old?.job ?? null, next.job),
-      }))
-      pagesChanged.current?.()
-    } catch (cause) {
-      if (live.current) {
-        setError(cause)
-        handleError(cause)
+  const refresh = useCallback(
+    async (pagesToo = true) => {
+      const mine = ++ticket.current
+      try {
+        const next = await loadKnowledgeStatus()
+        if (!live.current || mine !== ticket.current) return
+        setStatus((old) => ({
+          ...next,
+          job: newerJob(old?.job ?? null, next.job),
+        }))
+        if (pagesToo) pagesChanged.current?.()
+      } catch (cause) {
+        if (live.current) {
+          setError(cause)
+          handleError(cause)
+        }
       }
-    }
-  }, [handleError])
+    },
+    [handleError]
+  )
 
   useEffect(() => {
     const controller = new AbortController()
@@ -224,6 +238,38 @@ export function NativeKnowledge({
     return () => clearInterval(timer)
   }, [job?.state, refresh])
 
+  // Follow capture while it catches up — slowly, only while something is
+  // still uncaptured, only when no job poll is already running, and not while
+  // the tab is hidden. Pages are not touched: capture does not write them.
+  // Sources that cannot be captured (too large, failed, no engine) are
+  // accounted for: they do not keep this asking forever.
+  const catchingUp =
+    !!status &&
+    status.captureEnabled &&
+    status.captureBlocked === null &&
+    status.captured +
+      status.sourceProblems.tooLarge +
+      status.sourceProblems.failed +
+      status.sourceProblems.engineUnavailable <
+      status.eligible &&
+    job?.state !== "running"
+  useEffect(() => {
+    if (!catchingUp) return
+    const timer = setInterval(() => {
+      if (typeof document === "undefined" || !document.hidden)
+        void refresh(false)
+    }, CAPTURE_POLL_MS)
+    return () => clearInterval(timer)
+  }, [catchingUp, refresh])
+
+  // An explicit Refresh elsewhere in the section (the pages' button).
+  const lastSignal = useRef(refreshSignal)
+  useEffect(() => {
+    if (refreshSignal === lastSignal.current) return
+    lastSignal.current = refreshSignal
+    void refresh(false)
+  }, [refreshSignal, refresh])
+
   const models = (() => {
     const catalog = catalogs.find((entry) => entry.provider === provider)
     const ids = catalog?.models.map((entry) => entry.id) ?? []
@@ -267,6 +313,8 @@ export function NativeKnowledge({
         setStatus((old) =>
           old ? { ...old, captureEnabled: saved.captureEnabled } : old
         )
+        // What the server now reports, rather than only the flag we flipped.
+        await refresh(false)
       } catch (cause) {
         // Someone else saved first: show what is true now, change nothing.
         if (cause instanceof NativeClientError && cause.kind === "conflict") {

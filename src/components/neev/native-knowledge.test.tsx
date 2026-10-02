@@ -520,6 +520,34 @@ it("previews a readable page with source links, withheld citations and page link
   expect(mock.unknown).toEqual([])
 })
 
+it("shows a page a test answer links to, and re-reads it when asked again", async () => {
+  const mock = mockNativeSession(orgSession, pagesRoutes())
+  const view = shell(<NativeKnowledgePages focus={{ id: "p3", nonce: 1 }} />)
+  expect(await screen.findByText("Gamma body")).toBeVisible()
+  const reads = () =>
+    mock.fetcher.mock.calls.filter(
+      ([path]) => path === "/api/neev/knowledge/pages/p3"
+    ).length
+  const before = reads()
+  view.rerender(
+    <NativeTestRoot>
+      <NativeSuspendedSurface hidden={false}>
+        <NativeKnowledgePages focus={{ id: "p3", nonce: 2 }} />
+      </NativeSuspendedSurface>
+    </NativeTestRoot>
+  )
+  await waitFor(() => expect(reads()).toBe(before + 1))
+})
+
+it("shows a linked page as withheld if it has been withheld since the answer", async () => {
+  mockNativeSession(orgSession, pagesRoutes())
+  shell(<NativeKnowledgePages focus={{ id: "p1", nonce: 1 }} />)
+  expect(
+    await screen.findByText("Withheld: 1 source is no longer shared")
+  ).toBeVisible()
+  expect(screen.queryByRole("article")).not.toBeInTheDocument()
+})
+
 it("keeps the log collapsed, and loads earlier entries from the last one shown", async () => {
   mockNativeSession(orgSession, pagesRoutes())
   shell(<NativeKnowledgePages />)
@@ -1081,4 +1109,175 @@ it("clears a page error once the page reads again", async () => {
   await user.click(gamma)
   expect(await screen.findByText("Gamma body")).toBeVisible()
   expect(screen.queryByRole("alert")).toBeNull()
+})
+
+// ---------------------------------------------------------------------------
+// Live QA (2026-10-02): capture enabled, the server captured 3 sources, and
+// Status said "Captured 0" until the section was reopened.
+
+/** The number under a status label, e.g. "Captured". */
+function stat(label: string) {
+  const term = screen.getByText(label, { selector: "dt" })
+  return term.nextElementSibling?.textContent
+}
+
+/** Advance only the poll clock, `ms` at a time, flushing after each step. */
+async function advance(ms: number) {
+  await act(async () => {
+    vi.advanceTimersByTime(ms)
+  })
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  })
+}
+
+it("follows capture as it catches up, then stops asking", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+  let reads = 0
+  mockNativeSession(orgSession, {
+    "GET /api/neev/knowledge/status": () => {
+      reads += 1
+      return json(
+        status({
+          captureEnabled: true,
+          eligible: 3,
+          captured: reads >= 2 ? 3 : 0,
+        })
+      )
+    },
+    "GET /api/neev/knowledge/settings": () =>
+      json({ captureEnabled: true, revision: 4 }),
+    "GET /api/neev/agent/connections": connections,
+  })
+  shell(<NativeKnowledge />)
+  await screen.findByText("Captured", { selector: "dt" })
+  expect(stat("Captured")).toBe("0")
+  await tickUntil(() => expect(stat("Captured")).toBe("3"))
+  // Caught up: no more reads, however long the panel stays open.
+  const settled = reads
+  for (let step = 0; step < 4; step += 1) await advance(30_000)
+  expect(reads).toBe(settled)
+})
+
+it("does not poll when capture is off, or caught up with only a paused job", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+  let reads = 0
+  let current = status({ captureEnabled: false, eligible: 3, captured: 0 })
+  mockNativeSession(orgSession, {
+    "GET /api/neev/knowledge/status": () => {
+      reads += 1
+      return json(current)
+    },
+    "GET /api/neev/knowledge/settings": () =>
+      json({ captureEnabled: false, revision: 4 }),
+    "GET /api/neev/agent/connections": connections,
+  })
+  const view = shell(<NativeKnowledge />)
+  await screen.findByText("Captured", { selector: "dt" })
+  for (let step = 0; step < 4; step += 1) await advance(30_000)
+  expect(reads).toBe(1)
+  view.unmount()
+
+  reads = 0
+  current = status({
+    captureEnabled: true,
+    eligible: 3,
+    captured: 3,
+    job: job({ state: "paused", pauseReason: "manual" }),
+  })
+  shell(<NativeKnowledge />)
+  await screen.findByRole("button", { name: "Resume" })
+  for (let step = 0; step < 4; step += 1) await advance(30_000)
+  expect(reads).toBe(1)
+})
+
+it("stops following capture once every missing source is a known failure", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+  let reads = 0
+  mockNativeSession(orgSession, {
+    "GET /api/neev/knowledge/status": () => {
+      reads += 1
+      // 1 captured + 1 too large + 1 failed + 1 without an engine = 4 of 4.
+      return json(
+        status({
+          captureEnabled: true,
+          eligible: 4,
+          captured: 1,
+          sourceProblems: { tooLarge: 1, engineUnavailable: 1, failed: 1 },
+        })
+      )
+    },
+    "GET /api/neev/knowledge/settings": () =>
+      json({ captureEnabled: true, revision: 4 }),
+    "GET /api/neev/agent/connections": connections,
+  })
+  shell(<NativeKnowledge />)
+  await screen.findByText("Captured", { selector: "dt" })
+  for (let step = 0; step < 4; step += 1) await advance(30_000)
+  expect(reads).toBe(1)
+})
+
+it("re-reads status right after capture is switched on", async () => {
+  let reads = 0
+  mockNativeSession(orgSession, {
+    "GET /api/neev/knowledge/status": () => {
+      reads += 1
+      return json(
+        status({
+          captureEnabled: reads > 1,
+          eligible: 3,
+          captured: reads > 1 ? 1 : 0,
+        })
+      )
+    },
+    "GET /api/neev/knowledge/settings": () =>
+      json({ captureEnabled: false, revision: 3 }),
+    "PUT /api/neev/knowledge/settings": () =>
+      json({ captureEnabled: true, revision: 4 }),
+    "GET /api/neev/agent/connections": connections,
+  })
+  shell(<NativeKnowledge />)
+  await userEvent
+    .setup()
+    .click(
+      await screen.findByRole("switch", { name: "Capture shared knowledge" })
+    )
+  await waitFor(() => expect(stat("Captured")).toBe("1"))
+  expect(reads).toBe(2)
+})
+
+it("re-reads status when asked to refresh", async () => {
+  let reads = 0
+  mockNativeSession(orgSession, {
+    "GET /api/neev/knowledge/status": () => {
+      reads += 1
+      return json(status({ captured: reads > 1 ? 3 : 0 }))
+    },
+    "GET /api/neev/knowledge/settings": () =>
+      json({ captureEnabled: false, revision: 3 }),
+    "GET /api/neev/agent/connections": connections,
+  })
+  const tree = (signal: number) => (
+    <NativeTestRoot>
+      <NativeSuspendedSurface hidden={false}>
+        <NativeKnowledge refreshSignal={signal} />
+      </NativeSuspendedSurface>
+    </NativeTestRoot>
+  )
+  const view = render(tree(0))
+  await screen.findByText("Captured", { selector: "dt" })
+  expect(reads).toBe(1)
+  view.rerender(tree(1))
+  await waitFor(() => expect(stat("Captured")).toBe("3"))
+  expect(reads).toBe(2)
+})
+
+it("asks for a status refresh when the pages are refreshed", async () => {
+  const refreshed = vi.fn()
+  mockNativeSession(orgSession, pagesRoutes())
+  shell(<NativeKnowledgePages onRefresh={refreshed} />)
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: "Refresh" }))
+  expect(refreshed).toHaveBeenCalledTimes(1)
 })

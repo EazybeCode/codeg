@@ -196,6 +196,9 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             "/api/neev/knowledge/uncovered/reset",
             post(knowledge::reset_uncovered),
         )
+        .route("/api/neev/knowledge/ask", post(knowledge::start_ask))
+        .route("/api/neev/knowledge/ask/{id}", get(knowledge::get_ask))
+        .route("/api/neev/knowledge/ask/{id}/stop", post(knowledge::stop_ask))
         .route("/api/neev/mentions", get(content::list_mentions))
         .route("/api/neev/mentions/read", post(content::read_mentions))
         .route(

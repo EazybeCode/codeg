@@ -27,6 +27,7 @@ import { NativeAgentConnectionsPanel } from "./native-agent-connections"
 import { NativeLibrary } from "./native-library"
 import { NativeJoinCode } from "./native-join-code"
 import { NativeKnowledge } from "./native-knowledge"
+import { NativeKnowledgeAsk } from "./native-knowledge-ask"
 import { NativeKnowledgePages } from "./native-knowledge-pages"
 
 type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
@@ -102,6 +103,13 @@ function SettingsContent() {
   )
   // Bumped when a knowledge job may have written or withheld pages.
   const [knowledgeVersion, setKnowledgeVersion] = useState(0)
+  // Bumped by the pages' Refresh, so the status counters refresh with them.
+  const [knowledgeRefresh, setKnowledgeRefresh] = useState(0)
+  // A test answer's saved page, shown in the pages view.
+  const [knowledgeFocus, setKnowledgeFocus] = useState<{
+    id: string
+    nonce: number
+  } | null>(null)
   const opener = useRef<HTMLElement | null>(null),
     receipt = useRef<{ digest: string; id: string } | null>(null)
   const tabs = useRef(new Map<Section, HTMLButtonElement | null>())
@@ -640,10 +648,22 @@ function SettingsContent() {
                     onPagesChanged={() =>
                       setKnowledgeVersion((value) => value + 1)
                     }
+                    refreshSignal={knowledgeRefresh}
+                  />
+                  <NativeKnowledgeAsk
+                    key={`a-${organizationId}`}
+                    onOpenPage={(id) =>
+                      setKnowledgeFocus((old) => ({
+                        id,
+                        nonce: (old?.nonce ?? 0) + 1,
+                      }))
+                    }
                   />
                   <NativeKnowledgePages
                     key={`p-${organizationId}`}
                     version={knowledgeVersion}
+                    focus={knowledgeFocus}
+                    onRefresh={() => setKnowledgeRefresh((value) => value + 1)}
                   />
                 </>
               ) : null

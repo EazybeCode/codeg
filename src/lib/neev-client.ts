@@ -274,8 +274,10 @@ export async function nativeRequest(
         503: "unavailable",
       }
       const errorBody = await response.json().catch(() => null)
-      const code =
-        errorBody?.code === "content_quota" ? "content_quota" : undefined
+      // Only codes a caller acts on; anything else stays opaque.
+      const code = (
+        ["content_quota", "credential_missing", "ask_busy"] as const
+      ).find((known) => known === errorBody?.code)
       throw new NativeClientError(
         kinds[response.status] ?? "unavailable",
         response.status,

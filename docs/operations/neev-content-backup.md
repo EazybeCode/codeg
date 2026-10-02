@@ -164,12 +164,51 @@ attachments.
    does not remap schema names; prefer a new database when backing up an existing
    differently named schema. Do not use `--clean`, restore over the source, or
    silently import into a different database/schema than the one being verified.
-3. Import using `pg_restore --dbname RESTORE_DATABASE_NAME --exit-on-error --no-owner --no-privileges metadata.dump`, with the
-   restored connection supplied through separate `PGHOST`, `PGPORT`, `PGDATABASE`
-   (database name only), `PGUSER`, and any password/TLS settings in its environment.
-   A URL assigned directly to `PGDATABASE` is not expanded by libpq.
-   `--dbname` contains only the isolated database name and is required to perform
-   an import; without it, pg_restore defaults to emitting SQL instead.
+3. Import. Check the versions first. On the production host the backup's
+   `metadata.dump` is written by the host `pg_dump` **18.x** (custom archive
+   format 1.16), while the Neev database servers run **PostgreSQL 16**. Two
+   things follow, both verified on 2026-10-02:
+   - The PG 16 `pg_restore` cannot read the archive (`unsupported version
+     (1.16) in file header`).
+   - A direct `pg_restore` 18 `--dbname … --exit-on-error` into a PG 16 server
+     fails on `SET transaction_timeout = 0;`. That parameter exists only from
+     PG 17.
+
+   Every fresh PG 16 database also already has an empty `public` schema, and
+   the dump creates `public` itself. Use this procedure for an 18-on-16
+   restore. Run it against the **fresh isolated** database only.
+
+   ```sh
+   # a) render SQL with the dump's own major (no server connection)
+   /usr/bin/pg_restore --no-owner --no-privileges --file=restore.sql metadata.dump
+   # b) the ONLY PG17+ statement in the rendered SQL; expect exactly 1 line removed
+   test "$(grep -cx 'SET transaction_timeout = 0;' restore.sql)" = 1
+   grep -vx 'SET transaction_timeout = 0;' restore.sql > restore-16.sql
+   # c) the fresh isolated database: drop its default, empty public schema
+   psql -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public'          # PGDATABASE = the isolated name
+   # d) apply atomically with psql >= 16.10 (understands the \restrict lines)
+   psql -q -v ON_ERROR_STOP=1 --single-transaction -f restore-16.sql
+   ```
+
+   The restored connection is supplied through separate `PGHOST`, `PGPORT`,
+   `PGDATABASE` (database name only), `PGUSER`, and any password/TLS settings in
+   the environment. A URL assigned directly to `PGDATABASE` is not expanded by
+   libpq. Keep `restore.sql` and `restore-16.sql` under 0600 in a private
+   directory, and delete them afterwards. They contain the full database.
+
+   When the dump and server majors match, `pg_restore --dbname
+   RESTORE_DATABASE_NAME --exit-on-error --no-owner --no-privileges
+   metadata.dump` still works, after dropping the fresh database's empty `public`
+   if the dump creates it. `--dbname` contains only the isolated database name;
+   without it, pg_restore emits SQL instead.
+
+   The release tool
+   `.context/org-knowledge/release-prep/server/host-ops.py restore-proof` runs
+   exactly steps a–d. It did so into a network-less PG 16.15
+   `neev_restore_<32hex>` on 2026-10-02, then `restore-blobs`, then
+   `neev-content-verify`, which returned rc 0 at schema 22. The nightly
+   orchestrator canary only list-parses the dump with `pg_restore
+   --file=/dev/null`, so it does not exercise this import.
    Do not start the application or call its database initializer/migrator.
 4. Rebuild a fresh document root, running as the user that will own it (the
    application user):

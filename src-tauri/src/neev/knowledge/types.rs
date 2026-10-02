@@ -242,6 +242,10 @@ pub(crate) enum KnowledgeError {
     JobActive,
     #[error("no connected credential for this provider")]
     CredentialMissing,
+    #[error("this admin already has a running ask")]
+    AskBusy,
+    #[error("too many asks are running")]
+    AskLimited,
 }
 
 impl KnowledgeError {

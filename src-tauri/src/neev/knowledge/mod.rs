@@ -7,10 +7,13 @@
 //!   markdown pages by running batches on the starting admin's OWN connected
 //!   agent, through ordinary agent turns with `RunPurpose::Knowledge`.
 //! - `status` + `export` serve the admin-only views.
+//! - `ask` answers an admin's test question from the readable pages, in
+//!   memory only, on their own connected agent.
 //!
 //! Saved only: nothing here publishes to members or feeds any agent context.
 
 pub(crate) mod access;
+pub(crate) mod ask;
 pub(crate) mod capture;
 pub(crate) mod compile;
 pub(crate) mod export;
@@ -24,6 +27,8 @@ pub(crate) mod types;
 
 #[cfg(test)]
 mod access_tests;
+#[cfg(test)]
+mod ask_tests;
 #[cfg(test)]
 mod backup_verify_tests;
 #[cfg(test)]
