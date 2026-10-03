@@ -145,6 +145,10 @@ struct TurnPageDto {
 struct StartedTurnDto {
     turn: TurnDto,
     run_id: String,
+    /// Present only for an Auto turn: what was chosen and why. Omitted
+    /// otherwise, so a client that never asks for Auto reads the same body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<routing::RouteDto>,
 }
 
 #[derive(Serialize)]
@@ -254,6 +258,16 @@ struct StartTurnInput {
     /// so a client that predates attachments posts the body it always did.
     #[serde(default)]
     attachment_keys: Vec<String>,
+    /// Let the configured router choose this turn's model and effort within
+    /// the session's provider. Defaulted: absent means the session's own
+    /// settings, exactly as before.
+    #[serde(default)]
+    auto: bool,
+    /// A new chat's Auto decision (`POST /api/neev/agent/route`), presented by
+    /// its first turn so that turn is not routed a second time. Honoured once,
+    /// only for its own caller, and only if the session runs what was decided.
+    #[serde(default)]
+    route_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -575,6 +589,25 @@ pub(super) async fn start_turn(
     // Context is gathered BEFORE the new turn exists so it cannot include
     // itself, and only completed turns contribute (§ `conversation_prompt`).
     let history = sessions::recent_turns(&state, &actor, &session_id).await?;
+    // Decided BEFORE the turn exists, so it can never change the model under a
+    // running tool loop, race a steer or a stop, or start a second run: the
+    // one-live-turn rule below still arbitrates.
+    let route = if input.auto {
+        Some(routing::route_turn(&state, &actor, &session, &prompt, keys.len(), &history).await)
+    } else {
+        input
+            .route_id
+            .as_deref()
+            .filter(|id| id.len() <= 64)
+            .and_then(|id| routing::take_ticket(&state, &actor, id, &session))
+    };
+    // Supervision is resolved before the turn exists, too: a supervisor that
+    // cannot be had makes an ordinary turn, never an error.
+    let (supervision_plan, supervision_view) =
+        routing::supervision_for(&state, &actor, route.as_ref()).await;
+    let mut route_view = route
+        .as_ref()
+        .map(|route| routing::route_dto(route).with_supervision(supervision_view.clone()));
     // The whole session, as files the provider can open: the bounded replay
     // above is orientation, and a reader whose earlier message was longer than
     // the replay's per-message budget is entitled to have the agent able to read
@@ -607,9 +640,40 @@ pub(super) async fn start_turn(
 
     // A saved-session turn carries no request id, so this caller is always
     // its creator. The references commit with the turn row.
-    let (turn, _created) =
-        sessions::begin_turn_with_attachments(&state, &actor, &session_id, &prompt, None, &keys)
-            .await?;
+    let routed = route
+        .as_ref()
+        .filter(|route| route.outcome == crate::neev::agents::routing::Outcome::Routed);
+    let (turn, _created) = match routed {
+        Some(route) => {
+            sessions::begin_routed_turn(
+                &state,
+                &actor,
+                &session_id,
+                &prompt,
+                &keys,
+                &sessions::RoutedSettings {
+                    model: route.selection.model.clone(),
+                    effort: route.selection.effort.clone(),
+                    fast: route.selection.fast,
+                    expected_revision: session.revision,
+                },
+            )
+            .await?
+        }
+        None => {
+            sessions::begin_turn_with_attachments(&state, &actor, &session_id, &prompt, None, &keys)
+                .await?
+        }
+    };
+    // What runs: the routed selection, or the session's own settings.
+    let (run_model, run_effort, run_fast) = match routed {
+        Some(route) => (
+            route.selection.model.clone(),
+            route.selection.effort.clone(),
+            route.selection.fast,
+        ),
+        None => (session.model.clone(), session.effort.clone(), session.fast),
+    };
     // The run is described by STORAGE, not by the request: the references just
     // committed are read back and required to be the set that was resolved. A
     // mismatch settles the turn instead of launching against the wrong files.
@@ -618,6 +682,7 @@ pub(super) async fn start_turn(
         runs::settle_refusal(&state, &turn.run_id, "unavailable").await?;
         let settled = sessions::turn_by_run(&state, &actor, &turn.run_id).await?;
         let mut response = private_json(StartedTurnDto {
+                route: route_view.take(),
             run_id: settled.run_id.clone(),
             // Immediately settled turns have no steering inputs
             turn: turn_dto(settled, attachment_dtos(carried), Vec::new()),
@@ -645,14 +710,14 @@ pub(super) async fn start_turn(
         org_id: actor.org_id,
         chat_id: session_id.clone(),
         provider: session.provider.clone(),
-        model: session.model.clone(),
+        model: run_model,
         prompt: composed,
         credential_handle,
         briefing,
         // The session's stored choice, re-applied on every turn — which is what
         // makes it a setting rather than something to re-pick each time.
-        effort: session.effort.clone(),
-        fast: session.fast,
+        effort: run_effort,
+        fast: run_fast,
         // The bytes behind the references this turn committed. The runtime
         // stages them inside its own working directory; nothing here guesses a
         // path, and a run that cannot stage them fails rather than mentioning
@@ -666,6 +731,31 @@ pub(super) async fn start_turn(
         library_items,
         min_free_lanes: 1,
     };
+    if !supervision_plan.is_empty() {
+        // The supervised driver launches the executor itself, after the plan
+        // and only if no Stop arrived; one row, one run id, one stream.
+        let request_text = turn.prompt.clone();
+        runs::start_supervised(
+            state.clone(),
+            turn.run_id.clone(),
+            actor.clone(),
+            session_id,
+            turn.id.clone(),
+            runs::supervision::SupervisedStart {
+                executor: run_request,
+                request_text,
+                plan: supervision_plan,
+            },
+            runs::supervision::SupervisionRuntimes::shared(state.agents.clone()),
+        );
+        let mut response = private_json(StartedTurnDto {
+            route: route_view.take(),
+            run_id: turn.run_id.clone(),
+            turn: turn_dto(turn, attachment_dtos(carried), Vec::new()),
+        });
+        *response.status_mut() = StatusCode::CREATED;
+        return Ok(response);
+    }
     match state.agents.run(run_request).await {
         Ok(handle) => {
             runs::start(
@@ -680,6 +770,7 @@ pub(super) async fn start_turn(
             );
             // Just-started turns have no steering inputs yet
             let mut response = private_json(StartedTurnDto {
+                route: route_view.take(),
                 run_id: turn.run_id.clone(),
                 turn: turn_dto(turn, attachment_dtos(carried), Vec::new()),
             });
@@ -695,6 +786,7 @@ pub(super) async fn start_turn(
             let settled = sessions::turn_by_run(&state, &actor, &turn.run_id).await?;
             // Immediately settled turns have no steering inputs
             let mut response = private_json(StartedTurnDto {
+                route: route_view.take(),
                 run_id: settled.run_id.clone(),
                 turn: turn_dto(settled, attachment_dtos(carried), Vec::new()),
             });
@@ -1227,7 +1319,10 @@ fn started_event_for(run_id: &str, attachment: &runs::Attachment) -> Event {
         "type": "started",
         "runId": run_id,
         "turnId": attachment.run.turn_id,
-        "supportsSteering": attachment.run.supports_steering,
+        // A supervised run can take steering only while its executor runs on a
+        // transport that supports it; planning and review never can.
+        "supportsSteering": attachment.run.supports_steering
+            || attachment.run.steering_available(),
     }))
 }
 
@@ -2588,6 +2683,11 @@ async fn load_library_items(
 #[cfg(test)]
 #[path = "agent_sessions_tests.rs"]
 mod agent_sessions_tests;
+
+// Auto model routing lives beside this module and reuses its private helpers.
+#[path = "agent_routing.rs"]
+mod routing;
+pub(super) use routing::{route_new_chat, routing_status};
 
 // Retrying a failed run lives beside this module and reuses its private helpers.
 #[path = "agent_retry.rs"]

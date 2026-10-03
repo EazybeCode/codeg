@@ -255,6 +255,10 @@ pub(crate) async fn complete(
     account: VerifiedSubscription,
 ) -> Result<(), AgentError> {
     let (tx, connection, attempt, now) = lock_ticket(state, actor, ticket).await?;
+    // A new sign-in is a different account: nothing observed before applies.
+    state
+        .agent_usage
+        .forget(actor.org_id, actor.identity.user_id, ticket.provider.name());
     if !store::safe_label(&account.account_label) || !store::simple_id(&account.storage_handle) {
         return Err(AgentError::InvalidInput);
     }

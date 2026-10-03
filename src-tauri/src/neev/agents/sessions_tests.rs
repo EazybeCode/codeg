@@ -818,3 +818,105 @@ async fn steering_history_survives_into_the_next_provider_prompt() {
     let stored = turns(&h.state, &h.owner, &session.id, None).await.unwrap();
     assert_eq!(stored.items[0].response, "A😀B");
 }
+
+mod interrupted_review {
+    use super::*;
+    use crate::neev::agents::activity::ActivityLog;
+    use crate::neev::agents::runs::supervision::{
+        plan_pending_step, review_pending_step, Supervisor, REVIEW_STEP_ID,
+    };
+
+    fn claude() -> Supervisor {
+        Supervisor {
+            provider: "claude".into(),
+            model: "opus".into(),
+            effort: Some("high".into()),
+            credential_handle: Some("vol-owner".into()),
+        }
+    }
+
+    fn trace(step: Option<crate::neev::agents::activity::ActivityDraft>) -> Option<String> {
+        let mut log = ActivityLog::with_supervision_reserve();
+        if let Some(step) = step {
+            log.push_supervision(step, 4);
+        }
+        log.stored()
+    }
+
+    async fn running_with(h: &Harness, session: &AgentSession, activity: Option<String>) -> String {
+        let (turn, _) = begin_turn(&h.state, &h.owner, &session.id, "task", None)
+            .await
+            .unwrap();
+        db::execute(
+            &h.database,
+            "UPDATE neev_agent_turns SET response=$1,activity=$2 WHERE run_id=$3",
+            vec!["the finished answer".into(), activity.into(), turn.run_id.clone().into()],
+        )
+        .await
+        .unwrap();
+        turn.run_id
+    }
+
+    #[tokio::test]
+    async fn a_crash_during_review_keeps_the_completed_answer_in_history() {
+        let h = Harness::new().await;
+        let session = h.session().await;
+        running_with(&h, &session, trace(Some(review_pending_step(&claude())))).await;
+
+        assert_eq!(reconcile_interrupted(&h.database, NOW + 60).await.unwrap(), 1);
+        let page = turns(&h.state, &h.owner, &session.id, None).await.unwrap();
+        let turn = &page.items[0];
+        assert_eq!(turn.status, TurnStatus::Completed);
+        assert_eq!(turn.error_code, None);
+        assert_eq!(turn.response, "the finished answer");
+        let review = turn
+            .activity
+            .iter()
+            .find(|item| item.id == REVIEW_STEP_ID)
+            .expect("the review step is kept");
+        let shown = serde_json::to_string(&review).unwrap();
+        assert!(shown.contains("unavailable: interrupted"), "{shown}");
+        // The completed answer is replayed as context for the next turn.
+        let history = recent_turns(&h.state, &h.owner, &session.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].response, "the finished answer");
+        // Idempotent.
+        assert_eq!(reconcile_interrupted(&h.database, NOW + 61).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_crash_while_planning_or_executing_is_still_an_interruption() {
+        for activity in [trace(Some(plan_pending_step(&claude()))), trace(None), None] {
+            let h = Harness::new().await;
+            let session = h.session().await;
+            running_with(&h, &session, activity).await;
+            assert_eq!(reconcile_interrupted(&h.database, NOW + 60).await.unwrap(), 1);
+            let page = turns(&h.state, &h.owner, &session.id, None).await.unwrap();
+            assert_eq!(page.items[0].status, TurnStatus::Failed);
+            assert_eq!(page.items[0].error_code.as_deref(), Some("interrupted"));
+            assert_eq!(page.items[0].response, "the finished answer");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_settled_turn_is_never_rewritten_even_if_its_trace_mentions_a_pending_review() {
+        let h = Harness::new().await;
+        let session = h.session().await;
+        let pending = trace(Some(review_pending_step(&claude())));
+        let run_id = running_with(&h, &session, pending.clone()).await;
+        finish(
+            &h.database,
+            &run_id,
+            "the finished answer",
+            pending.as_deref(),
+            TurnStatus::Canceled,
+            Some("canceled"),
+            NOW + 5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reconcile_interrupted(&h.database, NOW + 60).await.unwrap(), 0);
+        let page = turns(&h.state, &h.owner, &session.id, None).await.unwrap();
+        assert_eq!(page.items[0].status, TurnStatus::Canceled);
+    }
+}

@@ -71,6 +71,16 @@ def _parse(argv):
     parser.add_argument(
         "--enable-steering", action="store_true", default=False, dest="enable_steering"
     )
+    # `tool-free` is the supervisor seam (planner/reviewer): the provider CLI is
+    # started with its tool set, MCP, skills and hooks switched off, and any
+    # shape this launcher cannot prove that for is refused. `choices` is the
+    # fail-closed part: an unknown policy is an argparse error, never a turn.
+    parser.add_argument(
+        "--tool-policy",
+        choices=("standard", "tool-free"),
+        default="standard",
+        dest="tool_policy",
+    )
     # Everything after `--` is the provider argv.
     parser.add_argument("provider_argv", nargs=argparse.REMAINDER)
     return parser.parse_args(argv)
@@ -382,6 +392,43 @@ def claude_stream_argv(provider, provider_argv, adapter=CLAUDE_ADAPTER, python=s
     return [python, "-I", adapter] + mapped + ["--", prompt]
 
 
+def tool_free_argv(provider, provider_argv, adapter=CLAUDE_ADAPTER, python=sandbox.PYTHON):
+    """Pure: a tool-free supervisor turn as the Claude adapter's argv, or SandboxError.
+
+    Only Claude is supported, because only Claude's CLI can be told to declare
+    NO tools (`--tools ""`, verified in `claude --help`); the adapter adds that,
+    `--strict-mcp-config` with no config, `--safe-mode` (no hooks, plugins,
+    skills or CLAUDE.md) and `dontAsk`, and refuses the turn if the CLI's own
+    `system/init` still reports a tool or an MCP server.
+
+    Codex is declined in both transports: the pinned app-server has no
+    "no tools" thread parameter, its models are `code_mode_only`, and a
+    `read-only` sandbox would only make tools FAIL inside ours (no bwrap), not
+    stop them being offered or run. ACP agents expose no such switch either.
+
+    Unlike `claude_stream_argv`, nothing falls back to the raw argv: an option
+    this table does not know (`--mcp-config` included) is a refusal, because a
+    raw `claude -p` would run with every tool it has.
+    """
+    if provider != "claude":
+        raise sandbox.SandboxError("unsupported")
+    argv = list(provider_argv)
+    if len(argv) < 3 or argv[1] != "-p" or not argv[2]:
+        raise sandbox.SandboxError("invalid")
+    binary, prompt, options = argv[0], argv[2], argv[3:]
+    walked = _walk_options(options, _CLAUDE_VALUE_OPTIONS, _CLAUDE_FLAG_OPTIONS)
+    if walked is None:
+        raise sandbox.SandboxError("invalid")
+    mapped = ["--claude", binary, "--tool-free"]
+    for option, at in walked:
+        if option == "--include-partial-messages":
+            mapped.append(option)
+        elif option in ("--model", "--effort", _CLAUDE_SYSTEM_PROMPT, "--settings"):
+            mapped += [option, options[at]]
+        # --verbose and --output-format are always set by the adapter itself.
+    return [python, "-I", adapter] + mapped + ["--", prompt]
+
+
 _ACP_MAX_IMAGES = 8
 
 
@@ -644,9 +691,18 @@ def build_spec(args, style=None):
         raise sandbox.SandboxError("invalid")
     style = load_response_style() if style is None else style
     enable_steering = getattr(args, "enable_steering", False)
-    if args.provider not in credentials.ACP_PROVIDERS:
+    tool_free = getattr(args, "tool_policy", "standard") == "tool-free"
+    if tool_free:
+        # No steering (a supervisor turn is one prompt) and no reader style
+        # policy (its output is parsed by the server, not read by a person).
+        if enable_steering:
+            raise sandbox.SandboxError("invalid")
+        provider_argv = tool_free_argv(args.provider, provider_argv)
+    elif args.provider not in credentials.ACP_PROVIDERS:
         provider_argv = response_style_argv(args.provider, provider_argv, style)
-    if args.provider in credentials.ACP_PROVIDERS:
+    if tool_free:
+        pass  # already the adapter's argv; none of the routes below apply
+    elif args.provider in credentials.ACP_PROVIDERS:
         # ACP runs have no steering; a runtime asking for it is misconfigured.
         if enable_steering:
             raise sandbox.SandboxError("invalid")

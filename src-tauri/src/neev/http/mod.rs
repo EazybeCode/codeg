@@ -264,6 +264,14 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/neev/join/preview", post(org::preview_join))
         .route("/api/neev/join", post(org::accept_join))
         .route("/api/neev/agent/run", post(agent::run))
+        .route(
+            "/api/neev/agent/routing",
+            get(agent_sessions::routing_status),
+        )
+        .route(
+            "/api/neev/agent/route",
+            post(agent_sessions::route_new_chat),
+        )
         .route("/api/neev/agent/cancel", post(agent::cancel))
         // Conductor-style agent sessions (spec §5). The one-shot `run`/`cancel`
         // routes above stay as the ad-hoc team-chat panel path; these own the

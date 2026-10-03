@@ -348,6 +348,10 @@ pub(crate) async fn disconnect(
     request_key: &str,
 ) -> Result<MutationReceipt, AgentError> {
     store::request_key(request_key)?;
+    // Usage observed under this sign-in never describes the next one.
+    state
+        .agent_usage
+        .forget(actor.org_id, actor.identity.user_id, provider.name());
     let tx = store::authorized_transaction(state, actor).await?;
     let connection = store::lock_connection(&tx, actor, provider)
         .await?

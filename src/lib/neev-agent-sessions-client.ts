@@ -181,6 +181,36 @@ export type NeevActivityState =
   | "library_tool_skipped"
   /** The provider's own failure: `detail` is its redacted, bounded message. */
   | "error"
+  /**
+   * Supervision of a complex Auto turn: a tool-free plan before the agent
+   * runs and a tool-free review of its reply after. Each step is revised in
+   * place (same `seq`): `plan_pending` becomes `plan`, `review_pending`
+   * becomes `review`. `detail` is plain text and always says what was and was
+   * not reviewed — a review is a model's reading, never a verification.
+   */
+  | "plan_pending"
+  | "plan"
+  | "review_pending"
+  | "review"
+
+/** How a supervision step came out. */
+export type NeevSupervisionVerdict =
+  | "running"
+  | "ready"
+  | "unavailable"
+  | "pass"
+  | "concerns"
+  | "fail"
+
+const SUPERVISION_VERDICTS: readonly NeevSupervisionVerdict[] = [
+  "running",
+  "ready",
+  "unavailable",
+  "pass",
+  "concerns",
+  "fail",
+]
+const SUPERVISION_STATES = ["plan_pending", "plan", "review_pending", "review"]
 
 /**
  * What kind of failure an `error` step records. It decides the one action a
@@ -243,6 +273,8 @@ export type NeevActivityItem =
       detail: string | null
       /** Only on `state: "error"`, and only from a server that sends it. */
       category?: NeevRunErrorCategory | null
+      /** Only on a supervision state. */
+      verdict?: NeevSupervisionVerdict
     })
 
 /**
@@ -295,6 +327,145 @@ export interface NeevAgentTurn {
 export interface NeevStartedTurn {
   turn: NeevAgentTurn
   runId: string
+  /** Only for an Auto turn: what ran and why. `null` for a manual turn. */
+  route: NeevRoute | null
+}
+
+/** How a routing decision came out. */
+export type NeevRouteOutcome = "routed" | "kept" | "fallback"
+
+/**
+ * What an Auto decision selected. `kept` = a brief follow-up stayed on the
+ * conversation's selection; `fallback` = the manual selection ran, for
+ * `reason`. Nothing here is a claim of supervision: it says what ran.
+ */
+export interface NeevRoute {
+  provider: NeevAgentProvider
+  model: string
+  label: string | null
+  effort: NeevEffort | null
+  fast: boolean
+  outcome: NeevRouteOutcome
+  reason: string | null
+  router: string | null
+  /** A new chat's decision, for its first turn to present once. */
+  routeId: string | null
+  /** Providers Auto left out because the caller's usage there is spent. */
+  withheld: NeevWithheld[]
+  /** Whether this turn is supervised, or why not; `null` when not needed. */
+  supervision: NeevRouteSupervision | null
+}
+
+export interface NeevWithheld {
+  provider: NeevAgentProvider
+  availability: string
+  /** Unix seconds the hold ends, when known. */
+  until: number | null
+}
+
+export interface NeevRouteSupervision {
+  state: "active" | "unavailable"
+  phases: "review" | "plan_review" | null
+  model: string | null
+  reason: string | null
+}
+
+function routeExtras(object: Record<string, unknown>): {
+  routeId: string | null
+  withheld: NeevWithheld[]
+  supervision: NeevRouteSupervision | null
+} {
+  let routeId: string | null = null
+  if (object.routeId !== undefined) {
+    routeId = text(object.routeId)
+    if (!UUID.test(routeId)) return invalid()
+  }
+  const withheld: NeevWithheld[] = []
+  if (object.withheld !== undefined) {
+    if (!Array.isArray(object.withheld) || object.withheld.length > 8)
+      return invalid()
+    for (const entry of object.withheld) {
+      const row = exact(entry, ["provider", "availability", "until"])
+      const provider = text(row.provider)
+      if (!(NEEV_AGENT_PROVIDERS as readonly string[]).includes(provider))
+        return invalid()
+      const availability = nullableCode(row.availability)
+      if (availability === null) return invalid()
+      withheld.push({
+        provider: provider as NeevAgentProvider,
+        availability,
+        until: nullableTimestamp(row.until),
+      })
+    }
+  }
+  let supervision: NeevRouteSupervision | null = null
+  if (object.supervision !== undefined) {
+    const row = exact(object.supervision, [
+      "state",
+      "phases",
+      "model",
+      "reason",
+    ])
+    if (row.state !== "active" && row.state !== "unavailable") return invalid()
+    const phases = row.phases
+    if (phases !== null && phases !== "review" && phases !== "plan_review")
+      return invalid()
+    const model = row.model === null ? null : text(row.model)
+    if (model !== null && !isSupportedModel(model)) return invalid()
+    const reason = nullableCode(row.reason)
+    // Active names its phases and model; unavailable says why. Never both.
+    if (
+      (row.state === "active") !==
+      (phases !== null && model !== null && reason === null)
+    )
+      return invalid()
+    supervision = { state: row.state, phases, model, reason }
+  }
+  return { routeId, withheld, supervision }
+}
+
+const ROUTE_OUTCOMES: readonly NeevRouteOutcome[] = [
+  "routed",
+  "kept",
+  "fallback",
+]
+
+export function parseRoute(value: unknown): NeevRoute {
+  const object = exact(
+    value,
+    ["provider", "model", "effort", "fast", "outcome", "reason", "router"],
+    ["label", "routeId", "withheld", "supervision"]
+  )
+  const provider = text(object.provider)
+  if (!(NEEV_AGENT_PROVIDERS as readonly string[]).includes(provider))
+    return invalid()
+  const model = text(object.model)
+  if (!isSupportedModel(model)) return invalid()
+  const effort = object.effort === null ? null : object.effort
+  if (effort !== null && !isSupportedEffort(effort)) return invalid()
+  if (typeof object.fast !== "boolean") return invalid()
+  const outcome = text(object.outcome) as NeevRouteOutcome
+  if (!ROUTE_OUTCOMES.includes(outcome)) return invalid()
+  const reason = nullableCode(object.reason)
+  // A fallback always says why; a routed or kept selection never has a reason.
+  if ((outcome === "fallback") !== (reason !== null)) return invalid()
+  const router = nullableCode(object.router)
+  let label: string | null = null
+  if (object.label !== undefined) {
+    label = text(object.label)
+    if (label.length < 1 || label.length > MAX_LABEL) return invalid()
+  }
+  return {
+    provider: provider as NeevAgentProvider,
+    model,
+    label,
+    effort,
+    fast: object.fast,
+    outcome,
+    reason,
+    router,
+    ...routeExtras(object),
+  }
 }
 
 export interface NeevAgentConnection {
@@ -878,6 +1049,10 @@ const ACTIVITY_STATES: readonly NeevActivityState[] = [
   "unsupported",
   "library_tool_skipped",
   "error",
+  "plan_pending",
+  "plan",
+  "review_pending",
+  "review",
 ]
 
 function activityItem(value: unknown): NeevActivityItem | null {
@@ -940,6 +1115,16 @@ function activityItem(value: unknown): NeevActivityItem | null {
             ).includes(item.category)
               ? (item.category as NeevRunErrorCategory)
               : "provider",
+          }
+        : {}),
+      ...(SUPERVISION_STATES.includes(item.state)
+        ? {
+            // An unknown verdict is shown as unavailable, never as a pass.
+            verdict: (SUPERVISION_VERDICTS as readonly unknown[]).includes(
+              item.category
+            )
+              ? (item.category as NeevSupervisionVerdict)
+              : "unavailable",
           }
         : {}),
     }
@@ -1146,13 +1331,16 @@ export function parseAgentTurnPage(value: unknown): NativePage<NeevAgentTurn> {
 }
 
 export function parseStartedTurn(value: unknown): NeevStartedTurn {
-  const object = exact(value, ["turn", "runId"])
+  const object = exact(value, ["turn", "runId"], ["route"])
   const turn = parseAgentTurn(object.turn)
   const id = runId(object.runId)
   // The envelope's run id must be the turn's own, or a reattach would follow a
   // different run than the one just started.
   if (id !== turn.runId) return invalid()
-  return { turn, runId: id }
+  const route = object.route === undefined ? null : parseRoute(object.route)
+  // An Auto turn must have run on what the route says it chose.
+  if (route && route.model !== turn.model) return invalid()
+  return { turn, runId: id, route }
 }
 
 function assertUuid(value: string): void {
@@ -1397,7 +1585,18 @@ export async function startAgentTurn(
    * into its sandbox; nothing is sent as a bare filename, so a key that failed
    * to upload simply is not here and the turn is not claimed to carry it.
    */
-  keys: readonly string[] = []
+  keys: readonly string[] = [],
+  /**
+   * Let the server's router choose this turn's model and effort within the
+   * session's provider. The decision is made before the turn exists, so it
+   * never changes a run already under way.
+   */
+  auto = false,
+  /**
+   * A new chat's decision from `routeNewAgentChat`, presented by its FIRST
+   * turn so that turn is not routed a second time.
+   */
+  routeId: string | null = null
 ): Promise<NeevStartedTurn> {
   assertSessionId(sessionId)
   const attachments = attachmentKeys(keys)
@@ -1415,6 +1614,8 @@ export async function startAgentTurn(
       {
         prompt,
         ...(attachments.length ? { attachmentKeys: attachments } : {}),
+        ...(auto ? { auto: true } : {}),
+        ...(routeId && !auto ? { routeId } : {}),
       },
       csrf,
       signal

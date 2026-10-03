@@ -2343,3 +2343,615 @@ mod direct_signin {
         assert_eq!(exchanges(&state), vec!["start_login"]);
     }
 }
+
+// ---- Auto model routing ----
+
+mod auto_routing {
+    use super::*;
+    use crate::neev::agents::routing::{
+        Decision, DecisionError, DecisionInput, DecisionProvider, Router,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Picks the option the catalogue labels `wanted`, at a high complexity.
+    struct Pick {
+        wanted: &'static str,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl DecisionProvider for Pick {
+        fn name(&self) -> &'static str {
+            "jev"
+        }
+        async fn decide(&self, input: &DecisionInput) -> Result<Decision, DecisionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let option = input
+                .options
+                .iter()
+                .position(|option| option.model == self.wanted)
+                .ok_or(DecisionError::Malformed)?;
+            Ok(Decision {
+                option,
+                confidence: 0.9,
+                complexity: 2.0,
+                complexity_confidence: 0.9,
+            })
+        }
+    }
+
+    async fn routed_fixture(
+        router: Router,
+        log: Arc<std::sync::Mutex<Vec<crate::neev::agents::execution::RunRequest>>>,
+    ) -> Client {
+        let database = h::database().await;
+        let user = h::native_account(&database, "owner", "owner@example.test").await;
+        h::organization(&database, user, "admin").await;
+        let mut server_state = ServerState::new(
+            database.clone(),
+            h::preview_config(),
+            Arc::new(h::TestClock::new(NOW)),
+        )
+        .unwrap();
+        server_state.set_agent_runtime(AgentRuntime::Fake(
+            FakeRuntime::new(vec!["done".to_owned()]).recording(log),
+        ));
+        server_state.set_agent_router(router);
+        let state = Arc::new(server_state);
+        sign_in(&state, &database, user).await
+    }
+
+    fn pick(wanted: &'static str) -> (Router, Arc<Pick>) {
+        let provider = Arc::new(Pick {
+            wanted,
+            calls: AtomicUsize::new(0),
+        });
+        (
+            Router::Ready {
+                provider: provider.clone(),
+                min_confidence: 0.3,
+            },
+            provider,
+        )
+    }
+
+    async fn auto_turn(client: &Client, session: &str, prompt: &str) -> Value {
+        let response = client
+            .post(&format!("/api/neev/agent/sessions/{session}/turns"))
+            .json(&serde_json::json!({ "prompt": prompt, "auto": true }))
+            .await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        response.json::<Value>()
+    }
+
+    #[tokio::test]
+    async fn status_is_off_by_default_and_honest_about_a_missing_key() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = routed_fixture(Router::Off, log.clone()).await;
+        let status = client.get("/api/neev/agent/routing").await.json::<Value>();
+        assert_eq!(status["state"], "off");
+        assert_eq!(status["router"], Value::Null);
+
+        let client =
+            routed_fixture(Router::MissingCredential { router: "jev" }, log).await;
+        let status = client.get("/api/neev/agent/routing").await.json::<Value>();
+        assert_eq!(status["state"], "missing_credential");
+        assert_eq!(status["router"], "jev");
+        assert!(status["maxTaskChars"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn an_auto_turn_runs_and_records_the_routed_model() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (router, picker) = pick("Opus");
+        let client = routed_fixture(router, log.clone()).await;
+        let session = client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started =
+            auto_turn(&client, id, "Redesign the sync engine across three services").await;
+        assert_eq!(started["route"]["outcome"], "routed");
+        assert_eq!(started["route"]["model"], "opus");
+        assert_eq!(started["route"]["effort"], "high");
+        assert_eq!(started["route"]["fast"], false);
+        assert_eq!(started["route"]["router"], "jev");
+        assert_eq!(started["turn"]["model"], "opus");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 1);
+        // The session now says what its latest turn ran on, so a retry and the
+        // next brief follow-up use the same choice.
+        let stored = client
+            .get(&format!("/api/neev/agent/sessions/{id}"))
+            .await
+            .json::<Value>();
+        assert_eq!(stored["model"], "opus");
+        assert_eq!(stored["effort"], "high");
+        let runs = log.lock().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].model, "opus");
+        assert_eq!(runs[0].effort.as_deref(), Some("high"));
+        assert!(!runs[0].fast);
+    }
+
+    #[tokio::test]
+    async fn without_a_router_auto_uses_the_session_settings_and_says_why() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = routed_fixture(Router::MissingCredential { router: "jev" }, log.clone()).await;
+        let session = client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started = auto_turn(&client, id, "Summarise the open pull requests").await;
+        assert_eq!(started["route"]["outcome"], "fallback");
+        assert_eq!(started["route"]["reason"], "missing_credential");
+        assert_eq!(started["route"]["router"], Value::Null);
+        assert_eq!(started["turn"]["model"], "default");
+        let stored = client
+            .get(&format!("/api/neev/agent/sessions/{id}"))
+            .await
+            .json::<Value>();
+        assert_eq!(stored["model"], "default");
+        assert_eq!(log.lock().unwrap()[0].model, "default");
+    }
+
+    #[tokio::test]
+    async fn a_manual_turn_is_untouched_and_carries_no_route() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (router, picker) = pick("Opus");
+        let client = routed_fixture(router, log.clone()).await;
+        let session = client.create_session().await;
+        let started = client
+            .start_turn(session["id"].as_str().unwrap(), "Explain this diff")
+            .await;
+        assert!(started.get("route").is_none());
+        assert_eq!(started["turn"]["model"], "default");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn routing_a_new_chat_with_nothing_connected_is_a_conflict() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (router, picker) = pick("Opus");
+        let client = routed_fixture(router, log).await;
+        let response = client
+            .post("/api/neev/agent/route")
+            .json(&serde_json::json!({
+                "prompt": "Build the importer",
+                "provider": "claude",
+                "model": "default",
+            }))
+            .await;
+        response.assert_status(axum::http::StatusCode::CONFLICT);
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn routing_a_new_chat_refuses_an_empty_or_unknown_body() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = routed_fixture(Router::Off, log).await;
+        for body in [
+            serde_json::json!({"prompt": "  ", "provider": "claude", "model": "default"}),
+            serde_json::json!({"prompt": "x", "provider": "claude", "model": "default", "apiKey": "k"}),
+        ] {
+            let response = client.post("/api/neev/agent/route").json(&body).await;
+            assert!(response.status_code().is_client_error(), "{body}");
+        }
+    }
+
+    // ---- Supervision, tickets and usage ----
+
+    use std::collections::HashMap;
+
+    type Runs = Arc<std::sync::Mutex<Vec<crate::neev::agents::execution::RunRequest>>>;
+    type ToolFree =
+        Arc<std::sync::Mutex<Vec<crate::neev::agents::execution::ToolFreeRequest>>>;
+
+    struct Full {
+        client: Client,
+        state: Arc<ServerState>,
+        org: i32,
+        user: i32,
+        runs: Runs,
+        tool_free: ToolFree,
+        /// The storage handle of each connected provider, by name.
+        handles: HashMap<String, String>,
+    }
+
+    /// Picks `wanted` at a given complexity level.
+    struct PickAt {
+        wanted: &'static str,
+        complexity: f64,
+        calls: AtomicUsize,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DecisionProvider for PickAt {
+        fn name(&self) -> &'static str {
+            "jev"
+        }
+        async fn decide(&self, input: &DecisionInput) -> Result<Decision, DecisionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.seen.lock().unwrap() = input
+                .options
+                .iter()
+                .map(|option| format!("{}/{}", option.agent, option.model))
+                .collect();
+            let option = input
+                .options
+                .iter()
+                .position(|option| option.model == self.wanted)
+                .ok_or(DecisionError::Malformed)?;
+            Ok(Decision {
+                option,
+                confidence: 0.9,
+                complexity: self.complexity,
+                complexity_confidence: 0.9,
+            })
+        }
+    }
+
+    fn pick_at(wanted: &'static str, complexity: f64) -> (Router, Arc<PickAt>) {
+        let provider = Arc::new(PickAt {
+            wanted,
+            complexity,
+            calls: AtomicUsize::new(0),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        (
+            Router::Ready {
+                provider: provider.clone(),
+                min_confidence: 0.3,
+            },
+            provider,
+        )
+    }
+
+    async fn full(
+        router: Router,
+        supervision: crate::neev::config::SupervisionMode,
+        connected: &[&str],
+    ) -> Full {
+        let database = h::database().await;
+        let user = h::native_account(&database, "owner", "owner@example.test").await;
+        let (org, _) = h::organization(&database, user, "admin").await;
+        let mut handles = HashMap::new();
+        for provider in connected {
+            let handle = uuid::Uuid::new_v4().simple().to_string();
+            handles.insert((*provider).to_owned(), handle.clone());
+            crate::neev::db::execute(
+                &database,
+                "INSERT INTO neev_agent_connections(id,org_id,user_id,provider,generation,state,account_label,checked_at,error_code,storage_handle,created_at,updated_at) VALUES($1,$2,$3,$4,1,'connected','acct',1700000000,NULL,$5,1700000000,1700000000)",
+                vec![
+                    uuid::Uuid::new_v4().simple().to_string().into(),
+                    org.into(),
+                    user.into(),
+                    (*provider).into(),
+                    handle.into(),
+                ],
+            )
+            .await
+            .unwrap();
+        }
+        let mut config = h::preview_config();
+        config.supervision.mode = supervision;
+        let mut server_state =
+            ServerState::new(database.clone(), config, Arc::new(h::TestClock::new(NOW))).unwrap();
+        let runs: Runs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool_free: ToolFree = Arc::new(std::sync::Mutex::new(Vec::new()));
+        server_state.set_agent_runtime(AgentRuntime::Fake(
+            FakeRuntime::new(vec!["done".to_owned()])
+                .recording(runs.clone())
+                .recording_tool_free(tool_free.clone()),
+        ));
+        server_state.set_agent_router(router);
+        let state = Arc::new(server_state);
+        let client = sign_in(&state, &database, user).await;
+        Full {
+            client,
+            state,
+            org,
+            user,
+            runs,
+            tool_free,
+            handles,
+        }
+    }
+
+    async fn settled(client: &Client, session: &str) -> Value {
+        for _ in 0..200 {
+            let page = client
+                .get(&format!("/api/neev/agent/sessions/{session}/turns"))
+                .await
+                .json::<Value>();
+            let last = page["items"].as_array().unwrap().last().cloned().unwrap();
+            if last["status"] != "running" {
+                return last;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("turn never settled");
+    }
+
+    #[tokio::test]
+    async fn complex_auto_work_is_planned_and_reviewed_on_the_callers_own_claude() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Opus", 2.0);
+        let f = full(router, SupervisionMode::PlanReview, &["claude"]).await;
+        let session = f.client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started = auto_turn(&f.client, id, "Redesign the sync engine across services").await;
+        assert_eq!(started["route"]["supervision"]["state"], "active");
+        assert_eq!(started["route"]["supervision"]["phases"], "plan_review");
+        assert_eq!(started["route"]["supervision"]["model"], "opus");
+        let turn = settled(&f.client, id).await;
+        // The executor's answer is the turn's answer, whatever the review said.
+        assert_eq!(turn["status"], "completed");
+        let supervised = f.tool_free.lock().unwrap().clone();
+        assert_eq!(supervised.len(), 2, "one plan and one review");
+        for request in &supervised {
+            assert_eq!(request.provider, "claude");
+            assert_eq!(request.model, "opus");
+            assert_eq!(request.credential_handle.as_ref(), f.handles.get("claude"));
+            assert_eq!(request.user_id, f.user);
+            assert_eq!(request.org_id, f.org);
+        }
+        assert_eq!(f.runs.lock().unwrap()[0].model, "opus");
+        let trace = serde_json::to_string(&turn["activity"]).unwrap();
+        assert!(trace.contains("supervision:plan"), "{trace}");
+        assert!(trace.contains("supervision:review"), "{trace}");
+    }
+
+    #[tokio::test]
+    async fn without_a_claude_connection_supervision_is_reported_unavailable_not_faked() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Opus", 3.0);
+        let f = full(router, SupervisionMode::Review, &[]).await;
+        let session = f.client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started = auto_turn(&f.client, id, "Migrate the billing schema safely").await;
+        assert_eq!(started["route"]["supervision"]["state"], "unavailable");
+        assert_eq!(started["route"]["supervision"]["reason"], "no_claude_connection");
+        assert_eq!(settled(&f.client, id).await["status"], "completed");
+        assert!(f.tool_free.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn simple_work_is_never_supervised() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Haiku", 0.0);
+        let f = full(router, SupervisionMode::PlanReview, &["claude"]).await;
+        let session = f.client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started = auto_turn(&f.client, id, "What does this regex match exactly?").await;
+        assert!(started["route"].get("supervision").is_none(), "{started}");
+        settled(&f.client, id).await;
+        assert!(f.tool_free.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_new_chat_is_routed_once_and_its_first_turn_presents_the_decision_once() {
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Sonnet", 1.0);
+        let f = full(router, SupervisionMode::Off, &["claude"]).await;
+        let decided = f
+            .client
+            .post("/api/neev/agent/route")
+            .json(&serde_json::json!({
+                "prompt": "Write the importer", "provider": "claude", "model": "default"
+            }))
+            .await
+            .json::<Value>();
+        assert_eq!(decided["outcome"], "routed");
+        let route_id = decided["routeId"].as_str().unwrap().to_owned();
+        let created = f
+            .client
+            .post("/api/neev/agent/sessions")
+            .json(&serde_json::json!({
+                "title": "Importer", "provider": "claude", "model": decided["model"],
+                "effort": decided["effort"], "requestId": uuid::Uuid::new_v4().to_string(),
+            }))
+            .await
+            .json::<Value>();
+        let id = created["id"].as_str().unwrap();
+        let first = f
+            .client
+            .post(&format!("/api/neev/agent/sessions/{id}/turns"))
+            .json(&serde_json::json!({ "prompt": "Write the importer", "routeId": route_id }))
+            .await
+            .json::<Value>();
+        assert_eq!(first["route"]["outcome"], "routed");
+        assert_eq!(first["turn"]["model"], "sonnet");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 1, "not routed again");
+        settled(&f.client, id).await;
+        // A ticket is spent on first use.
+        let again = f
+            .client
+            .post(&format!("/api/neev/agent/sessions/{id}/turns"))
+            .json(&serde_json::json!({ "prompt": "And tests", "routeId": route_id }))
+            .await
+            .json::<Value>();
+        assert!(again.get("route").is_none(), "{again}");
+    }
+
+    #[tokio::test]
+    async fn a_spent_provider_is_withheld_from_auto_and_reported() {
+        use crate::neev::agents::routing_usage::{AccountKey, FailureSignal};
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Opus", 1.0);
+        let f = full(router, SupervisionMode::Off, &["claude", "codex"]).await;
+        let key = |user: i32, provider: &str| AccountKey {
+            org_id: f.org,
+            user_id: user,
+            provider: provider.into(),
+            generation: 0,
+        };
+        f.state
+            .agent_usage
+            .record_failure(&key(f.user, "codex"), FailureSignal::QuotaExhausted, NOW);
+        let decided = f
+            .client
+            .post("/api/neev/agent/route")
+            .json(&serde_json::json!({
+                "prompt": "Write the importer", "provider": "codex", "model": "default"
+            }))
+            .await
+            .json::<Value>();
+        assert_eq!(decided["withheld"][0]["provider"], "codex");
+        assert_eq!(decided["withheld"][0]["availability"], "exhausted_unknown_reset");
+        assert!(picker
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|option| !option.starts_with("Codex")));
+        assert_eq!(decided["provider"], "claude");
+    }
+
+    #[tokio::test]
+    async fn a_chat_on_a_spent_provider_keeps_its_selection_and_says_why() {
+        use crate::neev::agents::routing_usage::{AccountKey, FailureSignal};
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Opus", 1.0);
+        let f = full(router, SupervisionMode::Off, &["claude"]).await;
+        f.state.agent_usage.record_failure(
+            &AccountKey {
+                org_id: f.org,
+                user_id: f.user,
+                provider: "claude".into(),
+                generation: 0,
+            },
+            FailureSignal::RateLimited,
+            NOW,
+        );
+        let session = f.client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started = auto_turn(&f.client, id, "Refactor the sync engine and its tests").await;
+        assert_eq!(started["route"]["reason"], "usage_limited");
+        assert_eq!(started["turn"]["model"], "default");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 0);
+        // Manual sends are never filtered.
+        settled(&f.client, id).await;
+        let manual = f.client.start_turn(id, "Do it anyway").await;
+        assert_eq!(manual["turn"]["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn the_status_shows_supervision_and_only_the_callers_own_usage() {
+        use crate::neev::agents::routing_usage::{AccountKey, FailureSignal};
+        use crate::neev::config::SupervisionMode;
+        let f = full(Router::Off, SupervisionMode::Review, &["codex"]).await;
+        // Someone else's spent account must not appear.
+        f.state.agent_usage.record_failure(
+            &AccountKey {
+                org_id: f.org,
+                user_id: f.user + 1000,
+                provider: "codex".into(),
+                generation: 0,
+            },
+            FailureSignal::QuotaExhausted,
+            NOW,
+        );
+        let status = f.client.get("/api/neev/agent/routing").await.json::<Value>();
+        assert_eq!(status["supervision"], "review");
+        assert_eq!(status["usage"].as_array().unwrap().len(), 1);
+        assert_eq!(status["usage"][0]["provider"], "codex");
+        assert_eq!(status["usage"][0]["availability"], "available");
+        assert_eq!(status["usage"][0]["remaining"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn decisions_are_throttled_per_person_but_manual_sends_never_are() {
+        use crate::neev::agents::routing::DECISIONS_PER_USER_PER_MINUTE;
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Sonnet", 1.0);
+        let f = full(router, SupervisionMode::Off, &["claude"]).await;
+        let ask = || {
+            f.client.post("/api/neev/agent/route").json(&serde_json::json!({
+                "prompt": "Write the importer", "provider": "claude", "model": "default"
+            }))
+        };
+        for _ in 0..DECISIONS_PER_USER_PER_MINUTE {
+            assert_eq!(ask().await.json::<Value>()["outcome"], "routed");
+        }
+        let throttled = ask().await.json::<Value>();
+        assert_eq!(throttled["outcome"], "fallback");
+        assert_eq!(throttled["reason"], "throttled");
+        assert!(throttled.get("routeId").is_none());
+        // An Auto turn is a decision too, and is throttled the same way.
+        let session = f.client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started = auto_turn(&f.client, id, "Refactor the importer and add tests").await;
+        assert_eq!(started["route"]["reason"], "throttled");
+        assert_eq!(
+            picker.calls.load(Ordering::SeqCst),
+            DECISIONS_PER_USER_PER_MINUTE,
+            "the router was never called past the limit"
+        );
+        // The send itself still runs on the person's own selection.
+        assert_eq!(started["turn"]["status"], "running");
+        settled(&f.client, id).await;
+        let manual = f.client.start_turn(id, "Then document it").await;
+        assert_eq!(manual["turn"]["status"], "running");
+    }
+
+    async fn fail_and_retry(f: &Full, run_id: &str) -> Value {
+        crate::neev::db::execute(
+            &f.state.database,
+            "UPDATE neev_agent_turns SET status='failed',error_code='provider',completed_at=updated_at WHERE run_id=$1",
+            vec![run_id.into()],
+        )
+        .await
+        .unwrap();
+        let response = f
+            .client
+            .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+            .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+            .await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        response.json::<Value>()
+    }
+
+    #[tokio::test]
+    async fn a_supervised_turn_is_retried_supervised_on_the_callers_own_claude() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Opus", 2.0);
+        let f = full(router, SupervisionMode::Review, &["claude"]).await;
+        let session = f.client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started = auto_turn(&f.client, id, "Redesign the sync engine across services").await;
+        let run_id = started["runId"].as_str().unwrap().to_owned();
+        settled(&f.client, id).await;
+        assert_eq!(f.tool_free.lock().unwrap().len(), 1, "one review");
+        fail_and_retry(&f, &run_id).await;
+        let retried = settled(&f.client, id).await;
+        assert_eq!(retried["status"], "completed");
+        let supervised = f.tool_free.lock().unwrap().clone();
+        assert_eq!(supervised.len(), 2, "the retry was reviewed too");
+        assert_eq!(supervised[1].credential_handle.as_ref(), f.handles.get("claude"));
+        assert!(serde_json::to_string(&retried["activity"])
+            .unwrap()
+            .contains("supervision:review"));
+    }
+
+    #[tokio::test]
+    async fn a_retry_that_cannot_be_supervised_claims_no_supervision() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Opus", 2.0);
+        let f = full(router, SupervisionMode::Review, &["claude"]).await;
+        let session = f.client.create_session().await;
+        let id = session["id"].as_str().unwrap();
+        let started = auto_turn(&f.client, id, "Redesign the sync engine across services").await;
+        let run_id = started["runId"].as_str().unwrap().to_owned();
+        settled(&f.client, id).await;
+        crate::neev::db::execute(
+            &f.state.database,
+            "DELETE FROM neev_agent_connections WHERE provider='claude'",
+            vec![],
+        )
+        .await
+        .unwrap();
+        fail_and_retry(&f, &run_id).await;
+        let retried = settled(&f.client, id).await;
+        assert_eq!(f.tool_free.lock().unwrap().len(), 1, "no supervisor ran");
+        assert!(!serde_json::to_string(&retried["activity"])
+            .unwrap()
+            .contains("supervision:"));
+    }
+}

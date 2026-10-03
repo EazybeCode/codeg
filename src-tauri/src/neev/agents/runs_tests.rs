@@ -555,9 +555,11 @@ fn buffer_only() -> LiveRun {
         buffer: std::sync::Mutex::new((String::new(), 0)),
         activity: std::sync::Mutex::new(crate::neev::agents::activity::ActivityLog::new()),
         events,
-        cancel: std::sync::Mutex::new(None),
-        steer_tx: None,
+        cancel: std::sync::Mutex::new(CancelSlot::default()),
+        steer_tx: std::sync::Mutex::new(None),
         supports_steering: false,
+        steerable: std::sync::atomic::AtomicBool::new(false),
+        phase: std::sync::Mutex::new(RunPhase::Executing),
     }
 }
 
@@ -820,4 +822,606 @@ async fn chat_purpose_still_stores_the_reply() {
     let (run_id, _live) = h.run("draft", vec!["kept reply".into()]).await;
     let turn = h.settled(&run_id).await;
     assert_eq!((turn.status, turn.response.as_str()), (TurnStatus::Completed, "kept reply"));
+}
+
+// ---------------------------------------------------------------------------
+// Supervised turns: one plan, one execution, one review — one turn, one run id.
+// ---------------------------------------------------------------------------
+
+use super::supervision::{
+    Limits, SupervisedStart, SupervisionPlan, SupervisionRuntimes, Supervisor, PLAN_STEP_ID,
+    REVIEW_STEP_ID,
+};
+use crate::neev::agents::activity::{ActivityKind, STATE_PLAN, STATE_REVIEW, STATE_REVIEW_PENDING};
+use crate::neev::agents::execution::{AgentRuntime, ExecutionError, ToolFreeRequest};
+
+const OWN_CLAUDE_HANDLE: &str = "own-claude-handle-0123456789abcdef";
+const VERDICT_CONCERNS: &str =
+    r#"{"verdict":"concerns","summary":"Probably right.","findings":["The fix was not run."]}"#;
+
+fn strong() -> Supervisor {
+    Supervisor {
+        provider: "claude".into(),
+        model: "opus".into(),
+        effort: Some("high".into()),
+        credential_handle: Some(OWN_CLAUDE_HANDLE.into()),
+    }
+}
+
+fn quick_limits() -> Limits {
+    Limits {
+        plan_timeout: std::time::Duration::from_secs(10),
+        review_timeout: std::time::Duration::from_secs(10),
+        ..Limits::default()
+    }
+}
+
+fn plan_and_review() -> SupervisionPlan {
+    SupervisionPlan {
+        planner: Some(strong()),
+        reviewer: Some(strong()),
+        limits: quick_limits(),
+    }
+}
+
+fn review_only() -> SupervisionPlan {
+    SupervisionPlan {
+        planner: None,
+        reviewer: Some(strong()),
+        limits: quick_limits(),
+    }
+}
+
+fn fake(chunks: &[&str]) -> FakeRuntime {
+    FakeRuntime::new(chunks.iter().map(|c| (*c).to_owned()).collect())
+}
+
+fn runtimes(
+    planner: FakeRuntime,
+    executor: FakeRuntime,
+    reviewer: FakeRuntime,
+) -> SupervisionRuntimes {
+    SupervisionRuntimes {
+        planner: Arc::new(AgentRuntime::Fake(planner)),
+        executor: Arc::new(AgentRuntime::Fake(executor)),
+        reviewer: Arc::new(AgentRuntime::Fake(reviewer)),
+    }
+}
+
+type Log<T> = Arc<std::sync::Mutex<Vec<T>>>;
+
+fn log<T>() -> Log<T> {
+    Arc::new(std::sync::Mutex::new(Vec::new()))
+}
+
+impl Harness {
+    fn executor_request(&self, prompt: &str) -> RunRequest {
+        RunRequest {
+            user_id: self.actor.identity.user_id,
+            org_id: self.actor.org_id,
+            chat_id: self.session.id.clone(),
+            // A cheaper executor on another provider: the supervisor's
+            // provider and credential are the caller's own, separately.
+            provider: "codex".into(),
+            model: "gpt-5-mini".into(),
+            prompt: prompt.into(),
+            credential_handle: Some("executor-codex-handle-0123456789".into()),
+            briefing: Some("standing briefing".into()),
+            effort: None,
+            fast: false,
+            attachments: Vec::new(),
+            context_files: Vec::new(),
+            library_items: Vec::new(),
+            min_free_lanes: 1,
+        }
+    }
+
+    async fn supervised(
+        &self,
+        prompt: &str,
+        plan: SupervisionPlan,
+        runtimes: SupervisionRuntimes,
+    ) -> (String, Arc<LiveRun>) {
+        let (turn, _) =
+            sessions::begin_turn(&self.state, &self.actor, &self.session.id, prompt, None)
+                .await
+                .unwrap();
+        let live = start_supervised(
+            self.state.clone(),
+            turn.run_id.clone(),
+            self.actor.clone(),
+            self.session.id.clone(),
+            turn.id.clone(),
+            SupervisedStart {
+                executor: self.executor_request(prompt),
+                request_text: prompt.into(),
+                plan,
+            },
+            runtimes,
+        );
+        (turn.run_id, live)
+    }
+}
+
+/// The one step with this id, as `(state, detail, category)`.
+fn step(turn: &sessions::AgentTurn, id: &str) -> (String, String, String) {
+    let found: Vec<_> = turn.activity.iter().filter(|item| item.id == id).collect();
+    assert_eq!(found.len(), 1, "exactly one {id} step: {:?}", turn.activity);
+    match &found[0].kind {
+        ActivityKind::Status {
+            state,
+            detail,
+            category,
+        } => (
+            state.clone(),
+            detail.clone().unwrap_or_default(),
+            category.clone().unwrap_or_default(),
+        ),
+        other => panic!("{id} is not a status: {other:?}"),
+    }
+}
+
+async fn until(what: &str, mut ready: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if ready() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("never reached: {what}");
+}
+
+#[tokio::test]
+async fn a_supervised_turn_plans_executes_and_reviews_under_one_run_id() {
+    let h = Harness::new().await;
+    let plans: Log<ToolFreeRequest> = log();
+    let executions: Log<RunRequest> = log();
+    let reviews: Log<ToolFreeRequest> = log();
+    let (run_id, _live) = h
+        .supervised(
+            "fix the failing test",
+            plan_and_review(),
+            runtimes(
+                fake(&["1. Reproduce.\n2. Fix.\n3. Re-run."]).recording_tool_free(plans.clone()),
+                fake(&["Fixed it."]).recording(executions.clone()),
+                fake(&[VERDICT_CONCERNS]).recording_tool_free(reviews.clone()),
+            ),
+        )
+        .await;
+    let turn = h.settled(&run_id).await;
+    // The executor's result is the turn's result, untouched by the review.
+    assert_eq!(turn.status, sessions::TurnStatus::Completed);
+    assert_eq!(turn.response, "Fixed it.");
+    assert_eq!(turn.error_code, None);
+    // One turn, one row.
+    let turns = sessions::turns(&h.state, &h.actor, &h.session.id, None)
+        .await
+        .unwrap();
+    assert_eq!(turns.items.len(), 1);
+
+    // Exactly one plan and one review, on the caller's own Claude credential.
+    let plans = plans.lock().unwrap().clone();
+    let reviews = reviews.lock().unwrap().clone();
+    assert_eq!((plans.len(), reviews.len()), (1, 1));
+    for request in plans.iter().chain(reviews.iter()) {
+        assert_eq!(request.provider, "claude");
+        assert_eq!(request.model, "opus");
+        assert_eq!(
+            request.credential_handle.as_deref(),
+            Some(OWN_CLAUDE_HANDLE)
+        );
+        assert_eq!(request.user_id, h.actor.identity.user_id);
+        assert_eq!(request.org_id, h.actor.org_id);
+    }
+    // The executor ran once, unchanged except for the advisory plan.
+    let executions = executions.lock().unwrap().clone();
+    assert_eq!(executions.len(), 1);
+    let executed = &executions[0];
+    assert_eq!(executed.provider, "codex");
+    assert_eq!(executed.model, "gpt-5-mini");
+    let briefing = executed.briefing.as_deref().unwrap();
+    assert!(briefing.starts_with("standing briefing"));
+    assert!(briefing.contains("<supervisor-plan>") && briefing.contains("2. Fix."));
+    // The reviewer saw the request, the plan and the reply.
+    assert!(reviews[0].prompt.contains("fix the failing test"));
+    assert!(reviews[0].prompt.contains("2. Fix."));
+    assert!(reviews[0].prompt.contains("Fixed it."));
+
+    let (state, detail, category) = step(&turn, PLAN_STEP_ID);
+    assert_eq!((state.as_str(), category.as_str()), (STATE_PLAN, "ready"));
+    assert!(detail.contains("supervisor: claude/opus") && detail.contains("1. Reproduce."));
+    let (state, detail, category) = step(&turn, REVIEW_STEP_ID);
+    assert_eq!(
+        (state.as_str(), category.as_str()),
+        (STATE_REVIEW, "concerns")
+    );
+    assert!(detail.contains("The fix was not run."));
+    assert!(detail.contains("Nothing was run, tested or verified."));
+}
+
+#[tokio::test]
+async fn every_verdict_is_display_only() {
+    for (raw, expected) in [
+        (r#"{"verdict":"pass","summary":"ok"}"#, "pass"),
+        (r#"{"verdict":"fail","summary":"wrong file"}"#, "fail"),
+        ("I think it is fine.", "unavailable"),
+    ] {
+        let h = Harness::new().await;
+        let (run_id, _live) = h
+            .supervised(
+                "q",
+                review_only(),
+                runtimes(fake(&["unused"]), fake(&["answer"]), fake(&[raw])),
+            )
+            .await;
+        let turn = h.settled(&run_id).await;
+        assert_eq!(turn.status, sessions::TurnStatus::Completed, "{raw}");
+        assert_eq!(turn.response, "answer");
+        let (state, detail, category) = step(&turn, REVIEW_STEP_ID);
+        assert_eq!(
+            (state.as_str(), category.as_str()),
+            (STATE_REVIEW, expected)
+        );
+        if expected == "unavailable" {
+            assert!(detail.contains("unavailable: malformed"), "{detail}");
+        }
+        // Review only: no plan step at all.
+        assert!(turn.activity.iter().all(|item| item.id != PLAN_STEP_ID));
+    }
+}
+
+#[tokio::test]
+async fn a_review_that_times_out_leaves_the_completed_turn_alone() {
+    let h = Harness::new().await;
+    let mut plan = review_only();
+    plan.limits.review_timeout = std::time::Duration::from_millis(150);
+    let (run_id, _live) = h
+        .supervised(
+            "q",
+            plan,
+            runtimes(fake(&["unused"]), fake(&["answer"]), fake(&["{"]).hanging()),
+        )
+        .await;
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.status, sessions::TurnStatus::Completed);
+    assert_eq!(turn.response, "answer");
+    let (_, detail, category) = step(&turn, REVIEW_STEP_ID);
+    assert_eq!(category, "unavailable");
+    assert!(detail.contains("unavailable: timeout"));
+}
+
+#[tokio::test]
+async fn a_failed_executor_is_never_reviewed() {
+    // Refused at launch.
+    let h = Harness::new().await;
+    let reviews: Log<ToolFreeRequest> = log();
+    let (run_id, _live) = h
+        .supervised(
+            "q",
+            plan_and_review(),
+            runtimes(
+                fake(&["1. plan"]),
+                fake(&["never"]).failing(ExecutionError::Provider),
+                fake(&[VERDICT_CONCERNS]).recording_tool_free(reviews.clone()),
+            ),
+        )
+        .await;
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.status, sessions::TurnStatus::Failed);
+    assert_eq!(turn.error_code.as_deref(), Some("provider"));
+    assert!(reviews.lock().unwrap().is_empty());
+    // The plan that was made is still on the row, honestly.
+    assert_eq!(step(&turn, PLAN_STEP_ID).2, "ready");
+    assert!(turn.activity.iter().all(|item| item.id != REVIEW_STEP_ID));
+
+    // Failed while streaming (over the stored cap).
+    let h = Harness::new().await;
+    let reviews: Log<ToolFreeRequest> = log();
+    let huge: Vec<String> = (0..30).map(|_| "x".repeat(10_000)).collect();
+    let (run_id, _live) = h
+        .supervised(
+            "q",
+            review_only(),
+            runtimes(
+                fake(&["unused"]),
+                FakeRuntime::new(huge),
+                fake(&[VERDICT_CONCERNS]).recording_tool_free(reviews.clone()),
+            ),
+        )
+        .await;
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.error_code.as_deref(), Some("too_large"));
+    assert!(reviews.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stop_while_planning_cancels_and_never_launches_the_executor() {
+    let h = Harness::new().await;
+    let plans: Log<ToolFreeRequest> = log();
+    let executions: Log<RunRequest> = log();
+    let (run_id, live) = h
+        .supervised(
+            "q",
+            plan_and_review(),
+            runtimes(
+                fake(&["1. thinking"])
+                    .hanging()
+                    .recording_tool_free(plans.clone()),
+                fake(&["answer"]).recording(executions.clone()),
+                fake(&[VERDICT_CONCERNS]),
+            ),
+        )
+        .await;
+    until("the planner is running", || {
+        !plans.lock().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(live.phase(), RunPhase::Planning);
+    live.cancel();
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.status, sessions::TurnStatus::Canceled);
+    assert_eq!(turn.error_code.as_deref(), Some("canceled"));
+    assert!(
+        executions.lock().unwrap().is_empty(),
+        "the executor must never launch after Stop"
+    );
+    let (state, detail, category) = step(&turn, PLAN_STEP_ID);
+    assert_eq!(
+        (state.as_str(), category.as_str()),
+        (STATE_PLAN, "unavailable")
+    );
+    assert!(detail.contains("unavailable: canceled"));
+}
+
+#[tokio::test]
+async fn stop_before_the_planner_starts_launches_nothing() {
+    let h = Harness::new().await;
+    let plans: Log<ToolFreeRequest> = log();
+    let executions: Log<RunRequest> = log();
+    let (run_id, live) = h
+        .supervised(
+            "q",
+            plan_and_review(),
+            runtimes(
+                fake(&["1. plan"]).recording_tool_free(plans.clone()),
+                fake(&["answer"]).recording(executions.clone()),
+                fake(&[VERDICT_CONCERNS]),
+            ),
+        )
+        .await;
+    live.cancel();
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.status, sessions::TurnStatus::Canceled);
+    assert!(executions.lock().unwrap().is_empty());
+    // The planner may or may not have been reached; either way nothing ran
+    // after the Stop and the row says so.
+    assert!(plans.lock().unwrap().len() <= 1);
+}
+
+#[tokio::test]
+async fn stop_while_reviewing_keeps_the_completed_execution() {
+    let h = Harness::new().await;
+    let reviews: Log<ToolFreeRequest> = log();
+    let (run_id, live) = h
+        .supervised(
+            "q",
+            review_only(),
+            runtimes(
+                fake(&["unused"]),
+                fake(&["the finished answer"]),
+                fake(&["{"]).hanging().recording_tool_free(reviews.clone()),
+            ),
+        )
+        .await;
+    let mut events = live.subscribe_for_test();
+    until("the reviewer is running", || {
+        !reviews.lock().unwrap().is_empty()
+    })
+    .await;
+    assert_eq!(live.phase(), RunPhase::Reviewing);
+
+    // Before Stop, the finished execution is already durable on the row, with
+    // the marker crash recovery needs.
+    let row = h.turn(&run_id).await;
+    assert_eq!(row.status, sessions::TurnStatus::Running);
+    assert_eq!(row.response, "the finished answer");
+    assert_eq!(step(&row, REVIEW_STEP_ID).0, STATE_REVIEW_PENDING);
+
+    live.cancel();
+    let mut reported = None;
+    while let Ok(signal) = events.recv().await {
+        if let RunSignal::Finished { status, error_code } = signal {
+            reported = Some((status, error_code));
+            break;
+        }
+    }
+    assert_eq!(reported, Some((sessions::TurnStatus::Completed, None)));
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.status, sessions::TurnStatus::Completed);
+    assert_eq!(turn.response, "the finished answer");
+    let (state, detail, category) = step(&turn, REVIEW_STEP_ID);
+    assert_eq!(
+        (state.as_str(), category.as_str()),
+        (STATE_REVIEW, "unavailable")
+    );
+    assert!(detail.contains("unavailable: canceled"));
+}
+
+#[tokio::test]
+async fn steering_is_refused_outside_execution() {
+    let h = Harness::new().await;
+    let plans: Log<ToolFreeRequest> = log();
+    let (run_id, live) = h
+        .supervised(
+            "q",
+            plan_and_review(),
+            runtimes(
+                fake(&["1."]).hanging().recording_tool_free(plans.clone()),
+                fake(&["answer"]),
+                fake(&[VERDICT_CONCERNS]),
+            ),
+        )
+        .await;
+    until("planning", || !plans.lock().unwrap().is_empty()).await;
+    assert!(!live.steering_available());
+    assert!(
+        !live.supports_steering,
+        "no steering is advertised up front"
+    );
+    assert_eq!(
+        live.steer("hurry".into(), uuid::Uuid::new_v4().to_string())
+            .await,
+        Err(SteerError::Unsupported)
+    );
+    live.cancel();
+    h.settled(&run_id).await;
+
+    let h = Harness::new().await;
+    let reviews: Log<ToolFreeRequest> = log();
+    let (run_id, live) = h
+        .supervised(
+            "q",
+            review_only(),
+            runtimes(
+                fake(&["unused"]),
+                fake(&["answer"]),
+                fake(&["{"]).hanging().recording_tool_free(reviews.clone()),
+            ),
+        )
+        .await;
+    until("reviewing", || !reviews.lock().unwrap().is_empty()).await;
+    assert_eq!(
+        live.steer("one more thing".into(), uuid::Uuid::new_v4().to_string())
+            .await,
+        Err(SteerError::Unsupported)
+    );
+    live.cancel();
+    h.settled(&run_id).await;
+}
+
+#[tokio::test]
+async fn an_ordinary_run_keeps_its_steering_contract() {
+    let h = Harness::new().await;
+    let chunks: Vec<String> = (0..5_000).map(|_| "tick ".to_owned()).collect();
+    let (run_id, live) = h.run("long", chunks).await;
+    assert_eq!(live.phase(), RunPhase::Executing);
+    // The fake transport cannot steer: Unsupported exactly as before.
+    assert_eq!(
+        live.steer("x".into(), uuid::Uuid::new_v4().to_string())
+            .await,
+        Err(SteerError::Unsupported)
+    );
+    live.cancel();
+    assert_eq!(
+        h.settled(&run_id).await.status,
+        sessions::TurnStatus::Canceled
+    );
+}
+
+#[tokio::test]
+async fn a_busy_planner_is_skipped_and_the_executor_runs_unplanned() {
+    let h = Harness::new().await;
+    let executions: Log<RunRequest> = log();
+    let (run_id, _live) = h
+        .supervised(
+            "q",
+            plan_and_review(),
+            runtimes(
+                fake(&["1."]).failing(ExecutionError::LanesBusy),
+                fake(&["answer"]).recording(executions.clone()),
+                fake(&[r#"{"verdict":"pass","summary":"ok"}"#]),
+            ),
+        )
+        .await;
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.status, sessions::TurnStatus::Completed);
+    let (_, detail, category) = step(&turn, PLAN_STEP_ID);
+    assert_eq!(category, "unavailable");
+    assert!(detail.contains("unavailable: busy"));
+    let executions = executions.lock().unwrap().clone();
+    assert_eq!(executions.len(), 1);
+    assert_eq!(executions[0].briefing.as_deref(), Some("standing briefing"));
+    assert_eq!(step(&turn, REVIEW_STEP_ID).2, "pass");
+}
+
+#[tokio::test]
+async fn a_supervisor_without_enforced_tool_free_mode_is_unsupported_not_run() {
+    let h = Harness::new().await;
+    let reviews: Log<ToolFreeRequest> = log();
+    let mut plan = review_only();
+    plan.reviewer = Some(Supervisor {
+        provider: "codex".into(),
+        model: "gpt-5".into(),
+        effort: Some("high".into()),
+        credential_handle: Some("codex-handle-0123456789abcdef".into()),
+    });
+    let (run_id, _live) = h
+        .supervised(
+            "q",
+            plan,
+            runtimes(
+                fake(&["unused"]),
+                fake(&["answer"]),
+                fake(&[VERDICT_CONCERNS]).recording_tool_free(reviews.clone()),
+            ),
+        )
+        .await;
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.status, sessions::TurnStatus::Completed);
+    assert!(reviews.lock().unwrap().is_empty());
+    assert!(step(&turn, REVIEW_STEP_ID)
+        .1
+        .contains("unavailable: unsupported"));
+}
+
+#[tokio::test]
+async fn only_the_executor_s_outputs_are_kept_and_the_reviewer_sees_names_only() {
+    let h = Harness::new().await;
+    let attachments = || async {
+        crate::neev::db::one(
+            &h.state.database,
+            "SELECT COUNT(*) AS c FROM neev_attachments",
+            vec![],
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "c")
+        .unwrap()
+    };
+    let before = attachments().await;
+    let reviews: Log<ToolFreeRequest> = log();
+    let (run_id, _live) = h
+        .supervised(
+            "Make a report",
+            review_only(),
+            runtimes(
+                fake(&["unused"]),
+                fake(&["[Report](outputs/report.html)"]).with_outputs(|_| {
+                    vec![(
+                        "report.html".into(),
+                        b"<!doctype html><title>EXECUTOR BYTES</title>".to_vec(),
+                    )]
+                }),
+                // A supervisor spool is discarded, never adopted.
+                fake(&[r#"{"verdict":"pass","summary":"ok"}"#])
+                    .with_outputs(|_| vec![("sneaky.html".into(), b"REVIEWER BYTES".to_vec())])
+                    .recording_tool_free(reviews.clone()),
+            ),
+        )
+        .await;
+    let turn = h.settled(&run_id).await;
+    assert_eq!(turn.status, sessions::TurnStatus::Completed);
+    assert!(turn.response.contains("/api/neev/attachments/"));
+    assert_eq!(
+        attachments().await,
+        before + 1,
+        "exactly the executor's file"
+    );
+    let reviews = reviews.lock().unwrap().clone();
+    assert!(reviews[0].prompt.contains("report.html"));
+    assert!(!reviews[0].prompt.contains("EXECUTOR BYTES"));
+    assert!(step(&turn, REVIEW_STEP_ID)
+        .1
+        .contains("1 generated file(s)"));
 }

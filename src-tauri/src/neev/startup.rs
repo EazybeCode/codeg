@@ -60,6 +60,14 @@ pub(crate) struct ServerState {
     /// org and connection generation, so a reconnected credential can never be
     /// served the catalogue read under the previous one.
     pub(crate) agent_catalogues: super::agents::discovery::Cache,
+    /// Auto model routing. Built from `config.routing`; `Off` unless an
+    /// operator configured a decision provider.
+    pub(crate) agent_router: Arc<super::agents::routing::Router>,
+    /// What each caller's own provider streams reported about their usage, in
+    /// memory only (a restart forgets it, which errs towards trying).
+    pub(crate) agent_usage: Arc<super::agents::routing_usage::UsageBook>,
+    /// Per-person and deployment-wide limit on Auto decisions (router calls).
+    pub(crate) agent_decisions: Arc<super::agents::routing::DecisionLimiter>,
     /// The org knowledge blob root, opened WITHOUT the originals broker, so a
     /// local miss is a miss (spec Amendment 1, storage). `None` when
     /// `NEEV_KNOWLEDGE_ROOT` is unset, which disables the feature.
@@ -120,7 +128,8 @@ impl ServerState {
             .transpose()
             .map_err(|_| ContentError::Storage)?;
         let knowledge = open_knowledge(&config)?;
-        Ok(Self {
+        let agent_router = Arc::new(super::agents::routing::Router::from_config(&config.routing));
+        let mut state = Self {
             database,
             config,
             blobs,
@@ -133,13 +142,18 @@ impl ServerState {
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
+            agent_router: Arc::new(super::agents::routing::Router::Off),
+            agent_usage: Arc::new(super::agents::routing_usage::UsageBook::new()),
+            agent_decisions: Arc::new(super::agents::routing::DecisionLimiter::new()),
             knowledge,
             knowledge_asks: super::knowledge::ask::AskRegistry::default(),
             oauth,
             magic,
             mail,
             engine,
-        })
+        };
+        state.agent_router = agent_router;
+        Ok(state)
     }
 
     #[cfg(test)]
@@ -164,6 +178,9 @@ impl ServerState {
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
+            agent_router: Arc::new(super::agents::routing::Router::Off),
+            agent_usage: Arc::new(super::agents::routing_usage::UsageBook::new()),
+            agent_decisions: Arc::new(super::agents::routing::DecisionLimiter::new()),
             knowledge,
             knowledge_asks: super::knowledge::ask::AskRegistry::default(),
             oauth,
@@ -196,6 +213,9 @@ impl ServerState {
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
+            agent_router: Arc::new(super::agents::routing::Router::Off),
+            agent_usage: Arc::new(super::agents::routing_usage::UsageBook::new()),
+            agent_decisions: Arc::new(super::agents::routing::DecisionLimiter::new()),
             knowledge,
             knowledge_asks: super::knowledge::ask::AskRegistry::default(),
             oauth,
@@ -228,6 +248,9 @@ impl ServerState {
             supervisor: std::sync::Arc::new(super::agents::supervisor::Supervisor::Unavailable),
             agent_logins: super::agents::supervisor::new_login_registry(),
             agent_catalogues: super::agents::discovery::new_cache(),
+            agent_router: Arc::new(super::agents::routing::Router::Off),
+            agent_usage: Arc::new(super::agents::routing_usage::UsageBook::new()),
+            agent_decisions: Arc::new(super::agents::routing::DecisionLimiter::new()),
             knowledge,
             knowledge_asks: super::knowledge::ask::AskRegistry::default(),
             oauth,
@@ -245,6 +268,11 @@ impl ServerState {
     #[cfg(any(test, feature = "dev-agent"))]
     pub(crate) fn set_agent_runtime(&mut self, runtime: super::agents::execution::AgentRuntime) {
         self.agents = Arc::new(runtime);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_router(&mut self, router: super::agents::routing::Router) {
+        self.agent_router = Arc::new(router);
     }
 }
 

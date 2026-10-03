@@ -115,8 +115,18 @@ describe("agent session wire validation", () => {
         NativeClientError
       )
     // A server that sends no `attachments` means a turn that carried none.
-    expect(parseAgentTurn(turn)).toEqual({ ...turn, attachments: [] })
-    expect(parseAgentTurn(settled)).toEqual({ ...settled, attachments: [] })
+    expect(parseAgentTurn(turn)).toEqual({
+      ...turn,
+      attachments: [],
+      inputs: [],
+      supportsSteering: false,
+    })
+    expect(parseAgentTurn(settled)).toEqual({
+      ...settled,
+      attachments: [],
+      inputs: [],
+      supportsSteering: false,
+    })
   })
 
   it("refuses sessions and turns that could not have come from the server", () => {
@@ -143,8 +153,9 @@ describe("agent session wire validation", () => {
 
   it("refuses a started-turn envelope whose run id is not the turn's", () => {
     expect(parseStartedTurn({ turn, runId: RUN_ID })).toEqual({
-      turn: { ...turn, attachments: [] },
+      turn: { ...turn, attachments: [], inputs: [], supportsSteering: false },
       runId: RUN_ID,
+      route: null,
     })
     expect(() =>
       parseStartedTurn({
@@ -152,6 +163,123 @@ describe("agent session wire validation", () => {
         runId: "ffffffffffffffffffffffffffffffff",
       })
     ).toThrow(NativeClientError)
+  })
+
+  it("reads an Auto turn's route and refuses one that contradicts the turn", () => {
+    const route = {
+      provider: "claude",
+      model: "default",
+      effort: null,
+      fast: false,
+      outcome: "fallback",
+      reason: "missing_credential",
+      router: null,
+    }
+    expect(parseStartedTurn({ turn, runId: RUN_ID, route }).route).toEqual({
+      ...route,
+      label: null,
+      routeId: null,
+      withheld: [],
+      supervision: null,
+    })
+    // The route must name the model the turn actually ran on.
+    expect(() =>
+      parseStartedTurn({
+        turn,
+        runId: RUN_ID,
+        route: { ...route, model: "opus" },
+      })
+    ).toThrow(NativeClientError)
+    // A fallback without a reason, or a routed answer with one, is not honest.
+    expect(() =>
+      parseStartedTurn({
+        turn,
+        runId: RUN_ID,
+        route: { ...route, reason: null },
+      })
+    ).toThrow(NativeClientError)
+    expect(() =>
+      parseStartedTurn({
+        turn,
+        runId: RUN_ID,
+        route: { ...route, outcome: "routed" },
+      })
+    ).toThrow(NativeClientError)
+  })
+
+  it("reads route extras and refuses a dishonest supervision claim", () => {
+    const route = {
+      provider: "claude",
+      model: "default",
+      effort: null,
+      fast: false,
+      outcome: "routed",
+      reason: null,
+      router: "jev",
+    }
+    const started = parseStartedTurn({
+      turn,
+      runId: RUN_ID,
+      route: {
+        ...route,
+        withheld: [{ provider: "codex", availability: "exhausted", until: 7 }],
+        supervision: {
+          state: "active",
+          phases: "review",
+          model: "opus",
+          reason: null,
+        },
+      },
+    })
+    expect(started.route?.withheld).toEqual([
+      { provider: "codex", availability: "exhausted", until: 7 },
+    ])
+    expect(started.route?.supervision?.model).toBe("opus")
+    for (const supervision of [
+      { state: "active", phases: null, model: null, reason: null },
+      { state: "unavailable", phases: "review", model: "opus", reason: null },
+      { state: "verified", phases: null, model: null, reason: "x" },
+    ])
+      expect(() =>
+        parseStartedTurn({
+          turn,
+          runId: RUN_ID,
+          route: { ...route, supervision },
+        })
+      ).toThrow(NativeClientError)
+    expect(() =>
+      parseStartedTurn({
+        turn,
+        runId: RUN_ID,
+        route: { ...route, routeId: "not-a-uuid" },
+      })
+    ).toThrow(NativeClientError)
+  })
+
+  it("reads supervision steps with their verdict, and an unknown one as unavailable", () => {
+    const items = parseActivity([
+      {
+        seq: 1,
+        offset: 0,
+        id: "supervision:review",
+        kind: "status",
+        state: "review",
+        detail: "verdict: pass",
+        category: "pass",
+      },
+      {
+        seq: 2,
+        offset: 0,
+        id: "supervision:plan",
+        kind: "status",
+        state: "plan",
+        detail: null,
+        category: "verified",
+      },
+    ])
+    expect(items.map((item) => item.kind === "status" && item.verdict)).toEqual(
+      ["pass", "unavailable"]
+    )
   })
 
   it("never lets a disabled runtime report a usable connection", () => {
@@ -195,6 +323,7 @@ describe("agent session wire validation", () => {
       runId: RUN_ID,
       turnId: TURN_ID,
       sequence: "2",
+      supportsSteering: false,
     })
     // A live reattach omits the sequence.
     expect(
@@ -206,6 +335,7 @@ describe("agent session wire validation", () => {
       runId: RUN_ID,
       turnId: TURN_ID,
       sequence: null,
+      supportsSteering: false,
     })
     expect(parseRunEvent('{"type":"chunk","text":"hi"}')).toEqual({
       type: "chunk",
@@ -1056,10 +1186,16 @@ describe("agent run stream", () => {
 describe("activity traces", () => {
   it("preserves skipped library tool notices in stored and streamed activity", () => {
     const notice = {
-      seq: 1, offset: 0, id: "library-notice", kind: "status",
-      state: "library_tool_skipped", detail: "workspace_search",
+      seq: 1,
+      offset: 0,
+      id: "library-notice",
+      kind: "status",
+      state: "library_tool_skipped",
+      detail: "workspace_search",
     }
-    expect(parseAgentTurn({ ...turn, activity: [notice] }).activity).toEqual([notice])
+    expect(parseAgentTurn({ ...turn, activity: [notice] }).activity).toEqual([
+      notice,
+    ])
     expect(parseActivityEvent({ type: "activity", ...notice })).toEqual(notice)
   })
 

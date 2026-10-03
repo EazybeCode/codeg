@@ -16,15 +16,24 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use super::execution::{RunEvent, RunHandle};
+use super::execution::{AgentRuntime, RunEvent, RunHandle, ToolFreeRequest};
 use super::generated::{self, PersistContext, SpoolError};
 use super::sessions::{self, TurnStatus, MAX_RESPONSE_CHARS};
 use crate::neev::startup::ServerState;
 use crate::neev::types::OrgContext;
+
+/// Plan and review around an executor run (`start_supervised`). Declared here
+/// rather than in `agents/mod.rs` only so this file compiles on its own while
+/// `mod.rs` is owned elsewhere; see `.context/auto-routing/supervision-lifecycle.md`.
+#[path = "supervision.rs"]
+pub(crate) mod supervision;
+
+use supervision::{RunScope, Skip, SupervisedStart, SupervisionRuntimes};
 
 /// Persist the accumulated reply once it has grown by this many characters, so
 /// a reload mid-run shows recent output without writing on every token.
@@ -94,6 +103,32 @@ pub(crate) enum SteerError {
     Rejected,
 }
 
+/// Where a run is in its turn. An ordinary run is `Executing` from start to
+/// finish; a supervised one (`start_supervised`) moves
+/// `Planning → Executing → Reviewing → Settling`, skipping what it does not run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunPhase {
+    /// The tool-free planner is running; the executor has not been launched.
+    Planning,
+    /// The executor is (or is about to be) running.
+    Executing,
+    /// The executor completed; the tool-free reviewer is running.
+    Reviewing,
+    /// Nothing is running any more; the turn is being written down.
+    Settling,
+}
+
+/// The current phase's stop, and whether a Stop was ever asked for.
+///
+/// Both behind ONE lock, so a Stop that arrives between phases — when there is
+/// no sender to fire — is remembered, and the next phase's sender is fired the
+/// moment it is installed instead of being missed.
+#[derive(Default)]
+struct CancelSlot {
+    sender: Option<oneshot::Sender<()>>,
+    requested: bool,
+}
+
 /// A run currently executing in this process.
 pub(crate) struct LiveRun {
     pub(crate) org_id: i32,
@@ -107,12 +142,19 @@ pub(crate) struct LiveRun {
     /// the reply, and capped independently of it.
     activity: Mutex<super::activity::ActivityLog>,
     events: broadcast::Sender<RunSignal>,
-    cancel: Mutex<Option<oneshot::Sender<()>>>,
+    cancel: Mutex<CancelSlot>,
     /// Channel to send follow-up input during the run. `None` if the transport
-    /// does not support steering (e.g., `codex exec` mode).
-    steer_tx: Option<mpsc::Sender<SteerInput>>,
-    /// Whether this run's transport supports mid-run steering.
+    /// does not support steering (e.g., `codex exec` mode), and outside the
+    /// executor's phase of a supervised turn.
+    steer_tx: Mutex<Option<mpsc::Sender<SteerInput>>>,
+    /// Whether this run's transport supports mid-run steering, as advertised
+    /// to a reader when it attaches. Fixed at registration: a supervised turn
+    /// advertises `false` because its executor does not exist yet (see
+    /// [`LiveRun::steering_available`] for the live answer).
     pub(crate) supports_steering: bool,
+    /// Whether the CURRENT executor can take steering input.
+    steerable: AtomicBool,
+    phase: Mutex<RunPhase>,
 }
 
 /// The outcome of appending one runtime chunk to the shared buffer.
@@ -312,13 +354,135 @@ impl LiveRun {
 
     /// Interrupt the turn. Idempotent — a second cancel is a no-op, so a retry
     /// or a double click cannot fail.
+    ///
+    /// Stops whatever phase is running. In a supervised turn that means: while
+    /// planning, the executor is never launched; while executing, exactly an
+    /// ordinary cancel; while reviewing, only the review stops and the
+    /// completed execution stands.
     pub(crate) fn cancel(&self) {
-        let sender = match self.cancel.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
+        let sender = {
+            let mut slot = match self.cancel.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            slot.requested = true;
+            slot.sender.take()
         };
         if let Some(sender) = sender {
             let _ = sender.send(());
+        }
+    }
+
+    fn cancel_slot(&self) -> std::sync::MutexGuard<'_, CancelSlot> {
+        match self.cancel.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Whether a Stop has been asked for at any point in this turn.
+    fn stop_requested(&self) -> bool {
+        self.cancel_slot().requested
+    }
+
+    /// Install the current phase's stop. If a Stop already arrived it is fired
+    /// at once, so a Stop racing a launch is never lost.
+    fn arm(&self, sender: oneshot::Sender<()>) {
+        let mut slot = self.cancel_slot();
+        if slot.requested {
+            drop(slot);
+            let _ = sender.send(());
+            return;
+        }
+        slot.sender = Some(sender);
+    }
+
+    /// Remove a finished phase's stop, so a later Stop cannot fire at a run
+    /// that is already over (dropping it is not a stop; see `collect`).
+    fn disarm(&self) {
+        let sender = self.cancel_slot().sender.take();
+        drop(sender);
+    }
+
+    /// Move to `phase` unless a Stop was asked for. Checked under the cancel
+    /// lock, so "Stop arrived" and "next phase began" cannot both be true.
+    fn enter_phase(&self, phase: RunPhase) -> bool {
+        let slot = self.cancel_slot();
+        if slot.requested {
+            return false;
+        }
+        self.set_phase(phase);
+        drop(slot);
+        true
+    }
+
+    fn set_phase(&self, phase: RunPhase) {
+        match self.phase.lock() {
+            Ok(mut guard) => *guard = phase,
+            Err(poisoned) => *poisoned.into_inner() = phase,
+        }
+    }
+
+    /// The phase this run is in now.
+    pub(crate) fn phase(&self) -> RunPhase {
+        match self.phase.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    /// Whether a steer sent now could be delivered: the executor is running,
+    /// its transport steers, and it has not been stopped. The live counterpart
+    /// of `supports_steering`, for a reader that wants to enable or disable its
+    /// steer box per phase.
+    pub(crate) fn steering_available(&self) -> bool {
+        self.phase() == RunPhase::Executing
+            && self.steerable.load(Ordering::SeqCst)
+            && self.cancel_slot().sender.is_some()
+    }
+
+    /// Take over the executor's steering and stop for the executing phase.
+    fn adopt_executor(&self, handle: &mut RunHandle) {
+        let steer_tx = handle.take_steer_tx();
+        let steerable = handle.supports_steering && steer_tx.is_some();
+        match self.steer_tx.lock() {
+            Ok(mut guard) => *guard = steer_tx,
+            Err(poisoned) => *poisoned.into_inner() = steer_tx,
+        }
+        self.steerable.store(steerable, Ordering::SeqCst);
+        if let Some(cancel) = handle.take_canceler() {
+            self.arm(cancel);
+        }
+    }
+
+    /// The executor is over: no more steering, and no stale stop.
+    fn release_executor(&self) {
+        self.steerable.store(false, Ordering::SeqCst);
+        match self.steer_tx.lock() {
+            Ok(mut guard) => *guard = None,
+            Err(poisoned) => *poisoned.into_inner() = None,
+        }
+        self.disarm();
+    }
+
+    /// Record (or revise) a supervision step and tell live readers.
+    fn record_supervision(&self, draft: super::activity::ActivityDraft) {
+        let offset = {
+            let guard = match self.buffer.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.1
+        };
+        let item = {
+            let mut log = match self.activity.lock() {
+                Ok(log) => log,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            log.push_supervision(draft, offset)
+        };
+        if let Some(item) = item {
+            let _ = self.events.send(RunSignal::Activity(item));
         }
     }
 
@@ -331,18 +495,26 @@ impl LiveRun {
     /// The timeout is bounded (default 30s) to prevent indefinite hangs when the
     /// provider or relay is stuck.
     pub(crate) async fn steer(&self, text: String, request_id: String) -> Result<(), SteerError> {
-        if !self.supports_steering {
+        // Only an executor can be steered. A planner or a reviewer has no
+        // steering channel at all (tool-free runs never do), so outside the
+        // executing phase this is a plain, explicit "not supported now".
+        match self.phase() {
+            RunPhase::Executing => {}
+            RunPhase::Planning | RunPhase::Reviewing => return Err(SteerError::Unsupported),
+            RunPhase::Settling => return Err(SteerError::Finished),
+        }
+        if !self.steerable.load(Ordering::SeqCst) {
             return Err(SteerError::Unsupported);
         }
         // Check if cancel channel is taken — run is finishing
-        let cancel_taken = match self.cancel.lock() {
-            Ok(guard) => guard.is_none(),
-            Err(poisoned) => poisoned.into_inner().is_none(),
-        };
-        if cancel_taken {
+        if self.cancel_slot().sender.is_none() {
             return Err(SteerError::Finished);
         }
-        let tx = self.steer_tx.as_ref().ok_or(SteerError::Unsupported)?;
+        let tx = match self.steer_tx.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+        .ok_or(SteerError::Unsupported)?;
 
         // Create the oneshot for this specific request's reply
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -504,9 +676,14 @@ pub(crate) fn start_with_purpose(
         buffer: Mutex::new((String::new(), 0)),
         activity: Mutex::new(super::activity::ActivityLog::new()),
         events,
-        cancel: Mutex::new(handle.take_canceler()),
-        steer_tx,
+        cancel: Mutex::new(CancelSlot {
+            sender: handle.take_canceler(),
+            requested: false,
+        }),
+        steer_tx: Mutex::new(steer_tx),
         supports_steering,
+        steerable: AtomicBool::new(supports_steering),
+        phase: Mutex::new(RunPhase::Executing),
     });
     lock(&state.agent_runs).insert(run_id.clone(), live.clone());
     tokio::spawn(drive(
@@ -521,6 +698,265 @@ pub(crate) fn start_with_purpose(
         purpose,
     ));
     live
+}
+
+/// Register a SUPERVISED turn and start its driver: an optional tool-free plan,
+/// the executor, then an optional tool-free review — one turn row, one run id,
+/// one stream, one terminal write.
+///
+/// The executor is launched HERE, not by the caller, because it must not exist
+/// before the plan does (and must never exist if Stop arrives while planning).
+/// A launch refusal settles the turn exactly as `settle_refusal` would.
+///
+/// Invariants:
+/// - The turn's `status`, `error_code`, `response` and attachments are the
+///   executor's. A plan or a review that fails, times out, is malformed or is
+///   stopped records `unavailable: <reason>` on its step and nothing else.
+/// - Review runs only after the executor COMPLETED, and only after its reply
+///   and outputs are durable on the (still running) row with a
+///   `review_pending` step.
+/// - Stop: while planning, the turn is `canceled` and the executor is never
+///   launched; while executing, exactly an ordinary cancel; while reviewing,
+///   the review is abandoned and the turn settles `completed`.
+/// - Steering reaches the executor only; any other phase is `Unsupported`.
+/// - Never published to a team chat: a supervised turn is a private session
+///   turn (team invocations stay on `start`).
+// Called by `http::agent_sessions::start_turn` for a supervised Auto turn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_supervised(
+    state: Arc<ServerState>,
+    run_id: String,
+    actor: OrgContext,
+    session_id: String,
+    turn_id: String,
+    start: SupervisedStart,
+    runtimes: SupervisionRuntimes,
+) -> Arc<LiveRun> {
+    let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
+    let first = if start.plan.planner.is_some() {
+        RunPhase::Planning
+    } else {
+        RunPhase::Executing
+    };
+    let live = Arc::new(LiveRun {
+        org_id: actor.org_id,
+        owner_id: actor.identity.user_id,
+        session_id,
+        turn_id,
+        buffer: Mutex::new((String::new(), 0)),
+        activity: Mutex::new(super::activity::ActivityLog::with_supervision_reserve()),
+        events,
+        cancel: Mutex::new(CancelSlot::default()),
+        steer_tx: Mutex::new(None),
+        supports_steering: false,
+        steerable: AtomicBool::new(false),
+        phase: Mutex::new(first),
+    });
+    lock(&state.agent_runs).insert(run_id.clone(), live.clone());
+    tokio::spawn(drive_supervised(
+        state,
+        run_id,
+        actor,
+        live.clone(),
+        start,
+        runtimes,
+    ));
+    live
+}
+
+/// One supervisor phase: launch, wire Stop to it, collect under its bounds.
+async fn supervise(
+    live: &LiveRun,
+    runtime: &AgentRuntime,
+    request: ToolFreeRequest,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+) -> Result<String, Skip> {
+    if live.stop_requested() {
+        return Err(Skip::Canceled);
+    }
+    let handle = supervision::launch(runtime, request).await?;
+    let (stop, stopped) = oneshot::channel();
+    live.arm(stop);
+    let result = supervision::collect(handle, timeout, max_bytes, stopped).await;
+    live.disarm();
+    result
+}
+
+async fn drive_supervised(
+    state: Arc<ServerState>,
+    run_id: String,
+    actor: OrgContext,
+    live: Arc<LiveRun>,
+    start: SupervisedStart,
+    runtimes: SupervisionRuntimes,
+) {
+    let SupervisedStart {
+        mut executor,
+        request_text,
+        plan,
+    } = start;
+    let limits = plan.limits.bounded();
+    let scope = RunScope::of(&executor);
+
+    // Planning. Advisory: whatever happens here, the executor's own request is
+    // unchanged except for a delimited plan in its briefing.
+    let mut planned: Option<String> = None;
+    if let Some(planner) = plan.planner.as_ref() {
+        live.record_supervision(supervision::plan_pending_step(planner));
+        let request = supervision::planner_request(&executor, planner, &limits);
+        let result = supervise(
+            &live,
+            &runtimes.planner,
+            request,
+            limits.plan_timeout,
+            limits.plan_output_bytes,
+        )
+        .await
+        .and_then(|raw| supervision::plan_text(&raw));
+        // A plan that arrived but was overtaken by Stop is not "ready".
+        let result = match result {
+            Ok(_) if live.stop_requested() => Err(Skip::Canceled),
+            other => other,
+        };
+        live.record_supervision(supervision::plan_step(planner, &result));
+        planned = result.ok();
+    }
+
+    // Executing. A Stop that arrived at any point before this is final: the
+    // executor is never launched.
+    if !live.enter_phase(RunPhase::Executing) {
+        live.set_phase(RunPhase::Settling);
+        finalize(
+            &state,
+            &run_id,
+            &live,
+            "",
+            TurnStatus::Canceled,
+            Some("canceled"),
+            false,
+        )
+        .await;
+        return;
+    }
+    if let Some(plan) = planned.as_deref() {
+        executor.briefing = supervision::briefing_with_plan(executor.briefing.take(), plan);
+    }
+    let mut handle = match runtimes.executor.run(executor).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            live.set_phase(RunPhase::Settling);
+            let code = sessions::execution_error_code(&error);
+            finalize(
+                &state,
+                &run_id,
+                &live,
+                "",
+                TurnStatus::Failed,
+                Some(code),
+                false,
+            )
+            .await;
+            return;
+        }
+    };
+    let workspace_root = handle.workspace_root.take();
+    let runtime_id = handle.run_id.clone();
+    live.adopt_executor(&mut handle);
+    let outcome = consume(
+        &state,
+        &run_id,
+        &runtime_id,
+        &actor,
+        &live,
+        &mut handle,
+        None,
+        workspace_root.as_ref(),
+        &RunPurpose::Chat,
+    )
+    .await;
+    live.release_executor();
+    drop(handle);
+
+    // Reviewing: only a COMPLETED execution, and never at its expense.
+    if let (TurnStatus::Completed, Some(reviewer)) = (outcome.status, plan.reviewer.as_ref()) {
+        let (request, coverage) = supervision::reviewer_request(
+            &scope,
+            reviewer,
+            &limits,
+            &request_text,
+            planned.as_deref(),
+            &outcome.response,
+            &outcome.generated_names,
+        );
+        let result = if !live.enter_phase(RunPhase::Reviewing) {
+            Err(Skip::Canceled)
+        } else if outcome.response.trim().is_empty() {
+            Err(Skip::Empty)
+        } else {
+            live.record_supervision(supervision::review_pending_step(reviewer));
+            // The finished execution is made durable BEFORE the review can
+            // take any time, so a crash or a stuck review cannot cost it.
+            persist_progress(
+                &state,
+                &run_id,
+                &outcome.response,
+                live.activity_stored().as_deref(),
+            )
+            .await;
+            supervise(
+                &live,
+                &runtimes.reviewer,
+                request,
+                limits.review_timeout,
+                limits.review_output_bytes,
+            )
+            .await
+            .and_then(|raw| supervision::parse_verdict(&raw))
+        };
+        live.record_supervision(supervision::review_step(reviewer, &result, &coverage));
+    }
+
+    live.set_phase(RunPhase::Settling);
+    finalize(
+        &state,
+        &run_id,
+        &live,
+        &outcome.response,
+        outcome.status,
+        outcome.error_code,
+        false,
+    )
+    .await;
+}
+
+/// Store a completed execution's reply and trace on its still-running row.
+///
+/// Guarded by `status='running'` like every driver write, so it can never
+/// touch a settled turn. Best effort: a failure here leaves the terminal write
+/// (which carries the same reply) as the record.
+async fn persist_progress(
+    state: &ServerState,
+    run_id: &str,
+    response: &str,
+    activity: Option<&str>,
+) -> bool {
+    let response: String = response.chars().take(MAX_RESPONSE_CHARS).collect();
+    let activity = activity
+        .filter(|text| text.len() <= super::activity::MAX_ACTIVITY_CHARS)
+        .map(str::to_owned);
+    crate::neev::db::execute(
+        &state.database,
+        "UPDATE neev_agent_turns SET response=$1,activity=$2,updated_at=$3 WHERE run_id=$4 AND status='running'",
+        vec![
+            response.into(),
+            activity.into(),
+            state.clock.now_unix().into(),
+            run_id.into(),
+        ],
+    )
+    .await
+    .is_ok()
 }
 
 /// Consume the runtime's stream: accumulate, broadcast, persist, settle.
@@ -538,6 +974,148 @@ async fn drive(
     workspace_root: Option<PathBuf>,
     purpose: RunPurpose,
 ) {
+    let knowledge = matches!(purpose, RunPurpose::Knowledge { .. });
+    let chat_id = publish.as_ref().map(|p| p.chat_id.as_str());
+    let Outcome {
+        mut status,
+        mut error_code,
+        response,
+        generated_keys,
+        ..
+    } = consume(
+        &state,
+        &run_id,
+        &runtime_id,
+        &actor,
+        &live,
+        &mut handle,
+        chat_id,
+        workspace_root.as_ref(),
+        &purpose,
+    )
+    .await;
+
+    // An explicitly team-invoked run publishes BEFORE it settles: the
+    // team-visible message is the product, so a turn is only "completed" once
+    // the team can actually see the reply. A publish that fails (the invoker
+    // lost write access, the chat was archived, the org hit its quota) turns
+    // the run into an honest failure and posts nothing.
+    //
+    // Generated keys are passed so attachments can be linked to the assistant message.
+    if let (Some(publication), TurnStatus::Completed, false) = (&publish, status, knowledge) {
+        match publish_reply_with_attachments(&state, publication, &response, &generated_keys).await
+        {
+            Ok(()) => {}
+            Err(code) => {
+                status = TurnStatus::Failed;
+                error_code = Some(code);
+            }
+        }
+    }
+
+    // Settle the durable row BEFORE leaving the registry, so a reader can never
+    // observe a run that is neither live nor final.
+    finalize(
+        &state, &run_id, &live, &response, status, error_code, knowledge,
+    )
+    .await;
+}
+
+/// What one run's stream said about the caller's provider usage.
+#[derive(Default)]
+struct UsageEvidence {
+    /// The provider whose stream reported a clean end of turn.
+    finished: Option<String>,
+    /// The provider's last structured failure class, if any.
+    failure: Option<(String, String)>,
+}
+
+impl UsageEvidence {
+    fn key(actor: &OrgContext, provider: &str) -> super::routing_usage::AccountKey {
+        super::routing_usage::AccountKey {
+            org_id: actor.org_id,
+            user_id: actor.identity.user_id,
+            provider: provider.to_owned(),
+            // Connection changes forget the account instead (`intents`), so
+            // one generation per (org, user, provider) is enough here.
+            generation: 0,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        state: &ServerState,
+        actor: &OrgContext,
+        signal: super::activity::UsageSignal,
+    ) {
+        use super::activity::UsageKind;
+        match signal.kind {
+            UsageKind::RateLimits(payload) => {
+                let now = state.clock.now_unix();
+                if let Some(snapshot) = super::routing_usage::parse_codex_rate_limits(&payload, now)
+                {
+                    state
+                        .agent_usage
+                        .record_snapshot(&Self::key(actor, &signal.provider), snapshot, now);
+                }
+            }
+            UsageKind::FailureHint(hint) => self.failure = Some((signal.provider, hint)),
+            UsageKind::Finished => self.finished = Some(signal.provider),
+        }
+    }
+
+    /// Record the outcome. A cancel or an interruption says nothing about
+    /// usage, so only a completed or provider-failed turn is recorded.
+    fn settle(self, state: &ServerState, actor: &OrgContext, status: TurnStatus) {
+        let now = state.clock.now_unix();
+        match status {
+            TurnStatus::Completed => {
+                if let Some(provider) = self.finished {
+                    state
+                        .agent_usage
+                        .record_success(&Self::key(actor, &provider), now);
+                }
+            }
+            TurnStatus::Failed => {
+                if let Some((provider, hint)) = self.failure {
+                    if let Some(signal) =
+                        super::routing_usage::structured_failure(&provider, Some(&hint))
+                    {
+                        state
+                            .agent_usage
+                            .record_failure(&Self::key(actor, &provider), signal, now);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// How one executor stream ended, after its outputs were handled.
+struct Outcome {
+    status: TurnStatus,
+    error_code: Option<&'static str>,
+    response: String,
+    generated_keys: Vec<String>,
+    /// File names of the stored outputs, for a reviewer (names only).
+    generated_names: Vec<String>,
+}
+
+/// Everything before publication and settlement: accumulate and broadcast the
+/// stream, classify how it ended, and persist (or settle) its outputs.
+#[allow(clippy::too_many_arguments)]
+async fn consume(
+    state: &Arc<ServerState>,
+    run_id: &str,
+    runtime_id: &str,
+    actor: &OrgContext,
+    live: &LiveRun,
+    handle: &mut RunHandle,
+    chat_id: Option<&str>,
+    workspace_root: Option<&PathBuf>,
+    purpose: &RunPurpose,
+) -> Outcome {
     let database = state.database.clone();
     let knowledge = matches!(purpose, RunPurpose::Knowledge { .. });
     let mut flushed = 0usize;
@@ -548,6 +1126,9 @@ async fn drive(
     // rather than read back from the trace, so a trace that hit its cap still
     // settles the turn with the right code.
     let mut failure: Option<super::provider_error::Category> = None;
+    // Usage evidence for Auto, from the provider's own stream. Settled into
+    // the caller's usage book once the run's outcome is known.
+    let mut usage = UsageEvidence::default();
     while let Some(event) = handle.next().await {
         // Read before the match, which moves the text out of the event.
         let whole = matches!(event, RunEvent::Message(_));
@@ -601,7 +1182,7 @@ async fn drive(
                 if total - flushed >= FLUSH_CHARS {
                     let (snapshot, chars) = live.snapshot();
                     let now = state.clock.now_unix();
-                    if sessions::persist_response(&database, &run_id, &snapshot, now)
+                    if sessions::persist_response(&database, run_id, &snapshot, now)
                         .await
                         .is_ok()
                     {
@@ -609,6 +1190,7 @@ async fn drive(
                     }
                 }
             }
+            RunEvent::Usage(signal) => usage.observe(state, actor, signal),
             RunEvent::Completed => {
                 settled = Some((TurnStatus::Completed, None));
                 break;
@@ -623,7 +1205,8 @@ async fn drive(
     let (mut status, mut error_code) = settled.unwrap_or((TurnStatus::Failed, Some("interrupted")));
     // The buffer is capped on append, so it is always storable as-is.
     let mut response = live.snapshot().0;
-    (status, error_code) = settle_provider_failure(&live, status, error_code, failure, &response);
+    (status, error_code) = settle_provider_failure(live, status, error_code, failure, &response);
+    usage.settle(state, actor, status);
 
     // Persist generated outputs from the spool BEFORE publication or settlement.
     // Only on successful completion - a failed run's outputs are not trusted.
@@ -633,13 +1216,16 @@ async fn drive(
     // creates spool/run-{runtime_id}/, and mismatched ids MUST be rejected.
     // For team chats, pass the chat_id so attachments are owned by the chat.
     let mut generated_keys: Vec<String> = Vec::new();
-    let chat_id = publish.as_ref().map(|p| p.chat_id.as_str());
-    if let RunPurpose::Knowledge { org_id, batch_id, .. } = &purpose {
+    let mut generated_names: Vec<String> = Vec::new();
+    if let RunPurpose::Knowledge {
+        org_id, batch_id, ..
+    } = purpose
+    {
         // Spool -> knowledge accept -> spool cleanup. Never attachments.
         let completed = status == TurnStatus::Completed;
         let canceled = status == TurnStatus::Canceled;
-        let files = match workspace_root.as_ref() {
-            Some(root) if completed => match generated::read_spool(root, &runtime_id) {
+        let files = match workspace_root {
+            Some(root) if completed => match generated::read_spool(root, runtime_id) {
                 Ok(files) => Ok(files),
                 Err(SpoolError::NotFound) => Ok(Vec::new()),
                 Err(_) => Err(()),
@@ -648,11 +1234,11 @@ async fn drive(
         };
         let now = state.clock.now_unix();
         let outcome = crate::neev::knowledge::output::settle_run(
-            &state, *org_id, batch_id, completed, canceled, files, now,
+            state, *org_id, batch_id, completed, canceled, files, now,
         )
         .await;
-        if let Some(root) = workspace_root.as_ref() {
-            generated::cleanup_spool(root, &runtime_id);
+        if let Some(root) = workspace_root {
+            generated::cleanup_spool(root, runtime_id);
         }
         let seq: i32 = crate::neev::db::one(
             &state.database,
@@ -679,13 +1265,13 @@ async fn drive(
             }
         }
     } else if status == TurnStatus::Completed {
-        if let Some(ref workspace_root) = workspace_root {
+        if let Some(workspace_root) = workspace_root {
             match persist_generated_outputs(
-                &state,
-                &runtime_id,
-                &run_id,
-                &actor,
-                &live,
+                state,
+                runtime_id,
+                run_id,
+                actor,
+                live,
                 workspace_root,
                 chat_id,
             )
@@ -696,6 +1282,7 @@ async fn drive(
                     if !stored.is_empty() {
                         response = generated::rewrite_output_links(&response, &stored);
                         generated_keys = stored.iter().map(|(_, key)| key.clone()).collect();
+                        generated_names = stored.iter().map(|(name, _)| name.clone()).collect();
                         // Update the live buffer so refresh sees rewritten links too
                         live.replace_buffer(&response);
                     }
@@ -709,36 +1296,38 @@ async fn drive(
         }
     }
 
-    // An explicitly team-invoked run publishes BEFORE it settles: the
-    // team-visible message is the product, so a turn is only "completed" once
-    // the team can actually see the reply. A publish that fails (the invoker
-    // lost write access, the chat was archived, the org hit its quota) turns
-    // the run into an honest failure and posts nothing.
-    //
-    // Generated keys are passed so attachments can be linked to the assistant message.
-    if let (Some(publication), TurnStatus::Completed, false) = (&publish, status, knowledge) {
-        match publish_reply_with_attachments(&state, publication, &response, &generated_keys).await
-        {
-            Ok(()) => {}
-            Err(code) => {
-                status = TurnStatus::Failed;
-                error_code = Some(code);
-            }
-        }
+    Outcome {
+        status,
+        error_code,
+        response,
+        generated_keys,
+        generated_names,
     }
+}
 
-    // Settle the durable row BEFORE leaving the registry, so a reader can never
-    // observe a run that is neither live nor final.
+/// Write the turn's terminal state once, tell readers, and leave the registry
+/// — in that order, so a reader never sees a run that is neither live nor
+/// final.
+async fn finalize(
+    state: &Arc<ServerState>,
+    run_id: &str,
+    live: &LiveRun,
+    response: &str,
+    status: TurnStatus,
+    error_code: Option<&'static str>,
+    knowledge: bool,
+) {
+    let database = state.database.clone();
     let trace = if knowledge {
         live.activity_names_only_stored()
     } else {
         live.activity_stored()
     };
     let stored = persist_terminal(
-        &state,
+        state,
         &database,
-        &run_id,
-        &response,
+        run_id,
+        response,
         trace.as_deref(),
         status,
         error_code,
@@ -757,8 +1346,8 @@ async fn drive(
         // failed turn, not a wedged session.
         tokio::spawn(reconcile_stranded(
             state.clone(),
-            run_id.clone(),
-            response.clone(),
+            run_id.to_owned(),
+            response.to_owned(),
         ));
         (TurnStatus::Failed, Some("unavailable"))
     };
@@ -766,7 +1355,7 @@ async fn drive(
         status: reported_status,
         error_code: reported_code.map(str::to_owned),
     });
-    lock(&state.agent_runs).remove(&run_id);
+    lock(&state.agent_runs).remove(run_id);
 }
 
 /// Reconcile how the stream ended with what the provider said about it.

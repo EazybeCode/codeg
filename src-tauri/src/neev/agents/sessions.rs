@@ -1036,6 +1036,16 @@ async fn recorded_attachments(
 /// The references are written in the SAME transaction as the turn row, so the
 /// caller can read them back and know the run it is about to start is described
 /// by durable storage rather than by the request that asked for it.
+/// The selection an Auto turn runs on, already validated against the
+/// caller's catalogue, and the session revision it was decided against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RoutedSettings {
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    pub(crate) fast: bool,
+    pub(crate) expected_revision: i64,
+}
+
 pub(crate) async fn begin_turn_with_attachments(
     state: &ServerState,
     actor: &OrgContext,
@@ -1043,6 +1053,36 @@ pub(crate) async fn begin_turn_with_attachments(
     text: &str,
     request_id: Option<&str>,
     attachment_keys: &[String],
+) -> Result<(AgentTurn, bool), ContentError> {
+    begin(state, actor, session_id, text, request_id, attachment_keys, None).await
+}
+
+/// Begin an Auto turn: the routed selection becomes the session's settings in
+/// the SAME transaction as the turn row, so the session always says what its
+/// latest turn ran on, a retry re-runs that choice, and the next brief
+/// follow-up keeps it. Refused with `Conflict` when the session changed since
+/// routing read it — a concurrent manual change wins rather than being
+/// overwritten by a decision made against the old state.
+pub(crate) async fn begin_routed_turn(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+    text: &str,
+    attachment_keys: &[String],
+    routed: &RoutedSettings,
+) -> Result<(AgentTurn, bool), ContentError> {
+    model(&routed.model)?;
+    begin(state, actor, session_id, text, None, attachment_keys, Some(routed)).await
+}
+
+async fn begin(
+    state: &ServerState,
+    actor: &OrgContext,
+    session_id: &str,
+    text: &str,
+    request_id: Option<&str>,
+    attachment_keys: &[String],
+    routed: Option<&RoutedSettings>,
 ) -> Result<(AgentTurn, bool), ContentError> {
     let text = prompt(text)?;
     let request_id = request_id
@@ -1083,6 +1123,12 @@ pub(crate) async fn begin_turn_with_attachments(
         let _ = live;
         return Err(ContentError::Conflict);
     }
+    if let Some(routed) = routed {
+        if found.revision != routed.expected_revision {
+            return Err(ContentError::Conflict);
+        }
+    }
+    let run_model = routed.map_or_else(|| found.model.clone(), |routed| routed.model.clone());
     let sequence: i64 = db::one(
         &tx,
         "SELECT COALESCE(MAX(sequence),0) AS n FROM neev_agent_turns WHERE org_id=$1 AND session_id=$2",
@@ -1111,7 +1157,7 @@ pub(crate) async fn begin_turn_with_attachments(
             request_id.clone().into(),
             text.into(),
             found.provider.clone().into(),
-            found.model.clone().into(),
+            run_model.clone().into(),
             now.into(),
         ],
     )
@@ -1129,17 +1175,41 @@ pub(crate) async fn begin_turn_with_attachments(
     .await?;
     // The session's own timestamp/revision move so the sidebar reorders and a
     // concurrent rename is detected.
-    db::execute(
-        &tx,
-        "UPDATE neev_agent_sessions SET revision=revision+1,updated_at=$1 WHERE org_id=$2 AND id=$3 AND owner_id=$4",
-        vec![
-            now.into(),
-            actor.org_id.into(),
-            session_id.into(),
-            actor.identity.user_id.into(),
-        ],
-    )
-    .await?;
+    match routed {
+        None => {
+            db::execute(
+                &tx,
+                "UPDATE neev_agent_sessions SET revision=revision+1,updated_at=$1 WHERE org_id=$2 AND id=$3 AND owner_id=$4",
+                vec![
+                    now.into(),
+                    actor.org_id.into(),
+                    session_id.into(),
+                    actor.identity.user_id.into(),
+                ],
+            )
+            .await?;
+        }
+        Some(routed) => {
+            let changed = db::execute(
+                &tx,
+                "UPDATE neev_agent_sessions SET model=$1,effort=$2,fast=$3,revision=revision+1,updated_at=$4 WHERE org_id=$5 AND id=$6 AND owner_id=$7 AND revision=$8",
+                vec![
+                    routed.model.clone().into(),
+                    routed.effort.clone().into(),
+                    routed.fast.into(),
+                    now.into(),
+                    actor.org_id.into(),
+                    session_id.into(),
+                    actor.identity.user_id.into(),
+                    routed.expected_revision.into(),
+                ],
+            )
+            .await?;
+            if changed.rows_affected() != 1 {
+                return Err(ContentError::Conflict);
+            }
+        }
+    }
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok((AgentTurn {
@@ -1155,7 +1225,7 @@ pub(crate) async fn begin_turn_with_attachments(
         status: TurnStatus::Running,
         error_code: None,
         provider: found.provider,
-        model: found.model,
+        model: run_model,
         created_at: now,
         updated_at: now,
         completed_at: None,
@@ -1407,13 +1477,44 @@ pub(crate) async fn reconcile_interrupted(
     database: &DatabaseConnection,
     now: i64,
 ) -> Result<u64, ContentError> {
+    use crate::neev::agents::runs::supervision::settle_interrupted_review;
+    let mut settled = 0u64;
+    // A supervised turn whose EXECUTION completed and was made durable before
+    // its review began (`runs::persist_progress`). Only the review was cut
+    // off, so the turn is the completed answer it already was, with the review
+    // step saying it was interrupted. The LIKE is a cheap prefilter; the
+    // decision is made on the parsed trace.
+    let rows = database
+        .query_all(db::statement(
+            database,
+            "SELECT run_id, activity FROM neev_agent_turns WHERE status='running' AND activity LIKE '%review_pending%'",
+            vec![],
+        ))
+        .await
+        .map_err(database_error)?;
+    for row in rows {
+        let Ok(run_id) = row.try_get::<String>("", "run_id") else {
+            continue;
+        };
+        let activity: Option<String> = row.try_get("", "activity").ok().flatten();
+        if let Some(trace) = settle_interrupted_review(activity.as_deref()) {
+            let changed = db::execute(
+                database,
+                "UPDATE neev_agent_turns SET status='completed',error_code=NULL,activity=$1,updated_at=$2,completed_at=$2 WHERE run_id=$3 AND status='running'",
+                vec![trace.into(), now.into(), run_id.into()],
+            )
+            .await?;
+            settled += changed.rows_affected();
+        }
+    }
+    // Everything else was interrupted mid-plan or mid-execution, as before.
     let changed = db::execute(
         database,
         "UPDATE neev_agent_turns SET status='failed',error_code='interrupted',updated_at=$1,completed_at=$1 WHERE status='running'",
         vec![now.into()],
     )
     .await?;
-    Ok(changed.rows_affected())
+    Ok(settled + changed.rows_affected())
 }
 
 /// Map an execution refusal to the durable error code stored on the turn.

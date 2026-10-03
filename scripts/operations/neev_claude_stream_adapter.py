@@ -49,6 +49,26 @@ MAX_PENDING_STEERS = 16
 # Interrupt timeout - reject steer if no response within this time
 INTERRUPT_TIMEOUT_SECS = 30
 
+# A tool-free (supervisor) turn: switched off where the tools live, in the CLI,
+# rather than observed and aborted afterwards. Verified against `claude --help`
+# (2.1.247; the image pins 2.1.267): `--tools ""` declares no built-in tool,
+# `--strict-mcp-config` with no `--mcp-config` loads no MCP server, `--safe-mode`
+# drops hooks/plugins/skills/CLAUDE.md while keeping the subscription sign-in
+# (`--bare` would not: it never reads OAuth), `dontAsk` denies anything not
+# pre-approved, and no transcript is written into the credential volume. A CLI
+# that does not know one of these exits with an error: the turn fails, it never
+# runs with tools.
+TOOL_FREE_ARGS = (
+    "--tools", "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--safe-mode",
+    "--permission-mode", "dontAsk",
+    "--no-session-persistence",
+)
+# Content blocks that mean a tool was asked for or answered.
+_TOOL_BLOCKS = frozenset(("tool_use", "server_tool_use", "mcp_tool_use", "tool_result"))
+
 
 def _parse(argv):
     parser = argparse.ArgumentParser(prog="neev_claude_stream_adapter", add_help=True)
@@ -69,6 +89,7 @@ def _parse(argv):
     parser.add_argument(
         "--enable-steering", action="store_true", default=False, dest="enable_steering"
     )
+    parser.add_argument("--tool-free", action="store_true", default=False, dest="tool_free")
     parser.add_argument("prompt", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     prompt = list(args.prompt)
@@ -105,7 +126,38 @@ def claude_argv(args):
         argv += ["--append-system-prompt", args.append_system_prompt]
     if args.settings:
         argv += ["--settings", args.settings]
+    if getattr(args, "tool_free", False):
+        argv += list(TOOL_FREE_ARGS)
     return argv
+
+
+def _tool_blocks(event):
+    """Pure: does this event carry a tool request or result anywhere we know?"""
+    blocks = []
+    inner = event.get("event")
+    if isinstance(inner, dict) and isinstance(inner.get("content_block"), dict):
+        blocks.append(inner["content_block"])
+    message = event.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), list):
+        blocks.extend(block for block in message["content"] if isinstance(block, dict))
+    return any(block.get("type") in _TOOL_BLOCKS for block in blocks)
+
+
+def _tool_free_violation(event):
+    """Pure: the failure code for an event a tool-free turn must not see, or None.
+
+    `system/init` is the CLI's own statement of what it loaded, sent before the
+    model answers: anything but an empty tool list and no MCP server means the
+    switches were not honoured, and the turn stops before a tool can be chosen.
+    A tool block after that is a second line, not the enforcement.
+    """
+    if event.get("type") == "system" and event.get("subtype") == "init":
+        if event.get("tools") != [] or event.get("mcp_servers") != []:
+            return "tool_free_unenforced"
+        return None
+    if _tool_blocks(event):
+        return "tool_use"
+    return None
 
 
 class Emitter:
@@ -217,6 +269,8 @@ class SteerState:
         self._emit = emit
         self._finished = False
         self._session_started = False
+        # Set by `drive` for a `--tool-free` turn; see `_tool_free_violation`.
+        self.tool_free = False
         # {uuid: request_id} for pending steers awaiting echo
         self._pending_steers = {}
         # {control_request_id: (uuid, timestamp)} for pending interrupt requests
@@ -494,6 +548,13 @@ def handle_event(event, line, emit, state):
     """
     event_type = event.get("type")
 
+    if getattr(state, "tool_free", False):
+        violation = _tool_free_violation(event)
+        if violation is not None:
+            state.mark_finished()
+            emit.turn_failed("tool-free turn: " + violation.replace("_", " "), violation)
+            return 4
+
     # System init message
     if event_type == "system":
         subtype = event.get("subtype")
@@ -565,6 +626,7 @@ def drive(child, args, emit, steer_input=None, stderr_tail=None):
     """Run Claude with stream-json, handling steering via interrupt."""
     stdin, stdout = child.stdin, child.stdout
     state = SteerState(emit)
+    state.tool_free = bool(getattr(args, "tool_free", False))
     steer_thread = None
 
     # Send initial prompt as user message
@@ -643,6 +705,9 @@ def main(argv=None, steer_input=None):
 
     if not args.prompt:
         emit.turn_failed("empty prompt")
+        return 2
+    if args.tool_free and (args.enable_steering or steer_input is not None):
+        emit.turn_failed("tool-free turns take no steering", "invalid")
         return 2
 
     # Determine steering input

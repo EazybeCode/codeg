@@ -60,6 +60,62 @@ MAX_REASON_CHARS = 1000
 STDERR_TAIL_LINES = 8
 STDERR_LINE_CHARS = 500
 
+# Usage evidence for Auto routing: Codex's documented `account/rateLimits`
+# data, reduced to windows only (never credits, plan or names) and bounded.
+RATE_LIMITS_READ_ID = 4
+MAX_USAGE_PAYLOAD_BYTES = 8 * 1024
+MAX_USAGE_POOLS = 8
+_WINDOW_FIELDS = ("usedPercent", "windowDurationMins", "resetsAt")
+
+
+def _window(value):
+    if not isinstance(value, dict):
+        return None
+    out = {}
+    for field in _WINDOW_FIELDS:
+        item = value.get(field)
+        if item is None or (isinstance(item, (int, float)) and not isinstance(item, bool)):
+            out[field] = item
+    return out if "usedPercent" in out and out["usedPercent"] is not None else None
+
+
+def _snapshot(value):
+    if not isinstance(value, dict):
+        return None
+    out = {}
+    limit_id = value.get("limitId")
+    if isinstance(limit_id, str) and len(limit_id) <= 64:
+        out["limitId"] = limit_id
+    for key in ("primary", "secondary"):
+        window = _window(value.get(key))
+        if window is not None:
+            out[key] = window
+    return out if ("primary" in out or "secondary" in out) else None
+
+
+def reduce_rate_limits(params):
+    """Keep only the documented windows of a rate-limit report, or None."""
+    if not isinstance(params, dict):
+        return None
+    payload = {}
+    single = _snapshot(params.get("rateLimits"))
+    if single is not None:
+        payload["rateLimits"] = single
+    pools = params.get("rateLimitsByLimitId")
+    if isinstance(pools, dict):
+        kept = {}
+        for key, value in list(pools.items())[:MAX_USAGE_POOLS]:
+            snapshot = _snapshot(value)
+            if isinstance(key, str) and len(key) <= 64 and snapshot is not None:
+                kept[key] = snapshot
+        if kept:
+            payload["rateLimitsByLimitId"] = kept
+    if not payload:
+        return None
+    if len(json.dumps(payload)) > MAX_USAGE_PAYLOAD_BYTES:
+        return None
+    return payload
+
 
 def error_hint(error):
     """Pure: the kind of a v2 `TurnError.codexErrorInfo`, or None.
@@ -290,6 +346,12 @@ class Emitter:
     def turn_completed(self):
         self._write({"type": "turn.completed"})
 
+    def usage(self, params):
+        """Forward a rate-limit report, reduced; nothing when unusable."""
+        payload = reduce_rate_limits(params)
+        if payload is not None:
+            self._write({"type": "neev.usage", "source": "codex.rateLimits", "payload": payload})
+
     def turn_failed(self, reason, code=None):
         """The turn is over and did not succeed.
 
@@ -353,6 +415,9 @@ def translate(method, params, emit, memory=None):
                 item.get("aggregatedOutput") or "",
                 item.get("exitCode"),
             )
+        return None
+    if method == "account/rateLimits/updated":
+        emit.usage(params)
         return None
     if method == "error":
         # An error notification (possibly a retry in progress). Remembered, so a
@@ -642,6 +707,12 @@ def drive(child, args, emit, cwd, steer_input=None, stderr_tail=None):
         if "id" not in message:
             continue
         msg_id = message["id"]
+        if msg_id == RATE_LIMITS_READ_ID:
+            # Best effort: an older CLI without the method, or any refusal,
+            # costs nothing and never touches the turn.
+            if "error" not in message:
+                emit.usage(message.get("result") or {})
+            continue
         if "error" in message:
             error = message["error"] or {}
             # Check if this is a steer response
@@ -686,6 +757,9 @@ def drive(child, args, emit, cwd, steer_input=None, stderr_tail=None):
                 emit.turn_failed("provider ignored: " + ", ".join(wrong), "settings_mismatch")
                 return 4
             _request(stdin, 3, "turn/start", start_params(args, thread_id, cwd))
+            # One read of the account's documented rate limits, for Auto. Its
+            # answer (or refusal) is handled above and never fails the turn.
+            _request(stdin, RATE_LIMITS_READ_ID, "account/rateLimits/read", {})
             # The turn itself is not on a clock: it may legitimately run for
             # minutes, and the launcher's own limits bound it.
             _clear_handshake_deadline()

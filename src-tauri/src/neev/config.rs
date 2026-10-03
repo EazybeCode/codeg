@@ -36,6 +36,178 @@ pub(crate) struct MailProvider {
     pub(crate) from: String,
 }
 
+/// Auto model routing (`NEEV_ROUTER_*`). Absent = off, and Auto is not offered.
+#[derive(Clone, PartialEq)]
+pub(crate) enum RoutingConfig {
+    Off,
+    Jev {
+        /// `None` when `NEEV_TYPESAFE_API_KEY` is absent: the router is then
+        /// reported as `missing_credential`, never as ready, and never called.
+        api_key: Option<String>,
+        model: crate::neev::agents::routing::JevModel,
+        timeout_ms: u64,
+        min_confidence: f64,
+    },
+}
+
+impl std::fmt::Debug for RoutingConfig {
+    // Hand-written so the key can never reach a log through `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("Off"),
+            Self::Jev {
+                api_key,
+                model,
+                timeout_ms,
+                min_confidence,
+            } => f
+                .debug_struct("Jev")
+                .field("api_key", &api_key.as_ref().map(|_| "<set>"))
+                .field("model", model)
+                .field("timeout_ms", timeout_ms)
+                .field("min_confidence", min_confidence)
+                .finish(),
+        }
+    }
+}
+
+pub(crate) const ROUTER_DEFAULT_TIMEOUT_MS: u64 = 3_000;
+pub(crate) const ROUTER_DEFAULT_MIN_CONFIDENCE: f64 = 0.3;
+
+pub(crate) fn routing(values: &HashMap<String, String>) -> Result<RoutingConfig, ConfigError> {
+    let Some(provider) = values.get("NEEV_ROUTER_PROVIDER") else {
+        return Ok(RoutingConfig::Off);
+    };
+    if provider != "jev" {
+        return Err(ConfigError::Provider);
+    }
+    let api_key = match values.get("NEEV_TYPESAFE_API_KEY") {
+        None => None,
+        Some(key) if key.is_empty() => None,
+        Some(key) if crate::neev::agents::routing::valid_key(key) => Some(key.clone()),
+        Some(_) => return Err(ConfigError::Provider),
+    };
+    let model = match values.get("NEEV_ROUTER_JEV_MODEL") {
+        None => crate::neev::agents::routing::JevModel::Pinned,
+        Some(value) => {
+            crate::neev::agents::routing::JevModel::parse(value).ok_or(ConfigError::Provider)?
+        }
+    };
+    let timeout_ms = match values.get("NEEV_ROUTER_TIMEOUT_MS") {
+        None => ROUTER_DEFAULT_TIMEOUT_MS,
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|ms| (500..=10_000).contains(ms))
+            .ok_or(ConfigError::Provider)?,
+    };
+    let min_confidence = match values.get("NEEV_ROUTER_MIN_CONFIDENCE") {
+        None => ROUTER_DEFAULT_MIN_CONFIDENCE,
+        Some(value) => value
+            .parse::<f64>()
+            .ok()
+            .filter(|level| level.is_finite() && (0.0..=1.0).contains(level))
+            .ok_or(ConfigError::Provider)?,
+    };
+    Ok(RoutingConfig::Jev {
+        api_key,
+        model,
+        timeout_ms,
+        min_confidence,
+    })
+}
+
+/// Supervision of complex Auto turns (`NEEV_SUPERVISION*`). Off unless set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SupervisionConfig {
+    pub(crate) mode: SupervisionMode,
+    /// The Claude model that plans and reviews. Checked against the caller's
+    /// own Claude catalogue on every use; never a client string.
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    /// The least routed complexity level (0..=3) that is supervised.
+    pub(crate) min_complexity: u8,
+    pub(crate) plan_timeout_ms: u64,
+    pub(crate) review_timeout_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SupervisionMode {
+    Off,
+    Review,
+    PlanReview,
+}
+
+impl SupervisionMode {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Review => "review",
+            Self::PlanReview => "plan_review",
+        }
+    }
+}
+
+impl SupervisionConfig {
+    pub(crate) fn off() -> Self {
+        Self {
+            mode: SupervisionMode::Off,
+            model: "opus".into(),
+            effort: Some("high".into()),
+            min_complexity: 2,
+            plan_timeout_ms: 60_000,
+            review_timeout_ms: 90_000,
+        }
+    }
+}
+
+pub(crate) fn supervision(
+    values: &HashMap<String, String>,
+) -> Result<SupervisionConfig, ConfigError> {
+    let mut config = SupervisionConfig::off();
+    config.mode = match values.get("NEEV_SUPERVISION").map(String::as_str) {
+        None | Some("off") => SupervisionMode::Off,
+        Some("review") => SupervisionMode::Review,
+        Some("plan_review") => SupervisionMode::PlanReview,
+        Some(_) => return Err(ConfigError::Provider),
+    };
+    if let Some(model) = values.get("NEEV_SUPERVISOR_MODEL") {
+        if !crate::neev::agents::execution::safe_model(model) || model == "default" {
+            return Err(ConfigError::Provider);
+        }
+        config.model = model.clone();
+    }
+    if let Some(effort) = values.get("NEEV_SUPERVISOR_EFFORT") {
+        config.effort = match effort.as_str() {
+            "" => None,
+            value if crate::neev::agents::capabilities::safe_effort(value) => {
+                Some(value.to_owned())
+            }
+            _ => return Err(ConfigError::Provider),
+        };
+    }
+    if let Some(level) = values.get("NEEV_SUPERVISION_MIN_COMPLEXITY") {
+        config.min_complexity = level
+            .parse::<u8>()
+            .ok()
+            .filter(|level| *level <= 3)
+            .ok_or(ConfigError::Provider)?;
+    }
+    for (key, slot) in [
+        ("NEEV_SUPERVISION_PLAN_TIMEOUT_MS", &mut config.plan_timeout_ms),
+        ("NEEV_SUPERVISION_REVIEW_TIMEOUT_MS", &mut config.review_timeout_ms),
+    ] {
+        if let Some(value) = values.get(key) {
+            *slot = value
+                .parse::<u64>()
+                .ok()
+                .filter(|ms| (5_000..=180_000).contains(ms))
+                .ok_or(ConfigError::Provider)?;
+        }
+    }
+    Ok(config)
+}
+
 pub(crate) struct ProviderConfig {
     pub(crate) google: Option<ProviderPair>,
     pub(crate) github: Option<ProviderPair>,
@@ -107,6 +279,10 @@ pub(crate) struct Config {
     /// document root. `None` disables the feature: routes answer 503 and no
     /// capture or compile loop runs.
     pub(crate) knowledge_root: Option<PathBuf>,
+    /// Auto model routing. `Off` unless `NEEV_ROUTER_PROVIDER` names one.
+    pub(crate) routing: RoutingConfig,
+    /// Supervision of complex Auto turns. Off unless `NEEV_SUPERVISION` is set.
+    pub(crate) supervision: SupervisionConfig,
     #[cfg(test)]
     pub(crate) _document_root_guard: Option<tempfile::TempDir>,
     #[cfg(test)]
@@ -115,7 +291,18 @@ pub(crate) struct Config {
 
 impl Config {
     pub(crate) fn from_env() -> Result<Self, ConfigError> {
-        const KEYS: [&str; 23] = [
+        const KEYS: [&str; 34] = [
+            "NEEV_SUPERVISION",
+            "NEEV_SUPERVISOR_MODEL",
+            "NEEV_SUPERVISOR_EFFORT",
+            "NEEV_SUPERVISION_MIN_COMPLEXITY",
+            "NEEV_SUPERVISION_PLAN_TIMEOUT_MS",
+            "NEEV_SUPERVISION_REVIEW_TIMEOUT_MS",
+            "NEEV_ROUTER_PROVIDER",
+            "NEEV_TYPESAFE_API_KEY",
+            "NEEV_ROUTER_JEV_MODEL",
+            "NEEV_ROUTER_TIMEOUT_MS",
+            "NEEV_ROUTER_MIN_CONFIDENCE",
             "NEEV_KNOWLEDGE_ROOT",
             "NEEV_DOCS_BACKEND_URL",
             "NEEV_DOCS_COLLABORATION_URL",
@@ -263,9 +450,13 @@ impl Config {
                 Some(root)
             }
         };
+        let routing = routing(values)?;
+        let supervision = supervision(values)?;
         Ok(Self {
             engine,
             knowledge_root,
+            routing,
+            supervision,
             origin,
             origin_header,
             google_callback,
@@ -507,6 +698,102 @@ fn mail(values: &HashMap<String, String>) -> Result<Option<MailProvider>, Config
             }))
         }
         _ => Err(ConfigError::Provider),
+    }
+}
+
+#[cfg(test)]
+mod routing_config_tests {
+    use super::*;
+    use crate::neev::agents::routing::JevModel;
+
+    fn values(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn absent_is_off() {
+        assert_eq!(routing(&values(&[])).unwrap(), RoutingConfig::Off);
+    }
+
+    #[test]
+    fn jev_without_a_key_is_configured_but_keyless() {
+        let config = routing(&values(&[("NEEV_ROUTER_PROVIDER", "jev")])).unwrap();
+        assert_eq!(
+            config,
+            RoutingConfig::Jev {
+                api_key: None,
+                model: JevModel::Pinned,
+                timeout_ms: ROUTER_DEFAULT_TIMEOUT_MS,
+                min_confidence: ROUTER_DEFAULT_MIN_CONFIDENCE,
+            }
+        );
+        let empty = routing(&values(&[
+            ("NEEV_ROUTER_PROVIDER", "jev"),
+            ("NEEV_TYPESAFE_API_KEY", ""),
+        ]))
+        .unwrap();
+        assert!(matches!(empty, RoutingConfig::Jev { api_key: None, .. }));
+    }
+
+    #[test]
+    fn a_full_configuration_is_read_and_its_key_is_never_debug_printed() {
+        let config = routing(&values(&[
+            ("NEEV_ROUTER_PROVIDER", "jev"),
+            ("NEEV_TYPESAFE_API_KEY", "ts-secret-value"),
+            ("NEEV_ROUTER_JEV_MODEL", "jev-latest"),
+            ("NEEV_ROUTER_TIMEOUT_MS", "2500"),
+            ("NEEV_ROUTER_MIN_CONFIDENCE", "0.45"),
+        ]))
+        .unwrap();
+        assert!(matches!(
+            config,
+            RoutingConfig::Jev { model: JevModel::Latest, timeout_ms: 2500, .. }
+        ));
+        assert!(!format!("{config:?}").contains("ts-secret-value"));
+    }
+
+    #[test]
+    fn supervision_is_off_unless_configured_and_strictly_parsed() {
+        assert_eq!(supervision(&values(&[])).unwrap(), SupervisionConfig::off());
+        let on = supervision(&values(&[
+            ("NEEV_SUPERVISION", "plan_review"),
+            ("NEEV_SUPERVISOR_MODEL", "opus"),
+            ("NEEV_SUPERVISOR_EFFORT", "xhigh"),
+            ("NEEV_SUPERVISION_MIN_COMPLEXITY", "3"),
+            ("NEEV_SUPERVISION_REVIEW_TIMEOUT_MS", "60000"),
+        ]))
+        .unwrap();
+        assert_eq!(on.mode, SupervisionMode::PlanReview);
+        assert_eq!(on.effort.as_deref(), Some("xhigh"));
+        assert_eq!(on.min_complexity, 3);
+        assert_eq!(on.review_timeout_ms, 60_000);
+        for pairs in [
+            vec![("NEEV_SUPERVISION", "always")],
+            vec![("NEEV_SUPERVISOR_MODEL", "--dangerous")],
+            vec![("NEEV_SUPERVISOR_MODEL", "default")],
+            vec![("NEEV_SUPERVISION_MIN_COMPLEXITY", "4")],
+            vec![("NEEV_SUPERVISION_PLAN_TIMEOUT_MS", "1000")],
+            vec![("NEEV_SUPERVISION_REVIEW_TIMEOUT_MS", "999999")],
+        ] {
+            assert_eq!(supervision(&values(&pairs)), Err(ConfigError::Provider), "{pairs:?}");
+        }
+    }
+
+    #[test]
+    fn typos_and_out_of_range_values_are_refused() {
+        for pairs in [
+            vec![("NEEV_ROUTER_PROVIDER", "openrouter")],
+            vec![("NEEV_ROUTER_PROVIDER", "jev"), ("NEEV_ROUTER_JEV_MODEL", "gpt-5")],
+            vec![("NEEV_ROUTER_PROVIDER", "jev"), ("NEEV_ROUTER_TIMEOUT_MS", "60000")],
+            vec![("NEEV_ROUTER_PROVIDER", "jev"), ("NEEV_ROUTER_TIMEOUT_MS", "fast")],
+            vec![("NEEV_ROUTER_PROVIDER", "jev"), ("NEEV_ROUTER_MIN_CONFIDENCE", "2")],
+            vec![("NEEV_ROUTER_PROVIDER", "jev"), ("NEEV_TYPESAFE_API_KEY", "a\nb")],
+        ] {
+            assert_eq!(routing(&values(&pairs)), Err(ConfigError::Provider), "{pairs:?}");
+        }
     }
 }
 

@@ -42,6 +42,46 @@ fn is_error_step(kind: &ActivityKind) -> bool {
     matches!(kind, ActivityKind::Status { state, .. } if state == super::provider_error::STATE_ERROR)
 }
 
+/// Bytes a supervised turn holds back for its plan and review steps, so an
+/// executor that fills its trace cannot cost the reader the verdict. Opt-in
+/// ([`ActivityLog::with_supervision_reserve`]): an ordinary turn keeps its
+/// whole budget. Sized for one plan and one review step at their stored
+/// detail bounds (`runs::supervision`), with room for JSON escaping.
+pub(crate) const SUPERVISION_RESERVE: usize = 6_144;
+/// Every supervision step's id starts with this. Only the server writes
+/// these steps; a provider stream cannot produce one.
+pub(crate) const SUPERVISION_ID_PREFIX: &str = "supervision:";
+/// The planner is running (revised in place to [`STATE_PLAN`]).
+pub(crate) const STATE_PLAN_PENDING: &str = "plan_pending";
+/// The planner finished: `category` is `ready`, `unavailable` or `canceled`.
+pub(crate) const STATE_PLAN: &str = "plan";
+/// The executor COMPLETED and its reply is final; the review is running
+/// (revised in place to [`STATE_REVIEW`]). A running row whose trace ends in
+/// this state holds a finished execution, which is what crash recovery needs
+/// to know.
+pub(crate) const STATE_REVIEW_PENDING: &str = "review_pending";
+/// The review finished: `category` is `pass`, `concerns`, `fail` or
+/// `unavailable`. Display only; it never changes the turn's status.
+pub(crate) const STATE_REVIEW: &str = "review";
+
+pub(crate) fn is_supervision_state(state: &str) -> bool {
+    matches!(
+        state,
+        STATE_PLAN_PENDING | STATE_PLAN | STATE_REVIEW_PENDING | STATE_REVIEW
+    )
+}
+
+fn is_supervision_step(id: &str, kind: &ActivityKind) -> bool {
+    id.starts_with(SUPERVISION_ID_PREFIX)
+        && matches!(kind, ActivityKind::Status { state, .. } if is_supervision_state(state))
+}
+
+/// Steps a trimmed trace must keep: the terminal error and the supervision
+/// steps, each of which is the stored answer to a question the reader asked.
+fn is_pinned(item: &ActivityItem) -> bool {
+    is_error_step(&item.kind) || is_supervision_step(&item.id, &item.kind)
+}
+
 /// What one recorded step was.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -149,7 +189,32 @@ pub(crate) enum StreamItem {
     /// whole message is a place where a break belongs.
     Message(String),
     Activity(ActivityDraft),
+    /// Usage evidence for Auto routing. Never stored, broadcast or shown.
+    Usage(UsageSignal),
 }
+
+/// What a provider's own stream said about the caller's usage. Tagged with
+/// the provider that emitted it, so a hint can only ever count against the
+/// account that produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UsageSignal {
+    pub(crate) provider: String,
+    pub(crate) kind: UsageKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UsageKind {
+    /// The adapter's whitelisted `account/rateLimits` payload (Codex only).
+    RateLimits(serde_json::Value),
+    /// The raw STRUCTURED class the provider attached to a failure (a Codex
+    /// `turn.failed.code`, a Claude assistant `error`). Never message text.
+    FailureHint(String),
+    /// The provider reported a clean end of turn.
+    Finished,
+}
+
+/// The largest usage payload accepted from the adapter.
+const MAX_USAGE_PAYLOAD_BYTES: usize = 8 * 1024;
 
 /// Statuses the server itself emits, as opposed to relaying.
 pub(crate) const STATE_TRUNCATED: &str = "truncated";
@@ -217,6 +282,9 @@ pub(crate) struct StreamParser {
     /// Used when the terminal failure itself carries less.
     error_hint: Option<String>,
     error_message: Option<String>,
+    /// Usage evidence produced while mapping the current line; appended after
+    /// that line's items.
+    usage: Vec<UsageSignal>,
 }
 
 impl StreamParser {
@@ -230,7 +298,15 @@ impl StreamParser {
             announced: HashSet::new(),
             error_hint: None,
             error_message: None,
+            usage: Vec::new(),
         }
+    }
+
+    fn usage_signal(&mut self, kind: UsageKind) {
+        self.usage.push(UsageSignal {
+            provider: self.provider.clone(),
+            kind,
+        });
     }
 
     /// The provider's own failure, classified, redacted and bounded.
@@ -241,6 +317,9 @@ impl StreamParser {
             message.to_owned()
         };
         let hint = hint.map(str::to_owned).or_else(|| self.error_hint.take());
+        if let Some(hint) = hint.as_deref().filter(|value| !value.is_empty()) {
+            self.usage_signal(UsageKind::FailureHint(hint.chars().take(64).collect()));
+        }
         let category = super::provider_error::classify(hint.as_deref(), &message);
         let safe = super::provider_error::sanitize(&message, &self.redact);
         StreamItem::Activity(super::provider_error::draft(category, safe))
@@ -339,7 +418,10 @@ impl StreamParser {
             _ => None,
         };
         match mapped {
-            Some(items) => items,
+            Some(mut items) => {
+                items.extend(self.usage.drain(..).map(StreamItem::Usage));
+                items
+            }
             None => {
                 // Nothing known matched. Say so once, so the UI can report
                 // "no trace available" instead of showing an empty one.
@@ -497,6 +579,9 @@ impl StreamParser {
                 let failed = value.get("is_error").and_then(|v| v.as_bool()) == Some(true)
                     || subtype.as_deref().is_some_and(|kind| kind.starts_with("error"));
                 let mut items = vec![self.status("result", "result", subtype)];
+                if !failed {
+                    self.usage_signal(UsageKind::Finished);
+                }
                 if failed {
                     // Claude's own words for why: `result` on an API error
                     // ("API Error: 401 … OAuth token has expired"), `errors[]`
@@ -693,7 +778,30 @@ impl StreamParser {
                 )])
             }
             "thread.started" | "turn.started" => Some(Vec::new()),
-            "turn.completed" => Some(vec![self.status("result", "result", None)]),
+            "turn.completed" => {
+                self.usage_signal(UsageKind::Finished);
+                Some(vec![self.status("result", "result", None)])
+            }
+            // The Codex adapter's whitelisted rate-limit report. Accepted only
+            // from Codex and only from its documented source; it is evidence
+            // for routing, never activity.
+            "neev.usage" => {
+                let payload = value.get("payload");
+                let accepted = self.provider == "codex"
+                    && value.get("source").and_then(|v| v.as_str()) == Some("codex.rateLimits")
+                    && payload.is_some_and(|payload| {
+                        payload.is_object()
+                            && serde_json::to_vec(payload)
+                                .map(|bytes| bytes.len() <= MAX_USAGE_PAYLOAD_BYTES)
+                                .unwrap_or(false)
+                    });
+                if accepted {
+                    if let Some(payload) = payload {
+                        self.usage_signal(UsageKind::RateLimits(payload.clone()));
+                    }
+                }
+                Some(Vec::new())
+            }
             "turn.failed" => Some(self.turn_failed(value)),
             // `codex exec` reports errors (including transient reconnects) as
             // their own envelope before `turn.failed`. Remembered, not shown:
@@ -749,6 +857,8 @@ pub(crate) struct ActivityLog {
     /// The one terminal error step has been recorded (it is never capped out,
     /// and never recorded twice).
     errored: bool,
+    /// Bytes still held back for supervision steps. Zero for ordinary turns.
+    reserve: usize,
 }
 
 impl ActivityLog {
@@ -761,6 +871,16 @@ impl ActivityLog {
             chars: 2,
             truncated: false,
             errored: false,
+            reserve: 0,
+        }
+    }
+
+    /// A supervised turn's log: [`SUPERVISION_RESERVE`] bytes are held back
+    /// from every ordinary step and spent only by [`Self::push_supervision`].
+    pub(crate) fn with_supervision_reserve() -> Self {
+        Self {
+            reserve: SUPERVISION_RESERVE,
+            ..Self::new()
         }
     }
 
@@ -779,6 +899,7 @@ impl ActivityLog {
             chars,
             truncated,
             errored,
+            reserve: 0,
         }
     }
 
@@ -806,6 +927,7 @@ impl ActivityLog {
             chars,
             truncated: self.truncated,
             errored: self.errored,
+            reserve: self.reserve,
         }
     }
 
@@ -858,7 +980,9 @@ impl ActivityLog {
                 // The error reserve is held back here too: a revision grows
                 // a step by up to `MAX_INPUT_CHARS`, and must not spend the
                 // space the terminal error is promised.
-                if self.chars + grown + MARKER_RESERVE + ERROR_RESERVE > MAX_ACTIVITY_CHARS {
+                if self.chars + grown + MARKER_RESERVE + ERROR_RESERVE + self.reserve
+                    > MAX_ACTIVITY_CHARS
+                {
                     // Keep the announcement, which is delivered and still true,
                     // and record that the trace stopped growing.
                     return self.mark_truncated(offset);
@@ -879,7 +1003,8 @@ impl ActivityLog {
             .map(|text| text.len() + 1)
             .unwrap_or(0);
         if self.items.len() + 1 >= MAX_ITEMS
-            || self.chars + cost + MARKER_RESERVE + ERROR_RESERVE > MAX_ACTIVITY_CHARS
+            || self.chars + cost + MARKER_RESERVE + ERROR_RESERVE + self.reserve
+                > MAX_ACTIVITY_CHARS
         {
             return self.mark_truncated(offset);
         }
@@ -915,6 +1040,79 @@ impl ActivityLog {
         Some(item)
     }
 
+    /// Record or revise one supervision step (see [`STATE_PLAN`] and friends).
+    ///
+    /// One step per phase: a second push with the same id revises the first in
+    /// place, keeping its `seq` and `offset`, so `plan_pending` BECOMES `plan`
+    /// rather than leaving a stale "running" row behind it. Like the terminal
+    /// error, it ignores `truncated` and the item cap and spends the reserve the
+    /// other steps left alone. A detail too large for what remains is
+    /// shortened, never dropped: the step itself (and its `category`, the
+    /// verdict) is what must survive. Returns `None` only for a draft that is
+    /// not a supervision step, or if not even the bare step fits.
+    pub(crate) fn push_supervision(
+        &mut self,
+        draft: ActivityDraft,
+        offset: usize,
+    ) -> Option<ActivityItem> {
+        if !is_supervision_step(&draft.id, &draft.kind) {
+            return None;
+        }
+        let ActivityKind::Status {
+            state,
+            mut detail,
+            category,
+        } = draft.kind
+        else {
+            return None;
+        };
+        let existing = self.items.iter().position(|item| item.id == draft.id);
+        let (seq, at, before) = match existing {
+            Some(position) => {
+                let item = &self.items[position];
+                (item.seq, item.offset, item_cost(item))
+            }
+            None => (self.next_seq, offset, 0),
+        };
+        // The terminal error keeps its promise; the marker reserve is kept too
+        // so an executor still running (plan step) can still say it was cut.
+        let held = MARKER_RESERVE + if self.errored { 0 } else { ERROR_RESERVE };
+        loop {
+            let item = ActivityItem {
+                seq,
+                offset: at,
+                id: draft.id.clone(),
+                kind: ActivityKind::Status {
+                    state: state.clone(),
+                    detail: detail.clone(),
+                    category: category.clone(),
+                },
+            };
+            let cost = item_cost(&item);
+            let after = self.chars.saturating_sub(before) + cost;
+            if after + held <= MAX_ACTIVITY_CHARS {
+                self.reserve = self.reserve.saturating_sub(cost.saturating_sub(before));
+                self.chars = after;
+                match existing {
+                    Some(position) => self.items[position] = item.clone(),
+                    None => {
+                        self.next_seq += 1;
+                        self.items.push(item.clone());
+                    }
+                }
+                return Some(item);
+            }
+            detail = match detail {
+                Some(text) if text.chars().count() > 16 => {
+                    let keep = text.chars().count() / 2;
+                    Some(format!("{}…", text.chars().take(keep).collect::<String>()))
+                }
+                Some(_) => None,
+                None => return None,
+            };
+        }
+    }
+
     fn mark_truncated(&mut self, offset: usize) -> Option<ActivityItem> {
         self.truncated = true;
         let item = ActivityItem {
@@ -948,17 +1146,20 @@ impl ActivityLog {
         if text.len() <= MAX_ACTIVITY_CHARS {
             return Some(text);
         }
-        // The terminal error is the one step a trimmed trace must keep: it is
-        // the stored reason the turn failed.
-        let error = self
+        // The terminal error is a step a trimmed trace must keep: it is the
+        // stored reason the turn failed. Supervision steps likewise: they are
+        // the plan and the verdict the reader was shown.
+        let pinned: Vec<ActivityItem> = self
             .items
             .iter()
-            .find(|item| is_error_step(&item.kind))
-            .cloned();
+            .filter(|item| is_pinned(item))
+            .cloned()
+            .collect();
+        let pinned_seq = pinned.iter().map(|item| item.seq).max().unwrap_or(0);
         let mut kept: Vec<ActivityItem> = self
             .items
             .iter()
-            .filter(|item| !is_error_step(&item.kind))
+            .filter(|item| !is_pinned(item))
             .cloned()
             .collect();
         while !kept.is_empty() {
@@ -971,7 +1172,7 @@ impl ActivityLog {
                     .last()
                     .map(|item| item.seq)
                     .unwrap_or(0)
-                    .max(error.as_ref().map(|item| item.seq).unwrap_or(0))
+                    .max(pinned_seq)
                     + 1,
                 offset: kept.last().map(|item| item.offset).unwrap_or(0),
                 id: STATE_TRUNCATED.to_owned(),
@@ -981,7 +1182,7 @@ impl ActivityLog {
                     category: None,
                 },
             });
-            candidate.extend(error.clone());
+            candidate.extend(pinned.iter().cloned());
             let text = serialize(&candidate);
             if text.len() <= MAX_ACTIVITY_CHARS {
                 return Some(text);
@@ -999,13 +1200,22 @@ impl ActivityLog {
                 category: None,
             },
         }];
-        if let Some(error) = error {
-            // `seq` is the client's dedupe key: the two must never share one.
-            marker[0].seq = error.seq + 1;
-            marker.insert(0, error);
+        if !pinned.is_empty() {
+            // `seq` is the client's dedupe key: the marker must never share one.
+            marker[0].seq = pinned_seq + 1;
+            let mut with_pinned = pinned;
+            with_pinned.extend(marker);
+            marker = with_pinned;
         }
         Some(serialize(&marker))
     }
+}
+
+/// What one item adds to the stored array: itself plus its separator.
+fn item_cost(item: &ActivityItem) -> usize {
+    serde_json::to_string(item)
+        .map(|text| text.len() + 1)
+        .unwrap_or(0)
 }
 
 fn serialize(items: &[ActivityItem]) -> String {

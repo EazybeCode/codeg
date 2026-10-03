@@ -13,6 +13,8 @@ pub(crate) mod generated;
 pub(crate) mod intents;
 pub(crate) mod library_runtime;
 pub(crate) mod provider_error;
+pub(crate) mod routing;
+pub(crate) mod routing_usage;
 pub(crate) mod recovery;
 pub(crate) mod runs;
 pub(crate) mod sessions;

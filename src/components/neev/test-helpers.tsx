@@ -141,6 +141,16 @@ export function mockNativeSession(
     // to the real deployed shape so unrelated tests need not mock it; a test
     // about the controls themselves overrides it with the case it is about.
     if (key === "GET /api/neev/agent/capabilities") return json(agentCatalog)
+    // Auto routing is off unless a test configures a router.
+    if (key === "GET /api/neev/agent/routing")
+      return json({
+        state: "off",
+        router: null,
+        maxTaskChars: 6000,
+        maxPreviousChars: 2000,
+        supervision: "off",
+        usage: [],
+      })
     // The workspace always mounts the mentions indicator; default to an empty
     // inbox so unrelated tests need not mock it. A test about being named
     // overrides it with the notices it is about.

@@ -9,6 +9,7 @@
 import {
   sliceByScalars,
   type NeevActivityItem,
+  type NeevSupervisionVerdict,
 } from "./neev-agent-sessions-client"
 
 /**
@@ -197,8 +198,62 @@ export function isNoise(item: NeevActivityItem): boolean {
       item.state === "result" ||
       // The provider's failure is the turn's OUTCOME, shown once by the
       // failure card with its actions — not a second time as a trace row.
-      item.state === "error")
+      item.state === "error" ||
+      // Supervision steps have their own compact summary under the reply.
+      isSupervisionState(item.state))
   )
+}
+
+function isSupervisionState(state: string): boolean {
+  return (
+    state === "plan_pending" ||
+    state === "plan" ||
+    state === "review_pending" ||
+    state === "review"
+  )
+}
+
+export interface NeevSupervisionStep {
+  verdict: NeevSupervisionVerdict
+  detail: string | null
+  pending: boolean
+}
+
+/**
+ * The supervision of one turn, from its trace: the latest plan and review
+ * steps (each is revised in place, so the highest `seq` wins), and the phase a
+ * still-running turn is in. `phase` is `null` when no supervisor is working —
+ * which is also when steering can reach the agent.
+ */
+export function supervisionOf(items: readonly NeevActivityItem[]): {
+  plan: NeevSupervisionStep | null
+  review: NeevSupervisionStep | null
+  phase: "planning" | "reviewing" | null
+} {
+  let plan: (NeevSupervisionStep & { seq: number }) | null = null
+  let review: (NeevSupervisionStep & { seq: number }) | null = null
+  for (const item of items) {
+    if (item.kind !== "status" || !isSupervisionState(item.state)) continue
+    const step = {
+      seq: item.seq,
+      verdict: item.verdict ?? "unavailable",
+      detail: item.detail,
+      pending: item.state.endsWith("_pending"),
+    }
+    if (item.state.startsWith("plan")) {
+      if (!plan || step.seq >= plan.seq) plan = step
+    } else if (!review || step.seq >= review.seq) review = step
+  }
+  const phase = review?.pending
+    ? "reviewing"
+    : plan?.pending && !review
+      ? "planning"
+      : null
+  const strip = (step: typeof plan): NeevSupervisionStep | null =>
+    step
+      ? { verdict: step.verdict, detail: step.detail, pending: step.pending }
+      : null
+  return { plan: strip(plan), review: strip(review), phase }
 }
 
 /** Everything the reader should see, in order. */

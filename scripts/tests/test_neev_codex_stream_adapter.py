@@ -96,6 +96,23 @@ for line in sys.stdin:
             result["sandbox"] = {"type": "workspaceWrite", "writableRoots": []}
         send({"jsonrpc": "2.0", "id": message["id"], "result": result})
     elif method == "turn/start":
+        if MODE in ("usageRead", "usageReadError"):
+            # The adapter's one rate-limit read follows turn/start.
+            read = json.loads(sys.stdin.readline())
+            assert read["method"] == "account/rateLimits/read", read
+            if MODE == "usageRead":
+                send({"jsonrpc": "2.0", "id": read["id"], "result": {"rateLimits": {
+                    "limitId": "codex", "limitName": "Codex", "planType": "plus",
+                    "credits": {"balance": "12.50", "hasCredits": True},
+                    "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1900000000},
+                    "secondary": None}}})
+            else:
+                send({"jsonrpc": "2.0", "id": read["id"],
+                      "error": {"code": -32601, "message": "method not found"}})
+        if MODE == "usageUpdated":
+            note("account/rateLimits/updated", {"rateLimits": {
+                "limitId": "codex", "planType": "pro",
+                "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1900000000}}})
         if MODE == "pgid":
             # Report the process group we were started in, so the test can show
             # that one killpg reaches the adapter and the provider together.
@@ -330,6 +347,54 @@ class TranslateTests(unittest.TestCase):
         # An interrupted turn is not a completed one either.
         self.assertEqual(adapter.translate(
             "turn/completed", {"turn": {"status": "interrupted"}}, self.emit), 4)
+
+
+class UsageTests(unittest.TestCase):
+    """Codex rate-limit data is forwarded for Auto, whitelisted and bounded."""
+
+    def setUp(self):
+        self.written = []
+
+        class Recorder(adapter.Emitter):
+            def _write(inner, payload):  # noqa: N805 - test double
+                self.written.append(payload)
+
+        self.emit = Recorder(None)
+
+    def test_an_update_is_forwarded_as_windows_only(self):
+        adapter.translate("account/rateLimits/updated", {"rateLimits": {
+            "limitId": "codex", "limitName": "Codex", "planType": "plus",
+            "credits": {"balance": "3.00"},
+            "primary": {"usedPercent": 71.5, "windowDurationMins": 300,
+                        "resetsAt": 1900000000, "extra": "x"},
+            "secondary": {"usedPercent": 10, "windowDurationMins": None, "resetsAt": None}}},
+            self.emit)
+        self.assertEqual(self.written, [{
+            "type": "neev.usage", "source": "codex.rateLimits",
+            "payload": {"rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 71.5, "windowDurationMins": 300, "resetsAt": 1900000000},
+                "secondary": {"usedPercent": 10, "windowDurationMins": None, "resetsAt": None}}}}])
+        text = json.dumps(self.written)
+        for leaked in ("planType", "credits", "balance", "limitName", "extra"):
+            self.assertNotIn(leaked, text)
+
+    def test_unusable_or_oversized_reports_emit_nothing(self):
+        for params in (
+            {},
+            {"rateLimits": None},
+            {"rateLimits": {"primary": {"usedPercent": "lots"}}},
+            {"rateLimits": {"primary": {"windowDurationMins": 5}}},
+            {"rateLimitsByLimitId": {("x" * 80): {"primary": {"usedPercent": 1}}}},
+        ):
+            adapter.translate("account/rateLimits/updated", params, self.emit)
+        self.assertEqual(self.written, [])
+        huge = {"rateLimitsByLimitId": {
+            f"pool{i}": {"limitId": "y" * 64, "primary": {"usedPercent": i}} for i in range(200)}}
+        reduced = adapter.reduce_rate_limits(huge)
+        self.assertIsNotNone(reduced)
+        self.assertLessEqual(len(reduced["rateLimitsByLimitId"]), adapter.MAX_USAGE_POOLS)
+        self.assertLessEqual(len(json.dumps(reduced)), adapter.MAX_USAGE_PAYLOAD_BYTES)
 
 
 class EndToEndTests(unittest.TestCase):
@@ -783,3 +848,35 @@ class SteeringEndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UsageEndToEndTests(unittest.TestCase):
+    """The rate-limit read and update, against the fake app-server."""
+
+    run_adapter = EndToEndTests.run_adapter
+
+    def _lines(self, mode):
+        return self.run_adapter(mode)
+
+    def test_the_read_answer_is_forwarded_and_the_turn_completes(self):
+        code, lines = self._lines("usageRead")
+        self.assertEqual(code, 0, lines)
+        usage = [line for line in lines if line["type"] == "neev.usage"]
+        self.assertEqual(len(usage), 1)
+        self.assertEqual(usage[0]["payload"]["rateLimits"]["primary"]["usedPercent"], 42)
+        self.assertNotIn("balance", json.dumps(usage))
+        self.assertEqual(lines[-1]["type"], "turn.completed")
+
+    def test_a_refused_read_never_touches_the_turn(self):
+        code, lines = self._lines("usageReadError")
+        self.assertEqual(code, 0, lines)
+        self.assertFalse([line for line in lines if line["type"] == "neev.usage"])
+        self.assertFalse([line for line in lines if line["type"] == "turn.failed"])
+        self.assertEqual(lines[-1]["type"], "turn.completed")
+
+    def test_an_update_during_the_turn_is_forwarded(self):
+        code, lines = self._lines("usageUpdated")
+        self.assertEqual(code, 0, lines)
+        usage = [line for line in lines if line["type"] == "neev.usage"]
+        self.assertEqual(usage[0]["payload"]["rateLimits"]["primary"]["usedPercent"], 100)
+        self.assertNotIn("planType", json.dumps(usage))

@@ -95,6 +95,86 @@ pub(crate) struct RunRequest {
     pub(crate) min_free_lanes: usize,
 }
 
+/// The most text a tool-free run may return, whatever the caller asks for.
+pub(crate) const TOOL_FREE_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// A supervisor (planner/reviewer) turn: text in, bounded text out, under the
+/// caller's OWN subscription credential, with no tools at all.
+///
+/// A separate type rather than a flag on [`RunRequest`] so that it cannot carry
+/// what a tool-free run must not have: there is no field for attachments,
+/// context files, library items (skills, MCP), speed or steering. Enforcement
+/// is at the provider boundary (`neev_agent_launch.tool_free_argv` and the
+/// Claude adapter's `TOOL_FREE_ARGS` + `system/init` check); [`text_only`] is a
+/// second line, not the protection. Only providers whose CLI can be told to
+/// declare no tools are supported ([`tool_free_supported`]); every other one is
+/// [`ExecutionError::Unsupported`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolFreeRequest {
+    pub(crate) user_id: i32,
+    pub(crate) org_id: i32,
+    pub(crate) chat_id: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    pub(crate) credential_handle: Option<String>,
+    /// Our fixed supervisor instructions, delivered as the system prompt.
+    pub(crate) instructions: String,
+    /// The bundle to plan or review, inline. Never a path.
+    pub(crate) prompt: String,
+    /// 1..=[`TOOL_FREE_MAX_OUTPUT_BYTES`]; anything else is refused.
+    pub(crate) max_output_bytes: usize,
+}
+
+impl ToolFreeRequest {
+    /// The ordinary request shape the launch path builds argv from, with every
+    /// side channel empty by construction.
+    fn as_run_request(&self) -> RunRequest {
+        RunRequest {
+            user_id: self.user_id,
+            org_id: self.org_id,
+            chat_id: self.chat_id.clone(),
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            prompt: self.prompt.clone(),
+            credential_handle: self.credential_handle.clone(),
+            briefing: Some(self.instructions.clone()).filter(|text| !text.is_empty()),
+            effort: self.effort.clone(),
+            fast: false,
+            attachments: Vec::new(),
+            context_files: Vec::new(),
+            library_items: Vec::new(),
+            min_free_lanes: 1,
+        }
+    }
+}
+
+/// Whether this provider has an enforced tool-free mode. Claude only: Codex's
+/// pinned app-server has no way to start a thread without tools (its models are
+/// `code_mode_only`, and a read-only sandbox would only make tools fail inside
+/// ours), and ACP agents expose no such switch.
+pub(crate) fn tool_free_supported(provider: &str) -> bool {
+    provider == "claude"
+}
+
+fn validate_tool_free(request: &ToolFreeRequest) -> Result<(), ExecutionError> {
+    if !tool_free_supported(&request.provider) {
+        return Err(ExecutionError::Unsupported);
+    }
+    if !(1..=TOOL_FREE_MAX_OUTPUT_BYTES).contains(&request.max_output_bytes) {
+        return Err(ExecutionError::Unauthorized);
+    }
+    Ok(())
+}
+
+/// How the launcher must constrain a run's tools. `Standard` adds nothing to
+/// the argv, so every existing launch is unchanged byte for byte.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolPolicy {
+    Standard,
+    ToolFree,
+}
+
 /// One file the user attached: its bytes, and enough to name and classify it.
 ///
 /// Bytes rather than a path, because only the runtime knows where this run's
@@ -448,6 +528,9 @@ pub(crate) enum RunEvent {
     /// status marker. Carried beside the text rather than inside it so the
     /// reply stays the reply.
     Activity(super::activity::ActivityDraft),
+    /// Usage evidence for Auto routing (see `routing_usage`). Consumed by the
+    /// run driver only: never stored, broadcast or shown.
+    Usage(super::activity::UsageSignal),
     Failed(String),
     Completed,
 }
@@ -685,6 +768,7 @@ async fn send_item(
             RunEvent::Message(text)
         }
         super::activity::StreamItem::Activity(draft) => RunEvent::Activity(draft),
+        super::activity::StreamItem::Usage(signal) => RunEvent::Usage(signal),
     };
     tx.send(event).await.map_err(|_| ())
 }
@@ -847,6 +931,93 @@ pub(crate) trait AgentExecutionRuntime: Send + Sync {
     async fn discover_models(&self, _request: DiscoveryRequest) -> Result<String, ExecutionError> {
         Err(ExecutionError::Unsupported)
     }
+
+    /// Run one tool-free supervisor turn ([`ToolFreeRequest`]). Defaults to
+    /// `Unsupported`: a runtime that cannot enforce it at the provider boundary
+    /// declines rather than running an ordinary turn and hoping.
+    async fn run_tool_free(&self, _request: ToolFreeRequest) -> Result<RunHandle, ExecutionError> {
+        Err(ExecutionError::Unsupported)
+    }
+}
+
+/// Wrap a tool-free run so its consumer sees text only, bounded.
+///
+/// Forwards `Started`, `Chunk`/`Message` up to `limit` bytes in total, and the
+/// terminal event. A tool call or result ends the run as `Failed("tool_use")`
+/// and output past the limit as `Failed("output_limit")`; both cancel the inner
+/// run and wait for its teardown. Other activity is dropped. The returned handle
+/// has no steering and no spool: whatever the inner run left in its spool is
+/// removed with `generated::cleanup_spool`, never read.
+///
+/// This observes events AFTER the provider emitted them, so it cannot stop a
+/// tool that already ran; it exists because the provider-side switches are the
+/// enforcement and a second, independent check costs nothing.
+fn text_only(mut inner: RunHandle, limit: usize) -> RunHandle {
+    let run_id = inner.run_id.clone();
+    let spool_root = inner.workspace_root.take();
+    let mut inner_cancel = inner.take_canceler();
+    drop(inner.take_steer_tx());
+    let (tx, rx) = mpsc::channel::<RunEvent>(16);
+    let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+    let spool_id = run_id.clone();
+    tokio::spawn(async move {
+        let mut used = 0usize;
+        let stop_reason = loop {
+            let event = tokio::select! {
+                _ = &mut cancel_rx => break Some("canceled"),
+                event = inner.next() => event,
+            };
+            let Some(event) = event else {
+                break Some("provider");
+            };
+            match event {
+                RunEvent::Started(_) => {}
+                RunEvent::Chunk(ref text) | RunEvent::Message(ref text) => {
+                    used = used.saturating_add(text.len());
+                    if used > limit {
+                        break Some("output_limit");
+                    }
+                }
+                RunEvent::Activity(ref draft) => match draft.kind {
+                    super::activity::ActivityKind::ToolCall { .. }
+                    | super::activity::ActivityKind::ToolResult { .. } => break Some("tool_use"),
+                    _ => continue,
+                },
+                // A supervisor's usage is not routing evidence here.
+                RunEvent::Usage(_) => continue,
+                RunEvent::Failed(_) | RunEvent::Completed => {
+                    let _ = tx.send(event).await;
+                    break None;
+                }
+            }
+            if tx.send(event).await.is_err() {
+                break Some("canceled");
+            }
+        };
+        if let Some(reason) = stop_reason {
+            if let Some(cancel) = inner_cancel.take() {
+                let _ = cancel.send(());
+            }
+            // Wait for the inner run's teardown before reporting and cleaning.
+            while let Some(event) = inner.next().await {
+                if matches!(event, RunEvent::Failed(_) | RunEvent::Completed) {
+                    break;
+                }
+            }
+            let _ = tx.send(RunEvent::Failed(reason.into())).await;
+        }
+        if let Some(root) = spool_root {
+            super::generated::cleanup_spool(&root, &spool_id);
+        }
+    });
+    RunHandle {
+        run_id,
+        events: rx,
+        cancel: Some(cancel_tx),
+        workspace_root: None,
+        steer_tx: None,
+        supports_steering: false,
+    }
 }
 
 /// Production default: refuses every run. No unsandboxed multi-tenant execution
@@ -877,6 +1048,8 @@ pub(crate) struct FakeRuntime {
     hang: bool,
     /// Refuse every run with this error (a runtime fault).
     fail: Option<ExecutionError>,
+    /// Every tool-free request this runtime was asked to run, in order.
+    tool_free_requests: Option<std::sync::Arc<std::sync::Mutex<Vec<ToolFreeRequest>>>>,
 }
 
 /// `(file name, bytes)` outputs for a request.
@@ -903,7 +1076,16 @@ impl FakeRuntime {
             slots: None,
             hang: false,
             fail: None,
+            tool_free_requests: None,
         }
+    }
+
+    pub(crate) fn recording_tool_free(
+        mut self,
+        log: std::sync::Arc<std::sync::Mutex<Vec<ToolFreeRequest>>>,
+    ) -> Self {
+        self.tool_free_requests = Some(log);
+        self
     }
 
     pub(crate) fn failing(mut self, error: ExecutionError) -> Self {
@@ -1036,6 +1218,19 @@ impl AgentExecutionRuntime for FakeRuntime {
             steer_tx: None, // FakeRuntime does not support steering
             supports_steering: false,
         })
+    }
+
+    /// Declines exactly what production declines, then streams the scripted
+    /// chunks through the same [`text_only`] guard.
+    async fn run_tool_free(&self, request: ToolFreeRequest) -> Result<RunHandle, ExecutionError> {
+        validate_tool_free(&request)?;
+        if let Some(log) = &self.tool_free_requests {
+            if let Ok(mut log) = log.lock() {
+                log.push(request.clone());
+            }
+        }
+        let limit = request.max_output_bytes;
+        Ok(text_only(self.run(request.as_run_request()).await?, limit))
     }
 }
 
@@ -1457,6 +1652,7 @@ impl SandboxedProviderCliRuntime {
         staged: &[StagedAttachment],
         context: &[StagedAttachment],
         library: &super::library_runtime::StagedLibrary,
+        policy: ToolPolicy,
     ) -> Result<Vec<String>, ExecutionError> {
         let prompt = prompt_with_attachments(&request.prompt, staged);
         // Combine briefing: context files + library skills
@@ -1490,7 +1686,21 @@ impl SandboxedProviderCliRuntime {
         // - Codex app-server mode: relay JSON {requestId, text} to launcher stdin
         // - Claude: launcher routes through stream-json adapter with interrupt steering
         // The Python launcher handles the provider-specific adapter routing.
-        if (request.provider == "codex" && matches!(self.codex_stream, CodexStream::AppServer))
+        if policy == ToolPolicy::ToolFree {
+            // A tool-free turn has nothing to read and nothing to steer; the
+            // launcher refuses any shape it cannot prove tool-free for.
+            if !staged.is_empty()
+                || !context.is_empty()
+                || !library.mcp_servers.is_empty()
+                || !library.skill_dirs.is_empty()
+                || !tool_free_supported(&request.provider)
+            {
+                return Err(ExecutionError::Unsupported);
+            }
+            argv.push("--tool-policy".into());
+            argv.push("tool-free".into());
+        } else if (request.provider == "codex"
+            && matches!(self.codex_stream, CodexStream::AppServer))
             || request.provider == "claude"
         {
             argv.push("--enable-steering".into());
@@ -1567,6 +1777,18 @@ impl SandboxedProviderCliRuntime {
         binary: &str,
         handle: &str,
     ) -> Result<Vec<String>, ExecutionError> {
+        self.launch_argv_with(request, lane, workdir, binary, handle, ToolPolicy::Standard)
+    }
+
+    fn launch_argv_with(
+        &self,
+        request: &RunRequest,
+        lane: Lane,
+        workdir: &Path,
+        binary: &str,
+        handle: &str,
+        policy: ToolPolicy,
+    ) -> Result<Vec<String>, ExecutionError> {
         // Staged HERE: the workdir exists by now and belongs to this run, which
         // is the only place a path for these files can honestly be chosen.
         let staged = stage_attachments(workdir, &request.attachments)?;
@@ -1581,7 +1803,7 @@ impl SandboxedProviderCliRuntime {
             ],
         };
         argv.extend(self.launcher_args(
-            request, lane, workdir, binary, handle, &staged, &context, &library,
+            request, lane, workdir, binary, handle, &staged, &context, &library, policy,
         )?);
         Ok(argv)
     }
@@ -1619,6 +1841,7 @@ impl SandboxedProviderCliRuntime {
             &[],
             &[],
             &empty_library,
+            ToolPolicy::Standard,
         )?;
         let cut = full
             .iter()
@@ -1770,6 +1993,25 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
     }
 
     async fn run(&self, request: RunRequest) -> Result<RunHandle, ExecutionError> {
+        self.run_with(request, ToolPolicy::Standard).await
+    }
+
+    async fn run_tool_free(&self, request: ToolFreeRequest) -> Result<RunHandle, ExecutionError> {
+        validate_tool_free(&request)?;
+        let limit = request.max_output_bytes;
+        let handle = self
+            .run_with(request.as_run_request(), ToolPolicy::ToolFree)
+            .await?;
+        Ok(text_only(handle, limit))
+    }
+}
+
+impl SandboxedProviderCliRuntime {
+    async fn run_with(
+        &self,
+        request: RunRequest,
+        policy: ToolPolicy,
+    ) -> Result<RunHandle, ExecutionError> {
         // Everything that can be refused is refused BEFORE a lane, a workdir or
         // a process exists: an unsupported provider or a caller with no
         // credential of their own never consumes an isolation slot.
@@ -1795,10 +2037,11 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
         }
         // Steering: Codex app-server mode and Claude support mid-run steering.
         // The Python launcher routes to the appropriate adapter for each provider.
-        let supports_steering = (request.provider == "codex"
-            && matches!(self.codex_stream, CodexStream::AppServer))
-            || request.provider == "claude";
-        let argv = self.launch_argv(&request, lane, &workdir, &binary, &handle)?;
+        let supports_steering = policy == ToolPolicy::Standard
+            && ((request.provider == "codex"
+                && matches!(self.codex_stream, CodexStream::AppServer))
+                || request.provider == "claude");
+        let argv = self.launch_argv_with(&request, lane, &workdir, &binary, &handle, policy)?;
         let mut child = match Command::new(&argv[0])
             .args(&argv[1..])
             // Defence in depth for §5.4: the server's own HOME/config must not
@@ -2033,6 +2276,23 @@ impl AgentRuntime {
         }
     }
 
+    /// Run one tool-free supervisor turn (see [`ToolFreeRequest`]). Every
+    /// runtime that cannot enforce it declines; none runs an ordinary turn
+    /// instead.
+    pub(crate) async fn run_tool_free(
+        &self,
+        request: ToolFreeRequest,
+    ) -> Result<RunHandle, ExecutionError> {
+        match self {
+            Self::Disabled(_) => Err(ExecutionError::Disabled),
+            #[cfg(any(test, feature = "dev-agent"))]
+            Self::Provider(runtime) => runtime.run_tool_free(request).await,
+            Self::Sandboxed(runtime) => runtime.run_tool_free(request).await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.run_tool_free(request).await,
+        }
+    }
+
     /// Read a provider's catalogue for one caller.
     ///
     /// The credential is resolved by the CALLER's own lookup before this is
@@ -2113,6 +2373,10 @@ pub(crate) fn sandboxed_runtime(
 pub(crate) fn new_job_registry() -> JobRegistry {
     std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
 }
+
+#[cfg(test)]
+#[path = "execution_tool_free_tests.rs"]
+mod tool_free_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2415,7 +2679,7 @@ mod tests {
         let mut run = request("look");
         run.provider = "gemini".into();
         let argv = runtime
-            .launcher_args(&run, lane, workdir, "/usr/local/bin/gemini", HANDLE, &staged, &[], &library)
+            .launcher_args(&run, lane, workdir, "/usr/local/bin/gemini", HANDLE, &staged, &[], &library, ToolPolicy::Standard)
             .unwrap();
         let sep = argv.iter().position(|a| a == "--").unwrap();
         let tail = &argv[sep + 1..];
@@ -3256,7 +3520,7 @@ mod tests {
         while let Some(event) = handle.next().await {
             match event {
                 RunEvent::Started(_) => started = true,
-                RunEvent::Activity(_) => {}
+                RunEvent::Activity(_) | RunEvent::Usage(_) => {}
                 // Raw stream: this harness accumulates what arrived, without
                 // the seam handling that `LiveRun::append_message` adds.
                 RunEvent::Chunk(chunk) | RunEvent::Message(chunk) => text.push_str(&chunk),

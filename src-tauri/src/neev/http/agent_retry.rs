@@ -379,6 +379,7 @@ async fn team_message(
 
 fn created(turn: AgentTurn, attachments: Vec<AttachmentDto>) -> Result<Response, ApiError> {
     let mut response = private_json(StartedTurnDto {
+        route: None,
         run_id: turn.run_id.clone(),
         turn: turn_dto(turn, attachments, Vec::new()),
     });
@@ -576,6 +577,34 @@ async fn retry_private(
         library_items,
         min_free_lanes: 1,
     };
+    // A turn that was supervised is retried supervised, re-resolved now on the
+    // caller's own Claude connection. If that is no longer possible the retry
+    // runs as an ordinary turn and records no supervision step, so nothing on
+    // it claims a plan or a review that did not happen.
+    let was_supervised = failed
+        .activity
+        .iter()
+        .any(|item| item.id.starts_with("supervision:"));
+    if was_supervised {
+        let (plan, _) = super::routing::resolve_supervision(&state, &actor).await;
+        if !plan.is_empty() {
+            let request_text = turn.prompt.clone();
+            runs::start_supervised(
+                state.clone(),
+                turn.run_id.clone(),
+                actor.clone(),
+                session.id.clone(),
+                turn.id.clone(),
+                runs::supervision::SupervisedStart {
+                    executor: run_request,
+                    request_text,
+                    plan,
+                },
+                runs::supervision::SupervisionRuntimes::shared(state.agents.clone()),
+            );
+            return created(turn, attachment_dtos(carried));
+        }
+    }
     let turn = launch(&state, &actor, &session.id, turn, run_request, None).await?;
     created(turn, attachment_dtos(carried))
 }

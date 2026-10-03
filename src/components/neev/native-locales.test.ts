@@ -58,6 +58,12 @@ it.each([
           page: 1,
           minutes: 1,
           seconds: 5,
+          chars: 6000,
+          previous: 2000,
+          choice: "Opus · high",
+          reason: "timeout",
+          model: "opus",
+          provider: "codex",
         })
       ).toBeTruthy()
     }

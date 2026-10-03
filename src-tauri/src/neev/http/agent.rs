@@ -76,7 +76,7 @@ fn event_json(event: &RunEvent) -> Option<String> {
         RunEvent::Chunk(text) | RunEvent::Message(text) => {
             format!("{{\"type\":\"chunk\",\"text\":{}}}", quote(text))
         }
-        RunEvent::Activity(_) => return None,
+        RunEvent::Activity(_) | RunEvent::Usage(_) => return None,
         RunEvent::Completed => "{\"type\":\"completed\"}".into(),
         RunEvent::Failed(reason) => format!("{{\"type\":\"failed\",\"reason\":{}}}", quote(reason)),
     })

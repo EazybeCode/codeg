@@ -637,7 +637,7 @@ async fn consume(handle: &mut RunHandle) -> Streamed {
     let mut out = Streamed::default();
     while let Some(event) = handle.next().await {
         match event {
-            RunEvent::Started(_) => {}
+            RunEvent::Started(_) | RunEvent::Usage(_) => {}
             RunEvent::Activity(draft) => {
                 if let Some(category) = provider_error::category_of(&draft.kind) {
                     let detail = match draft.kind {

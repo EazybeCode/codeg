@@ -11,6 +11,7 @@ import {
   runningTool,
   splitByActivity,
   summariseActivity,
+  supervisionOf,
   visibleActivity,
 } from "./neev-agent-activity"
 import { type NeevActivityItem } from "./neev-agent-sessions-client"
@@ -297,5 +298,44 @@ describe("provider error steps", () => {
     } as const
     expect(isNoise(step)).toBe(true)
     expect(summariseActivity([step]).unsupported).toBe(false)
+  })
+})
+
+describe("supervision", () => {
+  const step = (
+    seq: number,
+    state: "plan_pending" | "plan" | "review_pending" | "review",
+    verdict: "running" | "ready" | "unavailable" | "pass" | "concerns" | "fail"
+  ) => ({
+    seq,
+    offset: 0,
+    id: state.startsWith("plan") ? "supervision:plan" : "supervision:review",
+    kind: "status" as const,
+    state,
+    detail: "supervisor: claude/opus",
+    verdict,
+  })
+
+  it("follows each step as it is revised in place, and knows the phase", () => {
+    expect(supervisionOf([step(1, "plan_pending", "running")]).phase).toBe(
+      "planning"
+    )
+    expect(supervisionOf([step(1, "plan", "ready")]).phase).toBeNull()
+    const reviewing = supervisionOf([
+      step(1, "plan", "ready"),
+      step(5, "review_pending", "running"),
+    ])
+    expect(reviewing.phase).toBe("reviewing")
+    const done = supervisionOf([
+      step(1, "plan", "ready"),
+      step(5, "review", "concerns"),
+    ])
+    expect(done.phase).toBeNull()
+    expect(done.review?.verdict).toBe("concerns")
+  })
+
+  it("keeps supervision steps out of the tool timeline", () => {
+    expect(isNoise(step(1, "review", "pass"))).toBe(true)
+    expect(visibleActivity([step(1, "plan", "ready")])).toEqual([])
   })
 })

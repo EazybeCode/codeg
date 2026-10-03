@@ -63,6 +63,7 @@ import {
   runningTool,
   splitByActivity,
   summariseActivity,
+  supervisionOf,
   visibleActivity,
   type NeevToolResult,
 } from "@/lib/neev-agent-activity"
@@ -97,6 +98,18 @@ import {
   type UpdateNeevAgentSessionInput,
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls } from "./native-agent-controls"
+import {
+  AutoRouteChip,
+  RouteNote,
+  SupervisionSummary,
+  useAutoRouting,
+} from "./native-agent-auto"
+import {
+  rememberRoute,
+  recalledRoute,
+  routeNewAgentChat,
+} from "@/lib/neev-auto-route"
+import type { NeevRoute } from "@/lib/neev-agent-sessions-client"
 import { NativeRunFailure } from "./native-run-failure"
 import { providerName, runFailure } from "@/lib/neev-run-failure"
 import {
@@ -565,6 +578,19 @@ function NewAgentChat({
   // A session the first turn failed on. It EXISTS, so a retry sends into it
   // rather than creating a second one for the same draft.
   const created = useRef<NeevAgentSession | null>(null)
+  // The Auto decision for THIS draft, made once: a retry after a failed create
+  // reuses it (same request id, same body) instead of deciding again.
+  const decided = useRef<NeevRoute | null>(null)
+  const autoRouting = useAutoRouting(auth.scopeKey)
+  const [deciding, setDeciding] = useState(false)
+  // Aborted when this draft goes away (Cancel, navigation, another provider's
+  // menu), so a decision still in flight can never create a chat afterwards.
+  const alive = useRef<AbortController | null>(null)
+  useEffect(() => {
+    const controller = new AbortController()
+    alive.current = controller
+    return () => controller.abort()
+  }, [])
   const draftRef = useRef("")
   draftRef.current = promptText(draft)
   const composer = useRef<InlineComposerHandle>(null)
@@ -585,16 +611,22 @@ function NewAgentChat({
   // Three different things, said differently: still asking the server, asking
   // and been told there is no runtime, and a provider the user must connect.
   const ready = connection?.state === "connected"
+  // With Auto on, any connected provider can take the chat: the decision may
+  // choose one other than the draft's.
+  const anyConnected =
+    connections?.connections.some((row) => row.state === "connected") ?? false
+  const canRun =
+    ready || (autoRouting.active && anyConnected && !created.current)
   const unknown = connectionsLoading || connections === null
   // There is nothing to upload TO until the first message creates the session,
   // so files wait here and go up inside `start` — after the session exists and
   // before the turn that carries them.
-  const attachments = useAttachmentTray({ upload: null, disabled: !ready })
+  const attachments = useAttachmentTray({ upload: null, disabled: !canRun })
   const drop = useFileDrop({
     // Dropped ON the sentence the editor places it exactly where the pointer
     // was; this is the rest of the card, and the caret is the honest answer.
     onFiles: (files) => void composer.current?.addFiles(files),
-    disabled: !ready,
+    disabled: !canRun,
   })
   const stagedRef = useRef(false)
   stagedRef.current = !attachments.empty
@@ -610,7 +642,7 @@ function NewAgentChat({
       (promptIsEmpty(draft) && attachments.empty) ||
       busy ||
       !auth.session ||
-      !ready ||
+      !canRun ||
       attachments.uploading
     )
       return
@@ -619,7 +651,41 @@ function NewAgentChat({
     // One id per draft: a retry after a lost response returns the SAME session
     // rather than creating a second one.
     request.current ??= crypto.randomUUID()
+    const draftSignal = alive.current?.signal
     try {
+      let chosen = { provider, settings }
+      if (!created.current && autoRouting.active) {
+        if (!decided.current) {
+          setDeciding(true)
+          try {
+            decided.current = await routeNewAgentChat(
+              {
+                prompt,
+                provider,
+                model: settings.model,
+                effort: settings.effort,
+                fast: settings.fast,
+                attachedFiles: attachments.items.length,
+              },
+              auth.session.csrf,
+              draftSignal ?? auth.signal
+            )
+          } finally {
+            setDeciding(false)
+          }
+        }
+        // Cancelled or navigated away while deciding: create nothing.
+        if (draftSignal?.aborted) return
+        const route = decided.current
+        chosen = {
+          provider: route.provider,
+          settings: {
+            model: route.model,
+            effort: route.effort,
+            fast: route.fast,
+          },
+        }
+      }
       const session =
         created.current ??
         (await createAgentSession(
@@ -630,15 +696,16 @@ function NewAgentChat({
               promptText(draft).trim() || attachments.items[0]?.name || ""
             ),
             nodeId,
-            provider,
-            model: settings.model,
-            effort: settings.effort,
-            fast: settings.fast,
+            provider: chosen.provider,
+            model: chosen.settings.model,
+            effort: chosen.settings.effort,
+            fast: chosen.settings.fast,
             requestId: request.current,
           },
           auth.session.csrf,
           auth.signal
         ))
+      if (decided.current) rememberRoute(session.id, decided.current)
       // Remembered BEFORE the turn: if the turn fails the session still
       // exists, and must never be created a second time for this draft.
       created.current = session
@@ -660,7 +727,11 @@ function NewAgentChat({
         prompt,
         auth.session.csrf,
         auth.signal,
-        keys
+        keys,
+        false,
+        // The decision already made for this draft: presented once, so the
+        // first turn is not routed again.
+        decided.current?.routeId ?? null
       )
       setDraft([])
       draftRef.current = ""
@@ -732,6 +803,7 @@ function NewAgentChat({
               {t("agentChatKept")}
             </p>
           )}
+          <RouteNote route={null} deciding={deciding} className="px-1" />
           <NativeInlineComposer
             ref={composer}
             value={draft}
@@ -743,8 +815,8 @@ function NewAgentChat({
             placeholder={t("agentPromptPlaceholder")}
             onSubmit={() => void start()}
             busy={busy || attachments.uploading}
-            readOnly={!ready}
-            attachDisabled={!ready}
+            readOnly={!canRun}
+            attachDisabled={!canRun}
             autoFocus
             maxChars={NEEV_MAX_PROMPT_CHARS}
             className="min-h-16"
@@ -764,13 +836,23 @@ function NewAgentChat({
           )}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <AttachmentButton
-              disabled={!ready || busy}
+              disabled={!canRun || busy}
               remaining={remainingAttachments(attachments)}
               onFiles={(files) => void composer.current?.addFiles(files)}
             />
             {/* Picking a model under another provider's heading re-points this
                 whole draft — nothing has been created yet, so it is still a
                 choice about which chat to start rather than an edit to one. */}
+            <AutoRouteChip
+              status={autoRouting.status}
+              on={autoRouting.on}
+              onChange={(next) => {
+                autoRouting.setOn(next)
+                // A decision belongs to the switch it was made under.
+                decided.current = null
+              }}
+              disabled={frozen || busy}
+            />
             <AgentControls
               capabilities={capabilities}
               provider={provider}
@@ -789,7 +871,7 @@ function NewAgentChat({
                   block of explanation between the heading and the box someone
                   came here to type in. The state is unchanged — Send is still
                   held while `ready` is false — only the way it asks. */}
-              {!ready && !unknown && (
+              {!canRun && !unknown && (
                 <>
                   <p id={connectNote} className="sr-only">
                     {t("providerNotConnected", { name: provider })}
@@ -816,7 +898,7 @@ function NewAgentChat({
                 disabled={
                   (promptIsEmpty(draft) && attachments.empty) ||
                   busy ||
-                  !ready ||
+                  !canRun ||
                   attachments.uploading
                 }
                 onClick={() => void start()}
@@ -1544,6 +1626,13 @@ function AgentSessionView({
   // controls are showing the session's own row, which is the normal state.
   const [desired, setDesired] = useState<NeevAgentSettings | null>(null),
     [applying, setApplying] = useState(false)
+  const autoRouting = useAutoRouting(auth.scopeKey)
+  // What the latest Auto turn in this chat ran on, and why. Held in memory
+  // only: after a reload the session's own settings say what runs.
+  const [lastRoute, setLastRoute] = useState<NeevRoute | null>(() =>
+    recalledRoute(session.id)
+  )
+  useEffect(() => setLastRoute(recalledRoute(session.id)), [session.id])
   // Files for the next turn, uploaded to THIS session as they arrive. A key is
   // only ever staged into a run by a turn that carries it, so dropping a file
   // sends nothing to any provider.
@@ -1789,9 +1878,16 @@ function AgentSessionView({
   // only until it is sent: a follow-up in flight shows Stop again, so a steer
   // that never answers cannot leave a disabled Send where Stop should be.
   // Escape stops the run from the composer whichever it shows.
+  // A supervisor at work (planning or reviewing) takes no steering, so the one
+  // button is Stop — and while reviewing, it stops only the review.
+  const supervisionPhase = running ? supervisionOf(liveActivity).phase : null
   const stopping =
     running &&
-    (steeringInFlight !== null || !(supportsSteering && !promptIsEmpty(draft)))
+    (supervisionPhase !== null ||
+      steeringInFlight !== null ||
+      !(supportsSteering && !promptIsEmpty(draft)))
+  const stopLabel =
+    supervisionPhase === "reviewing" ? t("stopReview") : t("stopGeneration")
   usePublishRunningChat(auth.session, "agent", session.id, running)
   /**
    * What this session runs as, from the SESSION — not from local state.
@@ -1888,14 +1984,30 @@ function AgentSessionView({
       // Bytes first: a turn only carries files the server already has, and a
       // failure here keeps both the prompt and the files for another try.
       const keys = await attachments.takeKeys(undefined, ids)
+      const target = session.id
       const started = await startAgentTurn(
-        session.id,
+        target,
         prompt,
         auth.session.csrf,
         auth.signal,
-        keys
+        keys,
+        autoRouting.active
       )
       setTurns((old) => [...(old ?? []), started.turn])
+      if (started.route) {
+        rememberRoute(target, started.route)
+        setLastRoute(started.route)
+        // A routed turn stored its choice as the session's settings; read it
+        // back so the controls show what actually ran, not the old selection.
+        if (started.route.outcome === "routed")
+          void loadAgentSession(target, auth.signal)
+            .then((fresh) => {
+              if (openSession.current === target) onChanged(fresh)
+            })
+            .catch(() => {
+              // The next settings change re-reads it on conflict anyway.
+            })
+      }
       setDraft([])
       draftRef.current = ""
       // Only now: the turn owns them from here.
@@ -1930,6 +2042,9 @@ function AgentSessionView({
     retryRequest.current = request
     setRetryingRun(turn.runId)
     setError(null)
+    // The note describes the last Auto decision; a retry re-runs the stored
+    // selection and is not a new decision, so the note would mislead.
+    setLastRoute(null)
     try {
       const started = await retryAgentRun(
         turn.runId,
@@ -1979,7 +2094,14 @@ function AgentSessionView({
    * the server acknowledges receipt via the SSE input event.
    */
   async function steer() {
-    if (!activeRun || !auth.session || !supportsSteering) return
+    // A supervisor at work cannot take steering; the server would refuse it.
+    if (
+      !activeRun ||
+      !auth.session ||
+      !supportsSteering ||
+      supervisionPhase !== null
+    )
+      return
     // Capture the draft at the start of the attempt for later clearing.
     const sentDraft = draft
     const { prompt } = composeWirePrompt(
@@ -2211,6 +2333,7 @@ function AgentSessionView({
                       }
                       completed={!live && turn.status === "completed"}
                     />
+                    <SupervisionSummary items={items} />
                   </div>
                   {turn.status === "failed" && !live
                     ? failedTurn(turn)
@@ -2325,6 +2448,7 @@ function AgentSessionView({
               {t("agentsOff")}
             </p>
           )}
+          {lastRoute && <RouteNote route={lastRoute} className="px-1" />}
           <div className="flex min-w-0 items-center gap-2">
             <Bot
               aria-hidden
@@ -2338,6 +2462,12 @@ function AgentSessionView({
             {/* The provider is immutable here — a turn may not contradict its
                 session's, and a team holder's id is derived from it — so only
                 this provider's models are offered. */}
+            <AutoRouteChip
+              status={autoRouting.status}
+              on={autoRouting.on}
+              onChange={autoRouting.setOn}
+              disabled={session.archived}
+            />
             <AgentControls
               capabilities={capabilities}
               provider={session.provider as NeevAgentProvider}
@@ -2428,14 +2558,14 @@ function AgentSessionView({
               size="icon"
               variant="default"
               className="ms-auto rounded-md"
-              aria-label={stopping ? t("stopGeneration") : t("send")}
+              aria-label={stopping ? stopLabel : t("send")}
               // During a run the key that stops it is announced on the one
               // control, and repeated in the tooltip when that control is Send.
               aria-keyshortcuts={running ? "Escape" : undefined}
               aria-describedby={running && !stopping ? stopHint : undefined}
               title={
                 stopping
-                  ? t("stopGeneration")
+                  ? stopLabel
                   : running
                     ? `${t("send")} · ${t("stopShortcutHint")}`
                     : t("send")

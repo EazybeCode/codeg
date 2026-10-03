@@ -939,3 +939,310 @@ fn names_only_keeps_names_and_statuses_and_drops_every_payload() {
     assert!(matches!(&items[1].kind, ActivityKind::ToolResult { output, output_truncated: true, .. } if output.is_empty()));
     assert!(matches!(&items[2].kind, ActivityKind::Status { state, detail: None, category: Some(c) } if state == "error" && c == "provider"));
 }
+
+// ---------------------------------------------------------------------------
+// Supervision (plan / review) steps: a reserve the executor cannot spend, and
+// one step per phase, revised in place.
+// ---------------------------------------------------------------------------
+
+fn supervision(
+    id: &str,
+    state: &str,
+    detail: Option<&str>,
+    category: Option<&str>,
+) -> ActivityDraft {
+    ActivityDraft {
+        id: id.to_owned(),
+        kind: ActivityKind::Status {
+            state: state.to_owned(),
+            detail: detail.map(str::to_owned),
+            category: category.map(str::to_owned),
+        },
+    }
+}
+
+fn big_tool_result(index: usize) -> ActivityDraft {
+    ActivityDraft {
+        id: format!("t{index}"),
+        kind: ActivityKind::ToolResult {
+            call_id: format!("t{index}"),
+            output: "z".repeat(900),
+            output_truncated: false,
+            is_error: false,
+        },
+    }
+}
+
+#[test]
+fn an_ordinary_log_holds_no_supervision_reserve() {
+    // Ordinary turns keep their whole budget: the reserve is opt-in.
+    let mut plain = ActivityLog::new();
+    let mut reserved = ActivityLog::with_supervision_reserve();
+    let mut plain_items = 0;
+    let mut reserved_items = 0;
+    for index in 0..MAX_ITEMS {
+        if plain
+            .push(big_tool_result(index), index)
+            .is_some_and(|item| matches!(item.kind, ActivityKind::ToolResult { .. }))
+        {
+            plain_items += 1;
+        }
+        if reserved
+            .push(big_tool_result(index), index)
+            .is_some_and(|item| matches!(item.kind, ActivityKind::ToolResult { .. }))
+        {
+            reserved_items += 1;
+        }
+    }
+    assert!(
+        reserved_items < plain_items,
+        "the reserve must be held back from executor steps ({reserved_items} vs {plain_items})"
+    );
+}
+
+#[test]
+fn a_review_is_stored_even_after_the_executor_filled_the_trace() {
+    let mut log = ActivityLog::with_supervision_reserve();
+    log.push_supervision(
+        supervision(
+            "supervision:plan",
+            STATE_PLAN,
+            Some(&"p".repeat(1_900)),
+            Some("ready"),
+        ),
+        0,
+    )
+    .expect("the plan step is affordable from the reserve");
+    for index in 0..MAX_ITEMS {
+        log.push(big_tool_result(index), index);
+    }
+    // The executor ran out of budget and the trace says so.
+    assert!(log.items().iter().any(|item| matches!(
+        &item.kind,
+        ActivityKind::Status { state, .. } if state == STATE_TRUNCATED
+    )));
+    let pending = log
+        .push_supervision(
+            supervision(
+                "supervision:review",
+                STATE_REVIEW_PENDING,
+                Some("running"),
+                None,
+            ),
+            5,
+        )
+        .expect("review_pending is affordable after truncation");
+    let review = log
+        .push_supervision(
+            supervision(
+                "supervision:review",
+                STATE_REVIEW,
+                Some(&"r".repeat(2_900)),
+                Some("concerns"),
+            ),
+            5,
+        )
+        .expect("the verdict is affordable after truncation");
+    assert_eq!(
+        review.seq, pending.seq,
+        "one step per phase, revised in place"
+    );
+    let stored = log.stored().unwrap();
+    assert!(stored.len() <= MAX_ACTIVITY_CHARS);
+    let items = parse_stored(Some(&stored));
+    let reviews: Vec<_> = items
+        .iter()
+        .filter(|item| item.id == "supervision:review")
+        .collect();
+    assert_eq!(
+        reviews.len(),
+        1,
+        "the pending step was replaced, not duplicated"
+    );
+    assert!(matches!(
+        &reviews[0].kind,
+        ActivityKind::Status { state, category: Some(c), .. } if state == STATE_REVIEW && c == "concerns"
+    ));
+    assert!(items.iter().any(|item| item.id == "supervision:plan"));
+}
+
+#[test]
+fn a_supervision_step_that_cannot_fit_is_shortened_not_dropped() {
+    let mut log = ActivityLog::with_supervision_reserve();
+    for index in 0..MAX_ITEMS {
+        log.push(big_tool_result(index), index);
+    }
+    // Far larger than the reserve: kept, but shortened to fit.
+    let item = log
+        .push_supervision(
+            supervision(
+                "supervision:review",
+                STATE_REVIEW,
+                Some(&"🙂".repeat(20_000)),
+                Some("pass"),
+            ),
+            0,
+        )
+        .expect("shortened rather than refused");
+    let ActivityKind::Status {
+        detail: Some(detail),
+        ..
+    } = &item.kind
+    else {
+        panic!("detail kept");
+    };
+    assert!(detail.chars().count() < 20_000);
+    assert!(log.stored().unwrap().len() <= MAX_ACTIVITY_CHARS);
+}
+
+#[test]
+fn only_server_supervision_steps_take_the_reserve() {
+    let mut log = ActivityLog::with_supervision_reserve();
+    // Wrong id namespace, wrong kind, or an unrelated state: refused.
+    assert!(log
+        .push_supervision(supervision("review", STATE_REVIEW, None, None), 0)
+        .is_none());
+    assert!(log
+        .push_supervision(supervision("supervision:review", "result", None, None), 0)
+        .is_none());
+    assert!(log.push_supervision(big_tool_result(1), 0).is_none());
+    assert!(log.is_empty());
+}
+
+#[test]
+fn trimming_an_oversized_trace_keeps_supervision_steps() {
+    // Built through `resume` so the in-memory budget is bypassed and only
+    // `stored()`'s last-resort trimming is exercised.
+    let mut items: Vec<ActivityItem> = (0..120)
+        .map(|index| ActivityItem {
+            seq: index + 1,
+            offset: 0,
+            id: format!("t{index}"),
+            kind: ActivityKind::ToolResult {
+                call_id: format!("t{index}"),
+                output: "q".repeat(900),
+                output_truncated: false,
+                is_error: false,
+            },
+        })
+        .collect();
+    items.insert(
+        0,
+        ActivityItem {
+            seq: 500,
+            offset: 0,
+            id: "supervision:plan".into(),
+            kind: ActivityKind::Status {
+                state: STATE_PLAN.into(),
+                detail: Some("plan".into()),
+                category: Some("ready".into()),
+            },
+        },
+    );
+    items.push(ActivityItem {
+        seq: 501,
+        offset: 0,
+        id: "supervision:review".into(),
+        kind: ActivityKind::Status {
+            state: STATE_REVIEW.into(),
+            detail: Some("pass: fine".into()),
+            category: Some("pass".into()),
+        },
+    });
+    let log = ActivityLog::resume(items);
+    let stored = log.stored().unwrap();
+    assert!(stored.len() <= MAX_ACTIVITY_CHARS);
+    let parsed = parse_stored(Some(&stored));
+    assert!(parsed.iter().any(|item| item.id == "supervision:plan"));
+    assert!(parsed.iter().any(|item| item.id == "supervision:review"));
+    let mut seqs: Vec<u32> = parsed.iter().map(|item| item.seq).collect();
+    seqs.sort_unstable();
+    let before = seqs.len();
+    seqs.dedup();
+    assert_eq!(seqs.len(), before, "no duplicate seq survives trimming");
+}
+
+mod usage_signals {
+    use super::super::{StreamItem, StreamParser, UsageKind, UsageSignal};
+
+    fn usage(items: &[StreamItem]) -> Vec<UsageSignal> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                StreamItem::Usage(signal) => Some(signal.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const REPORT: &str = r#"{"type":"neev.usage","source":"codex.rateLimits","payload":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":1900000000}}}}"#;
+
+    #[test]
+    fn a_codex_rate_limit_report_is_usage_evidence_never_activity() {
+        let mut parser = StreamParser::new("codex", Vec::new());
+        let items = parser.push(REPORT);
+        assert_eq!(items.len(), 1, "{items:?}");
+        let signal = &usage(&items)[0];
+        assert_eq!(signal.provider, "codex");
+        assert!(matches!(signal.kind, UsageKind::RateLimits(_)));
+    }
+
+    #[test]
+    fn a_report_from_another_provider_or_source_or_oversized_is_dropped() {
+        for (provider, line) in [
+            ("claude", REPORT.to_owned()),
+            ("cursor", REPORT.to_owned()),
+            ("codex", REPORT.replace("codex.rateLimits", "elsewhere")),
+            (
+                "codex",
+                format!(
+                    r#"{{"type":"neev.usage","source":"codex.rateLimits","payload":{{"pad":"{}"}}}}"#,
+                    "x".repeat(9 * 1024)
+                ),
+            ),
+        ] {
+            let mut parser = StreamParser::new(provider, Vec::new());
+            assert!(usage(&parser.push(&line)).is_empty(), "{provider}");
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_carries_its_structured_hint_and_a_clean_one_says_finished() {
+        let mut parser = StreamParser::new("codex", Vec::new());
+        let failed = parser.push(
+            r#"{"type":"turn.failed","reason":"You've hit your usage limit.","code":"usageLimitExceeded"}"#,
+        );
+        assert_eq!(
+            usage(&failed),
+            vec![UsageSignal {
+                provider: "codex".into(),
+                kind: UsageKind::FailureHint("usageLimitExceeded".into()),
+            }]
+        );
+        let mut parser = StreamParser::new("codex", Vec::new());
+        let done = parser.push(r#"{"type":"turn.completed"}"#);
+        assert_eq!(usage(&done)[0].kind, UsageKind::Finished);
+    }
+
+    #[test]
+    fn a_failure_with_no_structured_class_carries_no_hint() {
+        // Text that merely mentions a limit proves nothing.
+        let mut parser = StreamParser::new("codex", Vec::new());
+        let items = parser.push(r#"{"type":"turn.failed","reason":"usage limit reached"}"#);
+        assert!(usage(&items).is_empty());
+    }
+
+    #[test]
+    fn a_claude_assistant_error_class_is_the_hint_of_its_failed_result() {
+        let mut parser = StreamParser::new("claude", Vec::new());
+        parser.push(r#"{"type":"assistant","error":"rate_limit","message":{"content":[{"type":"text","text":"slow down"}]}}"#);
+        let items = parser.push(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"rate limited"}"#);
+        assert_eq!(
+            usage(&items)[0].kind,
+            UsageKind::FailureHint("rate_limit".into())
+        );
+        let mut parser = StreamParser::new("claude", Vec::new());
+        let ok = parser.push(r#"{"type":"result","subtype":"success","is_error":false,"result":"done"}"#);
+        assert_eq!(usage(&ok)[0].kind, UsageKind::Finished);
+    }
+}
