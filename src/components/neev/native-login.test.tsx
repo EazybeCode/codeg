@@ -98,8 +98,8 @@ it("announces a uniform email acceptance without claiming delivery or storing th
     await screen.findByRole("button", { name: "Continue with Google" })
   ).toBeEnabled()
   expect(
-    screen.getByRole("button", { name: /GitHub.*unavailable/i })
-  ).toBeDisabled()
+    screen.queryByRole("button", { name: /GitHub/i })
+  ).not.toBeInTheDocument()
   await user.type(screen.getByLabelText("Email address"), "person@example.test")
   await user.click(screen.getByRole("button", { name: "Request sign-in link" }))
   expect(
@@ -168,9 +168,8 @@ it("offers the sign-in methods the public server advertises, to someone with no 
   await user.type(email, "sagar@eazybe.com")
   expect(send).toBeEnabled()
   expect(send).toHaveAccessibleName("Request sign-in link")
-  // GitHub genuinely is not configured on this server, and still says so.
-  const github = screen.getByRole("button", { name: /GitHub/ })
-  expect(github).toBeDisabled()
-  expect(github).toHaveAccessibleName("GitHub (optional) · unavailable")
+  expect(
+    screen.queryByRole("button", { name: /GitHub/i })
+  ).not.toBeInTheDocument()
   expect(mock.unknown).toEqual([])
 })

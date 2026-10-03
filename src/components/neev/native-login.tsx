@@ -105,10 +105,12 @@ export function NativeSignInMethods({
             ` · ${t(linked.includes("email") ? "linked" : "notConfigured")}`}
         </Button>
       </form>
-      <Button variant="ghost" className="w-full" disabled>
-        {t("github")} ·{" "}
-        {t(linked.includes("github") ? "linked" : "notConfigured")}
-      </Button>
+      {linking && (
+        <Button variant="ghost" className="w-full" disabled>
+          {t("github")} ·{" "}
+          {t(linked.includes("github") ? "linked" : "notConfigured")}
+        </Button>
+      )}
       <p
         role="status"
         aria-live="polite"
