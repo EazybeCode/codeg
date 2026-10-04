@@ -185,6 +185,9 @@ pub(crate) async fn ensure_team_session(
     if chat.kind != crate::neev::content::types::ResourceKind::Chat {
         return Err(ContentError::NotFound);
     }
+    if chat_in_trash(&tx, actor.org_id, chat_id).await? {
+        return Err(ContentError::Archived);
+    }
     let now = now(state)?;
     db::execute(
         &tx,
@@ -497,6 +500,9 @@ pub(crate) async fn create(
         if chat.kind != crate::neev::content::types::ResourceKind::Chat {
             return Err(ContentError::NotFound);
         }
+        if chat_in_trash(&tx, actor.org_id, chat_id).await? {
+            return Err(ContentError::Archived);
+        }
     }
     if let Some(node_id) = input.node_id {
         require_node(&tx, actor, node_id).await?;
@@ -665,6 +671,22 @@ async fn mutate(
     let current = owned(&tx, actor, id).await?;
     if current.revision != expected_revision {
         return Err(ContentError::Conflict);
+    }
+    // Archived by a folder trash: frozen until that folder is restored, like a
+    // batch resource, so it is neither unarchived nor re-filed from the trash.
+    if matches!(assignment, "archived" | "node_id")
+        && crate::neev::catalog::trash::session_trashed(&tx, actor.org_id, id).await?
+    {
+        return Err(ContentError::Archived);
+    }
+    // Archived on its own before its folder was trashed, so not in the batch:
+    // it still may not come back while filed under a hidden node.
+    if assignment == "archived" {
+        if let Some(node_id) = current.node_id {
+            if crate::neev::catalog::trash::node_trashed(&tx, actor.org_id, node_id).await? {
+                return Err(ContentError::Archived);
+            }
+        }
     }
     if let Some(node_id) = node {
         require_node(&tx, actor, node_id).await?;
@@ -883,6 +905,48 @@ async fn require_node(
     )
     .await?
     .ok_or(ContentError::NotFound)?;
+    // A project or folder in the trash (schema 23) is hidden: nothing is filed
+    // into it, exactly as no resource may be created in or moved into it.
+    if crate::neev::catalog::trash::node_trashed(tx, actor.org_id, node_id).await? {
+        return Err(ContentError::NotFound);
+    }
+    Ok(())
+}
+
+/// Whether `chat_id` sits on a project or folder that is in the trash.
+async fn chat_in_trash(
+    tx: &sea_orm::DatabaseTransaction,
+    org_id: i32,
+    chat_id: &str,
+) -> Result<bool, ContentError> {
+    Ok(db::one(
+        tx,
+        "SELECT 1 AS hit FROM neev_resources r JOIN neev_node_trash t ON t.org_id=r.org_id AND t.item_kind='node' AND t.item_id=CAST(r.node_id AS TEXT) WHERE r.org_id=$1 AND r.id=$2",
+        vec![org_id.into(), chat_id.into()],
+    )
+    .await?
+    .is_some())
+}
+
+/// New agent work is refused for a session filed under a trashed project or
+/// folder, or bound to a chat that lies in one. Enforced here, not in the UI,
+/// so a direct API call cannot start a run inside the trash. Reading the
+/// session and its history is unaffected; restore makes it runnable again.
+async fn require_live_placement(
+    tx: &sea_orm::DatabaseTransaction,
+    actor: &OrgContext,
+    found: &AgentSession,
+) -> Result<(), ContentError> {
+    if let Some(node_id) = found.node_id {
+        if crate::neev::catalog::trash::node_trashed(tx, actor.org_id, node_id).await? {
+            return Err(ContentError::Archived);
+        }
+    }
+    if let Some(chat_id) = found.bound_chat_id.as_deref() {
+        if chat_in_trash(tx, actor.org_id, chat_id).await? {
+            return Err(ContentError::Archived);
+        }
+    }
     Ok(())
 }
 
@@ -1114,6 +1178,9 @@ async fn begin(
             return Ok((existing, false));
         }
     }
+    // After the replay answer, so a retry of a turn that already exists still
+    // returns it (without executing) once its folder is trashed.
+    require_live_placement(&tx, actor, &found).await?;
     if found.archived {
         return Err(ContentError::Archived);
     }
@@ -1545,6 +1612,9 @@ pub(crate) fn failure_code(reason: &str) -> (TurnStatus, &'static str) {
 #[cfg(test)]
 #[path = "sessions_tests.rs"]
 mod sessions_tests;
+#[cfg(test)]
+#[path = "sessions_trash_tests.rs"]
+mod sessions_trash_tests;
 
 /// The HTTP layer's cursor parsing: sequences travel as strings so a 64-bit
 /// value survives JSON, exactly like the message/revision cursors.

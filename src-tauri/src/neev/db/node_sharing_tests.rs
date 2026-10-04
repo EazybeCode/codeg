@@ -72,9 +72,10 @@ async fn catalog(db: &DatabaseConnection) -> Vec<String> {
         .collect()
 }
 
-/// A fresh install is schema 22; these tests are about the 21 layer, so take
-/// the (empty) schema-22 knowledge layer off first.
+/// A fresh install is schema 23; these tests are about the 21 layer, so take
+/// the (empty) schema-23 trash and schema-22 knowledge layers off first.
 async fn at_twenty_one(db: &DatabaseConnection) {
+    assert_eq!(downgrade_node_trash(db).await, Ok(node_trash_migration::Downgrade::Done));
     assert_eq!(
         downgrade_knowledge(db).await,
         Ok(knowledge_migration::Downgrade::Downgraded)
@@ -160,7 +161,7 @@ async fn downgrade_restores_the_exact_catalog(db: &DatabaseConnection) {
     // The downgraded database is a valid schema 20 (the whole 20 arm runs) and
     // re-migrates; a second round trip lands on the same catalog.
     initialize(db).await.unwrap();
-    // Re-migration goes all the way to 22; step back to compare with the 21 catalog.
+    // Re-migration goes all the way to 23; step back to compare with the 21 catalog.
     at_twenty_one(db).await;
     assert_eq!(catalog(db).await, fresh);
     assert_eq!(downgrade_node_sharing(db).await, Ok(node_sharing_migration::Downgrade::Done));

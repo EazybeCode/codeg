@@ -141,23 +141,30 @@ class SlotProxyError(Exception):
         self.category = category
 
 
-def validate_scope(provider: str, purpose: str, slot: str) -> None:
+def validate_scope(provider: str, purpose: str, slot: str, extra_hosts=()) -> None:
     """Reject anything outside the supported matrix BEFORE spawning.
 
     `policy_for` is the authority on provider+purpose — it is what the child
     will build its allowlist from — so it is consulted here rather than
     duplicated, and a scope it denies never reaches a subprocess.
     """
-    if type(provider) is not str or provider not in VALID_PROVIDERS:
-        raise SlotProxyError("invalid")
-    if type(purpose) is not str or purpose not in VALID_PURPOSES:
+    if not _valid_scope_names(provider, purpose):
         raise SlotProxyError("invalid")
     if type(slot) is not str or slot not in ("a", "b"):
         raise SlotProxyError("invalid")
     try:
-        egress.policy_for(provider, purpose)
+        egress.policy_for(provider, purpose, extra_hosts=tuple(extra_hosts))
     except Exception:
         raise SlotProxyError("invalid") from None
+
+
+def _valid_scope_names(provider, purpose) -> bool:
+    """A provider+purpose this proxy serves: the provider matrix, or the
+    integration-only scope an admin's integration test runs under."""
+    if (provider, purpose) == egress.INTEGRATIONS_SCOPE:
+        return True
+    return (type(provider) is str and provider in VALID_PROVIDERS
+            and type(purpose) is str and purpose in VALID_PURPOSES)
 
 
 def proxy_bind_ip(slot: str) -> str:
@@ -168,7 +175,7 @@ def proxy_bind_ip(slot: str) -> str:
         raise SlotProxyError("invalid") from None
 
 
-def child_argv(provider: str, purpose: str, slot: str, ready_fd: int) -> list:
+def child_argv(provider: str, purpose: str, slot: str, ready_fd: int, extra_hosts=()) -> list:
     """The exact command that runs the proxy inside the login namespace.
 
     Fixed and fully explicit: no shell, no PATH lookup for `ip`, and the module
@@ -194,7 +201,7 @@ def child_argv(provider: str, purpose: str, slot: str, ready_fd: int) -> list:
         str(PROXY_PORT),
         "--ready-fd",
         str(ready_fd),
-    ]
+    ] + [arg for host in extra_hosts for arg in ("--extra-host", host)]
 
 
 # --------------------------------------------------------------------------- #
@@ -286,10 +293,10 @@ class ProxyLauncher:
         # all: no answer, so no start.
         raise SlotProxyError("unavailable")
 
-    def start(self, provider: str, purpose: str, slot: str):  # pragma: no cover
+    def start(self, provider: str, purpose: str, slot: str, extra_hosts=()):  # pragma: no cover
         read_fd, write_fd = os.pipe()
         os.set_inheritable(write_fd, True)
-        argv = child_argv(provider, purpose, slot, write_fd)
+        argv = child_argv(provider, purpose, slot, write_fd, extra_hosts=tuple(extra_hosts))
         try:
             process = subprocess.Popen(argv, pass_fds=(write_fd,), close_fds=True)
         except (OSError, ValueError):
@@ -359,6 +366,7 @@ def slot_proxy(
     purpose: str,
     slot: str,
     *,
+    extra_hosts=(),
     launcher: Optional[ProxyLauncher] = None,
     lock=None,
     quarantine_dir: Optional[str] = None,
@@ -369,7 +377,8 @@ def slot_proxy(
 
     Yields the `HTTP(S)_PROXY`/`NO_PROXY` environment the guest must run with.
     """
-    validate_scope(provider, purpose, slot)
+    extra_hosts = tuple(extra_hosts)
+    validate_scope(provider, purpose, slot, extra_hosts=extra_hosts)
     directory = quarantine_dir or _QUARANTINE_DIR
     if is_quarantined(slot, directory=directory):
         # A previous tenant's proxy could not be confirmed dead.
@@ -388,7 +397,12 @@ def slot_proxy(
             # Under our exclusive lock this can only be a stray listener, and a
             # stray listener is serving an allowlist we did not build.
             raise SlotProxyError("occupied")
-        child = launcher.start(provider, purpose, slot)
+        # Only a run with integrations passes hosts, so a launcher (or test
+        # double) written before them is called exactly as it always was.
+        if extra_hosts:
+            child = launcher.start(provider, purpose, slot, extra_hosts=extra_hosts)
+        else:
+            child = launcher.start(provider, purpose, slot)
         try:
             launcher.wait_ready(child, ready_timeout)
         except SlotProxyError:
@@ -596,11 +610,15 @@ def _drop_bounding_set(ops) -> None:
             _refuse()
 
 
-def _serve(provider: str, purpose: str, host: str, port: int, ready_fd: int) -> int:
+def _serve(provider: str, purpose: str, host: str, port: int, ready_fd: int,
+           extra_hosts=()) -> int:
     """Child: drop privileges, bind, signal ready, serve until terminated."""
     import asyncio
 
-    policy = egress.policy_for(provider, purpose)
+    if extra_hosts:
+        policy = egress.policy_for(provider, purpose, extra_hosts=tuple(extra_hosts))
+    else:
+        policy = egress.policy_for(provider, purpose)
     drop_privileges()
 
     async def run():
@@ -660,6 +678,7 @@ def main(argv=None) -> int:
     parser.add_argument("--host")
     parser.add_argument("--port", type=int, default=PROXY_PORT)
     parser.add_argument("--ready-fd", type=int, default=-1)
+    parser.add_argument("--extra-host", action="append", default=[], dest="extra_hosts")
     args = parser.parse_args(argv)
     if args.probe:
         if not args.host:
@@ -667,11 +686,19 @@ def main(argv=None) -> int:
         return _probe(args.host, args.port)
     if not args.serve:
         return 2
-    if args.provider not in VALID_PROVIDERS or args.purpose not in VALID_PURPOSES:
+    if not _valid_scope_names(args.provider, args.purpose):
         return 2
     if not args.host:
         return 2
+    extra_hosts = tuple(args.extra_hosts)
+    try:
+        egress.policy_for(args.provider, args.purpose, extra_hosts=extra_hosts)
+    except egress.EgressError:
+        return 2
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if extra_hosts:
+        return _serve(args.provider, args.purpose, args.host, args.port, args.ready_fd,
+                      extra_hosts=extra_hosts)
     return _serve(args.provider, args.purpose, args.host, args.port, args.ready_fd)
 
 

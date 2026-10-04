@@ -25,6 +25,7 @@ that produced nothing must say why.
 
 import argparse
 import json
+import re
 import os
 import select
 import signal
@@ -343,6 +344,14 @@ class Emitter:
             }
         )
 
+    def mcp_started(self, item):
+        """An MCP tool call has begun: announced in `codex exec --json`'s own
+        `mcp_tool_call` shape, so both Codex transports reach one parser."""
+        self._write({"type": "item.started", "item": mcp_item(item, completed=False)})
+
+    def mcp_completed(self, item):
+        self._write({"type": "item.completed", "item": mcp_item(item, completed=True)})
+
     def turn_completed(self):
         self._write({"type": "turn.completed"})
 
@@ -386,12 +395,80 @@ class Emitter:
         })
 
 
+# Bounds for a forwarded MCP tool call. The broker has already redacted every
+# integration secret from what the server returned; these keep a trace small.
+MAX_MCP_ARGUMENTS_CHARS = 16 * 1024
+MAX_MCP_RESULT_BLOCKS = 16
+_MCP_NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+_MCP_STATUS = {"inProgress": "in_progress", "in_progress": "in_progress",
+               "completed": "completed", "failed": "failed"}
+
+
+def _bounded_text(value, limit=MAX_TOOL_PREVIEW_CHARS):
+    text = value if isinstance(value, str) else ""
+    if len(text) > limit:
+        return text[:limit] + "\n[Output preview truncated]"
+    return text
+
+
+def mcp_item(item, completed):
+    """Pure: an app-server `mcpToolCall` item -> exec's `mcp_tool_call` item.
+
+    Stable id, server and tool (names only, validated), arguments (kept as JSON
+    when small, else a truncated preview string), and on completion the result's
+    text blocks (bounded, other block kinds by type only), the error message
+    (bounded) and the status — `failed` stays failed: a failure is never
+    reported as success."""
+    server = item.get("server") if isinstance(item.get("server"), str) else ""
+    tool = item.get("tool") if isinstance(item.get("tool"), str) else ""
+    out = {
+        "type": "mcp_tool_call",
+        "id": str(item.get("id") or "")[:200],
+        "server": server if _MCP_NAME.match(server) else "",
+        "tool": tool if _MCP_NAME.match(tool) else "",
+    }
+    arguments = item.get("arguments")
+    try:
+        encoded = json.dumps(arguments)
+    except (TypeError, ValueError):
+        encoded = ""
+    out["arguments"] = (arguments if len(encoded) <= MAX_MCP_ARGUMENTS_CHARS
+                        else _bounded_text(encoded, MAX_MCP_ARGUMENTS_CHARS))
+    status = _MCP_STATUS.get(item.get("status"), "in_progress" if not completed else "failed")
+    if not completed:
+        out["status"] = "in_progress"
+        return out
+    result = item.get("result") if isinstance(item.get("result"), dict) else None
+    error = item.get("error") if isinstance(item.get("error"), dict) else None
+    blocks = []
+    if result is not None:
+        for block in (result.get("content") or [])[:MAX_MCP_RESULT_BLOCKS]:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                blocks.append({"type": "text", "text": _bounded_text(block.get("text"))})
+            elif isinstance(block.get("type"), str):
+                blocks.append({"type": block["type"][:32]})
+    out["result"] = {"content": blocks} if result is not None else None
+    out["error"] = ({"message": _bounded_text(error.get("message"), MAX_REASON_CHARS)}
+                    if error is not None else None)
+    if result is not None and result.get("isError") is True:
+        status = "failed"
+    if error is not None:
+        status = "failed"
+    if status == "in_progress":
+        # Completed without a terminal status: not proven successful.
+        status = "failed" if result is None else "completed"
+    out["status"] = status
+    return out
+
+
 def translate(method, params, emit, memory=None):
     """One app-server notification -> zero or more of our envelopes.
 
     Names and fields are the version-matched schema's
     (`item/agentMessage/delta` carries `itemId`/`delta`; thread items are
-    camelCase `agentMessage`/`commandExecution`). Anything else is ignored
+    camelCase `agentMessage`/`commandExecution`/`mcpToolCall`). Anything else is ignored
     rather than guessed at — including reasoning, which is never surfaced.
 
     Returns `None` while the turn continues, or its exit code once it is over.
@@ -404,6 +481,8 @@ def translate(method, params, emit, memory=None):
     if method == "item/started":
         if kind == "commandExecution":
             emit.command_started(item.get("id", ""), item.get("command") or "")
+        elif kind == "mcpToolCall":
+            emit.mcp_started(item)
         return None
     if method == "item/completed":
         if kind == "agentMessage":
@@ -415,6 +494,8 @@ def translate(method, params, emit, memory=None):
                 item.get("aggregatedOutput") or "",
                 item.get("exitCode"),
             )
+        elif kind == "mcpToolCall":
+            emit.mcp_completed(item)
         return None
     if method == "account/rateLimits/updated":
         emit.usage(params)

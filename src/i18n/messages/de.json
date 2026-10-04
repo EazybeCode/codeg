@@ -6510,5 +6510,33 @@
     "askNoAgent": "Verbinde unter „Persönliche Agents“ deinen eigenen Claude- oder Codex-Agent, um zu testen.",
     "askProviderCopies": "Beim Fragen werden deine Frage und die gespeicherten Seiten an deinen verbundenen KI-Anbieter gesendet. Kopien beim Anbieter liegen außerhalb von Neev.",
     "askStartBusy": "Es läuft bereits ein Test. Warte, bis er fertig ist, oder stoppe ihn."
+  },
+  "NeevTrash": {
+    "moveToTrash": "In den Papierkorb",
+    "confirmTitle": "„{name}“ in den Papierkorb verschieben?",
+    "confirmBody": "Es verschwindet für alle in der Organisation aus der Seitenleiste. Jeder kann es aus dem Papierkorb an derselben Stelle wiederherstellen. Nichts wird gelöscht.",
+    "contents": "Verschiebt außerdem:",
+    "folders": "{count, plural, one {# Ordner} other {# Ordner}}",
+    "documents": "{count, plural, one {# Dokument} other {# Dokumente}}",
+    "chats": "{count, plural, one {# Chat} other {# Chats}}",
+    "empty": "Es ist leer.",
+    "checking": "Inhalt wird geprüft…",
+    "agentActive": "Hier läuft noch ein Agent. Stoppe ihn zuerst und verschiebe dies dann in den Papierkorb.",
+    "inUse": "Etwas hier wird gerade bearbeitet. Versuche es gleich noch einmal.",
+    "privateOthers": "{count, plural, one {# privates Element gehört} other {# private Elemente gehören}} anderen Mitgliedern. Sie müssen ihre Elemente zuerst verschieben oder löschen.",
+    "changed": "Das hat sich geändert, während du es angesehen hast. Bitte erneut prüfen.",
+    "failed": "Konnte nicht in den Papierkorb verschoben werden. Versuche es erneut.",
+    "cancel": "Abbrechen",
+    "section": "Projekte und Ordner",
+    "emptySection": "Keine Projekte oder Ordner im Papierkorb.",
+    "loading": "Wird geladen…",
+    "loadFailed": "Projekte und Ordner im Papierkorb konnten nicht geladen werden.",
+    "restore": "Wiederherstellen",
+    "restoreTo": "Wird in {parent} wiederhergestellt",
+    "restoreParentFirst": "Stelle zuerst {parent} wieder her",
+    "restoreFailed": "Wiederherstellen fehlgeschlagen. Versuche es erneut.",
+    "trashedBy": "Von {name} gelöscht",
+    "agentChats": "{count, plural, one {# eigener Agent-Chat} other {# eigene Agent-Chats}}",
+    "privateContent": "Enthält private Inhalte eines anderen Mitglieds. Es muss sie zuerst verschieben oder löschen."
   }
 }

@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use super::execution::ExecutionError;
+use crate::neev::integrations::{BrokeredIntegration, Transport};
 use crate::neev::library::{EnabledFile, EnabledItem, McpServerConfig, NormalizedMcpServer};
 
 /// Directory name for staged library items, under the run's workdir.
@@ -32,6 +33,9 @@ pub(crate) struct LibraryRunItem {
     pub(crate) kind: LibraryItemKind,
     pub(crate) files: Vec<LibraryRunFile>,
     pub(crate) setup_note: Option<String>,
+    /// A shared, authenticated integration (served by the run's broker), or
+    /// `None` for a skill or a legacy MCP item.
+    pub(crate) integration: Option<BrokeredIntegration>,
 }
 
 /// The kind of library item.
@@ -60,6 +64,7 @@ impl From<EnabledItem> for LibraryRunItem {
             },
             files: item.files.into_iter().map(LibraryRunFile::from).collect(),
             setup_note: item.setup_note,
+            integration: item.integration,
         }
     }
 }
@@ -81,6 +86,12 @@ pub(crate) struct StagedLibrary {
     pub(crate) skill_dirs: Vec<StagedSkill>,
     /// MCP server configurations to inject into the provider.
     pub(crate) mcp_servers: Vec<StagedMcpServer>,
+    /// Shared integrations whose credentials opened: served by the broker and
+    /// reached through the bridge (Claude and Codex only).
+    pub(crate) brokered: Vec<BrokeredIntegration>,
+    /// Shared integrations that cannot run this time (credentials could not be
+    /// opened), by key — named in the capability manifest, never configured.
+    pub(crate) unopened: Vec<BrokeredIntegration>,
 }
 
 /// A staged skill with its directory path.
@@ -158,6 +169,21 @@ pub(crate) fn stage_library(
                     directory: skill_dir,
                     setup_note: item.setup_note.clone(),
                 });
+            }
+            LibraryItemKind::Mcp if item.integration.is_some() => {
+                let integration = item.integration.clone().expect("checked above");
+                if !is_integration_key(&integration.spec.key) {
+                    return Err(ExecutionError::Unauthorized);
+                }
+                // Usable only if it opened AND its stored spec yields a bundle
+                // entry (a remote needs its URL, a package its id): otherwise it
+                // is named as unavailable, never configured as a tool.
+                let bundled = integrations_bundle(std::slice::from_ref(&integration)).is_some();
+                if integration.secrets.is_some() && bundled {
+                    result.brokered.push(integration);
+                } else {
+                    result.unopened.push(integration);
+                }
             }
             LibraryItemKind::Mcp => {
                 // MCP items have a single mcp.json file with normalized config.
@@ -282,6 +308,83 @@ pub(crate) fn stage_library(
     Err(ExecutionError::Unavailable)
 }
 
+/// The bridge an agent runs as a shared integration's MCP server: a fixed,
+/// root-owned script beside the launcher. Its only argument is the key.
+pub(crate) const BRIDGE_PYTHON: &str = "/usr/bin/python3";
+pub(crate) const BRIDGE_SCRIPT: &str = "/opt/neev/scripts/operations/neev_mcp_bridge.py";
+
+/// An integration key: `[a-z0-9][a-z0-9_-]{0,23}` — the agent-visible MCP
+/// server name, short enough that `mcp__<key>__<tool>` stays within tool-name
+/// limits.
+pub(crate) fn is_integration_key(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 24
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-' || *b == b'_')
+}
+
+/// Which agents can use brokered integrations this release. ACP agents ask
+/// permission for MCP tools in a form that does not reliably name the server,
+/// and their runs answer every permission request `reject_once` — so they are
+/// told the integration is unavailable rather than handed a tool that fails.
+pub(crate) fn brokered_supported(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex")
+}
+
+fn bridge_args(key: &str) -> Vec<String> {
+    vec!["-I".to_owned(), BRIDGE_SCRIPT.to_owned(), key.to_owned()]
+}
+
+/// Claude's `--allowedTools` value for the brokered servers: ONE comma-joined
+/// argument (the flag is variadic) granting each server's tools, `mcp__<key>`.
+pub(crate) fn claude_allowed_tools(brokered: &[BrokeredIntegration]) -> Option<String> {
+    if brokered.is_empty() {
+        return None;
+    }
+    Some(
+        brokered
+            .iter()
+            .map(|integration| format!("mcp__{}", integration.spec.key))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// The launcher's stdin bundle line (no trailing newline): servers with their
+/// SECRETS. It is written to the launcher's stdin only — never argv, a file or a
+/// log — and the launcher hands it to the broker over a pipe.
+pub(crate) fn integrations_bundle(brokered: &[BrokeredIntegration]) -> Option<String> {
+    let servers: Vec<serde_json::Value> = brokered
+        .iter()
+        .filter_map(|integration| {
+            let secrets = integration.secrets.as_ref()?;
+            let spec = &integration.spec;
+            let mut server = serde_json::json!({
+                "key": spec.key,
+                "transport": match spec.transport {
+                    Transport::Remote => "remote",
+                    Transport::Package => "package",
+                },
+                "hosts": spec.hosts,
+                "env": secrets.env,
+                "headers": secrets.headers,
+            });
+            match spec.transport {
+                Transport::Remote => server["url"] = serde_json::json!(spec.url.clone()?),
+                Transport::Package => server["package"] = serde_json::json!(spec.package.clone()?),
+            }
+            Some(server)
+        })
+        .collect();
+    if servers.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ "neevIntegrations": 1, "servers": servers }).to_string())
+}
+
 /// Validate that a path is safe for staging (no traversal, no absolute paths).
 fn is_safe_path(path: &str) -> bool {
     if path.is_empty()
@@ -362,13 +465,21 @@ pub(crate) fn skills_briefing(skills: &[StagedSkill]) -> Option<String> {
     text.push_str("and how to use it. Read the SKILL.md file before invoking a skill.\n\n");
 
     for skill in skills {
+        // Admin-entered text: neutralized like every other workspace datum, and
+        // flattened to one line so it cannot open a section of its own.
+        let one_line = |value: &str| {
+            super::briefing::neutralize(value)
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>()
+        };
         text.push_str(&format!(
             "- **{}**: {}/SKILL.md\n",
-            skill.name,
+            one_line(&skill.name),
             skill.directory.display()
         ));
         if let Some(note) = &skill.setup_note {
-            text.push_str(&format!("  Setup: {}\n", note));
+            text.push_str(&format!("  Setup: {}\n", one_line(note)));
         }
     }
 
@@ -380,12 +491,26 @@ pub(crate) fn skills_briefing(skills: &[StagedSkill]) -> Option<String> {
 /// Generate Claude MCP config JSON for a set of servers.
 ///
 /// Claude takes `--mcp-config <path>` with a JSON file containing the mcpServers map.
-pub(crate) fn claude_mcp_config(servers: &[StagedMcpServer]) -> Option<serde_json::Value> {
-    if servers.is_empty() {
+pub(crate) fn claude_mcp_config(
+    servers: &[StagedMcpServer],
+    brokered: &[BrokeredIntegration],
+) -> Option<serde_json::Value> {
+    if servers.is_empty() && brokered.is_empty() {
         return None;
     }
 
     let mut mcp_servers = serde_json::Map::new();
+    // Brokered integrations under their EXACT key, so `mcp__<key>` in
+    // `--allowedTools` matches. Only the bridge: no URL, header or token.
+    for integration in brokered {
+        mcp_servers.insert(
+            integration.spec.key.clone(),
+            serde_json::json!({
+                "command": BRIDGE_PYTHON,
+                "args": bridge_args(&integration.spec.key),
+            }),
+        );
+    }
     for server in servers {
         let safe_name = safe_mcp_name(&server.name, &server.id);
         let config = match &server.config {
@@ -417,10 +542,11 @@ pub(crate) fn claude_mcp_config(servers: &[StagedMcpServer]) -> Option<serde_jso
 pub(crate) fn write_claude_mcp_config(
     workdir: &Path,
     servers: &[StagedMcpServer],
+    brokered: &[BrokeredIntegration],
 ) -> Result<Option<PathBuf>, ExecutionError> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    let config = match claude_mcp_config(servers) {
+    let config = match claude_mcp_config(servers, brokered) {
         Some(config) => config,
         None => return Ok(None),
     };
@@ -452,8 +578,9 @@ pub(crate) fn write_claude_mcp_config(
 pub(crate) fn write_claude_mcp_config(
     _workdir: &Path,
     servers: &[StagedMcpServer],
+    brokered: &[BrokeredIntegration],
 ) -> Result<Option<PathBuf>, ExecutionError> {
-    if servers.is_empty() {
+    if servers.is_empty() && brokered.is_empty() {
         return Ok(None);
     }
     Err(ExecutionError::Unavailable)
@@ -517,8 +644,23 @@ pub(crate) fn acp_mcp_servers(servers: &[StagedMcpServer]) -> AcpMcpServers {
 /// valid TOML string literals (JSON strings are a subset of TOML strings).
 ///
 /// Returns a list of config override strings.
-pub(crate) fn codex_mcp_config(servers: &[StagedMcpServer]) -> Vec<String> {
+pub(crate) fn codex_mcp_config(
+    servers: &[StagedMcpServer],
+    brokered: &[BrokeredIntegration],
+) -> Vec<String> {
     let mut overrides = Vec::new();
+
+    for integration in brokered {
+        let key = &integration.spec.key;
+        overrides.push(format!(
+            "mcp_servers.{key}.command={}",
+            serde_json::to_string(BRIDGE_PYTHON).expect("strings serialize")
+        ));
+        overrides.push(format!(
+            "mcp_servers.{key}.args={}",
+            serde_json::to_string(&bridge_args(key)).expect("string arrays serialize")
+        ));
+    }
 
     for server in servers {
         let safe_name = safe_mcp_name(&server.name, &server.id);
@@ -563,6 +705,7 @@ mod tests {
                 })
                 .collect(),
             setup_note: None,
+            integration: None,
         }
     }
 
@@ -581,6 +724,7 @@ mod tests {
                 content,
             }],
             setup_note: Some("Requires node".to_string()),
+            integration: None,
         }
     }
 
@@ -751,7 +895,7 @@ mod tests {
             },
         ];
 
-        let config = claude_mcp_config(&servers).unwrap();
+        let config = claude_mcp_config(&servers, &[]).unwrap();
         let mcp_servers = config.get("mcpServers").unwrap().as_object().unwrap();
 
         // Check stdio server (full ID in key)
@@ -776,7 +920,7 @@ mod tests {
             },
         }];
 
-        let overrides = codex_mcp_config(&servers);
+        let overrides = codex_mcp_config(&servers, &[]);
         // Full ID in key
         assert!(overrides
             .iter()
@@ -798,7 +942,7 @@ mod tests {
             },
         }];
 
-        let overrides = codex_mcp_config(&servers);
+        let overrides = codex_mcp_config(&servers, &[]);
         // serde_json properly escapes the tab character
         assert!(overrides.iter().any(|o| o.contains(r#"\t"#)));
     }
@@ -844,6 +988,7 @@ mod tests {
                 content: b"not valid json".to_vec(),
             }],
             setup_note: None,
+            integration: None,
         }];
 
         let result = stage_library(dir.path(), &items);
@@ -860,6 +1005,7 @@ mod tests {
             kind: LibraryItemKind::Mcp,
             files: vec![], // No files
             setup_note: None,
+            integration: None,
         }];
 
         let result = stage_library(dir.path(), &items);
@@ -943,4 +1089,144 @@ mod tests {
         assert_eq!(acp.forwarded.len() + acp.skipped.len(), servers.len());
         assert!(acp.forwarded.iter().any(|s| s.contains("tool-small")));
     }
+
+    fn brokered(key: &str, transport: Transport, secret: Option<&str>) -> BrokeredIntegration {
+        use crate::neev::integrations::{IntegrationSecrets, IntegrationSpec};
+        let mut secrets = IntegrationSecrets::default();
+        if let Some(value) = secret {
+            match transport {
+                Transport::Remote => {
+                    secrets.headers.insert("Authorization".into(), format!("Bearer {value}"));
+                }
+                Transport::Package => {
+                    secrets.env.insert("NOTION_API_TOKEN".into(), value.into());
+                }
+            }
+        }
+        BrokeredIntegration {
+            spec: IntegrationSpec {
+                v: 1,
+                key: key.into(),
+                transport,
+                url: (transport == Transport::Remote).then(|| "https://api.fireflies.ai/mcp".into()),
+                package: (transport == Transport::Package).then(|| "notion".into()),
+                hosts: vec![if transport == Transport::Remote { "api.fireflies.ai" } else { "api.notion.com" }.into()],
+                secret_env: vec![],
+                secret_headers: vec![],
+                source: "test".into(),
+                notes: vec![],
+            },
+            secrets: secret.map(|_| secrets),
+        }
+    }
+
+    fn integration_item(id: &str, integration: BrokeredIntegration) -> LibraryRunItem {
+        LibraryRunItem {
+            id: id.into(),
+            name: integration.spec.key.clone(),
+            kind: LibraryItemKind::Mcp,
+            // The legacy-compatible mcp.json an old binary would read; ignored here.
+            files: vec![LibraryRunFile {
+                path: "mcp.json".into(),
+                content: br#"{"name":"x","type":"http","url":"https://api.fireflies.ai/mcp"}"#.to_vec(),
+            }],
+            setup_note: None,
+            integration: Some(integration),
+        }
+    }
+
+    const SECRET: &str = "synthetic-secret-abc123";
+
+    #[test]
+    fn brokered_items_are_staged_apart_from_legacy_and_never_as_their_mcp_json() {
+        let dir = TempDir::new().unwrap();
+        let items = vec![
+            integration_item("i1", brokered("fireflies", Transport::Remote, Some(SECRET))),
+            integration_item("i2", brokered("notion", Transport::Package, None)),
+        ];
+        let staged = stage_library(dir.path(), &items).unwrap();
+        assert!(staged.mcp_servers.is_empty());
+        assert_eq!(staged.brokered.len(), 1);
+        assert_eq!(staged.brokered[0].spec.key, "fireflies");
+        assert_eq!(staged.unopened.len(), 1);
+        assert_eq!(staged.unopened[0].spec.key, "notion");
+    }
+
+    #[test]
+    fn an_unsafe_integration_key_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let items = vec![integration_item("i1", brokered("../x", Transport::Remote, Some(SECRET)))];
+        assert!(matches!(stage_library(dir.path(), &items), Err(ExecutionError::Unauthorized)));
+        assert!(is_integration_key("github"));
+        assert!(!is_integration_key("GitHub"));
+        assert!(!is_integration_key(&"a".repeat(25)));
+    }
+
+    #[test]
+    fn agent_facing_config_names_only_the_bridge_under_the_exact_key() {
+        let servers = vec![brokered("fireflies", Transport::Remote, Some(SECRET))];
+        let claude = claude_mcp_config(&[], &servers).unwrap();
+        let entry = &claude["mcpServers"]["fireflies"];
+        assert_eq!(entry["command"], BRIDGE_PYTHON);
+        assert_eq!(entry["args"], serde_json::json!(["-I", BRIDGE_SCRIPT, "fireflies"]));
+        let codex = codex_mcp_config(&[], &servers);
+        assert!(codex.iter().any(|o| o.starts_with("mcp_servers.fireflies.command=")));
+        assert_eq!(claude_allowed_tools(&servers).unwrap(), "mcp__fireflies");
+        let everything = format!("{claude}{codex:?}");
+        assert!(!everything.contains(SECRET));
+        assert!(!everything.contains("api.fireflies.ai"));
+        assert!(!everything.contains("Authorization"));
+    }
+
+    #[test]
+    fn allowed_tools_is_one_comma_joined_value() {
+        let servers = vec![
+            brokered("github", Transport::Remote, Some(SECRET)),
+            brokered("notion", Transport::Package, Some(SECRET)),
+        ];
+        assert_eq!(claude_allowed_tools(&servers).unwrap(), "mcp__github,mcp__notion");
+        assert!(claude_allowed_tools(&[]).is_none());
+    }
+
+    #[test]
+    fn the_bundle_carries_secrets_and_matches_the_broker_shape() {
+        let servers = vec![
+            brokered("fireflies", Transport::Remote, Some(SECRET)),
+            brokered("notion", Transport::Package, Some(SECRET)),
+            brokered("gone", Transport::Remote, None),
+        ];
+        let bundle: serde_json::Value =
+            serde_json::from_str(&integrations_bundle(&servers).unwrap()).unwrap();
+        assert_eq!(bundle["neevIntegrations"], 1);
+        let list = bundle["servers"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "an unopened integration is never bundled");
+        assert_eq!(list[0]["transport"], "remote");
+        assert_eq!(list[0]["url"], "https://api.fireflies.ai/mcp");
+        assert_eq!(list[0]["headers"]["Authorization"], format!("Bearer {SECRET}"));
+        assert_eq!(list[1]["package"], "notion");
+        assert_eq!(list[1]["env"]["NOTION_API_TOKEN"], SECRET);
+        assert!(integrations_bundle(&[]).is_none());
+        assert!(!integrations_bundle(&servers).unwrap().contains('\n'));
+    }
+
+    #[test]
+    fn a_spec_that_cannot_be_bundled_is_unopened_not_configured() {
+        let dir = TempDir::new().unwrap();
+        let mut broken = brokered("broken", Transport::Remote, Some(SECRET));
+        broken.spec.url = None;
+        let staged = stage_library(dir.path(), &[integration_item("i9", broken)]).unwrap();
+        assert!(staged.brokered.is_empty());
+        assert_eq!(staged.unopened.len(), 1);
+        assert!(integrations_bundle(&staged.brokered).is_none());
+    }
+
+    #[test]
+    fn only_claude_and_codex_receive_brokered_integrations() {
+        assert!(brokered_supported("claude"));
+        assert!(brokered_supported("codex"));
+        for acp in ["gemini", "cursor", "opencode"] {
+            assert!(!brokered_supported(acp));
+        }
+    }
 }
+

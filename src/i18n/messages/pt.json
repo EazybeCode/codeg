@@ -6510,5 +6510,33 @@
     "askNoAgent": "Conecte seu próprio agente Claude ou Codex em Agentes pessoais para testar.",
     "askProviderCopies": "Perguntar envia sua pergunta e as páginas salvas ao seu provedor de IA conectado. Cópias mantidas pelo provedor ficam fora do Neev.",
     "askStartBusy": "Já há um teste em andamento. Aguarde o término ou interrompa-o."
+  },
+  "NeevTrash": {
+    "moveToTrash": "Mover para a lixeira",
+    "confirmTitle": "Mover “{name}” para a lixeira?",
+    "confirmBody": "Ele desaparece da barra lateral para todos na organização. Qualquer pessoa pode restaurá-lo da lixeira, no mesmo lugar. Nada é excluído.",
+    "contents": "Também move:",
+    "folders": "{count, plural, one {# pasta} other {# pastas}}",
+    "documents": "{count, plural, one {# documento} other {# documentos}}",
+    "chats": "{count, plural, one {# chat} other {# chats}}",
+    "empty": "Não há nada aqui.",
+    "checking": "Verificando o conteúdo…",
+    "agentActive": "Um agente ainda está em execução aqui. Pare-o primeiro e depois mova para a lixeira.",
+    "inUse": "Algo aqui está sendo editado agora. Tente novamente em instantes.",
+    "privateOthers": "{count, plural, one {# item privado pertence} other {# itens privados pertencem}} a outros membros. Eles precisam mover ou excluir seus itens primeiro.",
+    "changed": "Isso mudou enquanto você olhava. Verifique novamente.",
+    "failed": "Não foi possível mover para a lixeira. Tente novamente.",
+    "cancel": "Cancelar",
+    "section": "Projetos e pastas",
+    "emptySection": "Nenhum projeto ou pasta na lixeira.",
+    "loading": "Carregando…",
+    "loadFailed": "Não foi possível carregar os projetos e pastas da lixeira.",
+    "restore": "Restaurar",
+    "restoreTo": "Será restaurado em {parent}",
+    "restoreParentFirst": "Restaure {parent} primeiro",
+    "restoreFailed": "Não foi possível restaurar. Tente novamente.",
+    "trashedBy": "Movido para a lixeira por {name}",
+    "agentChats": "{count, plural, one {# chat de agente seu} other {# chats de agente seus}}",
+    "privateContent": "Contém conteúdo privado de outro membro. Ele precisa movê-lo ou enviá-lo para a lixeira primeiro."
   }
 }

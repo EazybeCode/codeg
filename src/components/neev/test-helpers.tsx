@@ -155,6 +155,9 @@ export function mockNativeSession(
     // inbox so unrelated tests need not mock it. A test about being named
     // overrides it with the notices it is about.
     if (key === "GET /api/neev/mentions") return json({ items: [], unread: 0 })
+    // The trash view lists trashed projects and folders (schema 23); default to
+    // none so unrelated trash tests need not mock it.
+    if (key === "GET /api/neev/trash/nodes") return json({ items: [] })
     unknown.push(key)
     throw new Error(`Unexpected fetch: ${key}`)
   })

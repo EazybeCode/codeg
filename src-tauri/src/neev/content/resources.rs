@@ -41,6 +41,14 @@ async fn node(tx: &DatabaseTransaction, org_id: i32, node_id: i32) -> Result<(),
     Ok(())
 }
 
+/// A project or folder in the trash takes no new or moved-in resources.
+async fn live_node(tx: &DatabaseTransaction, org_id: i32, node_id: i32) -> Result<(), ContentError> {
+    if crate::neev::catalog::trash::node_trashed(tx, org_id, node_id).await? {
+        return Err(ContentError::NotFound);
+    }
+    Ok(())
+}
+
 pub(crate) async fn receipt(
     tx: &DatabaseTransaction,
     actor: &OrgContext,
@@ -191,6 +199,7 @@ async fn create_on(
     let hash = org::digest_parts(&parts);
     let tx = begin(state, actor).await?;
     node(&tx, actor.org_id, input.node_id).await?;
+    live_node(&tx, actor.org_id, input.node_id).await?;
     // A retry still needs current access, but does not consume quota a second time.
     if let Some(id) = receipt(&tx, actor, "content.resource.create", &request, &hash).await? {
         let result = access::authorized(&tx, actor, &id, false).await?;
@@ -336,6 +345,12 @@ pub(crate) async fn update(
         return Err(ContentError::NotFound);
     }
     node(&tx, actor.org_id, patch.node_id).await?;
+    // Archived by a folder trash: frozen until that folder is restored, so it can
+    // neither be unarchived nor moved or re-shared from inside the trash.
+    if crate::neev::catalog::trash::resource_trashed(&tx, actor.org_id, id).await? {
+        return Err(ContentError::Archived);
+    }
+    live_node(&tx, actor.org_id, patch.node_id).await?;
     let now = state.clock.now_unix();
     for locked_id in &locked {
         if db::one(&tx,"SELECT id FROM neev_content_leases WHERE org_id=$1 AND resource_id=$2 AND expires_at>$3",vec![actor.org_id.into(),locked_id.clone().into(),now.into()]).await?.is_some() {return Err(ContentError::Conflict);}

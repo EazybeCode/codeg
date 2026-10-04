@@ -49,7 +49,8 @@ pub(crate) async fn list_page(
     let rows = tx
         .query_all(db::statement(
             &tx,
-            "SELECT id,org_id,parent_id,kind,name,revision FROM neev_nodes WHERE org_id=$1 AND id>$2 ORDER BY id LIMIT $3",
+            // Nodes in the trash (schema 23) are hidden; restore brings them back.
+            "SELECT id,org_id,parent_id,kind,name,revision FROM neev_nodes n WHERE org_id=$1 AND id>$2 AND NOT EXISTS (SELECT 1 FROM neev_node_trash t WHERE t.org_id=n.org_id AND t.item_kind='node' AND t.item_id=CAST(n.id AS TEXT)) ORDER BY id LIMIT $3",
             vec![
                 actor.org_id.into(),
                 after.unwrap_or(0).into(),
@@ -128,11 +129,21 @@ pub(crate) async fn update(
     }
     let input = validate_input(input)?;
     let tx = db::begin(&state.database).await?;
+    // The same global guard Move to Trash and restore take (`catalog::trash`).
+    // Trash plans a subtree from its parent links and then writes a ledger row
+    // per node; a re-parent committing between those two steps would hide a node
+    // that had already moved to a live folder. Serializing here closes that on
+    // PostgreSQL. (SQLite already serializes: `db::begin` takes the one writer
+    // lock before any read.)
+    db::lock_admission_guard(&tx).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     let current = load_node(&tx, actor.org_id, node_id, true)
         .await?
         .ok_or(AuthError::Forbidden)?;
     parse_kind(&current.kind)?;
+    if super::trash::node_trashed(&tx, actor.org_id, node_id).await? {
+        return Err(AuthError::Forbidden);
+    }
     if current.revision != expected_revision {
         return Err(AuthError::Conflict);
     }
@@ -178,10 +189,14 @@ pub(crate) async fn get(
     }
     let tx = db::begin(&state.database).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
-    let result = load_node(&tx, actor.org_id, node_id, false)
-        .await?
-        .map(node)
-        .transpose()?;
+    let result = if super::trash::node_trashed(&tx, actor.org_id, node_id).await? {
+        None
+    } else {
+        load_node(&tx, actor.org_id, node_id, false)
+            .await?
+            .map(node)
+            .transpose()?
+    };
     tx.commit().await.map_err(database_error)?;
     Ok(result)
 }
@@ -223,6 +238,9 @@ async fn validate_ancestor_chain(
             .ok_or(AuthError::Forbidden)?;
         if ancestor.kind == "working_directory" {
             return Err(AuthError::Unavailable);
+        }
+        if super::trash::node_trashed(tx, org_id, id).await? {
+            return Err(AuthError::Forbidden);
         }
         cursor = ancestor.parent_id;
     }

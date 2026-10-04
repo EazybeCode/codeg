@@ -784,3 +784,37 @@ async fn a_run_without_context_is_not_told_to_open_a_transcript() {
         "no pointer without a file to point at"
     );
 }
+
+#[tokio::test]
+async fn every_briefed_run_is_told_about_outputs_and_to_try_its_tools_once() {
+    let database = h::database().await;
+    let harness = Harness::new(database.clone()).await;
+    let bare = brief(
+        &harness,
+        &harness.alice_a,
+        Scope::Session { node_id: None },
+        "hello",
+    )
+    .await;
+    let with_context = brief_with(
+        &harness,
+        &harness.alice_a,
+        Scope::Session { node_id: None },
+        "hello",
+        &complete_manifest(3),
+    )
+    .await;
+    for text in [&bare, &with_context] {
+        // Outputs are exported for every provider, so every briefed run hears
+        // about them — exactly once, never twice when a transcript is staged.
+        assert_eq!(text.matches("<output-directory>").count(), 1);
+        assert!(text.contains("`outputs/`"));
+        assert!(
+            text.contains("try the tools and files you were actually given"),
+            "the agent tries before claiming it has no access"
+        );
+        // Standing instructions, so they sit BEFORE the untrusted fence.
+        let fence = text.find(" BEGIN >>>").unwrap();
+        assert!(text.find("<output-directory>").unwrap() < fence);
+    }
+}

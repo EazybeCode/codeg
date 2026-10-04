@@ -246,6 +246,80 @@ fn scrub(value: &str, needles: &[String]) -> String {
     out
 }
 
+/// `mcp__<server>__<tool>` and the call's arguments (as JSON text) for a Codex
+/// `mcp_tool_call` item. A name part that is not a plain identifier is dropped.
+fn mcp_call_parts(item: &serde_json::Value) -> (String, String) {
+    let part = |key: &str| {
+        item.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+            })
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let (server, tool) = (part("server"), part("tool"));
+    let name = if server.is_empty() || tool.is_empty() {
+        "mcp".to_owned()
+    } else {
+        format!("mcp__{server}__{tool}")
+    };
+    let input = match item.get("arguments") {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Null) | None => String::new(),
+        Some(value) => value.to_string(),
+    };
+    (name, input)
+}
+
+/// The visible outcome of a completed Codex `mcp_tool_call`: the result's text
+/// blocks (other block kinds by type), or the error message; an error unless the
+/// status is exactly `completed` with no error and no `isError`.
+fn mcp_result_parts(item: &serde_json::Value) -> (String, bool) {
+    let status = item.get("status").and_then(|v| v.as_str()).unwrap_or_default();
+    let error = item
+        .get("error")
+        .filter(|value| !value.is_null())
+        .map(|error| {
+            error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("the integration call failed")
+                .to_owned()
+        });
+    let result = item.get("result").filter(|value| !value.is_null());
+    let flagged = result
+        .and_then(|result| result.get("isError"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut texts = Vec::new();
+    for block in result
+        .and_then(|result| result.get("content"))
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        match block.get("type").and_then(|v| v.as_str()) {
+            Some("text") => {
+                texts.push(block.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_owned())
+            }
+            Some(other) => texts.push(format!("[{other}]")),
+            None => {}
+        }
+    }
+    let is_error = status != "completed" || error.is_some() || flagged;
+    let output = match error {
+        Some(message) if texts.is_empty() => message,
+        Some(message) => format!("{}\n{message}", texts.join("\n")),
+        None => texts.join("\n"),
+    };
+    (output, is_error)
+}
+
 /// A tool block that has started but whose input is still streaming.
 #[derive(Clone, Debug)]
 struct PendingTool {
@@ -706,6 +780,16 @@ impl StreamParser {
                     // with no output yet; the same id is re-sent at completion
                     // and the log revises that row in place rather than adding
                     // a second one. Everything else waits for its outcome.
+                    if item_type == "mcp_tool_call" {
+                        // An integration call is announced like a command; its
+                        // completion revises the same row (same id).
+                        if self.announced.len() < MAX_OPEN_ITEMS {
+                            self.announced.insert(id.clone());
+                        }
+                        let (name, input) = mcp_call_parts(item);
+                        let announced = if id.is_empty() { "mcp".to_owned() } else { id };
+                        return Some(vec![self.call(announced, name, &input)]);
+                    }
                     if item_type != "command_execution" {
                         return Some(Vec::new());
                     }
@@ -749,6 +833,23 @@ impl StreamParser {
                             items.push(self.call(id.clone(), "command".to_owned(), command));
                         }
                         items.push(self.result(id, output, exit.unwrap_or(0) != 0));
+                        Some(items)
+                    }
+                    // A shared-integration (MCP) tool call: `codex exec --json`
+                    // emits it, and the app-server adapter forwards
+                    // `mcpToolCall` in the same shape. Shown through the same
+                    // call/result rows as any tool, named `mcp__<server>__<tool>`
+                    // like Claude's MCP calls; a failed call stays an error.
+                    "mcp_tool_call" => {
+                        let announced = self.announced.remove(&id);
+                        let id = if id.is_empty() { "mcp".to_owned() } else { id };
+                        let mut items = Vec::new();
+                        if !announced {
+                            let (name, input) = mcp_call_parts(item);
+                            items.push(self.call(id.clone(), name, &input));
+                        }
+                        let (output, is_error) = mcp_result_parts(item);
+                        items.push(self.result(id, &output, is_error));
                         Some(items)
                     }
                     // Reasoning items are recognised and dropped.

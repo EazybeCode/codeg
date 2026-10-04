@@ -454,6 +454,10 @@ async fn retry_team(
         context.as_ref().map(|bundle| &bundle.manifest),
     )
     .await;
+    // Per turn, recomputed every time: the org's relevant compiled knowledge
+    // this member may read (shared-eligible, readable now), capped, as
+    // context files plus a citation note. Never fails the run.
+    let (briefing, knowledge_files) = super::with_knowledge(&state, &actor, &turn.prompt, briefing).await;
     let run_request = RunRequest {
         user_id: actor.identity.user_id,
         org_id: actor.org_id,
@@ -466,7 +470,12 @@ async fn retry_team(
         effort: session.effort.clone(),
         fast: session.fast,
         attachments: run_attachments(resolved),
-        context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
+        // Knowledge first: the briefing names only the first few context
+        // paths, and these are the ones this turn was given for its prompt.
+        context_files: knowledge_files
+            .into_iter()
+            .chain(context.map(|bundle| bundle.files).unwrap_or_default())
+            .collect(),
         library_items,
         min_free_lanes: 1,
     };
@@ -561,6 +570,10 @@ async fn retry_private(
         context.as_ref().map(|bundle| &bundle.manifest),
     )
     .await;
+    // Per turn, recomputed every time: the org's relevant compiled knowledge
+    // this member may read (shared-eligible, readable now), capped, as
+    // context files plus a citation note. Never fails the run.
+    let (briefing, knowledge_files) = super::with_knowledge(&state, &actor, &turn.prompt, briefing).await;
     let run_request = RunRequest {
         user_id: actor.identity.user_id,
         org_id: actor.org_id,
@@ -573,7 +586,12 @@ async fn retry_private(
         effort: session.effort.clone(),
         fast: session.fast,
         attachments: run_attachments(resolved),
-        context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
+        // Knowledge first: the briefing names only the first few context
+        // paths, and these are the ones this turn was given for its prompt.
+        context_files: knowledge_files
+            .into_iter()
+            .chain(context.map(|bundle| bundle.files).unwrap_or_default())
+            .collect(),
         library_items,
         min_free_lanes: 1,
     };

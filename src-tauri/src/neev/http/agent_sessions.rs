@@ -703,6 +703,10 @@ pub(super) async fn start_turn(
         context.as_ref().map(|bundle| &bundle.manifest),
     )
     .await;
+    // Per turn, recomputed every time: the org's relevant compiled knowledge
+    // this member may read (shared-eligible, readable now), capped, as
+    // context files plus a citation note. Never fails the run.
+    let (briefing, knowledge_files) = with_knowledge(&state, &actor, &turn.prompt, briefing).await;
 
     let run_request = RunRequest {
         // Server-authoritative identity: never a client-supplied user/org.
@@ -726,7 +730,12 @@ pub(super) async fn start_turn(
         // The session's own transcript and earlier files, staged separately from
         // the uploads above so the prompt can keep telling the truth about which
         // files arrived with this message.
-        context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
+        // Knowledge first: the briefing names only the first few context
+        // paths, and these are the ones this turn was given for its prompt.
+        context_files: knowledge_files
+            .into_iter()
+            .chain(context.map(|bundle| bundle.files).unwrap_or_default())
+            .collect(),
         // Shared org library items (skills and MCP configs).
         library_items,
         min_free_lanes: 1,
@@ -1871,6 +1880,10 @@ pub(super) async fn team_invoke(
         context.as_ref().map(|bundle| &bundle.manifest),
     )
     .await;
+    // Per turn, recomputed every time: the org's relevant compiled knowledge
+    // this member may read (shared-eligible, readable now), capped, as
+    // context files plus a citation note. Never fails the run.
+    let (briefing, knowledge_files) = with_knowledge(&state, &actor, &turn.prompt, briefing).await;
 
     let run_request = RunRequest {
         user_id: actor.identity.user_id,
@@ -1892,7 +1905,12 @@ pub(super) async fn team_invoke(
         // The chat's own transcript and earlier files. Nothing private to the
         // invoker is here: the set is scoped to this chat in SQL and re-proven
         // against the chat's ACL, so it is the same material the room can read.
-        context_files: context.map(|bundle| bundle.files).unwrap_or_default(),
+        // Knowledge first: the briefing names only the first few context
+        // paths, and these are the ones this turn was given for its prompt.
+        context_files: knowledge_files
+            .into_iter()
+            .chain(context.map(|bundle| bundle.files).unwrap_or_default())
+            .collect(),
         // Shared org library items (skills and MCP configs).
         library_items,
         min_free_lanes: 1,
@@ -2663,6 +2681,29 @@ pub(super) async fn list_connections(
             .map(|view| connection_dto(view, runtime_enabled))
             .collect(),
     }))
+}
+
+/// The member's per-turn Neev knowledge context: appended to the briefing as a
+/// short citation note and staged as capped context files. `None`/empty when
+/// knowledge is off, nothing is relevant, or anything fails — a run never fails
+/// over knowledge. Built from the turn's own prompt only; nothing here reaches
+/// the Auto router, which decides before this runs.
+async fn with_knowledge(
+    state: &ServerState,
+    actor: &OrgContext,
+    prompt: &str,
+    briefing: Option<String>,
+) -> (Option<String>, Vec<RunAttachment>) {
+    use crate::neev::agents::runtime_context::{knowledge_context, knowledge_section};
+    let Some(knowledge) = knowledge_context(state, actor, prompt).await else {
+        return (briefing, Vec::new());
+    };
+    let briefing = match (briefing, knowledge_section(&knowledge)) {
+        (Some(base), Some(section)) => Some(format!("{base}\n{section}")),
+        (Some(base), None) => Some(base),
+        (None, section) => section,
+    };
+    (briefing, knowledge.files)
 }
 
 /// Load enabled library items for the caller's org, converting to runtime form.

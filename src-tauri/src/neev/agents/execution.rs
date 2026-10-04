@@ -746,6 +746,58 @@ fn briefing_with_library(
     }
 }
 
+/// Append the capability manifest (`runtime_context::capabilities_section`):
+/// brokered integrations this agent can use, those it cannot (an ACP agent this
+/// release, or the dev runtime), those whose credentials could not be opened,
+/// legacy MCP servers, and shared skills by name. The same policy for every
+/// provider; nothing is claimed that this run cannot do.
+fn briefing_with_capabilities(
+    briefing: Option<String>,
+    provider: &str,
+    library: &super::library_runtime::StagedLibrary,
+    brokered_usable: bool,
+) -> Option<String> {
+    use super::runtime_context::{capabilities_section, IntegrationAvailability, IntegrationCapability};
+    use crate::neev::integrations::{BrokeredIntegration, Transport};
+    let describe = |integration: &BrokeredIntegration, availability| IntegrationCapability {
+        key: integration.spec.key.clone(),
+        transport: match integration.spec.transport {
+            Transport::Remote => "remote".into(),
+            Transport::Package => "package".into(),
+        },
+        hosts: integration.spec.hosts.clone(),
+        availability,
+    };
+    let usable = if brokered_usable {
+        IntegrationAvailability::Available
+    } else {
+        IntegrationAvailability::NotOnThisAgent
+    };
+    let mut integrations: Vec<IntegrationCapability> = library
+        .brokered
+        .iter()
+        .map(|integration| describe(integration, usable))
+        .collect();
+    integrations.extend(
+        library
+            .unopened
+            .iter()
+            .map(|integration| describe(integration, IntegrationAvailability::CredentialsUnavailable)),
+    );
+    integrations.extend(library.mcp_servers.iter().map(|server| IntegrationCapability {
+        key: super::library_runtime::safe_mcp_name(&server.name, &server.id),
+        transport: "legacy".into(),
+        hosts: Vec::new(),
+        availability: IntegrationAvailability::Available,
+    }));
+    let skills: Vec<String> = library.skill_dirs.iter().map(|skill| skill.name.clone()).collect();
+    match (briefing, capabilities_section(provider, &integrations, &skills)) {
+        (Some(base), Some(section)) => Some(format!("{base}\n{section}")),
+        (Some(base), None) => Some(base),
+        (None, section) => section,
+    }
+}
+
 /// Forward one mapped stream item to the run's consumer.
 ///
 /// Empty text is dropped rather than sent: a zero-length delta would spend a
@@ -1050,6 +1102,9 @@ pub(crate) struct FakeRuntime {
     fail: Option<ExecutionError>,
     /// Every tool-free request this runtime was asked to run, in order.
     tool_free_requests: Option<std::sync::Arc<std::sync::Mutex<Vec<ToolFreeRequest>>>>,
+    /// Integration checks: the state per key (default `ready`), and a log.
+    check_states: std::collections::HashMap<String, String>,
+    checks: Option<std::sync::Arc<std::sync::Mutex<Vec<crate::neev::integrations::IntegrationCheckRequest>>>>,
 }
 
 /// `(file name, bytes)` outputs for a request.
@@ -1077,7 +1132,62 @@ impl FakeRuntime {
             hang: false,
             fail: None,
             tool_free_requests: None,
+            check_states: std::collections::HashMap::new(),
+            checks: None,
         }
+    }
+
+    /// Script an integration check: `key` reports `state` (others `ready`).
+    pub(crate) fn with_check_state(mut self, key: &str, state: &str) -> Self {
+        self.check_states.insert(key.to_owned(), state.to_owned());
+        self
+    }
+
+    pub(crate) fn recording_checks(
+        mut self,
+        log: std::sync::Arc<std::sync::Mutex<Vec<crate::neev::integrations::IntegrationCheckRequest>>>,
+    ) -> Self {
+        self.checks = Some(log);
+        self
+    }
+
+    /// What the real check reports, without a sandbox: a missing secret is
+    /// `vault_unavailable`, otherwise the scripted state (`ready` by default,
+    /// with three tools).
+    pub(crate) fn check_integrations(
+        &self,
+        request: crate::neev::integrations::IntegrationCheckRequest,
+    ) -> Result<Vec<crate::neev::integrations::IntegrationCheckResult>, ExecutionError> {
+        if let Some(error) = &self.fail {
+            return Err(error.clone());
+        }
+        if let Some(log) = &self.checks {
+            log.lock().unwrap_or_else(|e| e.into_inner()).push(request.clone());
+        }
+        Ok(request
+            .integrations
+            .iter()
+            .map(|integration| {
+                let key = integration.spec.key.clone();
+                let state = if integration.secrets.is_none() {
+                    "vault_unavailable".to_owned()
+                } else {
+                    self.check_states.get(&key).cloned().unwrap_or_else(|| "ready".into())
+                };
+                let ready = state == "ready";
+                crate::neev::integrations::IntegrationCheckResult {
+                    key,
+                    tool_count: ready.then_some(3),
+                    http_status: match state.as_str() {
+                        "auth_failed" => Some(401),
+                        "forbidden" => Some(403),
+                        "not_found" => Some(404),
+                        _ => None,
+                    },
+                    state,
+                }
+            })
+            .collect())
     }
 
     pub(crate) fn recording_tool_free(
@@ -1291,6 +1401,10 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
         // Combine briefing: context files + library skills
         let briefing = briefing_with_context(request.briefing.as_deref(), &context);
         let briefing = briefing_with_library(briefing, &library.skill_dirs);
+        // The dev runtime has no broker: shared integrations are named as not
+        // available here rather than offered.
+        let briefing =
+            briefing_with_capabilities(briefing, &request.provider, &library, false);
         let prompt = prompt_with_attachments(&request.prompt, &staged);
         // Build provider arguments
         let mut argv = provider_argv(
@@ -1306,9 +1420,12 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
         if !library.mcp_servers.is_empty() {
             match request.provider.as_str() {
                 "claude" => {
+                    // The dev runtime has no broker: brokered integrations are
+                    // never configured here (only legacy servers are).
                     if let Some(config_path) = super::library_runtime::write_claude_mcp_config(
                         &self.workspace,
                         &library.mcp_servers,
+                        &[],
                     )? {
                         argv.push("--mcp-config".into());
                         argv.push(config_path.to_string_lossy().into_owned());
@@ -1316,7 +1433,7 @@ impl AgentExecutionRuntime for ProviderCliRuntime {
                 }
                 "codex" => {
                     for override_str in
-                        super::library_runtime::codex_mcp_config(&library.mcp_servers)
+                        super::library_runtime::codex_mcp_config(&library.mcp_servers, &[])
                     {
                         argv.push("-c".into());
                         argv.push(override_str);
@@ -1658,6 +1775,14 @@ impl SandboxedProviderCliRuntime {
         // Combine briefing: context files + library skills
         let briefing = briefing_with_context(request.briefing.as_deref(), context);
         let briefing = briefing_with_library(briefing, &library.skill_dirs);
+        // The honest per-agent capability manifest, after staging decided what
+        // this run can actually use.
+        let briefing = briefing_with_capabilities(
+            briefing,
+            &request.provider,
+            &library,
+            super::library_runtime::brokered_supported(&request.provider),
+        );
         let mut argv = vec![
             "--tenant".into(),
             format!("org:{}/user:{}", request.org_id, request.user_id),
@@ -1693,6 +1818,8 @@ impl SandboxedProviderCliRuntime {
                 || !context.is_empty()
                 || !library.mcp_servers.is_empty()
                 || !library.skill_dirs.is_empty()
+                || !library.brokered.is_empty()
+                || !library.unopened.is_empty()
                 || !tool_free_supported(&request.provider)
             {
                 return Err(ExecutionError::Unsupported);
@@ -1704,6 +1831,22 @@ impl SandboxedProviderCliRuntime {
             || request.provider == "claude"
         {
             argv.push("--enable-steering".into());
+        }
+        // Shared integrations this agent can use: the launcher reads their
+        // bundle (with secrets) as the first line of its stdin — never argv.
+        let brokered: &[crate::neev::integrations::BrokeredIntegration] =
+            if super::library_runtime::brokered_supported(&request.provider) {
+                &library.brokered
+            } else {
+                &[]
+            };
+        // The flag and the bundle are ONE decision: the flag is passed exactly
+        // when a bundle line will be written (see `launch_plan_with`), so the
+        // launcher never waits for a line that is not coming.
+        if policy == ToolPolicy::Standard
+            && super::library_runtime::integrations_bundle(brokered).is_some()
+        {
+            argv.push("--integrations-stdin".into());
         }
         for ip in &self.provider_ipv4 {
             argv.push("--provider-ipv4".into());
@@ -1722,26 +1865,36 @@ impl SandboxedProviderCliRuntime {
             &image_paths(staged),
         );
         // Add MCP config for Claude, or overrides for Codex
-        if !library.mcp_servers.is_empty() {
+        if !library.mcp_servers.is_empty() || !brokered.is_empty() {
             match request.provider.as_str() {
                 "claude" => {
                     if let Some(config_path) = super::library_runtime::write_claude_mcp_config(
                         workdir,
                         &library.mcp_servers,
+                        brokered,
                     )? {
                         provider_args.push("--mcp-config".into());
                         provider_args.push(config_path.to_string_lossy().into_owned());
                     }
+                    // Admin enablement is the grant: `-p` mode would otherwise
+                    // deny every MCP tool. Last, as ONE value: the flag is
+                    // variadic and must never sit in front of a positional.
+                    if let Some(tools) = super::library_runtime::claude_allowed_tools(brokered) {
+                        provider_args.push("--allowedTools".into());
+                        provider_args.push(tools);
+                    }
                 }
                 "codex" => {
                     for override_str in
-                        super::library_runtime::codex_mcp_config(&library.mcp_servers)
+                        super::library_runtime::codex_mcp_config(&library.mcp_servers, brokered)
                     {
                         provider_args.push("-c".into());
                         provider_args.push(override_str);
                     }
                 }
-                provider if super::acp_providers::is_acp(provider) => {
+                provider
+                    if super::acp_providers::is_acp(provider) && !library.mcp_servers.is_empty() =>
+                {
                     // ACP `session/new` takes MCP servers natively: inserted
                     // before the prompt separator as `--mcp <json>`.
                     let separator = provider_args.len() - 2;
@@ -1789,6 +1942,21 @@ impl SandboxedProviderCliRuntime {
         handle: &str,
         policy: ToolPolicy,
     ) -> Result<Vec<String>, ExecutionError> {
+        self.launch_plan_with(request, lane, workdir, binary, handle, policy)
+            .map(|(argv, _bundle)| argv)
+    }
+
+    /// The spawn argv plus, when this agent gets shared integrations, the
+    /// bundle line (WITH secrets) to write as the launcher's first stdin line.
+    fn launch_plan_with(
+        &self,
+        request: &RunRequest,
+        lane: Lane,
+        workdir: &Path,
+        binary: &str,
+        handle: &str,
+        policy: ToolPolicy,
+    ) -> Result<(Vec<String>, Option<String>), ExecutionError> {
         // Staged HERE: the workdir exists by now and belongs to this run, which
         // is the only place a path for these files can honestly be chosen.
         let staged = stage_attachments(workdir, &request.attachments)?;
@@ -1805,7 +1973,14 @@ impl SandboxedProviderCliRuntime {
         argv.extend(self.launcher_args(
             request, lane, workdir, binary, handle, &staged, &context, &library, policy,
         )?);
-        Ok(argv)
+        let bundle = if super::library_runtime::brokered_supported(&request.provider)
+            && policy == ToolPolicy::Standard
+        {
+            super::library_runtime::integrations_bundle(&library.brokered)
+        } else {
+            None
+        };
+        Ok((argv, bundle))
     }
 
     /// The launcher argv up to and including `-- <binary>`, without the
@@ -1850,6 +2025,130 @@ impl SandboxedProviderCliRuntime {
             .unwrap_or(full.len());
         argv.extend(full.into_iter().take(cut));
         Ok(argv)
+    }
+}
+
+/// Bound on one integration check: the checker allows 60 s per integration
+/// handshake plus broker/proxy start-up and teardown.
+const INTEGRATION_CHECK_SECS: u64 = 180;
+/// Output a checker may print (one short JSON line per integration).
+const INTEGRATION_CHECK_MAX_LINES: usize = 64;
+
+/// Spawn the launcher in check mode, hand it the bundle, and collect its
+/// result lines (bounded in time and count). Never returns secret material:
+/// the checker prints only keys, states, counts and HTTP statuses.
+async fn run_integration_check(argv: Vec<String>, bundle: String) -> Vec<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = match Command::new(&argv[0])
+        .args(&argv[1..])
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Vec::new(),
+    };
+    let pid = child.id();
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut payload = bundle.into_bytes();
+        payload.push(b'\n');
+        let written = stdin.write_all(&payload).await.is_ok() && stdin.flush().await.is_ok();
+        payload.iter_mut().for_each(|byte| *byte = 0);
+        drop(stdin);
+        if !written {
+            graceful_stop(&mut child, pid).await;
+            return Vec::new();
+        }
+    }
+    let Some(stdout) = child.stdout.take() else {
+        graceful_stop(&mut child, pid).await;
+        return Vec::new();
+    };
+    let mut collected = Vec::new();
+    let read = async {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if collected.len() >= INTEGRATION_CHECK_MAX_LINES {
+                break;
+            }
+            if line.len() <= 1024 {
+                collected.push(line);
+            }
+        }
+    };
+    let finished = tokio::time::timeout(
+        std::time::Duration::from_secs(INTEGRATION_CHECK_SECS),
+        read,
+    )
+    .await
+    .is_ok();
+    if finished {
+        let _ = child.wait().await;
+    } else {
+        graceful_stop(&mut child, pid).await;
+    }
+    collected
+}
+
+/// Pure: fold the checker's lines into the results. Only keys already present
+/// are updated; states must be plain tokens. With no line at all the launcher
+/// never got as far as the checker, and every runnable key stays
+/// `runtime_unavailable`; a runnable key the checker skipped is
+/// `protocol_error`.
+fn merge_check_lines(
+    results: &mut [crate::neev::integrations::IntegrationCheckResult],
+    lines: &[String],
+) {
+    let mut seen_any = false;
+    let mut reported = std::collections::HashSet::new();
+    for line in lines {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("neevIntegrationCheck").and_then(|v| v.as_u64()) != Some(1) {
+            continue;
+        }
+        let (Some(key), Some(state)) = (
+            value.get("key").and_then(|v| v.as_str()),
+            value.get("state").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        if state.is_empty()
+            || state.len() > 32
+            || !state.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+        {
+            continue;
+        }
+        seen_any = true;
+        if let Some(result) = results
+            .iter_mut()
+            .find(|r| r.key == key && r.state != "vault_unavailable")
+        {
+            result.state = state.to_owned();
+            result.tool_count = value
+                .get("toolCount")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok());
+            result.http_status = value
+                .get("httpStatus")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u16::try_from(n).ok());
+            reported.insert(key.to_owned());
+        }
+    }
+    if seen_any {
+        for result in results.iter_mut() {
+            if result.state == "runtime_unavailable" && !reported.contains(&result.key) {
+                result.state = "protocol_error".into();
+            }
+        }
     }
 }
 
@@ -2007,6 +2306,99 @@ impl AgentExecutionRuntime for SandboxedProviderCliRuntime {
 }
 
 impl SandboxedProviderCliRuntime {
+    /// See [`AgentRuntime::check_integrations`].
+    ///
+    /// Integrations whose credentials could not be opened are reported
+    /// `vault_unavailable` without running anything. The rest run in ONE
+    /// launcher check: a lane (non-blocking: a busy deployment says so), a
+    /// fresh run workdir, the slot proxy scoped to the integrations' hosts, the
+    /// broker, and the fixed checker as the lane uid. The bundle goes to the
+    /// launcher's stdin only.
+    pub(crate) async fn check_integrations(
+        &self,
+        request: crate::neev::integrations::IntegrationCheckRequest,
+    ) -> Result<Vec<crate::neev::integrations::IntegrationCheckResult>, ExecutionError> {
+        use crate::neev::integrations::IntegrationCheckResult;
+        if request.user_id <= 0 || request.org_id <= 0 {
+            return Err(ExecutionError::Unauthorized);
+        }
+        let runnable: Vec<_> = request
+            .integrations
+            .iter()
+            .filter(|integration| integration.secrets.is_some())
+            .cloned()
+            .collect();
+        let mut results: Vec<IntegrationCheckResult> = request
+            .integrations
+            .iter()
+            .map(|integration| IntegrationCheckResult {
+                key: integration.spec.key.clone(),
+                state: if integration.secrets.is_some() {
+                    "runtime_unavailable".into()
+                } else {
+                    "vault_unavailable".into()
+                },
+                tool_count: None,
+                http_status: None,
+            })
+            .collect();
+        let Some(bundle) = super::library_runtime::integrations_bundle(&runnable) else {
+            return Ok(results);
+        };
+        let lane = self.slots.acquire().ok_or(ExecutionError::LanesBusy)?;
+        let check_id = uuid::Uuid::new_v4().simple().to_string();
+        // `run-` prefix: the launcher only accepts run directories.
+        let workdir = self.workspace_root.join(format!("run-check-{check_id}"));
+        let guard = LaneGuard {
+            slots: self.slots.clone(),
+            lane,
+            workdir: workdir.clone(),
+        };
+        if std::fs::create_dir_all(&workdir).is_err() {
+            return Err(ExecutionError::Isolation);
+        }
+        let argv = self.check_argv(request.org_id, request.user_id, lane, &workdir);
+        let task = tokio::spawn(async move {
+            let lines = run_integration_check(argv, bundle).await;
+            drop(guard); // after the launcher's teardown, like a run
+            lines
+        });
+        let lines = task.await.map_err(|_| ExecutionError::Unavailable)?;
+        merge_check_lines(&mut results, &lines);
+        Ok(results)
+    }
+
+    /// Pure: the launcher argv for an integration check (no provider, no
+    /// credential handle, no provider argv).
+    fn check_argv(&self, org_id: i32, user_id: i32, lane: Lane, workdir: &Path) -> Vec<String> {
+        let mut argv = match &self.cap_helper {
+            Some(helper) => vec![helper.clone()],
+            None => vec![
+                self.python.clone(),
+                self.launcher.to_string_lossy().into_owned(),
+            ],
+        };
+        argv.extend([
+            "--tenant".into(),
+            format!("org:{org_id}/user:{user_id}"),
+            "--slot".into(),
+            lane.slot.to_string(),
+            "--workdir".into(),
+            workdir.to_string_lossy().into_owned(),
+            "--uid".into(),
+            lane.uid.to_string(),
+            "--gid".into(),
+            lane.uid.to_string(),
+            "--integration-check".into(),
+            "--integrations-stdin".into(),
+        ]);
+        for ip in &self.provider_ipv4 {
+            argv.push("--provider-ipv4".into());
+            argv.push(ip.clone());
+        }
+        argv
+    }
+
     async fn run_with(
         &self,
         request: RunRequest,
@@ -2041,7 +2433,8 @@ impl SandboxedProviderCliRuntime {
             && ((request.provider == "codex"
                 && matches!(self.codex_stream, CodexStream::AppServer))
                 || request.provider == "claude");
-        let argv = self.launch_argv_with(&request, lane, &workdir, &binary, &handle, policy)?;
+        let (argv, bundle) =
+            self.launch_plan_with(&request, lane, &workdir, &binary, &handle, policy)?;
         let mut child = match Command::new(&argv[0])
             .args(&argv[1..])
             // Defence in depth for §5.4: the server's own HOME/config must not
@@ -2052,8 +2445,13 @@ impl SandboxedProviderCliRuntime {
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_DATA_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
-            // Open stdin for steering in app-server mode; null otherwise.
-            .stdin(if supports_steering { Stdio::piped() } else { Stdio::null() })
+            // Open stdin for steering, or to hand the launcher the
+            // integrations bundle; null otherwise.
+            .stdin(if supports_steering || bundle.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true) // last-resort safety only; all paths stop gracefully first
@@ -2066,8 +2464,34 @@ impl SandboxedProviderCliRuntime {
             Some(stdout) => stdout,
             None => return Err(ExecutionError::Unavailable), // guard drops
         };
-        // Take stdin for steering relay in app-server mode
-        let child_stdin = if supports_steering { child.stdin.take() } else { None };
+        // The integrations bundle is the launcher's FIRST stdin line; steering
+        // lines (if any) follow on the same pipe. Without steering the pipe is
+        // closed right after it.
+        let mut child_stdin = if supports_steering || bundle.is_some() {
+            child.stdin.take()
+        } else {
+            None
+        };
+        if let Some(line) = bundle {
+            use tokio::io::AsyncWriteExt;
+            let Some(stdin) = child_stdin.as_mut() else {
+                let pid = child.id();
+                graceful_stop(&mut child, pid).await;
+                return Err(ExecutionError::Unavailable);
+            };
+            let mut payload = line.into_bytes();
+            payload.push(b'\n');
+            if stdin.write_all(&payload).await.is_err() || stdin.flush().await.is_err() {
+                let pid = child.id();
+                graceful_stop(&mut child, pid).await;
+                return Err(ExecutionError::Provider);
+            }
+            // Best effort: the bytes live only in this buffer from here on.
+            payload.iter_mut().for_each(|byte| *byte = 0);
+            if !supports_steering {
+                child_stdin = None; // dropping closes the launcher's stdin
+            }
+        }
         let pid = child.id();
         let (tx, rx) = mpsc::channel::<RunEvent>(16);
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
@@ -2321,6 +2745,25 @@ impl AgentRuntime {
     }
 }
 
+impl AgentRuntime {
+    /// Test an org's shared integrations through the real runtime path (lane,
+    /// slot proxy with the integrations' hosts, broker, bridge), with no
+    /// provider and no credential volume. One result per integration, in order.
+    pub(crate) async fn check_integrations(
+        &self,
+        request: crate::neev::integrations::IntegrationCheckRequest,
+    ) -> Result<Vec<crate::neev::integrations::IntegrationCheckResult>, ExecutionError> {
+        match self {
+            Self::Disabled(_) => Err(ExecutionError::Disabled),
+            #[cfg(any(test, feature = "dev-agent"))]
+            Self::Provider(_) => Err(ExecutionError::Unsupported),
+            Self::Sandboxed(runtime) => runtime.check_integrations(request).await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.check_integrations(request),
+        }
+    }
+}
+
 impl RunHandle {
     /// Take the cancel sender so a job registry can cancel this run by id from a
     /// separate request. Leaves `cancel()` on this handle a no-op afterwards.
@@ -2498,6 +2941,212 @@ mod tests {
         )
     }
 
+    const INTEGRATION_SECRET: &str = "synthetic-integration-secret-77";
+
+    fn integration_run_item(key: &str) -> super::super::library_runtime::LibraryRunItem {
+        use crate::neev::integrations::{BrokeredIntegration, IntegrationSecrets, IntegrationSpec, Transport};
+        let mut secrets = IntegrationSecrets::default();
+        secrets
+            .headers
+            .insert("Authorization".into(), format!("Bearer {INTEGRATION_SECRET}"));
+        super::super::library_runtime::LibraryRunItem {
+            id: format!("id-{key}"),
+            name: key.into(),
+            kind: super::super::library_runtime::LibraryItemKind::Mcp,
+            files: Vec::new(),
+            setup_note: None,
+            integration: Some(BrokeredIntegration {
+                spec: IntegrationSpec {
+                    v: 1,
+                    key: key.into(),
+                    transport: Transport::Remote,
+                    url: Some("https://api.fireflies.ai/mcp".into()),
+                    package: None,
+                    hosts: vec!["api.fireflies.ai".into()],
+                    secret_env: vec![],
+                    secret_headers: vec!["Authorization".into()],
+                    source: "test".into(),
+                    notes: vec![],
+                },
+                secrets: Some(secrets),
+            }),
+        }
+    }
+
+    fn plan_for(provider: &str, binary: &str, policy: ToolPolicy) -> (Vec<String>, Option<String>, tempfile::TempDir) {
+        let runtime = SandboxedProviderCliRuntime::new(
+            "python3",
+            "/opt/neev/scripts/operations/neev_agent_launch.py",
+            ProviderBinaries {
+                claude: Some("/usr/local/bin/claude".into()),
+                codex: Some("/usr/local/bin/codex".into()),
+                ..ProviderBinaries::claude("/usr/local/bin/claude")
+            },
+            "/data/agents",
+            vec!["140.82.112.3".into()],
+            None,
+            CodexStream::Exec,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = request("use fireflies");
+        run.provider = provider.into();
+        run.library_items = vec![integration_run_item("fireflies"), integration_run_item("github")];
+        let lane = Lane { slot: "a", uid: 61000 };
+        let (argv, bundle) = runtime
+            .launch_plan_with(&run, lane, dir.path(), binary, HANDLE, policy)
+            .unwrap();
+        (argv, bundle, dir)
+    }
+
+    #[test]
+    fn claude_gets_bridges_a_grant_and_the_bundle_only_on_stdin() {
+        let (argv, bundle, dir) = plan_for("claude", "/usr/local/bin/claude", ToolPolicy::Standard);
+        let sep = argv.iter().position(|a| a == "--").unwrap();
+        assert!(argv[..sep].contains(&"--integrations-stdin".to_string()));
+        let config = argv.iter().position(|a| a == "--mcp-config").unwrap();
+        assert!(config > sep);
+        let tools = argv.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(argv[tools + 1], "mcp__fireflies,mcp__github");
+        assert_eq!(tools + 2, argv.len(), "the variadic grant is last");
+        // No secret, header, URL or host anywhere the agent can read.
+        let argv_text = argv.join("\n");
+        assert!(!argv_text.contains(INTEGRATION_SECRET));
+        assert!(!argv_text.contains("Authorization"));
+        // The capability manifest names what this agent can use, honestly.
+        let briefing = &argv[argv.iter().position(|a| a == "--append-system-prompt").unwrap() + 1];
+        assert!(briefing.contains("<neev-capabilities>"), "{briefing}");
+        assert!(briefing.contains("fireflies") && briefing.contains("github"));
+        let staged = std::fs::read_to_string(&argv[config + 1]).unwrap();
+        assert!(staged.contains("neev_mcp_bridge.py"));
+        assert!(!staged.contains(INTEGRATION_SECRET) && !staged.contains("Authorization"));
+        for entry in walk(dir.path()) {
+            let bytes = std::fs::read(&entry).unwrap_or_default();
+            assert!(!String::from_utf8_lossy(&bytes).contains(INTEGRATION_SECRET));
+        }
+        let bundle = bundle.expect("claude runs carry the bundle");
+        assert!(bundle.contains(INTEGRATION_SECRET));
+        assert!(!bundle.contains('\n'));
+    }
+
+    fn walk(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    out.extend(walk(&path));
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn codex_gets_bridge_overrides_and_the_bundle() {
+        let (argv, bundle, _dir) = plan_for("codex", "/usr/local/bin/codex", ToolPolicy::Standard);
+        assert!(argv.contains(&"--integrations-stdin".to_string()));
+        assert!(argv.iter().any(|a| a.starts_with("mcp_servers.fireflies.command=")));
+        assert!(argv.iter().any(|a| a.starts_with("mcp_servers.github.args=")));
+        assert!(!argv.join(" ").contains(INTEGRATION_SECRET));
+        assert!(!argv.contains(&"--allowedTools".to_string()));
+        assert!(bundle.is_some());
+    }
+
+    #[test]
+    fn acp_agents_receive_no_brokered_integration_and_no_bundle() {
+        let runtime = acp_runtime();
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = request("hello");
+        run.provider = "gemini".into();
+        run.library_items = vec![integration_run_item("fireflies")];
+        let lane = Lane { slot: "a", uid: 61000 };
+        let (argv, bundle) = runtime
+            .launch_plan_with(&run, lane, dir.path(), "/usr/local/bin/gemini", HANDLE, ToolPolicy::Standard)
+            .unwrap();
+        assert!(bundle.is_none());
+        assert!(!argv.contains(&"--integrations-stdin".to_string()));
+        assert!(!argv.contains(&"--mcp".to_string()));
+        assert!(!argv.join(" ").contains(INTEGRATION_SECRET));
+        // The ACP prompt carries the manifest: the integration is named as NOT
+        // available to this agent, never offered as a tool.
+        let prompt = argv.last().unwrap();
+        assert!(prompt.contains("<neev-capabilities>"), "{prompt}");
+        assert!(prompt.contains("fireflies"));
+        assert!(prompt.to_lowercase().contains("not available"), "{prompt}");
+    }
+
+    #[test]
+    fn a_tool_free_turn_refuses_integrations() {
+        let runtime = sandboxed();
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = request("plan");
+        run.library_items = vec![integration_run_item("fireflies")];
+        let lane = Lane { slot: "a", uid: 61000 };
+        let result = runtime.launch_plan_with(
+            &run, lane, dir.path(), "/usr/local/bin/claude", HANDLE, ToolPolicy::ToolFree,
+        );
+        assert!(matches!(result, Err(ExecutionError::Unsupported)));
+    }
+
+    #[test]
+    fn integration_check_argv_has_no_provider_and_no_secret() {
+        let runtime = sandboxed();
+        let argv = runtime.check_argv(3, 7, Lane { slot: "b", uid: 61001 }, Path::new("/data/agents/run-check-x"));
+        assert_eq!(&argv[..2], &["python3", "/opt/neev/scripts/operations/neev_agent_launch.py"]);
+        for flag in ["--integration-check", "--integrations-stdin", "--provider-ipv4"] {
+            assert!(argv.contains(&flag.to_string()), "{flag}");
+        }
+        assert!(!argv.contains(&"--provider".to_string()));
+        assert!(!argv.contains(&"--credential-handle".to_string()));
+        assert!(!argv.contains(&"--".to_string()));
+    }
+
+    #[test]
+    fn check_lines_merge_by_key_and_never_invent_ready() {
+        use crate::neev::integrations::IntegrationCheckResult;
+        let fresh = |key: &str, state: &str| IntegrationCheckResult {
+            key: key.into(), state: state.into(), tool_count: None, http_status: None,
+        };
+        let mut results = vec![
+            fresh("github", "runtime_unavailable"),
+            fresh("notion", "vault_unavailable"),
+            fresh("fireflies", "runtime_unavailable"),
+        ];
+        merge_check_lines(&mut results, &[
+            r#"{"neevIntegrationCheck":1,"key":"github","state":"auth_failed","toolCount":null,"httpStatus":401}"#.into(),
+            r#"{"neevIntegrationCheck":1,"key":"notion","state":"ready","toolCount":9}"#.into(),
+            r#"{"neevIntegrationCheck":1,"key":"evil","state":"ready"}"#.into(),
+            r#"{"neevIntegrationCheck":1,"key":"fireflies","state":"Ready!"}"#.into(),
+            "not json".into(),
+        ]);
+        assert_eq!(results[0].state, "auth_failed");
+        assert_eq!(results[0].http_status, Some(401));
+        assert_eq!(results[1].state, "vault_unavailable", "a vault failure is never overwritten");
+        assert_eq!(results[2].state, "protocol_error", "silently skipped key");
+        let mut untouched = vec![fresh("github", "runtime_unavailable")];
+        merge_check_lines(&mut untouched, &[]);
+        assert_eq!(untouched[0].state, "runtime_unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_check_with_only_unopened_credentials_runs_nothing() {
+        let runtime = sandboxed();
+        let mut item = integration_run_item("fireflies").integration.unwrap();
+        item.secrets = None;
+        let results = runtime
+            .check_integrations(crate::neev::integrations::IntegrationCheckRequest {
+                user_id: 7,
+                org_id: 3,
+                integrations: vec![item],
+            })
+            .await
+            .unwrap();
+        assert_eq!(results[0].state, "vault_unavailable");
+        assert_eq!(runtime.slots.free_count(), 2);
+    }
+
     #[test]
     fn sandboxed_uses_cap_helper_prefix_when_set() {
         let runtime = SandboxedProviderCliRuntime::new(
@@ -2658,6 +3307,8 @@ mod tests {
         ];
         let library = StagedLibrary {
             skill_dirs: Vec::new(),
+            brokered: Vec::new(),
+            unopened: Vec::new(),
             mcp_servers: vec![
                 StagedMcpServer {
                     id: "abc123".into(),
@@ -3650,6 +4301,7 @@ mod tests {
                 .unwrap(),
             }],
             setup_note: None,
+            integration: None,
         }];
         req
     }

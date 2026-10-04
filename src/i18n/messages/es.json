@@ -6510,5 +6510,33 @@
     "askNoAgent": "Conecta tu propio agente de Claude o Codex en Agentes personales para probar.",
     "askProviderCopies": "Al preguntar, tu pregunta y las páginas guardadas se envían a tu proveedor de IA conectado. Las copias que guarde el proveedor quedan fuera de Neev.",
     "askStartBusy": "Ya hay una prueba en curso. Espera a que termine o detenla."
+  },
+  "NeevTrash": {
+    "moveToTrash": "Mover a la papelera",
+    "confirmTitle": "¿Mover «{name}» a la papelera?",
+    "confirmBody": "Desaparece de la barra lateral para todos en la organización. Cualquiera puede restaurarlo desde la papelera, en el mismo lugar. No se elimina nada.",
+    "contents": "También mueve:",
+    "folders": "{count, plural, one {# carpeta} other {# carpetas}}",
+    "documents": "{count, plural, one {# documento} other {# documentos}}",
+    "chats": "{count, plural, one {# chat} other {# chats}}",
+    "empty": "No contiene nada.",
+    "checking": "Comprobando el contenido…",
+    "agentActive": "Todavía hay un agente en ejecución aquí. Detenlo primero y luego muévelo a la papelera.",
+    "inUse": "Algo de aquí se está editando ahora mismo. Inténtalo de nuevo en un momento.",
+    "privateOthers": "{count, plural, one {# elemento privado pertenece} other {# elementos privados pertenecen}} a otros miembros. Primero deben mover o eliminar sus elementos.",
+    "changed": "Esto cambió mientras lo mirabas. Vuelve a comprobarlo.",
+    "failed": "No se pudo mover a la papelera. Inténtalo de nuevo.",
+    "cancel": "Cancelar",
+    "section": "Proyectos y carpetas",
+    "emptySection": "No hay proyectos ni carpetas en la papelera.",
+    "loading": "Cargando…",
+    "loadFailed": "No se pudieron cargar los proyectos y carpetas de la papelera.",
+    "restore": "Restaurar",
+    "restoreTo": "Se restaura en {parent}",
+    "restoreParentFirst": "Restaura primero {parent}",
+    "restoreFailed": "No se pudo restaurar. Inténtalo de nuevo.",
+    "trashedBy": "Enviado a la papelera por {name}",
+    "agentChats": "{count, plural, one {# chat de agente tuyo} other {# chats de agente tuyos}}",
+    "privateContent": "Contiene contenido privado de otro miembro. Primero debe moverlo o enviarlo a la papelera."
   }
 }

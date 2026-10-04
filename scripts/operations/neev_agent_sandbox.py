@@ -444,7 +444,7 @@ def _create_bind_mountpoint(workdir, run_uid, run_gid):  # pragma: no cover - Li
 
 
 def launch(spec, env=None, bind_source=None, stdin_pipe=False, stderr_pipe=False,
-           pty_stdio=False):  # pragma: no cover - Linux production path
+           pty_stdio=False, before_spawn=None):  # pragma: no cover - Linux production path
     """Launch the agent inside the sandbox. Linux only.
 
     `stdin_pipe=True` opens a pipe to the provider's stdin (login flows that drive the
@@ -466,6 +466,11 @@ def launch(spec, env=None, bind_source=None, stdin_pipe=False, stderr_pipe=False
     `bind_source`, when given, is the physical credential-volume mount to bind onto
     the lane-traversable `home_path(workdir)` inside the sandbox's private mount
     namespace (so the 0700 secret store is never exposed).
+
+    `before_spawn(netns)`, when given, runs AFTER the egress netns is wired and
+    BEFORE the provider is spawned (the shared-integration broker must hold its
+    sockets in that netns before the agent can race it for them). If it raises,
+    the wiring is torn down and nothing is spawned.
 
     `pty_stdio=True` gives the provider a pseudo-terminal as stdin AND stdout (for a
     login CLI that refuses to run its official flow without a TTY — see
@@ -506,6 +511,14 @@ def launch(spec, env=None, bind_source=None, stdin_pipe=False, stderr_pipe=False
         )
         egress.apply(egress_plan, egress_runner)  # rolls back on any failure
         join_netns = egress_plan.netns
+
+    if before_spawn is not None:
+        try:
+            before_spawn(join_netns)
+        except Exception as error:
+            if egress_plan is not None:
+                egress.teardown(egress_plan, egress_runner)
+            raise SandboxError("launch") from error
 
     argv = build_launch_argv(spec, join_netns=join_netns, bind_source=bind_source)
     master = slave = None

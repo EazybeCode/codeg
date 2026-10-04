@@ -10,6 +10,11 @@ use crate::neev::{
     auth::session,
     db,
     error::{database_error, AuthError},
+    integrations::{
+        BrokeredIntegration, IntegrationCheckRequest, IntegrationSecrets, IntegrationSpec,
+        IntegrationStatus, Transport, SECRETS_PATH, SPEC_PATH, STATUS_PATH,
+    },
+    library_integrations as vault,
     startup::ServerState,
     types::{OrgContext, Role},
 };
@@ -17,7 +22,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use sea_orm::{ConnectionTrait, DatabaseTransaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use zip::ZipArchive;
 
@@ -55,6 +60,55 @@ pub(crate) struct LibraryItem {
     pub(crate) revision: i64,
     pub(crate) files: Vec<String>,
     pub(crate) setup_note: Option<String>,
+    /// Present for shared (brokered) integrations: names, hosts and the last
+    /// test only — never a secret value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) integration: Option<IntegrationView>,
+}
+
+/// What members see of a shared integration (names only, never values).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IntegrationView {
+    pub(crate) transport: Transport,
+    pub(crate) hosts: Vec<String>,
+    /// `secret_env` names, then `secret_headers` names.
+    pub(crate) secret_names: Vec<String>,
+    pub(crate) source: String,
+    pub(crate) notes: Vec<String>,
+    /// The last admin test, only when it ran against the current revision.
+    pub(crate) status: Option<IntegrationStatus>,
+}
+
+/// An MCP server the import did not store, and why (a code, never a value).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SkippedServer {
+    pub(crate) name: String,
+    pub(crate) reason: String,
+}
+
+/// Result of an import: newly stored items plus per-server skips.
+#[derive(Debug)]
+pub(crate) struct ImportOutcome {
+    pub(crate) items: Vec<LibraryItem>,
+    pub(crate) skipped: Vec<SkippedServer>,
+}
+
+/// Write-only replacement of some or all of an integration's credentials.
+pub(crate) struct SecretsRequest {
+    pub(crate) expected_revision: i64,
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) headers: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for SecretsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretsRequest")
+            .field("expected_revision", &self.expected_revision)
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 // JavaScript cannot represent all i64 revisions exactly. Keep the native API's
@@ -64,11 +118,21 @@ fn serialize_revision<S: serde::Serializer>(value: &i64, serializer: S) -> Resul
 }
 
 /// Request to import a skill or MCP config.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportRequest {
     pub(crate) file_name: String,
     pub(crate) data: String, // base64
+}
+
+// The payload is an MCP export with plaintext tokens: never print it.
+impl std::fmt::Debug for ImportRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportRequest")
+            .field("file_name", &self.file_name)
+            .field("data", &format_args!("<{} base64 bytes>", self.data.len()))
+            .finish()
+    }
 }
 
 /// Request to update a library item (enable/disable).
@@ -84,13 +148,6 @@ pub(crate) struct PatchRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DeleteRequest {
     pub(crate) expected_revision: i64,
-}
-
-/// Response with all library items.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct LibraryResponse {
-    pub(crate) items: Vec<LibraryItem>,
 }
 
 /// Result of successful deletion.
@@ -188,8 +245,8 @@ async fn list_internal<C: ConnectionTrait>(
         let file_rows = db
             .query_all(db::statement(
                 db,
-                "SELECT path FROM neev_library_files WHERE item_id=$1 AND org_id=$2 ORDER BY path",
-                vec![id.clone().into(), org_id.into()],
+                "SELECT path FROM neev_library_files WHERE item_id=$1 AND org_id=$2 AND path<>$3 ORDER BY path",
+                vec![id.clone().into(), org_id.into(), SECRETS_PATH.into()],
             ))
             .await
             .map_err(database_error)?;
@@ -197,6 +254,12 @@ async fn list_internal<C: ConnectionTrait>(
             .iter()
             .map(|r| r.try_get("", "path").map_err(database_error))
             .collect::<Result<_, _>>()?;
+
+        let integration = if kind == "mcp" && files.iter().any(|f| f == SPEC_PATH) {
+            integration_view(db, &id, org_id, revision).await?
+        } else {
+            None
+        };
 
         items.push(LibraryItem {
             id,
@@ -207,9 +270,123 @@ async fn list_internal<C: ConnectionTrait>(
             revision,
             files,
             setup_note,
+            integration,
         });
     }
     Ok(items)
+}
+
+/// The member-visible view of an integration item (None if its spec is unreadable).
+async fn integration_view<C: ConnectionTrait>(
+    db: &C,
+    item_id: &str,
+    org_id: i32,
+    revision: i64,
+) -> Result<Option<IntegrationView>, AuthError> {
+    let Some(spec) = read_spec(db, item_id, org_id).await?.and_then(Result::ok) else {
+        return Ok(None);
+    };
+    let status = read_file(db, item_id, org_id, STATUS_PATH)
+        .await?
+        .and_then(|bytes| serde_json::from_slice::<IntegrationStatus>(&bytes).ok())
+        .filter(|status| status.revision == revision.to_string());
+    let mut secret_names = spec.secret_env.clone();
+    secret_names.extend(spec.secret_headers.iter().cloned());
+    Ok(Some(IntegrationView {
+        transport: spec.transport,
+        hosts: spec.hosts,
+        secret_names,
+        source: spec.source,
+        notes: spec.notes,
+        status,
+    }))
+}
+
+/// Read one stored file of an item (org-scoped).
+async fn read_file<C: ConnectionTrait>(
+    db: &C,
+    item_id: &str,
+    org_id: i32,
+    path: &str,
+) -> Result<Option<Vec<u8>>, AuthError> {
+    db::one(
+        db,
+        "SELECT content FROM neev_library_files WHERE item_id=$1 AND org_id=$2 AND path=$3",
+        vec![item_id.into(), org_id.into(), path.into()],
+    )
+    .await?
+    .map(|row| row.try_get::<Vec<u8>>("", "content").map_err(database_error))
+    .transpose()
+}
+
+/// `Some(Err(()))` when `integration.json` exists but does not parse.
+async fn read_spec<C: ConnectionTrait>(
+    db: &C,
+    item_id: &str,
+    org_id: i32,
+) -> Result<Option<Result<IntegrationSpec, ()>>, AuthError> {
+    Ok(read_file(db, item_id, org_id, SPEC_PATH)
+        .await?
+        .map(|bytes| parse_spec(&bytes)))
+}
+
+fn parse_spec(bytes: &[u8]) -> Result<IntegrationSpec, ()> {
+    serde_json::from_slice::<IntegrationSpec>(bytes)
+        .ok()
+        .filter(|spec| spec.v == crate::neev::integrations::SPEC_VERSION)
+        .ok_or(())
+}
+
+async fn insert_file<C: ConnectionTrait>(
+    db: &C,
+    item_id: &str,
+    org_id: i32,
+    path: &str,
+    content: Vec<u8>,
+) -> Result<(), AuthError> {
+    let hash = format!("{:x}", Sha256::digest(&content));
+    db::execute(
+        db,
+        "INSERT INTO neev_library_files (id, item_id, org_id, path, content_hash, content)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+        vec![
+            uuid::Uuid::new_v4().to_string().into(),
+            item_id.into(),
+            org_id.into(),
+            path.into(),
+            hash.into(),
+            content.into(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn delete_file<C: ConnectionTrait>(
+    db: &C,
+    item_id: &str,
+    org_id: i32,
+    path: &str,
+) -> Result<(), AuthError> {
+    db::execute(
+        db,
+        "DELETE FROM neev_library_files WHERE item_id=$1 AND org_id=$2 AND path=$3",
+        vec![item_id.into(), org_id.into(), path.into()],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Replace (delete + insert) one file of an item.
+async fn upsert_file<C: ConnectionTrait>(
+    db: &C,
+    item_id: &str,
+    org_id: i32,
+    path: &str,
+    content: Vec<u8>,
+) -> Result<(), AuthError> {
+    delete_file(db, item_id, org_id, path).await?;
+    insert_file(db, item_id, org_id, path, content).await
 }
 
 /// Get current storage usage for an org.
@@ -226,11 +403,15 @@ async fn get_org_storage_bytes<C: ConnectionTrait>(db: &C, org_id: i32) -> Resul
 }
 
 /// Import a skill ZIP/MD or MCP JSON file. Admin only.
+///
+/// An MCP file is imported per server: credential-free stdio servers become
+/// legacy items, authenticated ones become shared integrations (secrets
+/// sealed), and anything unsupported is reported in `skipped` (never a value).
 pub(crate) async fn import(
     state: &ServerState,
     actor: &OrgContext,
     request: ImportRequest,
-) -> Result<Vec<LibraryItem>, AuthError> {
+) -> Result<ImportOutcome, AuthError> {
     // Admin only
     if actor.role != Role::Admin {
         return Err(AuthError::Forbidden);
@@ -243,19 +424,67 @@ pub(crate) async fn import(
 
     // Determine type from filename and content
     let file_name = request.file_name.to_lowercase();
-    let (skills, mcp_servers) = if file_name.ends_with(".zip") {
-        (parse_skill_zip(&data)?, Vec::new())
+    let (skills, parsed) = if file_name.ends_with(".zip") {
+        (parse_skill_zip(&data)?, vault::ParsedImport::default())
     } else if file_name.ends_with(".json") {
         (Vec::new(), parse_mcp_json(&data)?)
     } else if file_name.ends_with(".md") {
-        (vec![parse_skill_md(&request.file_name, &data)?], Vec::new())
+        (
+            vec![parse_skill_md(&request.file_name, &data)?],
+            vault::ParsedImport::default(),
+        )
     } else {
         return Err(AuthError::Invalid);
     };
+    let vault::ParsedImport {
+        servers: mut mcp_servers,
+        mut skipped,
+    } = parsed;
+
+    if skills.is_empty() && mcp_servers.is_empty() && skipped.is_empty() {
+        return Err(AuthError::Invalid);
+    }
+
+    // Begin transaction with ACL checks
+    let tx = begin(state, actor).await?;
+
+    // MCP names are unique per org (case-insensitive): they become tool names.
+    if !mcp_servers.is_empty() {
+        let rows = tx
+            .query_all(db::statement(
+                &tx,
+                "SELECT name FROM neev_library_items WHERE org_id=$1 AND kind='mcp'",
+                vec![actor.org_id.into()],
+            ))
+            .await
+            .map_err(database_error)?;
+        let existing: HashSet<String> = rows
+            .iter()
+            .map(|r| r.try_get::<String>("", "name").map(|n| n.to_lowercase()))
+            .collect::<Result<_, _>>()
+            .map_err(database_error)?;
+        mcp_servers.retain(|server| {
+            if existing.contains(&server.key()) {
+                skipped.push(SkippedServer {
+                    name: server.display_name().to_string(),
+                    reason: "duplicate_name".into(),
+                });
+                false
+            } else {
+                true
+            }
+        });
+    }
 
     let total_items = skills.len() + mcp_servers.len();
     if total_items == 0 {
-        return Err(AuthError::Invalid);
+        // Nothing importable; the caller decides how to present the skips.
+        session::recheck(&tx, actor, state.clock.now_unix()).await?;
+        tx.commit().await.map_err(database_error)?;
+        return Ok(ImportOutcome {
+            items: Vec::new(),
+            skipped,
+        });
     }
 
     // Calculate total bytes to store
@@ -266,14 +495,18 @@ pub(crate) async fn import(
         }
     }
     for server in &mcp_servers {
-        // Estimate JSON size
-        new_bytes += serde_json::to_vec(&server)
-            .map(|v| v.len() as i64)
-            .unwrap_or(1000);
+        new_bytes += match server {
+            vault::ParsedServer::Legacy(server) => serde_json::to_vec(server)
+                .map(|v| v.len() as i64)
+                .unwrap_or(1000),
+            vault::ParsedServer::Integration(parsed) => {
+                let legacy = serde_json::to_vec_pretty(&parsed.legacy).map_or(1000, |v| v.len());
+                let spec = serde_json::to_vec(&parsed.spec).map_or(1000, |v| v.len());
+                let secrets = serde_json::to_vec(&parsed.secrets).map_or(1000, |v| v.len());
+                (legacy + spec + secrets + 31) as i64
+            }
+        };
     }
-
-    // Begin transaction with ACL checks
-    let tx = begin(state, actor).await?;
 
     // Check org item count limit
     let current_count = db::one(
@@ -318,41 +551,36 @@ pub(crate) async fn import(
         )
         .await?;
 
-        // Store files
         for file in skill.files {
-            let file_id = uuid::Uuid::new_v4().to_string();
-            let hash = format!("{:x}", Sha256::digest(&file.content));
-            db::execute(
-                &tx,
-                "INSERT INTO neev_library_files (id, item_id, org_id, path, content_hash, content)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-                vec![
-                    file_id.into(),
-                    id.clone().into(),
-                    actor.org_id.into(),
-                    file.path.into(),
-                    hash.into(),
-                    file.content.into(),
-                ],
-            )
-            .await?;
+            insert_file(&tx, &id, actor.org_id, &file.path, file.content).await?;
         }
 
         stored_ids.push(id);
     }
 
     // Store MCP servers (each as separate item)
+    let vault_key = vault::vault_key(&state.config.encryption_key);
     for server in mcp_servers {
         let id = uuid::Uuid::new_v4().to_string();
-        let setup_note = match &server.config {
-            McpServerConfig::Http { url } => Some(format!(
-                "This MCP server connects to {}. Ensure destination is on your network allowlist.",
-                url
-            )),
-            McpServerConfig::Stdio { command, .. } => Some(format!(
-                "This MCP server requires '{}' to be installed and in PATH.",
-                command
-            )),
+        let (name, setup_note, legacy) = match &server {
+            vault::ParsedServer::Legacy(server) => {
+                let note = match &server.config {
+                    McpServerConfig::Http { url } => format!(
+                        "This MCP server connects to {}. Ensure destination is on your network allowlist.",
+                        url
+                    ),
+                    McpServerConfig::Stdio { command, .. } => format!(
+                        "This MCP server requires '{}' to be installed and in PATH.",
+                        command
+                    ),
+                };
+                (server.name.clone(), note, server)
+            }
+            vault::ParsedServer::Integration(parsed) => (
+                parsed.spec.key.clone(),
+                vault::SETUP_NOTE.to_string(),
+                &parsed.legacy,
+            ),
         };
 
         db::execute(
@@ -362,30 +590,24 @@ pub(crate) async fn import(
             vec![
                 id.clone().into(),
                 actor.org_id.into(),
-                server.name.clone().into(),
+                name.into(),
                 actor.identity.user_id.into(),
-                setup_note.into(),
+                Some(setup_note).into(),
             ],
         )
         .await?;
 
-        // Store normalized config as JSON file
-        let config_json = serde_json::to_vec_pretty(&server).map_err(|_| AuthError::Invalid)?;
-        let file_id = uuid::Uuid::new_v4().to_string();
-        let hash = format!("{:x}", Sha256::digest(&config_json));
-        db::execute(
-            &tx,
-            "INSERT INTO neev_library_files (id, item_id, org_id, path, content_hash, content)
-             VALUES ($1, $2, $3, 'mcp.json', $4, $5)",
-            vec![
-                file_id.into(),
-                id.clone().into(),
-                actor.org_id.into(),
-                hash.into(),
-                config_json.into(),
-            ],
-        )
-        .await?;
+        // Legacy-compatible, credential-free config
+        let config_json = serde_json::to_vec_pretty(legacy).map_err(|_| AuthError::Invalid)?;
+        insert_file(&tx, &id, actor.org_id, "mcp.json", config_json).await?;
+
+        if let vault::ParsedServer::Integration(parsed) = &server {
+            let spec = serde_json::to_vec(&parsed.spec).map_err(|_| AuthError::Unavailable)?;
+            insert_file(&tx, &id, actor.org_id, SPEC_PATH, spec).await?;
+            let sealed = vault::seal(&vault_key, actor.org_id, &id, &parsed.secrets)
+                .map_err(|_| AuthError::Unavailable)?;
+            insert_file(&tx, &id, actor.org_id, SECRETS_PATH, sealed).await?;
+        }
 
         stored_ids.push(id);
     }
@@ -401,10 +623,211 @@ pub(crate) async fn import(
     tx.commit().await.map_err(database_error)?;
 
     let stored_set: HashSet<_> = stored_ids.iter().collect();
-    Ok(all_items
+    Ok(ImportOutcome {
+        items: all_items
+            .into_iter()
+            .filter(|item| stored_set.contains(&item.id))
+            .collect(),
+        skipped,
+    })
+}
+
+/// Load an org's integration item inside `tx`: (revision, spec). Not found →
+/// Forbidden (cross-org), stale → Conflict, not an integration → Invalid.
+async fn load_integration_item<C: ConnectionTrait>(
+    db: &C,
+    org_id: i32,
+    item_id: &str,
+    expected_revision: i64,
+) -> Result<IntegrationSpec, AuthError> {
+    let row = db::one(
+        db,
+        "SELECT revision, kind FROM neev_library_items WHERE id=$1 AND org_id=$2",
+        vec![item_id.into(), org_id.into()],
+    )
+    .await?
+    .ok_or(AuthError::Forbidden)?;
+    let current_rev: i64 = row.try_get("", "revision").map_err(database_error)?;
+    let kind: String = row.try_get("", "kind").map_err(database_error)?;
+    if current_rev != expected_revision {
+        return Err(AuthError::Conflict);
+    }
+    if kind != "mcp" {
+        return Err(AuthError::Invalid);
+    }
+    read_spec(db, item_id, org_id)
+        .await?
+        .ok_or(AuthError::Invalid)?
+        .map_err(|()| AuthError::Invalid)
+}
+
+/// Open an item's sealed secrets; any failure is `None` (vault unavailable).
+async fn open_secrets<C: ConnectionTrait>(
+    db: &C,
+    key: &[u8; 32],
+    org_id: i32,
+    item_id: &str,
+) -> Result<Option<IntegrationSecrets>, AuthError> {
+    Ok(read_file(db, item_id, org_id, SECRETS_PATH)
+        .await?
+        .and_then(|sealed| vault::open(key, org_id, item_id, &sealed).ok()))
+}
+
+/// Replace some or all credentials of a shared integration. Admin only.
+/// Write-only: values are never returned. Bumps the revision (hiding any
+/// earlier test result).
+pub(crate) async fn update_secrets(
+    state: &ServerState,
+    actor: &OrgContext,
+    item_id: &str,
+    request: SecretsRequest,
+) -> Result<LibraryItem, AuthError> {
+    if actor.role != Role::Admin {
+        return Err(AuthError::Forbidden);
+    }
+    if request.expected_revision < 1 || (request.env.is_empty() && request.headers.is_empty()) {
+        return Err(AuthError::Invalid);
+    }
+    if request
+        .env
+        .values()
+        .chain(request.headers.values())
+        .any(|value| vault::check_secret_value(value).is_err())
+    {
+        return Err(AuthError::Invalid);
+    }
+    let key = vault::vault_key(&state.config.encryption_key);
+
+    let tx = begin(state, actor).await?;
+    let spec = load_integration_item(&tx, actor.org_id, item_id, request.expected_revision).await?;
+    if !request.env.keys().all(|name| spec.secret_env.contains(name))
+        || !request
+            .headers
+            .keys()
+            .all(|name| spec.secret_headers.contains(name))
+    {
+        return Err(AuthError::Invalid);
+    }
+    let mut secrets = match open_secrets(&tx, &key, actor.org_id, item_id).await? {
+        Some(existing) => existing,
+        None => {
+            // Nothing to merge into: every declared secret must be provided.
+            if !spec.secret_env.iter().all(|n| request.env.contains_key(n))
+                || !spec
+                    .secret_headers
+                    .iter()
+                    .all(|n| request.headers.contains_key(n))
+            {
+                return Err(AuthError::Invalid);
+            }
+            IntegrationSecrets::default()
+        }
+    };
+    secrets.env.extend(request.env);
+    secrets.headers.extend(request.headers);
+    // Keep only declared names (a stale extra name is never carried forward).
+    secrets.env.retain(|name, _| spec.secret_env.contains(name));
+    secrets.headers.retain(|name, _| spec.secret_headers.contains(name));
+    let sealed = vault::seal(&key, actor.org_id, item_id, &secrets)
+        .map_err(|_| AuthError::Unavailable)?;
+    upsert_file(&tx, item_id, actor.org_id, SECRETS_PATH, sealed).await?;
+    delete_file(&tx, item_id, actor.org_id, STATUS_PATH).await?;
+    db::execute(
+        &tx,
+        "UPDATE neev_library_items SET revision=revision+1, updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND org_id=$2",
+        vec![item_id.into(), actor.org_id.into()],
+    )
+    .await?;
+
+    let updated = list_internal(&tx, actor.org_id)
+        .await?
         .into_iter()
-        .filter(|item| stored_set.contains(&item.id))
-        .collect())
+        .find(|i| i.id == item_id)
+        .ok_or(AuthError::Unavailable)?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(updated)
+}
+
+/// Test a shared integration through the runtime and record the result in
+/// `status.json`. Admin only. No transaction is held during the test; a
+/// result for a revision that changed meanwhile is dropped (Conflict).
+pub(crate) async fn test_integration(
+    state: &ServerState,
+    actor: &OrgContext,
+    item_id: &str,
+    expected_revision: i64,
+) -> Result<LibraryItem, AuthError> {
+    if actor.role != Role::Admin {
+        return Err(AuthError::Forbidden);
+    }
+    if expected_revision < 1 {
+        return Err(AuthError::Invalid);
+    }
+    let key = vault::vault_key(&state.config.encryption_key);
+
+    // tx #1: authorize and read.
+    let tx = begin(state, actor).await?;
+    let spec = load_integration_item(&tx, actor.org_id, item_id, expected_revision).await?;
+    let secrets = open_secrets(&tx, &key, actor.org_id, item_id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+
+    // The test itself, outside any transaction.
+    let integration_key = spec.key.clone();
+    let (check_state, tool_count, http_status) = match secrets {
+        None => ("vault_unavailable".to_string(), None, None),
+        Some(secrets) => match state
+            .agents
+            .check_integrations(IntegrationCheckRequest {
+                user_id: actor.identity.user_id,
+                org_id: actor.org_id,
+                integrations: vec![BrokeredIntegration {
+                    spec,
+                    secrets: Some(secrets),
+                }],
+            })
+            .await
+        {
+            Err(_) => ("runtime_unavailable".to_string(), None, None),
+            Ok(results) => results
+                .into_iter()
+                .find(|r| r.key == integration_key)
+                .map(|r| (r.state, r.tool_count, r.http_status))
+                .unwrap_or_else(|| ("protocol_error".to_string(), None, None)),
+        },
+    };
+
+    // tx #2: record, only if the item is unchanged.
+    let tx = begin(state, actor).await?;
+    let row = db::one(
+        &tx,
+        "SELECT revision FROM neev_library_items WHERE id=$1 AND org_id=$2",
+        vec![item_id.into(), actor.org_id.into()],
+    )
+    .await?
+    .ok_or(AuthError::Forbidden)?;
+    let current_rev: i64 = row.try_get("", "revision").map_err(database_error)?;
+    if current_rev != expected_revision {
+        return Err(AuthError::Conflict);
+    }
+    let status = IntegrationStatus {
+        state: check_state,
+        checked_at: state.clock.now_unix().to_string(),
+        tool_count,
+        detail: http_status.map(|s| format!("HTTP {s}")),
+        revision: current_rev.to_string(),
+    };
+    let status = serde_json::to_vec(&status).map_err(|_| AuthError::Unavailable)?;
+    upsert_file(&tx, item_id, actor.org_id, STATUS_PATH, status).await?;
+    let updated = list_internal(&tx, actor.org_id)
+        .await?
+        .into_iter()
+        .find(|i| i.id == item_id)
+        .ok_or(AuthError::Unavailable)?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(updated)
 }
 
 /// Update a library item (enable/disable). Admin only.
@@ -446,6 +869,21 @@ pub(crate) async fn patch(
         vec![request.enabled.into(), item_id.into()],
     )
     .await?;
+
+    // Enabling or disabling changes neither the credentials nor the config, so
+    // a test result for the revision just replaced still describes the item:
+    // carry it to the new revision instead of showing a tested integration as
+    // "untested" the moment it is enabled. Credential updates still clear it.
+    if let Some(mut status) = read_file(&tx, item_id, actor.org_id, STATUS_PATH)
+        .await?
+        .and_then(|bytes| serde_json::from_slice::<IntegrationStatus>(&bytes).ok())
+    {
+        if status.revision == current_rev.to_string() {
+            status.revision = (current_rev + 1).to_string();
+            let bytes = serde_json::to_vec(&status).map_err(|_| AuthError::Unavailable)?;
+            upsert_file(&tx, item_id, actor.org_id, STATUS_PATH, bytes).await?;
+        }
+    }
 
     // Re-fetch updated item
     let items = list_internal(&tx, actor.org_id).await?;
@@ -514,7 +952,8 @@ pub(crate) async fn load_enabled(
     actor: &OrgContext,
 ) -> Result<Vec<EnabledItem>, AuthError> {
     let tx = begin(state, actor).await?;
-    let items = load_enabled_internal(&tx, actor.org_id).await?;
+    let key = vault::vault_key(&state.config.encryption_key);
+    let items = load_enabled_internal(&tx, actor.org_id, &key).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
     Ok(items)
@@ -524,6 +963,7 @@ pub(crate) async fn load_enabled(
 async fn load_enabled_internal<C: ConnectionTrait>(
     db: &C,
     org_id: i32,
+    vault_key: &[u8; 32],
 ) -> Result<Vec<EnabledItem>, AuthError> {
     let rows = db
         .query_all(db::statement(
@@ -553,15 +993,40 @@ async fn load_enabled_internal<C: ConnectionTrait>(
             .map_err(database_error)?;
 
         let mut files = Vec::new();
+        let mut sealed: Option<Vec<u8>> = None;
         for fr in &file_rows {
             let path: String = fr.try_get("", "path").map_err(database_error)?;
             let content: Vec<u8> = fr.try_get("", "content").map_err(database_error)?;
             let stored_hash: String = fr.try_get("", "content_hash").map_err(database_error)?;
-            if format!("{:x}", Sha256::digest(&content)) != stored_hash {
+            let intact = format!("{:x}", Sha256::digest(&content)) == stored_hash;
+            if path == SECRETS_PATH {
+                // Never handed out as a file. A damaged blob only makes this
+                // integration unavailable (the vault rejects it below).
+                if intact {
+                    sealed = Some(content);
+                }
+                continue;
+            }
+            if !intact {
                 return Err(AuthError::Unavailable);
             }
             files.push(EnabledFile { path, content });
         }
+
+        let integration = match files.iter().find(|f| f.path == SPEC_PATH) {
+            Some(spec_file) if kind == "mcp" => {
+                // One damaged spec makes THAT integration unavailable, never the
+                // whole library (and never stages it as a legacy item).
+                let Ok(spec) = parse_spec(&spec_file.content) else {
+                    continue;
+                };
+                let secrets = sealed
+                    .as_deref()
+                    .and_then(|bytes| vault::open(vault_key, org_id, &id, bytes).ok());
+                Some(BrokeredIntegration { spec, secrets })
+            }
+            _ => None,
+        };
 
         items.push(EnabledItem {
             id,
@@ -569,6 +1034,7 @@ async fn load_enabled_internal<C: ConnectionTrait>(
             kind,
             files,
             setup_note,
+            integration,
         });
     }
     Ok(items)
@@ -582,6 +1048,9 @@ pub(crate) struct EnabledItem {
     pub(crate) kind: String,
     pub(crate) files: Vec<EnabledFile>,
     pub(crate) setup_note: Option<String>,
+    /// Shared integration (spec + opened secrets; `secrets: None` when the
+    /// vault could not open them). `None` for skills and legacy MCP items.
+    pub(crate) integration: Option<BrokeredIntegration>,
 }
 
 /// A file from an enabled item.
@@ -700,7 +1169,7 @@ fn parse_skill_zip(data: &[u8]) -> Result<Vec<ImportedSkill>, AuthError> {
     let mut all_files: Vec<(String, Vec<u8>)> = Vec::new();
 
     for i in 0..archive.len() {
-        let mut file = archive.by_index(i).map_err(|_| AuthError::Invalid)?;
+        let file = archive.by_index(i).map_err(|_| AuthError::Invalid)?;
 
         // Reject symlinks
         if file.is_symlink() {
@@ -934,169 +1403,23 @@ fn validate_mcp_command(cmd: &str) -> bool {
     !contains_credential_pattern(cmd)
 }
 
-/// Parse MCP JSON config and normalize to individual server entries.
-/// Strictly validates mcpServers map format, only allowing:
-/// - stdio: {command, args} or {type: "stdio", command, args}
-/// - http: {type: "http", url}
-fn parse_mcp_json(data: &[u8]) -> Result<Vec<NormalizedMcpServer>, AuthError> {
+/// Parse an MCP JSON file (`{"mcpServers": {...}}`) into legacy items,
+/// shared integrations and per-server skips. Legacy stdio entries keep the
+/// existing rules (slug name, command and args checks, no credentials).
+fn parse_mcp_json(data: &[u8]) -> Result<vault::ParsedImport, AuthError> {
     if data.len() > MAX_FILE_SIZE {
         return Err(AuthError::Limited);
     }
-
-    let json: serde_json::Value = serde_json::from_slice(data).map_err(|_| AuthError::Invalid)?;
-
-    // Must be an object with exactly mcpServers key
-    let obj = json.as_object().ok_or(AuthError::Invalid)?;
-    if obj.len() != 1 || !obj.contains_key("mcpServers") {
-        return Err(AuthError::Invalid);
-    }
-
-    let servers_map = obj
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .ok_or(AuthError::Invalid)?;
-
-    if servers_map.is_empty() {
-        return Err(AuthError::Invalid);
-    }
-
-    let mut servers = Vec::new();
-
-    for (name, config) in servers_map {
-        // Validate name (slug-ish)
-        if !validate_mcp_name(name) {
-            return Err(AuthError::Invalid);
-        }
-
-        let config_obj = config.as_object().ok_or(AuthError::Invalid)?;
-
-        // Determine transport type
-        let type_val = config_obj.get("type").and_then(|v| v.as_str());
-
-        let server_config = match type_val {
-            Some("http") => {
-                // HTTP transport: exactly {type, url}
-                if config_obj.len() != 2 {
-                    return Err(AuthError::Invalid);
-                }
-                let url = config_obj
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .ok_or(AuthError::Invalid)?;
-                validate_mcp_url(url)?;
-                McpServerConfig::Http {
-                    url: url.to_string(),
-                }
-            }
-            Some("stdio") | None => {
-                // stdio transport
-                let expected_keys: HashSet<&str> = if type_val.is_some() {
-                    ["type", "command", "args"].iter().cloned().collect()
-                } else {
-                    ["command", "args"].iter().cloned().collect()
-                };
-
-                // Reject unknown keys
-                for key in config_obj.keys() {
-                    if !expected_keys.contains(key.as_str()) {
-                        return Err(AuthError::Invalid);
-                    }
-                }
-
-                // Command is required
-                let command = config_obj
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .ok_or(AuthError::Invalid)?;
-
-                if !validate_mcp_command(command) {
-                    return Err(AuthError::Invalid);
-                }
-
-                // Parse args - must all be strings, reject non-strings
-                let args: Vec<String> = if let Some(args_val) = config_obj.get("args") {
-                    let arr = args_val.as_array().ok_or(AuthError::Invalid)?;
-                    if arr.len() > MAX_MCP_ARGS_COUNT {
-                        return Err(AuthError::Limited);
-                    }
-                    let mut result = Vec::with_capacity(arr.len());
-                    for arg in arr {
-                        let s = arg.as_str().ok_or(AuthError::Invalid)?; // Reject non-string
-                        if s.len() > MAX_MCP_ARG_LEN {
-                            return Err(AuthError::Limited);
-                        }
-                        if s.bytes().any(|b| b == 0) {
-                            return Err(AuthError::Invalid); // No NUL
-                        }
-                        if contains_credential_pattern(s) {
-                            return Err(AuthError::Invalid);
-                        }
-                        result.push(s.to_string());
-                    }
-                    result
-                } else {
-                    Vec::new()
-                };
-
-                McpServerConfig::Stdio {
-                    command: command.to_string(),
-                    args,
-                }
-            }
-            Some(_) => {
-                // Unknown type
-                return Err(AuthError::Invalid);
-            }
-        };
-
-        servers.push(NormalizedMcpServer {
-            name: name.clone(),
-            config: server_config,
-        });
-    }
-
-    Ok(servers)
-}
-
-/// Validate MCP URL - must be HTTPS, no credentials, no query/fragment.
-fn validate_mcp_url(url_str: &str) -> Result<(), AuthError> {
-    let url = url::Url::parse(url_str).map_err(|_| AuthError::Invalid)?;
-
-    // Must be HTTPS
-    if url.scheme() != "https" {
-        return Err(AuthError::Invalid);
-    }
-
-    // No username/password
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(AuthError::Invalid);
-    }
-
-    // No query string (could contain tokens)
-    if url.query().is_some() {
-        return Err(AuthError::Invalid);
-    }
-
-    // No fragment
-    if url.fragment().is_some() {
-        return Err(AuthError::Invalid);
-    }
-
-    // Check for private/local hosts
-    if let Some(host) = url.host_str() {
-        let host_lower = host.to_lowercase();
-        if host_lower == "localhost"
-            || host_lower.starts_with("127.")
-            || host_lower.starts_with("192.168.")
-            || host_lower.starts_with("10.")
-            || host_lower.ends_with(".local")
-            || host_lower.ends_with(".internal")
-        {
-            return Err(AuthError::Invalid);
-        }
-    }
-
-    Ok(())
+    vault::parse_import(data, |name, command, args| {
+        validate_mcp_name(name)
+            && validate_mcp_command(command)
+            && args.len() <= MAX_MCP_ARGS_COUNT
+            && args.iter().all(|arg| {
+                arg.len() <= MAX_MCP_ARG_LEN
+                    && !arg.bytes().any(|b| b == 0)
+                    && !contains_credential_pattern(arg)
+            })
+    })
 }
 
 /// Check if a string contains credential-like patterns.
@@ -1362,6 +1685,56 @@ mod tests {
         BASE64.encode(data)
     }
 
+    /// The pre-integration call shape: stored items only.
+    async fn import(
+        state: &ServerState,
+        actor: &OrgContext,
+        request: ImportRequest,
+    ) -> Result<Vec<LibraryItem>, AuthError> {
+        super::import(state, actor, request).await.map(|o| o.items)
+    }
+
+    /// Import an MCP JSON value; returns the full outcome.
+    async fn import_json(
+        state: &ServerState,
+        actor: &OrgContext,
+        json: serde_json::Value,
+    ) -> Result<ImportOutcome, AuthError> {
+        super::import(
+            state,
+            actor,
+            ImportRequest {
+                file_name: "mcp.json".into(),
+                data: b64(json.to_string().as_bytes()),
+            },
+        )
+        .await
+    }
+
+    fn skip_reasons(outcome: &ImportOutcome) -> Vec<(String, String)> {
+        outcome
+            .skipped
+            .iter()
+            .map(|s| (s.name.clone(), s.reason.clone()))
+            .collect()
+    }
+
+    async fn import_skip(json: Vec<u8>) -> Vec<(String, String)> {
+        let harness = h::OrgHarness::new().await;
+        let outcome = super::import(
+            harness.state(),
+            harness.owner_context(),
+            ImportRequest {
+                file_name: "mcp.json".into(),
+                data: b64(&json),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(outcome.items.is_empty());
+        skip_reasons(&outcome)
+    }
+
     #[tokio::test]
     async fn member_can_list_empty_library() {
         let harness = h::OrgHarness::new().await;
@@ -1493,7 +1866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn https_mcp_gets_setup_note() {
+    async fn https_mcp_becomes_shared_integration() {
         let harness = h::OrgHarness::new().await;
         let json_data = https_mcp_json();
         let request = ImportRequest {
@@ -1504,68 +1877,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(items.len(), 1);
-        assert!(items[0].setup_note.is_some());
-        assert!(items[0].setup_note.as_ref().unwrap().contains("allowlist"));
+        assert_eq!(items[0].setup_note.as_deref(), Some(vault::SETUP_NOTE));
+        let view = items[0].integration.as_ref().unwrap();
+        assert_eq!(view.transport, Transport::Remote);
+        assert_eq!(view.hosts, vec!["api.example.com".to_string()]);
+        assert!(view.secret_names.is_empty());
     }
 
     #[tokio::test]
-    async fn mcp_with_env_field_rejected() {
-        let harness = h::OrgHarness::new().await;
-        let json_data = env_mcp_json();
-        let request = ImportRequest {
-            file_name: "env-mcp.json".to_string(),
-            data: b64(&json_data),
-        };
-        let result = import(harness.state(), harness.owner_context(), request).await;
-        assert_eq!(result, Err(AuthError::Invalid));
+    async fn mcp_with_env_field_skipped() {
+        assert_eq!(
+            import_skip(env_mcp_json()).await,
+            vec![("test-mcp".into(), "unsupported_package".into())]
+        );
     }
 
     #[tokio::test]
-    async fn mcp_with_credential_args_rejected() {
-        let harness = h::OrgHarness::new().await;
-        let json_data = credential_args_mcp_json();
-        let request = ImportRequest {
-            file_name: "cred-mcp.json".to_string(),
-            data: b64(&json_data),
-        };
-        let result = import(harness.state(), harness.owner_context(), request).await;
-        assert_eq!(result, Err(AuthError::Invalid));
+    async fn mcp_with_credential_args_skipped() {
+        assert_eq!(
+            import_skip(credential_args_mcp_json()).await,
+            vec![("test-mcp".into(), "invalid_config".into())]
+        );
     }
 
     #[tokio::test]
-    async fn mcp_with_malformed_args_rejected() {
-        let harness = h::OrgHarness::new().await;
-        let json_data = malformed_args_mcp_json();
-        let request = ImportRequest {
-            file_name: "bad-args.json".to_string(),
-            data: b64(&json_data),
-        };
-        let result = import(harness.state(), harness.owner_context(), request).await;
-        assert_eq!(result, Err(AuthError::Invalid));
+    async fn mcp_with_malformed_args_skipped() {
+        assert_eq!(
+            import_skip(malformed_args_mcp_json()).await,
+            vec![("test-mcp".into(), "invalid_config".into())]
+        );
     }
 
     #[tokio::test]
-    async fn mcp_with_http_url_rejected() {
-        let harness = h::OrgHarness::new().await;
-        let json_data = http_mcp_json();
-        let request = ImportRequest {
-            file_name: "http-mcp.json".to_string(),
-            data: b64(&json_data),
-        };
-        let result = import(harness.state(), harness.owner_context(), request).await;
-        assert_eq!(result, Err(AuthError::Invalid));
+    async fn mcp_with_http_url_skipped() {
+        assert_eq!(
+            import_skip(http_mcp_json()).await,
+            vec![("insecure-mcp".into(), "invalid_url".into())]
+        );
     }
 
     #[tokio::test]
-    async fn mcp_with_unknown_http_field_rejected() {
+    async fn http_mcp_with_headers_becomes_integration() {
         let harness = h::OrgHarness::new().await;
-        let json_data = unknown_http_field_mcp_json();
-        let request = ImportRequest {
-            file_name: "bad-http.json".to_string(),
-            data: b64(&json_data),
-        };
-        let result = import(harness.state(), harness.owner_context(), request).await;
-        assert_eq!(result, Err(AuthError::Invalid));
+        let outcome = super::import(
+            harness.state(),
+            harness.owner_context(),
+            ImportRequest {
+                file_name: "bad-http.json".to_string(),
+                data: b64(&unknown_http_field_mcp_json()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(outcome.skipped.is_empty());
+        let view = outcome.items[0].integration.as_ref().unwrap();
+        assert_eq!(view.secret_names, vec!["Authorization".to_string()]);
+        assert!(!serde_json::to_string(&outcome.items).unwrap().contains("xyz"));
     }
 
     #[tokio::test]
@@ -1945,8 +2312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_name_with_special_chars_rejected() {
-        let harness = h::OrgHarness::new().await;
+    async fn mcp_name_with_special_chars_skipped() {
         let json_data = serde_json::json!({
             "mcpServers": {
                 "bad/name": {
@@ -1957,12 +2323,10 @@ mod tests {
         })
         .to_string()
         .into_bytes();
-        let request = ImportRequest {
-            file_name: "bad-name.json".to_string(),
-            data: b64(&json_data),
-        };
-        let result = import(harness.state(), harness.owner_context(), request).await;
-        assert_eq!(result, Err(AuthError::Invalid));
+        assert_eq!(
+            import_skip(json_data).await,
+            vec![("bad/name".into(), "invalid_name".into())]
+        );
     }
 
     #[test]
@@ -1982,38 +2346,16 @@ mod tests {
 
     #[test]
     fn url_validation() {
-        // Valid HTTPS URL
-        assert!(validate_mcp_url("https://api.example.com/mcp").is_ok());
-
-        // HTTP not allowed
-        assert_eq!(
-            validate_mcp_url("http://api.example.com/mcp"),
-            Err(AuthError::Invalid)
-        );
-
-        // URL with credentials not allowed
-        assert_eq!(
-            validate_mcp_url("https://user:pass@api.example.com/mcp"),
-            Err(AuthError::Invalid)
-        );
-
-        // URL with query not allowed
-        assert_eq!(
-            validate_mcp_url("https://api.example.com/mcp?token=123"),
-            Err(AuthError::Invalid)
-        );
-
-        // Localhost not allowed
-        assert_eq!(
-            validate_mcp_url("https://localhost/mcp"),
-            Err(AuthError::Invalid)
-        );
-
-        // Private IP not allowed
-        assert_eq!(
-            validate_mcp_url("https://192.168.1.1/mcp"),
-            Err(AuthError::Invalid)
-        );
+        assert!(vault::validate_remote_url("https://api.example.com/mcp").is_some());
+        for bad in [
+            "http://api.example.com/mcp",
+            "https://user:pass@api.example.com/mcp",
+            "https://api.example.com/mcp?token=123",
+            "https://localhost/mcp",
+            "https://192.168.1.1/mcp",
+        ] {
+            assert!(vault::validate_remote_url(bad).is_none(), "{bad}");
+        }
     }
 
     #[test]
@@ -2061,6 +2403,701 @@ mod tests {
         .unwrap();
         let wire = serde_json::to_value(&items[0]).unwrap();
         assert_eq!(wire["revision"], "1");
+    }
+
+    /// The authorized export SHAPE (synthetic values only).
+    fn export_shape_json() -> Vec<u8> {
+        serde_json::json!({"mcpServers": {
+            "hubspot": {"type": "stdio", "command": "npx", "args": ["-y", "@hubspot/mcp-server"],
+                "env": {"HUBSPOT_ACCESS_TOKEN": "synthetic-hubspot-0001"}},
+            "fireflies": {"type": "http", "url": "https://api.fireflies.ai/mcp",
+                "headers": {"Authorization": "Bearer synthetic-fireflies-0002"}},
+            "github": {"type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+                "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "synthetic-github-0003"}},
+            "notion": {"type": "stdio", "command": "npx", "args": ["-y", "@suekou/mcp-notion-server"],
+                "env": {"NOTION_API_TOKEN": "synthetic-notion-0004"}},
+            "sanity": {"type": "stdio", "command": "npx", "args": ["-y", "@sanity/mcp-server@latest"],
+                "env": {"SANITY_PROJECT_ID": "synthproj", "SANITY_DATASET": "production",
+                        "SANITY_API_TOKEN": "synthetic-sanity-0005", "MCP_USER_ROLE": "developer"}},
+            "aimfox": {"type": "http", "url": "https://mcp.aimfox.com/mcp",
+                "headers": {"Authorization": "Bearer synthetic-aimfox-0006"}},
+            "unblocked": {"type": "http", "url": "https://getunblocked.com/api/mcpsse",
+                "headers": {"Authorization": "Bearer synthetic-unblocked-0007"}}
+        }})
+        .to_string()
+        .into_bytes()
+    }
+
+    // --- Shared integrations -------------------------------------------------
+
+    const SYNTHETIC_SECRETS: &[&str] = &[
+        "synthetic-hubspot-0001",
+        "synthetic-fireflies-0002",
+        "synthetic-github-0003",
+        "synthetic-notion-0004",
+        "synthetic-sanity-0005",
+        "synthetic-aimfox-0006",
+        "synthetic-unblocked-0007",
+    ];
+
+    fn assert_no_secret(text: &str) {
+        for secret in SYNTHETIC_SECRETS {
+            assert!(!text.contains(secret), "secret value leaked");
+        }
+        assert!(!text.contains("synthetic-rotated"), "secret value leaked");
+    }
+
+    fn view<'a>(items: &'a [LibraryItem], name: &str) -> &'a IntegrationView {
+        items
+            .iter()
+            .find(|i| i.name == name)
+            .and_then(|i| i.integration.as_ref())
+            .unwrap_or_else(|| panic!("integration {name}"))
+    }
+
+    fn set_runtime(
+        harness: &mut h::OrgHarness,
+        runtime: crate::neev::agents::execution::AgentRuntime,
+    ) {
+        std::sync::Arc::get_mut(&mut harness.state)
+            .expect("owned test state")
+            .set_agent_runtime(runtime);
+    }
+
+    fn fake(
+        runtime: crate::neev::agents::execution::FakeRuntime,
+    ) -> crate::neev::agents::execution::AgentRuntime {
+        crate::neev::agents::execution::AgentRuntime::Fake(runtime)
+    }
+
+    fn new_fake() -> crate::neev::agents::execution::FakeRuntime {
+        crate::neev::agents::execution::FakeRuntime::new(vec![])
+    }
+
+    /// Import the export shape and return the stored items.
+    async fn import_export(harness: &h::OrgHarness) -> Vec<LibraryItem> {
+        let outcome = super::import(
+            harness.state(),
+            harness.owner_context(),
+            ImportRequest {
+                file_name: "mcp.json".into(),
+                data: b64(&export_shape_json()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(outcome.skipped.is_empty(), "{:?}", outcome.skipped);
+        outcome.items
+    }
+
+    fn item_id(items: &[LibraryItem], name: &str) -> String {
+        items.iter().find(|i| i.name == name).unwrap().id.clone()
+    }
+
+    async fn enable(harness: &h::OrgHarness, id: &str) {
+        patch(
+            harness.state(),
+            harness.owner_context(),
+            id,
+            PatchRequest {
+                expected_revision: 1,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_shape_imports_seven_integrations() {
+        let harness = h::OrgHarness::new().await;
+        let items = import_export(&harness).await;
+        assert_eq!(items.len(), 7);
+        for item in &items {
+            assert_eq!(item.kind, "mcp");
+            assert!(!item.enabled);
+            assert_eq!(item.setup_note.as_deref(), Some(vault::SETUP_NOTE));
+            assert_eq!(item.files, vec!["integration.json".to_string(), "mcp.json".to_string()]);
+            assert!(item.integration.as_ref().unwrap().status.is_none());
+        }
+        let hub = view(&items, "hubspot");
+        assert_eq!(hub.transport, Transport::Package);
+        assert_eq!(hub.hosts, vec!["api.hubspot.com".to_string()]);
+        assert_eq!(hub.secret_names, vec!["PRIVATE_APP_ACCESS_TOKEN".to_string()]);
+        assert_eq!(hub.source, "stdio:@hubspot/mcp-server");
+        let notion = view(&items, "notion");
+        assert_eq!(notion.transport, Transport::Package);
+        assert_eq!(notion.hosts, vec!["api.notion.com".to_string()]);
+        assert_eq!(notion.secret_names, vec!["NOTION_API_TOKEN".to_string()]);
+        let github = view(&items, "github");
+        assert_eq!(github.transport, Transport::Remote);
+        assert_eq!(github.hosts, vec!["api.githubcopilot.com".to_string()]);
+        assert_eq!(github.secret_names, vec!["Authorization".to_string()]);
+        assert_eq!(github.source, "stdio:@modelcontextprotocol/server-github");
+        assert_eq!(github.notes.len(), 1);
+        let sanity = view(&items, "sanity");
+        assert_eq!(sanity.transport, Transport::Remote);
+        assert_eq!(sanity.hosts, vec!["mcp.sanity.io".to_string()]);
+        assert_eq!(sanity.secret_names, vec!["Authorization".to_string()]);
+        assert!(sanity.notes[0].contains("dropped"));
+        for (name, host) in [
+            ("fireflies", "api.fireflies.ai"),
+            ("aimfox", "mcp.aimfox.com"),
+            ("unblocked", "getunblocked.com"),
+        ] {
+            let v = view(&items, name);
+            assert_eq!(v.transport, Transport::Remote);
+            assert_eq!(v.hosts, vec![host.to_string()]);
+            assert_eq!(v.secret_names, vec!["Authorization".to_string()]);
+            assert!(v.source.starts_with("http:https://"));
+        }
+        // The legacy mcp.json stays credential-free and old-binary compatible.
+        let row = db::one(
+            &harness.database,
+            "SELECT f.content FROM neev_library_files f JOIN neev_library_items i ON i.id=f.item_id
+             WHERE i.name='hubspot' AND f.path='mcp.json'",
+            vec![],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let legacy: serde_json::Value =
+            serde_json::from_slice(&row.try_get::<Vec<u8>>("", "content").unwrap()).unwrap();
+        assert_eq!(
+            legacy,
+            serde_json::json!({"name": "hubspot", "type": "stdio", "command": "npx",
+                "args": ["-y", "@hubspot/mcp-server@0.4.0"]})
+        );
+    }
+
+    #[tokio::test]
+    async fn import_skip_reasons_never_carry_values() {
+        let harness = h::OrgHarness::new().await;
+        let remote = |url: &str| serde_json::json!({"type": "http", "url": url,
+            "headers": {"Authorization": "Bearer synthetic-fireflies-0002"}});
+        let outcome = import_json(
+            harness.state(),
+            harness.owner_context(),
+            serde_json::json!({"mcpServers": {
+                "placeholder": {"type": "http", "url": "https://api.example.com/mcp",
+                    "headers": {"Authorization": "Bearer ${TOKEN}"}},
+                "unknownpkg": {"command": "npx", "args": ["-y", "some-mcp"]},
+                "stdioenv": {"command": "/usr/local/bin/tool", "env": {"API": "synthetic-notion-0004"}},
+                "hubnode": {"command": "npx", "args": ["-y", "@hubspot/mcp-server"],
+                    "env": {"PRIVATE_APP_ACCESS_TOKEN": "synthetic-hubspot-0001",
+                            "NODE_OPTIONS": "--require /tmp/x.js"}},
+                "plain": remote("http://api.example.com/mcp"),
+                "ipv4": remote("https://8.8.8.8/mcp"),
+                "local": remote("https://localhost/mcp"),
+                "private": remote("https://10.0.0.1/mcp"),
+                "metadata": remote("https://169.254.169.254/latest"),
+                "loop6": remote("https://[::1]/mcp"),
+                "userinfo": remote("https://u:p@api.example.com/mcp"),
+                "query": remote("https://api.example.com/mcp?k=v"),
+                "port": remote("https://api.example.com:8443/mcp"),
+                "crlf": {"type": "http", "url": "https://api.example.com/mcp",
+                    "headers": {"Authorization": "Bearer synthetic-aimfox-0006\r\nX: y"}},
+                "hosthdr": {"type": "http", "url": "https://api.example.com/mcp",
+                    "headers": {"Host": "synthetic-unblocked-0007"}},
+                "approve": {"type": "http", "url": "https://api.example.com/mcp",
+                    "autoApprove": ["x"]},
+                "Dup": remote("https://api.example.com/a"),
+                "dup": remote("https://api.example.com/b"),
+            }}),
+        )
+        .await
+        .unwrap();
+        let reasons: HashMap<String, String> = skip_reasons(&outcome).into_iter().collect();
+        let expect = [
+            ("placeholder", "unresolved_placeholder"),
+            ("unknownpkg", "unsupported_package"),
+            ("stdioenv", "unsupported_package"),
+            ("hubnode", "unsupported_env"),
+            ("plain", "invalid_url"),
+            ("ipv4", "invalid_url"),
+            ("local", "invalid_url"),
+            ("private", "invalid_url"),
+            ("metadata", "invalid_url"),
+            ("loop6", "invalid_url"),
+            ("userinfo", "invalid_url"),
+            ("query", "invalid_url"),
+            ("port", "invalid_url"),
+            ("crlf", "invalid_secret"),
+            ("hosthdr", "invalid_secret"),
+            ("approve", "unsupported_field"),
+        ];
+        for (name, reason) in expect {
+            assert_eq!(reasons.get(name).map(String::as_str), Some(reason), "{name}");
+        }
+        // Exactly one of Dup/dup is stored, the other is a duplicate.
+        assert_eq!(outcome.items.len(), 1);
+        assert_eq!(reasons.values().filter(|r| *r == "duplicate_name").count(), 1);
+        assert_no_secret(&format!("{outcome:?}"));
+        assert_no_secret(&serde_json::to_string(&outcome.skipped).unwrap());
+        assert_no_secret(&serde_json::to_string(&outcome.items).unwrap());
+
+        // A second import of an existing name is a duplicate (case-insensitive).
+        let again = import_json(
+            harness.state(),
+            harness.owner_context(),
+            serde_json::json!({"mcpServers": {"DUP": remote("https://api.example.com/c")}}),
+        )
+        .await
+        .unwrap();
+        assert!(again.items.is_empty());
+        assert_eq!(skip_reasons(&again), vec![("DUP".into(), "duplicate_name".into())]);
+    }
+
+    #[tokio::test]
+    async fn malformed_files_are_still_rejected_whole() {
+        let harness = h::OrgHarness::new().await;
+        for json in [
+            serde_json::json!({"mcpServers": {}}),
+            serde_json::json!({"mcpServers": {"a": {"url": "https://a.example.com"}}, "x": 1}),
+            serde_json::json!(["mcpServers"]),
+        ] {
+            assert!(matches!(
+                import_json(harness.state(), harness.owner_context(), json).await,
+                Err(AuthError::Invalid)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn secrets_never_exposed_in_responses_or_rows() {
+        let harness = h::OrgHarness::new().await;
+        let items = import_export(&harness).await;
+        assert_no_secret(&serde_json::to_string(&items).unwrap());
+        let listed = list(harness.state(), harness.member_context()).await.unwrap();
+        assert_no_secret(&serde_json::to_string(&listed).unwrap());
+        assert_no_secret(&format!("{listed:?}"));
+        assert!(listed.iter().all(|i| !i.files.iter().any(|f| f == SECRETS_PATH)));
+
+        let github = item_id(&items, "github");
+        let updated = update_secrets(
+            harness.state(),
+            harness.owner_context(),
+            &github,
+            SecretsRequest {
+                expected_revision: 1,
+                env: BTreeMap::new(),
+                headers: BTreeMap::from([(
+                    "Authorization".into(),
+                    "Bearer synthetic-rotated-9".into(),
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.revision, 2);
+        assert_no_secret(&serde_json::to_string(&updated).unwrap());
+        assert!(!updated.files.iter().any(|f| f == SECRETS_PATH));
+
+        let rows = harness
+            .database
+            .query_all(db::statement(
+                &harness.database,
+                "SELECT content FROM neev_library_files WHERE path=$1",
+                vec![SECRETS_PATH.into()],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 7);
+        for row in rows {
+            let content: Vec<u8> = row.try_get("", "content").unwrap();
+            assert_no_secret(&String::from_utf8_lossy(&content));
+        }
+    }
+
+    #[tokio::test]
+    async fn org_members_share_integrations_and_admins_alone_manage_them() {
+        let harness = h::OrgHarness::new().await;
+        let items = import_export(&harness).await;
+        let notion = item_id(&items, "notion");
+        enable(&harness, &notion).await;
+
+        for actor in [harness.owner_context(), harness.member_context()] {
+            let enabled = load_enabled(harness.state(), actor).await.unwrap();
+            assert_eq!(enabled.len(), 1);
+            let integration = enabled[0].integration.as_ref().unwrap();
+            assert_eq!(integration.spec.key, "notion");
+            let secrets = integration.secrets.as_ref().unwrap();
+            assert_eq!(secrets.env["NOTION_API_TOKEN"], "synthetic-notion-0004");
+            assert!(enabled[0].files.iter().all(|f| f.path != SECRETS_PATH));
+            assert_no_secret(&format!("{enabled:?}"));
+        }
+        assert!(load_enabled(harness.state(), harness.other_org_context())
+            .await
+            .unwrap()
+            .is_empty());
+
+        let secrets = || SecretsRequest {
+            expected_revision: 2,
+            env: BTreeMap::from([("NOTION_API_TOKEN".into(), "synthetic-rotated-1".into())]),
+            headers: BTreeMap::new(),
+        };
+        for actor in [harness.member_context(), harness.other_org_context()] {
+            assert_eq!(
+                update_secrets(harness.state(), actor, &notion, secrets()).await,
+                Err(AuthError::Forbidden)
+            );
+            assert_eq!(
+                test_integration(harness.state(), actor, &notion, 2).await,
+                Err(AuthError::Forbidden)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn moved_ciphertext_does_not_open_and_does_not_fail_the_load() {
+        let harness = h::OrgHarness::new().await;
+        let items = import_export(&harness).await;
+        let (hub, notion) = (item_id(&items, "hubspot"), item_id(&items, "notion"));
+        enable(&harness, &hub).await;
+        enable(&harness, &notion).await;
+        // Copy hubspot's sealed blob (and its hash) onto notion.
+        let row = db::one(
+            &harness.database,
+            "SELECT content, content_hash FROM neev_library_files WHERE item_id=$1 AND path=$2",
+            vec![hub.clone().into(), SECRETS_PATH.into()],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let content: Vec<u8> = row.try_get("", "content").unwrap();
+        let hash: String = row.try_get("", "content_hash").unwrap();
+        db::execute(
+            &harness.database,
+            "UPDATE neev_library_files SET content=$1, content_hash=$2 WHERE item_id=$3 AND path=$4",
+            vec![content.into(), hash.into(), notion.clone().into(), SECRETS_PATH.into()],
+        )
+        .await
+        .unwrap();
+
+        let enabled = load_enabled(harness.state(), harness.member_context()).await.unwrap();
+        let by_name = |n: &str| {
+            enabled
+                .iter()
+                .find(|i| i.name == n)
+                .and_then(|i| i.integration.clone())
+                .unwrap()
+        };
+        assert!(by_name("hubspot").secrets.is_some());
+        assert!(by_name("notion").secrets.is_none());
+
+        // A vault failure is reported by the test as vault_unavailable.
+        let tested = test_integration(harness.state(), harness.owner_context(), &notion, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            tested.integration.unwrap().status.unwrap().state,
+            "vault_unavailable"
+        );
+    }
+
+    #[test]
+    fn import_request_debug_never_prints_the_payload() {
+        let request = ImportRequest {
+            file_name: "conductor-mcp.json".into(),
+            data: "eyJzZWNyZXQiOiJzeW50aGV0aWMtdG9rZW4ifQ==".into(),
+        };
+        let text = format!("{request:?}");
+        assert!(text.contains("conductor-mcp.json"));
+        assert!(!text.contains("eyJzZWNyZXQi"));
+    }
+
+    #[tokio::test]
+    async fn one_damaged_spec_does_not_take_down_the_library() {
+        let harness = h::OrgHarness::new().await;
+        let items = import_export(&harness).await;
+        let owner = harness.owner_context();
+        for item in &items {
+            patch(harness.state(), owner, &item.id, PatchRequest { expected_revision: 1, enabled: true })
+                .await
+                .unwrap();
+        }
+        let broken = item_id(&items, "fireflies");
+        let garbage = b"{not json".to_vec();
+        let hash = format!("{:x}", Sha256::digest(&garbage));
+        db::execute(
+            &harness.state().database,
+            "UPDATE neev_library_files SET content=$1, content_hash=$2 WHERE item_id=$3 AND path=$4",
+            vec![garbage.into(), hash.into(), broken.clone().into(), SPEC_PATH.into()],
+        )
+        .await
+        .unwrap();
+        let enabled = load_enabled(harness.state(), harness.member_context()).await.unwrap();
+        assert!(!enabled.iter().any(|item| item.id == broken), "the damaged one is left out");
+        assert_eq!(enabled.len(), items.len() - 1, "every other integration still loads");
+    }
+
+    #[tokio::test]
+    async fn a_tested_integration_stays_tested_when_enabled_or_disabled() {
+        let mut harness = h::OrgHarness::new().await;
+        set_runtime(&mut harness, fake(new_fake()));
+        let items = import_export(&harness).await;
+        let owner = harness.owner_context();
+        let fireflies = item_id(&items, "fireflies");
+        test_integration(harness.state(), owner, &fireflies, 1).await.unwrap();
+        let enabled = patch(
+            harness.state(),
+            owner,
+            &fireflies,
+            PatchRequest { expected_revision: 1, enabled: true },
+        )
+        .await
+        .unwrap();
+        assert_eq!(enabled.revision, 2);
+        let status = enabled.integration.unwrap().status.expect("still tested after enable");
+        assert_eq!(status.state, "ready");
+        assert_eq!(status.revision, "2");
+        let disabled = patch(
+            harness.state(),
+            owner,
+            &fireflies,
+            PatchRequest { expected_revision: 2, enabled: false },
+        )
+        .await
+        .unwrap();
+        assert_eq!(disabled.integration.unwrap().status.unwrap().state, "ready");
+        // An untested item stays untested; a credential update still clears it.
+        let github = item_id(&items, "github");
+        let untested = patch(
+            harness.state(),
+            owner,
+            &github,
+            PatchRequest { expected_revision: 1, enabled: true },
+        )
+        .await
+        .unwrap();
+        assert!(untested.integration.unwrap().status.is_none());
+    }
+
+    #[tokio::test]
+    async fn integration_test_records_status_for_the_current_revision() {
+        let mut harness = h::OrgHarness::new().await;
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        set_runtime(
+            &mut harness,
+            fake(
+                new_fake()
+                    .with_check_state("github", "auth_failed")
+                    .with_check_state("aimfox", "forbidden")
+                    .recording_checks(log.clone()),
+            ),
+        );
+        let items = import_export(&harness).await;
+        let owner = harness.owner_context();
+
+        let fireflies = item_id(&items, "fireflies");
+        let ready = test_integration(harness.state(), owner, &fireflies, 1).await.unwrap();
+        assert_eq!(ready.revision, 1);
+        let status = ready.integration.as_ref().unwrap().status.clone().unwrap();
+        assert_eq!(status.state, "ready");
+        assert_eq!(status.tool_count, Some(3));
+        assert_eq!(status.revision, "1");
+        assert_eq!(status.checked_at, "1700000000");
+        let wire = serde_json::to_value(&ready).unwrap();
+        assert_eq!(wire["integration"]["status"]["toolCount"], 3);
+        {
+            let log = log.lock().unwrap();
+            assert_eq!(log.len(), 1);
+            assert_eq!(log[0].org_id, owner.org_id);
+            assert_eq!(log[0].user_id, owner.identity.user_id);
+            assert_eq!(log[0].integrations[0].spec.key, "fireflies");
+            assert!(log[0].integrations[0].secrets.is_some());
+        }
+
+        let github = item_id(&items, "github");
+        let failed = test_integration(harness.state(), owner, &github, 1).await.unwrap();
+        let status = failed.integration.unwrap().status.unwrap();
+        assert_eq!(status.state, "auth_failed");
+        assert_eq!(status.detail.as_deref(), Some("HTTP 401"));
+        assert_eq!(status.tool_count, None);
+
+        let aimfox = item_id(&items, "aimfox");
+        let forbidden = test_integration(harness.state(), owner, &aimfox, 1).await.unwrap();
+        let status = forbidden.integration.unwrap().status.unwrap();
+        assert_eq!(status.state, "forbidden");
+        assert_eq!(status.detail.as_deref(), Some("HTTP 403"));
+
+        // Members see the status read-only.
+        let listed = list(harness.state(), harness.member_context()).await.unwrap();
+        assert_eq!(view(&listed, "fireflies").status.as_ref().unwrap().state, "ready");
+
+        assert_eq!(
+            test_integration(harness.state(), owner, &fireflies, 2).await,
+            Err(AuthError::Conflict)
+        );
+
+        // New credentials bump the revision and hide the old result.
+        update_secrets(
+            harness.state(),
+            owner,
+            &fireflies,
+            SecretsRequest {
+                expected_revision: 1,
+                env: BTreeMap::new(),
+                headers: BTreeMap::from([(
+                    "Authorization".into(),
+                    "Bearer synthetic-rotated-2".into(),
+                )]),
+            },
+        )
+        .await
+        .unwrap();
+        let listed = list(harness.state(), owner).await.unwrap();
+        assert!(view(&listed, "fireflies").status.is_none());
+    }
+
+    #[tokio::test]
+    async fn integration_test_without_runtime_is_runtime_unavailable() {
+        let mut harness = h::OrgHarness::new().await;
+        set_runtime(
+            &mut harness,
+            fake(new_fake().failing(crate::neev::agents::execution::ExecutionError::Unavailable)),
+        );
+        let items = import_export(&harness).await;
+        let id = item_id(&items, "unblocked");
+        let item = test_integration(harness.state(), harness.owner_context(), &id, 1)
+            .await
+            .unwrap();
+        assert_eq!(item.integration.unwrap().status.unwrap().state, "runtime_unavailable");
+
+        // The production default (disabled runtime) reports the same.
+        let harness = h::OrgHarness::new().await;
+        let items = import_export(&harness).await;
+        let id = item_id(&items, "unblocked");
+        let item = test_integration(harness.state(), harness.owner_context(), &id, 1)
+            .await
+            .unwrap();
+        assert_eq!(item.integration.unwrap().status.unwrap().state, "runtime_unavailable");
+    }
+
+    #[tokio::test]
+    async fn update_secrets_validates_names_values_and_revision() {
+        let harness = h::OrgHarness::new().await;
+        let items = import_export(&harness).await;
+        let hub = item_id(&items, "hubspot");
+        let owner = harness.owner_context();
+        let request = |rev: i64, name: &str, value: &str| SecretsRequest {
+            expected_revision: rev,
+            env: BTreeMap::from([(name.to_string(), value.to_string())]),
+            headers: BTreeMap::new(),
+        };
+        for bad in [
+            request(1, "NODE_OPTIONS", "--require x"),
+            request(1, "HUBSPOT_ACCESS_TOKEN", "synthetic-rotated-3"),
+            request(1, "PRIVATE_APP_ACCESS_TOKEN", "a\r\nb"),
+            request(1, "PRIVATE_APP_ACCESS_TOKEN", ""),
+            request(1, "PRIVATE_APP_ACCESS_TOKEN", "non-ascii-\u{e9}"),
+            request(0, "PRIVATE_APP_ACCESS_TOKEN", "synthetic-rotated-3"),
+        ] {
+            assert_eq!(
+                update_secrets(harness.state(), owner, &hub, bad).await,
+                Err(AuthError::Invalid)
+            );
+        }
+        assert_eq!(
+            update_secrets(
+                harness.state(),
+                owner,
+                &hub,
+                request(5, "PRIVATE_APP_ACCESS_TOKEN", "synthetic-rotated-3")
+            )
+            .await,
+            Err(AuthError::Conflict)
+        );
+        // A skill is not an integration.
+        let skill = import(
+            harness.state(),
+            owner,
+            ImportRequest {
+                file_name: "SKILL.md".into(),
+                data: b64(b"# Skill\nText."),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            update_secrets(
+                harness.state(),
+                owner,
+                &skill[0].id,
+                request(1, "PRIVATE_APP_ACCESS_TOKEN", "synthetic-rotated-3")
+            )
+            .await,
+            Err(AuthError::Invalid)
+        );
+        let ok = update_secrets(
+            harness.state(),
+            owner,
+            &hub,
+            request(1, "PRIVATE_APP_ACCESS_TOKEN", "synthetic-rotated-3"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok.revision, 2);
+    }
+
+    #[tokio::test]
+    async fn updated_secrets_reach_the_runtime() {
+        let harness = h::OrgHarness::new().await;
+        let items = import_export(&harness).await;
+        let hub = item_id(&items, "hubspot");
+        update_secrets(
+            harness.state(),
+            harness.owner_context(),
+            &hub,
+            SecretsRequest {
+                expected_revision: 1,
+                env: BTreeMap::from([(
+                    "PRIVATE_APP_ACCESS_TOKEN".into(),
+                    "synthetic-rotated-4".into(),
+                )]),
+                headers: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        patch(
+            harness.state(),
+            harness.owner_context(),
+            &hub,
+            PatchRequest {
+                expected_revision: 2,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        let enabled = load_enabled(harness.state(), harness.member_context()).await.unwrap();
+        let secrets = enabled[0].integration.as_ref().unwrap().secrets.as_ref().unwrap();
+        assert_eq!(secrets.env.len(), 1);
+        assert_eq!(secrets.env["PRIVATE_APP_ACCESS_TOKEN"], "synthetic-rotated-4");
+    }
+
+    #[tokio::test]
+    async fn legacy_stdio_items_are_unchanged() {
+        let harness = h::OrgHarness::new().await;
+        let items = import(
+            harness.state(),
+            harness.owner_context(),
+            ImportRequest {
+                file_name: "mcp.json".into(),
+                data: b64(&valid_mcp_json()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(items[0].integration.is_none());
+        assert_eq!(items[0].files, vec!["mcp.json".to_string()]);
+        let wire = serde_json::to_value(&items[0]).unwrap();
+        assert!(wire.get("integration").is_none());
+        enable(&harness, &items[0].id).await;
+        let enabled = load_enabled(harness.state(), harness.owner_context()).await.unwrap();
+        assert!(enabled[0].integration.is_none());
+        assert_eq!(enabled[0].files.len(), 1);
     }
 
     #[tokio::test]

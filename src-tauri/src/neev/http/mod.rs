@@ -15,6 +15,7 @@ mod agent;
 mod agent_sessions;
 mod auth;
 pub(crate) mod catalog;
+mod catalog_trash;
 mod content;
 #[cfg(test)]
 mod content_tests;
@@ -135,6 +136,13 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route("/api/neev/nodes", get(catalog::list).post(catalog::create))
         .route("/api/neev/nodes/{node_id}", patch(catalog::update))
         .route(
+            "/api/neev/nodes/{node_id}/trash-preview",
+            get(catalog_trash::preview),
+        )
+        .route("/api/neev/nodes/{node_id}/trash", post(catalog_trash::trash))
+        .route("/api/neev/nodes/{node_id}/restore", post(catalog_trash::restore))
+        .route("/api/neev/trash/nodes", get(catalog_trash::list))
+        .route(
             "/api/neev/nodes/{node_id}/sharing",
             get(content::get_node_sharing).patch(content::update_node_sharing),
         )
@@ -220,6 +228,14 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         )
         .route("/api/neev/library", get(library::list))
         .route("/api/neev/library/import", post(library::import))
+        .route(
+            "/api/neev/library/{id}/secrets",
+            axum::routing::put(library::update_secrets),
+        )
+        .route(
+            "/api/neev/library/{id}/test",
+            post(library::test_integration),
+        )
         .route(
             "/api/neev/library/{id}",
             patch(library::update).delete(library::delete),

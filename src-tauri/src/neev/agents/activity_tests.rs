@@ -1246,3 +1246,87 @@ mod usage_signals {
         assert_eq!(usage(&ok)[0].kind, UsageKind::Finished);
     }
 }
+
+
+#[test]
+fn a_codex_integration_call_is_shown_once_with_its_result() {
+    // The app-server adapter's forwarded `mcpToolCall`, in exec's shape.
+    let mut parser = StreamParser::new("codex", Vec::new());
+    let items = drain(
+        &mut parser,
+        &[
+            r#"{"type":"item.started","item":{"type":"mcp_tool_call","id":"call_1","server":"accept","tool":"echo","arguments":{"text":"hi"},"status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"type":"mcp_tool_call","id":"call_1","server":"accept","tool":"echo","arguments":{"text":"hi"},"result":{"content":[{"type":"text","text":"echo:hi"},{"type":"image"}]},"error":null,"status":"completed"}}"#,
+        ],
+    );
+    let drafts = activity(&items);
+    assert_eq!(drafts.len(), 2, "one call (announced at start) and one result, not two calls");
+    assert_eq!(drafts[0].id, "call_1");
+    assert_eq!(
+        drafts[0].kind,
+        ActivityKind::ToolCall {
+            name: "mcp__accept__echo".into(),
+            input: r#"{"text":"hi"}"#.into(),
+            input_truncated: false,
+        }
+    );
+    assert_eq!(
+        drafts[1].kind,
+        ActivityKind::ToolResult {
+            call_id: "call_1".into(),
+            output: "echo:hi\n[image]".into(),
+            output_truncated: false,
+            is_error: false,
+        }
+    );
+}
+
+#[test]
+fn a_failed_codex_integration_call_stays_an_error() {
+    for line in [
+        r#"{"type":"item.completed","item":{"type":"mcp_tool_call","id":"c","server":"github","tool":"search","arguments":{},"result":null,"error":{"message":"Integration github unavailable: auth_failed (HTTP 401)"},"status":"failed"}}"#,
+        r#"{"type":"item.completed","item":{"type":"mcp_tool_call","id":"c","server":"github","tool":"search","arguments":{},"result":{"content":[{"type":"text","text":"nope"}],"isError":true},"error":null,"status":"completed"}}"#,
+        r#"{"type":"item.completed","item":{"type":"mcp_tool_call","id":"c","server":"github","tool":"search","arguments":{},"result":null,"error":null,"status":"in_progress"}}"#,
+    ] {
+        let mut parser = StreamParser::new("codex", Vec::new());
+        let items = drain(&mut parser, &[line]);
+        let drafts = activity(&items);
+        assert_eq!(drafts.len(), 2, "never announced: call + result");
+        assert!(matches!(&drafts[0].kind, ActivityKind::ToolCall { name, .. } if name == "mcp__github__search"));
+        assert!(
+            matches!(&drafts[1].kind, ActivityKind::ToolResult { is_error: true, .. }),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn codex_integration_call_payloads_are_scrubbed_bounded_and_named_safely() {
+    let handle = "handle-0123456789abcdef".to_owned();
+    let mut parser = StreamParser::new("codex", vec![handle.clone()]);
+    let big = "x".repeat(200_000);
+    let line = serde_json::json!({
+        "type": "item.completed",
+        "item": {"type": "mcp_tool_call", "id": "c9", "server": "bad server", "tool": "echo",
+                 "arguments": {"note": handle},
+                 "result": {"content": [{"type": "text", "text": big}]},
+                 "error": null, "status": "completed"}
+    })
+    .to_string();
+    let items = drain(&mut parser, &[&line]);
+    let drafts = activity(&items);
+    match &drafts[0].kind {
+        ActivityKind::ToolCall { name, input, .. } => {
+            assert_eq!(name, "mcp", "an unsafe server name is not shown");
+            assert!(!input.contains(&handle) && input.contains("[redacted]"));
+        }
+        other => panic!("{other:?}"),
+    }
+    match &drafts[1].kind {
+        ActivityKind::ToolResult { output, output_truncated, .. } => {
+            assert!(*output_truncated);
+            assert!(output.chars().count() < 200_000);
+        }
+        other => panic!("{other:?}"),
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "neev-mcp-packages",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@hubspot/mcp-server": "0.4.0",
+    "@suekou/mcp-notion-server": "2.0.2"
+  },
+  "description": "Pinned MCP servers the shared-integration broker runs (see scripts/operations/neev_mcp_broker.py PACKAGES)."
+}

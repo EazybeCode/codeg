@@ -6510,5 +6510,33 @@
     "askNoAgent": "Connect your own Claude or Codex agent under Personal agents to test.",
     "askProviderCopies": "Asking sends your question and the saved pages to your connected AI provider. Copies kept by the provider are outside Neev.",
     "askStartBusy": "A test is already running. Wait for it to finish, or stop it."
+  },
+  "NeevTrash": {
+    "moveToTrash": "Move to Trash",
+    "confirmTitle": "Move “{name}” to Trash?",
+    "confirmBody": "It disappears from the sidebar for everyone in the organization. Anyone can restore it from Trash, back to the same place. Nothing is deleted.",
+    "contents": "Also moves:",
+    "folders": "{count, plural, one {# folder} other {# folders}}",
+    "documents": "{count, plural, one {# document} other {# documents}}",
+    "chats": "{count, plural, one {# chat} other {# chats}}",
+    "empty": "It has nothing in it.",
+    "checking": "Checking what is inside…",
+    "agentActive": "An agent is still running in here. Stop it first, then move this to Trash.",
+    "inUse": "Something in here is being edited right now. Try again in a moment.",
+    "privateOthers": "{count, plural, one {# private item belongs} other {# private items belong}} to other members. They need to move or trash their items first.",
+    "changed": "This changed while you were looking. Check again.",
+    "failed": "Couldn't move this to Trash. Try again.",
+    "cancel": "Cancel",
+    "section": "Projects and folders",
+    "emptySection": "No projects or folders in Trash.",
+    "loading": "Loading…",
+    "loadFailed": "Couldn't load trashed projects and folders.",
+    "restore": "Restore",
+    "restoreTo": "Restores to {parent}",
+    "restoreParentFirst": "Restore {parent} first",
+    "restoreFailed": "Couldn't restore. Try again.",
+    "trashedBy": "Trashed by {name}",
+    "agentChats": "{count, plural, one {# agent chat of yours} other {# agent chats of yours}}",
+    "privateContent": "Contains private content belonging to another member. They need to move or trash it first."
   }
 }

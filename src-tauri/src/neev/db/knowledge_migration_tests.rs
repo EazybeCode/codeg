@@ -99,9 +99,17 @@ async fn insert_chain(db: &DatabaseConnection, org: i32, user: i32) {
     }
 }
 
-async fn fresh_is_twenty_two(db: &DatabaseConnection) {
+/// A fresh install is schema 23; these tests are about the 22 layer, so take
+/// the (empty) schema-23 trash ledger off first.
+async fn at_twenty_two(db: &DatabaseConnection) {
+    assert_eq!(downgrade_node_trash(db).await, Ok(node_trash_migration::Downgrade::Done));
     assert_eq!(version(db).await, knowledge_migration::SCHEMA_VERSION);
-    assert_eq!(CURRENT_SCHEMA_VERSION, 22);
+}
+
+async fn fresh_is_twenty_two(db: &DatabaseConnection) {
+    assert_eq!(CURRENT_SCHEMA_VERSION, node_trash_migration::SCHEMA_VERSION);
+    at_twenty_two(db).await;
+    assert_eq!(version(db).await, knowledge_migration::SCHEMA_VERSION);
     assert_eq!(knowledge_migration::TABLE_NAMES.len(), 12);
     assert_eq!(table_count(db).await, knowledge_migration::TABLE_NAMES.len());
     assert_eq!(knowledge_migration::validate(db).await, Ok(()));
@@ -119,6 +127,7 @@ async fn fresh_is_twenty_two(db: &DatabaseConnection) {
 
 /// 21 -> 22 changes no existing row; restart at 22 is a no-op.
 async fn twenty_one_upgrades_preserving_rows(db: &DatabaseConnection) {
+    at_twenty_two(db).await;
     seed(db).await;
     assert_eq!(downgrade_knowledge(db).await, Ok(knowledge_migration::Downgrade::Downgraded));
     assert_eq!(version(db).await, 21);
@@ -128,12 +137,12 @@ async fn twenty_one_upgrades_preserving_rows(db: &DatabaseConnection) {
     assert_eq!(before.len(), 5);
 
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, 22);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(table_count(db).await, 12);
     assert_eq!(rows(db).await, before, "the migration rewrote an existing row");
     let once = catalog(db).await;
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, 22);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(rows(db).await, before);
     assert_eq!(catalog(db).await, once, "restart changed the catalog");
 }
@@ -218,6 +227,7 @@ async fn constraints_hold(db: &DatabaseConnection) {
 /// The downgrade restores exactly the fresh catalog minus the twelve tables,
 /// preserves every row, is guarded on the marker, and round-trips.
 async fn downgrade_restores_schema_twenty_one(db: &DatabaseConnection) {
+    at_twenty_two(db).await;
     let fresh = catalog(db).await;
     let expected: Vec<String> = fresh
         .iter()
@@ -238,18 +248,20 @@ async fn downgrade_restores_schema_twenty_one(db: &DatabaseConnection) {
     // The schema-21 database is valid as itself and re-migrates; a second round
     // trip lands on the same catalogs.
     initialize(db).await.unwrap();
+    at_twenty_two(db).await;
     assert_eq!(catalog(db).await, fresh);
     assert_eq!(downgrade_knowledge(db).await, Ok(knowledge_migration::Downgrade::Downgraded));
     assert_eq!(catalog(db).await, expected);
     assert_eq!(rows(db).await, before);
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, 22);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
 }
 
 /// ANY knowledge row refuses the downgrade, which then changes nothing. Rows
 /// are removed child-first; every table is in turn the only populated leaf,
 /// and only the empty set downgrades.
 async fn downgrade_refuses_with_any_row(db: &DatabaseConnection) {
+    at_twenty_two(db).await;
     let (org, user) = seed(db).await;
     insert_chain(db, org, user).await;
     let catalog_before = catalog(db).await;
@@ -310,6 +322,7 @@ async fn a_lone_row_in_any_single_table_refuses_the_downgrade() {
     // SQLite only: foreign keys off so each table can hold a row on its own.
     for index in 0..knowledge_migration::TABLE_NAMES.len() {
         let db = h::database().await;
+        at_twenty_two(&db).await;
         let (org, user) = seed(&db).await;
         let (table, sql, values) = chain(org, user).remove(index);
         execute(&db, "PRAGMA foreign_keys=OFF", vec![]).await.unwrap();
@@ -328,6 +341,7 @@ async fn a_lone_row_in_any_single_table_refuses_the_downgrade() {
 async fn a_partial_or_tampered_knowledge_schema_is_refused_without_change() {
     // A missing table at marker 22.
     let db = h::database().await;
+    at_twenty_two(&db).await;
     execute(&db, "DROP TABLE neev_knowledge_log", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(validate_content_snapshot(&db).await, Err(AuthError::Unavailable));
@@ -335,6 +349,7 @@ async fn a_partial_or_tampered_knowledge_schema_is_refused_without_change() {
 
     // Marker 21 with the knowledge tables still present.
     let db = h::database().await;
+    at_twenty_two(&db).await;
     seed(&db).await;
     let before = rows(&db).await;
     execute(&db, "UPDATE neev_schema_version SET version=21 WHERE id=1", vec![]).await.unwrap();
@@ -344,6 +359,7 @@ async fn a_partial_or_tampered_knowledge_schema_is_refused_without_change() {
 
     // A look-alike table without its state CHECK.
     let db = h::database().await;
+    at_twenty_two(&db).await;
     execute(&db, "DROP TABLE neev_knowledge_coverage", vec![]).await.unwrap();
     execute(&db, "CREATE TABLE neev_knowledge_coverage (org_id integer NOT NULL, snapshot_id text NOT NULL, state text NOT NULL, attempts integer NOT NULL, updated_at bigint NOT NULL, CONSTRAINT neev_knowledge_coverage_pk PRIMARY KEY (org_id, snapshot_id))", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
@@ -470,6 +486,7 @@ async fn postgres_validation_compares_exact_definitions() {
 async fn postgres_downgrade_cannot_drop_a_row_committed_during_it() {
     use sea_orm::TransactionTrait;
     let (db, admin, schema) = h::postgres_database().await;
+    at_twenty_two(&db).await;
     let (org, user) = seed(&db).await;
     // Connection A: an uncommitted capture-style write.
     let writer = db.begin().await.unwrap();

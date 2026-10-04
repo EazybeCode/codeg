@@ -28,6 +28,7 @@ import re
 import signal
 import sys
 import threading
+import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -45,8 +46,8 @@ def _parse(argv):
     # The runtime (execution.rs) always passes these: which per-user credential
     # volume to open (scope = --tenant + --provider) and the opaque handle naming
     # it. The launcher opens the caller's OWN volume and delivers it as HOME.
-    parser.add_argument("--provider", required=True, choices=sorted(credentials.PROVIDERS))
-    parser.add_argument("--credential-handle", required=True, dest="credential_handle")
+    parser.add_argument("--provider", choices=sorted(credentials.PROVIDERS))
+    parser.add_argument("--credential-handle", dest="credential_handle")
     parser.add_argument("--provider-ipv4", action="append", default=[], dest="provider_ipv4")
     # Which Codex transport to run. `exec` is the deployment's existing
     # behaviour and stays the default, so an older runtime that passes nothing
@@ -81,9 +82,35 @@ def _parse(argv):
         default="standard",
         dest="tool_policy",
     )
+    # Shared integrations: the FIRST line of stdin is the broker bundle (servers
+    # and their secrets). Never argv, never a file. See `read_integrations`.
+    parser.add_argument(
+        "--integrations-stdin", action="store_true", default=False, dest="integrations_stdin"
+    )
+    # An admin's integration test: no provider, no credential volume — the fixed
+    # checker runs as the lane uid through the same bridge/broker/proxy path.
+    parser.add_argument(
+        "--integration-check", action="store_true", default=False, dest="integration_check"
+    )
+    # Acceptance only: lets the bundle name the kit's stdio stub package. The
+    # broker re-checks that the fixture is root-owned and unwritable; it does not
+    # exist in the production image.
+    parser.add_argument(
+        "--accept-fixture", action="store_true", default=False, dest="accept_fixture"
+    )
     # Everything after `--` is the provider argv.
     parser.add_argument("provider_argv", nargs=argparse.REMAINDER)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.integration_check and (args.provider is None or args.credential_handle is None):
+        parser.error("--provider and --credential-handle are required")
+    if args.integration_check and (args.provider_argv or args.enable_steering
+                                   or args.tool_policy != "standard"):
+        parser.error("--integration-check takes no provider argv")
+    if args.accept_fixture and not (args.integrations_stdin and args.integration_check):
+        # Acceptance fixtures are for the admin-check path only; the in-sandbox
+        # CLI acceptance drives the broker through `start_broker` directly.
+        parser.error("--accept-fixture needs --integration-check and --integrations-stdin")
+    return args
 
 
 # Codex's own flag for this exact situation. Its help: "Skip all confirmation
@@ -370,6 +397,7 @@ def claude_stream_argv(provider, provider_argv, adapter=CLAUDE_ADAPTER, python=s
     if walked is None:
         # Unknown option, fall back to direct execution
         return argv
+    _refuse_repeated_mcp_options(walked)
     for option, at in walked:
         if at is None:
             # Flag option - preserve it (--verbose, --include-partial-messages, etc.)
@@ -388,6 +416,8 @@ def claude_stream_argv(provider, provider_argv, adapter=CLAUDE_ADAPTER, python=s
             mapped += ["--append-system-prompt", value]
         elif option == "--settings":
             mapped += ["--settings", value]
+        elif option in _CLAUDE_MCP_OPTIONS:
+            mapped += [option, value]
         # --output-format is replaced by adapter's stream-json
     return [python, "-I", adapter] + mapped + ["--", prompt]
 
@@ -420,6 +450,8 @@ def tool_free_argv(provider, provider_argv, adapter=CLAUDE_ADAPTER, python=sandb
     if walked is None:
         raise sandbox.SandboxError("invalid")
     mapped = ["--claude", binary, "--tool-free"]
+    if any(option in _CLAUDE_MCP_OPTIONS for option, _ in walked):
+        raise sandbox.SandboxError("invalid")
     for option, at in walked:
         if option == "--include-partial-messages":
             mapped.append(option)
@@ -560,13 +592,26 @@ def load_response_style(path=RESPONSE_STYLE, limit=_MAX_RESPONSE_STYLE_BYTES):
 # `--append-system-prompt`, so `in argv` would find the prompt and append our
 # policy to it.
 _CLAUDE_SYSTEM_PROMPT = "--append-system-prompt"
+# `--mcp-config` (the run's library MCP file, inside the workdir) and
+# `--allowedTools` (the brokered integrations' `mcp__<key>` grants) are the shared
+# library's; a tool-free turn refuses both.
+_CLAUDE_MCP_OPTIONS = frozenset({"--mcp-config", "--allowedTools"})
 _CLAUDE_VALUE_OPTIONS = frozenset(
     {_CLAUDE_SYSTEM_PROMPT, "--effort", "--model", "--output-format", "--settings"}
-)
+) | _CLAUDE_MCP_OPTIONS
 _CLAUDE_FLAG_OPTIONS = frozenset({"--include-partial-messages", "--verbose"})
 # Codex `exec` options, same split, same reason (its prompt is index 3).
 _CODEX_VALUE_OPTIONS = frozenset({"-c", "-m", "--image"})
 _CODEX_FLAG_OPTIONS = frozenset({"--skip-git-repo-check", _EXTERNALLY_SANDBOXED})
+
+
+def _refuse_repeated_mcp_options(walked):
+    """One `--mcp-config` and ONE comma-joined `--allowedTools`, never repeated:
+    the CLI and the adapter keep only the last occurrence, which would silently
+    drop every other integration's grant."""
+    for option in _CLAUDE_MCP_OPTIONS:
+        if sum(1 for name, _ in walked if name == option) > 1:
+            raise sandbox.SandboxError("invalid")
 
 
 def _walk_options(options, value_options, flag_options):
@@ -678,6 +723,372 @@ def response_style_argv(provider, provider_argv, style):
     return argv[:3] + merged
 
 
+# --------------------------------------------------------------------------- #
+# Shared integrations (brokered MCP)
+# --------------------------------------------------------------------------- #
+
+_OPERATIONS = os.path.dirname(os.path.abspath(__file__))
+BROKER = os.path.join(_OPERATIONS, "neev_mcp_broker.py")
+CHECKER = os.path.join(_OPERATIONS, "neev_mcp_check.py")
+# The broker's own uid per slot: never a lane uid (61000/61001), the proxy's
+# (62000) or the web server's (65532), so neither the agent nor anything else in
+# the container can read its environment, memory or HOME.
+BROKER_UIDS = {"a": 63000, "b": 63001}
+BROKER_RUN_ROOT = "/run/neev-mcp"
+_BROKER_READY_SECONDS = 15.0
+
+
+class Integrations:
+    """The validated bundle: servers (with secrets), the raw line for the broker,
+    and the admin-configured hosts for the slot proxy."""
+
+    def __init__(self, servers, raw, accept_fixture=False):
+        import neev_mcp_broker as mcp_broker
+
+        self.accept_fixture = accept_fixture
+        self.servers = servers
+        self.raw = raw
+        self.keys = tuple(server["key"] for server in servers)
+        self.hosts = mcp_broker.bundle_hosts(servers)
+
+    def __repr__(self):  # never print secrets
+        return "Integrations(keys=%r, hosts=%r)" % (self.keys, self.hosts)
+
+
+def read_integrations(reader, accept_fixture=False, fixture_spec=None):
+    """Read ONE bounded bundle line from the launcher's stdin reader.
+
+    The same reader then serves the steering relay, so nothing after the first
+    newline is consumed here."""
+    import neev_mcp_broker as mcp_broker
+
+    line = reader.readline(mcp_broker.MAX_BUNDLE_BYTES + 1)
+    if not line.endswith(b"\n") or len(line) > mcp_broker.MAX_BUNDLE_BYTES:
+        raise sandbox.SandboxError("invalid")
+    raw = bytes(line[:-1])
+    packages = dict(mcp_broker.PACKAGES)
+    if accept_fixture:
+        spec = fixture_spec if fixture_spec is not None else mcp_broker.accept_fixture_spec()
+        if spec is None:
+            raise sandbox.SandboxError("invalid")
+        packages[mcp_broker.ACCEPT_FIXTURE_PACKAGE] = spec
+    try:
+        servers = mcp_broker.parse_bundle(raw, packages=packages)
+    except mcp_broker.IntegrationError:
+        raise sandbox.SandboxError("invalid") from None
+    if not servers:
+        raise sandbox.SandboxError("invalid")
+    return Integrations(servers, raw, accept_fixture=accept_fixture)
+
+
+def broker_launch_argv(netns, slot, tenant, peer_uid, broker_dir, accept_fixture=False):
+    """Pure: the broker sidecar's argv — the agent sandbox's own isolation chain
+    (fresh mount/uts/ipc/pid namespaces, private /proc, rlimits, setpriv to a
+    dedicated uid with no capabilities and no-new-privs) JOINING the run's named
+    egress netns, so its only way out is the run's slot proxy."""
+    if netns is None or slot not in BROKER_UIDS:
+        raise sandbox.SandboxError("invalid")
+    uid = BROKER_UIDS[slot]
+    spec = sandbox.SandboxSpec(
+        tenant=tenant,
+        slot=slot,
+        workdir=broker_dir,
+        run_uid=uid,
+        run_gid=uid,
+        provider_argv=(sandbox.PYTHON, "-I", BROKER, "--peer-uid", str(peer_uid),
+                       "--home", broker_dir) + (("--accept-fixture",) if accept_fixture else ()),
+        limits=sandbox.ResourceLimits(
+            cpu_seconds=3600,
+            # Node reserves V8 address space like Claude's helper does.
+            address_space_bytes=_ADDRESS_SPACE_BYTES,
+            open_files=512,
+            processes=128,
+        ),
+    )
+    return sandbox.build_launch_argv(spec, join_netns=netns)
+
+
+class _BrokerHandle:  # pragma: no cover - Linux production path
+    """The running broker. Its stdin (the bundle pipe) stays open as a lifeline:
+    if this launcher dies by any means the broker reads EOF and exits, and as PID
+    1 of its own pid namespace it takes its package children with it (B2)."""
+
+    def __init__(self, process, directory, uid):
+        self.process = process
+        self.directory = directory
+        self.uid = uid
+
+    def stop(self):
+        """Stop and VERIFY cleanup. False -> the caller quarantines the slot."""
+        try:
+            self.process.stdin.close()  # the lifeline: EOF -> broker exits
+        except Exception:
+            pass
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=5)
+        except Exception:
+            pass
+        slot = next(s for s, uid in BROKER_UIDS.items() if uid == self.uid)
+        deadline = time.monotonic() + 5
+        while uid_processes(self.uid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        return reclaim_slot(slot)
+
+
+def _remove_broker_dir(path):
+    """Remove the per-run broker dir; True only if it is verifiably gone."""
+    import shutil
+
+    try:
+        if os.path.islink(path):
+            os.unlink(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+    except OSError:
+        pass
+    return not os.path.lexists(path)
+
+
+# Shared temp roots a broker child could write to. The deployed AppArmor profile
+# grants no tmpfs/bind for a private /tmp (design review B11), so instead the
+# children get TMPDIR/HOME = the 0700 broker dir, and anything the broker uid
+# still left in these roots is removed before the broker starts and after it
+# stops — the next tenant on this slot (same broker uid) inherits nothing.
+_SHARED_TEMP_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
+
+
+def sweep_uid_temp(uid, roots=_SHARED_TEMP_ROOTS):
+    """Remove every entry under `roots` owned by `uid` (no symlink is followed).
+    Returns the number removed. Entries owned by anyone else are never touched."""
+    import shutil
+    import stat
+
+    removed = 0
+    for root in roots:
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(root, name)
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            if info.st_uid != uid:
+                if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                    removed += _sweep_owned_inside(path, uid)
+                continue
+            try:
+                if stat.S_ISDIR(info.st_mode):
+                    shutil.rmtree(path)
+                else:
+                    os.unlink(path)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _sweep_owned_inside(directory, uid, depth=0):
+    """Owned entries one or two levels inside a foreign directory (e.g. a sticky
+    shared dir like /tmp/.X11-unix). Bounded and symlink-safe."""
+    import shutil
+    import stat
+
+    if depth > 1:
+        return 0
+    removed = 0
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    for name in names[:4096]:
+        path = os.path.join(directory, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if info.st_uid == uid:
+            try:
+                if stat.S_ISDIR(info.st_mode):
+                    shutil.rmtree(path)
+                else:
+                    os.unlink(path)
+                removed += 1
+            except OSError:
+                pass
+        elif stat.S_ISDIR(info.st_mode):
+            removed += _sweep_owned_inside(path, uid, depth + 1)
+    return removed
+
+
+def leftover_uid_temp(uid, roots=_SHARED_TEMP_ROOTS):
+    """Every entry under `roots` (top level and two levels into foreign dirs)
+    still owned by `uid`. Empty means the sweep is verifiably complete."""
+    import stat
+
+    found = []
+
+    def scan(directory, depth):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            return
+        for name in names[:4096]:
+            path = os.path.join(directory, name)
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            if info.st_uid == uid:
+                found.append(path)
+            elif stat.S_ISDIR(info.st_mode) and depth < 2:
+                scan(path, depth + 1)
+
+    for root in roots:
+        scan(root, 0)
+    return found
+
+
+def reclaim_slot(slot, proc="/proc", roots=_SHARED_TEMP_ROOTS, run_root=None):
+    """Sweep this slot's broker leftovers and VERIFY: no broker-uid process, no
+    broker dir, no broker-uid temp entry. False means the slot must be
+    quarantined (fail closed, like a workdir that could not be removed)."""
+    uid = BROKER_UIDS[slot]
+    directory = os.path.join(run_root or BROKER_RUN_ROOT, slot)
+    sweep_uid_temp(uid, roots=roots)
+    gone = _remove_broker_dir(directory)
+    return gone and not uid_processes(uid, proc=proc) and not leftover_uid_temp(uid, roots=roots)
+
+
+def uid_processes(uid, proc="/proc"):
+    """Pids whose real uid is `uid` (empty where /proc does not exist)."""
+    found = []
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return found
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, name, "status"), "rb") as handle:
+                for line in handle:
+                    if line.startswith(b"Uid:"):
+                        if int(line.split()[1]) == uid:
+                            found.append(int(name))
+                        break
+        except (OSError, ValueError, IndexError):
+            continue
+    return found
+
+
+def stale_broker(slot, proc="/proc"):
+    """True when a process of this slot's broker uid is still alive: a previous
+    launcher died without its broker (B2). The slot must not be reused."""
+    return bool(uid_processes(BROKER_UIDS[slot], proc=proc))
+
+
+def _prepare_broker_dir(slot):  # pragma: no cover - Linux production path
+    """A fresh 0700 HOME/cwd for this slot's broker, root-created under /run,
+    handed to the broker uid without following a planted symlink."""
+    try:
+        os.mkdir(BROKER_RUN_ROOT, 0o711)
+    except FileExistsError:
+        pass
+    info = os.lstat(BROKER_RUN_ROOT)
+    import stat
+
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise sandbox.SandboxError("launch")
+    path = os.path.join(BROKER_RUN_ROOT, slot)
+    _remove_broker_dir(path)
+    os.mkdir(path, 0o700)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+    try:
+        os.fchown(fd, BROKER_UIDS[slot], BROKER_UIDS[slot])
+    finally:
+        os.close(fd)
+    return path
+
+
+def start_broker(*, netns, slot, tenant, peer_uid, proxy, bundle,
+                 accept_fixture=False):  # pragma: no cover
+    """Start the broker in the run's netns, hand it the bundle over a pipe, and
+    wait until its sockets are bound. Returns a handle, or None on failure (the
+    run proceeds; its bridges then report `broker_unavailable`)."""
+    import select
+    import subprocess
+
+    try:
+        sweep_uid_temp(BROKER_UIDS[slot])
+        directory = _prepare_broker_dir(slot)
+        argv = broker_launch_argv(netns, slot, tenant, peer_uid, directory,
+                                  accept_fixture=accept_fixture)
+    except (OSError, sandbox.SandboxError):
+        print("neev_agent_launch: integration broker unavailable: prepare", file=sys.stderr)
+        return None
+    env = {"PATH": _DEFAULT_PATH, "LANG": "C.UTF-8"}
+    if proxy:
+        env.update({"HTTPS_PROXY": proxy, "HTTP_PROXY": proxy, "NO_PROXY": ""})
+    try:
+        process = subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, cwd=directory,
+            start_new_session=True, close_fds=True)
+    except OSError:
+        _remove_broker_dir(directory)
+        print("neev_agent_launch: integration broker unavailable: spawn", file=sys.stderr)
+        return None
+    handle = _BrokerHandle(process, directory, BROKER_UIDS[slot])
+    try:
+        process.stdin.write(bundle + b"\n")
+        process.stdin.flush()  # NOT closed: the open pipe is the broker's lifeline
+        ready, _, _ = select.select([process.stdout], [], [], _BROKER_READY_SECONDS)
+        if not ready or not process.stdout.readline().startswith(b"R"):
+            raise OSError("not ready")
+    except OSError:
+        handle.stop()
+        print("neev_agent_launch: integration broker unavailable: ready", file=sys.stderr)
+        return None
+    return handle
+
+
+def build_check_spec(args, integrations):
+    """The admin integration check: the fixed checker as the lane uid, in the
+    run's egress netns, with the integration keys as its only arguments."""
+    egress = (
+        sandbox.EgressPolicy.provider_allowlist(args.provider_ipv4)
+        if args.provider_ipv4
+        else sandbox.EgressPolicy.deny_all()
+    )
+    spec = sandbox.SandboxSpec(
+        tenant=args.tenant,
+        slot=args.slot,
+        workdir=args.workdir,
+        run_uid=args.uid,
+        run_gid=args.gid,
+        provider_argv=(sandbox.PYTHON, "-I", CHECKER) + integrations.keys,
+        limits=sandbox.ResourceLimits(
+            cpu_seconds=120, address_space_bytes=4 * 1024**3, open_files=256, processes=64
+        ),
+        egress=egress,
+    )
+    sandbox.validate_spec(spec)
+    return spec
+
+
+def check_env(workdir, proxy_env=None):
+    env = {"PATH": _DEFAULT_PATH, "LANG": "C.UTF-8", "HOME": workdir}
+    if proxy_env:
+        env.update(proxy_env)
+    return env
+
+
 def build_spec(args, style=None):
     """Pure: turn parsed args into a validated SandboxSpec (raises SandboxError).
 
@@ -699,6 +1110,11 @@ def build_spec(args, style=None):
             raise sandbox.SandboxError("invalid")
         provider_argv = tool_free_argv(args.provider, provider_argv)
     elif args.provider not in credentials.ACP_PROVIDERS:
+        if args.provider == "claude" and len(provider_argv) >= 3 and provider_argv[1] == "-p":
+            walked = _walk_options(provider_argv[3:], _CLAUDE_VALUE_OPTIONS,
+                                   _CLAUDE_FLAG_OPTIONS)
+            if walked is not None:
+                _refuse_repeated_mcp_options(walked)
         provider_argv = response_style_argv(args.provider, provider_argv, style)
     if tool_free:
         pass  # already the adapter's argv; none of the routes below apply
@@ -843,10 +1259,30 @@ def main(argv=None, volumes=None):
     args = _parse(sys.argv[1:] if argv is None else argv)
     try:
         _validate_workdir_under_trusted_root(args.workdir)
-        spec = build_spec(args)
+        spec = None if args.integration_check else build_spec(args)
     except sandbox.SandboxError as error:
         print(f"neev_agent_launch: invalid spec: {error.category}", file=sys.stderr)
         return 2
+    # The bundle is read BEFORE anything is started, so a bad one costs nothing;
+    # the same reader then carries steering for the rest of the run.
+    reader = None
+    integrations = None
+    if args.integrations_stdin:
+        reader = _stdin_reader()
+        try:
+            integrations = read_integrations(reader, accept_fixture=args.accept_fixture)
+        except sandbox.SandboxError:
+            print("neev_agent_launch: invalid integrations bundle", file=sys.stderr)
+            return 2
+    if args.integration_check:
+        if integrations is None:
+            print("neev_agent_launch: integration check needs integrations", file=sys.stderr)
+            return 2
+        try:
+            spec = build_check_spec(args, integrations)
+        except sandbox.SandboxError as error:
+            print(f"neev_agent_launch: invalid spec: {error.category}", file=sys.stderr)
+            return 2
     # Open the caller's OWN per-user/per-provider credential volume and lend it to
     # this run's lane uid for the CHILD'S ENTIRE LIFETIME (a per-scope run lock is
     # held across the whole `with`, incl. cancel/teardown), then restored to the
@@ -861,7 +1297,10 @@ def main(argv=None, volumes=None):
                 file=sys.stderr,
             )
             return 2
-        volumes = _production_volumes()
+        if not args.integration_check:
+            volumes = _production_volumes()
+    if args.integration_check:
+        return _check_integrations(args, spec, integrations)
     # The provider sees its credentials at a lane-traversable HOME under the run
     # workdir; the sandbox bind-mounts the physical volume there in its private
     # mount namespace (the 0700 secret store is never made traversable).
@@ -877,8 +1316,19 @@ def main(argv=None, volumes=None):
         import neev_slot_proxy as slot_proxy
 
         try:
-            with slot_proxy.slot_proxy(args.provider, "run", args.slot) as proxy_env:
-                rc = _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as)
+            # Only a run with integrations names extra hosts, so every other run
+            # opens its proxy exactly as before.
+            scope = (
+                slot_proxy.slot_proxy(args.provider, "run", args.slot,
+                                      extra_hosts=integrations.hosts)
+                if integrations is not None
+                else slot_proxy.slot_proxy(args.provider, "run", args.slot)
+            )
+            with scope as proxy_env:
+                if _refuse_stale_broker(slot_proxy, args.slot):
+                    return 7
+                rc = _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as,
+                                          stdin_reader=reader, integrations=integrations)
                 if rc == 6:
                     # Workdir cleanup failed: the FIXED lane must not be reused. Write
                     # the durable slot quarantine too so the next run's slot_proxy also
@@ -894,10 +1344,59 @@ def main(argv=None, volumes=None):
                 file=sys.stderr,
             )
             return 7
-    return _deliver_run_cleanup(volumes, args, spec, None, home_as)
+    return _deliver_run_cleanup(volumes, args, spec, None, home_as,
+                                stdin_reader=reader, integrations=integrations)
 
 
-def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as):
+def _refuse_stale_broker(slot_proxy, slot):
+    """Under the slot lock, for EVERY egress run on this slot: a live process of
+    the slot's broker uid means an earlier launcher died and left its broker
+    (holding decrypted secrets) behind — quarantine, exactly as an occupied
+    proxy endpoint is (B2). Otherwise sweep what a killed run may have left
+    (broker dir, broker-uid temp entries) and refuse if that cannot be verified."""
+    if stale_broker(slot):
+        slot_proxy.quarantine(slot)
+        print("neev_agent_launch: slot proxy unavailable: occupied (stale integration broker)",
+              file=sys.stderr)
+        return True
+    if not reclaim_slot(slot):
+        slot_proxy.quarantine(slot)
+        print("neev_agent_launch: slot proxy unavailable: integration cleanup unverified",
+              file=sys.stderr)
+        return True
+    return False
+
+
+def _check_integrations(args, spec, integrations):
+    """Run the fixed checker through the real bridge/broker/proxy path, with no
+    provider and no credential volume, then remove the run workdir."""
+    import neev_slot_proxy as slot_proxy
+
+    def run(proxy_env):
+        return _run_child(spec, check_env(spec.workdir, proxy_env), integrations=integrations)
+
+    if spec.egress.mode == "provider_allowlist":
+        try:
+            with slot_proxy.slot_proxy("none", "integrations", args.slot,
+                                       extra_hosts=integrations.hosts) as proxy_env:
+                if _refuse_stale_broker(slot_proxy, args.slot):
+                    return 7
+                rc = run(proxy_env)
+        except slot_proxy.SlotProxyError as error:
+            print(f"neev_agent_launch: slot proxy unavailable: {error.category}",
+                  file=sys.stderr)
+            return 7
+    else:
+        rc = run(None)
+    if not _cleanup_run_workdir(args.workdir):
+        print("neev_agent_launch: run workdir cleanup failed (lane must be quarantined)",
+              file=sys.stderr)
+        return 6
+    return rc
+
+
+def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as, stdin_reader=None,
+                         integrations=None):
     """Open the caller's OWN volume, lend it to the lane uid for the child's whole
     lifetime, run the sandboxed provider, then privileged-remove the run workdir.
 
@@ -927,6 +1426,8 @@ def _deliver_run_cleanup(volumes, args, spec, proxy_env, home_as):
                 bind_source=delivery.mount,
                 relay_stdin=is_probe,
                 relay_steering=enable_steering,
+                stdin_reader=stdin_reader,
+                integrations=integrations,
             )
     except credentials.CredentialError as error:
         # Honest, non-sensitive reason ("busy" = another run for this user+provider
@@ -1251,7 +1752,14 @@ class _FdReader:
 _stdin_reader = _FdReader
 
 
-def _relay_stdin(destination, source, limit=_STDIN_RELAY_MAX_BYTES):
+# The integrations bundle carries secrets and is consumed by the launcher only
+# (`read_integrations`). If one ever reaches a relay — e.g. Rust sent it but the
+# argv lacked `--integrations-stdin` — it is dropped, never forwarded to the
+# lane-uid provider, and the run is aborted.
+_BUNDLE_MARKER = b'"neevIntegrations"'
+
+
+def _relay_stdin(destination, source, limit=_STDIN_RELAY_MAX_BYTES, on_bundle=None):
     """Copy at most `limit` bytes from `source` to `destination`, then close it.
 
     Bounded and one-way. The reader keeps its end open until the answer arrives,
@@ -1259,6 +1767,7 @@ def _relay_stdin(destination, source, limit=_STDIN_RELAY_MAX_BYTES):
     child's stdin is what lets a well-behaved app-server finish.
     """
     written = 0
+    tail = b""
     try:
         while written < limit:
             chunk = source.read1(min(4096, limit - written)) if hasattr(
@@ -1266,6 +1775,12 @@ def _relay_stdin(destination, source, limit=_STDIN_RELAY_MAX_BYTES):
             ) else source.read(min(4096, limit - written))
             if not chunk:
                 break
+            # Match across chunk boundaries too: keep the previous chunk's tail.
+            if _BUNDLE_MARKER in tail + chunk:
+                if on_bundle is not None:
+                    on_bundle()
+                break
+            tail = chunk[-(len(_BUNDLE_MARKER) - 1):]
             destination.write(chunk)
             destination.flush()
             written += len(chunk)
@@ -1285,7 +1800,7 @@ _STEER_MAX_TOTAL_BYTES = 1024 * 1024  # 1 MiB total steering input per run
 
 
 def _relay_steering(destination, source, max_line=_STEER_MAX_LINE_BYTES,
-                    max_total=_STEER_MAX_TOTAL_BYTES):
+                    max_total=_STEER_MAX_TOTAL_BYTES, on_bundle=None):
     """Relay steering JSON lines from `source` to `destination` until EOF or child exits.
 
     Unlike `_relay_stdin` (bounded byte count then close), this:
@@ -1315,6 +1830,10 @@ def _relay_steering(destination, source, max_line=_STEER_MAX_LINE_BYTES,
                 while line and not line.endswith(b"\n"):
                     line = source.readline(max_line + 1)
                 continue
+            if _BUNDLE_MARKER in line:
+                if on_bundle is not None:
+                    on_bundle()
+                break
             total += len(line)
             if total > max_total:
                 break
@@ -1329,7 +1848,8 @@ def _relay_steering(destination, source, max_line=_STEER_MAX_LINE_BYTES,
             pass
 
 
-def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=False):
+def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=False,
+               stdin_reader=None, integrations=None):
     """Launch the provider in the sandbox, forward its stream, and always tear the
     sandbox down. Runs while the credential volume is lent to this run's uid.
 
@@ -1338,13 +1858,52 @@ def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=Fa
     """
     # Open stdin pipe if either relay mode is requested
     needs_stdin = relay_stdin or relay_steering
+    # The integration broker is started INSIDE `launch`, after the run's netns is
+    # wired and BEFORE the agent exists (design review B1): its sockets are bound
+    # before any agent code runs, so the agent can neither race its MCP startup
+    # against it nor squat the abstract names. A deny-all run has no netns and
+    # therefore no broker (its bridges say so).
+    brokers = []
+
+    def before_spawn(netns):
+        if netns:
+            kwargs = {}
+            if integrations.accept_fixture:
+                kwargs["accept_fixture"] = True
+            brokers.append(start_broker(
+                netns=netns, slot=spec.slot, tenant=spec.tenant, peer_uid=spec.run_uid,
+                proxy=(env or {}).get("HTTPS_PROXY"), bundle=integrations.raw, **kwargs))
+
     try:
-        handle = sandbox.launch(
-            spec, env=env, bind_source=bind_source, stdin_pipe=needs_stdin
-        )
+        if integrations is not None:
+            handle = sandbox.launch(
+                spec, env=env, bind_source=bind_source, stdin_pipe=needs_stdin,
+                before_spawn=before_spawn,
+            )
+        else:
+            handle = sandbox.launch(
+                spec, env=env, bind_source=bind_source, stdin_pipe=needs_stdin
+            )
     except sandbox.SandboxError as error:
+        for broker in brokers:
+            if broker is not None and broker.stop() is False:
+                import neev_slot_proxy as slot_proxy
+
+                slot_proxy.quarantine(spec.slot)
+                print("neev_agent_launch: integration broker cleanup unverified "
+                      "(slot quarantined)", file=sys.stderr)
+                return 6
         print(f"neev_agent_launch: launch failed: {error.category}", file=sys.stderr)
         return 3
+    broker = brokers[0] if brokers else None
+    bundle_seen = []
+
+    def on_bundle():
+        bundle_seen.append(True)
+        try:
+            os.killpg(os.getpgid(handle.pid), signal.SIGKILL)
+        except OSError:
+            pass
 
     # The probe is a conversation: the app-server answers `initialize` before it
     # will accept a method, so its stdin must stay open until the caller has what
@@ -1353,7 +1912,8 @@ def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=Fa
     if relay_stdin and handle.stdin is not None:
         threading.Thread(
             target=_relay_stdin,
-            args=(handle.stdin, _stdin_reader()),
+            args=(handle.stdin, stdin_reader or _stdin_reader()),
+            kwargs={"on_bundle": on_bundle},
             daemon=True,
         ).start()
     elif relay_steering and handle.stdin is not None:
@@ -1362,7 +1922,8 @@ def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=Fa
         # through a raw fd, NEVER `sys.stdin.buffer` (see `_FdReader`).
         threading.Thread(
             target=_relay_steering,
-            args=(handle.stdin, _stdin_reader()),
+            args=(handle.stdin, stdin_reader or _stdin_reader()),
+            kwargs={"on_bundle": on_bundle},
             daemon=True,
         ).start()
 
@@ -1380,6 +1941,7 @@ def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=Fa
     signal.signal(signal.SIGINT, _terminate)
 
     rc = 4
+    broker_clean = True
     try:
         out = handle.stdout
         if out is not None:
@@ -1388,7 +1950,23 @@ def _run_child(spec, env, bind_source=None, relay_stdin=False, relay_steering=Fa
                 sys.stdout.buffer.flush()
         rc = handle.wait()
     finally:
+        if broker is not None:
+            # Before the netns it lives in is torn down; the result is verified.
+            broker_clean = broker.stop() is not False
         handle.teardown()  # kill process group + reap + egress teardown (idempotent)
+    if not broker_clean:
+        # Leftovers of a broker that held secrets could not be proven gone: the
+        # slot is never reused until an operator clears it (like rc 6).
+        import neev_slot_proxy as slot_proxy
+
+        slot_proxy.quarantine(spec.slot)
+        print("neev_agent_launch: integration broker cleanup unverified (slot quarantined)",
+              file=sys.stderr)
+        return 6
+    if bundle_seen:
+        print("neev_agent_launch: integrations bundle on a relay without --integrations-stdin",
+              file=sys.stderr)
+        return 2
     return 0 if rc == 0 else 4
 
 

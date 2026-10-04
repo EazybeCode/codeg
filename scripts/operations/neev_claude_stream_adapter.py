@@ -70,6 +70,16 @@ TOOL_FREE_ARGS = (
 _TOOL_BLOCKS = frozenset(("tool_use", "server_tool_use", "mcp_tool_use", "tool_result"))
 
 
+class _Once(argparse.Action):
+    """A single-valued option that refuses a second occurrence (the last one
+    would otherwise silently win and drop the others' MCP grants)."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error("%s may be given only once" % option_string)
+        setattr(namespace, self.dest, values)
+
+
 def _parse(argv):
     parser = argparse.ArgumentParser(prog="neev_claude_stream_adapter", add_help=True)
     parser.add_argument("--claude", required=True, help="Path to claude CLI binary")
@@ -80,6 +90,10 @@ def _parse(argv):
         "--append-system-prompt", default=None, dest="append_system_prompt"
     )
     parser.add_argument("--settings", default=None)
+    # The org library's MCP file (inside the run workdir) and the brokered
+    # integrations' tool grants (`mcp__<key>`, comma-separated).
+    parser.add_argument("--mcp-config", default=None, dest="mcp_config", action=_Once)
+    parser.add_argument("--allowedTools", default=None, dest="allowed_tools", action=_Once)
     # Flag options preserved from launcher
     parser.add_argument("--verbose", action="store_true", default=False)
     parser.add_argument(
@@ -126,7 +140,18 @@ def claude_argv(args):
         argv += ["--append-system-prompt", args.append_system_prompt]
     if args.settings:
         argv += ["--settings", args.settings]
-    if getattr(args, "tool_free", False):
+    tool_free = getattr(args, "tool_free", False)
+    mcp_config = getattr(args, "mcp_config", None)
+    allowed_tools = getattr(args, "allowed_tools", None)
+    if tool_free and (mcp_config or allowed_tools):
+        # A tool-free turn never loads a server or grants a tool.
+        sys.stderr.write("neev_claude_stream_adapter: tool-free turn refuses MCP\n")
+        raise SystemExit(2)
+    if mcp_config:
+        argv += ["--mcp-config", mcp_config]
+    if allowed_tools:
+        argv += ["--allowedTools", allowed_tools]
+    if tool_free:
         argv += list(TOOL_FREE_ARGS)
     return argv
 

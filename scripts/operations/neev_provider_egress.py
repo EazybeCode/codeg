@@ -26,7 +26,7 @@ import re
 import socket
 import sys
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Optional, Tuple
 
@@ -170,9 +170,16 @@ class DestinationPolicy:
     authorities: frozenset          # of bytes b"host:port"
     ports: MappingProxyType         # host(str) -> port(int)
     resolver_code: MappingProxyType  # host(str) -> fixed resolver program(str)
+    # host(str) -> (idle_seconds, lifetime_seconds) for hosts that differ from the
+    # provider defaults: integration MCP streams (legacy SSE) and long tool calls
+    # idle far longer than a provider's TLS does.
+    limits: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
 
     def hosts(self) -> frozenset:
         return frozenset(self.ports)
+
+    def limits_for(self, host: str):
+        return self.limits.get(host, (IDLE_SECONDS, LIFETIME_SECONDS))
 
     def port_for(self, host: str) -> int:
         try:
@@ -181,11 +188,37 @@ class DestinationPolicy:
             raise EgressError("denied") from None
 
 
-def policy_for(provider: str, purpose: str) -> DestinationPolicy:
+# The integration-only scope (an admin's "Test" of shared integrations): no
+# provider hosts at all, only the integrations' own, which must then be present.
+INTEGRATIONS_SCOPE = ("none", "integrations")
+# Integration tunnels: an SSE stream may be silent for minutes and a remote tool
+# call may take long, so they get a longer idle bound and a run-length lifetime.
+INTEGRATION_IDLE_SECONDS = 300.0
+INTEGRATION_LIFETIME_SECONDS = 3600.0
+
+
+def policy_for(provider: str, purpose: str, extra_hosts=()) -> DestinationPolicy:
     """Build the runtime CONNECT policy for a provider+purpose from the endpoint
-    allowlist. Raises EgressError on an unknown scope (fail closed)."""
+    allowlist, plus any admin-configured integration hosts (exact, 443).
+    Raises EgressError on an unknown scope or an invalid host (fail closed)."""
+    integration_hosts = set()
     try:
-        table = endpoints.endpoints(provider, purpose)
+        if (provider, purpose) == INTEGRATIONS_SCOPE:
+            if not extra_hosts:
+                raise endpoints.EndpointError("scope")
+            table = ()
+        else:
+            table = endpoints.endpoints(provider, purpose)
+        if extra_hosts:
+            if purpose not in ("run", "integrations"):
+                raise endpoints.EndpointError("scope")
+            known = {endpoint.host for endpoint in table}
+            added = tuple(
+                endpoint for endpoint in endpoints.integration_endpoints(list(extra_hosts))
+                if endpoint.host not in known
+            )
+            integration_hosts = {endpoint.host for endpoint in added}
+            table = tuple(table) + added
     except endpoints.EndpointError:
         raise EgressError("denied") from None
     ports = {}
@@ -199,6 +232,10 @@ def policy_for(provider: str, purpose: str) -> DestinationPolicy:
         authorities=frozenset(e.authority() for e in table),
         ports=MappingProxyType(ports),
         resolver_code=MappingProxyType(codes),
+        limits=MappingProxyType({
+            host: (INTEGRATION_IDLE_SECONDS, INTEGRATION_LIFETIME_SECONDS)
+            for host in integration_hosts
+        }),
     )
 
 
@@ -351,6 +388,9 @@ class ProviderEgressProxy:
             )
             stage = "parse"
             host = parse_connect(header, self._policy)
+            idle, lifetime = self._policy.limits_for(host)
+            if lifetime != LIFETIME_SECONDS:
+                deadline = deadline - LIFETIME_SECONDS + lifetime
             stage = "resolve"
             addresses = await login._before(
                 asyncio.ensure_future(_resolve(host, self._policy)),
@@ -367,7 +407,8 @@ class ProviderEgressProxy:
             writer.write(_ESTABLISHED)
             established = True
             await login._before(writer.drain(), deadline)
-            await self._tunnel(reader, writer, upstream_reader, upstream_writer, deadline)
+            await self._tunnel(reader, writer, upstream_reader, upstream_writer, deadline,
+                               idle=idle)
         except asyncio.CancelledError:
             raise
         except EgressError as error:
@@ -435,7 +476,8 @@ class ProviderEgressProxy:
             pass
 
     async def _tunnel(self, inbound_reader, inbound_writer, upstream_reader,
-                      upstream_writer, deadline) -> None:
+                      upstream_writer, deadline, idle=None) -> None:
+        idle = IDLE_SECONDS if idle is None else idle
         loop = asyncio.get_running_loop()
         last = [loop.time()]
         activity = asyncio.Event()
@@ -467,7 +509,7 @@ class ProviderEgressProxy:
         try:
             while True:
                 now = loop.time()
-                stop = min(deadline, last[0] + IDLE_SECONDS)
+                stop = min(deadline, last[0] + idle)
                 remaining = stop - now
                 if remaining <= 0:
                     raise EgressError("timeout")

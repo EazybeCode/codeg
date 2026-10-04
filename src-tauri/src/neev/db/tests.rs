@@ -128,6 +128,10 @@ async fn postgres_schema_reinitialization_and_foreign_keys() {
 /// that inventory. Sharing defaults and steer first (they reference nodes and
 /// turns), then library files before items.
 pub(super) async fn drop_tables_after_seventeen(db: &DatabaseConnection) {
+    // Schema 23's trash ledger is newest and references nodes; it goes first.
+    execute(db, "DROP TABLE IF EXISTS neev_node_trash", vec![])
+        .await
+        .unwrap();
     for table in super::knowledge_migration::DROP_ORDER {
         execute(db, &format!("DROP TABLE IF EXISTS {table}"), vec![])
             .await

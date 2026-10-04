@@ -792,7 +792,9 @@ async fn sqlite_gateway8_keyset_history_crosses_pages() {
 // ---- Task C: atomic version chain and read-only history ----
 
 async fn downgrade_to(db: &DatabaseConnection, target: i64) {
-    // Fresh schema is now v16; peel back one additive layer per version.
+    // Remove current additive layers before reconstructing historical v16.
+    super::tests::drop_tables_after_seventeen(db).await;
+    // Peel back one additive layer per version.
     // 16 and 15 are TABLES, so they come off with DROP TABLE. 14, 13 and 12 are
     // COLUMNS on the session tables rather than tables of their own, so they
     // come off with DROP COLUMN and the tables survive.
@@ -960,7 +962,7 @@ async fn sqlite_gateway8_initializer_marker_failure_rolls_back() {
     seed_native(&db).await;
     let account_before = h::count(&db, "neev_accounts").await;
     exact_seven_fixture(&db).await;
-    execute(&db, "CREATE TRIGGER fixture_reject_gateway8_marker BEFORE UPDATE OF version ON neev_schema_version WHEN NEW.version=16 BEGIN SELECT RAISE(ABORT,'fixture marker rejection'); END", vec![]).await.unwrap();
+    execute(&db, &format!("CREATE TRIGGER fixture_reject_gateway8_marker BEFORE UPDATE OF version ON neev_schema_version WHEN NEW.version={CURRENT_SCHEMA_VERSION} BEGIN SELECT RAISE(ABORT,'fixture marker rejection'); END"), vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
     assert_eq!(
         one(
@@ -1006,9 +1008,7 @@ async fn sqlite_gateway8_initializer_marker_failure_rolls_back() {
 async fn sqlite_gateway8_exact_historical_three_through_eight_read_only() {
     for target in [16_i64, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3] {
         let db = h::database().await;
-        if target < 16 {
-            downgrade_to(&db, target).await;
-        }
+        downgrade_to(&db, target).await;
         execute(&db, "PRAGMA query_only=ON", vec![]).await.unwrap();
         assert_eq!(validate_content_snapshot(&db).await, Ok(target));
         execute(&db, "PRAGMA query_only=OFF", vec![]).await.unwrap();
@@ -1258,7 +1258,7 @@ async fn postgres_gateway8_initializer_marker_failure_rolls_back() {
         let inventory_before = h::count(&db, "neev_document_formats").await; // status7 content present
         execute(
             &db,
-            "ALTER TABLE neev_schema_version ADD CONSTRAINT ck_fixture_reject_gateway8_marker CHECK (version<>9)",
+            &format!("ALTER TABLE neev_schema_version ADD CONSTRAINT ck_fixture_reject_gateway8_marker CHECK (version<>{CURRENT_SCHEMA_VERSION})"),
             vec![],
         )
         .await
@@ -1319,9 +1319,7 @@ async fn postgres_gateway8_exact_historical_three_through_eight_read_only() {
         let (db, admin, schema) = h::postgres_database().await;
         eprintln!("gateway8 read-only {target} owned schema: {schema}");
         let outcome = std::panic::AssertUnwindSafe(async {
-            if target < 11 {
-                downgrade_to(&db, target).await;
-            }
+            downgrade_to(&db, target).await;
             let tx = db.begin().await.unwrap();
             execute(&tx, "SET TRANSACTION READ ONLY", vec![])
                 .await

@@ -6510,5 +6510,33 @@
     "askNoAgent": "Connectez votre propre agent Claude ou Codex dans Agents personnels pour tester.",
     "askProviderCopies": "Poser une question envoie votre question et les pages enregistrées à votre fournisseur d’IA connecté. Les copies conservées par le fournisseur sont hors de Neev.",
     "askStartBusy": "Un test est déjà en cours. Attendez qu’il se termine ou arrêtez-le."
+  },
+  "NeevTrash": {
+    "moveToTrash": "Mettre à la corbeille",
+    "confirmTitle": "Mettre « {name} » à la corbeille ?",
+    "confirmBody": "Il disparaît de la barre latérale pour tout le monde dans l'organisation. Tout le monde peut le restaurer depuis la corbeille, au même endroit. Rien n'est supprimé.",
+    "contents": "Déplace aussi :",
+    "folders": "{count, plural, one {# dossier} other {# dossiers}}",
+    "documents": "{count, plural, one {# document} other {# documents}}",
+    "chats": "{count, plural, one {# discussion} other {# discussions}}",
+    "empty": "Il ne contient rien.",
+    "checking": "Vérification du contenu…",
+    "agentActive": "Un agent est encore en cours d'exécution ici. Arrêtez-le d'abord, puis mettez ceci à la corbeille.",
+    "inUse": "Un élément est en cours de modification. Réessayez dans un instant.",
+    "privateOthers": "{count, plural, one {# élément privé appartient} other {# éléments privés appartiennent}} à d'autres membres. Ils doivent d'abord déplacer ou supprimer leurs éléments.",
+    "changed": "Cela a changé pendant que vous regardiez. Vérifiez à nouveau.",
+    "failed": "Impossible de mettre à la corbeille. Réessayez.",
+    "cancel": "Annuler",
+    "section": "Projets et dossiers",
+    "emptySection": "Aucun projet ni dossier dans la corbeille.",
+    "loading": "Chargement…",
+    "loadFailed": "Impossible de charger les projets et dossiers de la corbeille.",
+    "restore": "Restaurer",
+    "restoreTo": "Sera restauré dans {parent}",
+    "restoreParentFirst": "Restaurez d'abord {parent}",
+    "restoreFailed": "Impossible de restaurer. Réessayez.",
+    "trashedBy": "Mis à la corbeille par {name}",
+    "agentChats": "{count, plural, one {# de vos discussions d'agent} other {# de vos discussions d'agent}}",
+    "privateContent": "Contient du contenu privé appartenant à un autre membre. Il doit d'abord le déplacer ou le mettre à la corbeille."
   }
 }

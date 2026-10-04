@@ -6510,5 +6510,33 @@
     "askNoAgent": "請在「個人智慧代理」中連接你自己的 Claude 或 Codex 智慧代理後再測試。",
     "askProviderCopies": "提問時，你的問題和已儲存的頁面會傳送給你連接的 AI 供應商。供應商保留的副本不在 Neev 的控制範圍內。",
     "askStartBusy": "已有測試正在執行。請等待其完成，或將其停止。"
+  },
+  "NeevTrash": {
+    "moveToTrash": "移到垃圾桶",
+    "confirmTitle": "將「{name}」移到垃圾桶？",
+    "confirmBody": "它會從組織內所有人的側邊欄中消失。任何人都可以從垃圾桶將其還原到原來的位置。不會刪除任何內容。",
+    "contents": "同時移動：",
+    "folders": "{count} 個資料夾",
+    "documents": "{count} 個文件",
+    "chats": "{count} 個聊天",
+    "empty": "其中沒有內容。",
+    "checking": "正在檢查其中的內容…",
+    "agentActive": "這裡仍有智慧體在執行。請先停止它，再移到垃圾桶。",
+    "inUse": "這裡的某些內容正在被編輯。請稍後再試。",
+    "privateOthers": "{count} 個私人項目屬於其他成員。他們需要先移動或刪除自己的項目。",
+    "changed": "在你檢視期間內容已變更。請重新檢查。",
+    "failed": "無法移到垃圾桶。請再試一次。",
+    "cancel": "取消",
+    "section": "專案和資料夾",
+    "emptySection": "垃圾桶中沒有專案或資料夾。",
+    "loading": "正在載入…",
+    "loadFailed": "無法載入已刪除的專案和資料夾。",
+    "restore": "還原",
+    "restoreTo": "將還原到 {parent}",
+    "restoreParentFirst": "請先還原 {parent}",
+    "restoreFailed": "無法還原。請再試一次。",
+    "trashedBy": "由 {name} 刪除",
+    "agentChats": "你的 {count} 個智慧體聊天",
+    "privateContent": "包含屬於其他成員的私人內容。需要對方先將其移走或移到垃圾桶。"
   }
 }

@@ -80,6 +80,13 @@ import { AgentRunIndicator } from "./agent-run-indicator"
 import { runningChatKey, useRunningChats } from "@/lib/neev-running-chats"
 import { AttachmentTrash } from "./native-trash-modal"
 import {
+  MoveNodeToTrashButton,
+  MoveNodeToTrashMenuItem,
+  NodeTrashHost,
+  NodeTrashSection,
+} from "./native-node-trash"
+import { descendantIds } from "@/lib/neev-node-trash"
+import {
   NativeDialogContent as DialogContent,
   NativeDropdownMenuContent as DropdownMenuContent,
 } from "./native-suspended-surface"
@@ -531,8 +538,8 @@ function ProjectPage({
             {node.name}
           </h1>
           {/* New items' default, and optionally my existing items: see FolderShare. */}
-          {access && (
-            <div className="pt-3">
+          <div className="flex items-center gap-1 pt-3">
+            {access && (
               <FolderShare
                 node={node}
                 folder={folder}
@@ -540,8 +547,9 @@ function ProjectPage({
                 onShared={access.onFolderShared}
                 onSharingChanged={access.onFolderSharingChanged}
               />
-            </div>
-          )}
+            )}
+            <MoveNodeToTrashButton node={node} />
+          </div>
         </div>
         {/* Only what the server said. Nothing is claimed while it is unknown. */}
         {effective && (
@@ -1090,6 +1098,7 @@ function NativeWorkspaceTree({
                     <DropdownMenuItem onSelect={() => edit(node)}>
                       {t("editDetails")}
                     </DropdownMenuItem>
+                    <MoveNodeToTrashMenuItem node={node} />
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
@@ -3146,6 +3155,23 @@ function WorkspaceContent() {
       })
     return () => controller.abort()
   }, [org, handleError])
+  /** A Move to Trash took this node and its subtree off the server's list. */
+  const removeTrashedNode = useCallback((node: NativeNode) => {
+    setNodes((old) => {
+      const gone = new Set([node.id, ...descendantIds(old, node.id)])
+      return old.filter((item) => !gone.has(item.id))
+    })
+  }, [])
+  /** A restore put a subtree back: read the tree again from the start. */
+  const reloadNodes = useCallback(() => {
+    if (!org) return
+    void loadNodes(org.id, null, auth.signal)
+      .then((page) => {
+        setNodes(page.nodes)
+        setNextAfter(page.nextAfter)
+      })
+      .catch(handleError)
+  }, [org, auth.signal, handleError])
   if (!org || !auth.session) return null
   function openEditor(value: Editor) {
     const active = document.activeElement as HTMLElement | null
@@ -3410,6 +3436,12 @@ function WorkspaceContent() {
           {/* Said here, beside the rows it is about. */}
           <NativeError error={mutationError} />
           {showTrash && <AttachmentTrash key={auth.scopeKey} />}
+          {showTrash && (
+            <NodeTrashSection
+              key={`nodes:${auth.scopeKey}`}
+              onRestored={reloadNodes}
+            />
+          )}
           {!loading && nodes.length === 0 && !query.trim() && (
             <p className="px-2 text-sm text-muted-foreground">
               {t("emptyProjects")}
@@ -3558,6 +3590,9 @@ function WorkspaceContent() {
           </aside>
         )}
         <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {/* Always mounted, so the sidebar menu and the folder view share
+              one Move to Trash confirmation even while the sidebar is shut. */}
+          <NodeTrashHost onTrashed={removeTrashedNode} />
           {/* Where you are, and what else is open. Two thin bars instead of a
               window-wide banner repeating the organization and the email. */}
           <div className="flex h-10 shrink-0 items-center gap-1 px-2">

@@ -517,6 +517,7 @@ async fn postgres_attachment_archive_migration_and_restore_preserve_refs() {
     let harness = h::OrgHarness::new_with_gateway_events_on(db.clone()).await;
     let (org_id, chat_id, message_id, session_id) = seed(&harness).await;
     let (key, _) = attach(&db, org_id, &chat_id, &message_id, &session_id).await;
+    super::tests::drop_tables_after_seventeen(&db).await;
     execute(
         &db,
         "ALTER TABLE neev_attachments DROP COLUMN archived",
@@ -530,7 +531,7 @@ async fn postgres_attachment_archive_migration_and_restore_preserve_refs() {
     )
     .await;
     assert_eq!(initialize(&db).await, Ok(()));
-    assert_eq!(schema_version(&db).await, 17);
+    assert_eq!(schema_version(&db).await, CURRENT_SCHEMA_VERSION);
     assert_eq!(count(&db, "neev_attachment_refs").await, 2);
     let actor = harness.owner_context().clone();
     crate::neev::content::attachment::set_archived(harness.state(), &actor, &key, true)

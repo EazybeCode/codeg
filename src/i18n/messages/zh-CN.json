@@ -6510,5 +6510,33 @@
     "askNoAgent": "请在“个人智能体”中连接你自己的 Claude 或 Codex 智能体后再测试。",
     "askProviderCopies": "提问时，你的问题和已保存的页面会发送给你连接的 AI 提供方。提供方保留的副本不在 Neev 的控制范围内。",
     "askStartBusy": "已有测试正在运行。请等待其完成，或将其停止。"
+  },
+  "NeevTrash": {
+    "moveToTrash": "移到废纸篓",
+    "confirmTitle": "将“{name}”移到废纸篓？",
+    "confirmBody": "它会从组织内所有人的侧边栏中消失。任何人都可以从废纸篓将其恢复到原来的位置。不会删除任何内容。",
+    "contents": "同时移动：",
+    "folders": "{count} 个文件夹",
+    "documents": "{count} 个文档",
+    "chats": "{count} 个聊天",
+    "empty": "其中没有内容。",
+    "checking": "正在检查其中的内容…",
+    "agentActive": "这里仍有智能体在运行。请先停止它，再移到废纸篓。",
+    "inUse": "这里的某些内容正在被编辑。请稍后重试。",
+    "privateOthers": "{count} 个私有项目属于其他成员。他们需要先移动或删除自己的项目。",
+    "changed": "在你查看期间内容已更改。请重新检查。",
+    "failed": "无法移到废纸篓。请重试。",
+    "cancel": "取消",
+    "section": "项目和文件夹",
+    "emptySection": "废纸篓中没有项目或文件夹。",
+    "loading": "正在加载…",
+    "loadFailed": "无法加载已删除的项目和文件夹。",
+    "restore": "恢复",
+    "restoreTo": "将恢复到 {parent}",
+    "restoreParentFirst": "请先恢复 {parent}",
+    "restoreFailed": "无法恢复。请重试。",
+    "trashedBy": "由 {name} 删除",
+    "agentChats": "你的 {count} 个智能体聊天",
+    "privateContent": "包含属于其他成员的私有内容。需要对方先将其移走或移到废纸篓。"
   }
 }

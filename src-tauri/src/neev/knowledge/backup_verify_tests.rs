@@ -20,7 +20,9 @@ async fn schema_22_knowledge_refs_are_verified_and_in_the_manifest() {
     let k = captured().await;
     let knowledge = store::store(&k.state).unwrap();
     let manifest = verify_snapshot_with(&k.state.database, &k.state.blobs, Some(knowledge)).await.unwrap();
-    assert_eq!(manifest.schema_version, 22);
+    // Fresh installs are past 22 (schema 23 adds the trash ledger); the
+    // knowledge refs are verified for every schema from 22 on.
+    assert_eq!(manifest.schema_version, crate::neev::db::CURRENT_SCHEMA_VERSION);
     // One snapshot and one page revision.
     assert_eq!(manifest.knowledge.len(), 2);
     let mut sorted = manifest.knowledge.clone();

@@ -1,27 +1,114 @@
-import { describe, expect, it } from "vitest"
-import { parseLibraryItems } from "./neev-library"
+import { expect, it } from "vitest"
+import {
+  integrationStatusMessage,
+  parseLibraryItem,
+  skippedReasonMessage,
+} from "./neev-library"
 
-const skill = {
+const base = {
   id: "d230e18b-8102-4560-a358-6d8aac05c712",
-  name: "Brand writing",
-  description: "Team tone",
-  kind: "skill",
+  name: "HubSpot",
+  description: "",
+  kind: "mcp",
   enabled: false,
   revision: "1",
-  files: ["SKILL.md", "references/tone.md"],
+  files: [],
   setupNote: null,
 }
-describe("shared library responses", () => {
-  it("reads team items without needing configuration or credentials", () => {
-    expect(parseLibraryItems({ items: [skill] })).toEqual([skill])
+const integration = {
+  transport: "remote",
+  hosts: ["mcp.hubspot.com"],
+  secretNames: ["HUBSPOT_ACCESS_TOKEN"],
+  source: "import",
+  notes: [],
+  status: {
+    state: "ready",
+    checkedAt: "1700000000",
+    toolCount: 3,
+    detail: null,
+    revision: "1",
+  },
+}
+
+it("parses items with, without and null integration", () => {
+  expect(parseLibraryItem(base).integration).toBeUndefined()
+  expect(parseLibraryItem({ ...base, integration: null }).integration).toBe(
+    undefined
+  )
+  const item = parseLibraryItem({ ...base, integration })
+  expect(item.integration?.status?.toolCount).toBe(3)
+  expect(
+    parseLibraryItem({ ...base, integration: { ...integration, status: null } })
+      .integration?.status
+  ).toBeNull()
+})
+
+it("rejects malformed integrations", () => {
+  for (const bad of [
+    "x",
+    { ...integration, transport: "stdio" },
+    { ...integration, hosts: [1] },
+    { ...integration, secretNames: "A" },
+    { ...integration, status: { ...integration.status, checkedAt: 5 } },
+    { ...integration, status: { ...integration.status, state: 1 } },
+    { ...integration, status: { ...integration.status, revision: undefined } },
+    { ...integration, status: { ...integration.status, revision: "0" } },
+  ])
+    expect(() => parseLibraryItem({ ...base, integration: bad })).toThrow()
+})
+
+it("maps status states to messages", () => {
+  expect(integrationStatusMessage(null)).toBe("Not tested yet")
+  expect(
+    integrationStatusMessage({
+      state: "auth_failed",
+      checkedAt: "1",
+      toolCount: null,
+      detail: null,
+      revision: "1",
+    })
+  ).toMatch(/rejected/)
+  expect(
+    integrationStatusMessage({
+      state: "weird",
+      checkedAt: "1",
+      toolCount: null,
+      detail: null,
+      revision: "1",
+    })
+  ).toBe("weird")
+})
+
+it("explains the newer states and skipped reasons", () => {
+  const status = (state: string) => ({
+    state,
+    checkedAt: "1",
+    toolCount: null,
+    detail: null,
+    revision: "1",
   })
-  it.each([
-    { ...skill, id: "../escape" },
-    { ...skill, kind: "script" },
-    { ...skill, revision: 1 },
-    { ...skill, enabled: "true" },
-    { ...skill, files: [false] },
-  ])("rejects malformed library rows", (row) => {
-    expect(() => parseLibraryItems({ items: [row] })).toThrow()
+  expect(integrationStatusMessage(status("forbidden"))).toBe(
+    "Credentials were accepted but access is not allowed (403)."
+  )
+  for (const state of ["session_expired", "busy", "broker_unavailable"])
+    expect(integrationStatusMessage(status(state))).not.toBe(state)
+  for (const reason of ["unsupported_field", "unsupported_env"])
+    expect(skippedReasonMessage(reason)).not.toBe(reason)
+})
+
+it("explains the broker's lost-connection, egress and invalid states", () => {
+  const status = (state: string) => ({
+    state,
+    checkedAt: "1",
+    toolCount: null,
+    detail: null,
+    revision: "1",
   })
+  expect(integrationStatusMessage(status("connection_lost"))).toMatch(
+    /not retried/
+  )
+  expect(integrationStatusMessage(status("egress_not_configured"))).toMatch(
+    /network path/
+  )
+  expect(integrationStatusMessage(status("invalid"))).toMatch(/Re-import/)
 })

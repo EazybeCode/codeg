@@ -257,6 +257,10 @@ mod tests {
         let (org, _) = h::organization(&db, user, "admin").await;
         // Schema 19's steer table and schema 21's sharing defaults are newer
         // than 17: remove them too, or the inventory matches no known version.
+        // Schema 23's trash ledger is newest; it comes off first.
+        execute(&db, "DROP TABLE neev_node_trash", vec![])
+            .await
+            .unwrap();
         for table in super::super::knowledge_migration::DROP_ORDER {
             execute(&db, &format!("DROP TABLE {table}"), vec![])
                 .await

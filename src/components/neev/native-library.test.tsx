@@ -187,3 +187,189 @@ it("reloads a teammate's changes after a revision conflict and explains the resu
   expect(await screen.findByText(/This item changed/)).toBeVisible()
   await waitFor(() => expect(screen.getByRole("switch")).toBeChecked())
 })
+
+const mcp = {
+  ...skill,
+  id: "a230e18b-8102-4560-a358-6d8aac05c713",
+  name: "HubSpot",
+  kind: "mcp",
+  files: [],
+  integration: {
+    transport: "remote",
+    hosts: ["mcp.hubspot.com"],
+    // An env-shaped name on a REMOTE integration is still a header.
+    secretNames: ["APIKEY", "Authorization"],
+    source: "import",
+    notes: [],
+    status: null,
+  },
+}
+function renderLibrary() {
+  render(
+    <NativeTestRoot>
+      <NativeSuspendedSurface hidden={false}>
+        <NativeLibrary />
+      </NativeSuspendedSurface>
+    </NativeTestRoot>
+  )
+}
+
+it("shows members integration readiness without management controls", async () => {
+  mockNativeSession(
+    { ...orgSession, role: "member" },
+    { "GET /api/neev/library": () => json({ items: [mcp] }) }
+  )
+  const user = userEvent.setup()
+  renderLibrary()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  expect(await screen.findByText("HubSpot")).toBeVisible()
+  expect(screen.getByText(/Not tested yet/)).toBeVisible()
+  expect(screen.getByText(/mcp\.hubspot\.com/)).toBeVisible()
+  expect(screen.queryByText("Test")).not.toBeInTheDocument()
+  expect(screen.queryByText("Update credentials")).not.toBeInTheDocument()
+})
+
+it("lets admins test an integration and shows the fresh status", async () => {
+  const bodies: unknown[] = []
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [mcp] }),
+    [`POST /api/neev/library/${mcp.id}/test`]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json({
+        ...mcp,
+        integration: {
+          ...mcp.integration,
+          status: {
+            state: "auth_failed",
+            checkedAt: "1700000000",
+            toolCount: null,
+            detail: null,
+            revision: "1",
+          },
+        },
+      })
+    },
+  })
+  const user = userEvent.setup()
+  renderLibrary()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  await user.click(await screen.findByRole("button", { name: "Test HubSpot" }))
+  expect(await screen.findByText(/Credentials were rejected/)).toBeVisible()
+  expect(bodies).toEqual([{ expectedRevision: "1" }])
+})
+
+it("sends a pinned package's credentials as env", async () => {
+  const bodies: unknown[] = []
+  const pkg = {
+    ...mcp,
+    integration: {
+      ...mcp.integration,
+      transport: "package",
+      hosts: ["api.hubspot.com"],
+      secretNames: ["PRIVATE_APP_ACCESS_TOKEN"],
+    },
+  }
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [pkg] }),
+    [`PUT /api/neev/library/${mcp.id}/secrets`]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json({ code: "unavailable" }, 503)
+    },
+  })
+  const user = userEvent.setup()
+  renderLibrary()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  await user.click(
+    await screen.findByRole("button", { name: /Update credentials/ })
+  )
+  await user.type(
+    screen.getByLabelText("PRIVATE_APP_ACCESS_TOKEN"),
+    "pkg-token"
+  )
+  await user.click(screen.getByRole("button", { name: "Save credentials" }))
+  await waitFor(() => expect(bodies).toHaveLength(1))
+  expect(bodies[0]).toEqual({
+    expectedRevision: "1",
+    env: { PRIVATE_APP_ACCESS_TOKEN: "pkg-token" },
+    headers: {},
+  })
+})
+
+it("submits write-only credentials by transport, then clears them", async () => {
+  const bodies: unknown[] = []
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [mcp] }),
+    [`PUT /api/neev/library/${mcp.id}/secrets`]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json({ code: "unavailable" }, 503)
+    },
+  })
+  const user = userEvent.setup()
+  renderLibrary()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  await user.click(
+    await screen.findByRole("button", { name: /Update credentials/ })
+  )
+  const token = screen.getByLabelText("APIKEY")
+  expect(token).toHaveAttribute("type", "password")
+  expect(token).toHaveValue("")
+  await user.type(token, "s3cret-token")
+  await user.type(screen.getByLabelText("Authorization"), "Bearer xyz")
+  await user.click(screen.getByRole("button", { name: "Save credentials" }))
+  await waitFor(() => expect(bodies).toHaveLength(1))
+  expect(bodies[0]).toEqual({
+    expectedRevision: "1",
+    env: {},
+    headers: { APIKEY: "s3cret-token", Authorization: "Bearer xyz" },
+  })
+  expect(screen.queryByLabelText("APIKEY")).toBeNull()
+  expect(document.body.innerHTML).not.toContain("s3cret-token")
+  await user.click(
+    await screen.findByRole("button", { name: /Update credentials/ })
+  )
+  expect(screen.getByLabelText("APIKEY")).toHaveValue("")
+})
+
+it("explains which imported servers were skipped and why", async () => {
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [] }),
+    "POST /api/neev/library/import": () =>
+      json({
+        items: [mcp],
+        skipped: [{ name: "local-tool", reason: "unsupported_package" }],
+      }),
+  })
+  const user = userEvent.setup()
+  renderLibrary()
+  await user.upload(
+    await screen.findByLabelText("Import files"),
+    new File(["{}"], "mcp.json", { type: "application/json" })
+  )
+  expect(await screen.findByText(/local-tool/)).toHaveTextContent(
+    /not supported/
+  )
+})
+
+it("shows skipped reasons when an import stores nothing (422)", async () => {
+  const mock = mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [] }),
+    "POST /api/neev/library/import": () =>
+      json(
+        {
+          items: [],
+          skipped: [{ name: "local-tool", reason: "unsupported_package" }],
+        },
+        422
+      ),
+  })
+  const user = userEvent.setup()
+  renderLibrary()
+  await user.upload(
+    await screen.findByLabelText("Import files"),
+    new File(["{}"], "mcp.json", { type: "application/json" })
+  )
+  expect(await screen.findByText(/local-tool/)).toHaveTextContent(
+    /not supported/
+  )
+  expect(mock.unknown).toEqual([])
+})

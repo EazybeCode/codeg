@@ -183,6 +183,33 @@ def endpoints(provider: str, purpose: str) -> tuple:
     return _ENDPOINTS[_key(provider, purpose)]
 
 
+# Admin-configured integration hosts (shared MCP integrations). Exact public DNS
+# names on 443 only, never IP literals or local/internal names, and few of them:
+# the org library is bounded and each integration names one or two hosts.
+MAX_INTEGRATION_HOSTS = 32
+_LOCAL_SUFFIXES = (".local", ".localhost", ".internal", ".lan", ".home.arpa", ".onion")
+
+
+def integration_endpoints(hosts) -> tuple:
+    """Validated `Endpoint(host, 443)` for each admin-configured integration host.
+
+    Raises EndpointError on anything that is not a list/tuple of distinct, public
+    looking FQDNs. The proxy still resolves each host itself and refuses a private
+    answer, so this is the first of two gates, not the only one."""
+    if not isinstance(hosts, (list, tuple)) or len(hosts) > MAX_INTEGRATION_HOSTS:
+        raise EndpointError("host")
+    table = []
+    for host in hosts:
+        endpoint = Endpoint(host, 443, False)  # shape: lowercase FQDN, no wildcard
+        labels = host.split(".")
+        if labels[-1].isdigit() or host == "localhost" or host.endswith(_LOCAL_SUFFIXES):
+            raise EndpointError("host")
+        if any(existing.host == host for existing in table):
+            raise EndpointError("host")
+        table.append(endpoint)
+    return tuple(table)
+
+
 def hosts(provider: str, purpose: str) -> frozenset:
     return frozenset(endpoint.host for endpoint in endpoints(provider, purpose))
 

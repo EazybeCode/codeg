@@ -12,8 +12,10 @@ pub(crate) mod engine;
 pub(crate) mod error;
 mod gateway;
 pub(crate) mod http;
+pub(crate) mod integrations;
 pub(crate) mod knowledge;
 pub(crate) mod library;
+pub(crate) mod library_integrations;
 #[cfg(feature = "dev-agent")]
 pub mod dev_agent;
 pub(crate) mod mail;
@@ -48,6 +50,7 @@ pub fn run_provider_schema_downgrade() -> std::process::ExitCode {
 /// The operator step the arguments name, exactly; anything else is a usage error.
 fn downgrade_step(args: &[&str]) -> Option<i64> {
     match args {
+        ["--from", "23", "--to", "22", "--confirm"] => Some(23),
         ["--from", "22", "--to", "21", "--confirm"] => Some(22),
         ["--from", "21", "--to", "20", "--confirm"] => Some(21),
         ["--from", "20", "--to", "19", "--confirm"] => Some(20),
@@ -60,7 +63,7 @@ fn downgrade_step(args: &[&str]) -> Option<i64> {
 fn run_schema_downgrade_with(args: &[&str], url: Option<String>) -> u8 {
     let Some(step) = downgrade_step(args) else {
         eprintln!(
-            "usage: neev-schema-downgrade --from 22 --to 21 --confirm\n       neev-schema-downgrade --from 21 --to 20 --confirm\n       neev-schema-downgrade --from 20 --to 19 --confirm"
+            "usage: neev-schema-downgrade --from 23 --to 22 --confirm\n       neev-schema-downgrade --from 22 --to 21 --confirm\n       neev-schema-downgrade --from 21 --to 20 --confirm\n       neev-schema-downgrade --from 20 --to 19 --confirm"
         );
         return 2;
     };
@@ -81,6 +84,9 @@ fn run_schema_downgrade_with(args: &[&str], url: Option<String>) -> u8 {
             eprintln!("neev-schema-downgrade: cannot connect");
             return 1;
         };
+        if step == 23 {
+            return trash_downgrade_exit(db::downgrade_node_trash(&database).await);
+        }
         if step == 22 {
             return knowledge_downgrade_exit(db::downgrade_knowledge(&database).await);
         }
@@ -110,6 +116,36 @@ fn run_schema_downgrade_with(args: &[&str], url: Option<String>) -> u8 {
             }
         }
     })
+}
+
+/// 23 -> 22 (project/folder trash). Same codes as the other steps: 0 done, 3
+/// wrong marker, 4 something is in the trash (refused; nothing changed — restore
+/// it first or keep 23), 1 database error or unknown shape (rolled back).
+fn trash_downgrade_exit(
+    result: Result<db::node_trash_migration::Downgrade, error::AuthError>,
+) -> u8 {
+    use db::node_trash_migration::Downgrade;
+    match result {
+        Ok(Downgrade::Done) => {
+            println!("downgraded schema 23 -> 22; the trash was empty, every row preserved");
+            0
+        }
+        Ok(Downgrade::NotAtTwentyThree(version)) => {
+            println!("refused: schema is {version}, not 23; nothing changed");
+            3
+        }
+        Ok(Downgrade::TrashExists { rows }) => {
+            println!(
+                "refused: {rows} item(s) are in the project/folder trash; nothing changed — \
+                 restore them first or keep schema 23 (never delete them or restore over them)"
+            );
+            4
+        }
+        Err(_) => {
+            eprintln!("neev-schema-downgrade: database error or unknown schema shape; rolled back");
+            1
+        }
+    }
 }
 
 /// 22 -> 21 (org knowledge). Same codes as the other steps: 0 done, 3 wrong
@@ -177,6 +213,7 @@ mod downgrade_cli_tests {
 
     #[test]
     fn only_the_exact_operator_steps_are_accepted() {
+        assert_eq!(downgrade_step(&["--from", "23", "--to", "22", "--confirm"]), Some(23));
         assert_eq!(downgrade_step(&["--from", "22", "--to", "21", "--confirm"]), Some(22));
         assert_eq!(downgrade_step(&["--from", "21", "--to", "20", "--confirm"]), Some(21));
         assert_eq!(downgrade_step(&["--from", "20", "--to", "19", "--confirm"]), Some(20));
@@ -221,12 +258,15 @@ mod downgrade_cli_tests {
             })
         };
 
+        // A fresh install is schema 23; take the (empty) trash layer off first.
+        let trash_step = ["--from", "23", "--to", "22", "--confirm"];
         let (url, runtime, database) = open("empty.db");
         runtime.block_on(database.clone().close()).unwrap();
+        assert_eq!(run_schema_downgrade_with(&trash_step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 3);
         let (_, runtime, database) = open("empty.db");
-        assert_eq!(version(&runtime, &database), 22, "initialize re-migrates the downgraded file");
+        assert_eq!(version(&runtime, &database), 23, "initialize re-migrates the downgraded file");
 
         let (url, runtime, database) = open("data.db");
         runtime.block_on(async {
@@ -235,9 +275,10 @@ mod downgrade_cli_tests {
             db::execute(&database, "INSERT INTO neev_knowledge_settings(org_id,capture_enabled,capture_blocked,revision,updated_by,updated_at) VALUES($1,false,NULL,1,$2,1)", vec![org.into(), user.into()]).await.unwrap();
             database.clone().close().await.unwrap();
         });
+        assert_eq!(run_schema_downgrade_with(&trash_step, Some(url.clone())), 0);
         assert_eq!(run_schema_downgrade_with(&step, Some(url.clone())), 4);
         let (_, runtime, database) = open("data.db");
-        assert_eq!(version(&runtime, &database), 22);
+        assert_eq!(version(&runtime, &database), 23);
         let rows: i64 = runtime.block_on(async {
             db::one(&database, "SELECT COUNT(*) AS n FROM neev_knowledge_settings", vec![]).await.unwrap().unwrap().try_get("", "n").unwrap()
         });

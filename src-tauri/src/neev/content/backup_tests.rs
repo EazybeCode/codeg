@@ -310,6 +310,10 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
     // Schemas 18 (library), 19 (steer) and 21 (folder sharing defaults) are
     // newer than every inventory this fixture rebuilds; 20 only widened a
     // CHECK, which older markers tolerate.
+    // Schema 23's trash ledger is newest of all; it goes first.
+    db::execute(database, "DROP TABLE IF EXISTS neev_node_trash", vec![])
+        .await
+        .unwrap();
     for table in crate::neev::db::knowledge_migration::DROP_ORDER {
         db::execute(database, &format!("DROP TABLE IF EXISTS {table}"), vec![])
             .await

@@ -138,8 +138,26 @@ COPY --chown=0:0 scripts/operations/neev_agent_launch.py \
      scripts/operations/neev_slot_proxy.py \
      scripts/operations/neev_login_callback.py \
      scripts/operations/neev_browser_capture.py \
+     scripts/operations/neev_mcp_broker.py \
+     scripts/operations/neev_mcp_bridge.py \
+     scripts/operations/neev_mcp_check.py \
+     scripts/operations/neev_mcp_acceptance.py \
      /opt/neev/scripts/operations/
 RUN chmod 0555 /opt/neev/scripts/operations/*.py
+
+# Shared-integration MCP packages, pinned by the committed lockfile (npm ci
+# verifies every tarball's sha512 integrity; lifecycle scripts are never run).
+# Installed root-owned and read-only; the per-run broker starts them as its own
+# uid, so nothing is fetched at run time (agents have no registry egress).
+# Versions: @hubspot/mcp-server 0.4.0, @suekou/mcp-notion-server 2.0.2.
+COPY --chown=0:0 deploy/mcp-packages/package.json deploy/mcp-packages/package-lock.json /opt/neev/mcp/
+RUN cd /opt/neev/mcp \
+    && /opt/neev/node/bin/node /opt/neev/node/lib/node_modules/npm/bin/npm-cli.js ci \
+         --ignore-scripts --omit=dev --no-audit --no-fund \
+    && rm -rf /root/.npm \
+    && chown -R 0:0 /opt/neev/mcp && chmod -R a-w,a+rX /opt/neev/mcp \
+    && test -f /opt/neev/mcp/node_modules/@hubspot/mcp-server/dist/index.js \
+    && test -f /opt/neev/mcp/node_modules/@suekou/mcp-notion-server/build/index.js
 # The shared response-style policy the launcher carries into each paid turn.
 # Data, not code: root-owned and world-READABLE only, beside the launcher that
 # is the only thing allowed to load it.

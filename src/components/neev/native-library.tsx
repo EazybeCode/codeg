@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { BookOpen, Plug, Trash2, Upload } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { NativeDialogContent as DialogContent } from "./native-suspended-surface"
@@ -11,7 +12,11 @@ import {
   deleteLibraryItem,
   enableLibraryItem,
   importLibrary,
+  integrationStatusMessage,
   loadLibrary,
+  skippedReasonMessage,
+  testLibraryItem,
+  updateLibrarySecrets,
   type LibraryItem,
 } from "@/lib/neev-library"
 import { useNativeAuth } from "./native-auth-provider"
@@ -31,6 +36,11 @@ export function NativeLibrary() {
   const [error, setError] = useState<unknown>(null)
   const [notice, setNotice] = useState("")
   const [failures, setFailures] = useState<string[]>([])
+  const [skipped, setSkipped] = useState<
+    { file: string; name: string; reason: string }[]
+  >([])
+  const [secretItem, setSecretItem] = useState<LibraryItem | null>(null)
+  const [secrets, setSecrets] = useState<Record<string, string>>({})
   const [remove, setRemove] = useState<LibraryItem | null>(null)
   const [refresh, setRefresh] = useState(0)
   const alive = useRef(false)
@@ -90,14 +100,18 @@ export function NativeLibrary() {
   }
   async function upload(files: File[]) {
     setFailures([])
+    setSkipped([])
     await mutate(async () => {
       let count = 0
       const failed: string[] = []
+      const skips: { file: string; name: string; reason: string }[] = []
       for (const file of files) {
         if (!alive.current || auth.signal?.aborted) break
         try {
-          const added = await importLibrary(file, csrf, auth.signal)
+          const result = await importLibrary(file, csrf, auth.signal)
           if (!alive.current || auth.signal?.aborted) return
+          const added = result.items
+          for (const s of result.skipped) skips.push({ file: file.name, ...s })
           count += added.length
           if (added[0]) setKind(added[0].kind)
           setItems((rows) => [
@@ -115,12 +129,53 @@ export function NativeLibrary() {
       }
       if (alive.current && !auth.signal?.aborted) {
         setFailures(failed)
+        setSkipped(skips)
         if (count)
           setNotice(
             `${count} ${count === 1 ? "item imported" : "items imported"}. Review and enable for your team.`
           )
       }
     })
+  }
+  function closeSecrets() {
+    setSecretItem(null)
+    setSecrets({})
+  }
+  function submitSecrets() {
+    const item = secretItem
+    if (!item?.integration) return
+    const env: Record<string, string> = {}
+    const headers: Record<string, string> = {}
+    // The integration's transport decides where a credential goes: a pinned
+    // package reads environment variables, a remote server gets headers —
+    // never the shape of the name (a remote header may well be `APIKEY`).
+    const target = item.integration.transport === "package" ? env : headers
+    for (const name of item.integration.secretNames) {
+      const value = secrets[name]
+      if (!value) continue
+      target[name] = value
+    }
+    // Secrets never outlive the submit, whatever the outcome.
+    closeSecrets()
+    if (!Object.keys(env).length && !Object.keys(headers).length) return
+    void mutate(async () => {
+      const updated = await updateLibrarySecrets(
+        item,
+        env,
+        headers,
+        csrf,
+        auth.signal
+      )
+      if (alive.current && !auth.signal?.aborted) {
+        replaceItem(updated)
+        setNotice("Credentials updated. Run a test to confirm they work.")
+      }
+    })
+  }
+  function replaceItem(updated: LibraryItem) {
+    setItems((rows) =>
+      rows.map((row) => (row.id === updated.id ? updated : row))
+    )
   }
   const visible = items.filter((item) => item.kind === kind)
   return (
@@ -194,10 +249,22 @@ export function NativeLibrary() {
         <div role="alert" className="space-y-1 text-sm text-destructive">
           <p>Could not import: {failures.join(", ")}.</p>
           <p>
-            Use a skill ZIP containing SKILL.md, a SKILL.md file, or MCP JSON
-            without credentials. Check archive paths and supported
-            configuration.
+            Use a skill ZIP containing SKILL.md, a SKILL.md file, or MCP JSON.
+            Check archive paths and supported configuration.
           </p>
+        </div>
+      )}
+      {skipped.length > 0 && (
+        <div role="alert" className="space-y-1 text-sm text-destructive">
+          <p>Some servers were not imported:</p>
+          <ul className="list-disc space-y-1 pl-5">
+            {skipped.map((entry, index) => (
+              <li key={`${entry.file}-${entry.name}-${index}`}>
+                {entry.name || "(unnamed)"}:{" "}
+                {skippedReasonMessage(entry.reason)}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {loading ? (
@@ -261,6 +328,76 @@ export function NativeLibrary() {
                     {item.setupNote}
                   </p>
                 )}
+                {item.integration && (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>
+                      {item.integration.transport === "remote"
+                        ? "Remote"
+                        : "Pinned package"}
+                      {item.integration.hosts.length > 0 &&
+                        ` · Allowed hosts: ${item.integration.hosts.join(", ")}`}
+                    </p>
+                    {item.integration.secretNames.length > 0 && (
+                      <p className="break-words">
+                        Credentials: {item.integration.secretNames.join(", ")}
+                      </p>
+                    )}
+                    {item.integration.notes.map((note) => (
+                      <p key={note} className="break-words">
+                        {note}
+                      </p>
+                    ))}
+                    <p>
+                      Status:{" "}
+                      {integrationStatusMessage(item.integration.status)}
+                      {item.integration.status?.toolCount != null &&
+                        ` · ${item.integration.status.toolCount} tools`}
+                    </p>
+                    <p>Members’ agents can use it when enabled.</p>
+                    {admin && secretItem?.id === item.id && (
+                      <form
+                        className="space-y-2 pt-2"
+                        autoComplete="off"
+                        onSubmit={(event) => {
+                          event.preventDefault()
+                          submitSecrets()
+                        }}
+                      >
+                        {item.integration.secretNames.map((name) => (
+                          <label key={name} className="block space-y-1">
+                            <span>{name}</span>
+                            <Input
+                              type="password"
+                              autoComplete="new-password"
+                              aria-label={name}
+                              value={secrets[name] ?? ""}
+                              onChange={(event) => {
+                                const value = event.target.value
+                                setSecrets((prev) => ({
+                                  ...prev,
+                                  [name]: value,
+                                }))
+                              }}
+                            />
+                          </label>
+                        ))}
+                        <div className="flex gap-2">
+                          <Button type="submit" size="sm" disabled={busy}>
+                            Save credentials
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={closeSecrets}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+                )}
                 {item.files.length > 0 && (
                   <details className="text-xs text-muted-foreground">
                     <summary className="cursor-pointer">
@@ -284,6 +421,43 @@ export function NativeLibrary() {
               </div>
               {admin && (
                 <div className="flex shrink-0 items-center gap-3">
+                  {item.integration && (
+                    <>
+                      {item.integration.secretNames.length > 0 && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy}
+                          aria-label={`Update credentials for ${item.name}`}
+                          onClick={() => {
+                            setSecrets({})
+                            setSecretItem(item)
+                          }}
+                        >
+                          Update credentials
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        aria-label={`Test ${item.name}`}
+                        onClick={() =>
+                          void mutate(async () => {
+                            const updated = await testLibraryItem(
+                              item,
+                              csrf,
+                              auth.signal
+                            )
+                            if (alive.current && !auth.signal?.aborted)
+                              replaceItem(updated)
+                          })
+                        }
+                      >
+                        {busy ? "Working…" : "Test"}
+                      </Button>
+                    </>
+                  )}
                   <Switch
                     aria-label={`Enable ${item.name}`}
                     checked={item.enabled}

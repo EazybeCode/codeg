@@ -415,43 +415,8 @@ async fn sqlite_v3_forward_origin_hardening() {
 async fn postgres_v3_forward_origin_hardening() {
     use futures::FutureExt;
     for invalid in [false, true] {
-        let (db, admin, schema) = h::postgres_database().await;
-        super::tests::drop_mention_tables(&db).await;
-    super::tests::drop_attachment_tables(&db).await;
-        for table in [
-            "neev_gateway_revoke_intents",
-            "neev_gateway_redemptions",
-            "neev_gateway_relying_sessions",
-            "neev_gateway_exchanges",
-            "neev_gateway_relying_bindings",
-            "neev_gateway_revocations",
-            "neev_gateway_audience",
-        ] {
-            execute(&db, &format!("DROP TABLE {table}"), vec![])
-                .await
-                .unwrap();
-        }
-        for table in agent_status_migration::TABLE_NAMES.iter().rev() {
-            execute(&db, &format!("DROP TABLE {table}"), vec![])
-                .await
-                .unwrap();
-        }
-        execute(&db, "DROP TABLE neev_document_formats", vec![])
-            .await
-            .unwrap();
-        for table in agent_migration::TABLE_NAMES.iter().rev() {
-            execute(&db, &format!("DROP TABLE {table}"), vec![])
-                .await
-                .unwrap();
-        }
-        for table in content_migration::TABLE_NAMES.iter().rev() {
-            execute(&db, &format!("DROP TABLE {table}"), vec![])
-                .await
-                .unwrap();
-        }
-        execute(&db, "UPDATE neev_schema_version SET version=2", vec![])
-            .await
-            .unwrap();
+        let (db, admin, schema) = h::postgres_database_uninitialized().await;
+        initialize_v2(&db).await;
         let outcome = std::panic::AssertUnwindSafe(v3_forward_hardening(&db, invalid))
             .catch_unwind()
             .await;
