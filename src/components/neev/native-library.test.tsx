@@ -373,3 +373,156 @@ it("shows skipped reasons when an import stores nothing (422)", async () => {
   )
   expect(mock.unknown).toEqual([])
 })
+
+const SYNTHETIC_TOKEN = "github_pat_SYNTHETIC0000000000000000"
+function renderConnect() {
+  render(
+    <NativeTestRoot>
+      <NativeSuspendedSurface hidden={false}>
+        <NativeLibrary />
+      </NativeSuspendedSurface>
+    </NativeTestRoot>
+  )
+}
+function decodeImport(init: RequestInit) {
+  const body = JSON.parse(init.body as string) as {
+    fileName: string
+    data: string
+  }
+  return { fileName: body.fileName, config: JSON.parse(atob(body.data)) }
+}
+
+it("offers Connect GitHub to admins only", async () => {
+  mockNativeSession(
+    { ...orgSession, role: "member" },
+    { "GET /api/neev/library": () => json({ items: [] }) }
+  )
+  const user = userEvent.setup()
+  renderConnect()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  expect(
+    screen.queryByRole("button", { name: "Connect GitHub" })
+  ).not.toBeInTheDocument()
+})
+
+it("connects GitHub through the encrypted import, clears the token and does not claim it works", async () => {
+  const imports: { fileName: string; config: unknown }[] = []
+  const github = {
+    ...skill,
+    id: "b230e18b-8102-4560-a358-6d8aac05c714",
+    name: "github",
+    description: "",
+    kind: "mcp",
+    files: ["mcp.json", "integration.json"],
+    setupNote: null,
+    integration: {
+      transport: "remote",
+      hosts: ["api.githubcopilot.com"],
+      secretNames: ["Authorization"],
+      source: "http:https://api.githubcopilot.com/mcp/",
+      notes: [],
+      status: null,
+    },
+  }
+  const mock = mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [] }),
+    "POST /api/neev/library/import": (init) => {
+      imports.push(decodeImport(init))
+      return json({ items: [github], skipped: [] }, 201)
+    },
+  })
+  const user = userEvent.setup()
+  renderConnect()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  await user.click(screen.getByRole("button", { name: "Connect GitHub" }))
+  const token = screen.getByLabelText("GitHub token")
+  expect(token).toHaveAttribute("type", "password")
+  expect(token).toHaveAttribute("autocomplete", "off")
+  await user.type(token, SYNTHETIC_TOKEN)
+  await user.click(screen.getByRole("button", { name: "Connect" }))
+  await waitFor(() => expect(imports).toHaveLength(1))
+  expect(imports[0]).toEqual({
+    fileName: "github.json",
+    config: {
+      mcpServers: {
+        github: {
+          type: "http",
+          url: "https://api.githubcopilot.com/mcp/",
+          headers: { Authorization: `Bearer ${SYNTHETIC_TOKEN}` },
+        },
+      },
+    },
+  })
+  // The token never travels in a URL.
+  for (const [path] of mock.fetcher.mock.calls)
+    expect(String(path)).not.toContain(SYNTHETIC_TOKEN)
+  expect(
+    await screen.findByText(/GitHub was added but is not tested yet/)
+  ).toBeVisible()
+  expect(screen.getByText(/Status: Not tested yet/)).toBeVisible()
+  expect(screen.queryByText(/\bready\b/i)).not.toBeInTheDocument()
+  expect(screen.queryByLabelText("GitHub token")).not.toBeInTheDocument()
+  expect(document.body.innerHTML).not.toContain(SYNTHETIC_TOKEN)
+  // Re-opening starts empty.
+  await user.click(screen.getByRole("button", { name: "Connect GitHub" }))
+  expect(screen.getByLabelText("GitHub token")).toHaveValue("")
+})
+
+it("explains an existing GitHub integration and failures without echoing the token", async () => {
+  let calls = 0
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [] }),
+    "POST /api/neev/library/import": () => {
+      calls += 1
+      return calls === 1
+        ? json(
+            {
+              items: [],
+              skipped: [{ name: "github", reason: "duplicate_name" }],
+            },
+            422
+          )
+        : json({ code: "unavailable" }, 503)
+    },
+  })
+  const user = userEvent.setup()
+  renderConnect()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  const attempt = async (n: number) => {
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }))
+    await user.type(screen.getByLabelText("GitHub token"), SYNTHETIC_TOKEN)
+    await user.click(screen.getByRole("button", { name: "Connect" }))
+    await waitFor(() => expect(calls).toBe(n))
+  }
+  // Already connected: explained, nothing claimed.
+  await attempt(1)
+  expect(await screen.findByText(/github/i, { selector: "li" })).toBeVisible()
+  expect(document.body.innerHTML).not.toContain(SYNTHETIC_TOKEN)
+  // A server failure: an error, still no token anywhere.
+  await attempt(2)
+  expect(await screen.findByRole("alert")).toBeVisible()
+  expect(document.body.innerHTML).not.toContain(SYNTHETIC_TOKEN)
+  expect(
+    screen.queryByText(/GitHub was added but is not tested yet/)
+  ).not.toBeInTheDocument()
+}, 15000)
+
+it("refuses a token with spaces before sending anything", async () => {
+  let calls = 0
+  mockNativeSession(orgSession, {
+    "GET /api/neev/library": () => json({ items: [] }),
+    "POST /api/neev/library/import": () => {
+      calls += 1
+      return json({ items: [], skipped: [] }, 201)
+    },
+  })
+  const user = userEvent.setup()
+  renderConnect()
+  await user.click(await screen.findByRole("button", { name: "Integrations" }))
+  await user.click(screen.getByRole("button", { name: "Connect GitHub" }))
+  await user.type(screen.getByLabelText("GitHub token"), "two words")
+  await user.click(screen.getByRole("button", { name: "Connect" }))
+  expect(await screen.findByText(/single token/i)).toBeVisible()
+  expect(calls).toBe(0)
+  expect(document.body.innerHTML).not.toContain("two words")
+})

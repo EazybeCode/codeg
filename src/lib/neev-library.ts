@@ -251,6 +251,35 @@ async function importRequest(
   if (!parsed) return invalid()
   return parsed
 }
+/** GitHub's official remote MCP server (token as a Bearer header). */
+export const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
+const MAX_GITHUB_TOKEN_CHARS = 8000
+
+/** The trimmed token if it is one printable-ASCII word, else null. Nothing
+ * about the token's permissions is assumed: the admin's Test tells. */
+export function validGithubToken(value: string): string | null {
+  const token = value.trim()
+  if (!token || token.length > MAX_GITHUB_TOKEN_CHARS) return null
+  return /^[\x21-\x7e]+$/.test(token) ? token : null
+}
+
+/** An MCP JSON import for GitHub's remote server. It goes through the same
+ * admin import as any file: sealed server-side, never listed or returned. */
+export function githubConnectionFile(token: string): File {
+  const config = {
+    mcpServers: {
+      github: {
+        type: "http",
+        url: GITHUB_MCP_URL,
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    },
+  }
+  return new File([JSON.stringify(config)], "github.json", {
+    type: "application/json",
+  })
+}
+
 export async function importLibrary(
   file: File,
   csrf: string,

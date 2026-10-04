@@ -1,8 +1,10 @@
 import { expect, it } from "vitest"
 import {
+  githubConnectionFile,
   integrationStatusMessage,
   parseLibraryItem,
   skippedReasonMessage,
+  validGithubToken,
 } from "./neev-library"
 
 const base = {
@@ -111,4 +113,34 @@ it("explains the broker's lost-connection, egress and invalid states", () => {
     /network path/
   )
   expect(integrationStatusMessage(status("invalid"))).toMatch(/Re-import/)
+})
+
+it("builds the GitHub remote MCP connection and validates the token shape", async () => {
+  expect(validGithubToken(" github_pat_ABC123 ")).toBe("github_pat_ABC123")
+  for (const bad of [
+    "",
+    "   ",
+    "two words",
+    "tab\there",
+    "naïve",
+    "x".repeat(8001),
+  ])
+    expect(validGithubToken(bad)).toBeNull()
+  const file = githubConnectionFile("github_pat_ABC123")
+  expect(file.name).toBe("github.json")
+  const text = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error)
+    reader.onload = () => resolve(String(reader.result))
+    reader.readAsText(file)
+  })
+  expect(JSON.parse(text)).toEqual({
+    mcpServers: {
+      github: {
+        type: "http",
+        url: "https://api.githubcopilot.com/mcp/",
+        headers: { Authorization: "Bearer github_pat_ABC123" },
+      },
+    },
+  })
 })

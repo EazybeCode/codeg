@@ -11,12 +11,14 @@ import { NativeClientError } from "@/lib/neev-client"
 import {
   deleteLibraryItem,
   enableLibraryItem,
+  githubConnectionFile,
   importLibrary,
   integrationStatusMessage,
   loadLibrary,
   skippedReasonMessage,
   testLibraryItem,
   updateLibrarySecrets,
+  validGithubToken,
   type LibraryItem,
 } from "@/lib/neev-library"
 import { useNativeAuth } from "./native-auth-provider"
@@ -42,6 +44,9 @@ export function NativeLibrary() {
   const [secretItem, setSecretItem] = useState<LibraryItem | null>(null)
   const [secrets, setSecrets] = useState<Record<string, string>>({})
   const [remove, setRemove] = useState<LibraryItem | null>(null)
+  const [githubOpen, setGithubOpen] = useState(false)
+  const [githubToken, setGithubToken] = useState("")
+  const [githubInvalid, setGithubInvalid] = useState(false)
   const [refresh, setRefresh] = useState(0)
   const alive = useRef(false)
   const locked = useRef(false)
@@ -137,6 +142,40 @@ export function NativeLibrary() {
       }
     })
   }
+  function closeGithub() {
+    setGithubOpen(false)
+    setGithubToken("")
+  }
+  function connectGithub() {
+    const token = validGithubToken(githubToken)
+    // The token never outlives the submit, whatever the outcome.
+    closeGithub()
+    if (!token) {
+      setGithubInvalid(true)
+      return
+    }
+    setGithubInvalid(false)
+    setFailures([])
+    setSkipped([])
+    void mutate(async () => {
+      const result = await importLibrary(
+        githubConnectionFile(token),
+        csrf,
+        auth.signal
+      )
+      if (!alive.current || auth.signal?.aborted) return
+      const added = result.items
+      setSkipped(result.skipped.map((s) => ({ file: "github.json", ...s })))
+      setItems((rows) => [
+        ...rows.filter((row) => !added.some((item) => item.id === row.id)),
+        ...added,
+      ])
+      if (added.length)
+        setNotice(
+          "GitHub was added but is not tested yet. Press Test, then enable it for your team."
+        )
+    })
+  }
   function closeSecrets() {
     setSecretItem(null)
     setSecrets({})
@@ -214,6 +253,19 @@ export function NativeLibrary() {
             </button>
           ))}
         </div>
+        {admin && kind === "mcp" && (
+          <Button
+            variant="outline"
+            disabled={busy}
+            onClick={() => {
+              setGithubInvalid(false)
+              setGithubToken("")
+              setGithubOpen(true)
+            }}
+          >
+            Connect GitHub
+          </Button>
+        )}
         {admin && (
           <label
             className={cn(
@@ -239,6 +291,47 @@ export function NativeLibrary() {
           </label>
         )}
       </div>
+      {admin && githubOpen && (
+        <form
+          className="space-y-2 rounded-xl border p-4"
+          aria-label="Connect GitHub"
+          onSubmit={(event) => {
+            event.preventDefault()
+            connectGithub()
+          }}
+        >
+          <label className="block space-y-1 text-sm">
+            <span>GitHub token</span>
+            <Input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="GitHub token"
+              value={githubToken}
+              onChange={(event) => setGithubToken(event.target.value)}
+            />
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Connects GitHub&apos;s remote MCP server for everyone in this
+            workspace. The token is stored encrypted and is never shown to
+            agents or members. Use a token that can read what your team needs;
+            Test will report whether GitHub accepts it.
+          </p>
+          <div className="flex gap-2">
+            <Button type="submit" disabled={busy || !githubToken}>
+              Connect
+            </Button>
+            <Button type="button" variant="ghost" onClick={closeGithub}>
+              Cancel
+            </Button>
+          </div>
+        </form>
+      )}
+      {githubInvalid && (
+        <p role="alert" className="text-sm text-destructive">
+          Paste the GitHub token as a single token, without spaces.
+        </p>
+      )}
       <NativeError error={error} />
       {notice && (
         <p role="status" className="text-sm text-muted-foreground">

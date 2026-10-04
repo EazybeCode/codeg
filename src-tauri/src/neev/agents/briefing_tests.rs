@@ -818,3 +818,29 @@ async fn every_briefed_run_is_told_about_outputs_and_to_try_its_tools_once() {
         assert!(text.find("<output-directory>").unwrap() < fence);
     }
 }
+
+#[tokio::test]
+async fn every_briefed_run_knows_where_shared_connections_are_made_and_what_personal_connectors_are() {
+    // A run with NO shared integrations must still be told the truth: the org
+    // connects services for everyone in Settings › Shared library, an agent
+    // cannot create one from chat, and a connector that comes with the
+    // provider's own account is the user's personal one, not Neev's.
+    let database = h::database().await;
+    let harness = Harness::new(database.clone()).await;
+    let text = brief(
+        &harness,
+        &harness.alice_a,
+        Scope::Session { node_id: None },
+        "can you read our github repo?",
+    )
+    .await;
+    assert_eq!(text.matches("<shared-connections>").count(), 1);
+    assert!(text.contains("Settings › Shared library › Integrations"));
+    assert!(text.contains("cannot create, save or change a connection from chat"));
+    assert!(text.contains("personal"));
+    assert!(text.contains("not Neev"));
+    // No promise about any service's permissions or scopes.
+    for promise in ["scope", "repo:", "read:org", "will have access"] {
+        assert!(!text.to_lowercase().contains(promise), "no permission promise: {promise}");
+    }
+}

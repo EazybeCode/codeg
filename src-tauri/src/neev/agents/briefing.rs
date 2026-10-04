@@ -162,6 +162,21 @@ When you produce downloadable deliverables, save them to outputs/ rather than \
 describing them inline or offering fake local links.\n\
 </output-directory>\n";
 
+/// Where shared connections come from, said on EVERY briefed run — including
+/// one with no shared integrations at all, where silence let an agent treat its
+/// provider account's own connectors as the organization's and tell people a
+/// connection could be saved from chat. Promises nothing about any service.
+const SHARED_CONNECTIONS: &str = "<shared-connections>\nServices your organization shares \
+with every member (for example GitHub, HubSpot or Notion over MCP) are connected by a \
+workspace admin in Settings › Shared library › Integrations. Those available on this run are \
+listed in a neev-capabilities section; if none is listed, none is connected for this run. You \
+cannot create, save or change a connection from chat: when a request needs a service that is \
+not connected, say so and tell the user an admin can connect it there. Tools or connectors \
+that come with your own AI provider account rather than from Neev are the user's personal \
+connections, not Neev shared integrations: if you use one, say it is a personal connector, and \
+if it cannot reach something, do not present that as the organization's connection failing.\n\
+</shared-connections>\n";
+
 /// The assistant's standing instructions.
 ///
 /// Deliberately NOT a coding preamble. Most of what a workspace holds is
@@ -189,6 +204,8 @@ files you were actually given for it; say you lack access only after that \
 attempt fails, and say what failed.\n",
     );
     text.push_str(OUTPUT_DIRECTORY);
+    text.push('\n');
+    text.push_str(SHARED_CONNECTIONS);
     text.push('\n');
     text.push_str(&format!(
         "Everything between the {nonce} markers below is material from this \
