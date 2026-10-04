@@ -938,6 +938,7 @@ impl Harness {
                 plan,
             },
             runtimes,
+            None,
         );
         (turn.run_id, live)
     }

@@ -719,8 +719,12 @@ pub(crate) fn start_with_purpose(
 ///   launched; while executing, exactly an ordinary cancel; while reviewing,
 ///   the review is abandoned and the turn settles `completed`.
 /// - Steering reaches the executor only; any other phase is `Unsupported`.
-/// - Never published to a team chat: a supervised turn is a private session
-///   turn (team invocations stay on `start`).
+/// - `publish` (a team ask in a resource chat): ONLY the executor's final
+///   reply is published, once, after the review step — never the plan or the
+///   review, which stay in the invoker's private trace. A Stop while planning
+///   or reviewing publishes nothing and settles the turn `canceled` (a team
+///   turn is `completed` only once the room can see its reply), and a failed
+///   publish settles it as an honest failure, exactly as `drive` does.
 // Called by `http::agent_sessions::start_turn` for a supervised Auto turn.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_supervised(
@@ -731,6 +735,7 @@ pub(crate) fn start_supervised(
     turn_id: String,
     start: SupervisedStart,
     runtimes: SupervisionRuntimes,
+    publish: Option<TeamPublication>,
 ) -> Arc<LiveRun> {
     let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
     let first = if start.plan.planner.is_some() {
@@ -760,6 +765,7 @@ pub(crate) fn start_supervised(
         live.clone(),
         start,
         runtimes,
+        publish,
     ));
     live
 }
@@ -790,7 +796,9 @@ async fn drive_supervised(
     live: Arc<LiveRun>,
     start: SupervisedStart,
     runtimes: SupervisionRuntimes,
+    publish: Option<TeamPublication>,
 ) {
+    let chat_id = publish.as_ref().map(|p| p.chat_id.clone());
     let SupervisedStart {
         mut executor,
         request_text,
@@ -870,7 +878,7 @@ async fn drive_supervised(
         &actor,
         &live,
         &mut handle,
-        None,
+        chat_id.as_deref(),
         workspace_root.as_ref(),
         &RunPurpose::Chat,
     )
@@ -917,14 +925,36 @@ async fn drive_supervised(
         live.record_supervision(supervision::review_step(reviewer, &result, &coverage));
     }
 
+    // A team ask publishes the executor's final reply (and its outputs) once,
+    // after supervision — never the plan or the review — before it settles.
+    let mut status = outcome.status;
+    let mut error_code = outcome.error_code;
+    if let (Some(publication), TurnStatus::Completed) = (&publish, status) {
+        if live.stop_requested() {
+            // Stopped while reviewing: the room never sees a reply, so the turn
+            // must not say it completed.
+            status = TurnStatus::Canceled;
+            error_code = Some("canceled");
+        } else if let Err(code) = publish_reply_with_attachments(
+            &state,
+            publication,
+            &outcome.response,
+            &outcome.generated_keys,
+        )
+        .await
+        {
+            status = TurnStatus::Failed;
+            error_code = Some(code);
+        }
+    }
     live.set_phase(RunPhase::Settling);
     finalize(
         &state,
         &run_id,
         &live,
         &outcome.response,
-        outcome.status,
-        outcome.error_code,
+        status,
+        error_code,
         false,
     )
     .await;

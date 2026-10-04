@@ -479,6 +479,34 @@ async fn retry_team(
         library_items,
         min_free_lanes: 1,
     };
+    // A supervised team ask is retried supervised (re-resolved now on the
+    // caller's own Claude), publishing only its final reply, exactly like the
+    // first attempt; if supervision is no longer possible it runs ordinarily.
+    let was_supervised = failed
+        .activity
+        .iter()
+        .any(|item| item.id.starts_with("supervision:"));
+    if was_supervised {
+        let (plan, _) = super::routing::resolve_supervision(&state, &actor).await;
+        if !plan.is_empty() {
+            let request_text = turn.prompt.clone();
+            runs::start_supervised(
+                state.clone(),
+                turn.run_id.clone(),
+                actor.clone(),
+                session.id.clone(),
+                turn.id.clone(),
+                runs::supervision::SupervisedStart {
+                    executor: run_request,
+                    request_text,
+                    plan,
+                },
+                runs::supervision::SupervisionRuntimes::shared(state.agents.clone()),
+                Some(publication),
+            );
+            return created(turn, Vec::new());
+        }
+    }
     let turn = launch(
         &state,
         &actor,
@@ -619,6 +647,8 @@ async fn retry_private(
                     plan,
                 },
                 runs::supervision::SupervisionRuntimes::shared(state.agents.clone()),
+                // A private session is never published.
+                None,
             );
             return created(turn, attachment_dtos(carried));
         }

@@ -1118,7 +1118,92 @@ pub(crate) async fn begin_turn_with_attachments(
     request_id: Option<&str>,
     attachment_keys: &[String],
 ) -> Result<(AgentTurn, bool), ContentError> {
-    begin(state, actor, session_id, text, request_id, attachment_keys, None).await
+    begin(state, actor, session_id, text, request_id, attachment_keys, None, None).await
+}
+
+/// Begin a team ask on one of the invoker's holders for `chat_id`, idempotent
+/// by `request_id` across ALL of their holders for that chat (see `begin`):
+/// whichever provider an earlier attempt ran on, the same request is that turn.
+pub(crate) async fn begin_team_turn(
+    state: &ServerState,
+    actor: &OrgContext,
+    chat_id: &str,
+    session_id: &str,
+    text: &str,
+    request_id: &str,
+) -> Result<(AgentTurn, bool), ContentError> {
+    begin(state, actor, session_id, text, Some(request_id), &[], None, Some(chat_id)).await
+}
+
+/// The invoker's holder ids for one chat: one per provider, deterministic.
+fn team_holder_ids(actor: &OrgContext, chat_id: &str) -> Vec<String> {
+    super::types::Provider::ALL
+        .iter()
+        .map(|provider| team_session_id(actor.org_id, actor.identity.user_id, chat_id, provider.name()))
+        .collect()
+}
+
+/// A turn for `request_id` on one of the invoker's OTHER holders for the chat.
+async fn sibling_turn_by_request<C: ConnectionTrait>(
+    db: &C,
+    actor: &OrgContext,
+    chat_id: &str,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Option<AgentTurn>, ContentError> {
+    for id in team_holder_ids(actor, chat_id) {
+        if id == session_id {
+            continue;
+        }
+        if let Some(turn) = turn_by_request(db, actor.org_id, &id, request_id).await? {
+            return Ok(Some(turn));
+        }
+    }
+    Ok(None)
+}
+
+/// The turn a team ask with this `request_id` already created, on any of the
+/// invoker's holders for the chat — looked up BEFORE routing, so a retry
+/// replays its first attempt instead of being decided (and run) again.
+pub(crate) async fn team_turn_by_request(
+    state: &ServerState,
+    actor: &OrgContext,
+    chat_id: &str,
+    request_id: &str,
+) -> Result<Option<AgentTurn>, ContentError> {
+    let request_id = org::normalize_request_id(request_id).map_err(|_| ContentError::Invalid)?;
+    let tx = resources::begin(state, actor).await?;
+    let found = sibling_turn_by_request(&tx, actor, chat_id, "", &request_id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(found)
+}
+
+/// The invoker's most recently used holder for this chat, if any: what an Auto
+/// follow-up continues (its provider is fixed, like an Agent Chat's). "Used"
+/// means it has the newest TURN — a holder whose settings were merely written
+/// by an attempt that then replayed elsewhere does not count.
+pub(crate) async fn latest_team_session(
+    state: &ServerState,
+    actor: &OrgContext,
+    chat_id: &str,
+) -> Result<Option<AgentSession>, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    let row = db::one(
+        &tx,
+        &format!(
+            "SELECT {SESSION_COLUMNS} FROM neev_agent_sessions s WHERE org_id=$1 AND owner_id=$2 AND kind='team' AND bound_chat_id=$3 AND archived=false ORDER BY COALESCE((SELECT MAX(t.created_at) FROM neev_agent_turns t WHERE t.org_id=s.org_id AND t.session_id=s.id),0) DESC,updated_at DESC,id LIMIT 1"
+        ),
+        vec![actor.org_id.into(), actor.identity.user_id.into(), chat_id.into()],
+    )
+    .await?;
+    let found = row.map(|row| session_row(&row)).transpose()?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    // Only a holder whose id is the deterministic one for its provider counts.
+    Ok(found.filter(|session| {
+        session.id == team_session_id(actor.org_id, actor.identity.user_id, chat_id, &session.provider)
+    }))
 }
 
 /// Begin an Auto turn: the routed selection becomes the session's settings in
@@ -1136,9 +1221,10 @@ pub(crate) async fn begin_routed_turn(
     routed: &RoutedSettings,
 ) -> Result<(AgentTurn, bool), ContentError> {
     model(&routed.model)?;
-    begin(state, actor, session_id, text, None, attachment_keys, Some(routed)).await
+    begin(state, actor, session_id, text, None, attachment_keys, Some(routed), None).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn begin(
     state: &ServerState,
     actor: &OrgContext,
@@ -1147,6 +1233,7 @@ async fn begin(
     request_id: Option<&str>,
     attachment_keys: &[String],
     routed: Option<&RoutedSettings>,
+    team_chat: Option<&str>,
 ) -> Result<(AgentTurn, bool), ContentError> {
     let text = prompt(text)?;
     let request_id = request_id
@@ -1176,6 +1263,20 @@ async fn begin(
             // what makes two simultaneous retries safe: exactly one caller can
             // ever be told it created the turn.
             return Ok((existing, false));
+        }
+        // A team ask may run on whichever provider Auto chose, so the same
+        // request can arrive at a DIFFERENT holder of this chat (a retry that
+        // routed elsewhere, or two first attempts racing). Answered here, in the
+        // transaction the global admission guard serializes, so exactly one
+        // attempt ever creates the turn and every other replays it.
+        if let Some(chat_id) = team_chat {
+            if let Some(existing) =
+                sibling_turn_by_request(&tx, actor, chat_id, session_id, request).await?
+            {
+                session::recheck(&tx, actor, state.clock.now_unix()).await?;
+                tx.commit().await.map_err(database_error)?;
+                return Ok((existing, false));
+            }
         }
     }
     // After the replay answer, so a retry of a turn that already exists still

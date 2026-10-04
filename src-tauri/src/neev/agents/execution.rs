@@ -1105,6 +1105,12 @@ pub(crate) struct FakeRuntime {
     /// Integration checks: the state per key (default `ready`), and a log.
     check_states: std::collections::HashMap<String, String>,
     checks: Option<std::sync::Arc<std::sync::Mutex<Vec<crate::neev::integrations::IntegrationCheckRequest>>>>,
+    /// Never complete a TOOL-FREE (supervisor) run on its own, while ordinary
+    /// runs still complete: a Stop can then arrive during a review.
+    hang_tool_free: bool,
+    /// Refuse the next N ordinary (executor) runs with this error, then run
+    /// normally; tool-free runs are unaffected. Shared across clones.
+    fail_executor: Option<(std::sync::Arc<std::sync::atomic::AtomicUsize>, ExecutionError)>,
 }
 
 /// `(file name, bytes)` outputs for a request.
@@ -1134,6 +1140,8 @@ impl FakeRuntime {
             tool_free_requests: None,
             check_states: std::collections::HashMap::new(),
             checks: None,
+            hang_tool_free: false,
+            fail_executor: None,
         }
     }
 
@@ -1229,6 +1237,21 @@ impl FakeRuntime {
         self.hang = true;
         self
     }
+
+    /// Supervisor (tool-free) runs never finish on their own.
+    pub(crate) fn hanging_tool_free(mut self) -> Self {
+        self.hang_tool_free = true;
+        self
+    }
+
+    /// The next `count` executor launches fail with `error`.
+    pub(crate) fn failing_first_executor_runs(mut self, count: usize, error: ExecutionError) -> Self {
+        self.fail_executor = Some((
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(count)),
+            error,
+        ));
+        self
+    }
 }
 
 /// Write a spool exactly as the launcher does: `spool/run-<id>/manifest.json`
@@ -1256,6 +1279,34 @@ fn write_fake_spool(root: &Path, run_id: &str, outputs: &FakeOutputs) -> std::io
 
 impl AgentExecutionRuntime for FakeRuntime {
     async fn run(&self, request: RunRequest) -> Result<RunHandle, ExecutionError> {
+        self.fake_run(request, self.hang, true).await
+    }
+
+    /// Declines exactly what production declines, then streams the scripted
+    /// chunks through the same [`text_only`] guard.
+    async fn run_tool_free(&self, request: ToolFreeRequest) -> Result<RunHandle, ExecutionError> {
+        validate_tool_free(&request)?;
+        if let Some(log) = &self.tool_free_requests {
+            if let Ok(mut log) = log.lock() {
+                log.push(request.clone());
+            }
+        }
+        let limit = request.max_output_bytes;
+        Ok(text_only(
+            self.fake_run(request.as_run_request(), self.hang || self.hang_tool_free, false)
+                .await?,
+            limit,
+        ))
+    }
+}
+
+impl FakeRuntime {
+    async fn fake_run(
+        &self,
+        request: RunRequest,
+        hang: bool,
+        executor: bool,
+    ) -> Result<RunHandle, ExecutionError> {
         if request.prompt.trim().is_empty() {
             return Err(ExecutionError::Unauthorized);
         }
@@ -1267,6 +1318,15 @@ impl AgentExecutionRuntime for FakeRuntime {
         if let Some(error) = &self.fail {
             return Err(error.clone());
         }
+        if let (true, Some((left, error))) = (executor, &self.fail_executor) {
+            use std::sync::atomic::Ordering;
+            if left
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return Err(error.clone());
+            }
+        }
         let lane = match &self.slots {
             Some(slots) => Some((
                 slots.clone(),
@@ -1276,7 +1336,7 @@ impl AgentExecutionRuntime for FakeRuntime {
             )),
             None => None,
         };
-        let run_id = if self.responder.is_some() || self.slots.is_some() || self.hang {
+        let run_id = if self.responder.is_some() || self.slots.is_some() || hang {
             uuid::Uuid::new_v4().to_string()
         } else {
             format!("run-{}-{}", request.user_id, request.chat_id)
@@ -1294,7 +1354,6 @@ impl AgentExecutionRuntime for FakeRuntime {
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
         let chunks = self.chunks.clone();
         let started = run_id.clone();
-        let hang = self.hang;
         tokio::spawn(async move {
             // Held for the life of the run; released when this task ends.
             let _lane = lane.map(|(slots, lane)| ReleaseOnDrop { slots, lane });
@@ -1328,19 +1387,6 @@ impl AgentExecutionRuntime for FakeRuntime {
             steer_tx: None, // FakeRuntime does not support steering
             supports_steering: false,
         })
-    }
-
-    /// Declines exactly what production declines, then streams the scripted
-    /// chunks through the same [`text_only`] guard.
-    async fn run_tool_free(&self, request: ToolFreeRequest) -> Result<RunHandle, ExecutionError> {
-        validate_tool_free(&request)?;
-        if let Some(log) = &self.tool_free_requests {
-            if let Ok(mut log) = log.lock() {
-                log.push(request.clone());
-            }
-        }
-        let limit = request.max_output_bytes;
-        Ok(text_only(self.run(request.as_run_request()).await?, limit))
     }
 }
 

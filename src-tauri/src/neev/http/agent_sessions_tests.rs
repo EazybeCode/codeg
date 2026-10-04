@@ -2608,7 +2608,28 @@ mod auto_routing {
         supervision: crate::neev::config::SupervisionMode,
         connected: &[&str],
     ) -> Full {
-        let database = h::database().await;
+        full_with(router, supervision, connected, |runtime| runtime).await
+    }
+
+    /// `full` with the fake runtime adjusted (hanging runs or supervisors,
+    /// failing executor launches).
+    async fn full_with(
+        router: Router,
+        supervision: crate::neev::config::SupervisionMode,
+        connected: &[&str],
+        tweak: fn(FakeRuntime) -> FakeRuntime,
+    ) -> Full {
+        full_on(h::database().await, router, supervision, connected, tweak).await
+    }
+
+    /// `full_with` on a given database (an isolated PostgreSQL one included).
+    async fn full_on(
+        database: sea_orm::DatabaseConnection,
+        router: Router,
+        supervision: crate::neev::config::SupervisionMode,
+        connected: &[&str],
+        tweak: fn(FakeRuntime) -> FakeRuntime,
+    ) -> Full {
         let user = h::native_account(&database, "owner", "owner@example.test").await;
         let (org, _) = h::organization(&database, user, "admin").await;
         let mut handles = HashMap::new();
@@ -2635,11 +2656,11 @@ mod auto_routing {
             ServerState::new(database.clone(), config, Arc::new(h::TestClock::new(NOW))).unwrap();
         let runs: Runs = Arc::new(std::sync::Mutex::new(Vec::new()));
         let tool_free: ToolFree = Arc::new(std::sync::Mutex::new(Vec::new()));
-        server_state.set_agent_runtime(AgentRuntime::Fake(
-            FakeRuntime::new(vec!["done".to_owned()])
-                .recording(runs.clone())
-                .recording_tool_free(tool_free.clone()),
-        ));
+        let runtime = FakeRuntime::new(vec!["done".to_owned()])
+            .recording(runs.clone())
+            .recording_tool_free(tool_free.clone());
+        let runtime = tweak(runtime);
+        server_state.set_agent_runtime(AgentRuntime::Fake(runtime));
         server_state.set_agent_router(router);
         let state = Arc::new(server_state);
         let client = sign_in(&state, &database, user).await;
@@ -2953,5 +2974,498 @@ mod auto_routing {
         assert!(!serde_json::to_string(&retried["activity"])
             .unwrap()
             .contains("supervision:"));
+    }
+
+    // ---- Auto in a resource-bound chat ("Ask agent" in NativeChat) ----
+
+    async fn team_chat(f: &Full) -> (String, String) {
+        let actor = h::scoped_context(&f.state.database, f.user, f.org, NOW).await;
+        make_chat(&f.state, &actor).await
+    }
+
+    async fn team_ask(
+        f: &Full,
+        chat: &(String, String),
+        prompt: &str,
+        provider: &str,
+        auto: Option<bool>,
+        request_id: &str,
+    ) -> axum_test::TestResponse {
+        let mut body = serde_json::json!({
+            "prompt": prompt,
+            "provider": provider,
+            "model": "default",
+            "requestId": request_id,
+            "expectedAuthRevision": chat.1,
+        });
+        if let Some(auto) = auto {
+            body["auto"] = Value::Bool(auto);
+        }
+        f.client
+            .post(&format!("/api/neev/chats/{}/agent", chat.0))
+            .json(&body)
+            .await
+    }
+
+    async fn drain(f: &Full, run_id: &str) {
+        f.client
+            .get(&format!("/api/neev/agent/runs/{run_id}/events"))
+            .await
+            .text();
+    }
+
+    async fn chat_messages(f: &Full, chat: &(String, String)) -> Vec<Value> {
+        f.client
+            .get(&format!("/api/neev/chats/{}/messages", chat.0))
+            .await
+            .json::<Value>()["items"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    fn holder(f: &Full, chat: &(String, String), provider: &str) -> String {
+        crate::neev::agents::sessions::team_session_id(f.org, f.user, &chat.0, provider)
+    }
+
+    async fn holder_turns(f: &Full, chat: &(String, String), provider: &str) -> usize {
+        let count = crate::neev::db::one(
+            &f.state.database,
+            "SELECT COUNT(*) AS n FROM neev_agent_turns WHERE org_id=$1 AND session_id=$2",
+            vec![f.org.into(), holder(f, chat, provider).into()],
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "n")
+        .unwrap();
+        count as usize
+    }
+
+    #[tokio::test]
+    async fn a_team_ask_without_auto_is_unchanged_and_carries_no_route() {
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Opus", 2.0);
+        let f = full(router, SupervisionMode::Off, &["claude", "codex"]).await;
+        let chat = team_chat(&f).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let response = team_ask(&f, &chat, "Summarise the thread", "codex", None, &id).await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let body = response.json::<Value>();
+        assert!(body.get("route").is_none(), "{body}");
+        assert_eq!(body["turn"]["provider"], "codex");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 0, "no decision without auto");
+        // `auto: false` is accepted and means exactly the same.
+        let explicit = team_ask(&f, &chat, "Again", "codex", Some(false), &uuid::Uuid::new_v4().to_string()).await;
+        explicit.assert_status(axum::http::StatusCode::CREATED);
+        assert!(explicit.json::<Value>().get("route").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_first_auto_ask_routes_across_providers_and_publishes_once() {
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Opus", 1.0);
+        let f = full(router, SupervisionMode::Off, &["claude", "codex"]).await;
+        let chat = team_chat(&f).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let response =
+            team_ask(&f, &chat, "Redesign the sync engine across services", "codex", Some(true), &id).await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let body = response.json::<Value>();
+        assert_eq!(body["route"]["outcome"], "routed", "{body}");
+        assert_eq!(body["route"]["provider"], "claude");
+        assert_eq!(body["route"]["model"], "opus");
+        assert_eq!(body["turn"]["provider"], "claude");
+        assert_eq!(body["turn"]["model"], "opus");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 1);
+        // The routed provider's holder carries the routed settings; the
+        // composer's provider got no holder and no turn.
+        let actor = h::scoped_context(&f.state.database, f.user, f.org, NOW).await;
+        let claude = crate::neev::agents::sessions::get(&f.state, &actor, &holder(&f, &chat, "claude"))
+            .await
+            .unwrap();
+        assert_eq!(claude.model, "opus");
+        assert_eq!(holder_turns(&f, &chat, "codex").await, 0);
+        {
+            let runs = f.runs.lock().unwrap();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].provider, "claude");
+            assert_eq!(runs[0].model, "opus");
+            assert_eq!(runs[0].credential_handle.as_ref(), f.handles.get("claude"));
+        }
+        drain(&f, body["runId"].as_str().unwrap()).await;
+        let items = chat_messages(&f, &chat).await;
+        assert_eq!(items.len(), 2, "the ask and one reply: {items:?}");
+        assert_eq!(items[1]["authorKind"], "agent");
+        assert_eq!(items[1]["agentLabel"], "claude");
+    }
+
+    #[tokio::test]
+    async fn a_retried_auto_ask_replays_without_deciding_or_running_again() {
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Opus", 1.0);
+        let f = full(router, SupervisionMode::Off, &["claude", "codex"]).await;
+        let chat = team_chat(&f).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let first = team_ask(&f, &chat, "Plan the migration", "codex", Some(true), &id)
+            .await
+            .json::<Value>();
+        let again = team_ask(&f, &chat, "Plan the migration", "codex", Some(true), &id).await;
+        again.assert_status(axum::http::StatusCode::CREATED);
+        let again = again.json::<Value>();
+        assert_eq!(again["runId"], first["runId"]);
+        assert_eq!(again["turn"]["id"], first["turn"]["id"]);
+        assert!(again.get("route").is_none(), "a replay does not re-decide: {again}");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.runs.lock().unwrap().len(), 1);
+        drain(&f, first["runId"].as_str().unwrap()).await;
+        assert_eq!(chat_messages(&f, &chat).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_same_request_on_another_holder_is_a_replay_inside_the_turn_transaction() {
+        // The in-transaction guard behind the replay: even when a second attempt
+        // arrives at a DIFFERENT provider's holder (a concurrent first attempt
+        // that routed elsewhere), it gets the existing turn and executes nothing.
+        use crate::neev::config::SupervisionMode;
+        let f = full(Router::Off, SupervisionMode::Off, &["claude", "codex"]).await;
+        let chat = team_chat(&f).await;
+        let actor = h::scoped_context(&f.state.database, f.user, f.org, NOW).await;
+        let request = uuid::Uuid::new_v4().to_string();
+        let mut sessions = Vec::new();
+        for provider in ["claude", "codex"] {
+            sessions.push(
+                crate::neev::agents::sessions::ensure_team_session(
+                    &f.state, &actor, &chat.0, provider, "default", "Team invocation", None, false,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        let (first, created) = crate::neev::agents::sessions::begin_team_turn(
+            &f.state, &actor, &chat.0, &sessions[0].id, "ask", &request,
+        )
+        .await
+        .unwrap();
+        assert!(created);
+        let (second, created) = crate::neev::agents::sessions::begin_team_turn(
+            &f.state, &actor, &chat.0, &sessions[1].id, "ask", &request,
+        )
+        .await
+        .unwrap();
+        assert!(!created, "the second attempt must not execute");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.session_id, sessions[0].id);
+        assert_eq!(holder_turns(&f, &chat, "codex").await, 0);
+        // The lookup a handler does before routing finds it too.
+        let found = crate::neev::agents::sessions::team_turn_by_request(&f.state, &actor, &chat.0, &request)
+            .await
+            .unwrap()
+            .expect("found across holders");
+        assert_eq!(found.id, first.id);
+    }
+
+    #[tokio::test]
+    async fn a_follow_up_auto_ask_is_decided_within_the_last_holders_provider() {
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Opus", 1.0);
+        let f = full(router, SupervisionMode::Off, &["claude", "codex"]).await;
+        let chat = team_chat(&f).await;
+        let first = team_ask(&f, &chat, "Redesign the importer", "codex", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        drain(&f, first["runId"].as_str().unwrap()).await;
+        let second = team_ask(&f, &chat, "Now redesign the exporter in the same way, end to end", "codex", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        assert_eq!(second["turn"]["provider"], "claude", "{second}");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 2);
+        let seen = picker.seen.lock().unwrap().clone();
+        // Every option offered is the holder's provider (labelled by its agent
+        // name): the decision never left Claude for the composer's Codex.
+        assert!(!seen.is_empty() && seen.iter().all(|option| option.starts_with("Claude Code/")), "{seen:?}");
+        assert_eq!(holder_turns(&f, &chat, "codex").await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_undecidable_auto_ask_runs_the_composer_selection_honestly() {
+        use crate::neev::config::SupervisionMode;
+        let f = full(Router::Off, SupervisionMode::Off, &["claude", "codex"]).await;
+        let chat = team_chat(&f).await;
+        let body = team_ask(&f, &chat, "Summarise", "codex", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        assert_eq!(body["route"]["outcome"], "fallback", "{body}");
+        assert_eq!(body["route"]["provider"], "codex");
+        assert_eq!(body["turn"]["provider"], "codex");
+        assert_eq!(f.runs.lock().unwrap()[0].provider, "codex");
+    }
+
+    #[tokio::test]
+    async fn auto_never_routes_for_a_caller_who_cannot_write_the_chat() {
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Opus", 2.0);
+        let f = full(router, SupervisionMode::PlanReview, &["claude", "codex"]).await;
+        let peer = h::native_account(&f.state.database, "peer", "peer@example.test").await;
+        h::add_membership(&f.state.database, f.org, peer, "member").await;
+        let peer_actor = h::scoped_context(&f.state.database, peer, f.org, NOW).await;
+        let peer_chat = make_chat(&f.state, &peer_actor).await;
+        team_ask(&f, &peer_chat, "post here", "codex", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .assert_status_not_found();
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 0);
+        assert!(f.runs.lock().unwrap().is_empty());
+        assert!(f.tool_free.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_supervised_team_ask_publishes_only_the_executors_final_reply() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Opus", 2.0);
+        let f = full(router, SupervisionMode::PlanReview, &["claude"]).await;
+        let chat = team_chat(&f).await;
+        let body = team_ask(&f, &chat, "Redesign the sync engine across services", "claude", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        assert_eq!(body["route"]["supervision"]["state"], "active", "{body}");
+        drain(&f, body["runId"].as_str().unwrap()).await;
+        let supervised = f.tool_free.lock().unwrap().clone();
+        assert_eq!(supervised.len(), 2, "one plan and one review");
+        for request in &supervised {
+            assert_eq!(request.credential_handle.as_ref(), f.handles.get("claude"));
+        }
+        let items = chat_messages(&f, &chat).await;
+        assert_eq!(items.len(), 2, "the ask and exactly one agent reply: {items:?}");
+        assert_eq!(items[1]["authorKind"], "agent");
+        assert_eq!(items[1]["body"], "done");
+        // The supervisor's own steps stay in the invoker's private trace.
+        let actor = h::scoped_context(&f.state.database, f.user, f.org, NOW).await;
+        let turns = crate::neev::agents::sessions::turns(&f.state, &actor, &holder(&f, &chat, "claude"), None)
+            .await
+            .unwrap();
+        let trace = serde_json::to_string(&turns.items[0].activity).unwrap();
+        assert!(trace.contains("supervision:plan") && trace.contains("supervision:review"), "{trace}");
+        assert_eq!(turns.items[0].status, crate::neev::agents::sessions::TurnStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_supervised_team_ask_while_planning_publishes_nothing() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Opus", 2.0);
+        let f = full_with(router, SupervisionMode::PlanReview, &["claude"], |r| r.hanging()).await;
+        let chat = team_chat(&f).await;
+        let body = team_ask(&f, &chat, "Redesign the sync engine across services", "claude", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        let run_id = body["runId"].as_str().unwrap().to_owned();
+        f.client
+            .post("/api/neev/agent/runs/cancel")
+            .json(&serde_json::json!({ "runId": run_id }))
+            .await
+            .assert_status_ok();
+        drain(&f, &run_id).await;
+        let actor = h::scoped_context(&f.state.database, f.user, f.org, NOW).await;
+        let turns = crate::neev::agents::sessions::turns(&f.state, &actor, &holder(&f, &chat, "claude"), None)
+            .await
+            .unwrap();
+        assert_eq!(turns.items[0].status, crate::neev::agents::sessions::TurnStatus::Canceled);
+        // The fake records the supervisor's tool-free run in the same log; the
+        // EXECUTOR (the ask itself) must never have been launched.
+        assert!(
+            f.runs
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|run| run.prompt != "Redesign the sync engine across services"),
+            "the executor never launched"
+        );
+        assert_eq!(f.tool_free.lock().unwrap().len(), 1, "only the plan was attempted");
+        let items = chat_messages(&f, &chat).await;
+        assert_eq!(items.len(), 1, "only the ask: {items:?}");
+    }
+
+    #[tokio::test]
+    async fn an_undecided_first_ask_never_falls_back_to_a_disconnected_composer() {
+        // B1: Auto is on, the composer names a provider that is NOT connected,
+        // and the router cannot decide. The ask must run on a connected
+        // provider (the cross-provider fallback), not fail after it is visible.
+        use crate::neev::config::SupervisionMode;
+        let f = full(Router::Off, SupervisionMode::Off, &["claude"]).await;
+        let chat = team_chat(&f).await;
+        let response = team_ask(&f, &chat, "Summarise the thread", "codex", Some(true), &uuid::Uuid::new_v4().to_string()).await;
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let body = response.json::<Value>();
+        assert_eq!(body["route"]["outcome"], "fallback", "{body}");
+        assert_eq!(body["route"]["provider"], "claude");
+        assert_eq!(body["turn"]["provider"], "claude");
+        assert_eq!(f.runs.lock().unwrap()[0].provider, "claude");
+        drain(&f, body["runId"].as_str().unwrap()).await;
+        let items = chat_messages(&f, &chat).await;
+        assert_eq!(items.len(), 2, "the ask is answered: {items:?}");
+        assert_eq!(items[1]["agentLabel"], "claude");
+    }
+
+    #[tokio::test]
+    async fn an_undecided_follow_up_keeps_the_holder_when_the_composer_is_disconnected() {
+        use crate::neev::config::SupervisionMode;
+        let f = full(Router::Off, SupervisionMode::Off, &["claude"]).await;
+        let chat = team_chat(&f).await;
+        let first = team_ask(&f, &chat, "Start", "claude", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        drain(&f, first["runId"].as_str().unwrap()).await;
+        let second = team_ask(&f, &chat, "Continue with the next part", "codex", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        assert_eq!(second["route"]["outcome"], "fallback", "{second}");
+        assert_eq!(second["turn"]["provider"], "claude");
+        assert_eq!(holder_turns(&f, &chat, "codex").await, 0);
+    }
+
+    #[tokio::test]
+    async fn auto_with_nothing_connected_is_refused_before_the_ask_is_visible() {
+        use crate::neev::config::SupervisionMode;
+        let (router, picker) = pick_at("Opus", 1.0);
+        let f = full(router, SupervisionMode::Off, &[]).await;
+        let chat = team_chat(&f).await;
+        team_ask(&f, &chat, "Anyone?", "claude", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .assert_status(axum::http::StatusCode::CONFLICT);
+        assert!(chat_messages(&f, &chat).await.is_empty(), "no orphaned ask");
+        assert_eq!(picker.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_supervised_team_ask_while_reviewing_publishes_nothing() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Opus", 2.0);
+        let f = full_with(router, SupervisionMode::Review, &["claude"], |r| r.hanging_tool_free()).await;
+        let chat = team_chat(&f).await;
+        let body = team_ask(&f, &chat, "Redesign the sync engine across services", "claude", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        let run_id = body["runId"].as_str().unwrap().to_owned();
+        let actor = h::scoped_context(&f.state.database, f.user, f.org, NOW).await;
+        // Wait until the executor has finished and the review is under way.
+        let mut reviewing = false;
+        for _ in 0..200 {
+            if !f.tool_free.lock().unwrap().is_empty() {
+                reviewing = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(reviewing, "the review started");
+        f.client
+            .post("/api/neev/agent/runs/cancel")
+            .json(&serde_json::json!({ "runId": run_id }))
+            .await
+            .assert_status_ok();
+        drain(&f, &run_id).await;
+        let turns = crate::neev::agents::sessions::turns(&f.state, &actor, &holder(&f, &chat, "claude"), None)
+            .await
+            .unwrap();
+        assert_eq!(turns.items[0].status, crate::neev::agents::sessions::TurnStatus::Canceled);
+        assert!(
+            f.runs.lock().unwrap().iter().any(|run| run.prompt == "Redesign the sync engine across services"),
+            "the executor did run"
+        );
+        let items = chat_messages(&f, &chat).await;
+        assert_eq!(items.len(), 1, "a stopped review publishes nothing: {items:?}");
+    }
+
+    #[tokio::test]
+    async fn a_supervised_team_retry_is_supervised_again_and_publishes_once() {
+        use crate::neev::config::SupervisionMode;
+        let (router, _) = pick_at("Opus", 2.0);
+        let f = full_with(router, SupervisionMode::PlanReview, &["claude"], |r| {
+            r.failing_first_executor_runs(1, crate::neev::agents::execution::ExecutionError::Unavailable)
+        })
+        .await;
+        let chat = team_chat(&f).await;
+        let body = team_ask(&f, &chat, "Redesign the sync engine across services", "claude", Some(true), &uuid::Uuid::new_v4().to_string())
+            .await
+            .json::<Value>();
+        let run_id = body["runId"].as_str().unwrap().to_owned();
+        drain(&f, &run_id).await;
+        let actor = h::scoped_context(&f.state.database, f.user, f.org, NOW).await;
+        let failed = crate::neev::agents::sessions::turn_by_run(&f.state, &actor, &run_id).await.unwrap();
+        assert_eq!(failed.status, crate::neev::agents::sessions::TurnStatus::Failed);
+        assert_eq!(chat_messages(&f, &chat).await.len(), 1, "a failed ask publishes nothing");
+
+        let retried = f
+            .client
+            .post(&format!("/api/neev/agent/runs/{run_id}/retry"))
+            .json(&serde_json::json!({ "requestId": uuid::Uuid::new_v4().to_string() }))
+            .await;
+        retried.assert_status(axum::http::StatusCode::CREATED);
+        let retried = retried.json::<Value>();
+        let retry_run = retried["runId"].as_str().unwrap().to_owned();
+        drain(&f, &retry_run).await;
+        let turn = crate::neev::agents::sessions::turn_by_run(&f.state, &actor, &retry_run).await.unwrap();
+        assert_eq!(turn.status, crate::neev::agents::sessions::TurnStatus::Completed);
+        let trace = serde_json::to_string(&turn.activity).unwrap();
+        assert!(trace.contains("supervision:plan") && trace.contains("supervision:review"), "{trace}");
+        let items = chat_messages(&f, &chat).await;
+        assert_eq!(items.len(), 2, "the ask and exactly one reply: {items:?}");
+        assert_eq!(items[1]["authorKind"], "agent");
+        assert_eq!(items[1]["body"], "done");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated PostgreSQL"]
+    async fn postgres_two_first_attempts_on_different_holders_make_one_turn() {
+        use crate::neev::config::SupervisionMode;
+        let (database, admin, schema) = h::postgres_database().await;
+        eprintln!("team auto race owned schema: {schema}");
+        let f = full_on(database.clone(), Router::Off, SupervisionMode::Off, &["claude", "codex"], |r| r).await;
+        let chat = team_chat(&f).await;
+        let actor = h::scoped_context(&f.state.database, f.user, f.org, NOW).await;
+        let mut holders = Vec::new();
+        for provider in ["claude", "codex"] {
+            holders.push(
+                crate::neev::agents::sessions::ensure_team_session(
+                    &f.state, &actor, &chat.0, provider, "default", "Team invocation", None, false,
+                )
+                .await
+                .unwrap()
+                .id,
+            );
+        }
+        let request = uuid::Uuid::new_v4().to_string();
+        let blocker = crate::neev::db::begin(&database).await.unwrap();
+        crate::neev::db::lock_admission_guard(&blocker).await.unwrap();
+        let mut tasks = Vec::new();
+        for holder_id in holders.clone() {
+            let state = f.state.clone();
+            let actor = actor.clone();
+            let chat_id = chat.0.clone();
+            let request = request.clone();
+            tasks.push(tokio::spawn(async move {
+                crate::neev::agents::sessions::begin_team_turn(
+                    &state, &actor, &chat_id, &holder_id, "ask", &request,
+                )
+                .await
+            }));
+        }
+        h::wait_for_postgres_locks(&admin, "%neev_schema_version%FOR UPDATE%", 2).await;
+        blocker.commit().await.unwrap();
+        let mut created = 0;
+        let mut ids = std::collections::BTreeSet::new();
+        for task in tasks {
+            let (turn, made) = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            created += usize::from(made);
+            ids.insert(turn.id);
+        }
+        assert_eq!(created, 1, "exactly one attempt creates the turn");
+        assert_eq!(ids.len(), 1, "both attempts resolve to the same turn");
+        let total = holder_turns(&f, &chat, "claude").await + holder_turns(&f, &chat, "codex").await;
+        assert_eq!(total, 1);
+        drop(f);
+        h::cleanup_postgres(database, admin, schema).await;
     }
 }

@@ -756,6 +756,8 @@ pub(super) async fn start_turn(
                 plan: supervision_plan,
             },
             runs::supervision::SupervisionRuntimes::shared(state.agents.clone()),
+            // A saved Agent Chat is private: no publication, ever.
+            None,
         );
         let mut response = private_json(StartedTurnDto {
             route: route_view.take(),
@@ -1570,6 +1572,12 @@ struct TeamInvokeInput {
     /// is unchanged either way, because a mention is plain readable text in it.
     #[serde(default)]
     mentions: Vec<super::content::MentionInputDto>,
+    /// Auto: decide the agent, model and effort for this ask with the existing
+    /// routing policy (`routing::route_team_ask`). `provider`/`model`/`effort`/
+    /// `fast` above are then the fallback — exactly what runs when Auto is off
+    /// or cannot decide.
+    #[serde(default)]
+    auto: bool,
 }
 
 #[derive(Serialize)]
@@ -1583,6 +1591,11 @@ struct TeamInvokeDto {
     /// session uses, so there is one streaming implementation, not two.
     turn: TurnDto,
     run_id: String,
+    /// The Auto decision this ask ran on (with its supervision), when the ask
+    /// asked for Auto and a decision was made. Absent otherwise — including on
+    /// an idempotent replay, which never decides again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<routing::RouteDto>,
 }
 
 /// GET `/api/neev/agent/capabilities` — what the installed runners accept.
@@ -1743,7 +1756,9 @@ pub(super) async fn team_invoke(
         catalog::organization_mutation::<TeamInvokeInput>(&state, request, TURN_BODY_LIMIT).await?;
     canonical_uuid(&input.request_id)?;
     let expected = catalog::canonical_revision(&input.expected_auth_revision)?;
-    let provider = provider_of(&input.provider).ok_or(ApiError::Invalid)?;
+    // The composer's provider is validated up front either way: it is what
+    // runs without Auto, and Auto's fallback.
+    provider_of(&input.provider).ok_or(ApiError::Invalid)?;
     let keys = requested_keys(&input.attachment_keys)?;
     let prompt = sent_text(input.prompt, keys.len());
     // Resolved before anything is written: a key from another chat, one the
@@ -1751,6 +1766,13 @@ pub(super) async fn team_invoke(
     // rather than after the ask is already team-visible.
     let resolved =
         attachment::resolve_for_run(&state, &actor, Owner::Chat(&chat_id), &keys).await?;
+    // Auto with NOTHING connected could only fall back to a provider that cannot
+    // run: refused here, before the ask is team-visible, so the room never sees
+    // an ask that can get no reply. (Without Auto the composer's own connection
+    // is checked exactly as before.)
+    if input.auto && routing::connected_providers(&state, &actor).await.is_empty() {
+        return Err(ApiError::Conflict);
+    }
 
     // 1. The ask becomes team-visible first, with its files bound to it in the
     //    same transaction. This also proves write access to the chat and
@@ -1789,19 +1811,68 @@ pub(super) async fn team_invoke(
         return Err(ApiError::Conflict);
     }
 
-    // 2. The invoker's own durable holder for this chat + provider.
-    // Applied to the holder before anything launches, so the FIRST ask runs at
-    // the settings the reader chose rather than at defaults they would then be
-    // charged to correct.
+    // 2. A retry of an ask that already has a turn — on whichever of the
+    //    invoker's holders it ran, since Auto may have chosen any provider —
+    //    replays that turn before anything is decided or run again.
+    if let Some(existing) =
+        sessions::team_turn_by_request(&state, &actor, &chat_id, &input.request_id).await?
+    {
+        let inputs =
+            steer_inputs_for_turn(&state, actor.org_id, &existing.session_id, existing.sequence)
+                .await;
+        let mut response = private_json(TeamInvokeDto {
+            message: super::content::message_dto(
+                prompt_message,
+                attachment_dtos(carried),
+                named_in_prompt,
+            )?,
+            run_id: existing.run_id.clone(),
+            turn: turn_dto(existing, Vec::new(), inputs),
+            route: None,
+        });
+        *response.status_mut() = StatusCode::CREATED;
+        return Ok(response);
+    }
+
+    // 3. Auto: decided BEFORE the turn exists (one request, no ticket), with
+    //    the composer's selection as the fallback. Never an error.
+    let composer = crate::neev::agents::routing::Selection {
+        provider: input.provider.clone(),
+        model: input.model.clone(),
+        effort: input.effort.clone(),
+        fast: input.fast,
+    };
+    let route = if input.auto {
+        Some(
+            routing::route_team_ask(&state, &actor, &chat_id, &prompt, keys.len(), composer.clone())
+                .await,
+        )
+    } else {
+        None
+    };
+    let selection = route.as_ref().map_or(composer, |route| route.selection.clone());
+    let provider = provider_of(&selection.provider).ok_or(ApiError::Invalid)?;
+    // Supervision, likewise resolved before the turn exists: a supervisor that
+    // cannot be had makes an ordinary ask, never an error.
+    let (supervision_plan, supervision_view) =
+        routing::supervision_for(&state, &actor, route.as_ref()).await;
+    let route_view = route
+        .as_ref()
+        .map(|route| routing::route_dto(route).with_supervision(supervision_view.clone()));
+
+    // 4. The invoker's own durable holder for this chat + the provider that
+    //    will run. The selection is applied to the holder before anything
+    //    launches, so the FIRST ask runs at the chosen settings, a retry re-runs
+    //    them, and the next brief Auto follow-up keeps them.
     let session = sessions::ensure_team_session(
         &state,
         &actor,
         &chat_id,
-        &input.provider,
-        &input.model,
+        &selection.provider,
+        &selection.model,
         "Team invocation",
-        input.effort.as_deref(),
-        input.fast,
+        selection.effort.as_deref(),
+        selection.fast,
     )
     .await?;
     // The credential is resolved BEFORE the turn exists. Anything that can fail
@@ -1814,29 +1885,33 @@ pub(super) async fn team_invoke(
     // `requestId` makes the whole invocation idempotent — a retry (racing or
     // long after the fact) resolves to the SAME turn and run, so the provider
     // never executes one ask twice and no duplicate reply can be published.
+    // Arbitrated inside the turn transaction across ALL of the invoker's
+    // holders for this chat (`begin_team_turn`), so two concurrent first
+    // attempts that routed to different providers still make ONE turn.
     // No attachment references on the TURN: these files belong to the chat and
     // are already recorded on the message the room can see. Referencing them a
     // second time from a private holder would give one attachment two
     // audiences.
-    let (turn, created) = sessions::begin_turn(
+    let (turn, created) = sessions::begin_team_turn(
         &state,
         &actor,
+        &chat_id,
         &session.id,
         &prompt,
-        Some(&input.request_id),
+        &input.request_id,
     )
     .await?;
     // ONLY the caller that created the turn executes it.
     //
-    // This is decided inside `begin_turn`'s transaction, arbitrated by the
-    // unique `(org_id, session_id, request_id)` index — not by looking the run
-    // up in the registry. A registry check here would be a race: two truly
+    // This is decided inside `begin_team_turn`'s transaction, not by looking the
+    // run up in the registry. A registry check here would be a race: two truly
     // simultaneous retries can both miss it while the first is still awaiting
     // the runtime, and the loser could then start a second provider execution
     // (or settle the shared turn as `busy` while the winner is still running).
     if !created {
         // Idempotent retry - load any steering inputs that may have been recorded
-        let inputs = steer_inputs_for_turn(&state, actor.org_id, &session.id, turn.sequence).await;
+        let inputs =
+            steer_inputs_for_turn(&state, actor.org_id, &turn.session_id, turn.sequence).await;
         let mut response = private_json(TeamInvokeDto {
             message: super::content::message_dto(
                 prompt_message,
@@ -1845,6 +1920,7 @@ pub(super) async fn team_invoke(
             )?,
             run_id: turn.run_id.clone(),
             turn: turn_dto(turn, Vec::new(), inputs),
+            route: None,
         });
         *response.status_mut() = StatusCode::CREATED;
         return Ok(response);
@@ -1852,7 +1928,8 @@ pub(super) async fn team_invoke(
     let publication = runs::TeamPublication {
         chat_id: chat_id.clone(),
         invoker: actor.clone(),
-        agent_label: input.provider.clone(),
+        // What actually runs, which under Auto may differ from the composer.
+        agent_label: session.provider.clone(),
         turn_id: turn.id.clone(),
     };
     // The thread is context the invoker is reading right now, so replaying a
@@ -1915,6 +1992,37 @@ pub(super) async fn team_invoke(
         library_items,
         min_free_lanes: 1,
     };
+    if !supervision_plan.is_empty() {
+        // The supervised driver launches the executor itself, after the plan;
+        // it publishes ONLY the executor's final reply, once, after the review.
+        let request_text = turn.prompt.clone();
+        runs::start_supervised(
+            state.clone(),
+            turn.run_id.clone(),
+            actor.clone(),
+            session.id.clone(),
+            turn.id.clone(),
+            runs::supervision::SupervisedStart {
+                executor: run_request,
+                request_text,
+                plan: supervision_plan,
+            },
+            runs::supervision::SupervisionRuntimes::shared(state.agents.clone()),
+            Some(publication),
+        );
+        let mut response = private_json(TeamInvokeDto {
+            message: super::content::message_dto(
+                prompt_message,
+                attachment_dtos(carried),
+                named_in_prompt,
+            )?,
+            run_id: turn.run_id.clone(),
+            turn: turn_dto(turn, Vec::new(), Vec::new()),
+            route: route_view,
+        });
+        *response.status_mut() = StatusCode::CREATED;
+        return Ok(response);
+    }
     let turn = match state.agents.run(run_request).await {
         Ok(handle) => {
             runs::start(
@@ -1945,6 +2053,7 @@ pub(super) async fn team_invoke(
         )?,
         run_id: turn.run_id.clone(),
         turn: turn_dto(turn, Vec::new(), Vec::new()),
+        route: route_view,
     });
     *response.status_mut() = StatusCode::CREATED;
     Ok(response)

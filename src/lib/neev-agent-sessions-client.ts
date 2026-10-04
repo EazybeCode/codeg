@@ -1744,6 +1744,11 @@ export interface NeevTeamInvocation {
   message: NativeMessage
   turn: NeevAgentTurn
   runId: string
+  /**
+   * Only for an ask sent with Auto: what ran and why. `null` for a manual ask
+   * and for a replay of an earlier one, which carries no new decision.
+   */
+  route: NeevRoute | null
 }
 
 export interface InvokeTeamAgentInput {
@@ -1781,14 +1786,28 @@ export interface InvokeTeamAgentInput {
   mentions?: readonly MentionSpan[]
   requestId: string
   expectedAuthRevision: string
+  /**
+   * Let the server's router choose the agent, model and effort among the
+   * caller's own connected agents. The selection above stays the fallback.
+   * Sent only when true, so a manual ask is exactly what it was before.
+   */
+  auto?: boolean
 }
 
 export function parseTeamInvocation(value: unknown): NeevTeamInvocation {
-  const object = exact(value, ["message", "turn", "runId"])
+  const object = exact(value, ["message", "turn", "runId"], ["route"])
   const turn = parseAgentTurn(object.turn)
   const id = runId(object.runId)
   if (id !== turn.runId) return invalid()
-  return { message: parseMessage(object.message), turn, runId: id }
+  // Absent and null are the same answer: no decision was made by this request.
+  const route =
+    object.route === undefined || object.route === null
+      ? null
+      : parseRoute(object.route)
+  // An Auto ask must have run on what the route says it chose.
+  if (route && (route.provider !== turn.provider || route.model !== turn.model))
+    return invalid()
+  return { message: parseMessage(object.message), turn, runId: id, route }
 }
 
 /**
@@ -1843,6 +1862,7 @@ export async function invokeTeamAgent(
   if (input.fast === true) body.fast = true
   if (keys.length) body.attachmentKeys = keys
   if (named.length) body.mentions = named
+  if (input.auto === true) body.auto = true
   const invocation = parseTeamInvocation(
     await contentMutation(`/api/neev/chats/${chatId}/agent`, body, csrf, signal)
   )

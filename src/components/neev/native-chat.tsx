@@ -79,9 +79,12 @@ import {
   type NeevAgentSession,
   type NeevAgentSettings,
   type NeevAgentTurn,
+  type NeevRoute,
   type NeevRunInput,
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls, reconcileAgentSettings } from "./native-agent-controls"
+import { AutoRouteChip, RouteNote, useAutoRouting } from "./native-agent-auto"
+import { recalledRoute, rememberRoute } from "@/lib/neev-auto-route"
 import { NativeRunFailure } from "./native-run-failure"
 import { providerName, runFailure } from "@/lib/neev-run-failure"
 import {
@@ -482,6 +485,13 @@ function Chat({
   // it again after a dropped response resolve to the same new run.
   const [retrying, setRetrying] = useState(false)
   const retryRequest = useRef<{ runId: string; id: string } | null>(null)
+  // Auto routing: the same per-device switch Agent Chats uses, and the last
+  // decision for THIS chat so the composer can say what the ask ran on.
+  const autoRouting = useAutoRouting(auth.scopeKey)
+  const [lastRoute, setLastRoute] = useState<NeevRoute | null>(() =>
+    recalledRoute(resource.id)
+  )
+  useEffect(() => setLastRoute(recalledRoute(resource.id)), [resource.id])
   const refreshConnections = useCallback(async () => {
     const value = await loadAgentConnections(auth.signal)
     if (!auth.signal?.aborted) setConnections(value)
@@ -1241,6 +1251,9 @@ function Chat({
     retryRequest.current = request
     setRetrying(true)
     setError(null)
+    // The note describes the last Auto decision; a retry re-runs the stored
+    // selection and is not a new decision, so the note would mislead.
+    setLastRoute(null)
     try {
       const started = await retryAgentRun(
         turn.runId,
@@ -1338,9 +1351,14 @@ function Chat({
     try {
       const wiring = await refreshConnections()
       if (!scope.isCurrent()) return
+      // With Auto on, any connected agent can take the ask: the decision may
+      // choose one other than the selection, and it only chooses among the
+      // caller's connected ones. With it off, the selection must be connected.
       if (
         !wiring.connections.some(
-          (row) => row.provider === agentProvider && row.state === "connected"
+          (row) =>
+            row.state === "connected" &&
+            (row.provider === agentProvider || autoRouting.active)
         )
       ) {
         providerChosen.current = true
@@ -1381,6 +1399,7 @@ function Chat({
           ? previous
           : { id: crypto.randomUUID(), prompt, keys, mentions: named }
       invokeRequest.current = request
+      const auto = autoRouting.active
       const invocation = await invokeTeamAgent(
         latest.id,
         {
@@ -1400,6 +1419,8 @@ function Chat({
           mentions: named,
           requestId: request.id,
           expectedAuthRevision: pinned.current,
+          // The selection above is the fallback when Auto cannot decide.
+          auto,
         },
         auth.session.csrf,
         auth.signal
@@ -1415,6 +1436,39 @@ function Chat({
       followHistory.current = true
       absorb([invocation.message])
       void nameFromFirstMessage(promptText(written), staged)
+      // The agent that actually took the ask. With Auto that may not be the
+      // selection — and a replay of an earlier Auto ask carries no route, so
+      // its turn is what says where it ran.
+      const route = invocation.route
+      const turnProvider = invocation.turn.provider as NeevAgentProvider
+      const ran: NeevAgentProvider = route
+        ? route.provider
+        : auto && NEEV_AGENT_PROVIDERS.includes(turnProvider)
+          ? turnProvider
+          : agentProvider
+      // A note describes THIS ask's decision; an ask without one clears it
+      // rather than leave an earlier decision standing as if it were this one.
+      if (route) rememberRoute(latest.id, route)
+      setLastRoute(route)
+      if (ran !== agentProvider || route?.outcome === "routed") {
+        // Show what ran, not the selection it replaced. A held choice belonged
+        // to the selection, so it is dropped rather than laid over the routed
+        // holder; the holder is read back for the settings it now stores.
+        setAgentProvider(ran)
+        setDesired(null)
+        const owner = auth.session.user.id
+        void loadTeamAgentSession(latest.id, ran, scope.signal)
+          .then((fresh) => {
+            if (!fresh || fresh.ownerId !== owner || !scope.isCurrent()) return
+            setHolders((old) => [
+              ...old.filter((item) => item.id !== fresh.id),
+              fresh,
+            ])
+          })
+          .catch(() => {
+            // The read at the end of the run brings the holders back anyway.
+          })
+      }
       if (invocation.turn.status !== "running") {
         // Refused before it ever ran; the ask stays visible and the reason is
         // named — from the settled turn, by the failure card — rather than left
@@ -1430,7 +1484,7 @@ function Chat({
         invocation.runId,
         Date.now(),
         invocation.turn.activity,
-        agentProvider,
+        ran,
         invocation.message.sequence
       )
     } catch (cause) {
@@ -2225,6 +2279,9 @@ function Chat({
             />
           )}
           <NativeError error={error} />
+          {mode === "agent" && lastRoute && (
+            <RouteNote route={lastRoute} className="px-1" />
+          )}
           {(latest.authRevision !== pinned.current ||
             (error instanceof NativeClientError &&
               error.kind === "conflict")) && (
@@ -2302,6 +2359,12 @@ function Chat({
                     select: the provider heading a model sits under IS the
                     provider choice, so which agent runs and what it runs as are
                     one decision in one place. */}
+                <AutoRouteChip
+                  status={autoRouting.status}
+                  on={autoRouting.on}
+                  onChange={autoRouting.setOn}
+                  disabled={agentBusy || latest.archived}
+                />
                 <AgentControls
                   capabilities={capabilities}
                   provider={agentProvider}

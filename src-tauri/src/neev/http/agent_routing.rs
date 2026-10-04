@@ -297,10 +297,29 @@ pub(in crate::neev::http) async fn route_new_chat(
     {
         return Err(ApiError::Invalid);
     }
+    let (route, withheld) = route_across(&state, &actor, &input).await?;
+    let mut dto = route_dto(&route);
+    dto.withheld = withheld_dto(&withheld);
+    if route.outcome == Outcome::Routed {
+        dto.route_id = Some(issue_ticket(&state, &actor, &route));
+    }
+    Ok(private_json(dto))
+}
+
+/// The cross-provider decision for a NEW conversation (a new Agent Chat, or a
+/// first Auto ask in a resource chat): every provider the caller has
+/// connected, most headroom first, usage-filtered, admitted, confirmed, with
+/// the caller's manual selection as the fallback. `Conflict` when nothing is
+/// connected or no runtime is bound.
+async fn route_across(
+    state: &ServerState,
+    actor: &OrgContext,
+    input: &RouteInput,
+) -> Result<(Route, Vec<Withheld>), ApiError> {
     if !state.agents.is_available() {
         return Err(ApiError::Conflict);
     }
-    let connected: Vec<&'static str> = intents::list(&state, &actor)
+    let connected: Vec<&'static str> = intents::list(state, actor)
         .await
         .map_err(super::super::agent_error)?
         .into_iter()
@@ -313,16 +332,16 @@ pub(in crate::neev::http) async fn route_new_chat(
     // Most headroom first, so the per-decision caps never drop the provider
     // that still has room.
     let connected =
-        routing_usage::order_providers(&connected, |provider| usage_of(&state, &actor, provider));
+        routing_usage::order_providers(&connected, |provider| usage_of(state, actor, provider));
     let mut catalogues = Vec::with_capacity(connected.len());
     for provider in &connected {
-        catalogues.push(catalogue(&state, &actor, provider).await);
+        catalogues.push(catalogue(state, actor, provider).await);
     }
-    let fallback = manual_fallback(&state, &actor, &input, &catalogues).await;
+    let fallback = manual_fallback(state, actor, input, &catalogues).await;
     let mut candidates = routing::candidates(&catalogues, &connected);
-    label_usage(&state, &actor, &mut candidates);
+    label_usage(state, actor, &mut candidates);
     let filtered =
-        routing_usage::filter_for_auto(&candidates, |provider| usage_of(&state, &actor, provider));
+        routing_usage::filter_for_auto(&candidates, |provider| usage_of(state, actor, provider));
     let ready = state.agent_router.status() == routing::RouterStatus::Ready;
     let route = if filtered.eligible.is_empty() && !candidates.is_empty() && ready {
         Route {
@@ -332,7 +351,7 @@ pub(in crate::neev::http) async fn route_new_chat(
             label: None,
             complexity: None,
         }
-    } else if ready && !filtered.eligible.is_empty() && !admit(&state, &actor) {
+    } else if ready && !filtered.eligible.is_empty() && !admit(state, actor) {
         Route {
             selection: fallback,
             outcome: Outcome::Fallback(FallbackReason::Throttled),
@@ -354,14 +373,97 @@ pub(in crate::neev::http) async fn route_new_chat(
                 fallback.clone(),
             )
             .await;
-        confirm(&state, &actor, route, fallback).await
+        confirm(state, actor, route, fallback).await
     };
-    let mut dto = route_dto(&route);
-    dto.withheld = withheld_dto(&filtered.withheld);
-    if route.outcome == Outcome::Routed {
-        dto.route_id = Some(issue_ticket(&state, &actor, &route));
+    Ok((route, filtered.withheld))
+}
+
+/// The decision for an Auto ask in a resource-bound chat ("Ask agent").
+///
+/// The existing policy, nothing new: a FOLLOW-UP continues the invoker's most
+/// recently used holder for this chat and is decided within that holder's
+/// provider exactly as an Agent Chat follow-up is (`route_turn`; a brief one
+/// keeps its selection without a decision). A FIRST ask — or one whose last
+/// holder's provider is no longer connected — is decided across every
+/// connected provider exactly as a new Agent Chat is (`route_across`).
+///
+/// Never an error, and never a disconnected provider when a connected one
+/// exists: an undecided cross-provider ask keeps `route_across`'s own fallback
+/// (the composer's selection when it is connected and unblocked, otherwise a
+/// connected provider's default); an undecided follow-up uses the composer's
+/// selection when its provider is connected, otherwise the holder's own
+/// (connected) selection. Only when NOTHING is connected is the composer's
+/// selection returned as is — the caller refuses that before anything is
+/// written.
+pub(super) async fn route_team_ask(
+    state: &ServerState,
+    actor: &OrgContext,
+    chat_id: &str,
+    prompt: &str,
+    attached_files: usize,
+    composer: Selection,
+) -> Route {
+    let connected = connected_providers(state, actor).await;
+    let holder = sessions::latest_team_session(state, actor, chat_id)
+        .await
+        .ok()
+        .flatten();
+    match holder {
+        Some(holder) if connected.contains(&holder.provider.as_str()) => {
+            let history = sessions::recent_turns(state, actor, &holder.id)
+                .await
+                .unwrap_or_default();
+            let route = route_turn(state, actor, &holder, prompt, attached_files, &history).await;
+            match route.outcome {
+                // Undecided: the composer's choice when it can run; otherwise the
+                // holder's own selection, which `route_turn` already fell back to.
+                Outcome::Fallback(reason) if connected.contains(&composer.provider.as_str()) => {
+                    Route {
+                        selection: composer,
+                        outcome: Outcome::Fallback(reason),
+                        router: None,
+                        label: None,
+                        complexity: None,
+                    }
+                }
+                _ => route,
+            }
+        }
+        _ => {
+            let input = RouteInput {
+                prompt: prompt.to_owned(),
+                provider: composer.provider.clone(),
+                model: composer.model.clone(),
+                effort: composer.effort.clone(),
+                fast: composer.fast,
+                attached_files,
+            };
+            match route_across(state, actor, &input).await {
+                Ok((route, _withheld)) => route,
+                Err(_) => Route {
+                    selection: composer,
+                    outcome: Outcome::Fallback(FallbackReason::NoCandidates),
+                    router: None,
+                    label: None,
+                    complexity: None,
+                },
+            }
+        }
     }
-    Ok(private_json(dto))
+}
+
+/// The providers this caller has connected (empty when the list cannot be read).
+pub(super) async fn connected_providers(state: &ServerState, actor: &OrgContext) -> Vec<&'static str> {
+    intents::list(state, actor)
+        .await
+        .map(|views| {
+            views
+                .into_iter()
+                .filter(|view| view.state == ConnectionState::Connected)
+                .map(|view| view.provider.name())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ---- Turns ----

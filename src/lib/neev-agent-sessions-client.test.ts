@@ -27,6 +27,7 @@ import {
   parseRunEvent,
   sliceByScalars,
   parseStartedTurn,
+  parseTeamInvocation,
   retryAgentRun,
   startAgentTurn,
   updateAgentSession,
@@ -657,6 +658,108 @@ describe("team invocation", () => {
     // the run id is the turn's, so the caller streams the run it just started.
     expect(invocation.message.authorKind).toBe("human")
     expect(invocation.runId).toBe(turn.runId)
+  })
+
+  it("asks for Auto only when it was asked for, and reads the route it ran on", async () => {
+    const bodies: Record<string, unknown>[] = []
+    const route = {
+      provider: "claude",
+      model: "default",
+      label: "Default",
+      effort: null,
+      fast: false,
+      outcome: "routed",
+      reason: null,
+      router: "jev",
+      supervision: {
+        state: "active",
+        phases: "review",
+        model: "opus",
+        reason: null,
+      },
+    }
+    const replies: unknown[] = [
+      { message: ask, turn, runId: RUN_ID },
+      { message: ask, turn, runId: RUN_ID, route },
+    ]
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(init.body as string))
+        return json(replies.shift(), 201)
+      })
+    )
+    const base = {
+      prompt: "summarise the incident",
+      provider: "claude" as const,
+      model: "default",
+      requestId: SESSION_ID,
+      expectedAuthRevision: "2",
+    }
+    const manual = await invokeTeamAgent(
+      CHAT_ID,
+      { ...base, auto: false },
+      "csrf"
+    )
+    // Off is ABSENT, so a manual ask is byte-identical to one sent before
+    // Auto existed here.
+    expect(bodies[0]).toEqual(base)
+    expect(manual.route).toBeNull()
+    const routed = await invokeTeamAgent(
+      CHAT_ID,
+      { ...base, auto: true },
+      "csrf"
+    )
+    expect(bodies[1]).toEqual({ ...base, auto: true })
+    expect(routed.route).toMatchObject({
+      provider: "claude",
+      outcome: "routed",
+      supervision: { state: "active", phases: "review", model: "opus" },
+    })
+  })
+
+  it("accepts no route, a null route or a valid one, and nothing else", () => {
+    const base = { message: ask, turn, runId: RUN_ID }
+    const route = {
+      provider: "claude",
+      model: "default",
+      effort: null,
+      fast: false,
+      outcome: "fallback",
+      reason: "throttled",
+      router: "jev",
+    }
+    expect(parseTeamInvocation(base).route).toBeNull()
+    // A replay of an earlier ask carries no new decision.
+    expect(parseTeamInvocation({ ...base, route: null }).route).toBeNull()
+    expect(parseTeamInvocation({ ...base, route }).route).toEqual({
+      ...route,
+      label: null,
+      routeId: null,
+      withheld: [],
+      supervision: null,
+    })
+    for (const bad of [
+      // Not a route at all.
+      { ...base, route: "claude" },
+      // A fallback that does not say why is not honest.
+      { ...base, route: { ...route, reason: null } },
+      // A route that names something other than what the turn ran on.
+      { ...base, route: { ...route, model: "opus" } },
+      { ...base, route: { ...route, provider: "codex" } },
+      // A dishonest supervision claim.
+      {
+        ...base,
+        route: {
+          ...route,
+          supervision: { state: "active", phases: null, model: null },
+        },
+      },
+      // The envelope stays strict otherwise.
+      { ...base, extra: true },
+      { ...base, route, extra: true },
+    ])
+      expect(() => parseTeamInvocation(bad)).toThrow(NativeClientError)
   })
 
   it("refuses an unsupported provider, model or revision before any request", async () => {
