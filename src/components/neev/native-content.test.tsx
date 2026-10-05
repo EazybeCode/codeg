@@ -705,9 +705,18 @@ it.each(["chat", "document"] as const)(
         )
       )
     )
-    expect(composerText(screen.getByRole("textbox", { name }))).toBe(
-      "retained draft"
-    )
+    if (kind === "chat") {
+      // The retry is in flight as a pending message (instant send), and the
+      // OLD scope's completion settles nothing: the words stay pending, shown
+      // once, and nothing is put back into or taken out of the box.
+      expect(composerText(screen.getByRole("textbox", { name }))).toBe("")
+      const pending = screen.getAllByText("retained draft")
+      expect(pending).toHaveLength(1)
+      expect(pending[0].closest("li")).toHaveAttribute("aria-busy", "true")
+    } else
+      expect(composerText(screen.getByRole("textbox", { name }))).toBe(
+        "retained draft"
+      )
     // A chat's composer stays usable while a send is in flight — an agent run
     // shares this box and can take minutes. What that costs is a race the
     // clear has to win honestly: text typed before the server answers is newer

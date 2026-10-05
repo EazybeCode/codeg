@@ -2,6 +2,8 @@
 
 import { Streamdown, type Components } from "streamdown"
 import { useTranslations } from "next-intl"
+import { messageSource } from "@/lib/neev-copy"
+import { CopyableCodeBlock, CopyMessageButton } from "./native-copy"
 
 function safeUrl(value: string): string | undefined {
   if (value.startsWith("#")) return value
@@ -149,8 +151,28 @@ const COMPONENTS = {
   // make them readable.
 } as Components
 
+/*
+ * The same set plus a Copy button on every fenced code block. Also defined
+ * once, and only ever used for COMPLETE text: a streaming reply keeps the set
+ * above, so block memoisation is untouched while it grows, and switches to this
+ * one exactly once, when it settles.
+ */
+const COMPONENTS_WITH_CODE_COPY = {
+  ...(COMPONENTS as Record<string, unknown>),
+  pre: CopyableCodeBlock,
+} as Components
+
 /** Off by default and passed explicitly, for the same reason. */
 const NO_LINK_SAFETY = { enabled: false }
+
+/**
+ * What a reader may copy from this text once it is complete.
+ * `none`: nothing (documents, knowledge pages — the default, unchanged).
+ * `code`: each fenced code block's raw code.
+ * `message`: the code blocks, plus the whole Markdown source from one button
+ * after the text.
+ */
+export type NativeMarkdownCopy = "none" | "code" | "message"
 
 export function NativeMarkdown({
   markdown,
@@ -171,11 +193,19 @@ export function NativeMarkdown({
    * never wrote.
    */
   streaming = false,
+  /**
+   * Copy controls for COMPLETE text only: while `streaming`, nothing is added
+   * (no buttons that would copy half an answer, and no change to the
+   * components Streamdown memoises on).
+   */
+  copy = "none",
 }: {
   markdown: string
   streaming?: boolean
+  copy?: NativeMarkdownCopy
 }) {
-  return (
+  const copying = !streaming && copy !== "none"
+  const body = (
     /*
      * 14px on a 23px line, and a heading scale that stays close to it.
      *
@@ -225,10 +255,21 @@ export function NativeMarkdown({
         skipHtml
         allowedElements={ALLOWED}
         urlTransform={safeUrl}
-        components={COMPONENTS}
+        components={copying ? COMPONENTS_WITH_CODE_COPY : COMPONENTS}
       >
         {markdown}
       </Streamdown>
+    </div>
+  )
+  if (!(copying && copy === "message") || !messageSource(markdown)) return body
+  return (
+    <div className="group/message">
+      {body}
+      {/* One button for the whole reply, after it — not one per paragraph or
+          list item. */}
+      <div className="mt-1 flex">
+        <CopyMessageButton markdown={() => messageSource(markdown)} />
+      </div>
     </div>
   )
 }

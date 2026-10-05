@@ -16,6 +16,7 @@ import {
   TranscriptBody,
 } from "./native-agent-chats"
 import { NativeBoundary } from "./native-boundary"
+import { ForkTabsContext, type OpenFork } from "./native-reply-actions"
 import {
   json,
   mockNativeSession,
@@ -2018,4 +2019,286 @@ it("shows a stored provider failure after reload and retries the same ask", asyn
   )
   expect(started).toBe(0)
   expect(await screen.findByText("Second time lucky")).toBeVisible()
+})
+
+it("copies a completed answer once, as its source, and each code block on its own", async () => {
+  const answer = "Use this:\n\n```ts\nconst a = 1\n```\n\nThen run it."
+  const done = {
+    ...runningTurn,
+    status: "completed",
+    response: answer,
+    completedAt: 1_700_000_002,
+    activity: [
+      {
+        seq: 1,
+        offset: 0,
+        id: "t1",
+        kind: "tool_call",
+        name: "Read",
+        input: "parser.ts",
+      },
+    ],
+  }
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [done], nextAfter: null }),
+  })
+  const user = userEvent.setup()
+  // After setup: user-event installs its own clipboard stub.
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  })
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  await screen.findByText("Then run it.")
+  // One per answer, one per fenced block — never per paragraph.
+  expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(1)
+  expect(screen.getAllByRole("button", { name: "Copy code" })).toHaveLength(1)
+  await user.click(screen.getByRole("button", { name: "Copy" }))
+  // The stored Markdown, not the rendered page or the trace rows.
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(answer))
+  await user.click(screen.getByRole("button", { name: "Copy code" }))
+  await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("const a = 1"))
+})
+
+it("offers no Copy while a reply is still streaming", () => {
+  render(
+    <NextIntlClientProvider locale="en" messages={messages}>
+      <TranscriptBody text={"```ts\nconst a = 1\n```"} items={[]} streaming />
+    </NextIntlClientProvider>
+  )
+  expect(screen.queryByRole("button", { name: /^Copy/ })).toBeNull()
+})
+
+it("shows a saved chat's ask at once and puts it back if it does not land", async () => {
+  let answer!: (response: Response) => void
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve
+      }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByText("Refactor the parser"))
+  const box = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await waitFor(() => expect(composerEditable(box)).toBe(true))
+  await typeInComposer(box, "Summarise the parser")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // Before the server answers: an empty box and the ask in the transcript.
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  const turns = screen.getByRole("list", { name: "Session history" })
+  expect(
+    within(turns).getByText("Summarise the parser").closest("li")
+  ).toHaveAttribute("aria-busy", "true")
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json({ code: "unavailable" }, 503)))
+  await waitFor(() => expect(composerText(box)).toBe("Summarise the parser"))
+  expect(within(turns).queryByText("Summarise the parser")).toBeNull()
+})
+
+it("shows a new chat's first ask at once and puts it back if the chat is not created", async () => {
+  let answer!: (response: Response) => void
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () => json(CONNECTED),
+    "POST /api/neev/agent/sessions": () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve
+      }),
+  })
+  const user = userEvent.setup()
+  composer()
+  const box = await screen.findByRole("textbox", { name: "Message" })
+  await waitFor(() => expect(composerEditable(box)).toBe(true))
+  await typeInComposer(box, "Explain the parser to me")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // Before anything exists on the server: empty box, the ask shown above it,
+  // and no typing into a box that is about to hand over.
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  expect(
+    screen.getByText("Explain the parser to me").closest("[aria-busy]")
+  ).toHaveAttribute("aria-busy", "true")
+  expect(composerEditable(box)).toBe(false)
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json({ code: "unavailable" }, 503)))
+  await waitFor(() =>
+    expect(composerText(box)).toBe("Explain the parser to me")
+  )
+  expect(screen.getAllByText("Explain the parser to me")).toHaveLength(1)
+  await waitFor(() => expect(composerEditable(box)).toBe(true))
+})
+
+// ---- Fork to new tab ----
+
+const FORKED_SESSION = "77777777-7777-4777-8777-777777777777"
+const doneTurn = {
+  ...runningTurn,
+  status: "completed",
+  response: "The parser is a Pratt parser.",
+  completedAt: 1_700_000_002,
+}
+const failedLater = {
+  ...runningTurn,
+  id: "33333333-3333-4333-8333-333333333334",
+  sequence: "2",
+  prompt: "And the lexer?",
+  status: "failed",
+  errorCode: "provider",
+  completedAt: 1_700_000_003,
+}
+
+function savedWithTabs(
+  openFork: OpenFork,
+  fork: (init: RequestInit) => Response | Promise<Response>
+) {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [doneTurn, failedLater], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/fork`]: fork,
+  })
+  return render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <ForkTabsContext.Provider value={openFork}>
+          <NativeAgentChats nodeId={null} sessionId={SESSION_ID} />
+        </ForkTabsContext.Provider>
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+}
+
+it("forks a saved chat at a completed turn into a new tab, and says what was left out", async () => {
+  const bodies: Record<string, unknown>[] = []
+  const openFork = vi.fn<OpenFork>(async () => "opened")
+  savedWithTabs(openFork, (init) => {
+    bodies.push(JSON.parse(init.body as string))
+    return json(
+      {
+        sessionId: FORKED_SESSION,
+        sourceSessionId: SESSION_ID,
+        throughTurnId: TURN_ID,
+        copiedTurns: 1,
+        copiedAttachments: 0,
+        archivedAttachmentsNotCopied: 1,
+        skippedIncompleteTurns: 2,
+        replayed: false,
+      },
+      201
+    )
+  })
+  const user = userEvent.setup()
+  await screen.findByText("The parser is a Pratt parser.")
+  // Completed turns only: the failed one offers no fork.
+  expect(screen.getAllByRole("button", { name: "More actions" })).toHaveLength(
+    1
+  )
+  await user.click(screen.getByRole("button", { name: "More actions" }))
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Fork to new tab" })
+  )
+  await waitFor(() =>
+    expect(openFork).toHaveBeenCalledWith({
+      kind: "agent",
+      sessionId: FORKED_SESSION,
+    })
+  )
+  expect(bodies).toEqual([
+    { throughTurnId: TURN_ID, requestId: expect.any(String) },
+  ])
+  expect(
+    await screen.findByText(
+      "Forked to a new tab. 1 deleted file was not copied. 2 unfinished turns were left out."
+    )
+  ).toBeVisible()
+  // The original is still here, unchanged.
+  expect(screen.getByText("The parser is a Pratt parser.")).toBeVisible()
+})
+
+it("names a saved chat's fork refusal and keeps the request id for the retry", async () => {
+  const bodies: Record<string, unknown>[] = []
+  savedWithTabs(
+    vi.fn<OpenFork>(async () => "opened"),
+    (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json({ code: "fork_bound_chat_unavailable" }, 409)
+    }
+  )
+  const user = userEvent.setup()
+  await screen.findByText("The parser is a Pratt parser.")
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await user.click(screen.getByRole("button", { name: "More actions" }))
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Fork to new tab" })
+    )
+    await waitFor(() => expect(bodies).toHaveLength(attempt + 1))
+  }
+  expect(
+    await screen.findByText(
+      "The chat this conversation belongs to is no longer available."
+    )
+  ).toBeVisible()
+  expect(bodies[1].requestId).toBe(bodies[0].requestId)
+})
+
+it("holds navigation while a saved chat's ask is on its way, and never shows it in another chat", async () => {
+  let answer!: (response: Response) => void
+  let guard: ((action: () => void) => void) | null = null
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session, second] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`GET /api/neev/agent/sessions/${SECOND_ID}/turns`]: () =>
+      json({ items: [], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve
+      }),
+  })
+  const user = userEvent.setup()
+  const tree = (id: string) => (
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeAgentChats
+          nodeId={null}
+          sessionId={id}
+          onRequestNavigationGuard={(next) => {
+            guard = next
+          }}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  const view = render(tree(SESSION_ID))
+  const box = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await waitFor(() => expect(composerEditable(box)).toBe(true))
+  await typeInComposer(box, "Summarise the parser")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  // Empty box, ask in flight: leaving asks first instead of losing it.
+  const leave = vi.fn()
+  await waitFor(() => expect(guard).not.toBeNull())
+  act(() => guard!(leave))
+  expect(leave).not.toHaveBeenCalled()
+  expect(await screen.findByRole("dialog")).toBeVisible()
+  await user.click(screen.getByRole("button", { name: "Keep editing" }))
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  expect(leave).not.toHaveBeenCalled()
+  // The view switches to another chat in place: the pending ask is not drawn
+  // under it, then or when the first chat's answer arrives.
+  view.rerender(tree(SECOND_ID))
+  await screen.findByRole("textbox", { name: "Ask the agent" })
+  await waitFor(() =>
+    expect(screen.queryByText("Summarise the parser")).toBeNull()
+  )
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json({ code: "unavailable" }, 503)))
+  expect(screen.queryByText("Summarise the parser")).toBeNull()
 })

@@ -1,16 +1,15 @@
 "use client"
 
-// Auto model routing in the composer: one chip to switch it on, and one short
-// line saying what the last turn ran on and, when Auto could not decide, why.
+// Auto model routing in the composer: a choice at the top of the model picker
+// (`AgentControls`), and one short line saying what the last turn ran on and,
+// when Auto could not decide, why.
 //
 // Nothing here decides anything. The server routes over the caller's own
-// connected agents and falls back to the manual selection, which stays on
-// screen beside the chip because it IS the fallback.
+// connected agents and falls back to the manual selection, which the composer
+// keeps privately while Auto is chosen: picking a model turns Auto off.
 
 import { useEffect, useState } from "react"
-import { Sparkles } from "lucide-react"
 import { useTranslations } from "next-intl"
-import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import type {
   NeevActivityItem,
@@ -30,23 +29,37 @@ import {
 /**
  * The router's status, read once per mount, and this device's Auto switch.
  *
- * `active` is true only when the switch is on AND the router is ready: a
- * missing key never sends a turn as "Auto".
+ * `active` is true only when Auto is chosen AND the router is ready: a
+ * missing key never sends a turn as "Auto". The choice is per account
+ * (`autoAccount`): one person in one organization.
  */
-export function useAutoRouting(scopeKey: unknown) {
-  const [status, setStatus] = useState<NeevRoutingStatus | null>(null)
-  // Read once on mount. The chip renders only after the status arrives, so a
-  // prerendered page never shows a switch state that differs from this.
-  const [on, setOn] = useState(readAutoPreference)
+export function useAutoRouting(scopeKey: unknown, account: string | null) {
+  // Tagged with the scope it was read for: after a sign-in or org switch the
+  // previous account's answer is never shown while the new one is read.
+  const [read, setRead] = useState<{
+    scope: unknown
+    status: NeevRoutingStatus | null
+  }>({ scope: undefined, status: null })
+  const status = read.scope === scopeKey ? read.status : null
+  // Read on mount and again whenever the account changes. Auto is offered
+  // only after the status arrives, so a prerendered page never shows a choice
+  // that differs from this.
+  const [saved, setSaved] = useState(() => ({
+    account,
+    on: readAutoPreference(account),
+  }))
+  const on = saved.account === account ? saved.on : readAutoPreference(account)
   useEffect(() => {
     const controller = new AbortController()
     loadRoutingStatus(controller.signal)
       .then((value) => {
-        if (!controller.signal.aborted) setStatus(value)
+        if (!controller.signal.aborted)
+          setRead({ scope: scopeKey, status: value })
       })
       .catch(() => {
         // Unknown is treated as off: Auto is never offered on a guess.
-        if (!controller.signal.aborted) setStatus(null)
+        if (!controller.signal.aborted)
+          setRead({ scope: scopeKey, status: null })
       })
     return () => controller.abort()
   }, [scopeKey])
@@ -55,57 +68,41 @@ export function useAutoRouting(scopeKey: unknown) {
     on,
     active: on && status?.state === "ready",
     setOn(next: boolean) {
-      writeAutoPreference(next)
-      setOn(next)
+      writeAutoPreference(next, account)
+      setSaved({ account, on: next })
     },
   }
 }
 
-/** The Auto switch. Absent when no router is configured. */
-export function AutoRouteChip({
-  status,
-  on,
-  onChange,
-  disabled,
-}: {
+/**
+ * Auto as a choice in the model picker. Absent (`status` null or "off") when
+ * no router is configured; offered but disabled when its key is missing.
+ */
+export type AgentAuto = {
   status: NeevRoutingStatus | null
   on: boolean
   onChange: (next: boolean) => void
   disabled?: boolean
-}) {
-  const t = useTranslations("NativeContent")
-  if (!status || status.state === "off") return null
-  const missing = status.state === "missing_credential"
-  const explanation = missing
-    ? t("autoRouteMissingKey")
-    : [
-        t("autoRouteExplain", {
-          chars: status.maxTaskChars,
-          previous: status.maxPreviousChars,
-        }),
-        status.supervision !== "off" ? t("autoSupervisionExplain") : null,
-      ]
-        .filter(Boolean)
-        .join(" ")
-  return (
-    <Button
-      type="button"
-      size="sm"
-      variant={on && !missing ? "secondary" : "ghost"}
-      aria-pressed={missing ? undefined : on}
-      aria-label={`${t("autoRoute")}: ${explanation}`}
-      title={explanation}
-      disabled={disabled || missing}
-      onClick={() => onChange(!on)}
-      className={cn(
-        "h-7 shrink-0 gap-1 rounded-full px-2 text-xs font-normal",
-        missing && "text-muted-foreground line-through"
-      )}
-    >
-      <Sparkles aria-hidden className="size-3.5" />
-      {t("autoRoute")}
-    </Button>
-  )
+}
+
+/**
+ * What Auto does and what it sends where — the privacy disclosure, carried by
+ * the picker itself whenever Auto is offered.
+ */
+export function autoExplanation(
+  t: ReturnType<typeof useTranslations<"NativeContent">>,
+  status: NeevRoutingStatus
+): string {
+  if (status.state === "missing_credential") return t("autoRouteMissingKey")
+  return [
+    t("autoRouteExplain", {
+      chars: status.maxTaskChars,
+      previous: status.maxPreviousChars,
+    }),
+    status.supervision !== "off" ? t("autoSupervisionExplain") : null,
+  ]
+    .filter(Boolean)
+    .join(" ")
 }
 
 const REASONS = [

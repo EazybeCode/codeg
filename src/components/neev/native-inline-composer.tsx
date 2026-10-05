@@ -428,6 +428,7 @@ export function NativeInlineComposer({
   autoFocus = false,
   maxChars,
   mentions,
+  retain,
   className,
 }: {
   ref?: React.Ref<InlineComposerHandle>
@@ -448,6 +449,13 @@ export function NativeInlineComposer({
   maxChars?: number
   /** Absent: this conversation has nobody to name, so `@` is just `@`. */
   mentions?: MentionSource
+  /**
+   * Files that belong to a message still on its way. The box was emptied when
+   * it was sent, but its files must stay staged until the server has them (or
+   * come back with the words if it does not), so leaving the box does not
+   * unstage them the way deleting a chip does.
+   */
+  retain?: ReadonlySet<string>
   className?: string
 }) {
   const c = useTranslations("NativeContent")
@@ -849,6 +857,12 @@ export function NativeInlineComposer({
         inDoc.set(String(node.attrs.localId ?? ""), pos)
     })
     for (const [id, item] of held) known.current.set(id, item)
+    // Sent, not deleted: forgotten here, and never unstaged by this editor.
+    for (const id of retain ?? []) {
+      if (inDoc.has(id)) continue
+      confirmed.current.delete(id)
+      released.current.delete(id)
+    }
     for (const id of inDoc.keys()) {
       if (held.has(id)) {
         pending.current.delete(id)
@@ -889,7 +903,7 @@ export function NativeInlineComposer({
       known.current.delete(id)
       trayRef.current.remove(id)
     }
-  }, [editor, tray.items, tray.generation, value])
+  }, [editor, tray.items, tray.generation, value, retain])
 
   const context = useMemo(
     () => ({ tray, disabled: readOnly }),

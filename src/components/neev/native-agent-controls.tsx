@@ -17,7 +17,7 @@
 //    is still accurate after a reload.
 
 import { useId, useState, useSyncExternalStore } from "react"
-import { ChevronDown, Settings2, Zap } from "lucide-react"
+import { ChevronDown, Settings2, Sparkles, Zap } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import {
@@ -50,6 +50,7 @@ import {
   subscribeShortlists,
   writeShortlist,
 } from "@/lib/neev-model-shortlist"
+import { autoExplanation, type AgentAuto } from "./native-agent-auto"
 import {
   NativeDropdownMenuContent as DropdownMenuContent,
   NativeDropdownMenuSubContent as DropdownMenuSubContent,
@@ -239,6 +240,12 @@ export function providerModelLabel(
  * impossible combination is still disabled with its reason rather than repaired
  * into a different one, and the shortlist reorders the menu without ever adding
  * to it.
+ *
+ * Auto, when a router is configured, is the first choice in the same menu.
+ * While it is chosen the trigger says Auto, no model is shown as selected and
+ * reasoning and speed are not offered: the router picks all three, and the
+ * selection underneath is only its private fallback. Picking any model — even
+ * that fallback — is a manual choice and turns Auto off.
  */
 export function AgentControls({
   capabilities,
@@ -247,6 +254,7 @@ export function AgentControls({
   onChange,
   disabled = false,
   lockProvider = false,
+  auto,
   className,
 }: {
   capabilities: NeevAgentCapabilities | null
@@ -262,6 +270,8 @@ export function AgentControls({
   disabled?: boolean
   /** An existing session: its provider is immutable, so only its group shows. */
   lockProvider?: boolean
+  /** Auto as a choice in this picker. Omitted where Auto does not apply. */
+  auto?: AgentAuto
   className?: string
 }) {
   const t = useContentTranslations()
@@ -276,6 +286,14 @@ export function AgentControls({
   // FIRST row's description, so a reader would be told about another chat's
   // model. `aria-describedby` resolves by id, so the ids have to be real.
   const speedNote = useId()
+  const autoNote = useId()
+  const autoStatus = auto?.status ?? null
+  // Offered whenever a router is configured; chosen only when it can run. A
+  // missing key is shown, disabled, rather than hidden or claimed as Auto.
+  const autoOffered = autoStatus !== null && autoStatus.state !== "off"
+  const autoReady = autoStatus?.state === "ready"
+  const autoActive = autoReady && auto?.on === true
+  const autoDescription = autoStatus ? autoExplanation(t, autoStatus) : ""
   // Shared across every mounted composer, so pinning a model in one tab pins
   // it in all of them. Server-rendered there is nothing saved at all.
   const pins = useSyncExternalStore(
@@ -296,8 +314,27 @@ export function AgentControls({
     onChange(settled, nextProvider)
   }
 
+  /** A model picked by hand: always a manual choice, so Auto goes off. */
+  function pick(next: NeevAgentSettings, nextProvider: NeevAgentProvider) {
+    if (auto?.on) auto.onChange(false)
+    apply(next, nextProvider)
+  }
+
   // Nothing has been read yet, or the read failed. Say what it runs as now and
   // offer nothing: an empty menu would imply there is nothing to choose.
+  if (!capabilities && autoActive)
+    return (
+      <span
+        title={autoDescription}
+        className={cn(
+          "flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground",
+          className
+        )}
+      >
+        <Sparkles aria-hidden className="size-3.5 shrink-0" />
+        <span className="truncate">{t("autoRoute")}</span>
+      </span>
+    )
   if (!capabilities)
     return (
       <span
@@ -380,38 +417,76 @@ export function AgentControls({
             // behind it: the model is what the trigger leads with, and it is
             // what someone reaching for this control is looking for.
             aria-label={t("agentModel")}
-            title={`${providerModelLabel(t, view, settings, provider)} · ${effortLabel(
-              t,
-              settings.effort
-            )}${settings.fast ? ` · ${t("speedFast")}` : ""}`}
+            // While Auto is chosen the trigger carries its disclosure: what is
+            // sent where to decide, on hover and as its description.
+            aria-describedby={autoActive ? autoNote : undefined}
+            title={
+              autoActive
+                ? autoDescription
+                : `${providerModelLabel(t, view, settings, provider)} · ${effortLabel(
+                    t,
+                    settings.effort
+                  )}${settings.fast ? ` · ${t("speedFast")}` : ""}`
+            }
             className="h-7 min-w-0 max-w-64 shrink gap-1.5 rounded-full px-2 text-xs font-normal"
           >
-            <span className="truncate">
-              {providerModelLabel(t, view, settings, provider)}
-            </span>
-            {/* The level rides on the same trigger, muted. It is the second
-                thing anyone checks before a costly turn, and a whole control
-                of its own was more row than it was worth. */}
-            <span className="shrink-0 text-muted-foreground">
-              {effortLabel(t, settings.effort)}
-            </span>
-            {settings.fast && (
-              <Zap
-                aria-hidden
-                className="size-3 shrink-0 text-muted-foreground"
-              />
+            {autoActive ? (
+              <>
+                <Sparkles aria-hidden className="size-3.5 shrink-0" />
+                <span className="truncate">{t("autoRoute")}</span>
+              </>
+            ) : (
+              <>
+                <span className="truncate">
+                  {providerModelLabel(t, view, settings, provider)}
+                </span>
+                {/* The level rides on the same trigger, muted. It is the
+                    second thing anyone checks before a costly turn, and a
+                    whole control of its own was more row than it was worth. */}
+                <span className="shrink-0 text-muted-foreground">
+                  {effortLabel(t, settings.effort)}
+                </span>
+                {settings.fast && (
+                  <Zap
+                    aria-hidden
+                    className="size-3 shrink-0 text-muted-foreground"
+                  />
+                )}
+              </>
             )}
             <ChevronDown aria-hidden className="size-3 shrink-0 opacity-60" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="min-w-60">
+          {autoOffered && (
+            <>
+              <DropdownMenuRadioGroup
+                aria-label={t("autoRoute")}
+                value={autoActive ? "auto" : ""}
+                onValueChange={() => auto?.onChange(true)}
+              >
+                <DropdownMenuRadioItem
+                  value="auto"
+                  disabled={!autoReady || auto?.disabled}
+                  title={autoDescription}
+                  aria-describedby={autoNote}
+                >
+                  <Sparkles aria-hidden className="size-3.5 opacity-60" />
+                  <span className="truncate">{t("autoRoute")}</span>
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+            </>
+          )}
           <DropdownMenuRadioGroup
             // Named as well as drawn: with two providers in the catalogue, a
             // bare list of model names does not say whose they are.
             aria-label={view.catalog?.label ?? provider}
-            value={settings.model}
+            // Nothing is shown as selected while Auto chooses: the selection
+            // underneath is only its fallback.
+            value={autoActive ? "" : settings.model}
             onValueChange={(next) =>
-              apply({ ...settings, model: next }, provider)
+              pick({ ...settings, model: next }, provider)
             }
           >
             {shortlist.map((id) => {
@@ -451,9 +526,13 @@ export function AgentControls({
                       // Only the selected provider's group has a selection. A
                       // second group showing one too would say the session was
                       // two things.
-                      value={group.provider === provider ? settings.model : ""}
+                      value={
+                        group.provider === provider && !autoActive
+                          ? settings.model
+                          : ""
+                      }
                       onValueChange={(next) =>
-                        apply({ ...settings, model: next }, group.provider)
+                        pick({ ...settings, model: next }, group.provider)
                       }
                     >
                       {group.models.map(modelItem)}
@@ -486,65 +565,74 @@ export function AgentControls({
 
           <DropdownMenuSeparator />
 
-          <DropdownMenuSub>
-            {/* Disabled when the model takes no level at all: `efforts` always
+          {/* Reasoning and speed are Auto's to choose while it is on, so they
+              are not asked for — and their warnings are not shown. */}
+          {!autoActive && (
+            <>
+              <DropdownMenuSub>
+                {/* Disabled when the model takes no level at all: `efforts` always
                 carries the provider default, so one entry means there is
                 nothing to choose between. */}
-            <DropdownMenuSubTrigger
-              disabled={view.efforts.length <= 1}
-              aria-label={t("agentEffort")}
-            >
-              <span className="truncate">{t("agentEffort")}</span>
-              <span className="ms-auto ps-4 text-muted-foreground">
-                {effortLabel(t, settings.effort)}
-              </span>
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent
-              aria-label={t("agentEffort")}
-              className="min-w-40"
-            >
-              <DropdownMenuRadioGroup
-                aria-label={t("agentEffort")}
-                // `null` is a real choice — the provider's own default, with no
-                // flag passed — so it is carried as a value rather than as an
-                // absence.
-                value={settings.effort ?? ""}
-                onValueChange={(next) =>
-                  apply(
-                    { ...settings, effort: next === "" ? null : next },
-                    provider
-                  )
+                <DropdownMenuSubTrigger
+                  disabled={view.efforts.length <= 1}
+                  aria-label={t("agentEffort")}
+                >
+                  <span className="truncate">{t("agentEffort")}</span>
+                  <span className="ms-auto ps-4 text-muted-foreground">
+                    {effortLabel(t, settings.effort)}
+                  </span>
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent
+                  aria-label={t("agentEffort")}
+                  className="min-w-40"
+                >
+                  <DropdownMenuRadioGroup
+                    aria-label={t("agentEffort")}
+                    // `null` is a real choice — the provider's own default, with no
+                    // flag passed — so it is carried as a value rather than as an
+                    // absence.
+                    value={settings.effort ?? ""}
+                    onValueChange={(next) =>
+                      apply(
+                        { ...settings, effort: next === "" ? null : next },
+                        provider
+                      )
+                    }
+                  >
+                    {view.efforts.map((level) => (
+                      <DropdownMenuRadioItem
+                        key={level ?? ""}
+                        value={level ?? ""}
+                      >
+                        {effortLabel(t, level)}
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+
+              <DropdownMenuCheckboxItem
+                checked={settings.fast}
+                disabled={fastBlocked}
+                // Both states are described: the reason it cannot be used, or what
+                // using it costs. Neither is discoverable from the word "Fast".
+                aria-describedby={speedNote}
+                title={speedDescription}
+                // The menu stays open. Speed is read against the model right above
+                // it, and closing on every toggle would make comparing the two a
+                // matter of reopening the menu.
+                onSelect={(event) => event.preventDefault()}
+                onCheckedChange={(next) =>
+                  apply({ ...settings, fast: next === true }, provider)
                 }
               >
-                {view.efforts.map((level) => (
-                  <DropdownMenuRadioItem key={level ?? ""} value={level ?? ""}>
-                    {effortLabel(t, level)}
-                  </DropdownMenuRadioItem>
-                ))}
-              </DropdownMenuRadioGroup>
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
+                <Zap aria-hidden className="size-3.5 opacity-60" />
+                <span className="truncate">{t("speedFast")}</span>
+              </DropdownMenuCheckboxItem>
 
-          <DropdownMenuCheckboxItem
-            checked={settings.fast}
-            disabled={fastBlocked}
-            // Both states are described: the reason it cannot be used, or what
-            // using it costs. Neither is discoverable from the word "Fast".
-            aria-describedby={speedNote}
-            title={speedDescription}
-            // The menu stays open. Speed is read against the model right above
-            // it, and closing on every toggle would make comparing the two a
-            // matter of reopening the menu.
-            onSelect={(event) => event.preventDefault()}
-            onCheckedChange={(next) =>
-              apply({ ...settings, fast: next === true }, provider)
-            }
-          >
-            <Zap aria-hidden className="size-3.5 opacity-60" />
-            <span className="truncate">{t("speedFast")}</span>
-          </DropdownMenuCheckboxItem>
-
-          <DropdownMenuSeparator />
+              <DropdownMenuSeparator />
+            </>
+          )}
 
           <DropdownMenuSub>
             <DropdownMenuSubTrigger>
@@ -584,8 +672,13 @@ export function AgentControls({
           at once and a shared id would point every Fast row at the first
           row's model. */}
       <span id={speedNote} className="sr-only">
-        {speedDescription}
+        {autoActive ? "" : speedDescription}
       </span>
+      {autoOffered && (
+        <span id={autoNote} className="sr-only">
+          {autoDescription}
+        </span>
+      )}
       {/* Announced once, and only when a choice was NOT honoured in full.
           Turning Fast off because the new model cannot run it is a change
           nobody asked for, so it is said out loud — but the standing reason

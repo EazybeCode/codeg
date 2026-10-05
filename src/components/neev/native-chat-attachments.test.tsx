@@ -1,4 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { NativeChat } from "./native-chat"
@@ -295,4 +302,46 @@ it("re-mints the ask's request id once its files change after a failure", async 
   await waitFor(() => expect(asks).toHaveLength(3))
   expect(asks[2].attachmentKeys).toBeUndefined()
   expect(asks[2].requestId).not.toBe(asks[0].requestId)
+})
+
+it("shows a files-only message at once, by name, and keeps its file if it fails", async () => {
+  let answer!: (response: Response) => void
+  const posted: Record<string, unknown>[] = []
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${messagesPath}`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${uploadPath}`]: () => json(attachment, 201),
+    [`POST ${messagesPath}`]: (init) => {
+      posted.push(JSON.parse(init.body as string))
+      return posted.length === 1
+        ? new Promise<Response>((resolve) => {
+            answer = resolve
+          })
+        : json({ ...sent, body: "[attachment 1: shot.png]" }, 201)
+    },
+  })
+  mount()
+  const box = await ready()
+  fireEvent.drop(box, { dataTransfer: fileDrag([png()]) })
+  await screen.findByRole("button", { name: "Remove shot.png" })
+  const send = screen.getByRole("button", { name: "Send" })
+  await waitFor(() => expect(send).toBeEnabled())
+  await userEvent.setup().click(send)
+  // Not an empty bubble: the file is named while the message is on its way,
+  // and the box no longer holds it.
+  const thread = screen.getByRole("list", { name: "Messages" })
+  const pending = await within(thread).findByText("shot.png")
+  expect(pending.closest("li")).toHaveAttribute("aria-busy", "true")
+  expect(screen.queryByRole("button", { name: "Remove shot.png" })).toBeNull()
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json({ code: "unavailable" }, 503)))
+  // Back in the box, still staged with its key: Send again is the same file.
+  expect(
+    await screen.findByRole("button", { name: "Remove shot.png" })
+  ).toBeVisible()
+  await waitFor(() => expect(send).toBeEnabled())
+  await userEvent.setup().click(send)
+  await waitFor(() => expect(posted).toHaveLength(2))
+  expect(posted[1].attachmentKeys).toEqual([KEY])
+  expect(posted[1].requestId).toBe(posted[0].requestId)
 })

@@ -19,6 +19,9 @@ mod catalog_trash;
 mod content;
 #[cfg(test)]
 mod content_tests;
+mod fork;
+#[cfg(test)]
+mod fork_tests;
 pub(crate) mod cookies;
 mod library;
 mod org;
@@ -346,6 +349,13 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
         .route(
             "/api/neev/chats/{chat_id}/agent",
             get(agent_sessions::team_session).post(agent_sessions::team_invoke),
+        )
+        // "Fork to new tab": copy a conversation up through one reply into a
+        // new private conversation (`content::fork`, `agents::session_fork`).
+        .route("/api/neev/chats/{chat_id}/fork", post(fork::fork_chat))
+        .route(
+            "/api/neev/agent/sessions/{session_id}/fork",
+            post(fork::fork_session),
         )
         .route(
             "/api/neev/agent/connections",

@@ -6,6 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react"
+import { writeTabs } from "@/lib/neev-workspace-tabs"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeBoundary } from "./native-boundary"
@@ -2453,4 +2454,65 @@ it("never moves another kept frame when one is brought back", async () => {
   expect(watchedBeta.seen.removed).toBe(false)
   watchedAlpha.stop()
   watchedBeta.stop()
+})
+
+it("opens a fork in a NEW tab beside the chat it came from", async () => {
+  const FORK_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+  const REPLY_ID = "55555555-5555-4555-8555-555555555555"
+  const forkChat = { ...NEW_CHAT, id: FORK_ID, title: "New chat (fork)" }
+  const reply = {
+    id: REPLY_ID,
+    sequence: "1",
+    authorId: 1,
+    authorName: "Sagar",
+    authorKind: "agent",
+    agentLabel: "claude",
+    body: "Here is the plan.",
+    createdAt: 1_700_000_000,
+    attachments: [],
+  }
+  // The chat is the one tab open, as a reload restores it.
+  writeTabs(1, 3, [{ kind: "resource", resourceId: NEW_CHAT_ID, nodeId: 4 }], 0)
+  const routes = restoringRoutes(() => json(DOC))
+  mockNativeSession(undefined, {
+    ...routes,
+    "GET /api/neev/nodes/4/chats": () =>
+      json({ items: [NEW_CHAT], nextAfter: null }),
+    [`GET /api/neev/chats/${NEW_CHAT_ID}/messages`]: () =>
+      json({ items: [reply], nextAfter: null }),
+    [`POST /api/neev/chats/${NEW_CHAT_ID}/fork`]: () =>
+      json(
+        {
+          chatId: FORK_ID,
+          sourceChatId: NEW_CHAT_ID,
+          throughMessageId: REPLY_ID,
+          nodeId: 4,
+          copiedMessages: 1,
+          copiedAttachments: 0,
+          archivedAttachmentsNotCopied: 0,
+          replayed: false,
+        },
+        201
+      ),
+    [`GET /api/neev/resources/${FORK_ID}`]: () => json(forkChat),
+    [`GET /api/neev/chats/${FORK_ID}/messages`]: () =>
+      json({
+        items: [{ ...reply, id: "66666666-6666-4666-8666-666666666666" }],
+        nextAfter: null,
+      }),
+  })
+  const user = userEvent.setup()
+  mountWorkspace()
+  await screen.findByRole("tab", { name: /New chat/ })
+  await screen.findByText("Here is the plan.")
+  await user.click(screen.getByRole("button", { name: "More actions" }))
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Fork to new tab" })
+  )
+  // Two tabs now: the original is still open, and the fork is in front.
+  const fork = await screen.findByRole("tab", { name: /New chat \(fork\)/ })
+  await waitFor(() => expect(fork).toHaveAttribute("aria-selected", "true"))
+  const names = screen.getAllByRole("tab").map((tab) => tab.textContent ?? "")
+  expect(names).toHaveLength(2)
+  expect(names.some((name) => /New chat$/.test(name.trim()))).toBe(true)
 })

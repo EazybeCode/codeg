@@ -9,6 +9,7 @@ import {
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { NativeChat } from "./native-chat"
+import { ForkTabsContext, type OpenFork } from "./native-reply-actions"
 import { NativeBoundary } from "./native-boundary"
 import {
   json,
@@ -19,6 +20,7 @@ import {
   composerText,
   composerEditable,
   typeInComposer,
+  type Handler,
 } from "./test-helpers"
 import type { NativeResource } from "@/lib/neev-content-client"
 import messages from "@/i18n/messages/en.json"
@@ -893,7 +895,8 @@ it("hands the streamed reply to the stored one with no gap and no double", async
   const list = await screen.findByRole("list", { name: "Messages" })
   const thread = within(list)
   // The live row is the one inside the live region; the stored row is not.
-  const preview = () => list.querySelector('[aria-live="polite"]')
+  // (A settled reply's Copy announces through its own sr-only region.)
+  const preview = () => list.querySelector('[aria-live="polite"]:not(.sr-only)')
   await waitFor(() =>
     expect(thread.queryByRole("button", { name: /Working…/ })).toBeNull()
   )
@@ -2733,4 +2736,456 @@ it("offers Reconnect, not Retry, when the provider sign-in expired", async () =>
   expect(card).toHaveTextContent("API Error: 401 OAuth token has expired.")
   expect(within(card).getByRole("button", { name: "Reconnect" })).toBeVisible()
   expect(within(card).queryByRole("button", { name: "Retry" })).toBeNull()
+})
+
+it("copies a settled agent reply as its source, and not a person's message", async () => {
+  const body = "Try this:\n\n```sh\nmake test\n```"
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({
+        items: [askMessage, { ...replyMessage, body }],
+        nextAfter: null,
+      }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+  })
+  const user = userEvent.setup()
+  // After setup: user-event installs its own clipboard stub.
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  })
+  mount()
+  await ready()
+  await screen.findByText("make test")
+  // One for the reply, one for its code; none for the human ask.
+  expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(1)
+  expect(screen.getAllByRole("button", { name: "Copy code" })).toHaveLength(1)
+  await user.click(screen.getByRole("button", { name: "Copy" }))
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(body))
+})
+
+it("shows a sent message at once, clears the box, and settles it exactly once", async () => {
+  let answer!: (response: Response) => void
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}`]: () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve
+      }),
+  })
+  const user = userEvent.setup()
+  mount()
+  await ready()
+  const box = screen.getByRole("textbox", { name: "Message" })
+  await typeInComposer(box, message.body)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  // Before the server answers: the box is empty and the words are in the
+  // thread, marked as still going.
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  const thread = screen.getByRole("list", { name: "Messages" })
+  const pending = within(thread).getByText(message.body).closest("li")!
+  expect(pending).toHaveAttribute("aria-busy", "true")
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json(message, 201)))
+  await waitFor(() =>
+    expect(
+      within(thread).getByText(message.body).closest("li")
+    ).not.toHaveAttribute("aria-busy")
+  )
+  expect(within(thread).getAllByText(message.body)).toHaveLength(1)
+})
+
+it("puts a failed message back without losing what was typed after it", async () => {
+  let answer!: (response: Response) => void
+  const bodies: Record<string, unknown>[] = []
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}`]: (init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return bodies.length === 1
+        ? new Promise<Response>((resolve) => {
+            answer = resolve
+          })
+        : json(message, 201)
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await ready()
+  const box = screen.getByRole("textbox", { name: "Message" })
+  await typeInComposer(box, message.body)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  await typeInComposer(box, "next thing")
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json({ code: "unavailable" }, 503)))
+  expect(await screen.findByRole("alert")).toBeVisible()
+  // Both survive: the unsent message first, then what came after it.
+  // (The box draws the blank line between them as breaks, not text.)
+  await waitFor(() =>
+    expect(composerText(box)).toBe(`${message.body}next thing`)
+  )
+  expect(box.querySelectorAll("br").length).toBeGreaterThan(0)
+  const thread = screen.getByRole("list", { name: "Messages" })
+  expect(within(thread).queryByText(message.body)).toBeNull()
+})
+
+it("shows an agent ask at once, before the run is accepted", async () => {
+  let answer!: (response: Response) => void
+  mockNativeSession(undefined, {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`GET ${path}?after=1`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [AGENT_PATH]: () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve
+      }),
+  })
+  const user = userEvent.setup()
+  mount(true)
+  await ready()
+  await user.click(await screen.findByRole("button", { name: "Ask agent" }))
+  const box = screen.getByRole("textbox", { name: "Message" })
+  await typeInComposer(box, "help")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  const thread = screen.getByRole("list", { name: "Messages" })
+  expect(within(thread).getByText("help").closest("li")).toHaveAttribute(
+    "aria-busy",
+    "true"
+  )
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json({ code: "unavailable" }, 503)))
+  await waitFor(() => expect(composerText(box)).toBe("help"))
+  expect(within(thread).queryByText("help")).toBeNull()
+})
+
+/** History that grows while a send is in flight, read by the 5 s poll. */
+function growingHistory() {
+  const items: Record<string, unknown>[] = []
+  const seen = { reads: 0, withItems: 0 }
+  const read = () => {
+    seen.reads += 1
+    if (items.length) seen.withItems += 1
+    return json({ items: [...items], nextAfter: null })
+  }
+  return {
+    items,
+    seen,
+    routes: {
+      [`GET ${path}`]: read,
+      [`GET ${path}?after=1`]: read,
+      [`GET ${path}?after=2`]: read,
+    },
+  }
+}
+
+it("is not settled by a same-text message from another tab, and shows both", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+  const history = growingHistory()
+  let answer!: (response: Response) => void
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    ...history.routes,
+    [`POST ${path}`]: () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve
+      }),
+  })
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  mount()
+  await ready()
+  await typeInComposer(
+    screen.getByRole("textbox", { name: "Message" }),
+    message.body
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  const thread = within(screen.getByRole("list", { name: "Messages" }))
+  await waitFor(() => expect(thread.getByText(message.body)).toBeVisible())
+  // Another tab of the same person sends the same words, and the poll sees it.
+  const other = { ...message, id: "99999999-9999-4999-8999-999999999999" }
+  history.items.push(other)
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000)
+  })
+  // The poll really did read the new message back.
+  expect(history.seen.withItems).toBeGreaterThan(0)
+  // Still pending: a look-alike is not this request's answer.
+  expect(thread.getByText(message.body).closest("li")).toHaveAttribute(
+    "aria-busy",
+    "true"
+  )
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () =>
+    answer(
+      json(
+        {
+          ...message,
+          id: "88888888-8888-4888-8888-888888888888",
+          sequence: "2",
+        },
+        201
+      )
+    )
+  )
+  // Both are real messages, so both show; nothing is pending any more.
+  await waitFor(() => expect(thread.getAllByText(message.body)).toHaveLength(2))
+  for (const row of thread.getAllByText(message.body))
+    expect(row.closest("li")).not.toHaveAttribute("aria-busy")
+})
+
+it("does not show a message twice when the stream brings it before the response", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+  const history = growingHistory()
+  let answer!: (response: Response) => void
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    ...history.routes,
+    [`POST ${path}`]: () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve
+      }),
+  })
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  mount()
+  await ready()
+  await typeInComposer(
+    screen.getByRole("textbox", { name: "Message" }),
+    message.body
+  )
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  const thread = within(screen.getByRole("list", { name: "Messages" }))
+  // The server already stored it and the poll reads it back first.
+  history.items.push(message)
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(5000)
+  })
+  // The poll really did read the new message back.
+  expect(history.seen.withItems).toBeGreaterThan(0)
+  expect(thread.getAllByText(message.body)).toHaveLength(1)
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json(message, 201)))
+  await waitFor(() =>
+    expect(thread.getByText(message.body).closest("li")).not.toHaveAttribute(
+      "aria-busy"
+    )
+  )
+  expect(thread.getAllByText(message.body)).toHaveLength(1)
+})
+
+// ---- Fork to new tab ----
+
+const FORK_ID = "77777777-7777-4777-8777-777777777777"
+const FORK_PATH = `POST /api/neev/chats/${resource.id}/fork`
+const forked = (over: Record<string, unknown> = {}) => ({
+  chatId: FORK_ID,
+  sourceChatId: resource.id,
+  throughMessageId: replyMessage.id,
+  nodeId: resource.nodeId,
+  copiedMessages: 2,
+  copiedAttachments: 0,
+  archivedAttachmentsNotCopied: 0,
+  replayed: false,
+  ...over,
+})
+
+function mountWithTabs(openFork: OpenFork) {
+  return render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <ForkTabsContext.Provider value={openFork}>
+          <NativeChat
+            resource={resource}
+            onBack={() => {}}
+            onChanged={() => {}}
+          />
+        </ForkTabsContext.Provider>
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+}
+
+function settledThread(fork: Handler) {
+  return {
+    "GET /api/workos/capabilities": capable,
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () =>
+      json({ items: [askMessage, replyMessage], nextAfter: null }),
+    [`GET ${path}?after=2`]: () => json({ items: [], nextAfter: null }),
+    ...noSessions,
+    [FORK_PATH]: fork,
+  }
+}
+
+async function chooseFork(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "More actions" }))
+  await user.click(
+    await screen.findByRole("menuitem", { name: "Fork to new tab" })
+  )
+}
+
+it("forks a settled agent reply into a NEW tab and keeps this chat open", async () => {
+  const bodies: Record<string, unknown>[] = []
+  const openFork = vi.fn<OpenFork>(async () => "opened")
+  mockNativeSession(
+    undefined,
+    settledThread((init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json(forked(), 201)
+    })
+  )
+  const user = userEvent.setup()
+  mountWithTabs(openFork)
+  await ready()
+  await screen.findByText(replyMessage.body)
+  // Only the agent's reply has actions; the person's ask does not.
+  expect(screen.getAllByRole("button", { name: "More actions" })).toHaveLength(
+    1
+  )
+  await chooseFork(user)
+  await waitFor(() => expect(openFork).toHaveBeenCalledTimes(1))
+  expect(bodies).toEqual([
+    { throughMessageId: replyMessage.id, requestId: expect.any(String) },
+  ])
+  // A new tab for the fork — never this one replaced.
+  expect(openFork).toHaveBeenCalledWith({
+    kind: "resource",
+    resourceId: FORK_ID,
+  })
+  expect(await screen.findByText("Forked to a new tab.")).toBeVisible()
+  expect(screen.getByText(replyMessage.body)).toBeVisible()
+  expect(screen.getByText(askMessage.body)).toBeVisible()
+})
+
+it("keeps one request id across a refused, a failed and a successful fork", async () => {
+  const bodies: Record<string, unknown>[] = []
+  const openFork = vi.fn<OpenFork>(async () => "opened")
+  mockNativeSession(
+    undefined,
+    settledThread((init) => {
+      bodies.push(JSON.parse(init.body as string))
+      if (bodies.length === 1) return json({ code: "fork_too_large" }, 409)
+      if (bodies.length === 2) return json({ code: "unavailable" }, 503)
+      return json(forked({ archivedAttachmentsNotCopied: 2 }), 201)
+    })
+  )
+  const user = userEvent.setup()
+  mountWithTabs(openFork)
+  await ready()
+  await chooseFork(user)
+  expect(
+    await screen.findByText("This conversation is too long to fork.")
+  ).toBeVisible()
+  expect(openFork).not.toHaveBeenCalled()
+  await chooseFork(user)
+  await waitFor(() => expect(bodies).toHaveLength(2))
+  expect(await screen.findByRole("alert")).toBeVisible()
+  await chooseFork(user)
+  expect(
+    await screen.findByText(
+      "Forked to a new tab. 2 deleted files were not copied."
+    )
+  ).toBeVisible()
+  // The same id every time, so a lost response resolves to one fork.
+  expect(new Set(bodies.map((body) => body.requestId)).size).toBe(1)
+})
+
+it("replays the same fork when the tab strip was full, and starts fresh after", async () => {
+  const bodies: Record<string, unknown>[] = []
+  const openFork = vi
+    .fn<OpenFork>()
+    .mockResolvedValueOnce("tab_limit")
+    .mockResolvedValue("opened")
+  mockNativeSession(
+    undefined,
+    settledThread((init) => {
+      bodies.push(JSON.parse(init.body as string))
+      return json(forked({ replayed: bodies.length === 2 }), 201)
+    })
+  )
+  const user = userEvent.setup()
+  mountWithTabs(openFork)
+  await ready()
+  await chooseFork(user)
+  expect(
+    await screen.findByText(/there is no room for another tab/)
+  ).toBeVisible()
+  await chooseFork(user)
+  expect(await screen.findByText("Forked to a new tab.")).toBeVisible()
+  expect(bodies[1].requestId).toBe(bodies[0].requestId)
+  // Opened: a later fork of the same reply is a new fork.
+  await chooseFork(user)
+  await waitFor(() => expect(bodies).toHaveLength(3))
+  expect(bodies[2].requestId).not.toBe(bodies[0].requestId)
+})
+
+it("sends one fork however often it is chosen while one is on its way", async () => {
+  let answer!: (response: Response) => void
+  let posts = 0
+  mockNativeSession(
+    undefined,
+    settledThread(() => {
+      posts += 1
+      return new Promise<Response>((resolve) => {
+        answer = resolve
+      })
+    })
+  )
+  const user = userEvent.setup()
+  mountWithTabs(vi.fn<OpenFork>(async () => "opened"))
+  await ready()
+  await chooseFork(user)
+  expect(await screen.findByText("Forking…")).toBeVisible()
+  await user.click(screen.getByRole("button", { name: "More actions" }))
+  expect(
+    await screen.findByRole("menuitem", { name: "Fork to new tab" })
+  ).toHaveAttribute("aria-disabled", "true")
+  await user.keyboard("{Escape}")
+  expect(posts).toBe(1)
+  await act(async () => answer(json(forked(), 201)))
+  expect(await screen.findByText("Forked to a new tab.")).toBeVisible()
+})
+
+it("counts a text-only message on its way as unsent work until it lands", async () => {
+  let answer!: (response: Response) => void
+  const dirty = vi.fn()
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () => json(resource),
+    [`GET ${path}`]: () => json({ items: [], nextAfter: null }),
+    [`POST ${path}`]: () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve
+      }),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeChat
+          resource={resource}
+          onBack={() => {}}
+          onChanged={() => {}}
+          onDirtyChange={dirty}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  await ready()
+  const box = screen.getByRole("textbox", { name: "Message" })
+  await typeInComposer(box, message.body)
+  await user.click(screen.getByRole("button", { name: "Send" }))
+  await waitFor(() => expect(composerText(box)).toBe(""))
+  // The box is empty, but leaving now would abort a send that has not landed.
+  await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(true))
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json(message, 201)))
+  await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false))
 })

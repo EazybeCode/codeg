@@ -19,6 +19,9 @@ pub(crate) mod recovery;
 pub(crate) mod runs;
 pub(crate) mod runtime_context;
 pub(crate) mod sessions;
+pub(crate) mod session_fork;
+#[cfg(test)]
+mod session_fork_tests;
 pub(crate) mod status;
 pub(crate) mod steering_history;
 pub(crate) mod supervisor;

@@ -200,7 +200,16 @@ function base(invoked: () => boolean) {
   }
 }
 
-const autoChip = () => screen.queryByRole("button", { name: /^Auto:/ })
+const picker = () => screen.getByRole("button", { name: "Model" })
+/** Auto is on: the one picker says so, and nothing stands beside it. */
+async function autoShown() {
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Auto$/))
+  expect(screen.queryByRole("button", { name: /^Auto/ })).toBeNull()
+}
+async function openPicker(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "Model" }))
+  return screen.findByRole("menu")
+}
 
 it("offers Auto beside the agent controls only when the router is ready", async () => {
   mockNativeSession(undefined, {
@@ -211,18 +220,38 @@ it("offers Auto beside the agent controls only when the router is ready", async 
   mount()
   await ready()
   // On by default once the router is ready — the same default Agent Chats has.
-  const chip = await screen.findByRole("button", { name: /^Auto:/ })
-  expect(chip).toHaveAttribute("aria-pressed", "true")
-  // The device preference Agent Chats reads: switching it here switches it
-  // there.
-  await user.click(chip)
-  expect(chip).toHaveAttribute("aria-pressed", "false")
-  expect(localStorage.getItem("neev.agent.auto")).toBe("0")
+  await autoShown()
+  let menu = await openPicker(user)
+  const items = within(menu).getAllByRole("menuitemradio")
+  expect(items[0]).toHaveAccessibleName("Auto")
+  expect(items[0]).toHaveAttribute("aria-checked", "true")
+  for (const item of items.slice(1))
+    expect(item).toHaveAttribute("aria-checked", "false")
+  expect(within(menu).queryByRole("menuitem", { name: "Reasoning" })).toBeNull()
+  expect(
+    within(menu).queryByRole("menuitemcheckbox", { name: "Fast" })
+  ).toBeNull()
+  // The device preference Agent Chats reads: a manual pick here — even the
+  // model Auto would fall back to — switches it off there too.
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Default" }))
+  expect(localStorage.getItem("neev.agent.auto:1:3")).toBe("0")
+  await waitFor(() =>
+    expect(picker()).toHaveTextContent("Claude Code · Default")
+  )
+  menu = await openPicker(user)
+  expect(
+    within(menu).getByRole("menuitem", { name: "Reasoning" })
+  ).toBeVisible()
+  await user.keyboard("{Escape}")
   // A team message is not an agent turn, so there is nothing to route.
   await user.click(screen.getByRole("button", { name: "Team chat" }))
-  expect(autoChip()).toBeNull()
+  expect(screen.queryByRole("button", { name: "Model" })).toBeNull()
   await user.click(screen.getByRole("button", { name: "Ask agent" }))
-  expect(await screen.findByRole("button", { name: /^Auto:/ })).toBeVisible()
+  // And Auto comes back from the same picker.
+  menu = await openPicker(user)
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Auto" }))
+  expect(localStorage.getItem("neev.agent.auto:1:3")).toBe("1")
+  await autoShown()
 })
 
 it("offers no Auto control when no router is configured", async () => {
@@ -231,10 +260,12 @@ it("offers no Auto control when no router is configured", async () => {
     undefined,
     base(() => false)
   )
+  const user = userEvent.setup()
   mount()
   await ready()
-  await screen.findByRole("button", { name: "Model" })
-  await waitFor(() => expect(autoChip()).toBeNull())
+  const menu = await openPicker(user)
+  expect(within(menu).queryByRole("menuitemradio", { name: "Auto" })).toBeNull()
+  expect(screen.queryByRole("button", { name: /^Auto/ })).toBeNull()
 })
 
 it("honours a switch turned off in Agent Chats and sends a manual ask unchanged", async () => {
@@ -260,10 +291,14 @@ it("honours a switch turned off in Agent Chats and sends a manual ask unchanged"
   const user = userEvent.setup()
   mount()
   await ready()
-  expect(await screen.findByRole("button", { name: /^Auto:/ })).toHaveAttribute(
-    "aria-pressed",
-    "false"
+  await waitFor(() =>
+    expect(picker()).toHaveTextContent("Claude Code · Default")
   )
+  const menu = await openPicker(user)
+  expect(
+    within(menu).getByRole("menuitemradio", { name: "Auto" })
+  ).toHaveAttribute("aria-checked", "false")
+  await user.keyboard("{Escape}")
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(bodies).toHaveLength(1))
@@ -328,7 +363,7 @@ it("with Auto on, lets any connected agent take the ask and follows the one that
   const user = userEvent.setup()
   mount()
   await ready()
-  await screen.findByRole("button", { name: /^Auto:/ })
+  await autoShown()
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(bodies).toHaveLength(1))
@@ -341,13 +376,10 @@ it("with Auto on, lets any connected agent take the ask and follows the one that
   // No connect dialog: the gate needed ANY connected agent.
   expect(screen.queryByRole("dialog")).toBeNull()
   await waitFor(() => expect(events).toEqual([RUN_ID]))
-  // The controls now say what ran, read back from that provider's holder.
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
-      "Codex · Default"
-    )
-  )
+  // The note says what ran; the picker still says Auto, with no manual
+  // model asked for.
   expect(await screen.findByText("Auto: Default · low")).toBeVisible()
+  expect(picker()).toHaveTextContent(/^Auto$/)
 })
 
 it("with Auto off, keeps today's gate on the selected provider", async () => {
@@ -370,7 +402,9 @@ it("with Auto off, keeps today's gate on the selected provider", async () => {
   const user = userEvent.setup()
   mount()
   await ready()
-  await screen.findByRole("button", { name: /^Auto:/ })
+  await waitFor(() =>
+    expect(picker()).toHaveTextContent("Claude Code · Default")
+  )
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   expect(await screen.findByRole("dialog")).toBeVisible()
@@ -420,8 +454,9 @@ it("labels, streams, steers and stops the routed run, and shows what it ran on",
   const user = userEvent.setup()
   mount()
   await ready()
-  await screen.findByRole("button", { name: /^Auto:/ })
-  // The composer points at Codex; Auto will run Claude instead.
+  await autoShown()
+  // The composer points at Codex; Auto will run Claude instead. Picking Codex
+  // is a manual choice, so it turns Auto off…
   await user.click(screen.getByRole("button", { name: "Model" }))
   await user.click(screen.getByRole("menuitem", { name: "More models" }))
   const all = await screen.findByRole("menu", { name: "More models" })
@@ -435,6 +470,10 @@ it("labels, streams, steers and stops the routed run, and shows what it ran on",
       "Codex · Default"
     )
   )
+  // …and choosing Auto again keeps Codex as its private fallback.
+  const menu = await openPicker(user)
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Auto" }))
+  await autoShown()
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(bodies).toHaveLength(1))
@@ -453,13 +492,9 @@ it("labels, streams, steers and stops the routed run, and shows what it ran on",
   const preview = screen.getByText("Opus is on it").closest("li")!
   expect(within(preview).getByText("claude")).toBeVisible()
   expect(within(preview).queryByText("codex")).toBeNull()
-  // The controls switch to what ran, and the note says so.
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
-      "Opus"
-    )
-  )
-  expect(screen.getByText("Auto: Opus · high")).toBeVisible()
+  // Auto stays the choice; the note says what it ran on.
+  expect(await screen.findByText("Auto: Opus · high")).toBeVisible()
+  expect(picker()).toHaveTextContent(/^Auto$/)
   // Steering and Stop are keyed on the run, routed or not.
   await typeAsk("Focus on edge cases")
   await user.click(screen.getByRole("button", { name: "Send" }))
@@ -505,7 +540,7 @@ it("says honestly when Auto fell back to the selection", async () => {
   const user = userEvent.setup()
   mount()
   await ready()
-  await screen.findByRole("button", { name: /^Auto:/ })
+  await autoShown()
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   expect(
@@ -595,7 +630,7 @@ it("clears the note on Retry, which re-runs the stored selection", async () => {
   const user = userEvent.setup()
   mount()
   await ready()
-  await screen.findByRole("button", { name: /^Auto:/ })
+  await autoShown()
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   expect(await screen.findByText("Auto: Opus · high")).toBeVisible()
@@ -634,7 +669,7 @@ it("shows the ask once when a lost response is replayed without a route", async 
   const user = userEvent.setup()
   mount()
   await ready()
-  await screen.findByRole("button", { name: /^Auto:/ })
+  await autoShown()
   await typeAsk()
   await user.click(screen.getByRole("button", { name: "Send" }))
   await waitFor(() => expect(bodies).toHaveLength(1))

@@ -36,7 +36,12 @@ import {
   type NeevAttachmentType,
   type NeevRejectedFile,
 } from "@/lib/neev-attachments"
-import { attachmentMarker, parseSentPrompt } from "@/lib/neev-inline-prompt"
+import {
+  attachmentMarker,
+  mentionText,
+  parseSentPrompt,
+  type PromptSegment,
+} from "@/lib/neev-inline-prompt"
 import { countCodePoints, type MentionSpan } from "@/lib/neev-mentions"
 import { MentionedText } from "./native-mentions"
 
@@ -831,6 +836,43 @@ function SentReference({
  * block rendering would put each run of text on its own line and destroy the
  * one thing this is for.
  */
+/**
+ * A message on its way, drawn from what was typed: the words, each file as a
+ * chip where it sat, each person as their name. Nothing here has a key yet,
+ * so files are named rather than linked — an attachment-only message still
+ * shows what was sent.
+ */
+export function OutgoingPrompt({
+  segments,
+  names,
+}: {
+  segments: readonly PromptSegment[]
+  /** The staged files' names at send time, by local id. */
+  names: ReadonlyMap<string, string>
+}) {
+  return (
+    <p className="whitespace-pre-wrap break-words">
+      {segments.map((segment, index) =>
+        segment.kind === "text" ? (
+          <span key={index}>{segment.text}</span>
+        ) : segment.kind === "attachment" ? (
+          <span
+            key={index}
+            className="mx-0.5 inline-flex max-w-full items-center gap-1 rounded-md border px-1.5 align-baseline text-xs"
+          >
+            <Paperclip aria-hidden className="size-3 shrink-0" />
+            <span className="truncate">{names.get(segment.id) ?? ""}</span>
+          </span>
+        ) : (
+          <span key={index} className="font-medium">
+            {mentionText(segment.name)}
+          </span>
+        )
+      )}
+    </p>
+  )
+}
+
 export function SentPrompt({
   body,
   attachments,

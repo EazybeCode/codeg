@@ -1,4 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, expect, it, vi } from "vitest"
 import { NativeAgentChats } from "./native-agent-chats"
@@ -380,4 +387,44 @@ it("never carries a file into the chat that was opened next", async () => {
   await waitFor(() => expect(started).not.toBeNull())
   // The other chat's file is nowhere near this turn.
   expect(started).toEqual({ prompt: "Different question" })
+})
+
+it("shows a saved chat's files-only ask by name at once, and keeps the file if it fails", async () => {
+  let answer!: (response: Response) => void
+  const starts: Record<string, unknown>[] = []
+  let uploads = 0
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [UPLOAD]: () => {
+      uploads += 1
+      return json(attachment, 201)
+    },
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [START]: (init) => {
+      starts.push(JSON.parse(init.body as string))
+      return new Promise<Response>((resolve) => {
+        answer = resolve
+      })
+    },
+  })
+  openSession()
+  const box = await screen.findByRole("textbox", { name: "Ask the agent" })
+  fireEvent.drop(box, { dataTransfer: fileDrag([png("diagram.png")]) })
+  await screen.findByRole("button", { name: "Remove diagram.png" })
+  const send = screen.getByRole("button", { name: "Send" })
+  await waitFor(() => expect(send).toBeEnabled())
+  await userEvent.setup().click(send)
+  const turns = screen.getByRole("list", { name: "Session history" })
+  const pending = await within(turns).findByText("diagram.png")
+  expect(pending.closest("li")).toHaveAttribute("aria-busy", "true")
+  await waitFor(() => expect(answer).toBeDefined())
+  await act(async () => answer(json({ code: "unavailable" }, 503)))
+  // The file comes back staged, uploaded once, ready to send again.
+  expect(
+    await screen.findByRole("button", { name: "Remove diagram.png" })
+  ).toBeVisible()
+  expect(within(turns).queryByText("diagram.png")).toBeNull()
+  expect(uploads).toBe(1)
+  expect(starts[0]).toMatchObject({ attachmentKeys: [KEY] })
 })

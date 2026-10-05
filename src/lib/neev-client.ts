@@ -276,7 +276,17 @@ export async function nativeRequest(
       const errorBody = await response.json().catch(() => null)
       // Only codes a caller acts on; anything else stays opaque.
       const code = (
-        ["content_quota", "credential_missing", "ask_busy"] as const
+        [
+          "content_quota",
+          "credential_missing",
+          "ask_busy",
+          // Fork refusals (`neev-fork`): each names why nothing was created.
+          "fork_not_complete",
+          "fork_too_large",
+          "fork_attachments_too_large",
+          "fork_source_trashed",
+          "fork_bound_chat_unavailable",
+        ] as const
       ).find((known) => known === errorBody?.code)
       throw new NativeClientError(
         kinds[response.status] ?? "unavailable",

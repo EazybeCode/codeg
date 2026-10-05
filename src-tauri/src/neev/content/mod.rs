@@ -11,6 +11,9 @@ mod blob_tests;
 #[cfg(test)]
 mod document_tests;
 pub(crate) mod documents;
+pub(crate) mod fork;
+#[cfg(test)]
+mod fork_tests;
 pub(crate) mod image;
 #[cfg(all(test, unix))]
 mod image_tests;

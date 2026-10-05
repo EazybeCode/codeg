@@ -8,7 +8,7 @@
  * remembers two small things on this device: whether Auto is switched on, and
  * the last decision per chat so the composer can say what ran.
  */
-import { NativeClientError } from "./neev-client"
+import { NativeClientError, type NativeSession } from "./neev-client"
 import { contentGet, contentMutation } from "./neev-content-client"
 import {
   isSupportedEffort,
@@ -193,22 +193,43 @@ export async function routeNewAgentChat(
 const PREFERENCE_KEY = "neev.agent.auto"
 
 /**
- * Whether this device sends with Auto. ON by default — Auto is the default
- * once the server's router is ready — and off only after someone switched it
- * off here. The switch alone never makes a turn "Auto": that also needs the
- * router to be ready, so a missing key always means the manual selection.
+ * Whose Auto choice this is: one person in one organization. Two people on
+ * one device, or one person in two organizations, each keep their own.
  */
-export function readAutoPreference(): boolean {
+export function autoAccount(session: NativeSession | null): string | null {
+  if (!session) return null
+  return `${session.user.id}:${session.organization?.id ?? "identity"}`
+}
+
+/**
+ * Whether this account sends with Auto. ON by default — Auto is the default
+ * once the server's router is ready — and off only after someone chose a
+ * model by hand. A choice saved before choices were per account still counts
+ * until this account makes its own. The preference alone never makes a turn
+ * "Auto": that also needs the router to be ready, so a missing key always
+ * means the manual selection.
+ */
+export function readAutoPreference(account: string | null = null): boolean {
   try {
-    return globalThis.localStorage?.getItem(PREFERENCE_KEY) !== "0"
+    const storage = globalThis.localStorage
+    const own = account
+      ? storage?.getItem(`${PREFERENCE_KEY}:${account}`)
+      : null
+    return (own ?? storage?.getItem(PREFERENCE_KEY)) !== "0"
   } catch {
     return true
   }
 }
 
-export function writeAutoPreference(on: boolean): void {
+export function writeAutoPreference(
+  on: boolean,
+  account: string | null = null
+): void {
   try {
-    globalThis.localStorage?.setItem(PREFERENCE_KEY, on ? "1" : "0")
+    globalThis.localStorage?.setItem(
+      account ? `${PREFERENCE_KEY}:${account}` : PREFERENCE_KEY,
+      on ? "1" : "0"
+    )
   } catch {
     // Storage refused (private mode): the switch still works for this page.
   }

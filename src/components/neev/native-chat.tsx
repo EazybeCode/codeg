@@ -83,12 +83,24 @@ import {
   type NeevRunInput,
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls, reconcileAgentSettings } from "./native-agent-controls"
-import { AutoRouteChip, RouteNote, useAutoRouting } from "./native-agent-auto"
-import { recalledRoute, rememberRoute } from "@/lib/neev-auto-route"
+import { RouteNote, useAutoRouting } from "./native-agent-auto"
+import {
+  ReplyActions,
+  useForkAction,
+  useOpenFork,
+} from "./native-reply-actions"
+import { forkChat } from "@/lib/neev-fork"
+import { messageSource } from "@/lib/neev-copy"
+import {
+  autoAccount,
+  recalledRoute,
+  rememberRoute,
+} from "@/lib/neev-auto-route"
 import { NativeRunFailure } from "./native-run-failure"
 import { providerName, runFailure } from "@/lib/neev-run-failure"
 import {
   AttachmentButton,
+  OutgoingPrompt,
   SentPrompt,
   SentAttachments,
   useAttachmentTray,
@@ -101,6 +113,7 @@ import {
   type InlineComposerHandle,
 } from "./native-inline-composer"
 import {
+  attachmentIds,
   composeWirePrompt,
   promptIsEmpty,
   promptText,
@@ -487,7 +500,25 @@ function Chat({
   const retryRequest = useRef<{ runId: string; id: string } | null>(null)
   // Auto routing: the same per-device switch Agent Chats uses, and the last
   // decision for THIS chat so the composer can say what the ask ran on.
-  const autoRouting = useAutoRouting(auth.scopeKey)
+  const autoRouting = useAutoRouting(auth.scopeKey, autoAccount(auth.session))
+  const forkAction = useForkAction(auth.scopeKey, useOpenFork())
+  /**
+   * Copy this chat up through one agent reply into a new private chat, and
+   * open that in a new tab. The server copies; nothing is run.
+   */
+  function forkReply(messageId: string) {
+    const session = auth.session
+    if (!session) return
+    const chatId = latest.id
+    void forkAction.fork(messageId, async (requestId) => {
+      const made = await forkChat(chatId, messageId, requestId, session.csrf)
+      return {
+        target: { kind: "resource", resourceId: made.chatId },
+        archived: made.archivedAttachmentsNotCopied,
+        skipped: 0,
+      }
+    })
+  }
   const [lastRoute, setLastRoute] = useState<NeevRoute | null>(() =>
     recalledRoute(resource.id)
   )
@@ -561,11 +592,41 @@ function Chat({
   const pushAdvertised = auth.capabilities?.realtime ?? false
   const historyElement = useRef<HTMLOListElement>(null)
   const followHistory = useRef(true)
+  // The message on its way: shown at once, settled by the server's answer to
+  // THIS request (its message id), or put back in the box if it fails.
+  const [outgoing, setOutgoing] = useState<{
+    segments: readonly PromptSegment[]
+    names: ReadonlyMap<string, string>
+    files: ReadonlySet<string>
+    after: string | null
+  } | null>(null)
+  // The tray as of the latest render, for a restore that runs after awaits.
+  const stagedNow = useRef(attachments.items)
+  useEffect(() => {
+    stagedNow.current = attachments.items
+  })
+  // While this reader's own message is in flight, their NEWER messages wait
+  // off screen: one may be this very message arriving by the stream before
+  // the response, and which one it is is known only from the response. Held
+  // for display only, and only until the request settles — then everything
+  // shows, so a same-text message from another tab is never lost or merged.
+  const ownId = auth.session?.user.id
+  const shownMessages = outgoing
+    ? messages.filter(
+        (message) =>
+          !(
+            message.authorKind === "human" &&
+            message.authorId === ownId &&
+            (outgoing.after === null ||
+              Number(message.sequence) > Number(outgoing.after))
+          )
+      )
+    : messages
   useLayoutEffect(() => {
     const history = historyElement.current
     if (history && followHistory.current)
       history.scrollTop = history.scrollHeight
-  }, [messages, loading, liveActivity, agentText])
+  }, [messages, loading, liveActivity, agentText, outgoing])
   const pinned = useRef(resource.authRevision),
     messagesRef = useRef<NativeMessage[]>([]),
     // Which run the live preview belongs to. A handover still in flight when
@@ -728,11 +789,14 @@ function Chat({
     }
   }
   // A staged file is unsent work in exactly the way typed text is, so leaving
-  // with one asks the same question.
+  // with one asks the same question — and so is a message on its way: the box
+  // is already empty, but leaving would abort a send that has not landed.
   useEffect(() => {
-    onDirtyChange?.(!!draftRef.current || !attachments.empty)
+    onDirtyChange?.(
+      !!draftRef.current || !attachments.empty || outgoing !== null
+    )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attachments.empty])
+  }, [attachments.empty, outgoing])
   // Merge server rows into the thread by id, ordered by sequence. Callers never
   // invent a message: everything here came back from the server.
   //
@@ -849,6 +913,11 @@ function Chat({
     sending.current = false
     busy.current = false
     setSaving(false)
+    // A message still on its way when the scope moved is ambiguous: it may or
+    // may not have landed. Its words go back into the box, and its request id
+    // stays in `retry` / `invokeRequest`, so Send again is a replay the server
+    // dedupes — never a second message.
+    if (outgoing) unsend(outgoing.segments)
     void refresh(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope])
@@ -1348,6 +1417,7 @@ function Chat({
       return
     if (checkingConnection.current) return
     checkingConnection.current = true
+    showSending(written)
     try {
       const wiring = await refreshConnections()
       if (!scope.isCurrent()) return
@@ -1364,10 +1434,14 @@ function Chat({
         providerChosen.current = true
         setError(null)
         setConnectOpen(true)
+        unsend(written)
         return
       }
     } catch (cause) {
-      if (scope.isCurrent()) fail(cause)
+      if (scope.isCurrent()) {
+        unsend(written)
+        fail(cause)
+      }
       return
     } finally {
       checkingConnection.current = false
@@ -1376,10 +1450,14 @@ function Chat({
     // very turn it was chosen for. Store it first, and if that fails do not
     // invoke: the prompt stays exactly where it was typed, with the reason
     // beside it, rather than running under a configuration nobody chose.
-    if (desired && holder && !(await applySettings(desired))) return
+    if (desired && holder && !(await applySettings(desired))) {
+      if (scope.isCurrent()) unsend(written)
+      return
+    }
     setAgentBusy(true)
     setAgentText("")
     setError(null)
+    let durable = false
     try {
       // Bytes first: a key only exists once the server has the file, so an ask
       // can never mention a file that is not there. A failure here leaves the
@@ -1430,11 +1508,11 @@ function Chat({
       // The files go with it, and only now — the message the server returned is
       // what carries them from here on.
       invokeRequest.current = null
-      clearSent(written)
-      attachments.clear()
+      durable = true
+      settleAttachments(ids)
       retry.current = null
-      followHistory.current = true
       absorb([invocation.message])
+      setOutgoing(null)
       void nameFromFirstMessage(promptText(written), staged)
       // The agent that actually took the ask. With Auto that may not be the
       // selection — and a replay of an earlier Auto ask carries no route, so
@@ -1495,6 +1573,8 @@ function Chat({
           setAgentBusy(false)
           setAgentRunId(null)
         }
+        // Not posted: the ask goes back, and keeps its request id for Send.
+        if (!durable) unsend(written)
         fail(cause)
       }
     }
@@ -1602,6 +1682,7 @@ function Chat({
     sending.current = true
     setSaving(true)
     setError(null)
+    showSending(written)
     let keys: string[]
     try {
       // Nothing is posted until every staged file has a key. A failure here
@@ -1610,6 +1691,7 @@ function Chat({
       keys = await attachments.takeKeys(undefined, ids)
     } catch (cause) {
       if (scope.isCurrent()) {
+        unsend(written)
         setError(cause)
         sending.current = false
         setSaving(false)
@@ -1648,15 +1730,16 @@ function Chat({
         scope.signal
       )
       if (!scope.isCurrent()) return
-      followHistory.current = true
       absorb([message])
+      setOutgoing(null)
       // Leave the incremental cursor unchanged: another author's intervening messages may exist.
-      clearSent(written)
-      attachments.clear()
+      settleAttachments(ids)
       retry.current = null
       pinned.current = latest.authRevision
       void nameFromFirstMessage(promptText(written), staged)
     } catch (e) {
+      // Kept in `retry`, so Send on the restored words is the same request.
+      if (scope.isCurrent()) unsend(written)
       fail(e)
     } finally {
       if (scope.isCurrent()) {
@@ -1684,6 +1767,52 @@ function Chat({
       draftRef.current = ""
       onDirtyChange?.(false)
     }
+  }
+  /**
+   * Show a message the moment it is sent, before the server has it.
+   *
+   * Called once the synchronous checks pass: the words leave the box and sit
+   * at the end of the thread, marked as still going, so sending feels
+   * instant. Nothing else changes — the request, its id and its files are the
+   * same as before — and `unsend` puts it all back if it does not land.
+   */
+  function showSending(sent: readonly PromptSegment[]) {
+    setOutgoing({
+      segments: sent,
+      names: new Map(attachments.items.map((item) => [item.id, item.name])),
+      files: new Set(attachmentIds(sent)),
+      after:
+        messagesRef.current[messagesRef.current.length - 1]?.sequence ?? null,
+    })
+    // The reader just acted, so their message is brought into view; streaming
+    // and other people's messages still only follow a reader at the bottom.
+    followHistory.current = true
+    clearSent(sent)
+  }
+  /**
+   * A message that did not land goes back where it was written, ahead of
+   * anything typed since — so neither is lost — with its files still staged.
+   */
+  function unsend(sent: readonly PromptSegment[]) {
+    setOutgoing(null)
+    // A file that is no longer staged cannot come back as a chip that would
+    // send nothing; the words around it still do.
+    const staged = new Set(stagedNow.current.map((item) => item.id))
+    const back = sent.filter(
+      (segment) => segment.kind !== "attachment" || staged.has(segment.id)
+    )
+    setDraft((current) => {
+      const restored: PromptSegment[] = promptIsEmpty(current)
+        ? [...back]
+        : [...back, { kind: "text", text: "\n\n" }, ...current]
+      draftRef.current = promptText(restored)
+      return restored
+    })
+    onDirtyChange?.(true)
+  }
+  /** Only the files that went with the message leave the tray. */
+  function settleAttachments(ids: readonly string[]) {
+    for (const id of ids) attachments.remove(id)
   }
   /** Whichever way this composer is pointed. */
   function submit() {
@@ -2000,7 +2129,7 @@ function Chat({
             className="mx-auto w-full max-w-3xl"
           />
         )}
-        {messages.map((message) => (
+        {shownMessages.map((message) => (
           <li
             key={message.id}
             className="mx-auto flex w-full max-w-3xl gap-2.5"
@@ -2016,7 +2145,7 @@ function Chat({
                 be mirrored per reader. */}
             <div
               className={cn(
-                "min-w-0 flex-1 space-y-1",
+                "group/message min-w-0 flex-1 space-y-1",
                 message.authorKind === "human" && CHAT_USER_SURFACE
               )}
             >
@@ -2068,10 +2197,24 @@ function Chat({
                   items={traces.get(message.id)!.activity}
                 />
               ) : (
-                <NativeMarkdown markdown={message.body} />
+                <NativeMarkdown
+                  markdown={message.body}
+                  copy={message.authorKind === "agent" ? "code" : "none"}
+                />
               )}
               {message.authorKind === "agent" && (
                 <SentAttachments attachments={message.attachments} />
+              )}
+              {/* A stored agent reply is complete by construction: Copy (its
+                  Markdown, never the trace rows) and Fork to new tab. */}
+              {message.authorKind === "agent" && (
+                <ReplyActions
+                  markdown={() => messageSource(message.body)}
+                  forkKey={message.id}
+                  onFork={() => forkReply(message.id)}
+                  forking={forkAction.forking}
+                  outcome={forkAction.outcome}
+                />
               )}
               {/* Below the reply, where the live footer is: a run that put its
                   progress above the answer moved every word of that answer up
@@ -2100,6 +2243,33 @@ function Chat({
             </div>
           </li>
         ))}
+        {/* The message on its way, drawn like the stored one it becomes. Its
+            state is the muted tone and `aria-busy`, not a spinner: a running
+            agent already has its own progress line, and one signal is enough.
+            It is replaced only by the server's answer to this request — never
+            by a message that merely looks the same. */}
+        {outgoing && (
+          <li
+            aria-busy="true"
+            className="mx-auto flex w-full max-w-3xl gap-2.5 opacity-70"
+          >
+            <AuthorMark
+              agent={false}
+              initial={(auth.session?.user.displayName ?? "").slice(0, 1)}
+            />
+            <div className={cn("min-w-0 flex-1 space-y-1", CHAT_USER_SURFACE)}>
+              <MessageMeta
+                author={auth.session?.user.displayName ?? null}
+                invoker={null}
+                at={null}
+              />
+              <OutgoingPrompt
+                segments={outgoing.segments}
+                names={outgoing.names}
+              />
+            </div>
+          </li>
+        )}
         {(agentBusy || agentText) && !previewStored && (
           <li className="mx-auto flex w-full max-w-3xl gap-2.5">
             <AuthorMark agent initial="" />
@@ -2204,6 +2374,7 @@ function Chat({
           <NativeInlineComposer
             ref={composer}
             value={draft}
+            retain={outgoing?.files}
             onChange={(next) => {
               // An editor that re-reports what it already holds — remounting
               // after a hidden tab is shown again does this — is not an edit,
@@ -2213,7 +2384,9 @@ function Chat({
               draftRef.current = promptText(next)
               setDraft(next)
               retry.current = null
-              onDirtyChange?.(!promptIsEmpty(next) || !attachments.empty)
+              onDirtyChange?.(
+                !promptIsEmpty(next) || !attachments.empty || outgoing !== null
+              )
             }}
             tray={attachments}
             label={t("message")}
@@ -2359,17 +2532,17 @@ function Chat({
                     select: the provider heading a model sits under IS the
                     provider choice, so which agent runs and what it runs as are
                     one decision in one place. */}
-                <AutoRouteChip
-                  status={autoRouting.status}
-                  on={autoRouting.on}
-                  onChange={autoRouting.setOn}
-                  disabled={agentBusy || latest.archived}
-                />
                 <AgentControls
                   capabilities={capabilities}
                   provider={agentProvider}
                   settings={shown}
                   disabled={agentBusy || applying || latest.archived}
+                  auto={{
+                    status: autoRouting.status,
+                    on: autoRouting.on,
+                    onChange: autoRouting.setOn,
+                    disabled: agentBusy || latest.archived,
+                  }}
                   onChange={(next, nextProvider) => {
                     providerChosen.current = true
                     const target = connections?.connections.find(

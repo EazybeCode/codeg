@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { NativeClientError } from "./neev-client"
 import {
+  autoAccount,
   parseRoutingStatus,
   readAutoPreference,
   recalledRoute,
@@ -241,6 +242,55 @@ describe("device-local state", () => {
     expect(readAutoPreference()).toBe(false)
     writeAutoPreference(true)
     expect(readAutoPreference()).toBe(true)
+  })
+
+  it("keeps each person's choice in each organization apart", () => {
+    localStorage.clear()
+    // Fresh: no stored choice anywhere means Auto.
+    expect(readAutoPreference("1:7")).toBe(true)
+    writeAutoPreference(false, "1:7")
+    expect(readAutoPreference("1:7")).toBe(false)
+    // Another org, or another person on this device, still starts on Auto.
+    expect(readAutoPreference("1:8")).toBe(true)
+    expect(readAutoPreference("2:7")).toBe(true)
+    writeAutoPreference(true, "1:7")
+    expect(readAutoPreference("1:7")).toBe(true)
+  })
+
+  it("honours a choice made before preferences were per account", () => {
+    localStorage.clear()
+    localStorage.setItem("neev.agent.auto", "0")
+    expect(readAutoPreference("1:7")).toBe(false)
+    localStorage.setItem("neev.agent.auto", "1")
+    expect(readAutoPreference("1:7")).toBe(true)
+    // An account's own choice wins, and writing it leaves the old one alone.
+    localStorage.setItem("neev.agent.auto", "0")
+    writeAutoPreference(true, "1:7")
+    expect(readAutoPreference("1:7")).toBe(true)
+    expect(localStorage.getItem("neev.agent.auto")).toBe("0")
+  })
+
+  it("names an account by person and organization", () => {
+    const user = { id: 1 } as never
+    expect(autoAccount(null)).toBeNull()
+    expect(
+      autoAccount({
+        user,
+        csrf: "c",
+        scope: "identity",
+        organization: null,
+        role: null,
+      })
+    ).toBe("1:identity")
+    expect(
+      autoAccount({
+        user,
+        csrf: "c",
+        scope: "organization",
+        organization: { id: 7 } as never,
+        role: "member" as never,
+      })
+    ).toBe("1:7")
   })
 
   it("remembers a bounded number of last routes", () => {

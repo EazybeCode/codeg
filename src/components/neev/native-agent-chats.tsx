@@ -99,12 +99,19 @@ import {
 } from "@/lib/neev-agent-sessions-client"
 import { AgentControls } from "./native-agent-controls"
 import {
-  AutoRouteChip,
+  ReplyActions,
+  useForkAction,
+  useOpenFork,
+} from "./native-reply-actions"
+import { forkAgentChat } from "@/lib/neev-fork"
+import { messageSource } from "@/lib/neev-copy"
+import {
   RouteNote,
   SupervisionSummary,
   useAutoRouting,
 } from "./native-agent-auto"
 import {
+  autoAccount,
   rememberRoute,
   recalledRoute,
   routeNewAgentChat,
@@ -114,6 +121,7 @@ import { NativeRunFailure } from "./native-run-failure"
 import { providerName, runFailure } from "@/lib/neev-run-failure"
 import {
   AttachmentButton,
+  OutgoingPrompt,
   SentPrompt,
   SentAttachments,
   useAttachmentTray,
@@ -126,6 +134,7 @@ import {
   type InlineComposerHandle,
 } from "./native-inline-composer"
 import {
+  attachmentIds,
   composeWirePrompt,
   promptIsEmpty,
   promptText,
@@ -581,7 +590,7 @@ function NewAgentChat({
   // The Auto decision for THIS draft, made once: a retry after a failed create
   // reuses it (same request id, same body) instead of deciding again.
   const decided = useRef<NeevRoute | null>(null)
-  const autoRouting = useAutoRouting(auth.scopeKey)
+  const autoRouting = useAutoRouting(auth.scopeKey, autoAccount(auth.session))
   const [deciding, setDeciding] = useState(false)
   // Aborted when this draft goes away (Cancel, navigation, another provider's
   // menu), so a decision still in flight can never create a chat afterwards.
@@ -599,7 +608,8 @@ function NewAgentChat({
   useEffect(() => {
     onRequestNavigationGuard?.((action) => {
       // Staged files are unsent work too, even with nothing typed.
-      if (!draftRef.current.trim() && !stagedRef.current) return action()
+      if (!draftRef.current.trim() && !stagedRef.current && !sendingRef.current)
+        return action()
       if (window.confirm(t("discardDraftPrompt"))) action()
     })
     return () => onRequestNavigationGuard?.((action) => action())
@@ -622,6 +632,27 @@ function NewAgentChat({
   // so files wait here and go up inside `start` — after the session exists and
   // before the turn that carries them.
   const attachments = useAttachmentTray({ upload: null, disabled: !canRun })
+  // The first ask on its way: shown above the box the moment it is sent, and
+  // put back into the box if the chat or its first turn does not land.
+  const [outgoing, setOutgoing] = useState<{
+    segments: readonly PromptSegment[]
+    names: ReadonlyMap<string, string>
+    files: ReadonlySet<string>
+  } | null>(null)
+  const stagedNow = useRef(attachments.items)
+  useEffect(() => {
+    stagedNow.current = attachments.items
+  })
+  function restoreFirst(sent: readonly PromptSegment[]) {
+    setOutgoing(null)
+    const staged = new Set(stagedNow.current.map((item) => item.id))
+    // The box is read-only while the chat starts, so nothing newer is there.
+    setDraft(
+      sent.filter(
+        (segment) => segment.kind !== "attachment" || staged.has(segment.id)
+      )
+    )
+  }
   const drop = useFileDrop({
     // Dropped ON the sentence the editor places it exactly where the pointer
     // was; this is the rest of the card, and the caret is the honest answer.
@@ -630,12 +661,16 @@ function NewAgentChat({
   })
   const stagedRef = useRef(false)
   stagedRef.current = !attachments.empty
+  // The first ask on its way is unsent work too until the chat exists.
+  const sendingRef = useRef(false)
+  sendingRef.current = outgoing !== null
 
   async function start() {
     // The words and the files in the order they were written: each file leaves
     // a numbered marker where it sat, and the keys go up in that same order.
+    const written = draft
     const { prompt, ids } = composeWirePrompt(
-      draft,
+      written,
       new Map(attachments.items.map((item) => [item.id, item.name]))
     )
     if (
@@ -648,6 +683,20 @@ function NewAgentChat({
       return
     setBusy(true)
     setError(null)
+    // Read before the box empties: the title and the routing hint come from
+    // what was sent, not from whatever the box holds by the time they are used.
+    const firstFile = attachments.items[0]?.name ?? ""
+    const fileCount = attachments.items.length
+    // Shown at once: the box empties and the first ask sits above it, muted,
+    // while a model is chosen and the chat is created. Its files stay staged
+    // (`retain`) until the turn has them, and all of it comes back on failure.
+    setOutgoing({
+      segments: written,
+      names: new Map(attachments.items.map((item) => [item.id, item.name])),
+      files: new Set(attachmentIds(written)),
+    })
+    setDraft([])
+    draftRef.current = ""
     // One id per draft: a retry after a lost response returns the SAME session
     // rather than creating a second one.
     request.current ??= crypto.randomUUID()
@@ -665,7 +714,7 @@ function NewAgentChat({
                 model: settings.model,
                 effort: settings.effort,
                 fast: settings.fast,
-                attachedFiles: attachments.items.length,
+                attachedFiles: fileCount,
               },
               auth.session.csrf,
               draftSignal ?? auth.signal
@@ -692,9 +741,7 @@ function NewAgentChat({
           {
             // A chat started from files alone takes its name from the first
             // of them: a real thing the person chose, not a placeholder.
-            title: deriveSessionTitle(
-              promptText(draft).trim() || attachments.items[0]?.name || ""
-            ),
+            title: deriveSessionTitle(promptText(written).trim() || firstFile),
             nodeId,
             provider: chosen.provider,
             model: chosen.settings.model,
@@ -733,8 +780,6 @@ function NewAgentChat({
         // first turn is not routed again.
         decided.current?.routeId ?? null
       )
-      setDraft([])
-      draftRef.current = ""
       attachments.clear()
       onCreated(session)
     } catch (cause) {
@@ -755,18 +800,18 @@ function NewAgentChat({
         }
         if (landed) {
           // The work was done. Hand over to the transcript that holds it.
-          setDraft([])
-          draftRef.current = ""
           attachments.clear()
           onCreated(session)
           return
         }
-        // Nothing was recorded: the chat exists but is empty. Keep the prompt
-        // where the user can see it and send it again deliberately — an empty
-        // chat and a lost message would explain nothing.
+        // Nothing was recorded: the chat exists but is empty. Put the prompt
+        // back where the user can see it and send it again deliberately — an
+        // empty chat and a lost message would explain nothing.
+        restoreFirst(written)
         setError(cause)
         return
       }
+      restoreFirst(written)
       setError(cause)
     } finally {
       setBusy(false)
@@ -783,6 +828,16 @@ function NewAgentChat({
           <p className="mt-1 text-sm leading-6 text-muted-foreground">
             {t("agentChatsPrivate")}
           </p>
+          {outgoing && (
+            <div aria-busy="true" className="mt-4 flex justify-end opacity-70">
+              <div className={cn("max-w-[85%]", CHAT_USER_SURFACE)}>
+                <OutgoingPrompt
+                  segments={outgoing.segments}
+                  names={outgoing.names}
+                />
+              </div>
+            </div>
+          )}
         </div>
       </div>
       <div className="shrink-0 px-4 pb-3 pt-2 sm:px-8 sm:pb-5">
@@ -807,6 +862,7 @@ function NewAgentChat({
           <NativeInlineComposer
             ref={composer}
             value={draft}
+            retain={outgoing?.files}
             onChange={(next) => {
               if (!sameSegments(next, draft)) setDraft(next)
             }}
@@ -815,7 +871,9 @@ function NewAgentChat({
             placeholder={t("agentPromptPlaceholder")}
             onSubmit={() => void start()}
             busy={busy || attachments.uploading}
-            readOnly={!canRun}
+            // Read-only while the chat starts: it hands over to the transcript
+            // on success, and words typed now would have nowhere to go.
+            readOnly={!canRun || busy}
             attachDisabled={!canRun}
             autoFocus
             maxChars={NEEV_MAX_PROMPT_CHARS}
@@ -843,22 +901,22 @@ function NewAgentChat({
             {/* Picking a model under another provider's heading re-points this
                 whole draft — nothing has been created yet, so it is still a
                 choice about which chat to start rather than an edit to one. */}
-            <AutoRouteChip
-              status={autoRouting.status}
-              on={autoRouting.on}
-              onChange={(next) => {
-                autoRouting.setOn(next)
-                // A decision belongs to the switch it was made under.
-                decided.current = null
-              }}
-              disabled={frozen || busy}
-            />
             <AgentControls
               capabilities={capabilities}
               provider={provider}
               settings={settings}
               disabled={frozen}
               lockProvider={frozen}
+              auto={{
+                status: autoRouting.status,
+                on: autoRouting.on,
+                onChange: (next) => {
+                  autoRouting.setOn(next)
+                  // A decision belongs to the choice it was made under.
+                  decided.current = null
+                },
+                disabled: frozen || busy,
+              }}
               onChange={(next, nextProvider) => {
                 setSettings(next)
                 setProvider(nextProvider)
@@ -1544,6 +1602,9 @@ export function TranscriptBody({
               >
                 <NativeMarkdown
                   markdown={part.text}
+                  // Each fenced block of settled text gets its own Copy; the
+                  // whole answer's Copy sits after the turn, not per part.
+                  copy={streaming ? "none" : "code"}
                   streaming={
                     streaming &&
                     segment.index === segments.length - 1 &&
@@ -1626,7 +1687,32 @@ function AgentSessionView({
   // controls are showing the session's own row, which is the normal state.
   const [desired, setDesired] = useState<NeevAgentSettings | null>(null),
     [applying, setApplying] = useState(false)
-  const autoRouting = useAutoRouting(auth.scopeKey)
+  // The ask on its way, shown the moment Send is pressed and replaced by its
+  // turn once the server has it — or put back in the box if it never lands.
+  const [outgoing, setOutgoing] = useState<{
+    segments: readonly PromptSegment[]
+    names: ReadonlyMap<string, string>
+    files: ReadonlySet<string>
+  } | null>(null)
+  const autoRouting = useAutoRouting(auth.scopeKey, autoAccount(auth.session))
+  const forkAction = useForkAction(auth.scopeKey, useOpenFork())
+  /**
+   * Copy this chat up through one completed turn into a new private Agent
+   * Chat, and open that in a new tab. The server copies; nothing is run.
+   */
+  function forkTurn(turnId: string) {
+    const signedIn = auth.session
+    if (!signedIn) return
+    const source = session.id
+    void forkAction.fork(turnId, async (requestId) => {
+      const made = await forkAgentChat(source, turnId, requestId, signedIn.csrf)
+      return {
+        target: { kind: "agent", sessionId: made.sessionId },
+        archived: made.archivedAttachmentsNotCopied,
+        skipped: made.skippedIncompleteTurns,
+      }
+    })
+  }
   // What the latest Auto turn in this chat ran on, and why. Held in memory
   // only: after a reload the session's own settings say what runs.
   const [lastRoute, setLastRoute] = useState<NeevRoute | null>(() =>
@@ -1648,6 +1734,11 @@ function AgentSessionView({
   const attachments = useAttachmentTray({
     upload: uploader,
     disabled: session.archived || !auth.session,
+  })
+  // The tray as of the latest render, for a restore that runs after awaits.
+  const stagedNow = useRef(attachments.items)
+  useEffect(() => {
+    stagedNow.current = attachments.items
   })
   const composer = useRef<InlineComposerHandle>(null)
   const drop = useFileDrop({
@@ -1672,6 +1763,10 @@ function AgentSessionView({
   // over an old tray.
   const stagedRef = useRef(false)
   stagedRef.current = !attachments.empty
+  // An ask on its way is unsent work too: the box is already empty, but
+  // leaving before it lands would lose it.
+  const sendingRef = useRef(false)
+  sendingRef.current = outgoing !== null
   const history = useRef<HTMLOListElement>(null)
   /**
    * Whether the reader is still following the newest output.
@@ -1693,6 +1788,8 @@ function AgentSessionView({
     openSession.current = session.id
     setDesired(null)
     setApplying(false)
+    // The old chat's pending ask is not this chat's: never drawn under it.
+    setOutgoing(null)
     // Files were uploaded to the chat they were dropped into. Carrying them
     // across would attach them to a different conversation, so the tray is
     // emptied and anything still uploading is abandoned.
@@ -1713,7 +1810,8 @@ function AgentSessionView({
     if (!onRequestNavigationGuard) return
     const guard: ContentNavigationGuard = (action) => {
       // Staged files are unsent work too: leaving would discard them.
-      if (draftRef.current || stagedRef.current) setPending(() => action)
+      if (draftRef.current || stagedRef.current || sendingRef.current)
+        setPending(() => action)
       else action()
     }
     onRequestNavigationGuard(guard)
@@ -1955,11 +2053,32 @@ function AgentSessionView({
     }
   }
 
+  /**
+   * An ask that did not land goes back where it was written, ahead of anything
+   * typed since, so neither is lost. Its files never left the tray.
+   */
+  function unsend(sent: readonly PromptSegment[]) {
+    setOutgoing(null)
+    // A file no longer staged cannot come back as a chip that sends nothing.
+    const staged = new Set(stagedNow.current.map((item) => item.id))
+    const back = sent.filter(
+      (segment) => segment.kind !== "attachment" || staged.has(segment.id)
+    )
+    setDraft((current) => {
+      const restored: PromptSegment[] = promptIsEmpty(current)
+        ? [...back]
+        : [...back, { kind: "text", text: "\n\n" }, ...current]
+      draftRef.current = promptText(restored)
+      return restored
+    })
+  }
+
   async function send() {
     // Files alone are a complete ask: the prompt goes up empty and the server
     // is what says so, rather than this composer inventing a sentence.
+    const written = draft
     const { prompt, ids } = composeWirePrompt(
-      draft,
+      written,
       new Map(attachments.items.map((item) => [item.id, item.name]))
     )
     if (
@@ -1972,11 +2091,21 @@ function AgentSessionView({
       return
     setSending(true)
     setError(null)
+    // Shown at once: the box empties and the ask sits in the transcript,
+    // muted, until the server has it. What is typed meanwhile is kept.
+    setOutgoing({
+      segments: written,
+      names: new Map(attachments.items.map((item) => [item.id, item.name])),
+      files: new Set(attachmentIds(written)),
+    })
+    setDraft([])
+    draftRef.current = ""
     // The run reads the SESSION, so an unstored choice would be silently
     // ignored by the very turn it was chosen for. Store it first, and if that
-    // fails do not send: the prompt stays exactly where it was typed, with the
+    // fails do not send: the prompt goes back where it was typed, with the
     // reason beside it, rather than running under a configuration nobody chose.
     if (desired && !(await applySettings(desired))) {
+      if (openSession.current === session.id) unsend(written)
       setSending(false)
       return
     }
@@ -1994,6 +2123,7 @@ function AgentSessionView({
         autoRouting.active
       )
       setTurns((old) => [...(old ?? []), started.turn])
+      setOutgoing(null)
       if (started.route) {
         rememberRoute(target, started.route)
         setLastRoute(started.route)
@@ -2008,10 +2138,9 @@ function AgentSessionView({
               // The next settings change re-reads it on conflict anyway.
             })
       }
-      setDraft([])
-      draftRef.current = ""
-      // Only now: the turn owns them from here.
-      attachments.clear()
+      // Only now, and only the files that went with it: the turn owns them
+      // from here, and any added since stay staged.
+      for (const id of ids) attachments.remove(id)
       // A refused turn comes back already settled with its real reason; only a
       // genuinely running one gets an attachment.
       if (started.turn.status === "running") {
@@ -2020,6 +2149,7 @@ function AgentSessionView({
         setActiveRun(started.runId)
       }
     } catch (cause) {
+      if (openSession.current === session.id) unsend(written)
       fail(cause)
     } finally {
       setSending(false)
@@ -2300,7 +2430,7 @@ function AgentSessionView({
                     />
                   </div>
                 </div>
-                <div className="space-y-2">
+                <div className="group/message space-y-2">
                   {/* Prose and tool rows in one body, in the order the server's
                       offsets record them. Live text while the run is in flight,
                       the stored reply once it is not — the same component in the
@@ -2317,6 +2447,17 @@ function AgentSessionView({
                       streaming={live}
                     />
                   </div>
+                  {/* One Copy for the whole settled answer: its stored
+                      Markdown, never the trace rows or a half-streamed reply. */}
+                  {!live && turn.status === "completed" && (
+                    <ReplyActions
+                      markdown={() => messageSource(turn.response)}
+                      forkKey={turn.id}
+                      onFork={() => forkTurn(turn.id)}
+                      forking={forkAction.forking}
+                      outcome={forkAction.outcome}
+                    />
+                  )}
                   <SentAttachments attachments={generatedAttachments} />
                   {/* Progress after the newest output, near the composer. The
                       clock stays outside the response live region, and the trace
@@ -2347,6 +2488,24 @@ function AgentSessionView({
               </li>
             )
           })}
+          {/* The ask on its way, drawn like the turn it becomes. Muted and
+              `aria-busy` rather than a spinner: the run has its own progress
+              line once it starts, and one signal is enough. */}
+          {outgoing !== null && (
+            <li
+              aria-busy="true"
+              className="mx-auto w-full max-w-3xl opacity-70"
+            >
+              <div className="flex justify-end">
+                <div className={cn("max-w-[85%]", CHAT_USER_SURFACE)}>
+                  <OutgoingPrompt
+                    segments={outgoing.segments}
+                    names={outgoing.names}
+                  />
+                </div>
+              </div>
+            </li>
+          )}
         </ol>
       )}
 
@@ -2396,6 +2555,7 @@ function AgentSessionView({
           <NativeInlineComposer
             ref={composer}
             value={draft}
+            retain={outgoing?.files}
             onChange={(next) => {
               // Re-reporting what it already holds is not an edit.
               if (sameSegments(next, draft)) return
@@ -2462,18 +2622,18 @@ function AgentSessionView({
             {/* The provider is immutable here — a turn may not contradict its
                 session's, and a team holder's id is derived from it — so only
                 this provider's models are offered. */}
-            <AutoRouteChip
-              status={autoRouting.status}
-              on={autoRouting.on}
-              onChange={autoRouting.setOn}
-              disabled={session.archived}
-            />
             <AgentControls
               capabilities={capabilities}
               provider={session.provider as NeevAgentProvider}
               settings={shown}
               lockProvider
               disabled={applying || session.archived || !ready}
+              auto={{
+                status: autoRouting.status,
+                on: autoRouting.on,
+                onChange: autoRouting.setOn,
+                disabled: session.archived,
+              }}
               onChange={(next) => {
                 // Stored straight away so it is already in force by the time
                 // the next prompt is sent; `send` re-checks in case this is

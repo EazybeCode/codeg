@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
 import messages from "@/i18n/messages/en.json"
@@ -89,6 +89,14 @@ const ROUTED = {
   routeId: "44444444-4444-4444-8444-444444444444",
 }
 
+/** The one model picker. Its accessible name stays "Model" in every state. */
+const picker = () => screen.getByRole("button", { name: "Model" })
+
+async function openPicker(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "Model" }))
+  return screen.findByRole("menu")
+}
+
 function composer() {
   return render(
     <NativeTestRoot>
@@ -123,11 +131,16 @@ it("offers no Auto control when no router is configured", async () => {
     "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
     "GET /api/neev/agent/connections": () => json(CONNECTED),
   })
+  const user = userEvent.setup()
   composer()
   await screen.findByRole("textbox", { name: "Message" })
-  await waitFor(() =>
-    expect(screen.queryByRole("button", { name: /^Auto/ })).toBeNull()
-  )
+  // No standalone switch, and nothing called Auto inside the picker either.
+  expect(screen.queryByRole("button", { name: /^Auto/ })).toBeNull()
+  const menu = await openPicker(user)
+  expect(within(menu).queryByRole("menuitemradio", { name: "Auto" })).toBeNull()
+  expect(
+    within(menu).getByRole("menuitem", { name: "Reasoning" })
+  ).toBeVisible()
 })
 
 it("shows a missing router key as unavailable and sends manually", async () => {
@@ -163,11 +176,21 @@ it("shows a missing router key as unavailable and sends manually", async () => {
       )
     },
   })
+  const user = userEvent.setup()
   composer()
-  const chip = await screen.findByRole("button", {
-    name: /^Auto: .*key is missing/,
-  })
-  expect(chip).toBeDisabled()
+  // The saved preference is on, but a missing key never shows as Auto.
+  await waitFor(() =>
+    expect(picker()).toHaveTextContent("Claude Code · Default")
+  )
+  const menu = await openPicker(user)
+  const auto = within(menu).getByRole("menuitemradio", { name: "Auto" })
+  expect(auto).toHaveAttribute("aria-disabled", "true")
+  expect(auto.getAttribute("title")).toMatch(/key is missing/)
+  expect(auto).toHaveAttribute("aria-checked", "false")
+  expect(
+    within(menu).getByRole("menuitemradio", { name: "Default" })
+  ).toHaveAttribute("aria-checked", "true")
+  await user.keyboard("{Escape}")
   await typeAndSend("Redesign the sync engine")
   await waitFor(() => expect(started).not.toBeNull())
   expect(routed).not.toHaveBeenCalled()
@@ -197,13 +220,29 @@ it("routes a new chat exactly once and creates it on the decision", async () => 
       return json({ turn: runningTurn, runId: RUN_ID }, 201)
     },
   })
+  const user = userEvent.setup()
   composer()
-  const chip = await screen.findByRole("button", { name: /^Auto: Jev chooses/ })
-  expect(chip).toHaveAttribute("aria-pressed", "true")
+  // One picker, and it says Auto: no standalone switch beside it.
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Auto$/))
+  expect(screen.queryByRole("button", { name: /^Auto/ })).toBeNull()
   // The privacy disclosure is part of the control itself.
-  expect(chip.getAttribute("title")).toMatch(
+  expect(picker().getAttribute("title")).toMatch(
     /6000 characters of your message, plus up to 2000 characters of the previous exchange, are sent to TypeSafe/
   )
+  const menu = await openPicker(user)
+  const items = within(menu).getAllByRole("menuitemradio")
+  // Auto leads, is the choice, and no manual model claims to be selected.
+  expect(items[0]).toHaveAccessibleName("Auto")
+  expect(items[0]).toHaveAttribute("aria-checked", "true")
+  expect(items[0].getAttribute("title")).toMatch(/sent to TypeSafe/)
+  for (const item of items.slice(1))
+    expect(item).toHaveAttribute("aria-checked", "false")
+  // Manual reasoning and speed are not asked for while Auto chooses them.
+  expect(within(menu).queryByRole("menuitem", { name: "Reasoning" })).toBeNull()
+  expect(
+    within(menu).queryByRole("menuitemcheckbox", { name: "Fast" })
+  ).toBeNull()
+  await user.keyboard("{Escape}")
   await typeAndSend("Redesign the sync engine")
   await waitFor(() => expect(started).not.toBeNull())
   expect(routes).toEqual([
@@ -252,17 +291,153 @@ it("is on by default once the router is ready, and can be switched off", async (
   })
   const user = userEvent.setup()
   composer()
-  const chip = await screen.findByRole("button", {
-    name: /^Auto: Jev chooses/,
-  })
-  expect(chip).toHaveAttribute("aria-pressed", "true")
-  // The manual override: switched off, the draft's own selection is sent.
-  await user.click(chip)
-  expect(chip).toHaveAttribute("aria-pressed", "false")
-  expect(localStorage.getItem("neev.agent.auto")).toBe("0")
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Auto$/))
+  // The manual override: picking a model — even the very one Auto would fall
+  // back to — turns Auto off, and the draft's own selection is sent.
+  let menu = await openPicker(user)
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Default" }))
+  expect(localStorage.getItem("neev.agent.auto:1:3")).toBe("0")
+  await waitFor(() =>
+    expect(picker()).toHaveTextContent("Claude Code · Default")
+  )
+  menu = await openPicker(user)
+  expect(
+    within(menu).getByRole("menuitemradio", { name: "Auto" })
+  ).toHaveAttribute("aria-checked", "false")
+  expect(
+    within(menu).getByRole("menuitemradio", { name: "Default" })
+  ).toHaveAttribute("aria-checked", "true")
+  // Manual reasoning and speed are back.
+  expect(
+    within(menu).getByRole("menuitem", { name: "Reasoning" })
+  ).toBeVisible()
+  expect(
+    within(menu).getByRole("menuitemcheckbox", { name: "Fast" })
+  ).toBeInTheDocument()
+  await user.keyboard("{Escape}")
   await typeAndSend("Redesign the sync engine")
   await waitFor(() => expect(started).not.toBeNull())
   expect(routed).not.toHaveBeenCalled()
+})
+
+it("turns Auto on from inside the picker, without asking for a model", async () => {
+  localStorage.setItem("neev.agent.auto", "0")
+  const routes: Record<string, unknown>[] = []
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/agent/connections": () => json(CONNECTED),
+    "GET /api/neev/agent/routing": () => json(READY),
+    "POST /api/neev/agent/route": (init) => {
+      routes.push(JSON.parse(init.body as string))
+      return json(ROUTED)
+    },
+    "POST /api/neev/agent/sessions": () => json(session, 201),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ turn: runningTurn, runId: RUN_ID }, 201),
+  })
+  const user = userEvent.setup()
+  composer()
+  await waitFor(() =>
+    expect(picker()).toHaveTextContent("Claude Code · Default")
+  )
+  const menu = await openPicker(user)
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Auto" }))
+  expect(localStorage.getItem("neev.agent.auto:1:3")).toBe("1")
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Auto$/))
+  await typeAndSend("Redesign the sync engine")
+  await waitFor(() => expect(routes).toHaveLength(1))
+})
+
+function savedChat(turns: Record<string, unknown>[]) {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    [`GET /api/neev/agent/sessions/${SESSION_ID}`]: () => json(session),
+    "GET /api/neev/agent/connections": () => json(CONNECTED),
+    "GET /api/neev/agent/routing": () => json(READY),
+    [`GET /api/neev/agent/sessions/${SESSION_ID}/turns`]: () =>
+      json({ items: [], nextAfter: null }),
+    [`PATCH /api/neev/agent/sessions/${SESSION_ID}/settings`]: () =>
+      json({ ...session, revision: "2" }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: (init) => {
+      turns.push(JSON.parse(init.body as string))
+      return json(
+        {
+          turn: { ...runningTurn, status: "failed", errorCode: "x" },
+          runId: RUN_ID,
+        },
+        201
+      )
+    },
+  })
+  return render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeAgentChats sessionId={SESSION_ID} />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+}
+
+async function sendSaved(user: ReturnType<typeof userEvent.setup>) {
+  const box = await screen.findByRole("textbox", { name: "Ask the agent" })
+  await waitFor(() => expect(composerEditable(box)).toBe(true))
+  await typeInComposer(box, "Tighten the error handling")
+  await user.click(screen.getByRole("button", { name: "Send" }))
+}
+
+it("a saved chat shows Auto in its one picker and asks for it on the turn", async () => {
+  const turns: Record<string, unknown>[] = []
+  const user = userEvent.setup()
+  savedChat(turns)
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Auto$/))
+  expect(screen.queryByRole("button", { name: /^Auto/ })).toBeNull()
+  const menu = await openPicker(user)
+  expect(
+    within(menu).getByRole("menuitemradio", { name: "Auto" })
+  ).toHaveAttribute("aria-checked", "true")
+  expect(
+    within(menu).getByRole("menuitemradio", { name: "Opus" })
+  ).toHaveAttribute("aria-checked", "false")
+  expect(within(menu).queryByRole("menuitem", { name: "Reasoning" })).toBeNull()
+  await user.keyboard("{Escape}")
+  await sendSaved(user)
+  await waitFor(() => expect(turns).toHaveLength(1))
+  expect(turns[0]).toMatchObject({ auto: true })
+})
+
+it("a saved chat's manual pick — even its stored model — turns Auto off", async () => {
+  const turns: Record<string, unknown>[] = []
+  const user = userEvent.setup()
+  savedChat(turns)
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Auto$/))
+  const menu = await openPicker(user)
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Opus" }))
+  expect(localStorage.getItem("neev.agent.auto:1:3")).toBe("0")
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Opus/))
+  await sendSaved(user)
+  await waitFor(() => expect(turns).toHaveLength(1))
+  expect(turns[0]).not.toHaveProperty("auto")
+})
+
+it("keeps a manual choice and its model across a reload", async () => {
+  const turns: Record<string, unknown>[] = []
+  const user = userEvent.setup()
+  const first = savedChat(turns)
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Auto$/))
+  const menu = await openPicker(user)
+  await user.click(within(menu).getByRole("menuitemradio", { name: "Opus" }))
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Opus/))
+  first.unmount()
+  // A reload: the stored manual choice is not overwritten by the default.
+  savedChat(turns)
+  await waitFor(() => expect(picker()).toHaveTextContent(/^Opus/))
+  const again = await openPicker(user)
+  expect(
+    within(again).getByRole("menuitemradio", { name: "Auto" })
+  ).toHaveAttribute("aria-checked", "false")
+  expect(
+    within(again).getByRole("menuitemradio", { name: "Opus" })
+  ).toHaveAttribute("aria-checked", "true")
 })
 
 it("creates nothing when the draft goes away while Auto is deciding", async () => {
