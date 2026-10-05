@@ -1,5 +1,6 @@
 "use client"
 
+import { ShareDialog, useResourceLevel } from "./native-sharing"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useTranslations } from "next-intl"
@@ -89,7 +90,8 @@ function Content({
   const auth = useNativeAuth(),
     router = useRouter(),
     t = useTranslations("NativeContent"),
-    n = useTranslations("Native")
+    n = useTranslations("Native"),
+    sh = useTranslations("Sharing")
   const [kind, setKind] = useState<NativeResourceKind>(
       creation?.kind ?? "chat"
     ),
@@ -424,6 +426,7 @@ function Content({
     setTitle(action === "create" ? "" : (selected?.title ?? ""))
     setDialog(action)
     if (action === "move") {
+      setMoveRefused(false)
       setDestination(selected?.nodeId ?? node.id)
       setDestinations([])
       void (async () => {
@@ -492,6 +495,14 @@ function Content({
       }
     }
   }
+  // The reader's own level, read once for the open item and only when it can
+  // be below edit (a shared item they did not create). Unknown counts as
+  // view: no write control is offered on a guess.
+  const level = useResourceLevel(selected ?? null)
+  const viewOnly = level === "view" || level === "unknown"
+  const [sharing, setSharing] = useState(false)
+  // The last move was refused by where it was going (View or hidden there).
+  const [moveRefused, setMoveRefused] = useState(false)
   function guardUpdate(
     change: { visibility: "private" } | { archived: boolean }
   ) {
@@ -510,7 +521,7 @@ function Content({
       Pick<NativeResource, "visibility" | "archived" | "nodeId" | "title">
     >,
     targetId = selected?.id
-  ) {
+  ): Promise<unknown> {
     if (
       !selected ||
       selected.id !== targetId ||
@@ -518,7 +529,7 @@ function Content({
       mutationBusy.current ||
       !scope.isCurrent()
     )
-      return
+      return null
     mutationBusy.current = true
     const requestId = ++mutationRequest.current
     const selection = selectionGeneration.current
@@ -543,7 +554,7 @@ function Content({
         auth.session.csrf,
         scope.signal
       )
-      if (!current()) return
+      if (!current()) return null
       setDialog(null)
       // `changed`, not `setSelected`: this is the one place a rename, a move or
       // an archive made from THIS menu becomes true, and the tab strip, the
@@ -554,9 +565,21 @@ function Content({
       changed(resource)
       onOpened?.(resource)
       if (resource.nodeId !== node.id) back()
+      return null
     } catch (e) {
-      if (current()) fail(e)
+      // A move refused by its DESTINATION (a folder the reader can only view,
+      // or cannot see) says nothing about this item: it stays open, and the
+      // dialog says why, rather than treating the item as lost.
+      const destinationRefused =
+        "nodeId" in change &&
+        (e instanceof NativeContentNotFoundError ||
+          (e instanceof NativeClientError &&
+            (e.kind === "forbidden" || e.status === 404)))
+      if (current() && destinationRefused) setMoveRefused(true)
+      else if (current()) fail(e)
       else if (scope.isCurrent()) auth.handleError(e)
+      // The refusal, for a dialog that asked for this change.
+      return e
     } finally {
       if (current()) {
         mutationBusy.current = false
@@ -801,7 +824,8 @@ function Content({
                   shareable: !selected.originChatId,
                   disabled: saving,
                   onRename: () => open("rename"),
-                  onShare: () => open("share"),
+                  onShare: () => guard(() => setSharing(true)),
+                  viewOnly,
                   onMakePrivate: () => guardUpdate({ visibility: "private" }),
                   onArchiveToggle: () =>
                     guardUpdate({ archived: !selected.archived }),
@@ -830,7 +854,8 @@ function Content({
                   shareable: !selected.originChatId,
                   disabled: saving,
                   onRename: () => open("rename"),
-                  onShare: () => open("share"),
+                  onShare: () => guard(() => setSharing(true)),
+                  viewOnly,
                   onMakePrivate: () => guardUpdate({ visibility: "private" }),
                   onArchiveToggle: () =>
                     guardUpdate({ archived: !selected.archived }),
@@ -854,7 +879,8 @@ function Content({
                   shareable: !selected.originChatId,
                   disabled: saving,
                   onRename: () => open("rename"),
-                  onShare: () => open("share"),
+                  onShare: () => guard(() => setSharing(true)),
+                  viewOnly,
                   onMakePrivate: () => guardUpdate({ visibility: "private" }),
                   onArchiveToggle: () =>
                     guardUpdate({ archived: !selected.archived }),
@@ -868,6 +894,18 @@ function Content({
           <p role="alert">{t("unavailable")}</p>
         ) : (
           <NativeError error={error} />
+        )}
+        {selected && (
+          <ShareDialog
+            open={sharing}
+            onOpenChange={setSharing}
+            title={selected.title}
+            target={{
+              kind: "resource",
+              resource: selected,
+              onVisibility: (visibility) => update({ visibility }),
+            }}
+          />
         )}
         <Dialog
           open={!!dialog && !(chromeless && dialog === "create")}
@@ -930,15 +968,21 @@ function Content({
                   />
                 </label>
               )}
+              {dialog === "move" && moveRefused && (
+                <p role="alert" className="text-sm text-destructive">
+                  {sh("moveRefused")}
+                </p>
+              )}
               {dialog === "move" && (
                 <label className="block space-y-2">
                   <span className="text-sm">{t("destination")}</span>
                   <select
                     value={destination}
                     disabled={saving}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      setMoveRefused(false)
                       setDestination(Number(event.target.value))
-                    }
+                    }}
                     className="h-10 w-full rounded-lg border bg-background px-3"
                   >
                     {destinations.map((value) => (

@@ -30,6 +30,10 @@ const FORK_BODY_LIMIT: usize = 1024;
 struct ChatForkInput {
     through_message_id: String,
     request_id: String,
+    /// Where the fork lands. Needed only when the source's folder is hidden
+    /// from the caller (`fork_no_location`); must be a folder they may place in.
+    #[serde(default)]
+    node_id: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +79,7 @@ fn refusal(error: fork::ForkError) -> Response {
         fork::ForkError::AttachmentsTooLarge => "fork_attachments_too_large",
         fork::ForkError::SourceTrashed => "fork_source_trashed",
         fork::ForkError::BoundChatUnavailable => "fork_bound_chat_unavailable",
+        fork::ForkError::NoLocation => "fork_no_location",
     };
     let mut response = (StatusCode::CONFLICT, Json(serde_json::json!({ "code": code }))).into_response();
     add_private_headers(&mut response);
@@ -97,12 +102,13 @@ pub(super) async fn fork_chat(
     let (input, actor) =
         organization_mutation::<ChatForkInput>(&state, request, FORK_BODY_LIMIT).await?;
     Ok(
-        match fork::fork_chat(
+        match fork::fork_chat_into(
             &state,
             &actor,
             &chat_id,
             &input.through_message_id,
             &input.request_id,
+            input.node_id,
         )
         .await
         {

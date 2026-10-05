@@ -120,3 +120,25 @@ it("parses strictly: unknown fields, wrong types, a fork of itself or an empty f
   ])
     expect(() => parseAgentChatFork(bad)).toThrow(NativeClientError)
 })
+
+it("names a target folder only when asked, and refuses a fork placed elsewhere", async () => {
+  let fetcher = respond(201, chatFork)
+  await forkChat(A, C, R, "csrf", undefined, 7)
+  expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+    throughMessageId: C,
+    requestId: R,
+    nodeId: 7,
+  })
+  fetcher = respond(201, chatFork)
+  await expect(forkChat(A, C, R, "csrf", undefined, 8)).rejects.toMatchObject({
+    kind: "invalid_response",
+  })
+  fetcher = respond(201, chatFork)
+  await expect(forkChat(A, C, R, "csrf", undefined, 0)).rejects.toMatchObject({
+    kind: "invalid_request",
+  })
+  expect(fetcher).not.toHaveBeenCalled()
+  respond(409, { code: "fork_no_location" })
+  const refused = await forkChat(A, C, R, "csrf").catch((error) => error)
+  expect(forkRefusal(refused)).toBe("fork_no_location")
+})

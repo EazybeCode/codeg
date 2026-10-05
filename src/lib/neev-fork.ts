@@ -44,6 +44,8 @@ export type NeevForkRefusal =
   | "fork_attachments_too_large"
   | "fork_source_trashed"
   | "fork_bound_chat_unavailable"
+  /** The source's folder is hidden or View-only for you and no folder above it takes the fork. */
+  | "fork_no_location"
 
 const REFUSALS: readonly NeevForkRefusal[] = [
   "fork_not_complete",
@@ -51,6 +53,7 @@ const REFUSALS: readonly NeevForkRefusal[] = [
   "fork_attachments_too_large",
   "fork_source_trashed",
   "fork_bound_chat_unavailable",
+  "fork_no_location",
 ]
 
 /** The refusal behind an error from a fork helper, or `null` for any other failure. */
@@ -170,20 +173,30 @@ export async function forkChat(
   throughMessageId: string,
   requestId: string,
   csrf: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /**
+   * Where the fork lands. Needed only after `fork_no_location` (the source's
+   * folder is hidden from the caller); a folder they may place a chat in.
+   * Retry with the SAME `requestId` and target.
+   */
+  nodeId?: number
 ): Promise<NeevChatFork> {
   const chat = requestArgument(chatId)
-  return parseChatFork(
-    await nativeMutation(
-      `/api/neev/chats/${chat}/fork`,
-      {
-        throughMessageId: requestArgument(throughMessageId),
-        requestId: requestArgument(requestId),
-      },
-      csrf,
-      signal
-    )
+  if (
+    nodeId !== undefined &&
+    (!Number.isInteger(nodeId) || nodeId <= 0 || nodeId > 2147483647)
   )
+    throw new NativeClientError("invalid_request")
+  const body: Record<string, unknown> = {
+    throughMessageId: requestArgument(throughMessageId),
+    requestId: requestArgument(requestId),
+  }
+  if (nodeId !== undefined) body.nodeId = nodeId
+  const fork = parseChatFork(
+    await nativeMutation(`/api/neev/chats/${chat}/fork`, body, csrf, signal)
+  )
+  if (nodeId !== undefined && fork.nodeId !== nodeId) return invalid()
+  return fork
 }
 
 /** Fork the caller's Agent Chat up through the completed turn `throughTurnId`. */

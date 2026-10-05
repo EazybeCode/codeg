@@ -190,6 +190,13 @@ describe("native content wire validation", () => {
     expect(fetcher).toHaveBeenCalledTimes(1)
   })
 
+  it("accepts member/team sharing as its own audience, and nothing unknown", () => {
+    expect(
+      parseResource({ ...resource, visibility: "shared" }).visibility
+    ).toBe("shared")
+    expect(() => parseResource({ ...resource, visibility: "public" })).toThrow()
+  })
+
   it("accepts revision zero only for resource contentRevision", () => {
     expect(parseResource(resource).visibility).toBe("private")
     expect(() => parseResource({ ...resource, authRevision: "01" })).toThrow()

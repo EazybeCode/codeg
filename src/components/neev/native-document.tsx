@@ -94,8 +94,13 @@ function BodyView({ body, source = false }: { body: Body; source?: boolean }) {
 export type ResourceActions = {
   isCreator: boolean
   archived: boolean
-  visibility: "private" | "organization"
+  visibility: NativeResource["visibility"]
   shareable: boolean
+  /**
+   * The reader holds a View grant: nothing here may be written. Decided from
+   * the server's access level, never guessed from the list row.
+   */
+  viewOnly?: boolean
   disabled: boolean
   onRename: () => void
   onShare: () => void
@@ -229,6 +234,9 @@ function Document({
     setDocWidthState(next)
     setDocWidth(next)
   }
+  // A View grant: readable, never writable here. The server refuses writes
+  // too; this keeps the editor from accepting words it could never save.
+  const viewOnly = actions?.viewOnly === true
   const [latest, setLatestState] = useState(resource),
     [draft, setDraft] = useState<Body>(emptyBody),
     [conversion, setConversion] = useState<RichDocument | null>(null),
@@ -342,6 +350,7 @@ function Document({
     if (
       !scope.isCurrent() ||
       latest.archived ||
+      viewOnly ||
       visibleEditorGeneration !== editorGeneration.current
     )
       return
@@ -1094,6 +1103,7 @@ function Document({
           <span className="hidden min-w-0 truncate text-xs text-muted-foreground/80 sm:inline">
             {latest.originChatId ? `${t("sourceAudience")} · ` : ""}
             {t(latest.visibility)}
+            {viewOnly ? ` · ${t("viewOnly")}` : ""}
             {latest.archived ? ` · ${t("archived")}` : ""}
           </span>
           {/* The audience never collapses to nothing. At narrow widths the words
@@ -1151,10 +1161,14 @@ function Document({
                 // that shares with is the consequence of pressing it, so it
                 // stays in the accessible name and in the tooltip.
                 aria-label={t(
-                  actions.visibility === "private" ? "share" : "makePrivate"
+                  actions.visibility !== "organization"
+                    ? "shareShort"
+                    : "makePrivate"
                 )}
                 title={t(
-                  actions.visibility === "private" ? "share" : "makePrivate"
+                  actions.visibility !== "organization"
+                    ? "shareShort"
+                    : "makePrivate"
                 )}
                 aria-describedby={
                   actions.visibility === "organization"
@@ -1162,19 +1176,19 @@ function Document({
                     : undefined
                 }
                 onClick={
-                  actions.visibility === "private"
+                  actions.visibility !== "organization"
                     ? actions.onShare
                     : actions.onMakePrivate
                 }
               >
-                {actions.visibility === "private" ? (
+                {actions.visibility !== "organization" ? (
                   <Users aria-hidden />
                 ) : (
                   <Lock aria-hidden />
                 )}
                 <span className="hidden sm:inline">
                   {t(
-                    actions.visibility === "private"
+                    actions.visibility !== "organization"
                       ? "shareShort"
                       : "makePrivate"
                   )}
@@ -1316,11 +1330,11 @@ function Document({
             <NativeRichEditor
               key={`${auth.scopeKey}:${resource.id}:${visibleEditorGeneration}`}
               document={draft.document}
-              readOnly={latest.archived}
+              readOnly={latest.archived || viewOnly}
               autoFocus={fresh}
               onChange={(document) => edit({ format: "blocks", document })}
               uploadImage={
-                saving || latest.archived
+                saving || latest.archived || viewOnly
                   ? undefined
                   : (file) =>
                       uploadNativeImage(
@@ -1336,7 +1350,7 @@ function Document({
               <span className="text-sm">{t("documentContent")}</span>
               <textarea
                 value={draft.markdown}
-                disabled={latest.archived}
+                disabled={latest.archived || viewOnly}
                 onChange={(event) =>
                   edit({ format: "markdown", markdown: event.target.value })
                 }

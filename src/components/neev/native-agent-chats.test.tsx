@@ -2302,3 +2302,86 @@ it("holds navigation while a saved chat's ask is on its way, and never shows it 
   await act(async () => answer(json({ code: "unavailable" }, 503)))
   expect(screen.queryByText("Summarise the parser")).toBeNull()
 })
+
+// ---- Shared Agent Chats (View only) ----
+
+const sharedSession = { ...session, ownerId: 2, title: "Pricing research" }
+const sharedDone = {
+  ...runningTurn,
+  status: "completed",
+  response: "Three tiers.",
+  completedAt: 1_700_000_002,
+}
+
+it("opens an Agent Chat shared with me read-only, and continues only by forking", async () => {
+  const forks: Record<string, unknown>[] = []
+  const posts: string[] = []
+  mockNativeSession(undefined, {
+    // Not in my own list: it is read directly.
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    [`GET /api/neev/agent/sessions/${SESSION_ID}`]: () => json(sharedSession),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [sharedDone], nextAfter: null }),
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/fork`]: (init) => {
+      forks.push(JSON.parse(init.body as string))
+      return json({ code: "unavailable" }, 503)
+    },
+    [`POST /api/neev/agent/sessions/${SESSION_ID}/turns`]: () => {
+      posts.push("turn")
+      return json({ code: "not_found" }, 404)
+    },
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeAgentChats nodeId={null} sessionId={SESSION_ID} />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  expect(await screen.findByText("Three tiers.")).toBeVisible()
+  expect(screen.getByText(/Shared with you · View only/)).toBeVisible()
+  // Nothing that would use the owner's account: no composer, no settings,
+  // no rename/trash, no sharing.
+  expect(screen.queryByRole("textbox", { name: "Ask the agent" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "Model" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "Content actions" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "Share" })).toBeNull()
+  await user.click(screen.getByRole("button", { name: "Fork to continue" }))
+  await waitFor(() =>
+    expect(forks).toEqual([
+      { throughTurnId: TURN_ID, requestId: expect.any(String) },
+    ])
+  )
+  expect(posts).toEqual([])
+})
+
+it("offers its owner Share, View-only, in the Agent Chat header", async () => {
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [session] }),
+    "GET /api/neev/agent/connections": () => json(connected),
+    [TURNS]: () => json({ items: [], nextAfter: null }),
+    [`GET /api/neev/agent/sessions/${SESSION_ID}/access`]: () =>
+      json({
+        sessionId: SESSION_ID,
+        revision: "1",
+        level: "owner",
+        canManage: true,
+        direct: [],
+      }),
+    "GET /api/neev/teams": () => json({ teams: [] }),
+  })
+  const user = userEvent.setup()
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeAgentChats nodeId={null} sessionId={SESSION_ID} />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  await screen.findByRole("textbox", { name: "Ask the agent" })
+  await user.click(screen.getByRole("button", { name: "Share" }))
+  expect(await screen.findByRole("dialog")).toHaveTextContent(
+    "your account is never used for them"
+  )
+})

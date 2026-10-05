@@ -448,6 +448,69 @@ async fn owned<C: ConnectionTrait>(
     .ok_or(ContentError::NotFound)
 }
 
+/// Load a session the actor may VIEW: their own, or a standalone Agent Chat a
+/// member shared with them (`content::grants`). Only reads use this; every
+/// write, run and setting stays on `owned`, so a viewer gets `NotFound` there.
+async fn readable<C: ConnectionTrait>(
+    db: &C,
+    actor: &OrgContext,
+    id: &str,
+) -> Result<AgentSession, ContentError> {
+    db::one(
+        db,
+        &format!(
+            "SELECT {SESSION_COLUMNS} FROM neev_agent_sessions s WHERE org_id=$1 AND id=$2 AND {}",
+            crate::neev::content::grants::session_readable_sql("s", "$3")
+        ),
+        vec![
+            actor.org_id.into(),
+            id.into(),
+            actor.identity.user_id.into(),
+        ],
+    )
+    .await?
+    .map(|row| session_row(&row))
+    .transpose()?
+    .ok_or(ContentError::NotFound)
+}
+
+/// Who shared an Agent Chat, as the viewer sees them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionOwner {
+    pub user_id: i32,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+}
+
+/// Agent Chats other members shared with the actor, newest first, with their
+/// owners.
+pub(crate) async fn shared_with(
+    state: &ServerState,
+    actor: &OrgContext,
+) -> Result<Vec<(AgentSession, SessionOwner)>, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    let mut items = Vec::new();
+    for id in crate::neev::content::grants::shared_session_ids(&tx, actor).await? {
+        let found = readable(&tx, actor, &id).await?;
+        let row = db::one(
+            &tx,
+            "SELECT display_name,avatar_url FROM neev_accounts WHERE id=$1",
+            vec![found.owner_id.into()],
+        )
+        .await?
+        .ok_or(ContentError::Storage)?;
+        let owner = SessionOwner {
+            user_id: found.owner_id,
+            display_name: row.try_get("", "display_name").map_err(database_error)?,
+            avatar_url: row.try_get("", "avatar_url").map_err(database_error)?,
+        };
+        items.push((found, owner));
+    }
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(items)
+}
+
 pub(crate) async fn create(
     state: &ServerState,
     actor: &OrgContext,
@@ -613,6 +676,20 @@ pub(crate) async fn get(
     Ok(found)
 }
 
+/// `get` for a reader: the owner, or a member it is shared with (View). Only
+/// the read endpoints use this; `get` stays the owner gate everywhere else.
+pub(crate) async fn view(
+    state: &ServerState,
+    actor: &OrgContext,
+    id: &str,
+) -> Result<AgentSession, ContentError> {
+    let tx = resources::begin(state, actor).await?;
+    let found = readable(&tx, actor, id).await?;
+    session::recheck(&tx, actor, state.clock.now_unix()).await?;
+    tx.commit().await.map_err(database_error)?;
+    Ok(found)
+}
+
 /// The session's turns in order. `after` is a sequence cursor, so a reload can
 /// fetch the whole history and a live view can fetch only what it is missing.
 pub(crate) async fn turns(
@@ -622,7 +699,7 @@ pub(crate) async fn turns(
     after: Option<i64>,
 ) -> Result<crate::neev::content::types::Page<AgentTurn>, ContentError> {
     let tx = resources::begin(state, actor).await?;
-    owned(&tx, actor, id).await?;
+    let viewer = readable(&tx, actor, id).await?.owner_id != actor.identity.user_id;
     if after.is_some_and(|cursor| cursor < 0) {
         return Err(ContentError::Invalid);
     }
@@ -638,11 +715,18 @@ pub(crate) async fn turns(
         .await
         .map_err(database_error)?;
     let has_more = rows.len() > 100;
-    let items = rows
+    let mut items = rows
         .iter()
         .take(100)
         .map(turn_row)
         .collect::<Result<Vec<_>, _>>()?;
+    // A viewer sees what was said, never the owner's trace: tool activity can
+    // hold their personal connectors' output and private context.
+    if viewer {
+        for turn in &mut items {
+            turn.activity.clear();
+        }
+    }
     let next_after = if has_more {
         items.last().map(|turn| turn.sequence.to_string())
     } else {
@@ -910,6 +994,9 @@ async fn require_node(
     if crate::neev::catalog::trash::node_trashed(tx, actor.org_id, node_id).await? {
         return Err(ContentError::NotFound);
     }
+    // Restricted folders (schema 24): filing needs a place the actor may put
+    // things — a hidden folder is missing, a View-only one is refused.
+    crate::neev::content::resources::placeable(tx, actor, node_id).await?;
     Ok(())
 }
 

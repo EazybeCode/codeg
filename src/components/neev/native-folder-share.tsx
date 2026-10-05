@@ -176,6 +176,7 @@ export function FolderShare({
   onSharingChanged: (sharing: FolderSharing) => void
 }) {
   const t = useTranslations("NativeContent"),
+    sh = useTranslations("Sharing"),
     n = useTranslations("Native")
   const auth = useNativeAuth()
   /** The scope the dialog was opened in; it is open only while that holds. */
@@ -428,17 +429,22 @@ export function FolderShare({
                   {t("folderPolicyLegend", { name: node.name })}
                 </legend>
                 <p>
-                  {t(
-                    sharing.effectiveVisibility === "organization"
-                      ? "folderPolicyNowShared"
-                      : "folderPolicyNowPrivate",
-                    { organization }
-                  )}{" "}
+                  {sharing.effectiveVisibility === "shared"
+                    ? sh("folderPolicyNowFolderAccess")
+                    : t(
+                        sharing.effectiveVisibility === "organization"
+                          ? "folderPolicyNowShared"
+                          : "folderPolicyNowPrivate",
+                        { organization }
+                      )}{" "}
                   {source}
                 </p>
                 {(
                   [
                     ["organization", t("folderPolicyShared", { organization })],
+                    // Deliberate, never preselected: new items open to the
+                    // people and teams this folder is shared with.
+                    ["shared", sh("folderPolicyFolderAccess")],
                     ["private", t("folderPolicyPrivate")],
                     ["inherit", t("folderPolicyInherit")],
                   ] as const
@@ -464,6 +470,9 @@ export function FolderShare({
                 )}
                 <p className="text-muted-foreground">
                   {t("folderPolicyExisting")}
+                </p>
+                <p className="text-muted-foreground">
+                  {sh("folderGrantsApplyTo")}
                 </p>
               </fieldset>
             )}
@@ -559,9 +568,13 @@ export function FolderShare({
                           name: node.name,
                           organization,
                         })
-                      : savedChoice === "private"
-                        ? t("folderPolicySavedPrivate", { name: node.name })
-                        : t("folderPolicySavedInherit", { name: node.name })}
+                      : savedChoice === "shared"
+                        ? sh("folderPolicySavedFolderAccess", {
+                            name: node.name,
+                          })
+                        : savedChoice === "private"
+                          ? t("folderPolicySavedPrivate", { name: node.name })
+                          : t("folderPolicySavedInherit", { name: node.name })}
                   </p>
                 )}
                 {policyOutcome === "conflict" && (

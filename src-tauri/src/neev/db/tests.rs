@@ -128,7 +128,13 @@ async fn postgres_schema_reinitialization_and_foreign_keys() {
 /// that inventory. Sharing defaults and steer first (they reference nodes and
 /// turns), then library files before items.
 pub(super) async fn drop_tables_after_seventeen(db: &DatabaseConnection) {
-    // Schema 23's trash ledger is newest and references nodes; it goes first.
+    // Schema 24's sharing tables are newest (members before teams), then
+    // schema 23's trash ledger, which references nodes.
+    for table in ["neev_restricted_nodes", "neev_shared_marks", "neev_grants", "neev_team_members", "neev_teams"] {
+        execute(db, &format!("DROP TABLE IF EXISTS {table}"), vec![])
+            .await
+            .unwrap();
+    }
     execute(db, "DROP TABLE IF EXISTS neev_node_trash", vec![])
         .await
         .unwrap();

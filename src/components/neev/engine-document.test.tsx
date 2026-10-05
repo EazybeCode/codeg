@@ -500,9 +500,7 @@ it("ignores a title the frame tries to announce itself", async () => {
 it("keeps the sharing, archive and move actions Neev owns", async () => {
   const user = userEvent.setup()
   await openEngineDocument(user)
-  expect(
-    screen.getByRole("button", { name: "Share with organization" })
-  ).toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Share" })).toBeInTheDocument()
   await openContentMenu()
   expect(
     await screen.findByRole("menuitem", { name: "Move to trash" })
@@ -540,7 +538,7 @@ it("shows an organization member no creator-only actions", async () => {
     screen.queryByRole("button", { name: "Content actions" })
   ).not.toBeInTheDocument()
   expect(
-    screen.queryByRole("button", { name: "Share with organization" })
+    screen.queryByRole("button", { name: "Share" })
   ).not.toBeInTheDocument()
 })
 
@@ -1228,4 +1226,38 @@ it("leaves an unrelated Escape in the editor alone", async () => {
   })
   expect(outside).toHaveFocus()
   outside.remove()
+})
+
+/**
+ * A View grantee: the editor in the frame is read-only because the server
+ * projects the reader role (and refuses writes). The outer header says so, and
+ * offers none of the owner's actions.
+ */
+it("labels an engine document opened with a View grant, with no owner actions", async () => {
+  mockNativeSession()
+  render(
+    <NativeTestRoot>
+      <EngineDocument
+        resource={{ ...resource, visibility: "shared", creatorId: 9 }}
+        onBack={vi.fn()}
+        actions={{
+          isCreator: false,
+          archived: false,
+          visibility: "shared",
+          shareable: true,
+          disabled: false,
+          viewOnly: true,
+          onRename: vi.fn(),
+          onShare: vi.fn(),
+          onMakePrivate: vi.fn(),
+          onArchiveToggle: vi.fn(),
+          onMove: vi.fn(),
+        }}
+      />
+    </NativeTestRoot>
+  )
+  await screen.findByTitle("Design document")
+  expect(screen.getByText(/Shared · View only/)).toBeInTheDocument()
+  expect(screen.queryByRole("button", { name: "Share" })).toBeNull()
+  expect(screen.queryByRole("button", { name: "Make private" })).toBeNull()
 })

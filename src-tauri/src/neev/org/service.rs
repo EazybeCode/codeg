@@ -394,6 +394,15 @@ async fn mutate_member(
                 vec![target.id.into()],
             )
             .await?;
+            // Shares end WITH the membership: a later re-invite reactivates
+            // this row, and must not bring any of them back.
+            crate::neev::content::grants::revoke_member(
+                &tx,
+                actor.org_id,
+                target.user_id,
+                state.clock.now_unix(),
+            )
+            .await?;
         }
     }
     let now = state.clock.now_unix();

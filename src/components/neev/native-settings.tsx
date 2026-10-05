@@ -25,6 +25,7 @@ import { NativeDialogContent as DialogContent } from "./native-suspended-surface
 import { NativeSignInMethods } from "./native-login"
 import { NativeAgentConnectionsPanel } from "./native-agent-connections"
 import { NativeLibrary } from "./native-library"
+import { NativePeopleDirectory } from "./native-people"
 import { NativeJoinCode } from "./native-join-code"
 import { NativeKnowledge } from "./native-knowledge"
 import { NativeKnowledgeAsk } from "./native-knowledge-ask"
@@ -45,6 +46,7 @@ type Logo = { action: "keep" | "remove" } | { action: "upload"; data: string }
 const SECTIONS = [
   "organization",
   "members",
+  "people",
   "library",
   "knowledge",
   "agents",
@@ -74,6 +76,7 @@ function requestedSection(): Section | null {
 const SECTION_LABEL = {
   organization: "organization",
   members: "members",
+  people: "peopleAndTeams",
   agents: "personalAgents",
   library: "sharedLibrary",
   knowledge: "knowledge",
@@ -677,6 +680,14 @@ function SettingsContent() {
                 </>
               ) : null
             )}
+          {/* Every active member's directory: names and teams, this
+              organization only. Teams are managed by admins. */}
+          {panel(
+            "people",
+            current === "people" ? (
+              <NativePeopleDirectory key={organizationId} />
+            ) : null
+          )}
           {panel(
             "library",
             current === "library" ? (

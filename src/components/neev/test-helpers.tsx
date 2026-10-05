@@ -120,6 +120,25 @@ export function mockNativeSession(
         inheritedFrom: null,
         canManage: true,
       })
+    // A folder's access (v2): default to an open folder the reader can edit,
+    // so tests about other things need not mock it.
+    const nodeAccess = /^GET \/api\/neev\/nodes\/(\d+)\/access$/.exec(key)
+    if (nodeAccess)
+      return json({
+        nodeId: Number(nodeAccess[1]),
+        revision: "1",
+        canManage: true,
+        canRestrict: true,
+        restricted: false,
+        level: "edit",
+        direct: [],
+        inherited: [],
+      })
+    if (key === "GET /api/neev/shared/resources") return json({ resources: [] })
+    // The workspace sidebar lists Agent Chats shared with the reader; default
+    // to none so unrelated workspace tests need not mock it.
+    if (key === "GET /api/neev/agent/shared-sessions")
+      return json({ sessions: [] })
     if (key === "GET /api/neev/organization/join-code")
       return json({ code: null, disabled: false })
     // Settings always mounts the per-user agent connection panel; default to

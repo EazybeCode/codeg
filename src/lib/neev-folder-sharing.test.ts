@@ -217,3 +217,34 @@ it("keeps a node revision from going backwards", () => {
   )
   expect(newerRevision("4", "not-a-revision")).toBe("4")
 })
+
+it("accepts a folder-access (shared) default set here or inherited", async () => {
+  expect(
+    parseFolderSharing(
+      dto({ defaultVisibility: "shared", effectiveVisibility: "shared" }),
+      4
+    ).effectiveVisibility
+  ).toBe("shared")
+  expect(
+    parseFolderSharing(
+      dto({ effectiveVisibility: "shared", inheritedFrom: 2 }),
+      4
+    ).inheritedFrom
+  ).toBe(2)
+  // Nothing set anywhere is private, never shared.
+  expect(() =>
+    parseFolderSharing(dto({ effectiveVisibility: "shared" }), 4)
+  ).toThrow()
+  const fetcher = stub(() =>
+    json(dto({ defaultVisibility: "shared", effectiveVisibility: "shared" }))
+  )
+  await updateFolderSharing(
+    4,
+    { expectedRevision: "7", defaultVisibility: "shared" },
+    "csrf"
+  )
+  expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toEqual({
+    expectedRevision: "7",
+    defaultVisibility: "shared",
+  })
+})

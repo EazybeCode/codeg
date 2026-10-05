@@ -405,6 +405,9 @@ function Chat({
     })
     return { promise, open }
   })
+  // A View grant: the chat is readable, nothing in it is writable. Decided
+  // from the server's access level by the caller, never from the list row.
+  const viewOnly = actions?.viewOnly === true
   const [latest, setLatest] = useState(resource),
     [messages, setMessages] = useState<NativeMessage[]>([]),
     [draft, setDraft] = useState<PromptSegment[]>([]),
@@ -506,12 +509,19 @@ function Chat({
    * Copy this chat up through one agent reply into a new private chat, and
    * open that in a new tab. The server copies; nothing is run.
    */
-  function forkReply(messageId: string) {
+  function forkReply(messageId: string, nodeId?: number) {
     const session = auth.session
     if (!session) return
     const chatId = latest.id
     void forkAction.fork(messageId, async (requestId) => {
-      const made = await forkChat(chatId, messageId, requestId, session.csrf)
+      const made = await forkChat(
+        chatId,
+        messageId,
+        requestId,
+        session.csrf,
+        undefined,
+        nodeId
+      )
       return {
         target: { kind: "resource", resourceId: made.chatId },
         archived: made.archivedAttachmentsNotCopied,
@@ -1411,6 +1421,7 @@ function Chat({
       saving ||
       applying ||
       latest.archived ||
+      viewOnly ||
       attachments.uploading ||
       !auth.session
     )
@@ -1669,6 +1680,7 @@ function Chat({
       (promptIsEmpty(written) && attachments.empty) ||
       sending.current ||
       latest.archived ||
+      viewOnly ||
       attachments.uploading ||
       !auth.session ||
       !scope.isCurrent()
@@ -1925,7 +1937,7 @@ function Chat({
   const sendable =
     (!promptIsEmpty(draft) || !attachments.empty) &&
     !composerBusy &&
-    !latest.archived
+    !(latest.archived || viewOnly)
   // A run that takes follow-ups is the one busy state Enter still submits in:
   // `submit` steers it. Held as busy, Enter fell through to the editor and a
   // follow-up became a new line instead of a message.
@@ -2010,6 +2022,7 @@ function Chat({
           </span>
           <p className="hidden min-w-0 shrink-0 truncate text-xs text-muted-foreground/80 sm:block">
             {t(latest.visibility)}
+            {viewOnly ? ` · ${t("viewOnly")}` : ""}
             {latest.archived ? ` · ${t("archived")}` : ""} ·{" "}
             <span role="status">
               {t(
@@ -2036,10 +2049,14 @@ function Chat({
                 // so it stays in the accessible name and in the tooltip rather
                 // than being dropped along with the width.
                 aria-label={t(
-                  actions.visibility === "private" ? "share" : "makePrivate"
+                  actions.visibility !== "organization"
+                    ? "shareShort"
+                    : "makePrivate"
                 )}
                 title={t(
-                  actions.visibility === "private" ? "share" : "makePrivate"
+                  actions.visibility !== "organization"
+                    ? "shareShort"
+                    : "makePrivate"
                 )}
                 aria-describedby={
                   actions.visibility === "organization"
@@ -2047,19 +2064,19 @@ function Chat({
                     : undefined
                 }
                 onClick={
-                  actions.visibility === "private"
+                  actions.visibility !== "organization"
                     ? actions.onShare
                     : actions.onMakePrivate
                 }
               >
-                {actions.visibility === "private" ? (
+                {actions.visibility !== "organization" ? (
                   <Users aria-hidden />
                 ) : (
                   <Lock aria-hidden />
                 )}
                 <span className="hidden sm:inline">
                   {t(
-                    actions.visibility === "private"
+                    actions.visibility !== "organization"
                       ? "shareShort"
                       : "makePrivate"
                   )}
@@ -2212,6 +2229,7 @@ function Chat({
                   markdown={() => messageSource(message.body)}
                   forkKey={message.id}
                   onFork={() => forkReply(message.id)}
+                  onForkInto={(nodeId) => forkReply(message.id, nodeId)}
                   forking={forkAction.forking}
                   outcome={forkAction.outcome}
                 />
@@ -2399,8 +2417,8 @@ function Chat({
             }
             onSubmit={submit}
             busy={enterBusy}
-            readOnly={latest.archived}
-            attachDisabled={latest.archived || !auth.session}
+            readOnly={latest.archived || viewOnly}
+            attachDisabled={latest.archived || viewOnly || !auth.session}
             autoFocus={fresh}
             // No source at all in a private chat, so `@` stays a character
             // there. The reader themself is never offered: you do not need to
@@ -2476,7 +2494,7 @@ function Chat({
               {t("agentPostsToTeam")}
             </p>
             <AttachmentButton
-              disabled={latest.archived || !auth.session}
+              disabled={latest.archived || viewOnly || !auth.session}
               remaining={remainingAttachments(attachments)}
               onFiles={(files) => void composer.current?.addFiles(files)}
             />
@@ -2536,12 +2554,14 @@ function Chat({
                   capabilities={capabilities}
                   provider={agentProvider}
                   settings={shown}
-                  disabled={agentBusy || applying || latest.archived}
+                  disabled={
+                    agentBusy || applying || latest.archived || viewOnly
+                  }
                   auto={{
                     status: autoRouting.status,
                     on: autoRouting.on,
                     onChange: autoRouting.setOn,
-                    disabled: agentBusy || latest.archived,
+                    disabled: agentBusy || latest.archived || viewOnly,
                   }}
                   onChange={(next, nextProvider) => {
                     providerChosen.current = true

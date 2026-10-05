@@ -124,6 +124,11 @@ async fn rich_snapshot_contract(database: DatabaseConnection, schema_version: i6
         ),
         ContentError::Storage
     );
+    // The live service paths below run schema-24 code against the rewound
+    // inventory; give them the (empty) sharing tables they read.
+    crate::neev::db::member_sharing_migration::create_missing_for_tests(&h.state.database)
+        .await
+        .unwrap();
     assert_eq!(
         documents::restore(&h.state, &h.creator, &doc.id, 2, &request(), 2, 1).await,
         Err(ContentError::Storage)
@@ -311,6 +316,12 @@ async fn downgrade_snapshot(database: &DatabaseConnection, schema_version: i64) 
     // newer than every inventory this fixture rebuilds; 20 only widened a
     // CHECK, which older markers tolerate.
     // Schema 23's trash ledger is newest of all; it goes first.
+    // Schema 24's sharing tables are newer still; they go before it.
+    for table in ["neev_restricted_nodes", "neev_shared_marks", "neev_grants", "neev_team_members", "neev_teams"] {
+        db::execute(database, &format!("DROP TABLE IF EXISTS {table}"), vec![])
+            .await
+            .unwrap();
+    }
     db::execute(database, "DROP TABLE IF EXISTS neev_node_trash", vec![])
         .await
         .unwrap();

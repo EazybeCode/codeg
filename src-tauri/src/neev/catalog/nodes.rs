@@ -4,6 +4,7 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction, FromQueryResult};
 
 use crate::neev::{
     auth::session,
+    content::{grants::Tree, types::ContentError},
     db,
     error::{database_error, AuthError},
     startup::ServerState,
@@ -11,6 +12,16 @@ use crate::neev::{
 };
 
 const PAGE_SIZE: usize = 200;
+
+/// The reader's view of the org tree (restricted folders, schema 24).
+async fn tree<C: ConnectionTrait>(db: &C, actor: &OrgContext) -> Result<Tree, AuthError> {
+    Tree::load(db, actor.org_id, actor.identity.user_id)
+        .await
+        .map_err(|error| match error {
+            ContentError::Auth(error) => error,
+            _ => AuthError::Unavailable,
+        })
+}
 const ORGANIZATION_NODE_LIMIT: i64 = 1000;
 
 #[derive(FromQueryResult)]
@@ -72,6 +83,11 @@ pub(crate) async fn list_page(
     } else {
         None
     };
+    // Only what this reader may see. A visible node whose parent is hidden is
+    // a shared root: its parent id travels, never its name. The page cursor is
+    // positional, so a hidden row only shortens a page.
+    let view = tree(&tx, actor).await?;
+    nodes.retain(|node| view.visible(node.id));
     tx.commit().await.map_err(database_error)?;
     Ok((nodes, next_after))
 }
@@ -98,6 +114,15 @@ pub(crate) async fn create(
     }
     if let Some(parent_id) = input.parent_id {
         validate_ancestor_chain(&tx, actor.org_id, parent_id, None).await?;
+        // A child goes only where the creator may place things: a hidden
+        // parent is as good as missing; a View-only one is refused.
+        let view = tree(&tx, actor).await?;
+        if !view.visible(parent_id) {
+            return Err(AuthError::Forbidden);
+        }
+        if !view.placeable(parent_id) {
+            return Err(AuthError::Forbidden);
+        }
     }
     let row = db::one(
         &tx,
@@ -113,10 +138,17 @@ pub(crate) async fn create(
     .await?
     .ok_or(AuthError::Unavailable)?;
     let created = node(NodeRow::from_query_result(&row, "").map_err(database_error)?)?;
+    if created.parent_id.is_some() {
+        crate::neev::db::member_sharing_migration::refresh_region(&tx, actor.org_id).await?;
+    }
     tx.commit().await.map_err(database_error)?;
     Ok(created)
 }
 
+/// Every `neev_nodes` write that changes a `parent_id` (or adds a node) must
+/// call `member_sharing_migration::refresh_region` in the same transaction: the
+/// org wiki reads the derived restricted region, the access rule reads the
+/// marks and the tree, and the two must never disagree.
 pub(crate) async fn update(
     state: &ServerState,
     actor: &OrgContext,
@@ -144,6 +176,11 @@ pub(crate) async fn update(
     if super::trash::node_trashed(&tx, actor.org_id, node_id).await? {
         return Err(AuthError::Forbidden);
     }
+    // Renaming or moving needs Edit on the node; a hidden one is missing.
+    let view = tree(&tx, actor).await?;
+    if !view.placeable(node_id) {
+        return Err(AuthError::Forbidden);
+    }
     if current.revision != expected_revision {
         return Err(AuthError::Conflict);
     }
@@ -152,6 +189,52 @@ pub(crate) async fn update(
             return Err(AuthError::Invalid);
         }
         validate_ancestor_chain(&tx, actor.org_id, parent_id, Some(node_id)).await?;
+    }
+    if input.parent_id != current.parent_id {
+        match input.parent_id {
+            // Into a place the mover may place things, and never out of a
+            // restricted region unless they created every root being left.
+            Some(parent_id) => {
+                if !view.placeable(parent_id) {
+                    return Err(AuthError::Forbidden);
+                }
+                if let Some(from) = current.parent_id {
+                    if !view.may_leave(from, parent_id) {
+                        return Err(AuthError::Forbidden);
+                    }
+                }
+                // Moving INTO a restriction hides the node (and everything in
+                // it) from everyone outside that restriction: it is restricting
+                // the node, which only its creator may do. Without this any
+                // member could hide another's open folder inside their own.
+                let before = current
+                    .parent_id
+                    .map(|from| view.restricted_roots(from))
+                    .unwrap_or_default();
+                let entering = view
+                    .restricted_roots(parent_id)
+                    .into_iter()
+                    .any(|root| !before.contains(&root));
+                if entering && view.creator(node_id) != Some(actor.identity.user_id) {
+                    return Err(AuthError::Forbidden);
+                }
+            }
+            None => {
+                if let Some(from) = current.parent_id {
+                    if !view.may_leave_to_top(from) {
+                        return Err(AuthError::Forbidden);
+                    }
+                }
+            }
+        }
+        // T-1: crossing a restriction boundary changes who controls every
+        // restriction below; only someone who sees the whole subtree and
+        // already controls each of those restrictions may do it.
+        let before = current.parent_id.map(|from| view.restricted_roots(from)).unwrap_or_default();
+        let after = input.parent_id.map(|to| view.restricted_roots(to)).unwrap_or_default();
+        if before != after && !view.controls_subtree(node_id, false) {
+            return Err(AuthError::Forbidden);
+        }
     }
     let next_revision = current.revision.checked_add(1).ok_or(AuthError::Conflict)?;
     let updated = db::execute(
@@ -171,6 +254,9 @@ pub(crate) async fn update(
     if updated.rows_affected() != 1 {
         return Err(AuthError::Conflict);
     }
+    if input.parent_id != current.parent_id {
+        crate::neev::db::member_sharing_migration::refresh_region(&tx, actor.org_id).await?;
+    }
     let updated = load_node(&tx, actor.org_id, node_id, false)
         .await?
         .ok_or(AuthError::Unavailable)?;
@@ -189,7 +275,9 @@ pub(crate) async fn get(
     }
     let tx = db::begin(&state.database).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
-    let result = if super::trash::node_trashed(&tx, actor.org_id, node_id).await? {
+    let result = if super::trash::node_trashed(&tx, actor.org_id, node_id).await?
+        || !tree(&tx, actor).await?.visible(node_id)
+    {
         None
     } else {
         load_node(&tx, actor.org_id, node_id, false)

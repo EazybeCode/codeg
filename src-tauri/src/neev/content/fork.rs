@@ -62,6 +62,9 @@ pub(crate) enum ForkError {
     SourceTrashed,
     /// An Agent Chat bound to a chat the forker can no longer read.
     BoundChatUnavailable,
+    /// The source's folder is hidden or View-only for the forker, and no folder
+    /// above it is one they may place a chat in.
+    NoLocation,
 }
 
 impl From<ContentError> for ForkError {
@@ -357,6 +360,7 @@ async fn snapshot(
     actor: &OrgContext,
     chat_id: &str,
     through: &str,
+    target: Option<i32>,
 ) -> Result<ChatSnapshot, ForkError> {
     let chat = access::authorized(tx, actor, chat_id, false).await?;
     if chat.kind != ResourceKind::Chat {
@@ -448,9 +452,47 @@ async fn snapshot(
         files.insert(file.key.clone(), file);
     }
     check_file_bounds(&files)?;
+    // Where the fork lands (restricted folders, schema 24): an explicit target
+    // must be a folder the forker may place a chat in. Otherwise the source's
+    // folder if they may place there, else the nearest folder above it they
+    // may — but the walk STOPS at the first folder hidden from them, so a fork
+    // never reveals where a hidden folder sits; the caller then names a target.
+    let tree = super::grants::Tree::load(tx, actor.org_id, actor.identity.user_id).await?;
+    let node_id = match target {
+        Some(node) => {
+            if !tree.visible(node) {
+                return Err(ContentError::NotFound.into());
+            }
+            if !tree.placeable(node) {
+                return Err(ContentError::Auth(crate::neev::error::AuthError::Forbidden).into());
+            }
+            Some(node)
+        }
+        None => {
+            let mut found = None;
+            let mut cursor = Some(chat.node_id);
+            let mut depth = 0;
+            while let Some(at) = cursor {
+                depth += 1;
+                if depth > 1000 {
+                    return Err(ContentError::Storage.into());
+                }
+                if !tree.visible(at) {
+                    break;
+                }
+                if tree.placeable(at) {
+                    found = Some(at);
+                    break;
+                }
+                cursor = tree.parent(at);
+            }
+            found
+        }
+    };
+    let node_id = node_id.ok_or(ForkError::NoLocation)?;
     Ok(ChatSnapshot {
         title: chat.title,
-        node_id: chat.node_id,
+        node_id,
         messages,
         files,
         archived: archived.len() as i64,
@@ -467,10 +509,38 @@ pub(crate) async fn fork_chat(
     through: &str,
     request_id: &str,
 ) -> Result<ChatFork, ForkError> {
+    fork_chat_into(state, actor, chat_id, through, request_id, None).await
+}
+
+/// `fork_chat`, landing in `target` when one is named (it must be a folder the
+/// caller may place a chat in). Needed when the source's folder is hidden from
+/// the caller: the fork then refuses with `NoLocation` until a target is given.
+pub(crate) async fn fork_chat_into(
+    state: &ServerState,
+    actor: &OrgContext,
+    chat_id: &str,
+    through: &str,
+    request_id: &str,
+    target: Option<i32>,
+) -> Result<ChatFork, ForkError> {
     access::canonical_id(chat_id)?;
     access::canonical_id(through)?;
+    if target.is_some_and(|node| node <= 0) {
+        return Err(ContentError::Invalid.into());
+    }
     let request = org::normalize_request_id(request_id).map_err(|_| ContentError::Invalid)?;
-    let hash = fork_hash(actor, chat_id, through);
+    // A named target is part of the request identity, appended so an untargeted
+    // fork keeps its original hash.
+    let hash = match target {
+        None => fork_hash(actor, chat_id, through),
+        Some(node) => org::digest_parts(&[
+            FORK_ACTION,
+            &actor.org_id.to_string(),
+            chat_id,
+            through,
+            &node.to_string(),
+        ]),
+    };
 
     // 1. Snapshot, guarded and short.
     let tx = resources::begin(state, actor).await?;
@@ -480,7 +550,7 @@ pub(crate) async fn fork_chat(
         tx.commit().await.map_err(database_error)?;
         return Ok(done);
     }
-    let snap = snapshot(&tx, actor, chat_id, through).await?;
+    let snap = snapshot(&tx, actor, chat_id, through, target).await?;
     session::recheck(&tx, actor, state.clock.now_unix()).await?;
     tx.commit().await.map_err(database_error)?;
 
@@ -488,7 +558,7 @@ pub(crate) async fn fork_chat(
     let copied = copy_files(state, actor.org_id, &snap.files).await?;
 
     // 3. Commit, guarded; any failure takes the fresh blobs back with it.
-    match commit_chat(state, actor, chat_id, through, &request, &hash, &snap, &copied).await {
+    match commit_chat(state, actor, chat_id, through, target, &request, &hash, &snap, &copied).await {
         Ok(fork) => {
             if fork.replayed {
                 discard_files(state, actor.org_id, &copied).await;
@@ -503,11 +573,13 @@ pub(crate) async fn fork_chat(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn commit_chat(
     state: &ServerState,
     actor: &OrgContext,
     chat_id: &str,
     through: &str,
+    target: Option<i32>,
     request: &str,
     hash: &str,
     snap: &ChatSnapshot,
@@ -525,7 +597,7 @@ async fn commit_chat(
     // source, the history up through the selection is the one copied (messages
     // are append-only, so the same ids in the same order means the same text),
     // and every copied file still exists unarchived with the same bytes.
-    let again = snapshot(&tx, actor, chat_id, through).await?;
+    let again = snapshot(&tx, actor, chat_id, through, target).await?;
     let same = again.messages.len() == snap.messages.len()
         && again
             .messages

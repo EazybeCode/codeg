@@ -286,6 +286,10 @@ export async function nativeRequest(
           "fork_attachments_too_large",
           "fork_source_trashed",
           "fork_bound_chat_unavailable",
+          "fork_no_location",
+          // Sharing refusals (`neev-sharing`).
+          "team_name_taken",
+          "resource_not_shared",
         ] as const
       ).find((known) => known === errorBody?.code)
       throw new NativeClientError(
@@ -556,8 +560,13 @@ export async function loadNodes(
         node.orgId !== orgId ||
         node.id <= (index ? nodes[index - 1].id : (after ?? 0))
     ) ||
+    // Restricted folders hide rows AFTER the page is cut, so a page may be
+    // short or even empty while more follow: the cursor is the last id the
+    // server scanned. It must still move forward past everything returned, so
+    // paging always terminates.
     (nextAfter !== null &&
-      (nodes.length === 0 || nextAfter !== nodes[nodes.length - 1].id))
+      nextAfter <
+        (nodes.length ? nodes[nodes.length - 1].id : (after ?? 0) + 1))
   )
     return invalid()
   return { nodes, nextAfter }

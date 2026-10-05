@@ -100,6 +100,19 @@ function workspace(
     "GET /api/neev/nodes/4/chats": () =>
       json({ items: [MINE_CHAT], nextAfter: null }),
   }
+  // The Share dialog reads who has access when it opens.
+  for (const item of all)
+    routes[`GET /api/neev/resources/${item.id}/access`] = () =>
+      json({
+        resourceId: item.id,
+        visibility: item.id === CHAT_ID ? chatAudience : item.visibility,
+        authRevision: item.authRevision,
+        level: "owner",
+        canManage: true,
+        boundTo: null,
+        direct: [],
+        inherited: [],
+      })
   for (const item of all)
     routes[`PATCH /api/neev/resources/${item.id}`] = (init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -127,6 +140,23 @@ function workspace(
   return { patches, mock }
 }
 
+/**
+ * In the Share dialog, choose "Everyone in <org>": widening asks the same
+ * full-history question before anything is sent. Returns that question.
+ */
+async function widen(user: ReturnType<typeof userEvent.setup>) {
+  const dialog = await screen.findByRole("dialog")
+  await user.click(
+    await within(dialog).findByRole("radio", { name: /^Everyone in/ })
+  )
+  return {
+    dialog,
+    question: within(dialog).getByRole("group", {
+      name: "Share full history?",
+    }),
+  }
+}
+
 /** The folder's own list, not the sidebar tree. */
 async function folder(user: ReturnType<typeof userEvent.setup>) {
   await user.click(
@@ -142,18 +172,18 @@ it("shares the creator's private document from the folder, after the full-histor
   await user.click(
     await list.findByRole("button", { name: "Share Fixture private doc" })
   )
+  const { question } = await widen(user)
   // Nothing is sent until the reader has read what sharing means.
   expect(patches).toEqual([])
-  const dialog = await screen.findByRole("dialog", {
-    name: "Share full history?",
-  })
-  expect(dialog).toHaveTextContent(
+  expect(question).toHaveTextContent(
     "Everyone in Neev demo will be able to read this resource and its full history."
   )
   await user.click(
-    within(dialog).getByRole("button", { name: "Share full history" })
+    within(question).getByRole("button", { name: "Share full history" })
   )
   await waitFor(() => expect(patches).toHaveLength(1))
+  // The dialog stays on the item as it now is; Done closes it.
+  await user.click(await screen.findByRole("button", { name: "Done" }))
   // The same PATCH the header sends: only the visibility moves, and the
   // revision read with the row guards against a concurrent change.
   expect(patches[0]).toEqual({
@@ -182,11 +212,12 @@ it("sends nothing when the question is cancelled", async () => {
   await user.click(
     await list.findByRole("button", { name: "Share Fixture private doc" })
   )
-  await user.click(
-    within(await screen.findByRole("dialog")).getByRole("button", {
-      name: "Cancel",
-    })
-  )
+  const { dialog, question } = await widen(user)
+  await user.click(within(question).getByRole("button", { name: "Cancel" }))
+  expect(
+    within(dialog).queryByRole("group", { name: "Share full history?" })
+  ).toBeNull()
+  await user.click(within(dialog).getByRole("button", { name: "Done" }))
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
   expect(patches).toEqual([])
 })
@@ -212,12 +243,12 @@ it("shares a team chat from the folder the same way", async () => {
   await user.click(
     await list.findByRole("button", { name: "Share Fixture team chat" })
   )
+  const { question } = await widen(user)
   await user.click(
-    within(await screen.findByRole("dialog")).getByRole("button", {
-      name: "Share full history",
-    })
+    within(question).getByRole("button", { name: "Share full history" })
   )
   await waitFor(() => expect(patches).toHaveLength(1))
+  await user.click(await screen.findByRole("button", { name: "Done" }))
   expect(patches[0]).toMatchObject({
     id: CHAT_ID,
     body: { visibility: "organization" },
@@ -280,12 +311,16 @@ it("keeps the question open and says why when the server refuses", async () => {
   await user.click(
     await list.findByRole("button", { name: "Share Fixture private doc" })
   )
-  const dialog = await screen.findByRole("dialog")
+  const { dialog, question } = await widen(user)
   await user.click(
-    within(dialog).getByRole("button", { name: "Share full history" })
+    within(question).getByRole("button", { name: "Share full history" })
   )
   await waitFor(() => expect(patches).toHaveLength(1))
   expect(await within(dialog).findByRole("alert")).toBeInTheDocument()
+  // The question stays open, so the reader can try again or cancel.
+  expect(
+    within(dialog).getByRole("group", { name: "Share full history?" })
+  ).toBeInTheDocument()
   // Still private: nothing changed on the row (behind the modal, so hidden
   // from the accessibility tree while the question is open).
   expect(

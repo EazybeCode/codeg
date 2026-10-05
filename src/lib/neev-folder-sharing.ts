@@ -15,8 +15,8 @@
 import { NativeClientError } from "./neev-client"
 import { contentGet, contentMutation } from "./neev-content-client"
 
-export type FolderDefault = "inherit" | "private" | "organization"
-export type FolderAudience = "private" | "organization"
+export type FolderDefault = "inherit" | "private" | "shared" | "organization"
+export type FolderAudience = "private" | "shared" | "organization"
 
 export interface FolderSharing {
   nodeId: number
@@ -76,11 +76,13 @@ export function parseFolderSharing(
   if (
     defaultVisibility !== "inherit" &&
     defaultVisibility !== "private" &&
+    defaultVisibility !== "shared" &&
     defaultVisibility !== "organization"
   )
     invalid()
   if (
     effectiveVisibility !== "private" &&
+    effectiveVisibility !== "shared" &&
     effectiveVisibility !== "organization"
   )
     invalid()
@@ -134,7 +136,9 @@ export async function updateFolderSharing(
   assertNode(nodeId)
   if (
     !isRevision(input.expectedRevision) ||
-    !["inherit", "private", "organization"].includes(input.defaultVisibility)
+    !["inherit", "private", "shared", "organization"].includes(
+      input.defaultVisibility
+    )
   )
     invalidRequest()
   return parseFolderSharing(

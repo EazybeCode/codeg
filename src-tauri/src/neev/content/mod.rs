@@ -12,6 +12,9 @@ mod blob_tests;
 mod document_tests;
 pub(crate) mod documents;
 pub(crate) mod fork;
+pub(crate) mod grants;
+#[cfg(test)]
+mod grants_tests;
 #[cfg(test)]
 mod fork_tests;
 pub(crate) mod image;

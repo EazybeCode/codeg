@@ -117,14 +117,26 @@ pub(crate) struct TrashItem {
     pub agent_chats: i64,
 }
 
-/// `r` readable by `$user` (alias `s` is the LEFT JOINed origin chat). Mirrors
-/// `content::resources::list`, so a count never includes what the viewer
-/// cannot open.
-fn visible(user: &str) -> String {
-    format!(
-        "((r.origin_chat_id IS NULL AND (r.visibility='organization' OR r.creator_id={user})) OR \
-(r.origin_chat_id IS NOT NULL AND (COALESCE(s.visibility,'')='organization' OR COALESCE(s.creator_id,0)={user})))"
-    )
+/// `r` readable by the actor (alias `s` is the LEFT JOINed origin chat): the
+/// same rule `content::resources::list` applies, so a count never includes
+/// what the viewer cannot open.
+async fn view<C: ConnectionTrait>(db: &C, actor: &OrgContext) -> Result<crate::neev::content::grants::Tree, TrashError> {
+    crate::neev::content::grants::Tree::load(db, actor.org_id, actor.identity.user_id)
+        .await
+        .map_err(|error| match error {
+            crate::neev::content::types::ContentError::Auth(error) => TrashError::Auth(error),
+            _ => TrashError::Auth(AuthError::Unavailable),
+        })
+}
+
+async fn visible<C: ConnectionTrait>(db: &C, actor: &OrgContext) -> Result<String, TrashError> {
+    let audience = crate::neev::content::grants::Audience::load(db, actor.org_id, actor.identity.user_id)
+        .await
+        .map_err(|error| match error {
+            crate::neev::content::types::ContentError::Auth(error) => TrashError::Auth(error),
+            _ => TrashError::Auth(AuthError::Unavailable),
+        })?;
+    Ok(audience.readable("r", "s"))
 }
 
 const ORIGIN_JOIN: &str =
@@ -263,6 +275,8 @@ struct Plan {
     sessions: Vec<(String, bool, bool)>,
     agent_active: i64,
     in_use: i64,
+    /// The subtree holds a folder the actor cannot see (a restricted one).
+    hidden: bool,
 }
 
 async fn plan(
@@ -280,17 +294,26 @@ async fn plan(
         return Err(TrashError::NotFound);
     }
     let root_revision = root.revision;
+    // Only a folder the actor can see, and may change (Edit), is theirs to
+    // trash; a hidden one is as good as missing.
+    let tree = view(tx, actor).await?;
+    if !tree.visible(node_id) {
+        return Err(TrashError::NotFound);
+    }
+    if !tree.placeable(node_id) {
+        return Err(TrashError::Auth(AuthError::Forbidden));
+    }
     let subtree = live_subtree(&nodes, node_id);
     let user = actor.identity.user_id;
-    let mut values: Vec<Value> = vec![actor.org_id.into(), user.into()];
+    let mut values: Vec<Value> = vec![actor.org_id.into()];
     values.extend(subtree.iter().map(|id| Value::from(*id)));
-    let list = placeholders(3, subtree.len());
+    let list = placeholders(2, subtree.len());
+    let readable = visible(tx, actor).await?;
     let rows = tx
         .query_all(db::statement(
             tx,
             &format!(
-                "SELECT r.id,r.kind,CASE WHEN {} THEN 1 ELSE 0 END AS readable FROM neev_resources r {ORIGIN_JOIN} WHERE r.org_id=$1 AND r.archived=false AND r.node_id IN ({list}) ORDER BY r.id",
-                visible("$2")
+                "SELECT r.id,r.kind,CASE WHEN {readable} THEN 1 ELSE 0 END AS readable FROM neev_resources r {ORIGIN_JOIN} WHERE r.org_id=$1 AND r.archived=false AND r.node_id IN ({list}) ORDER BY r.id"
             ),
             values,
         ))
@@ -313,11 +336,12 @@ async fn plan(
     let node_list = placeholders(2, subtree.len());
     let mut session_values: Vec<Value> = vec![actor.org_id.into(), user.into()];
     session_values.extend(subtree.iter().map(|id| Value::from(*id)));
+    let session_list = placeholders(3, subtree.len());
     let session_rows = tx
         .query_all(db::statement(
             tx,
             &format!(
-                "SELECT g.id,CASE WHEN g.owner_id=$2 THEN 1 ELSE 0 END AS mine,CASE WHEN g.bound_chat_id IS NULL THEN 1 ELSE 0 END AS standalone FROM neev_agent_sessions g WHERE g.org_id=$1 AND g.kind='chat' AND g.archived=false AND g.node_id IN ({list}) ORDER BY g.id"
+                "SELECT g.id,CASE WHEN g.owner_id=$2 THEN 1 ELSE 0 END AS mine,CASE WHEN g.bound_chat_id IS NULL THEN 1 ELSE 0 END AS standalone FROM neev_agent_sessions g WHERE g.org_id=$1 AND g.kind='chat' AND g.archived=false AND g.node_id IN ({session_list}) ORDER BY g.id"
             ),
             session_values,
         ))
@@ -347,10 +371,11 @@ async fn plan(
     .map_err(database_error)?;
     let mut lease_values: Vec<Value> = vec![actor.org_id.into(), now.into()];
     lease_values.extend(subtree.iter().map(|id| Value::from(*id)));
+    let hidden = subtree.iter().any(|id| !tree.visible(*id));
     let in_use: i64 = db::one(
         tx,
         &format!(
-            "SELECT COUNT(*) AS n FROM neev_content_leases l JOIN neev_resources r ON r.org_id=l.org_id AND r.id=l.resource_id WHERE l.org_id=$1 AND l.expires_at>$2 AND r.archived=false AND r.node_id IN ({list})"
+            "SELECT COUNT(*) AS n FROM neev_content_leases l JOIN neev_resources r ON r.org_id=l.org_id AND r.id=l.resource_id WHERE l.org_id=$1 AND l.expires_at>$2 AND r.archived=false AND r.node_id IN ({session_list})"
         ),
         lease_values,
     )
@@ -365,6 +390,7 @@ async fn plan(
         sessions,
         agent_active,
         in_use,
+        hidden,
     })
 }
 
@@ -390,7 +416,8 @@ fn preview_of(plan: &Plan) -> Preview {
         // Chats: trashing would hide work the actor cannot see. Whether, never
         // how many.
         private_others: plan.resources.iter().any(|(_, _, readable)| !readable)
-            || plan.sessions.iter().any(|(_, mine, _)| !mine),
+            || plan.sessions.iter().any(|(_, mine, _)| !mine)
+            || plan.hidden,
     }
 }
 
@@ -613,6 +640,15 @@ pub(crate) async fn restore(
     .ok_or(TrashError::NotFound)?;
     let parent_id: Option<NodeId> = node.try_get("", "parent_id").map_err(database_error)?;
     let revision: i64 = node.try_get("", "revision").map_err(database_error)?;
+    {
+        let tree = view(&tx, actor).await?;
+        if !tree.visible(node_id) {
+            return Err(TrashError::NotFound);
+        }
+        if !tree.placeable(node_id) {
+            return Err(TrashError::Auth(AuthError::Forbidden));
+        }
+    }
     let batch: String = db::one(
         &tx,
         "SELECT batch_id FROM neev_node_trash WHERE org_id=$1 AND item_kind='node' AND item_id=$2 AND root_node_id=$3",
@@ -674,6 +710,8 @@ pub(crate) async fn list(
     actor: &OrgContext,
 ) -> Result<Vec<TrashItem>, TrashError> {
     let tx = begin(state, actor).await?;
+    let readable = visible(&tx, actor).await?;
+    let tree = view(&tx, actor).await?;
     let rows = tx
         .query_all(db::statement(
             &tx,
@@ -693,6 +731,14 @@ ORDER BY t.trashed_at DESC,t.root_node_id DESC LIMIT {LIST_LIMIT}"
         .map_err(database_error)?;
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
+        // Only batches whose root this reader can see; a hidden parent's name
+        // never shows.
+        let root: NodeId = row.try_get("", "root_node_id").map_err(database_error)?;
+        if !tree.visible(root) {
+            continue;
+        }
+        let parent: Option<NodeId> = row.try_get("", "parent_id").map_err(database_error)?;
+        let parent_visible = parent.is_some_and(|id| tree.visible(id));
         let batch: String = row.try_get("", "batch_id").map_err(database_error)?;
         let kind: String = row.try_get("", "kind").map_err(database_error)?;
         let kind = match kind.as_str() {
@@ -713,10 +759,9 @@ ORDER BY t.trashed_at DESC,t.root_node_id DESC LIMIT {LIST_LIMIT}"
             .query_all(db::statement(
                 &tx,
                 &format!(
-                    "SELECT r.kind,COUNT(*) AS n FROM neev_node_trash t JOIN neev_resources r ON r.org_id=t.org_id AND r.id=t.item_id {ORIGIN_JOIN} WHERE t.org_id=$1 AND t.batch_id=$2 AND t.item_kind='resource' AND {} GROUP BY r.kind",
-                    visible("$3")
+                    "SELECT r.kind,COUNT(*) AS n FROM neev_node_trash t JOIN neev_resources r ON r.org_id=t.org_id AND r.id=t.item_id {ORIGIN_JOIN} WHERE t.org_id=$1 AND t.batch_id=$2 AND t.item_kind='resource' AND {readable} GROUP BY r.kind"
                 ),
-                vec![actor.org_id.into(), batch.clone().into(), actor.identity.user_id.into()],
+                vec![actor.org_id.into(), batch.clone().into()],
             ))
             .await
             .map_err(database_error)?;
@@ -746,7 +791,11 @@ ORDER BY t.trashed_at DESC,t.root_node_id DESC LIMIT {LIST_LIMIT}"
             kind,
             name: row.try_get("", "name").map_err(database_error)?,
             parent_id: row.try_get("", "parent_id").map_err(database_error)?,
-            parent_name: row.try_get("", "parent_name").map_err(database_error)?,
+            parent_name: if parent_visible {
+                row.try_get("", "parent_name").map_err(database_error)?
+            } else {
+                None
+            },
             parent_trashed: parent_trashed != 0,
             trashed_by: row.try_get("", "trashed_by").map_err(database_error)?,
             trashed_by_name: row.try_get("", "trashed_by_name").map_err(database_error)?,

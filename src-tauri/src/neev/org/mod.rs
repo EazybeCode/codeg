@@ -1,5 +1,8 @@
 pub(crate) mod invites;
 pub(crate) mod join_code;
+pub(crate) mod teams;
+#[cfg(test)]
+mod teams_tests;
 mod service;
 pub(crate) use service::{digest_parts, normalize_request_id};
 

@@ -26,6 +26,9 @@ pub(crate) mod cookies;
 mod library;
 mod org;
 mod realtime;
+mod sharing;
+#[cfg(test)]
+mod sharing_tests;
 mod knowledge;
 #[cfg(test)]
 mod knowledge_tests;
@@ -250,6 +253,46 @@ pub(crate) fn router(state: Arc<ServerState>) -> Router {
             get(org::details).patch(org::update_branding),
         )
         .route("/api/neev/organization/members", get(org::members))
+        // Member directory, teams, and sharing with members and teams
+        // (`.context/sharing-api-contract.md`).
+        .route("/api/neev/organization/directory", get(sharing::directory))
+        .route("/api/neev/teams", get(sharing::list_teams).post(sharing::create_team))
+        .route(
+            "/api/neev/teams/{team_id}",
+            patch(sharing::rename_team).delete(sharing::delete_team),
+        )
+        .route(
+            "/api/neev/teams/{team_id}/members",
+            get(sharing::team_members).post(sharing::add_team_member),
+        )
+        .route(
+            "/api/neev/teams/{team_id}/members/{user_id}",
+            delete(sharing::remove_team_member),
+        )
+        .route("/api/neev/resources/{id}/access", get(sharing::resource_access))
+        .route(
+            "/api/neev/resources/{id}/grants",
+            axum::routing::put(sharing::put_resource_grant).delete(sharing::delete_resource_grant),
+        )
+        .route("/api/neev/nodes/{node_id}/access", get(sharing::node_access))
+        .route(
+            "/api/neev/nodes/{node_id}/restriction",
+            axum::routing::put(sharing::put_node_restriction),
+        )
+        .route("/api/neev/shared/resources", get(content::shared_resources))
+        .route(
+            "/api/neev/nodes/{node_id}/grants",
+            axum::routing::put(sharing::put_node_grant).delete(sharing::delete_node_grant),
+        )
+        .route(
+            "/api/neev/agent/sessions/{session_id}/access",
+            get(sharing::session_access),
+        )
+        .route(
+            "/api/neev/agent/sessions/{session_id}/grants",
+            axum::routing::put(sharing::put_session_grant).delete(sharing::delete_session_grant),
+        )
+        .route("/api/neev/agent/shared-sessions", get(sharing::shared_sessions))
         .route(
             "/api/neev/organization/members/{member_id}/role",
             patch(org::set_role),

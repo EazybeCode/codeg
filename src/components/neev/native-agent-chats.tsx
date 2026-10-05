@@ -13,6 +13,7 @@
 //    a dropped connection can never repeat a prompt's side effects. A run that
 //    cannot be followed is reported as such and needs an explicit new turn.
 
+import { ShareDialog } from "./native-sharing"
 import {
   useCallback,
   useEffect,
@@ -43,6 +44,7 @@ import {
   Search,
   Terminal,
   Wrench,
+  Users,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { AgentRunIndicator } from "./agent-run-indicator"
@@ -329,6 +331,28 @@ function AgentChats({
     [auth, nodeId, filing, absorb]
   )
 
+  const [sharedOpen, setSharedOpen] = useState<NeevAgentSession | null>(null)
+  const [sharedPending, setSharedPending] = useState<string | null>(null)
+  const ownListed =
+    !!sessionId && (sessions ?? []).some((item) => item.id === sessionId)
+  useEffect(() => {
+    if (!sessionId || sessions === null || ownListed) return
+    if (sharedOpen?.id === sessionId) return
+    const controller = new AbortController()
+    setSharedPending(sessionId)
+    loadAgentSession(sessionId, controller.signal)
+      .then((found) => {
+        if (!controller.signal.aborted) setSharedOpen(found)
+      })
+      .catch(() => {
+        // Not readable: the honest "missing" state below.
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setSharedPending(null)
+      })
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, sessions === null, ownListed])
   // A new chat is a composer, not a form: the provider came from the menu that
   // opened it, and the first message is what creates the session.
   if (draftProvider)
@@ -352,12 +376,14 @@ function AgentChats({
     )
 
   // The sidebar owns selection, so a named session opens straight into its
-  // transcript rather than through this surface's own list.
+  // transcript rather than through this surface's own list. One shared WITH
+  // the reader is not in their own list: it is read directly.
   const selected = sessionId
-    ? (sessions ?? []).find((item) => item.id === sessionId)
+    ? ((sessions ?? []).find((item) => item.id === sessionId) ??
+      (sharedOpen?.id === sessionId ? sharedOpen : null))
     : null
   if (sessionId && !selected)
-    return sessions === null ? (
+    return sessions === null || sharedPending === sessionId ? (
       <p role="status" className="px-6 py-10 text-sm text-muted-foreground">
         {n("loading")}
       </p>
@@ -1652,7 +1678,13 @@ function AgentSessionView({
 }) {
   const auth = useNativeAuth(),
     t = useTranslations("NativeContent"),
-    n = useTranslations("Native")
+    n = useTranslations("Native"),
+    sh = useTranslations("Sharing")
+  // Shared WITH the reader (a View grant): readable only. Running, steering,
+  // retrying, settings and filing all use the owner's account and stay the
+  // owner's; the reader continues by forking onto their own connection.
+  const owned = session.ownerId === auth.session?.user.id
+  const [sharingSession, setSharingSession] = useState(false)
   // Per instance: several composers stay mounted at once, so a fixed id would
   // point every Connect control at the first one's description.
   const connectNote = useId()
@@ -1696,6 +1728,10 @@ function AgentSessionView({
   } | null>(null)
   const autoRouting = useAutoRouting(auth.scopeKey, autoAccount(auth.session))
   const forkAction = useForkAction(auth.scopeKey, useOpenFork())
+  // What a viewer forks from to continue: the newest completed turn.
+  const lastCompleted =
+    [...(turns ?? [])].reverse().find((turn) => turn.status === "completed") ??
+    null
   /**
    * Copy this chat up through one completed turn into a new private Agent
    * Chat, and open that in a new tab. The server copies; nothing is run.
@@ -2334,32 +2370,54 @@ function AgentSessionView({
             <Lock aria-hidden className="size-3.5" />
           </span>
           <p className="hidden min-w-0 shrink-0 truncate text-xs text-muted-foreground/80 sm:block">
-            {t("private")}
+            {owned ? t("private") : sh("sharedWithYouViewOnly")}
             {session.archived ? ` · ${t("archived")}` : ""} ·{" "}
             <span role="status">{runStatusLabel()}</span>
           </p>
         </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
+        {owned && !session.archived && (
+          <>
             <Button
               variant="ghost"
-              size="icon"
-              aria-label={t("resourceActions")}
+              size="sm"
+              className="gap-1.5"
+              aria-label={sh("share")}
+              onClick={() => setSharingSession(true)}
             >
-              <MoreHorizontal aria-hidden />
+              <Users aria-hidden className="size-3.5" />
+              <span className="hidden sm:inline">{sh("share")}</span>
             </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={() => setRenaming(true)}>
-              {t("rename")}
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={() => void mutate({ archived: !session.archived })}
-            >
-              {t(session.archived ? "restoreFromTrash" : "moveToTrash")}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+            <ShareDialog
+              open={sharingSession}
+              onOpenChange={setSharingSession}
+              title={session.title}
+              target={{ kind: "session", session }}
+            />
+          </>
+        )}
+        {owned && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={t("resourceActions")}
+              >
+                <MoreHorizontal aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setRenaming(true)}>
+                {t("rename")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => void mutate({ archived: !session.archived })}
+              >
+                {t(session.archived ? "restoreFromTrash" : "moveToTrash")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
 
       {turns === null ? (
@@ -2509,248 +2567,265 @@ function AgentSessionView({
         </ol>
       )}
 
-      <form
-        onSubmit={(event) => {
-          event.preventDefault()
-          // When a run is active and supports steering, Enter sends into
-          // the same run. When running without steering, Enter does nothing
-          // (text is kept for the next turn). Otherwise it starts a new turn.
-          if (running && supportsSteering) void steer()
-          else if (!running) void send()
-        }}
-        onKeyDown={(event) => {
-          // Stop is always one key away, even while the corner shows Send.
-          // Not when something inside claimed Escape first (the mention
-          // picker), and not from a portalled menu opened from this row,
-          // whose Escape only closes that menu.
-          if (
-            event.key !== "Escape" ||
-            !running ||
-            event.defaultPrevented ||
-            !event.currentTarget.contains(event.target as Node)
-          )
-            return
-          event.preventDefault()
-          void cancel()
-        }}
-        className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-4 pb-3 pt-2 sm:px-8 sm:pb-5 sm:pt-3"
-      >
-        <div
-          {...drop.handlers}
-          className={cn(
-            // Same geometry and same focus accent as the team-chat composer:
-            // one control should not change shape between two chat surfaces.
-            CHAT_COMPOSER,
-            drop.over && CHAT_COMPOSER_DROP
-          )}
+      {owned ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            // When a run is active and supports steering, Enter sends into
+            // the same run. When running without steering, Enter does nothing
+            // (text is kept for the next turn). Otherwise it starts a new turn.
+            if (running && supportsSteering) void steer()
+            else if (!running) void send()
+          }}
+          onKeyDown={(event) => {
+            // Stop is always one key away, even while the corner shows Send.
+            // Not when something inside claimed Escape first (the mention
+            // picker), and not from a portalled menu opened from this row,
+            // whose Escape only closes that menu.
+            if (
+              event.key !== "Escape" ||
+              !running ||
+              event.defaultPrevented ||
+              !event.currentTarget.contains(event.target as Node)
+            )
+              return
+            event.preventDefault()
+            void cancel()
+          }}
+          className="mx-auto w-full max-w-[832px] shrink-0 space-y-3 px-4 pb-3 pt-2 sm:px-8 sm:pb-5 sm:pt-3"
         >
-          {drop.over && (
-            <p
-              role="status"
-              className="px-1 pb-1 text-xs text-muted-foreground"
-            >
-              {t("attachmentDrop")}
-            </p>
-          )}
-          <NativeInlineComposer
-            ref={composer}
-            value={draft}
-            retain={outgoing?.files}
-            onChange={(next) => {
-              // Re-reporting what it already holds is not an edit.
-              if (sameSegments(next, draft)) return
-              draftRef.current = promptText(next)
-              setDraft(next)
-            }}
-            tray={attachments}
-            label={
-              running && supportsSteering
-                ? t("agentFollowUp")
-                : t("agentPrompt")
-            }
-            placeholder={
-              running && supportsSteering
-                ? t("agentFollowUp")
-                : t("agentPrompt")
-            }
-            onSubmit={() => {
-              if (running && supportsSteering) void steer()
-              else if (!running) void send()
-            }}
-            busy={sending || steeringInFlight !== null || attachments.uploading}
-            // Typing is always allowed during a run (for the next turn, or for
-            // steering when supported). Entering submits when not running or
-            // when steering is supported.
-            readOnly={sending || session.archived || !ready}
-            // Attachments are not supported mid-run.
-            attachDisabled={session.archived || !ready || running}
-            maxChars={NEEV_MAX_PROMPT_CHARS}
-            className="min-h-14"
-          />
-          {/* Sending is held while bytes are still going up; say so rather than
-              leaving a Send button that does nothing when pressed. */}
-          {attachments.uploading && (
-            <p role="status" className="px-1 text-xs text-muted-foreground">
-              {t("attachmentsPending")}
-            </p>
-          )}
-          {running && !attachments.empty && (
-            <p role="status" className="text-xs text-muted-foreground">
-              {t("agentFollowUpTextOnly")}
-            </p>
-          )}
-          <NativeError error={error} />
-          {/* Agents off for the whole server is not something this person can
-              connect their way out of, so it stays a sentence. Everything that
-              IS actionable is the Connect control in the row below. */}
-          {!runtimeEnabled && (
-            <p role="status" className="px-1 text-xs text-muted-foreground">
-              {t("agentsOff")}
-            </p>
-          )}
-          {lastRoute && <RouteNote route={lastRoute} className="px-1" />}
-          <div className="flex min-w-0 items-center gap-2">
-            <Bot
-              aria-hidden
-              className="size-3.5 shrink-0 text-muted-foreground"
-            />
-            <AttachmentButton
-              disabled={sending || session.archived || !ready}
-              remaining={remainingAttachments(attachments)}
-              onFiles={(files) => void composer.current?.addFiles(files)}
-            />
-            {/* The provider is immutable here — a turn may not contradict its
-                session's, and a team holder's id is derived from it — so only
-                this provider's models are offered. */}
-            <AgentControls
-              capabilities={capabilities}
-              provider={session.provider as NeevAgentProvider}
-              settings={shown}
-              lockProvider
-              disabled={applying || session.archived || !ready}
-              auto={{
-                status: autoRouting.status,
-                on: autoRouting.on,
-                onChange: autoRouting.setOn,
-                disabled: session.archived,
-              }}
-              onChange={(next) => {
-                // Stored straight away so it is already in force by the time
-                // the next prompt is sent; `send` re-checks in case this is
-                // still in flight or was refused.
-                setDesired(next)
-                void applySettings(next)
-              }}
-              className="min-w-0 flex-1"
-            />
-            {/* Announced, not printed. Both states are momentary — a write in
-                flight, or one that has not landed — and giving each a visible
-                word made the row jump width every time a chip was touched. The
-                chips themselves are disabled while `applying`, which is the
-                visible half of the same fact. */}
-            <span role="status" className="sr-only">
-              {applying
-                ? t("settingsPending")
-                : desired !== null
-                  ? t("settingsUnsaved")
-                  : ""}
-            </span>
-            {/* Honest, compact, and the only thing here that fixes it. The
-                sentence and trailing link this replaces sat under the composer
-                whenever the provider was not connected — a full line, every
-                time, saying the state rather than offering the remedy. Send
-                stays disabled either way: nothing here pretends a
-                disconnected provider will run. */}
-            {runtimeEnabled &&
-              connection &&
-              connection.state !== "connected" && (
-                <>
-                  <p id={connectNote} className="sr-only">
-                    {t("providerNotConnected", { name: session.provider })}
-                  </p>
-                  <Button
-                    asChild
-                    size="sm"
-                    variant="outline"
-                    className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs font-normal"
-                  >
-                    <Link
-                      href="/settings?section=agents"
-                      aria-describedby={connectNote}
-                      title={t("providerNotConnected", {
-                        name: session.provider,
-                      })}
-                      onClick={(event) => {
-                        if (onRequestSettings) {
-                          event.preventDefault()
-                          onRequestSettings()
-                        }
-                      }}
-                    >
-                      <PlugZap aria-hidden className="size-3.5" />
-                      {connection.state === "reconnect_required"
-                        ? t("reconnectProvider")
-                        : t("connectProvider")}
-                    </Link>
-                  </Button>
-                </>
-              )}
-            {phase === "lost" && running && (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setAttachNonce((value) => value + 1)}
-              >
-                {t("agentReconnect")}
-              </Button>
+          <div
+            {...drop.handlers}
+            className={cn(
+              // Same geometry and same focus accent as the team-chat composer:
+              // one control should not change shape between two chat surfaces.
+              CHAT_COMPOSER,
+              drop.over && CHAT_COMPOSER_DROP
             )}
-            {/* ONE control, always in the same corner. A run shows Stop; typing
-                a follow-up the run can take turns it into Send, and clearing
-                the text turns it back. Two buttons side by side moved Stop
-                left the moment steering was on. */}
-            {running && (
-              <p id={stopHint} className="sr-only">
-                {t("stopShortcutHint")}
+          >
+            {drop.over && (
+              <p
+                role="status"
+                className="px-1 pb-1 text-xs text-muted-foreground"
+              >
+                {t("attachmentDrop")}
               </p>
             )}
-            <Button
-              type={stopping ? "button" : "submit"}
-              size="icon"
-              variant="default"
-              className="ms-auto rounded-md"
-              aria-label={stopping ? stopLabel : t("send")}
-              // During a run the key that stops it is announced on the one
-              // control, and repeated in the tooltip when that control is Send.
-              aria-keyshortcuts={running ? "Escape" : undefined}
-              aria-describedby={running && !stopping ? stopHint : undefined}
-              title={
-                stopping
-                  ? stopLabel
-                  : running
-                    ? `${t("send")} · ${t("stopShortcutHint")}`
-                    : t("send")
+            <NativeInlineComposer
+              ref={composer}
+              value={draft}
+              retain={outgoing?.files}
+              onChange={(next) => {
+                // Re-reporting what it already holds is not an edit.
+                if (sameSegments(next, draft)) return
+                draftRef.current = promptText(next)
+                setDraft(next)
+              }}
+              tray={attachments}
+              label={
+                running && supportsSteering
+                  ? t("agentFollowUp")
+                  : t("agentPrompt")
               }
-              disabled={
-                stopping
-                  ? false
-                  : sending ||
-                    steeringInFlight !== null ||
-                    session.archived ||
-                    !ready ||
-                    attachments.uploading ||
-                    (promptIsEmpty(draft) && attachments.empty)
+              placeholder={
+                running && supportsSteering
+                  ? t("agentFollowUp")
+                  : t("agentPrompt")
               }
-              onClick={stopping ? () => void cancel() : undefined}
-            >
-              {stopping ? (
-                <Square aria-hidden className="size-3.5 fill-current" />
-              ) : (
-                <ArrowUp aria-hidden />
+              onSubmit={() => {
+                if (running && supportsSteering) void steer()
+                else if (!running) void send()
+              }}
+              busy={
+                sending || steeringInFlight !== null || attachments.uploading
+              }
+              // Typing is always allowed during a run (for the next turn, or for
+              // steering when supported). Entering submits when not running or
+              // when steering is supported.
+              readOnly={sending || session.archived || !ready}
+              // Attachments are not supported mid-run.
+              attachDisabled={session.archived || !ready || running}
+              maxChars={NEEV_MAX_PROMPT_CHARS}
+              className="min-h-14"
+            />
+            {/* Sending is held while bytes are still going up; say so rather than
+                leaving a Send button that does nothing when pressed. */}
+            {attachments.uploading && (
+              <p role="status" className="px-1 text-xs text-muted-foreground">
+                {t("attachmentsPending")}
+              </p>
+            )}
+            {running && !attachments.empty && (
+              <p role="status" className="text-xs text-muted-foreground">
+                {t("agentFollowUpTextOnly")}
+              </p>
+            )}
+            <NativeError error={error} />
+            {/* Agents off for the whole server is not something this person can
+                connect their way out of, so it stays a sentence. Everything that
+                IS actionable is the Connect control in the row below. */}
+            {!runtimeEnabled && (
+              <p role="status" className="px-1 text-xs text-muted-foreground">
+                {t("agentsOff")}
+              </p>
+            )}
+            {lastRoute && <RouteNote route={lastRoute} className="px-1" />}
+            <div className="flex min-w-0 items-center gap-2">
+              <Bot
+                aria-hidden
+                className="size-3.5 shrink-0 text-muted-foreground"
+              />
+              <AttachmentButton
+                disabled={sending || session.archived || !ready}
+                remaining={remainingAttachments(attachments)}
+                onFiles={(files) => void composer.current?.addFiles(files)}
+              />
+              {/* The provider is immutable here — a turn may not contradict its
+                  session's, and a team holder's id is derived from it — so only
+                  this provider's models are offered. */}
+              <AgentControls
+                capabilities={capabilities}
+                provider={session.provider as NeevAgentProvider}
+                settings={shown}
+                lockProvider
+                disabled={applying || session.archived || !ready}
+                auto={{
+                  status: autoRouting.status,
+                  on: autoRouting.on,
+                  onChange: autoRouting.setOn,
+                  disabled: session.archived,
+                }}
+                onChange={(next) => {
+                  // Stored straight away so it is already in force by the time
+                  // the next prompt is sent; `send` re-checks in case this is
+                  // still in flight or was refused.
+                  setDesired(next)
+                  void applySettings(next)
+                }}
+                className="min-w-0 flex-1"
+              />
+              {/* Announced, not printed. Both states are momentary — a write in
+                  flight, or one that has not landed — and giving each a visible
+                  word made the row jump width every time a chip was touched. The
+                  chips themselves are disabled while `applying`, which is the
+                  visible half of the same fact. */}
+              <span role="status" className="sr-only">
+                {applying
+                  ? t("settingsPending")
+                  : desired !== null
+                    ? t("settingsUnsaved")
+                    : ""}
+              </span>
+              {/* Honest, compact, and the only thing here that fixes it. The
+                  sentence and trailing link this replaces sat under the composer
+                  whenever the provider was not connected — a full line, every
+                  time, saying the state rather than offering the remedy. Send
+                  stays disabled either way: nothing here pretends a
+                  disconnected provider will run. */}
+              {runtimeEnabled &&
+                connection &&
+                connection.state !== "connected" && (
+                  <>
+                    <p id={connectNote} className="sr-only">
+                      {t("providerNotConnected", { name: session.provider })}
+                    </p>
+                    <Button
+                      asChild
+                      size="sm"
+                      variant="outline"
+                      className="h-7 shrink-0 gap-1.5 rounded-full px-2.5 text-xs font-normal"
+                    >
+                      <Link
+                        href="/settings?section=agents"
+                        aria-describedby={connectNote}
+                        title={t("providerNotConnected", {
+                          name: session.provider,
+                        })}
+                        onClick={(event) => {
+                          if (onRequestSettings) {
+                            event.preventDefault()
+                            onRequestSettings()
+                          }
+                        }}
+                      >
+                        <PlugZap aria-hidden className="size-3.5" />
+                        {connection.state === "reconnect_required"
+                          ? t("reconnectProvider")
+                          : t("connectProvider")}
+                      </Link>
+                    </Button>
+                  </>
+                )}
+              {phase === "lost" && running && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setAttachNonce((value) => value + 1)}
+                >
+                  {t("agentReconnect")}
+                </Button>
               )}
-            </Button>
+              {/* ONE control, always in the same corner. A run shows Stop; typing
+                  a follow-up the run can take turns it into Send, and clearing
+                  the text turns it back. Two buttons side by side moved Stop
+                  left the moment steering was on. */}
+              {running && (
+                <p id={stopHint} className="sr-only">
+                  {t("stopShortcutHint")}
+                </p>
+              )}
+              <Button
+                type={stopping ? "button" : "submit"}
+                size="icon"
+                variant="default"
+                className="ms-auto rounded-md"
+                aria-label={stopping ? stopLabel : t("send")}
+                // During a run the key that stops it is announced on the one
+                // control, and repeated in the tooltip when that control is Send.
+                aria-keyshortcuts={running ? "Escape" : undefined}
+                aria-describedby={running && !stopping ? stopHint : undefined}
+                title={
+                  stopping
+                    ? stopLabel
+                    : running
+                      ? `${t("send")} · ${t("stopShortcutHint")}`
+                      : t("send")
+                }
+                disabled={
+                  stopping
+                    ? false
+                    : sending ||
+                      steeringInFlight !== null ||
+                      session.archived ||
+                      !ready ||
+                      attachments.uploading ||
+                      (promptIsEmpty(draft) && attachments.empty)
+                }
+                onClick={stopping ? () => void cancel() : undefined}
+              >
+                {stopping ? (
+                  <Square aria-hidden className="size-3.5 fill-current" />
+                ) : (
+                  <ArrowUp aria-hidden />
+                )}
+              </Button>
+            </div>
           </div>
+        </form>
+      ) : (
+        <div className="mx-auto flex w-full max-w-[832px] shrink-0 flex-wrap items-center justify-between gap-2 px-4 pb-3 pt-2 sm:px-8 sm:pb-5">
+          <p className="text-sm text-muted-foreground">{sh("viewerExplain")}</p>
+          {lastCompleted && (
+            <Button
+              size="sm"
+              disabled={forkAction.forking !== null}
+              onClick={() => forkTurn(lastCompleted.id)}
+            >
+              {sh("forkToContinue")}
+            </Button>
+          )}
         </div>
-      </form>
+      )}
 
       <Dialog
         open={pending !== null}
@@ -2824,7 +2899,9 @@ function AgentSessionView({
         provider={providerName(turn.provider)}
         retrying={retryingRun === turn.runId}
         reconnected={reconnected}
-        onRetry={newest && !running ? () => void retryTurn(turn) : undefined}
+        onRetry={
+          owned && newest && !running ? () => void retryTurn(turn) : undefined
+        }
         onReconnect={
           newest
             ? () => {

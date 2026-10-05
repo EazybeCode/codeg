@@ -378,3 +378,59 @@ async fn realtime_is_advertised_when_it_is_mounted() {
     let capabilities: Value = h.server.get("/api/workos/capabilities").await.json();
     assert_eq!(capabilities["realtime"], true);
 }
+
+/// Member/team sharing: removing the reader's grant ends an established stream
+/// on its next heartbeat recheck, with no content notice in between; a folder
+/// grant removal does the same.
+#[tokio::test]
+async fn removing_a_grant_revokes_a_live_reader_without_any_notice() {
+    use crate::neev::content::grants::{self, Level, Principal};
+    for through_folder in [false, true] {
+        let h = Harness::new().await;
+        let current = resources::get(&h.state, &h.owner, &h.chat).await.unwrap();
+        let shared = resources::update(
+            &h.state,
+            &h.owner,
+            &h.chat,
+            ResourcePatch {
+                expected_auth_revision: current.auth_revision,
+                title: current.title.clone(),
+                node_id: current.node_id,
+                visibility: Visibility::Shared,
+                archived: false,
+            },
+        )
+        .await
+        .unwrap();
+        let reader = Principal::User(h.member.identity.user_id);
+        if through_folder {
+            let node = grants::node_access(&h.state, &h.owner, shared.node_id).await.unwrap();
+            grants::set_node_grant(&h.state, &h.owner, shared.node_id, node.revision, &reader, Some(Level::View))
+                .await
+                .unwrap();
+        } else {
+            grants::set_resource_grant(&h.state, &h.owner, &h.chat, shared.auth_revision, &reader, Some(Level::View))
+                .await
+                .unwrap();
+        }
+        let (response, ()) = tokio::join!(h.member_stream(&h.chat), async {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            if through_folder {
+                let node = grants::node_access(&h.state, &h.owner, shared.node_id).await.unwrap();
+                grants::set_node_grant(&h.state, &h.owner, shared.node_id, node.revision, &reader, None)
+                    .await
+                    .unwrap();
+            } else {
+                let now = resources::get(&h.state, &h.owner, &h.chat).await.unwrap();
+                grants::set_resource_grant(&h.state, &h.owner, &h.chat, now.auth_revision, &reader, None)
+                    .await
+                    .unwrap();
+            }
+        });
+        let body = response.text();
+        let parsed = frames(&body);
+        let seen = kinds(&parsed);
+        assert_eq!(seen.first(), Some(&"sync"), "the reader was live first: {body}");
+        assert_eq!(seen.last(), Some(&"revoked"), "grant removal did not stop the stream: {body}");
+    }
+}

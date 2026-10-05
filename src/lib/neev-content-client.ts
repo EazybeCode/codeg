@@ -12,7 +12,16 @@ import {
 } from "./neev-mentions"
 
 export type NativeResourceKind = "chat" | "document"
-export type NativeVisibility = "private" | "organization"
+const VISIBILITIES: readonly NativeVisibility[] = [
+  "private",
+  "shared",
+  "organization",
+]
+/**
+ * `shared`: the creator plus the members and teams it (or its folders) are
+ * shared with (`neev-sharing`).
+ */
+export type NativeVisibility = "private" | "shared" | "organization"
 
 /**
  * Which editor owns a document's content.
@@ -320,7 +329,11 @@ export function parseResource(value: unknown): NativeResource {
       : object.engine === "native" || object.engine === "lasuite"
         ? object.engine
         : invalid()
-  if (object.visibility !== "private" && object.visibility !== "organization")
+  if (
+    object.visibility !== "private" &&
+    object.visibility !== "shared" &&
+    object.visibility !== "organization"
+  )
     return invalid()
   if (typeof object.archived !== "boolean") return invalid()
   const originChatId =
@@ -702,7 +715,7 @@ export async function createNativeResource(
   const explicit = input.visibility !== undefined
   if (
     explicit &&
-    ((input.visibility !== "private" && input.visibility !== "organization") ||
+    (!VISIBILITIES.includes(input.visibility as NativeVisibility) ||
       Object.prototype.hasOwnProperty.call(input, "originChatId"))
   )
     invalidRequest()
@@ -744,7 +757,7 @@ export async function updateNativeResource(
   assertPositiveRevision(input.expectedAuthRevision)
   if (
     typeof input.title !== "string" ||
-    (input.visibility !== "private" && input.visibility !== "organization") ||
+    !VISIBILITIES.includes(input.visibility) ||
     typeof input.archived !== "boolean"
   )
     invalidRequest()

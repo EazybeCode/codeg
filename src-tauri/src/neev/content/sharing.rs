@@ -1,7 +1,8 @@
 //! Folder sharing defaults (schema 21): what audience a NEW resource gets when
 //! its creator does not choose one.
 //!
-//! A node either carries an explicit default (`private` / `organization`) or
+//! A node either carries an explicit default (`private` / `shared` /
+//! `organization`; `shared` is stored as `private` + a schema-24 mark) or
 //! inherits its parent's; a chain with no explicit default is private. The
 //! default is resolved once, inside the creating transaction, and MATERIALIZED
 //! into the new resource's own `visibility` — it is never consulted by access
@@ -13,7 +14,7 @@ use crate::neev::{
     db,
     error::database_error,
     startup::ServerState,
-    types::{NodeId, OrgContext, Role},
+    types::{NodeId, OrgContext},
 };
 use sea_orm::{DatabaseTransaction, FromQueryResult};
 use std::collections::HashSet;
@@ -25,6 +26,10 @@ const MAX_DEPTH: usize = 1000;
 pub(crate) enum DefaultVisibility {
     Inherit,
     Private,
+    /// New items use member/team sharing ("folder access"). Stored as a
+    /// `private` default plus a `node_default` shared mark, so a rollback reads
+    /// it as private.
+    Shared,
     Organization,
 }
 
@@ -33,6 +38,7 @@ impl DefaultVisibility {
         match self {
             Self::Inherit => None,
             Self::Private => Some(Visibility::Private),
+            Self::Shared => Some(Visibility::Shared),
             Self::Organization => Some(Visibility::Organization),
         }
     }
@@ -55,8 +61,8 @@ struct NodeRow {
     parent_id: Option<NodeId>,
     kind: String,
     revision: i64,
-    created_by: i32,
     default_visibility: Option<String>,
+    shared_default: i64,
 }
 
 /// The raw row, whatever its kind; `None` when absent from this org.
@@ -71,7 +77,7 @@ async fn load_any(
     let row = db::one(
         tx,
         &format!(
-            "SELECT n.parent_id,n.kind,n.revision,n.created_by,(SELECT d.default_visibility FROM neev_node_sharing_defaults d WHERE d.org_id=n.org_id AND d.node_id=n.id) AS default_visibility FROM neev_nodes n WHERE n.org_id=$1 AND n.id=$2{}",
+            "SELECT n.parent_id,n.kind,n.revision,(SELECT d.default_visibility FROM neev_node_sharing_defaults d WHERE d.org_id=n.org_id AND d.node_id=n.id) AS default_visibility,(SELECT COUNT(*) FROM neev_shared_marks k WHERE k.org_id=n.org_id AND k.mark_kind='node_default' AND k.target_id=CAST(n.id AS TEXT)) AS shared_default FROM neev_nodes n WHERE n.org_id=$1 AND n.id=$2{}",
             if locked { session::lock(tx) } else { "" }
         ),
         vec![org_id.into(), node_id.into()],
@@ -101,12 +107,13 @@ async fn load_node(
     Ok(row)
 }
 
-fn parse(value: Option<&str>) -> Result<DefaultVisibility, ContentError> {
-    match value {
-        None => Ok(DefaultVisibility::Inherit),
-        Some("private") => Ok(DefaultVisibility::Private),
-        Some("organization") => Ok(DefaultVisibility::Organization),
-        Some(_) => Err(ContentError::Storage),
+fn parse(node: &NodeRow) -> Result<DefaultVisibility, ContentError> {
+    match (node.default_visibility.as_deref(), node.shared_default) {
+        (None, 0) => Ok(DefaultVisibility::Inherit),
+        (Some("private"), 0) => Ok(DefaultVisibility::Private),
+        (Some("private"), _) => Ok(DefaultVisibility::Shared),
+        (Some("organization"), 0) => Ok(DefaultVisibility::Organization),
+        _ => Err(ContentError::Storage),
     }
 }
 
@@ -124,7 +131,7 @@ async fn resolve_from(
     node_id: NodeId,
     node: &NodeRow,
 ) -> Result<(DefaultVisibility, Visibility, Option<NodeId>), ContentError> {
-    let own = parse(node.default_visibility.as_deref())?;
+    let own = parse(node)?;
     if let Some(explicit) = own.explicit() {
         return Ok((own, explicit, None));
     }
@@ -144,7 +151,7 @@ async fn resolve_from(
         if !matches!(ancestor.kind.as_str(), "project" | "folder") {
             break;
         }
-        if let Some(explicit) = parse(ancestor.default_visibility.as_deref())?.explicit() {
+        if let Some(explicit) = parse(&ancestor)?.explicit() {
             return Ok((own, explicit, Some(id)));
         }
         cursor = ancestor.parent_id;
@@ -162,8 +169,23 @@ pub(crate) async fn resolve(
     Ok(resolve_from(tx, org_id, node_id, &node).await?.1)
 }
 
-fn can_manage(actor: &OrgContext, node: &NodeRow) -> bool {
-    actor.role == Role::Admin || node.created_by == actor.identity.user_id
+/// The same rule node grants use (`grants::can_manage_node`): creator or
+/// admin in an open region, creator or the restricted root's creator inside one.
+fn can_manage(tree: &super::grants::Tree, actor: &OrgContext, node_id: NodeId) -> bool {
+    super::grants::can_manage_node(tree, actor, node_id)
+}
+
+/// A node the actor cannot see is not found, exactly as a missing one.
+async fn seen(
+    tx: &DatabaseTransaction,
+    actor: &OrgContext,
+    node_id: NodeId,
+) -> Result<super::grants::Tree, ContentError> {
+    let tree = super::grants::Tree::load(tx, actor.org_id, actor.identity.user_id).await?;
+    if !tree.visible(node_id) {
+        return Err(ContentError::NotFound);
+    }
+    Ok(tree)
 }
 
 async fn snapshot(
@@ -174,13 +196,15 @@ async fn snapshot(
 ) -> Result<NodeSharing, ContentError> {
     let (default_visibility, effective_visibility, inherited_from) =
         resolve_from(tx, actor.org_id, node_id, node).await?;
+    let tree = seen(tx, actor, node_id).await?;
     Ok(NodeSharing {
         node_id,
         revision: node.revision,
         default_visibility,
         effective_visibility,
-        inherited_from,
-        can_manage: can_manage(actor, node),
+        // A default inherited from a folder the reader cannot see names none.
+        inherited_from: inherited_from.filter(|id| tree.visible(*id)),
+        can_manage: can_manage(&tree, actor, node_id),
     })
 }
 
@@ -213,13 +237,14 @@ pub(crate) async fn set(
     }
     let tx = resources::begin(state, actor).await?;
     let node = load_node(&tx, actor.org_id, node_id, true).await?;
-    if !can_manage(actor, &node) {
+    let tree = seen(&tx, actor, node_id).await?;
+    if !can_manage(&tree, actor, node_id) {
         return Err(ContentError::Auth(crate::neev::error::AuthError::Forbidden));
     }
     if node.revision != expected_revision {
         return Err(ContentError::Conflict);
     }
-    if parse(node.default_visibility.as_deref())? == requested {
+    if parse(&node)? == requested {
         let result = snapshot(&tx, actor, node_id, &node).await?;
         session::recheck(&tx, actor, state.clock.now_unix()).await?;
         tx.commit().await.map_err(database_error)?;
@@ -243,6 +268,25 @@ pub(crate) async fn set(
     .await?;
     if bumped.rows_affected() != 1 {
         return Err(ContentError::Conflict);
+    }
+    db::execute(
+        &tx,
+        "DELETE FROM neev_shared_marks WHERE org_id=$1 AND mark_kind='node_default' AND target_id=$2",
+        vec![actor.org_id.into(), node_id.to_string().into()],
+    )
+    .await?;
+    if requested == DefaultVisibility::Shared {
+        db::execute(
+            &tx,
+            "INSERT INTO neev_shared_marks(org_id,mark_kind,target_id,set_by,created_at) VALUES($1,'node_default',$2,$3,$4)",
+            vec![
+                actor.org_id.into(),
+                node_id.to_string().into(),
+                actor.identity.user_id.into(),
+                now.into(),
+            ],
+        )
+        .await?;
     }
     match requested.explicit() {
         None => {

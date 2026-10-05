@@ -92,7 +92,7 @@ async function triggerAction(
   user: { click: (element: Element) => Promise<void> },
   name: string
 ) {
-  if (name === "Make private" || name === "Share with organization") {
+  if (name === "Make private" || name === "Share") {
     await user.click(screen.getByRole("button", { name }))
     return
   }
@@ -322,9 +322,7 @@ it.each(["Make private", "Move to trash", "Restore"] as const)(
       archived: action === "Move to trash",
     })
     expect(screen.getByRole("heading", { name: "Fresh title" })).toBeVisible()
-    expect(
-      screen.getByRole("button", { name: "Share with organization" })
-    ).toBeVisible()
+    expect(screen.getByRole("button", { name: "Share" })).toBeVisible()
     if (action === "Move to trash") {
       expect(
         composerEditable(screen.getByRole("textbox", { name: "Message" }))
@@ -881,6 +879,17 @@ it("creates private content only inside the selected node and confirms sharing i
       bodies.push(JSON.parse(init.body as string))
       return json(chat, 201)
     },
+    [`GET /api/neev/resources/${chat.id}/access`]: () =>
+      json({
+        resourceId: chat.id,
+        visibility: "private",
+        authRevision: "1",
+        level: "owner",
+        canManage: true,
+        boundTo: null,
+        direct: [],
+        inherited: [],
+      }),
     [`GET /api/neev/resources/${chat.id}`]: () => json(latest),
     [`GET /api/neev/chats/${chat.id}/messages`]: () =>
       json({ items: [], nextAfter: null }),
@@ -903,13 +912,21 @@ it("creates private content only inside the selected node and confirms sharing i
     title: "Design chat",
     requestId: expect.any(String),
   })
+  await user.click(screen.getByRole("button", { name: "Share" }))
+  // The Share dialog: choosing everyone asks the full-history question first.
+  const shareDialog = await screen.findByRole("dialog")
   await user.click(
-    screen.getByRole("button", { name: "Share with organization" })
+    await within(shareDialog).findByRole("radio", { name: /^Everyone in/ })
   )
-  expect(screen.getByRole("dialog")).toHaveTextContent("Everyone in Neev demo")
-  expect(screen.getByRole("dialog")).toHaveTextContent("full history")
+  const question = within(shareDialog).getByRole("group", {
+    name: "Share full history?",
+  })
+  expect(question).toHaveTextContent("Everyone in Neev demo")
+  expect(question).toHaveTextContent("full history")
   expect(bodies).toHaveLength(1)
-  await user.click(screen.getByRole("button", { name: "Share full history" }))
+  await user.click(
+    within(question).getByRole("button", { name: "Share full history" })
+  )
   await waitFor(() => expect(bodies).toHaveLength(2))
   expect(bodies[1]).toEqual({
     expectedAuthRevision: "1",
@@ -1222,9 +1239,7 @@ it("never offers independent sharing for a source-bound document", async () => {
   await user.click(await screen.findByRole("button", { name: /Design chat/ }))
   await screen.findByRole("textbox", { name: "Document content" })
   expect(screen.getByText(/Audience follows source chat/)).toBeVisible()
-  expect(
-    screen.queryByRole("button", { name: "Share with organization" })
-  ).toBeNull()
+  expect(screen.queryByRole("button", { name: "Share" })).toBeNull()
   expect(screen.queryByRole("button", { name: "Make private" })).toBeNull()
   expect(mock.unknown).toEqual([])
 })
@@ -1236,6 +1251,17 @@ it("discards the actual draft before opening a creator action on the same resour
       json({ items: [], nextAfter: null }),
     "GET /api/neev/nodes/4/chats": () =>
       json({ items: [chat], nextAfter: null }),
+    [`GET /api/neev/resources/${chat.id}/access`]: () =>
+      json({
+        resourceId: chat.id,
+        visibility: "private",
+        authRevision: "1",
+        level: "owner",
+        canManage: true,
+        boundTo: null,
+        direct: [],
+        inherited: [],
+      }),
     [`GET /api/neev/resources/${chat.id}`]: () => json(chat),
     [`GET /api/neev/chats/${chat.id}/messages`]: () =>
       json({ items: [], nextAfter: null }),
@@ -1247,13 +1273,12 @@ it("discards the actual draft before opening a creator action on the same resour
     await screen.findByRole("textbox", { name: "Message" }),
     "discard me"
   )
-  await user.click(
-    screen.getByRole("button", { name: "Share with organization" })
-  )
+  await user.click(screen.getByRole("button", { name: "Share" }))
   await user.click(screen.getByRole("button", { name: "Discard changes" }))
   expect(screen.queryByText("discard me")).toBeNull()
-  expect(screen.getByRole("dialog")).toHaveTextContent("Share full history?")
-  await user.click(screen.getByRole("button", { name: "Cancel" }))
+  // Only then the Share dialog, for this resource.
+  expect(await screen.findByRole("dialog")).toHaveTextContent("Design chat")
+  await user.click(await screen.findByRole("button", { name: "Done" }))
   expect(
     composerText(await screen.findByRole("textbox", { name: "Message" }))
   ).toBe("")
@@ -1616,4 +1641,54 @@ it("rejects a late private list response after auth generation changes even when
   })
   expect(screen.queryByText("other organization's secret")).toBeNull()
   expect(mock.unknown).toEqual([])
+})
+
+it("keeps the move dialog open and says why when the destination refuses (View or restricted)", async () => {
+  const patches: unknown[] = []
+  mockNativeSession(undefined, {
+    "GET /api/neev/agent/sessions": () => json({ sessions: [] }),
+    "GET /api/neev/nodes/4/documents": () =>
+      json({ items: [], nextAfter: null }),
+    "GET /api/neev/nodes/4/chats": () =>
+      json({ items: [chat], nextAfter: null }),
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [node, { ...node, id: 5, name: "Restricted board" }],
+        nextAfter: null,
+      }),
+    [`GET /api/neev/resources/${chat.id}`]: () => json(chat),
+    [`GET /api/neev/chats/${chat.id}/messages`]: () =>
+      json({ items: [], nextAfter: null }),
+    // A View recipient there may not place anything in it (contract v2).
+    [`PATCH /api/neev/resources/${chat.id}`]: (init) => {
+      patches.push(JSON.parse(init.body as string))
+      return json({ code: "forbidden" }, 403)
+    },
+  })
+  const user = userEvent.setup()
+  mount()
+  await user.click(await screen.findByRole("button", { name: /Design chat/ }))
+  await screen.findByRole("textbox", { name: "Message" })
+  await triggerAction(user, "Move")
+  await screen.findByRole("option", { name: "Restricted board · #5" })
+  await user.selectOptions(
+    screen.getByRole("combobox", { name: "Destination folder" }),
+    "5"
+  )
+  await user.click(screen.getByRole("button", { name: "Save" }))
+  await waitFor(() => expect(patches).toHaveLength(1))
+  const dialog = await screen.findByRole("dialog")
+  expect(
+    await within(dialog).findByText(
+      "You can't move this there. You need Edit on that folder."
+    )
+  ).toBeVisible()
+  // The item itself was not lost: it is still open behind the dialog.
+  expect(
+    screen.getByRole("textbox", { name: "Message", hidden: true })
+  ).toBeInTheDocument()
+  // Nothing moved: the item is still open where it was.
+  expect(
+    within(dialog).getByRole("combobox", { name: "Destination folder" })
+  ).toBeInTheDocument()
 })

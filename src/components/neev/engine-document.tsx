@@ -589,6 +589,9 @@ function Frame({
         </span>
         <span className="hidden sm:inline">
           {t(resource.visibility)}
+          {/* The editor itself is read-only for a View grantee: the server
+              projects the reader role and refuses writes. This says so. */}
+          {actions?.viewOnly ? ` · ${t("viewOnly")}` : ""}
           {resource.archived ? ` · ${t("archived")}` : ""}
         </span>
       </span>
@@ -601,16 +604,18 @@ function Frame({
           // Icon-only here, so the accessible name is the only reading of it
           // there is; the tooltip gives the same sentence to a pointer.
           aria-label={t(
-            actions.visibility === "private" ? "share" : "makePrivate"
+            actions.visibility !== "organization" ? "shareShort" : "makePrivate"
           )}
-          title={t(actions.visibility === "private" ? "share" : "makePrivate")}
+          title={t(
+            actions.visibility !== "organization" ? "shareShort" : "makePrivate"
+          )}
           onClick={
-            actions.visibility === "private"
+            actions.visibility !== "organization"
               ? actions.onShare
               : actions.onMakePrivate
           }
         >
-          {actions.visibility === "private" ? (
+          {actions.visibility !== "organization" ? (
             <Users aria-hidden />
           ) : (
             <Lock aria-hidden />

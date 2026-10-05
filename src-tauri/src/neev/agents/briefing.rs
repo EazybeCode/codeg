@@ -271,26 +271,26 @@ async fn items(
     // the model with the invoker's private titles is a leak waiting for the
     // model to repeat one — organization-visible only, and a private item is
     // excluded even from its own owner's invocation.
-    // `$3` is the actor, and the SHARED predicate does not use it. Binding a
-    // placeholder a statement never references is an error on PostgreSQL (and
-    // silently tolerated on SQLite, so tests alone would not have caught it) —
-    // the bind list is therefore built to match the predicate exactly.
+    // Neither predicate takes a placeholder beyond `$1`/`$2` (the reader's
+    // audience inlines only integer literals). Binding a placeholder a
+    // statement never references is an error on PostgreSQL (and silently
+    // tolerated on SQLite, so tests alone would not have caught it) — the bind
+    // list is therefore built to match the predicate exactly.
     let (audience, mut binds) = if shared {
         (
             "((r.origin_chat_id IS NULL AND r.visibility='organization') \
-             OR (r.origin_chat_id IS NOT NULL AND s.visibility='organization'))",
+             OR (r.origin_chat_id IS NOT NULL AND s.visibility='organization'))"
+                .to_owned(),
             vec![actor.org_id.into(), node_id.into()],
         )
     } else {
-        (
-            "((r.origin_chat_id IS NULL AND (r.visibility='organization' OR r.creator_id=$3)) \
-             OR (r.origin_chat_id IS NOT NULL AND (s.visibility='organization' OR s.creator_id=$3)))",
-            vec![
-                actor.org_id.into(),
-                node_id.into(),
-                actor.identity.user_id.into(),
-            ],
-        )
+        // The invoker's own run: exactly what they could open themselves,
+        // including what members shared with them (the `resources::list` rule).
+        let readable =
+            crate::neev::content::grants::Audience::load(tx, actor.org_id, actor.identity.user_id)
+                .await?
+                .readable("r", "s");
+        (readable, vec![actor.org_id.into(), node_id.into()])
     };
     let limit_placeholder = binds.len() + 1;
     binds.push((MAX_ITEMS as i64).into());
@@ -413,6 +413,24 @@ pub(crate) async fn build(
         .ok()
         .flatten()
         .and_then(|row| row.try_get::<i32>("", "node_id").ok()),
+    };
+    // Restricted folders (schema 24): a private run names its folder only if
+    // the invoker can see it; a chat's reply is published to the chat's
+    // readers, who need not see a restricted folder, so a chat in a restricted
+    // region names no folder and lists none of its items.
+    let node_id = match node_id {
+        Some(id) => {
+            let tree =
+                crate::neev::content::grants::Tree::load(&tx, actor.org_id, actor.identity.user_id)
+                    .await
+                    .ok()?;
+            let shown = match scope {
+                Scope::Session { .. } => tree.visible(id),
+                Scope::Chat { .. } => tree.place(id).is_some_and(|place| !place.restricted_region),
+            };
+            shown.then_some(id)
+        }
+        None => None,
     };
     let place = match node_id {
         Some(id) => place(&tx, actor.org_id, id).await,

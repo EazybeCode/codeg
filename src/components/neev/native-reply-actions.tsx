@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import { forkRefusal } from "@/lib/neev-fork"
+import { loadNodes, type NativeNode } from "@/lib/neev-client"
 import { loadNativeResource } from "@/lib/neev-content-client"
 import { loadAgentSession } from "@/lib/neev-agent-sessions-client"
 import {
@@ -182,6 +183,7 @@ export function ReplyActions({
   markdown,
   forkKey,
   onFork,
+  onForkInto,
   forking,
   outcome,
   className,
@@ -189,6 +191,12 @@ export function ReplyActions({
   markdown: () => string
   forkKey: string
   onFork: () => void
+  /**
+   * After `fork_no_location`: fork into a folder the reader picks. The SAME
+   * request id is used (the hook keeps it until the fork opens), so a retry
+   * can never make two forks.
+   */
+  onForkInto?: (nodeId: number) => void
   /** The reply a fork is on its way for, if any. */
   forking: string | null
   outcome: ForkOutcome | null
@@ -230,7 +238,7 @@ export function ReplyActions({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      <ForkStatus busy={busy} outcome={mine} />
+      <ForkStatus busy={busy} outcome={mine} onForkInto={onForkInto} />
     </div>
   )
 }
@@ -238,9 +246,11 @@ export function ReplyActions({
 function ForkStatus({
   busy,
   outcome,
+  onForkInto,
 }: {
   busy: boolean
   outcome: ForkOutcome | null
+  onForkInto?: (nodeId: number) => void
 }) {
   const t = useTranslations("NativeContent")
   if (busy)
@@ -252,6 +262,8 @@ function ForkStatus({
   if (!outcome) return null
   if (outcome.kind === "error") {
     const refusal = forkRefusal(outcome.error)
+    if (refusal === "fork_no_location" && onForkInto)
+      return <ForkDestination onPick={onForkInto} />
     return refusal ? (
       <p role="alert" className="text-xs text-destructive">
         {t(`forkError_${refusal}`)}
@@ -279,5 +291,79 @@ function ForkStatus({
     <p role="status" className="text-xs text-muted-foreground">
       {notes.join(" ")}
     </p>
+  )
+}
+
+/**
+ * Where to put a fork when its source's folder is hidden from the reader:
+ * the folders the reader can see (every page, including empty ones the
+ * server returns while hidden rows shorten pages), and "Fork here". A folder
+ * they can only view refuses, and they choose again.
+ */
+function ForkDestination({ onPick }: { onPick: (nodeId: number) => void }) {
+  const t = useTranslations("NativeContent")
+  const sh = useTranslations("Sharing")
+  const auth = useNativeAuth()
+  const orgId = auth.session?.organization?.id
+  const [folders, setFolders] = useState<NativeNode[] | null>(null)
+  const [chosen, setChosen] = useState<number | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  useEffect(() => {
+    if (orgId === undefined) return
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        let after: number | null = null
+        const all: NativeNode[] = []
+        do {
+          const page = await loadNodes(orgId, after, controller.signal)
+          if (controller.signal.aborted) return
+          all.push(...page.nodes)
+          after = page.nextAfter
+        } while (after !== null)
+        setFolders(all)
+        setChosen(all[0]?.id ?? null)
+      } catch (cause) {
+        if (!controller.signal.aborted) setError(cause)
+      }
+    })()
+    return () => controller.abort()
+  }, [orgId])
+  return (
+    <div
+      role="group"
+      aria-label={sh("forkChooseFolder")}
+      className="space-y-1.5"
+    >
+      <p role="alert" className="text-xs text-muted-foreground">
+        {t("forkError_fork_no_location")}
+      </p>
+      {folders && folders.length > 0 && (
+        <form
+          className="flex flex-wrap items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (chosen !== null) onPick(chosen)
+          }}
+        >
+          <select
+            aria-label={sh("forkChooseFolder")}
+            value={chosen ?? ""}
+            onChange={(event) => setChosen(Number(event.target.value))}
+            className="h-8 max-w-64 rounded-md border bg-background px-2 text-xs"
+          >
+            {folders.map((folder) => (
+              <option key={folder.id} value={folder.id}>
+                {folder.name}
+              </option>
+            ))}
+          </select>
+          <Button type="submit" size="sm" variant="secondary">
+            {sh("forkHere")}
+          </Button>
+        </form>
+      )}
+      <NativeError error={error} />
+    </div>
   )
 }

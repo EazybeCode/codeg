@@ -41,6 +41,23 @@ async fn node(tx: &DatabaseTransaction, org_id: i32, node_id: i32) -> Result<(),
     Ok(())
 }
 
+/// A new or moved-in item goes only where the actor may place things: a
+/// hidden folder is as good as missing, a View-only one is refused.
+pub(crate) async fn placeable(
+    tx: &DatabaseTransaction,
+    actor: &OrgContext,
+    node_id: i32,
+) -> Result<super::grants::Tree, ContentError> {
+    let tree = super::grants::Tree::load(tx, actor.org_id, actor.identity.user_id).await?;
+    if !tree.visible(node_id) {
+        return Err(ContentError::NotFound);
+    }
+    if !tree.placeable(node_id) {
+        return Err(ContentError::Auth(crate::neev::error::AuthError::Forbidden));
+    }
+    Ok(tree)
+}
+
 /// A project or folder in the trash takes no new or moved-in resources.
 async fn live_node(tx: &DatabaseTransaction, org_id: i32, node_id: i32) -> Result<(), ContentError> {
     if crate::neev::catalog::trash::node_trashed(tx, org_id, node_id).await? {
@@ -193,6 +210,7 @@ async fn create_on(
     if let Some(visibility) = explicit {
         parts.push(match visibility {
             Visibility::Private => "visibility.private",
+            Visibility::Shared => "visibility.shared",
             Visibility::Organization => "visibility.organization",
         });
     }
@@ -200,6 +218,7 @@ async fn create_on(
     let tx = begin(state, actor).await?;
     node(&tx, actor.org_id, input.node_id).await?;
     live_node(&tx, actor.org_id, input.node_id).await?;
+    placeable(&tx, actor, input.node_id).await?;
     // A retry still needs current access, but does not consume quota a second time.
     if let Some(id) = receipt(&tx, actor, "content.resource.create", &request, &hash).await? {
         let result = access::authorized(&tx, actor, &id, false).await?;
@@ -234,6 +253,9 @@ async fn create_on(
         return Err(ContentError::Invalid);
     }
     db::execute(&tx,"INSERT INTO neev_resources(org_id,id,kind,node_id,creator_id,title,visibility,origin_chat_id,origin_kind,auth_revision,content_revision,archived,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,0,false,$10,$10)",vec![actor.org_id.into(),id.clone().into(),access::kind_name(input.kind).into(),input.node_id.into(),actor.identity.user_id.into(),title.into(),access::visibility_name(visibility).into(),input.origin_chat_id.clone().into(),input.origin_chat_id.as_ref().map(|_|"chat".to_string()).into(),now.into()]).await?;
+    if input.origin_chat_id.is_none() {
+        super::grants::store_visibility(&tx, actor, &id, visibility, false, now).await?;
+    }
     record_receipt(&tx, actor, "content.resource.create", &request, &hash, &id).await?;
     if engine {
         crate::neev::engine::binding::bind(&tx, actor.org_id, actor.identity.user_id, &id).await?;
@@ -266,6 +288,12 @@ pub(crate) async fn list(
 ) -> Result<Page<Resource>, ContentError> {
     let tx = begin(state, actor).await?;
     node(&tx, actor.org_id, node_id).await?;
+    if !super::grants::Tree::load(&tx, actor.org_id, actor.identity.user_id)
+        .await?
+        .visible(node_id)
+    {
+        return Err(ContentError::NotFound);
+    }
     let mut last = String::new();
     if let Some(cursor) = after {
         if cursor.len() > 512 {
@@ -288,7 +316,9 @@ pub(crate) async fn list(
         last = id;
     }
     // Apply effective audience before LIMIT; hidden rows cannot change page sizes.
-    let rows=tx.query_all(db::statement(&tx,"SELECT r.id FROM neev_resources r LEFT JOIN neev_resources s ON s.org_id=r.org_id AND s.id=r.origin_chat_id AND s.kind='chat' WHERE r.org_id=$1 AND r.node_id=$2 AND r.kind=$3 AND r.archived=$4 AND r.id>$5 AND ((r.origin_chat_id IS NULL AND (r.visibility='organization' OR r.creator_id=$6)) OR (r.origin_chat_id IS NOT NULL AND (s.visibility='organization' OR s.creator_id=$6))) ORDER BY r.id LIMIT 101",vec![actor.org_id.into(),node_id.into(),access::kind_name(kind).into(),archived.into(),last.into(),actor.identity.user_id.into()])).await.map_err(database_error)?;
+    let audience =
+        super::grants::Audience::load(&tx, actor.org_id, actor.identity.user_id).await?;
+    let rows=tx.query_all(db::statement(&tx,&format!("SELECT r.id FROM neev_resources r LEFT JOIN neev_resources s ON s.org_id=r.org_id AND s.id=r.origin_chat_id AND s.kind='chat' WHERE r.org_id=$1 AND r.node_id=$2 AND r.kind=$3 AND r.archived=$4 AND r.id>$5 AND {} ORDER BY r.id LIMIT 101",audience.readable("r","s")),vec![actor.org_id.into(),node_id.into(),access::kind_name(kind).into(),archived.into(),last.into()])).await.map_err(database_error)?;
     let has_more = rows.len() > 100;
     let mut items = Vec::new();
     for row in rows.iter().take(100) {
@@ -330,7 +360,11 @@ pub(crate) async fn update(
     let tx = begin(state, actor).await?;
     let locked = access::lock_resources(&tx, actor, id, true).await?;
     // Metadata must permit creator unarchive; body writes use authorized(...,true).
-    let current = access::authorized(&tx, actor, id, false).await?;
+    let (current, level) = access::resolve(&tx, actor, id, false).await?;
+    // A viewer changes nothing, not even the title.
+    if level < super::grants::Level::Edit {
+        return Err(ContentError::NotFound);
+    }
     if current.auth_revision != patch.expected_auth_revision {
         return Err(ContentError::Conflict);
     }
@@ -351,6 +385,14 @@ pub(crate) async fn update(
         return Err(ContentError::Archived);
     }
     live_node(&tx, actor.org_id, patch.node_id).await?;
+    if patch.node_id != current.node_id {
+        // Into a place the mover may place things; out of a restricted region
+        // only for the creator of every restricted root being left.
+        let tree = placeable(&tx, actor, patch.node_id).await?;
+        if !tree.may_leave(current.node_id, patch.node_id) {
+            return Err(ContentError::Auth(crate::neev::error::AuthError::Forbidden));
+        }
+    }
     let now = state.clock.now_unix();
     for locked_id in &locked {
         if db::one(&tx,"SELECT id FROM neev_content_leases WHERE org_id=$1 AND resource_id=$2 AND expires_at>$3",vec![actor.org_id.into(),locked_id.clone().into(),now.into()]).await?.is_some() {return Err(ContentError::Conflict);}
@@ -360,6 +402,9 @@ pub(crate) async fn update(
         .checked_add(1)
         .ok_or(ContentError::Conflict)?;
     db::execute(&tx,"UPDATE neev_resources SET title=$1,node_id=$2,visibility=$3,archived=$4,auth_revision=$5,updated_at=$6 WHERE org_id=$7 AND id=$8",vec![title.into(),patch.node_id.into(),access::visibility_name(patch.visibility).into(),patch.archived.into(),revision.into(),now.into(),actor.org_id.into(),id.into()]).await?;
+    if current.origin_chat_id.is_none() && patch.visibility != current.visibility {
+        super::grants::store_visibility(&tx, actor, id, patch.visibility, false, now).await?;
+    }
     if current.kind == ResourceKind::Chat {
         for attached in &locked {
             if attached == id {

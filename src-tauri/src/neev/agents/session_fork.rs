@@ -75,6 +75,7 @@ struct SteerSnapshot {
 }
 
 struct SourceSession {
+    owner_id: i32,
     title: String,
     provider: String,
     model: String,
@@ -103,8 +104,11 @@ fn fork_hash(actor: &OrgContext, session_id: &str, through: &str) -> String {
     org::digest_parts(&[FORK_ACTION, &actor.org_id.to_string(), session_id, through])
 }
 
-/// The caller's own forkable Agent Chat: owned, a `chat` session (never a team
-/// holder), and not an org-knowledge job's hidden session.
+/// A forkable Agent Chat the caller may read: their own, or one a member shared
+/// with them (View) — a `chat` session (never a team holder), and not an
+/// org-knowledge job's hidden session. The fork is always the CALLER's own
+/// private session, and its runs use the caller's own connection; nothing of
+/// the source owner's provider identity is copied.
 async fn source<C: ConnectionTrait>(
     db: &C,
     actor: &OrgContext,
@@ -112,7 +116,10 @@ async fn source<C: ConnectionTrait>(
 ) -> Result<SourceSession, ForkError> {
     let row = db::one(
         db,
-        "SELECT title,provider,model,effort,fast,bound_chat_id,node_id FROM neev_agent_sessions s WHERE org_id=$1 AND id=$2 AND owner_id=$3 AND kind='chat' AND NOT EXISTS (SELECT 1 FROM neev_knowledge_jobs j WHERE j.org_id=s.org_id AND j.session_id=s.id)",
+        &format!(
+            "SELECT owner_id,title,provider,model,effort,fast,bound_chat_id,node_id FROM neev_agent_sessions s WHERE org_id=$1 AND id=$2 AND {} AND kind='chat' AND NOT EXISTS (SELECT 1 FROM neev_knowledge_jobs j WHERE j.org_id=s.org_id AND j.session_id=s.id)",
+            crate::neev::content::grants::session_readable_sql("s", "$3")
+        ),
         vec![
             actor.org_id.into(),
             id.into(),
@@ -122,6 +129,7 @@ async fn source<C: ConnectionTrait>(
     .await?
     .ok_or(ContentError::NotFound)?;
     Ok(SourceSession {
+        owner_id: row.try_get("", "owner_id").map_err(database_error)?,
         title: row.try_get("", "title").map_err(database_error)?,
         provider: row.try_get("", "provider").map_err(database_error)?,
         model: row.try_get("", "model").map_err(database_error)?,
@@ -201,7 +209,15 @@ async fn snapshot(
         let sequence: i64 = row.try_get("", "sequence").map_err(database_error)?;
         let prompt: String = row.try_get("", "prompt").map_err(database_error)?;
         let response: String = row.try_get("", "response").map_err(database_error)?;
-        let activity: Option<String> = row.try_get("", "activity").map_err(database_error)?;
+        // A viewer's fork carries no trace: the owner's tool activity can hold
+        // their personal connectors' output and private context, and never
+        // crosses to another member. Prompts, replies and files are what was
+        // shared.
+        let activity: Option<String> = if source.owner_id == actor.identity.user_id {
+            row.try_get("", "activity").map_err(database_error)?
+        } else {
+            None
+        };
         text_bytes += (prompt.len() + response.len() + activity.as_ref().map_or(0, String::len))
             as i64;
         index.insert(sequence, turns.len());
@@ -411,8 +427,15 @@ async fn commit(
     fork::charge_files(&tx, actor.org_id, copied).await?;
     // A placement in a folder now in the trash is dropped (unfiled): a session
     // is owner-private wherever it sits, so placement never widens it.
+    // Kept only where the forker may place things (restricted folders,
+    // schema 24): a folder hidden from them, or View-only, leaves it unfiled.
     let node_id = match snap.source.node_id {
-        Some(node) if !crate::neev::catalog::trash::node_trashed(&tx, actor.org_id, node).await? => {
+        Some(node)
+            if !crate::neev::catalog::trash::node_trashed(&tx, actor.org_id, node).await?
+                && crate::neev::content::grants::Tree::load(&tx, actor.org_id, actor.identity.user_id)
+                    .await?
+                    .placeable(node) =>
+        {
             Some(node)
         }
         _ => None,

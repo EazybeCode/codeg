@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::neev::{
     auth::session,
     content::{
-        attachment, documents, image, mentions, messages, resources, rich, sharing,
+        access, attachment, documents, image, mentions, messages, resources, rich, sharing,
         types::{
             ContentError, DocumentFormat, Message, Page, Resource, ResourceInput, ResourceKind,
             ResourcePatch, Revision, RichSaveInput, SaveInput, Visibility,
@@ -81,6 +81,7 @@ struct SharingPatchInput {
 enum DefaultVisibilityInput {
     Inherit,
     Private,
+    Shared,
     Organization,
 }
 
@@ -109,6 +110,7 @@ struct PatchInput {
 #[serde(rename_all = "lowercase")]
 enum VisibilityInput {
     Private,
+    Shared,
     Organization,
 }
 
@@ -427,12 +429,10 @@ fn node_sharing_dto(value: sharing::NodeSharing) -> NodeSharingDto {
         default_visibility: match value.default_visibility {
             sharing::DefaultVisibility::Inherit => "inherit",
             sharing::DefaultVisibility::Private => "private",
+            sharing::DefaultVisibility::Shared => "shared",
             sharing::DefaultVisibility::Organization => "organization",
         },
-        effective_visibility: match value.effective_visibility {
-            Visibility::Private => "private",
-            Visibility::Organization => "organization",
-        },
+        effective_visibility: access::visibility_label(value.effective_visibility),
         inherited_from: value.inherited_from,
         can_manage: value.can_manage,
     }
@@ -468,6 +468,7 @@ pub(super) async fn update_node_sharing(
     let requested = match input.default_visibility {
         DefaultVisibilityInput::Inherit => sharing::DefaultVisibility::Inherit,
         DefaultVisibilityInput::Private => sharing::DefaultVisibility::Private,
+        DefaultVisibilityInput::Shared => sharing::DefaultVisibility::Shared,
         DefaultVisibilityInput::Organization => sharing::DefaultVisibility::Organization,
     };
     let result = sharing::set(&state, &actor, node_id, revision, requested).await?;
@@ -492,6 +493,28 @@ pub(super) async fn get_resource(
 ///
 /// A separate point read rather than a join, so the native content path keeps
 /// its exact shape and a legacy document's read is unchanged.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SharedResourcesDto {
+    resources: Vec<ResourceDto>,
+}
+
+/// GET /api/neev/shared/resources — what the caller can open whose folder is
+/// hidden from them (shared directly, or their own). Folder names never travel.
+pub(super) async fn shared_resources(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _permit = catalog::permit(&state)?;
+    let actor = catalog::organization_get(&state, &headers).await?;
+    let mut resources = Vec::new();
+    for resource in crate::neev::content::grants::shared_in_hidden(&state, &actor).await? {
+        let engine = engine_backed(&state, &resource).await?;
+        resources.push(resource_dto(resource, engine)?);
+    }
+    Ok(private_json(SharedResourcesDto { resources }))
+}
+
 async fn engine_backed(state: &ServerState, resource: &Resource) -> Result<bool, ApiError> {
     Ok(crate::neev::engine::binding::bound_now(&state.database, resource).await?)
 }
@@ -1357,10 +1380,7 @@ fn resource_dto(resource: Resource, engine_backed: bool) -> Result<ResourceDto, 
         },
         creator_id: resource.creator_id,
         title: resource.title,
-        visibility: match resource.visibility {
-            Visibility::Private => "private",
-            Visibility::Organization => "organization",
-        },
+        visibility: access::visibility_label(resource.visibility),
         origin_chat_id: resource.origin_chat_id,
         auth_revision: resource.auth_revision.to_string(),
         content_revision: resource.content_revision.to_string(),
@@ -1485,6 +1505,7 @@ impl From<VisibilityInput> for Visibility {
     fn from(value: VisibilityInput) -> Self {
         match value {
             VisibilityInput::Private => Self::Private,
+            VisibilityInput::Shared => Self::Shared,
             VisibilityInput::Organization => Self::Organization,
         }
     }

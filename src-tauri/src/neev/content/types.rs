@@ -9,6 +9,8 @@ pub(crate) enum ResourceKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Visibility {
     Private,
+    /// The creator, plus member/team grants on it and on its folders.
+    Shared,
     Organization,
 }
 

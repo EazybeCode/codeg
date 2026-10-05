@@ -135,3 +135,63 @@ async fn a_revision_is_withheld_while_any_dependency_is_revoked() {
     k.archive(&a.id, false).await;
     assert_eq!(revision_readable(&k.state.database, k.admin.org_id, &page, 1).await.unwrap(), Readable::Readable);
 }
+
+/// Restricted folders (schema 24): a page is withheld at read the moment any
+/// dependency's folder is restricted — no recompile — and readable again when
+/// it reopens; a document whose own folder is open but whose BOUND CHAT sits in
+/// a restricted folder is never eligible.
+#[tokio::test]
+async fn a_restricted_folder_withholds_its_sources_live_and_reopening_restores_them() {
+    let k = K::new(database().await).await;
+    k.enable_capture().await;
+    let a = k.shared_doc("A").await;
+    k.save_markdown(&a.id, "# A\n\nalpha").await;
+    let b = k.shared_chat("B").await;
+    k.post(&b.id, "beta").await;
+    let open = crate::neev::catalog::nodes::create(
+        &k.state,
+        &k.member,
+        crate::neev::types::NodeInput {
+            parent_id: None,
+            kind: crate::neev::types::NodeKind::Project,
+            name: "Open".into(),
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    let bound = resources::create(
+        &k.state,
+        &k.member,
+        ResourceInput {
+            node_id: open,
+            kind: ResourceKind::Document,
+            title: "Notes".into(),
+            origin_chat_id: Some(b.id.clone()),
+            request_id: uuid::Uuid::new_v4().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    k.capture().await;
+    let page = k.seed_page("p", "P", "# P\n\nbody", &[&a.id, &b.id]).await;
+    let db = &k.state.database;
+    let org = k.admin.org_id;
+    assert_eq!(revision_readable(db, org, &page, 1).await.unwrap(), Readable::Readable);
+    assert!(is_eligible(db, org, &bound.id).await.unwrap().is_some());
+
+    let revision = crate::neev::content::grants::node_access(&k.state, &k.member, k.node).await.unwrap().revision;
+    crate::neev::content::grants::set_node_restricted(&k.state, &k.member, k.node, revision, true).await.unwrap();
+    let withheld = Readable::Withheld { unreadable_sources: 2 };
+    assert_eq!(revision_readable(db, org, &page, 1).await.unwrap(), withheld);
+    assert_eq!(readable_heads(db, org).await.unwrap().get(&page), Some(&withheld));
+    assert!(is_eligible(db, org, &a.id).await.unwrap().is_none());
+    assert!(is_eligible(db, org, &bound.id).await.unwrap().is_none(), "its chat is in a restricted folder");
+    let eligible = eligible_sources(db, org).await.unwrap();
+    assert!(eligible.iter().all(|s| s.id != a.id && s.id != b.id && s.id != bound.id));
+
+    let revision = crate::neev::content::grants::node_access(&k.state, &k.member, k.node).await.unwrap().revision;
+    crate::neev::content::grants::set_node_restricted(&k.state, &k.member, k.node, revision, false).await.unwrap();
+    assert_eq!(revision_readable(db, org, &page, 1).await.unwrap(), Readable::Readable);
+    assert!(is_eligible(db, org, &bound.id).await.unwrap().is_some());
+}

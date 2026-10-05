@@ -57,7 +57,7 @@ const POLL_INTERVAL_MS: u64 = 500;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionDto {
+pub(super) struct SessionDto {
     id: String,
     org_id: i32,
     owner_id: i32,
@@ -290,7 +290,7 @@ pub(super) struct TurnPageInput {
     after: Option<String>,
 }
 
-fn session_dto(session: AgentSession) -> SessionDto {
+pub(super) fn session_dto(session: AgentSession) -> SessionDto {
     SessionDto {
         id: session.id,
         org_id: session.org_id,
@@ -494,7 +494,7 @@ pub(super) async fn get_session(
     canonical_uuid(&id)?;
     let actor = catalog::organization_get(&state, &headers).await?;
     Ok(private_json(session_dto(
-        sessions::get(&state, &actor, &id).await?,
+        sessions::view(&state, &actor, &id).await?,
     )))
 }
 

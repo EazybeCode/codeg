@@ -54,9 +54,10 @@ impl Owner<'_> {
 
 /// Prove the caller may use this conversation, for reading or for writing.
 ///
-/// A chat defers to the resource ACL. A session is private to its owner and has
-/// no sharing, so ownership IS the check — and the uniform `NotFound` keeps the
-/// existence of someone else's session unobservable.
+/// A chat defers to the resource ACL. A session is written only by its owner;
+/// it is read by its owner or a member it is shared with (View only). The
+/// uniform `NotFound` keeps the existence of someone else's session
+/// unobservable.
 pub(crate) async fn authorize(
     db: &sea_orm::DatabaseTransaction,
     actor: &OrgContext,
@@ -71,7 +72,7 @@ pub(crate) async fn authorize(
             }
             Ok(())
         }
-        Owner::Session(id) => {
+        Owner::Session(id) if write => {
             db::one(
                 db,
                 "SELECT id FROM neev_agent_sessions WHERE org_id=$1 AND id=$2 AND owner_id=$3",
@@ -83,6 +84,11 @@ pub(crate) async fn authorize(
             )
             .await?
             .ok_or(ContentError::NotFound)?;
+            Ok(())
+        }
+        // Reading: the owner, or a member the Agent Chat is shared with (View).
+        Owner::Session(id) => {
+            super::grants::session_level(db, actor, id).await?;
             Ok(())
         }
     }

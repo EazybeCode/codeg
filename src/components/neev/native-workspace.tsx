@@ -1,5 +1,12 @@
 "use client"
 
+import {
+  canWriteFolder,
+  ShareDialog,
+  SharedSessionsList,
+  useNodeLevel,
+  useNodeMenuLevels,
+} from "./native-sharing"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useTheme } from "next-themes"
@@ -122,9 +129,10 @@ import {
   createNativeResource,
   listNativeResources,
   loadNativeResource,
-  updateNativeResource,
+  NativeContentNotFoundError,
   type NativeResource,
   type NativeResourceKind,
+  updateNativeResource,
 } from "@/lib/neev-content-client"
 import { ChatFilesList } from "./native-chat-files"
 import { useExpandedItems } from "@/lib/neev-session-files-state"
@@ -175,6 +183,50 @@ const CONTENT_KINDS: NativeResourceKind[] = ["document", "chat"]
  * This lists its documents, its team chats and its agent chats together, in one
  * measure, with the same five ways to add that the sidebar menu offers.
  */
+
+/**
+ * Whether anything above (or at) `nodeId` is hidden from this reader: the
+ * node itself is not listed, or its outermost listed ancestor still has a
+ * parent. Callers decide only once the list is complete.
+ */
+function locationHidden(nodes: NativeNode[], nodeId: number): boolean {
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  let current = byId.get(nodeId)
+  if (!current) return true
+  for (let step = 0; step <= nodes.length; step += 1) {
+    if (current.parentId === null) return false
+    const parent = byId.get(current.parentId)
+    if (!parent) return true
+    current = parent
+  }
+  return false
+}
+
+/**
+ * One page of folders the reader can see. A page may come back EMPTY with a
+ * cursor when every row on it is hidden from the reader (contract v2.1 P-7):
+ * that is not the end, so reading continues until a page has rows or the
+ * cursor ends. Bounded, so a server that never stops cannot spin here.
+ */
+const MAX_EMPTY_NODE_PAGES = 100
+async function loadVisibleNodes(
+  orgId: number,
+  after: number | null,
+  signal?: AbortSignal
+): Promise<{ nodes: NativeNode[]; nextAfter: number | null }> {
+  let page = await loadNodes(orgId, after, signal)
+  for (
+    let skipped = 0;
+    page.nodes.length === 0 &&
+    page.nextAfter !== null &&
+    skipped < MAX_EMPTY_NODE_PAGES;
+    skipped += 1
+  ) {
+    if (signal?.aborted) break
+    page = await loadNodes(orgId, page.nextAfter, signal)
+  }
+  return page
+}
 
 /** A container and every ancestor above it, outermost first. */
 function trail(nodes: NativeNode[], nodeId: number): string[] {
@@ -292,7 +344,8 @@ function newest(
 function ResourcePanel({
   orgId,
   resourceId,
-  node,
+  node: listedNode,
+  nodeHidden = false,
   cached,
   fresh,
   registerGuard,
@@ -305,6 +358,12 @@ function ResourcePanel({
   /** Newly created, so it may still take its name from what is written. */
   fresh: boolean
   node: NativeNode | undefined
+  /**
+   * The folder list is complete and this item's folder is not in it: the
+   * folder is hidden from the reader (v2). The item still opens, under a
+   * stand-in that carries the id only and is named "Shared with you".
+   */
+  nodeHidden?: boolean
   cached: NativeResource | undefined
   registerGuard: (guard: ContentNavigationGuard) => void
   onGone: () => void
@@ -320,7 +379,8 @@ function ResourcePanel({
   onResolved: (resource: NativeResource) => void
 }) {
   const auth = useNativeAuth(),
-    t = useTranslations("Native")
+    t = useTranslations("Native"),
+    sh = useTranslations("Sharing")
   // Seeded from the sidebar's list when it happens to hold this one, and
   // otherwise fetched below. Either way it is read once: the panel then owns
   // what it is showing.
@@ -387,9 +447,12 @@ function ResourcePanel({
         auth.handleAuthorityError(cause)
         // Gone or no longer permitted, from the resource's OWN read — not
         // from its absence in a lazily-loaded catalog.
+        // Hidden (v2) reads exactly like missing: the tab goes, and nothing it
+        // held — title or content — stays on screen.
         if (
-          cause instanceof NativeClientError &&
-          (cause.status === 404 || cause.status === 403)
+          cause instanceof NativeContentNotFoundError ||
+          (cause instanceof NativeClientError &&
+            (cause.status === 404 || cause.status === 403))
         )
           onGone()
         else setError(cause)
@@ -399,6 +462,19 @@ function ResourcePanel({
     return () => controller.abort()
   }, [resource, orgId, resourceId, auth, onGone])
 
+  // Never the hidden folder's name: only its id, and "Shared with you".
+  const node: NativeNode | undefined =
+    listedNode ??
+    (nodeHidden && resource
+      ? {
+          id: resource.nodeId,
+          orgId,
+          parentId: null,
+          kind: "folder",
+          name: sh("sharedWithYou"),
+          revision: "0",
+        }
+      : undefined)
   if (error) return <NativeError error={error} />
   if (!node || !resource)
     return (
@@ -495,6 +571,9 @@ function ProjectPage({
   access?: ItemAccess
 }) {
   const c = useTranslations("NativeContent")
+  const sh = useTranslations("Sharing")
+  const [sharingNode, setSharingNode] = useState(false)
+  const nodeLevel = useNodeLevel(node.id)
   const auth = useNativeAuth()
   // Re-read on focus: another manager may have changed it meanwhile.
   const folder = useFolderSharing(node.id, { refreshOnFocus: true })
@@ -541,6 +620,22 @@ function ProjectPage({
           </h1>
           {/* New items' default, and optionally my existing items: see FolderShare. */}
           <div className="flex items-center gap-1 pt-3">
+            {/* Who can open this folder's Folder-access items. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => setSharingNode(true)}
+            >
+              <Users aria-hidden className="size-3.5" />
+              {sh("shareFolder")}
+            </Button>
+            <ShareDialog
+              open={sharingNode}
+              onOpenChange={setSharingNode}
+              title={node.name}
+              target={{ kind: "node", node }}
+            />
             {access && (
               <FolderShare
                 node={node}
@@ -563,7 +658,9 @@ function ProjectPage({
             )}
             {effective === "organization"
               ? c("folderNewItemsShared", { organization })
-              : c("folderNewItemsPrivate")}
+              : effective === "shared"
+                ? sh("folderNewItemsFolderAccess")
+                : c("folderNewItemsPrivate")}
           </p>
         )}
         {held && (
@@ -577,6 +674,7 @@ function ProjectPage({
           // Offered unless new items are KNOWN to be private: shared, still
           // loading, or unreadable all leave the reader the private choice.
           privateOffered={effective !== "private"}
+          canCreate={nodeLevel !== "view"}
           checkAudience={checkAudience}
           node={node}
           items={items}
@@ -687,6 +785,7 @@ function ProjectContents({
   access,
   privateOffered = false,
   checkAudience,
+  canCreate = true,
 }: {
   node: NativeNode
   items: NativeResource[]
@@ -700,9 +799,12 @@ function ProjectContents({
   privateOffered?: boolean
   /** Re-checks the folder's audience before a default create; false = hold. */
   checkAudience?: () => Promise<boolean>
+  /** False for a View recipient of a restricted folder: nothing can be placed. */
+  canCreate?: boolean
 }) {
   const t = useTranslations("Native"),
-    c = useTranslations("NativeContent")
+    c = useTranslations("NativeContent"),
+    sh = useTranslations("Sharing")
   /**
    * A private exception, chosen BEFORE anything is created or written.
    *
@@ -718,7 +820,10 @@ function ProjectContents({
     "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-2 text-start text-sm hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
   return (
     <div className="mt-8 space-y-6">
-      <div className="flex flex-wrap gap-2">
+      {!canCreate && (
+        <p className="text-sm text-muted-foreground">{sh("folderViewOnly")}</p>
+      )}
+      <div hidden={!canCreate} className="flex flex-wrap gap-2">
         {(
           [
             ["document", c("newDocument"), FileText],
@@ -746,7 +851,7 @@ function ProjectContents({
           </Button>
         ))}
       </div>
-      {privateOffered && (
+      {privateOffered && canCreate && (
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -956,6 +1061,10 @@ function NativeWorkspaceTree({
   }
   // Track which chats/sessions are expanded to show generated files.
   const expandedFiles = useExpandedItems(auth.scopeKey)
+  // Each folder's level, read lazily when its menu first opens (never per row
+  // on load), so a View recipient is not offered writes the server refuses.
+  const menuLevels = useNodeMenuLevels(auth.scopeKey)
+  const sh = useTranslations("Sharing")
   return (
     <ul
       className={cn(
@@ -1052,8 +1161,14 @@ function NativeWorkspaceTree({
                   </span>
                 </button>
                 {/* One menu for everything a project can hold, instead of a
-                    permanent row per kind repeated under every container. */}
-                <DropdownMenu>
+                    permanent row per kind repeated under every container.
+                    Its writes wait for this folder's level, read the first
+                    time the menu opens. */}
+                <DropdownMenu
+                  onOpenChange={(open) => {
+                    if (open) menuLevels.load(node)
+                  }}
+                >
                   <DropdownMenuTrigger asChild>
                     <button
                       aria-label={t("actions", { name: node.name })}
@@ -1071,7 +1186,18 @@ function NativeWorkspaceTree({
                       }
                     }}
                   >
+                    {!canWriteFolder(menuLevels.levelOf(node)) && (
+                      <p
+                        role="status"
+                        className="px-2 py-1.5 text-xs text-muted-foreground"
+                      >
+                        {menuLevels.levelOf(node) === "view"
+                          ? sh("folderMenuViewOnly")
+                          : sh("folderMenuChecking")}
+                      </p>
+                    )}
                     <DropdownMenuItem
+                      disabled={!canWriteFolder(menuLevels.levelOf(node))}
                       onSelect={() => {
                         contentOpener.current = node.id
                         void createContent(node, "document")
@@ -1085,6 +1211,7 @@ function NativeWorkspaceTree({
                         inside the conversation — where they can be changed
                         without starting a different kind of thing. */}
                     <DropdownMenuItem
+                      disabled={!canWriteFolder(menuLevels.levelOf(node))}
                       onSelect={() => {
                         contentOpener.current = node.id
                         void createContent(node, "chat")
@@ -1093,14 +1220,22 @@ function NativeWorkspaceTree({
                       <Bot aria-hidden className="size-4" />
                       {c("newAgentChat")}
                     </DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => create(node)}>
+                    <DropdownMenuItem
+                      disabled={!canWriteFolder(menuLevels.levelOf(node))}
+                      onSelect={() => create(node)}
+                    >
                       <Folder aria-hidden className="size-4" />
                       {t("newSubfolder")}
                     </DropdownMenuItem>
-                    <DropdownMenuItem onSelect={() => edit(node)}>
+                    <DropdownMenuItem
+                      disabled={!canWriteFolder(menuLevels.levelOf(node))}
+                      onSelect={() => edit(node)}
+                    >
                       {t("editDetails")}
                     </DropdownMenuItem>
-                    <MoveNodeToTrashMenuItem node={node} />
+                    {canWriteFolder(menuLevels.levelOf(node)) && (
+                      <MoveNodeToTrashMenuItem node={node} />
+                    )}
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
@@ -1622,6 +1757,7 @@ type RenameTarget =
 function WorkspaceContent() {
   const t = useTranslations("Native"),
     c = useTranslations("NativeContent"),
+    sh = useTranslations("Sharing"),
     auth = useNativeAuth(),
     mobile = useIsMobile()
   const router = useRouter()
@@ -2757,15 +2893,18 @@ function WorkspaceContent() {
   const [shareTarget, setShareTarget] = useState<NativeResource | null>(null)
   const [accessError, setAccessError] = useState<unknown>(null)
   const setVisibility = useCallback(
-    (resource: NativeResource, visibility: NativeResource["visibility"]) => {
-      if (!auth.session || mutationBusy) return
-      guardAll(() => {
-        void (async () => {
-          setMutationBusy(true)
-          setAccessError(null)
-          try {
-            applyResource(
-              await updateNativeResource(
+    (
+      resource: NativeResource,
+      visibility: NativeResource["visibility"]
+    ): Promise<unknown> =>
+      new Promise<unknown>((resolve) => {
+        if (!auth.session || mutationBusy) return resolve(null)
+        guardAll(() => {
+          void (async () => {
+            setMutationBusy(true)
+            setAccessError(null)
+            try {
+              const updated = await updateNativeResource(
                 resource.orgId,
                 resource.id,
                 {
@@ -2778,23 +2917,27 @@ function WorkspaceContent() {
                 auth.session!.csrf,
                 auth.signal
               )
-            )
-            setShareTarget(null)
-            // A chat's generated files have no audience of their own: the
-            // server answers them with the chat's. Re-read the lists on screen
-            // so they stop showing the audience from before.
-            if (resource.kind === "chat")
-              for (const id of Object.keys(itemsByNode))
-                void loadItems(Number(id))
-          } catch (cause) {
-            setAccessError(cause)
-            auth.handleError(cause)
-          } finally {
-            setMutationBusy(false)
-          }
-        })()
-      })
-    },
+              applyResource(updated)
+              // The Share dialog stays open on the item as it now is.
+              setShareTarget((old) => (old?.id === updated.id ? updated : old))
+              // A chat's generated files have no audience of their own: the
+              // server answers them with the chat's. Re-read the lists on screen
+              // so they stop showing the audience from before.
+              if (resource.kind === "chat")
+                for (const id of Object.keys(itemsByNode))
+                  void loadItems(Number(id))
+              resolve(null)
+            } catch (cause) {
+              setAccessError(cause)
+              auth.handleError(cause)
+              // The refusal, for the Share dialog that asked for this change.
+              resolve(cause)
+            } finally {
+              setMutationBusy(false)
+            }
+          })()
+        })
+      }),
     [auth, applyResource, guardAll, mutationBusy, itemsByNode, loadItems]
   )
   const itemAccess = {
@@ -3190,7 +3333,7 @@ function WorkspaceContent() {
   useEffect(() => {
     if (!org) return
     const controller = new AbortController()
-    void loadNodes(org.id, null, controller.signal)
+    void loadVisibleNodes(org.id, null, controller.signal)
       .then((page) => {
         if (!controller.signal.aborted) {
           setNodes(page.nodes)
@@ -3218,7 +3361,7 @@ function WorkspaceContent() {
   /** A restore put a subtree back: read the tree again from the start. */
   const reloadNodes = useCallback(() => {
     if (!org) return
-    void loadNodes(org.id, null, auth.signal)
+    void loadVisibleNodes(org.id, null, auth.signal)
       .then((page) => {
         setNodes(page.nodes)
         setNextAfter(page.nextAfter)
@@ -3292,7 +3435,7 @@ function WorkspaceContent() {
     setLoading(true)
     setError(null)
     try {
-      const page = await loadNodes(org.id, nextAfter, auth.signal)
+      const page = await loadVisibleNodes(org.id, nextAfter, auth.signal)
       setNodes((old) =>
         [
           ...new Map(
@@ -3334,10 +3477,81 @@ function WorkspaceContent() {
   // Where the active tab lives: project, then the thing inside it.
   const breadcrumb: string[] = []
   if (front) {
+    // Above what this reader can see there is only "Shared with you": the
+    // hidden folders' names are never shown, not even as a path.
+    if (
+      frontNodeId !== null &&
+      nextAfter === null &&
+      !loading &&
+      !query.trim() &&
+      locationHidden(nodes, frontNodeId)
+    )
+      breadcrumb.push(sh("sharedWithYou"))
     for (const name of frontNodeId === null ? [] : trail(nodes, frontNodeId))
       breadcrumb.push(name)
     if (front.kind !== "project") breadcrumb.push(tabTitle(front))
   }
+
+  // A visible folder whose parent is not in the (complete, unfiltered) list
+  // is a shared root: its parent is hidden from this reader. Only decided
+  // once every page has loaded and no search narrows the list, so a parent
+  // still on its way is never mistaken for a hidden one.
+  const visibleNodeIds = new Set(nodes.map((node) => node.id))
+  const sharedRootIds =
+    nextAfter === null && !loading && !query.trim()
+      ? nodes
+          .filter(
+            (node) =>
+              node.parentId !== null && !visibleNodeIds.has(node.parentId)
+          )
+          .map((node) => node.id)
+      : []
+  const renderTree = (treeNodes: NativeNode[]) => (
+    <NativeWorkspaceTree
+      nodes={treeNodes}
+      expanded={expanded}
+      kind={sectionKind}
+      itemsByNode={itemsByNode}
+      openResourceId={frontResourceId}
+      toggle={(id) =>
+        setExpanded((old) => {
+          const next = new Set(old)
+          if (next.has(id)) next.delete(id)
+          else {
+            next.add(id)
+          }
+          return next
+        })
+      }
+      create={(node) =>
+        keepAll(() => openEditor({ kind: "folder", parentId: node.id }))
+      }
+      edit={(node) =>
+        keepAll(() =>
+          openEditor({ kind: node.kind, parentId: node.parentId, node })
+        )
+      }
+      createContent={createContent}
+      selectResource={openResource}
+      agentSessions={agentSessions}
+      selectNode={selectNode}
+      selectedNodeId={frontNodeId}
+      openAgentSessionId={frontSessionId}
+      openAgentSession={openAgentSession}
+      showTrash={showTrash}
+      renameResource={renameResource}
+      trashResource={trashResource}
+      renameSession={renameSession}
+      trashSession={trashSession}
+      actionsBusy={mutationBusy}
+      currentUserId={currentUserId}
+      currentOrgId={currentOrgId}
+      moveItem={moveItem}
+      movePending={movePending}
+      dropTargetNodeId={dropTargetNodeId}
+      setDropTargetNodeId={setDropTargetNodeId}
+    />
+  )
 
   const sidebar = (
     <div className="flex h-full min-w-0 flex-col">
@@ -3442,50 +3656,25 @@ function WorkspaceContent() {
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-1.5">
-          <NativeWorkspaceTree
-            nodes={nodes}
-            expanded={expanded}
-            kind={sectionKind}
-            itemsByNode={itemsByNode}
-            openResourceId={frontResourceId}
-            toggle={(id) =>
-              setExpanded((old) => {
-                const next = new Set(old)
-                if (next.has(id)) next.delete(id)
-                else {
-                  next.add(id)
-                }
-                return next
-              })
-            }
-            create={(node) =>
-              keepAll(() => openEditor({ kind: "folder", parentId: node.id }))
-            }
-            edit={(node) =>
-              keepAll(() =>
-                openEditor({ kind: node.kind, parentId: node.parentId, node })
-              )
-            }
-            createContent={createContent}
-            selectResource={openResource}
-            agentSessions={agentSessions}
-            selectNode={selectNode}
-            selectedNodeId={frontNodeId}
-            openAgentSessionId={frontSessionId}
-            openAgentSession={openAgentSession}
-            showTrash={showTrash}
-            renameResource={renameResource}
-            trashResource={trashResource}
-            renameSession={renameSession}
-            trashSession={trashSession}
-            actionsBusy={mutationBusy}
-            currentUserId={currentUserId}
-            currentOrgId={currentOrgId}
-            moveItem={moveItem}
-            movePending={movePending}
-            dropTargetNodeId={dropTargetNodeId}
-            setDropTargetNodeId={setDropTargetNodeId}
-          />
+          {renderTree(nodes)}
+          {/* Folders shared with me whose parent I cannot see: their own
+              group, never under (or named after) the hidden parent. */}
+          {sharedRootIds.length > 0 && (
+            <section aria-label={sh("sharedFolders")} className="mt-2">
+              <h3 className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                {sh("sharedFolders")}
+              </h3>
+              {renderTree(
+                nodes
+                  .filter((node) => node.parentId !== null)
+                  .map((node) =>
+                    sharedRootIds.includes(node.id)
+                      ? { ...node, parentId: null }
+                      : node
+                  )
+              )}
+            </section>
+          )}
           {/* Said here, beside the rows it is about. */}
           <NativeError error={mutationError} />
           {showTrash && <AttachmentTrash key={auth.scopeKey} />}
@@ -3533,6 +3722,47 @@ function WorkspaceContent() {
           row above the account, where the same keyboard walk reaches it no
           matter how long the tree is.
         */}
+        {/* Agent Chats shared with me, and the people & teams directory. */}
+        <SharedSessionsList
+          scopeKey={auth.scopeKey}
+          onOpenResource={(resource) =>
+            keepAll(() => {
+              setOpen(null)
+              setCreation(undefined)
+              const section = resource.kind === "chat" ? "team" : "docs"
+              setSectionState(section)
+              setActiveSection(section)
+              setDrawer(false)
+              // Its folder may be hidden: the tab carries the id only, and the
+              // breadcrumb says "Shared with you" instead of any name.
+              noteResource(resource)
+              showTab({
+                kind: "resource",
+                resourceId: resource.id,
+                nodeId: resource.nodeId,
+              })
+            })
+          }
+          onOpen={(sessionId) =>
+            keepAll(() => {
+              setOpen(null)
+              setCreation(undefined)
+              setSectionState("agents")
+              setActiveSection("agents")
+              setDrawer(false)
+              showTab({ kind: "agent", sessionId })
+            })
+          }
+        />
+        <button
+          onClick={() =>
+            guardAll(() => router.push("/settings?section=people"))
+          }
+          className="flex min-h-8 w-full items-center gap-2 rounded-lg px-2 text-start text-sm text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <Users aria-hidden className="size-3.5 shrink-0" />
+          <span className="truncate">{sh("peopleAndTeams")}</span>
+        </button>
         <button
           onClick={() => setShowTrash((value) => !value)}
           aria-pressed={showTrash}
@@ -3901,6 +4131,12 @@ function WorkspaceContent() {
                         <ResourcePanel
                           orgId={org.id}
                           resourceId={tab.resourceId}
+                          nodeHidden={
+                            nextAfter === null &&
+                            !loading &&
+                            !query.trim() &&
+                            !nodeById(tab.nodeId)
+                          }
                           fresh={tab.fresh === true}
                           onResolved={noteResource}
                           onChanged={(next) => {
@@ -4088,44 +4324,23 @@ function WorkspaceContent() {
           </form>
         </DialogContent>
       </Dialog>
-      {/* Sharing one item from a folder list: the same question, in the same
-          words, as sharing it from its own header. */}
-      <Dialog
-        open={shareTarget !== null}
-        onOpenChange={(value) => {
-          if (!value && !mutationBusy) setShareTarget(null)
-        }}
-      >
-        <DialogContent>
-          <DialogTitle>{c("shareTitle")}</DialogTitle>
-          <DialogDescription>
-            {c("shareDescription", {
-              organization: auth.session?.organization?.name ?? "",
-            })}
-          </DialogDescription>
-          <p className="truncate text-sm font-medium">{shareTarget?.title}</p>
-          <NativeError error={accessError} />
-          <div className="flex justify-end gap-2">
-            <Button
-              variant="ghost"
-              type="button"
-              disabled={mutationBusy}
-              onClick={() => setShareTarget(null)}
-            >
-              {t("cancel")}
-            </Button>
-            <Button
-              type="button"
-              disabled={mutationBusy || !shareTarget}
-              onClick={() => {
-                if (shareTarget) setVisibility(shareTarget, "organization")
-              }}
-            >
-              {mutationBusy ? t("working") : c("confirmShare")}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* Sharing one item from a folder list: the same dialog as its own
+          header opens. */}
+      {shareTarget && (
+        <ShareDialog
+          open
+          onOpenChange={(value) => {
+            if (!value) setShareTarget(null)
+          }}
+          title={shareTarget.title}
+          target={{
+            kind: "resource",
+            resource: shareTarget,
+            onVisibility: (visibility) =>
+              setVisibility(shareTarget, visibility),
+          }}
+        />
+      )}
       {/* Renaming, for the sidebar. One field, because a name is the only
           thing being changed and the PATCH behind it carries the rest of the
           row back unaltered. */}

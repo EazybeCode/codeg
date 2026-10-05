@@ -1707,7 +1707,7 @@ it("keeps the chat header on one compact row with a title that can give way", as
   // The title's box must be allowed to shrink below its content width.
   expect(title.parentElement).toHaveClass("min-w-0", "flex-1")
   // The actions never compress it, and never wrap into a second row.
-  const share = screen.getByRole("button", { name: "Share with organization" })
+  const share = screen.getByRole("button", { name: "Share" })
   expect(share.parentElement).toHaveClass("shrink-0")
   expect(share.parentElement).not.toHaveClass("flex-wrap")
   // The visible label collapses on a phone; the accessible name never does —
@@ -1719,7 +1719,7 @@ it("keeps the chat header on one compact row with a title that can give way", as
   // the full sentence, and the visible word is contained in it, which is what
   // keeps voice control able to say what it sees (WCAG 2.5.3).
   expect(share.querySelector("span")).toHaveTextContent(/^Share$/)
-  expect(share).toHaveAttribute("title", "Share with organization")
+  expect(share).toHaveAttribute("title", "Share")
   expect(share.getAttribute("aria-label")).toContain(
     share.querySelector("span")?.textContent ?? ""
   )
@@ -3188,4 +3188,135 @@ it("counts a text-only message on its way as unsent work until it lands", async 
   await waitFor(() => expect(answer).toBeDefined())
   await act(async () => answer(json(message, 201)))
   await waitFor(() => expect(dirty).toHaveBeenLastCalledWith(false))
+})
+
+it("gives a View grantee a read-only chat: nothing can be typed or sent", async () => {
+  const posts: string[] = []
+  mockNativeSession(undefined, {
+    [`GET /api/neev/resources/${resource.id}`]: () =>
+      json({ ...resource, visibility: "shared", creatorId: 9 }),
+    [`GET ${path}`]: () =>
+      json({
+        items: [{ ...message, authorId: 9, authorName: "Ana" }],
+        nextAfter: null,
+      }),
+    [`POST ${path}`]: () => {
+      posts.push("message")
+      return json({ code: "not_found" }, 404)
+    },
+  })
+  render(
+    <NativeTestRoot>
+      <NativeBoundary>
+        <NativeChat
+          resource={
+            { ...resource, visibility: "shared", creatorId: 9 } as never
+          }
+          onBack={() => {}}
+          onChanged={() => {}}
+          actions={{
+            isCreator: false,
+            archived: false,
+            visibility: "shared",
+            shareable: true,
+            disabled: false,
+            viewOnly: true,
+            onRename: vi.fn(),
+            onShare: vi.fn(),
+            onMakePrivate: vi.fn(),
+            onArchiveToggle: vi.fn(),
+            onMove: vi.fn(),
+          }}
+        />
+      </NativeBoundary>
+    </NativeTestRoot>
+  )
+  await ready()
+  expect(await screen.findByText(message.body)).toBeVisible()
+  expect(screen.getAllByText(/View only/).length).toBeGreaterThan(0)
+  expect(
+    composerEditable(screen.getByRole("textbox", { name: "Message" }))
+  ).toBe(false)
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
+  expect(posts).toEqual([])
+})
+
+it("says plainly when there is nowhere the reader can place a fork", async () => {
+  mockNativeSession(
+    undefined,
+    settledThread(() => json({ code: "fork_no_location" }, 409))
+  )
+  const user = userEvent.setup()
+  mountWithTabs(vi.fn<OpenFork>(async () => "opened"))
+  await ready()
+  await chooseFork(user)
+  expect(
+    await screen.findByText(
+      "There is nowhere you can place a copy of this conversation. Ask for Edit on a folder, then try again."
+    )
+  ).toBeVisible()
+})
+
+it("lets the reader pick a folder for a fork with nowhere to go, as the same request", async () => {
+  const bodies: Record<string, unknown>[] = []
+  const openFork = vi.fn<OpenFork>(async () => "opened")
+  mockNativeSession(undefined, {
+    ...settledThread((init) => {
+      const body = JSON.parse(init.body as string)
+      bodies.push(body)
+      return body.nodeId === undefined
+        ? json({ code: "fork_no_location" }, 409)
+        : json(forked({ nodeId: 8 }), 201)
+    }),
+    // Only folders this reader can see, across pages.
+    "GET /api/neev/nodes": () =>
+      json({
+        nodes: [
+          {
+            id: 5,
+            orgId: 3,
+            parentId: null,
+            kind: "project",
+            name: "Shared plans",
+            revision: "1",
+          },
+        ],
+        nextAfter: 5,
+      }),
+    "GET /api/neev/nodes?after=5": () =>
+      json({
+        nodes: [
+          {
+            id: 8,
+            orgId: 3,
+            parentId: null,
+            kind: "project",
+            name: "My notes",
+            revision: "1",
+          },
+        ],
+        nextAfter: null,
+      }),
+  })
+  const user = userEvent.setup()
+  mountWithTabs(openFork)
+  await ready()
+  await chooseFork(user)
+  const picker = await screen.findByRole("group", {
+    name: "Choose a folder for the copy",
+  })
+  expect(within(picker).getByText(/nowhere you can place a copy/)).toBeVisible()
+  await user.selectOptions(
+    await within(picker).findByRole("combobox", {
+      name: "Choose a folder for the copy",
+    }),
+    "8"
+  )
+  await user.click(within(picker).getByRole("button", { name: "Fork here" }))
+  await waitFor(() => expect(openFork).toHaveBeenCalledTimes(1))
+  expect(bodies[1]).toEqual({
+    throughMessageId: replyMessage.id,
+    requestId: bodies[0].requestId,
+    nodeId: 8,
+  })
 })

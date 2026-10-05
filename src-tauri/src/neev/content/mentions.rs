@@ -8,8 +8,9 @@
 //!    span of the body that says so, so reading a message back never has to
 //!    match a name against a directory and guess.
 //!  - **A mention can never widen an audience.** Only a chat the whole
-//!    organization can already read accepts them, and only an ACTIVE member of
-//!    the sender's own organization can be named. A private conversation
+//!    organization can already read accepts them — or a shared chat, where
+//!    every person named must already be able to read it — and only an ACTIVE
+//!    member of the sender's own organization can be named. A private conversation
 //!    notifies nobody, because there is nobody in it to notify.
 //!  - **Only a person can write one.** This is called from the human append
 //!    path alone; `publish_agent_reply` records nothing here, so text an agent
@@ -107,8 +108,13 @@ pub(super) async fn link_to_message(
         return Err(ContentError::Invalid);
     }
     // The audience rule, stated once: a mention may only exist where everybody
-    // named can already read what they are being named in.
-    if chat.visibility != Visibility::Organization {
+    // named can already read what they are being named in. An organization
+    // chat is read by every member; a shared one only by its grantees, so each
+    // person named is checked against the chat's own rule below. A private
+    // chat has nobody else in it.
+    if !matches!(chat.visibility, Visibility::Organization | Visibility::Shared)
+        || chat.origin_chat_id.is_some()
+    {
         return Err(ContentError::Invalid);
     }
     let mut reach = 0i64;
@@ -132,6 +138,12 @@ pub(super) async fn link_to_message(
         .await?
         .ok_or(ContentError::Invalid)?;
         let display_name: String = row.try_get("", "display_name").map_err(database_error)?;
+        if super::grants::level(tx, actor.org_id, mention.user_id, chat)
+            .await?
+            .is_none()
+        {
+            return Err(ContentError::Invalid);
+        }
         // The body has to actually say it. A span that covers anything but this
         // person's own name is a claim about somebody else's words.
         if text != format!("@{display_name}") {
@@ -219,10 +231,13 @@ pub(crate) async fn inbox(
     actor: &OrgContext,
 ) -> Result<(Vec<Notice>, i64), ContentError> {
     let tx = resources::begin(state, actor).await?;
+    let readable = super::grants::Audience::load(&tx, actor.org_id, actor.identity.user_id)
+        .await?
+        .readable_unbound("r");
     let rows = tx
         .query_all(db::statement(
             &tx,
-            "SELECT m.id AS message_id,m.chat_id,m.body,m.created_at,a.display_name AS author_name,r.title AS chat_title,SUM(CASE WHEN n.read_at IS NULL THEN 1 ELSE 0 END) AS unread FROM neev_message_mentions n JOIN neev_messages m ON m.org_id=n.org_id AND m.id=n.message_id JOIN neev_resources r ON r.org_id=m.org_id AND r.id=m.chat_id JOIN neev_accounts a ON a.id=m.author_id WHERE n.org_id=$1 AND n.user_id=$2 AND m.author_id<>$2 AND r.kind='chat' AND r.visibility='organization' AND r.origin_chat_id IS NULL GROUP BY m.id,m.chat_id,m.body,m.created_at,a.display_name,r.title ORDER BY (SUM(CASE WHEN n.read_at IS NULL THEN 1 ELSE 0 END)>0) DESC,m.created_at DESC,m.id LIMIT $3",
+            &format!("SELECT m.id AS message_id,m.chat_id,m.body,m.created_at,a.display_name AS author_name,r.title AS chat_title,SUM(CASE WHEN n.read_at IS NULL THEN 1 ELSE 0 END) AS unread FROM neev_message_mentions n JOIN neev_messages m ON m.org_id=n.org_id AND m.id=n.message_id JOIN neev_resources r ON r.org_id=m.org_id AND r.id=m.chat_id JOIN neev_accounts a ON a.id=m.author_id WHERE n.org_id=$1 AND n.user_id=$2 AND m.author_id<>$2 AND r.kind='chat' AND {readable} GROUP BY m.id,m.chat_id,m.body,m.created_at,a.display_name,r.title ORDER BY (SUM(CASE WHEN n.read_at IS NULL THEN 1 ELSE 0 END)>0) DESC,m.created_at DESC,m.id LIMIT $3"),
             vec![
                 actor.org_id.into(),
                 actor.identity.user_id.into(),
@@ -237,7 +252,7 @@ pub(crate) async fn inbox(
     // about what is visible.
     let counted = db::one(
         &tx,
-        "SELECT COUNT(DISTINCT m.id) AS c FROM neev_message_mentions n JOIN neev_messages m ON m.org_id=n.org_id AND m.id=n.message_id JOIN neev_resources r ON r.org_id=m.org_id AND r.id=m.chat_id WHERE n.org_id=$1 AND n.user_id=$2 AND n.read_at IS NULL AND m.author_id<>$2 AND r.kind='chat' AND r.visibility='organization' AND r.origin_chat_id IS NULL",
+        &format!("SELECT COUNT(DISTINCT m.id) AS c FROM neev_message_mentions n JOIN neev_messages m ON m.org_id=n.org_id AND m.id=n.message_id JOIN neev_resources r ON r.org_id=m.org_id AND r.id=m.chat_id WHERE n.org_id=$1 AND n.user_id=$2 AND n.read_at IS NULL AND m.author_id<>$2 AND r.kind='chat' AND {readable}"),
         vec![actor.org_id.into(), actor.identity.user_id.into()],
     )
     .await?
@@ -303,6 +318,9 @@ pub(crate) async fn mark_read(
         return Err(ContentError::Invalid);
     }
     let tx = resources::begin(state, actor).await?;
+    let readable = super::grants::Audience::load(&tx, actor.org_id, actor.identity.user_id)
+        .await?
+        .readable_unbound("r");
     let mut args: Vec<sea_orm::Value> = vec![
         now.into(),
         actor.org_id.into(),
@@ -317,7 +335,7 @@ pub(crate) async fn mark_read(
     // has since been made private changes nothing, exactly as reading it shows
     // nothing.
     let sql = format!(
-        "UPDATE neev_message_mentions SET read_at=$1 WHERE org_id=$2 AND user_id=$3 AND read_at IS NULL AND message_id IN (SELECT m.id FROM neev_messages m JOIN neev_resources r ON r.org_id=m.org_id AND r.id=m.chat_id WHERE m.org_id=$2 AND r.kind='chat' AND r.visibility='organization' AND r.origin_chat_id IS NULL AND m.id IN ({}))",
+        "UPDATE neev_message_mentions SET read_at=$1 WHERE org_id=$2 AND user_id=$3 AND read_at IS NULL AND message_id IN (SELECT m.id FROM neev_messages m JOIN neev_resources r ON r.org_id=m.org_id AND r.id=m.chat_id WHERE m.org_id=$2 AND r.kind='chat' AND {readable} AND m.id IN ({}))",
         placeholders(message_ids.len(), 4)
     );
     db::execute(&tx, &sql, args).await?;

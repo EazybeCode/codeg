@@ -14,12 +14,14 @@ use std::collections::HashMap;
 /// `r` is the resource alias. Mirrors `access.rs` for a non-creator member,
 /// plus the archived exclusion (Amendment 1 §A1.3, verbatim).
 pub(crate) fn eligible_predicate(r: &str) -> String {
+    // Schema 24: nothing inside a restricted folder or project is org-wide,
+    // whatever its own visibility says — by its own node, or its bound chat's.
     format!(
         "({r}.archived=false AND {r}.kind IN ('document','chat') AND (\
-({r}.origin_chat_id IS NULL AND {r}.visibility='organization') OR \
-({r}.origin_chat_id IS NOT NULL AND {r}.kind='document' AND EXISTS (SELECT 1 FROM neev_resources c \
+({r}.origin_chat_id IS NULL AND {r}.visibility='organization' AND NOT EXISTS (SELECT 1 FROM neev_restricted_nodes x WHERE x.org_id={r}.org_id AND x.node_id={r}.node_id)) OR \
+({r}.origin_chat_id IS NOT NULL AND {r}.kind='document' AND NOT EXISTS (SELECT 1 FROM neev_restricted_nodes x WHERE x.org_id={r}.org_id AND x.node_id={r}.node_id) AND EXISTS (SELECT 1 FROM neev_resources c \
 WHERE c.org_id={r}.org_id AND c.id={r}.origin_chat_id AND c.kind='chat' AND c.origin_chat_id IS NULL \
-AND c.visibility='organization' AND c.archived=false))))"
+AND c.visibility='organization' AND c.archived=false AND NOT EXISTS (SELECT 1 FROM neev_restricted_nodes y WHERE y.org_id=c.org_id AND y.node_id=c.node_id)))))"
     )
 }
 

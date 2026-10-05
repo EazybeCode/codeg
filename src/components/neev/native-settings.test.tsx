@@ -528,6 +528,9 @@ it("walks the sections with the arrow, home and end keys", async () => {
   await user.keyboard("{ArrowDown}")
   expect(screen.getByRole("tab", { name: MEMBERS })).toHaveFocus()
   expect(panelOf(MEMBERS)).toBeVisible()
+  // Every member's directory, after Members.
+  await user.keyboard("{ArrowRight}")
+  expect(screen.getByRole("tab", { name: "People & teams" })).toHaveFocus()
   await user.keyboard("{ArrowRight}")
   expect(screen.getByRole("tab", { name: "Shared library" })).toHaveFocus()
   // An admin has the Knowledge section next.

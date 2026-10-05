@@ -69,8 +69,16 @@ async fn trash_folder(db: &DatabaseConnection, org: i32, user: i32, folder: i32)
     Ok(())
 }
 
+/// A fresh install is schema 24; these tests are about the 23 layer, so take
+/// the (empty) schema-24 sharing tables off first.
+async fn at_twenty_three(db: &DatabaseConnection) {
+    assert_eq!(downgrade_member_sharing(db).await, Ok(member_sharing_migration::Downgrade::Done));
+    assert_eq!(version(db).await, node_trash_migration::SCHEMA_VERSION);
+}
+
 async fn fresh_is_twenty_three(db: &DatabaseConnection) {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 23);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 24);
+    at_twenty_three(db).await;
     assert_eq!(version(db).await, node_trash_migration::SCHEMA_VERSION);
     assert!(has_table(db).await);
     assert_eq!(node_trash_migration::validate(db).await, Ok(()));
@@ -97,6 +105,7 @@ async fn fresh_is_twenty_three(db: &DatabaseConnection) {
 
 /// 22 -> 23 changes no existing row; restart at 23 is a no-op.
 async fn twenty_two_upgrades_preserving_rows(db: &DatabaseConnection) {
+    at_twenty_three(db).await;
     assert_eq!(downgrade_node_trash(db).await, Ok(node_trash_migration::Downgrade::Done));
     assert_eq!(version(db).await, 22);
     assert!(!has_table(db).await);
@@ -104,7 +113,7 @@ async fn twenty_two_upgrades_preserving_rows(db: &DatabaseConnection) {
     seed(db).await;
     let before = rows(db).await;
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, 23);
+    assert_eq!(version(db).await, CURRENT_SCHEMA_VERSION);
     assert!(has_table(db).await);
     assert_eq!(rows(db).await, before, "the migration rewrote an existing row");
     let once = catalog(db).await;
@@ -116,6 +125,7 @@ async fn twenty_two_upgrades_preserving_rows(db: &DatabaseConnection) {
 /// Anything in the trash refuses the downgrade, which then changes nothing;
 /// an empty trash downgrades to exactly the schema-22 catalog.
 async fn downgrade_is_guarded(db: &DatabaseConnection) {
+    at_twenty_three(db).await;
     let fresh = catalog(db).await;
     let expected: Vec<String> = fresh
         .iter()
@@ -141,7 +151,7 @@ async fn downgrade_is_guarded(db: &DatabaseConnection) {
         Ok(node_trash_migration::Downgrade::NotAtTwentyThree(22))
     );
     initialize(db).await.unwrap();
-    assert_eq!(version(db).await, 23);
+    at_twenty_three(db).await;
     assert_eq!(catalog(db).await, fresh);
 }
 
@@ -189,6 +199,7 @@ async fn an_incoherent_ledger_is_refused() {
 
     // A look-alike table without its kind CHECK.
     let db = h::database().await;
+    at_twenty_three(&db).await;
     execute(&db, "DROP TABLE neev_node_trash", vec![]).await.unwrap();
     execute(&db, "CREATE TABLE neev_node_trash (org_id integer NOT NULL, batch_id text NOT NULL, item_kind text NOT NULL, item_id text NOT NULL, root_node_id integer NOT NULL, trashed_by integer NOT NULL, trashed_at bigint NOT NULL, CONSTRAINT neev_node_trash_pk PRIMARY KEY (org_id, item_kind, item_id))", vec![]).await.unwrap();
     assert_eq!(initialize(&db).await, Err(AuthError::Unavailable));
